@@ -130,7 +130,7 @@ docker run -p 6632:6632 --network queen \
 <div class="code-meta-wrap with-copy">
   <div class="code-meta"><span>bash · pop it back</span><button class="copy-btn" type="button">copy</button></div>
 <pre><code class="language-bash">curl 'http://localhost:6632/api/v1/pop/queue/demo?autoAck=true'
-# => {"messages":[{"data":{"hello":"world"},"transactionId":"...","partitionId":"...",...}], ...}</code></pre>
+# => {"success":true,"messages":[{"data":{"hello":"world"},"transactionId":"019dc9c2-1a80-7000-9bc1-3f8e5a2d10ab","partitionId":"c0715a3e-9b21-4e8a-9c3a-40e1cb4f7c1a","partition":"Default","leaseId":"019dc9b7-cb4f-7c1a-9b21-7e8a5c3a40e1","consumerGroup":"__QUEUE_MODE__","createdAt":"2026-04-26T10:59:28.267966Z","retryCount":0,"producerSub":null}],"partitionsClaimed":1}</code></pre>
 </div>
 
 <p class="muted">

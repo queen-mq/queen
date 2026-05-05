@@ -483,7 +483,7 @@ for (const auto&amp; m : messages) {
 
     <div class="tab-pane pane-curl"><pre><code class="language-bash">curl 'http://localhost:6632/api/v1/pop/queue/orders?batch=10'
 
-# returns {"messages":[{"transactionId":"...","partitionId":"...",...}, ...]}
+# returns {"success":true,"messages":[{"transactionId":"019dc9c2-1a80-7000-9bc1-3f8e5a2d10ab","partitionId":"c0715a3e-9b21-4e8a-9c3a-40e1cb4f7c1a","partition":"Default","leaseId":"019dc9b7-cb4f-7c1a-9b21-7e8a5c3a40e1","data":{"orderId":1},"createdAt":"2026-04-26T10:59:28.267966Z","retryCount":0}],"partitionsClaimed":1}
 
 curl -X POST http://localhost:6632/api/v1/ack \
   -H 'Content-Type: application/json' \
@@ -720,15 +720,15 @@ curl 'http://localhost:6632/api/v1/pop/queue/events?batch=200&amp;partitions=50&
 # {
 #   "success": true,
 #   "queue": "events",
-#   "partition": "p7",                    # first claimed partition (back-compat)
-#   "partitionId": "...",                 # first claimed partitionId (back-compat)
-#   "leaseId": "worker-uuid",             # shared across all claimed partitions
+#   "partition": "p7",                                              # first claimed partition (back-compat)
+#   "partitionId": "8f7e6d5c-4b3a-4291-8e7f-2d9c5b8a3e10",           # first claimed partitionId (back-compat)
+#   "leaseId": "worker-abc",                                        # shared across all claimed partitions
 #   "messages": [
-#     {"transactionId":"...","partitionId":"...","partition":"p7","leaseId":"...", ...},
-#     {"transactionId":"...","partitionId":"...","partition":"p12","leaseId":"...", ...},
-#     ...
+#     {"transactionId":"019dc9c2-1a80-7000-9bc1-3f8e5a2d10ab","partitionId":"8f7e6d5c-4b3a-4291-8e7f-2d9c5b8a3e10","partition":"p7", "leaseId":"worker-abc","data":{"event":"click"}},
+#     {"transactionId":"019dc9c2-1a80-7000-9bc1-3f8e5a2d10ac","partitionId":"12a3b4c5-d6e7-4890-9876-543210abcdef","partition":"p12","leaseId":"worker-abc","data":{"event":"purchase"}},
+#     {"transactionId":"019dc9c2-1a80-7000-9bc1-3f8e5a2d10ad","partitionId":"5e9f8c7b-6a5d-4e2f-9c1b-0a9e8f7d6c5b","partition":"p3", "leaseId":"worker-abc","data":{"event":"view"}}
 #   ],
-#   "partitionsClaimed": 8                # how many partitions actually contributed
+#   "partitionsClaimed": 8                                          # how many partitions actually contributed
 # }</code></pre></div>
   </div>
 </div>
