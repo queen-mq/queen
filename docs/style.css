@@ -623,3 +623,70 @@ img.bordered + figcaption {
 figure { margin: 16px 0; }
 
 .divider-thin { height: 1px; background: var(--bd); border: 0; margin: 28px 0; }
+
+/* =========================================================================
+   ANIMATED SVG FIGURES (used inline with prose and on the visual tour)
+   ========================================================================= */
+
+/* Hero-sized figure: full-width inside the .shell container, with caption */
+.pipeline-figure {
+  margin: 0 auto;
+  max-width: 1180px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: var(--ink-0);
+  overflow: hidden;
+}
+.pipeline-figure img { display: block; width: 100%; height: auto; }
+.pipeline-figure figcaption {
+  border-top: 1px solid var(--bd);
+  padding: 12px 18px;
+  font-size: 12.5px; color: var(--text-mid); line-height: 1.55;
+}
+.pipeline-figure figcaption strong { color: var(--text-hi); font-weight: 500; }
+
+/* Inline-with-prose variant: lighter chrome, used inside concept sections */
+.diagram-figure {
+  margin: 18px 0 22px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  background: var(--ink-0);
+  overflow: hidden;
+}
+.diagram-figure img { display: block; width: 100%; height: auto; }
+.diagram-figure figcaption {
+  border-top: 1px solid var(--bd);
+  padding: 10px 14px;
+  font-size: 12px; color: var(--text-low); line-height: 1.5;
+}
+.diagram-figure figcaption strong { color: var(--text-mid); font-weight: 500; }
+
+/* Wide comparison figures (Queen vs Kafka / RabbitMQ are 1600x760).
+   Render full-width inside .shell. */
+.compare-figure {
+  margin: 18px 0 22px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  background: var(--ink-0);
+  overflow: hidden;
+}
+.compare-figure img { display: block; width: 100%; height: auto; }
+.compare-figure figcaption {
+  border-top: 1px solid var(--bd);
+  padding: 10px 14px;
+  font-size: 12px; color: var(--text-low); line-height: 1.5;
+}
+.compare-figure figcaption strong { color: var(--text-mid); font-weight: 500; }
+
+/* Respect users who opt out of animations: pause the SMIL animations.
+   Browsers don't natively respect this for SMIL, but elements with CSS
+   animations (e.g. card-bg gradients later) will pause; for SMIL we rely
+   on the diagram still reading at its initial frame. */
+@media (prefers-reduced-motion: reduce) {
+  .pipeline-figure img,
+  .diagram-figure img,
+  .compare-figure img {
+    /* Static frame already conveys the layout; SMIL keeps running but
+       no scroll-driven animation is forced on top of it. */
+  }
+}

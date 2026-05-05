@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720"
+     role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid meet"
+     font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <title id="title">Queen MQ: lease, retry, and dead-letter queue</title>
+  <desc id="desc">A popped message is leased to one consumer for the configured lease window. If the consumer crashes or fails, the lease expires and the message returns to the head of the partition. After the configured retry limit it routes to the dead-letter queue with the original payload, error, and retry count.</desc>
+
+  <defs>
+    <filter id="g-cyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-green" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-red" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <linearGradient id="card-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1d1f"/>
+      <stop offset="1" stop-color="#19191b"/>
+    </linearGradient>
+    <linearGradient id="dlq-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1418"/>
+      <stop offset="1" stop-color="#1a1014"/>
+    </linearGradient>
+
+    <g id="ic-queen">
+      <rect x="-11" y="-11" width="22" height="22" rx="6" fill="#1d1d1f" stroke="#35353a"/>
+      <text y="5" font-size="14" font-weight="700" fill="#4ade80" text-anchor="middle">Q</text>
+    </g>
+    <symbol id="ic-worker" viewBox="0 0 16 16" overflow="visible">
+      <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M 5 8 L 7 10 L 11 6" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="ic-skull" viewBox="0 0 24 24" overflow="visible">
+      <path d="M 12 3 C 7 3 4 6 4 11 C 4 13 5 14 5 15 L 5 18 L 9 18 L 9 21 L 11 21 L 11 18 L 13 18 L 13 21 L 15 21 L 15 18 L 19 18 L 19 15 C 19 14 20 13 20 11 C 20 6 17 3 12 3 Z"
+            fill="none" stroke="#fb7185" stroke-width="1.5" stroke-linejoin="round"/>
+      <circle cx="9" cy="11" r="1.6" fill="#fb7185"/>
+      <circle cx="15" cy="11" r="1.6" fill="#fb7185"/>
+    </symbol>
+
+    <style>
+      .label    { font: 600 10.5px Inter, system-ui, sans-serif; letter-spacing: 0.18em; fill: #6a6a6a; text-transform: uppercase; }
+      .h-eng    { font: 600 18px Inter, system-ui, sans-serif; fill: #e6e6e6; }
+      .h-sub    { font: 500 12px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .pill     { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #e6e6e6; }
+      .pill-mid { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #9a9a9a; }
+      .micro    { font: 500 10.5px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .micro-low{ font: 500 10.5px Inter, system-ui, sans-serif; fill: #6a6a6a; }
+      .num      { font: 600 13px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .num-big  { font: 600 30px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .ok       { fill: #4ade80; }
+      .warn     { fill: #e6b450; }
+      .bad      { fill: #fb7185; }
+      .cyan     { fill: #22d3ee; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="720" fill="#141415"/>
+
+  <!-- ============================ TITLE BAR ============================ -->
+  <g transform="translate(40 44)">
+    <g transform="translate(11 0)"><use href="#ic-queen"/></g>
+    <text x="32" y="-1" class="h-eng">queen-mq</text>
+    <text x="32" y="17" class="h-sub">lease &#8226; retry &#8226; dead-letter queue</text>
+  </g>
+  <g transform="translate(1240 44)" text-anchor="end">
+    <text x="0" y="-8" class="label">CONFIG</text>
+    <text x="0" y="9"  class="num">leaseTime: 30s &#8226; retryLimit: 3</text>
+  </g>
+  <line x1="40" y1="80" x2="1240" y2="80" stroke="#26262a"/>
+
+  <!-- ============================ NODES ============================ -->
+
+  <!-- QUEUE (left) -->
+  <g>
+    <rect x="60" y="200" width="200" height="140" rx="12" fill="url(#card-bg)" stroke="#26262a"/>
+    <text x="80" y="228" class="label">QUEUE</text>
+    <text x="80" y="252" class="num">user-events</text>
+    <text x="80" y="270" class="micro-low">partition sess:9c1d</text>
+
+    <!-- Visible head message m1 -->
+    <g transform="translate(80 290)">
+      <rect width="160" height="32" rx="6" fill="#1a1a1c" stroke="#22d3ee" stroke-opacity="0.4"/>
+      <circle cx="14" cy="16" r="4" fill="#22d3ee" filter="url(#g-cyan)">
+        <animate attributeName="opacity" values="0.5;1;0.5" dur="1.6s" repeatCount="indefinite"/>
+      </circle>
+      <text x="26" y="20" class="pill">msg-7af2</text>
+      <text x="150" y="20" class="pill-mid" text-anchor="end">head</text>
+    </g>
+  </g>
+
+  <!-- WORKER (center) -->
+  <g>
+    <rect x="420" y="200" width="280" height="140" rx="12" fill="url(#card-bg)" stroke="#26262a"/>
+    <!-- Highlighting border that flashes red on each lease expiry -->
+    <rect x="420" y="200" width="280" height="140" rx="12" fill="none" stroke="#fb7185" stroke-opacity="0">
+      <animate attributeName="stroke-opacity" values="0;0;0.6;0;0;0;0.6;0;0"
+               keyTimes="0;0.3;0.34;0.4;0.55;0.65;0.69;0.75;1" dur="9s" repeatCount="indefinite"/>
+    </rect>
+
+    <text x="440" y="228" class="label">WORKER &#8226; LEASE HOLDER</text>
+
+    <g transform="translate(440 248)" color="#4ade80">
+      <use href="#ic-worker" x="0" y="0" width="20" height="20"/>
+      <text x="28" y="15" class="num">consumer-1</text>
+    </g>
+
+    <!-- Lease timer card (counts down 30s --> 0) -->
+    <g transform="translate(440 290)">
+      <text class="micro-low">LEASE</text>
+      <g transform="translate(0 18)">
+        <text class="num warn" font-size="16" font-variant-numeric="tabular-nums">
+          <tspan opacity="1">
+            <animate attributeName="opacity" values="1;0;0;0;0;0;0;0;0;1"
+                     keyTimes="0;0.05;0.1;0.15;0.2;0.25;0.3;0.55;0.65;1" dur="9s" repeatCount="indefinite"/>30s</tspan>
+          <tspan opacity="0" x="0">
+            <animate attributeName="opacity" values="0;1;0;0;0;0;0;0"
+                     keyTimes="0;0.05;0.1;0.15;0.2;0.25;0.3;1" dur="9s" repeatCount="indefinite"/>20s</tspan>
+          <tspan opacity="0" x="0">
+            <animate attributeName="opacity" values="0;0;1;0;0;0;0;0"
+                     keyTimes="0;0.1;0.15;0.2;0.25;0.3;0.55;1" dur="9s" repeatCount="indefinite"/>10s</tspan>
+          <tspan opacity="0" x="0" fill="#fb7185">
+            <animate attributeName="opacity" values="0;0;0;1;1;0;0;0"
+                     keyTimes="0;0.2;0.25;0.3;0.4;0.45;0.55;1" dur="9s" repeatCount="indefinite"/>EXPIRED</tspan>
+          <tspan opacity="0" x="0">
+            <animate attributeName="opacity" values="0;0;0;0;1;0;0;0;0"
+                     keyTimes="0;0.4;0.45;0.55;0.55;0.6;0.65;0.7;1" dur="9s" repeatCount="indefinite"/>30s</tspan>
+        </text>
+      </g>
+    </g>
+
+    <!-- Retry counter -->
+    <g transform="translate(560 290)">
+      <text class="micro-low">RETRIES</text>
+      <g transform="translate(0 18)">
+        <text class="num warn" font-size="16" font-variant-numeric="tabular-nums">
+          <tspan opacity="1">
+            <animate attributeName="opacity" values="1;1;0;0;0;0;0;0;0;1"
+                     keyTimes="0;0.34;0.36;0.4;0.5;0.6;0.66;0.7;0.85;1" dur="9s" repeatCount="indefinite"/>0 / 3</tspan>
+          <tspan opacity="0" x="0">
+            <animate attributeName="opacity" values="0;0;1;1;0;0;0;0;0"
+                     keyTimes="0;0.34;0.36;0.4;0.66;0.7;0.85;0.9;1" dur="9s" repeatCount="indefinite"/>1 / 3</tspan>
+          <tspan opacity="0" x="0" fill="#fb7185">
+            <animate attributeName="opacity" values="0;0;0;0;1;1;0;0;0"
+                     keyTimes="0;0.4;0.5;0.66;0.7;0.85;0.9;0.95;1" dur="9s" repeatCount="indefinite"/>3 / 3</tspan>
+        </text>
+      </g>
+    </g>
+
+    <!-- Status pill -->
+    <g transform="translate(440 318)" opacity="0">
+      <animate attributeName="opacity" values="0;0;1;0;0;0;1;0;0"
+               keyTimes="0;0.3;0.34;0.45;0.65;0.69;0.74;0.85;1" dur="9s" repeatCount="indefinite"/>
+      <rect x="0" y="-12" width="220" height="22" rx="11" fill="#1d1d1f" stroke="#3a2222"/>
+      <circle cx="12" cy="-1" r="3" fill="#fb7185"/>
+      <text x="22" y="3" class="pill-mid bad" font-size="10.5">consumer crashed &#8226; lease expired</text>
+    </g>
+  </g>
+
+  <!-- COMPLETED (top-right destination, static) -->
+  <g>
+    <rect x="860" y="140" width="240" height="80" rx="10" fill="url(#card-bg)" stroke="#26262a"/>
+    <text x="880" y="166" class="label">SUCCESS</text>
+    <g transform="translate(880 178)">
+      <circle r="6" cx="6" cy="6" fill="#1d1d1f" stroke="#4ade80" stroke-width="1.4"/>
+      <path d="M 3 6 L 5 8 L 9 4" stroke="#4ade80" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 0)"/>
+      <text x="22" y="11" class="num ok">completed</text>
+    </g>
+    <text x="880" y="208" class="micro-low">ack(message, 'completed') &#8226; offset advances</text>
+  </g>
+
+  <!-- DLQ (bottom-right destination, prominent) -->
+  <g>
+    <rect x="860" y="320" width="340" height="180" rx="12" fill="url(#dlq-bg)" stroke="#3a2222"/>
+    <!-- pulse border -->
+    <rect x="860" y="320" width="340" height="180" rx="12" fill="none" stroke="#fb7185" stroke-opacity="0">
+      <animate attributeName="stroke-opacity" values="0;0;0;0;0;0;0;0.5;0.2;0"
+               keyTimes="0;0.65;0.7;0.75;0.8;0.85;0.9;0.94;0.97;1" dur="9s" repeatCount="indefinite"/>
+    </rect>
+
+    <text x="880" y="350" class="label">DEAD-LETTER QUEUE</text>
+    <g transform="translate(880 364)">
+      <use href="#ic-skull" x="-2" y="-12" width="22" height="22"/>
+      <text x="28" y="6" class="num bad">q.user-events.dlq</text>
+    </g>
+
+    <!-- DLQ count -->
+    <g transform="translate(880 410)">
+      <text class="micro-low">MESSAGES IN DLQ</text>
+      <text y="38" class="num-big bad" font-variant-numeric="tabular-nums">
+        <tspan opacity="1">
+          <animate attributeName="opacity" values="1;1;0;0;1"
+                   keyTimes="0;0.85;0.88;0.97;1" dur="9s" repeatCount="indefinite"/>0</tspan>
+        <tspan opacity="0" x="0">
+          <animate attributeName="opacity" values="0;0;1;1;0"
+                   keyTimes="0;0.85;0.88;0.97;1" dur="9s" repeatCount="indefinite"/>1</tspan>
+      </text>
+      <text x="0" y="58" class="micro-low">browse, filter, replay from the dashboard</text>
+    </g>
+  </g>
+
+  <!-- ============================ ARROWS BETWEEN NODES ============================ -->
+  <g stroke="#26262a" stroke-width="1.2" fill="none">
+    <!-- queue -> worker -->
+    <line x1="260" y1="270" x2="420" y2="270" stroke-dasharray="3 4"/>
+    <text x="340" y="258" class="micro-low" text-anchor="middle">pop</text>
+
+    <!-- worker -> completed (top success path, static, dim) -->
+    <path d="M 700 230 C 760 230 800 180 860 180" stroke-dasharray="3 4"/>
+    <text x="780" y="170" class="micro-low" text-anchor="middle">on success</text>
+
+    <!-- worker -> back to queue (retry loop, curving above) -->
+    <path d="M 560 200 C 560 130 360 130 260 200" stroke="#3a2f1c" stroke-dasharray="3 4"/>
+    <g transform="translate(410 130)">
+      <rect x="-72" y="-12" width="144" height="22" rx="11" fill="#1d1d1f" stroke="#3a2f1c"/>
+      <text y="3" class="pill-mid warn" font-size="10.5" text-anchor="middle">on fail/timeout &#8226; &#215; up to 3</text>
+    </g>
+
+    <!-- worker -> DLQ (after retryLimit) -->
+    <path d="M 700 310 C 760 310 800 410 860 410" stroke="#3a2222"/>
+    <g transform="translate(782 388)">
+      <rect x="-72" y="-12" width="148" height="22" rx="11" fill="#1d1d1f" stroke="#3a2222"/>
+      <text y="3" class="pill-mid bad" font-size="10.5" text-anchor="middle">after retryLimit reached</text>
+    </g>
+  </g>
+
+  <!-- ============================ ANIMATED MESSAGE DOT (failing path) ============================ -->
+  <!-- Path of dot:
+       t=0.00..0.05  in queue head (cx=120, cy=306)
+       t=0.05..0.30  queue -> worker, lease ticks
+       t=0.30..0.40  fail flash (loops back to queue)
+       t=0.40..0.55  in worker again
+       t=0.55..0.70  fail again, retry++
+       t=0.70..0.85  routed to DLQ (red arc)
+       t=0.85..0.95  in DLQ, count ticks
+       t=0.95..1.00  cycle reset
+  -->
+  <g>
+    <!-- Travel-and-stay dot. Cy/Cx animated together along key positions. -->
+    <circle r="6" filter="url(#g-cyan)" opacity="0">
+      <animate attributeName="opacity"
+               values="0;1;1;1;1;1;0;0;0"
+               keyTimes="0;0.05;0.3;0.4;0.55;0.85;0.88;0.97;1"
+               dur="9s" repeatCount="indefinite"/>
+      <!-- horizontal motion (x) -->
+      <animate attributeName="cx"
+               values="160;160;540;160;540;540;1000;1000;160"
+               keyTimes="0;0.05;0.3;0.4;0.55;0.7;0.85;0.97;1"
+               dur="9s" repeatCount="indefinite"/>
+      <!-- vertical motion (y), rises during retry loop -->
+      <animate attributeName="cy"
+               values="306;306;270;306;270;270;410;410;306"
+               keyTimes="0;0.05;0.3;0.4;0.55;0.7;0.85;0.97;1"
+               dur="9s" repeatCount="indefinite"/>
+      <!-- color: cyan when in flight, amber during retry, red when going to DLQ -->
+      <animate attributeName="fill"
+               values="#22d3ee;#22d3ee;#22d3ee;#e6b450;#e6b450;#fb7185;#fb7185;#fb7185;#22d3ee"
+               keyTimes="0;0.05;0.3;0.35;0.55;0.7;0.85;0.97;1"
+               dur="9s" repeatCount="indefinite"/>
+      <!-- size pulse on each fail / DLQ landing -->
+      <animate attributeName="r"
+               values="6;6;6;9;6;9;6;9;6;6"
+               keyTimes="0;0.05;0.3;0.32;0.4;0.7;0.72;0.85;0.88;1"
+               dur="9s" repeatCount="indefinite"/>
+    </circle>
+
+    <!-- Static fail-flash X overlay on worker -->
+    <g opacity="0">
+      <animate attributeName="opacity"
+               values="0;0;1;0;0;0;1;0;0;0"
+               keyTimes="0;0.3;0.32;0.36;0.55;0.65;0.67;0.72;0.75;1"
+               dur="9s" repeatCount="indefinite"/>
+      <line x1="525" y1="255" x2="555" y2="285" stroke="#fb7185" stroke-width="3" stroke-linecap="round"/>
+      <line x1="555" y1="255" x2="525" y2="285" stroke="#fb7185" stroke-width="3" stroke-linecap="round"/>
+    </g>
+  </g>
+
+  <!-- ============================ INSET / CONFIG SUMMARY ============================ -->
+  <g transform="translate(60 540)">
+    <rect width="1140" height="100" rx="10" fill="url(#card-bg)" stroke="#26262a"/>
+
+    <text x="20" y="22" class="label">LEASE LIFECYCLE</text>
+    <g transform="translate(20 44)">
+      <text class="num">while held</text>
+      <text x="100" y="0" class="micro-low">message is invisible to other consumers; renew via heartbeat for long jobs</text>
+    </g>
+    <g transform="translate(20 68)">
+      <text class="num warn">on expiry</text>
+      <text x="100" y="0" class="micro-low">message returns to head of partition with retryCount += 1, ordering preserved</text>
+    </g>
+    <g transform="translate(20 88)">
+      <text class="num bad">on retryLimit</text>
+      <text x="100" y="0" class="micro-low">message routed to per-queue DLQ with last error, original payload, and retry trace</text>
+    </g>
+  </g>
+
+  <!-- ============================ FOOTER TAGS ============================ -->
+  <g transform="translate(60 685)">
+    <line x1="0" y1="-22" x2="1140" y2="-22" stroke="#26262a"/>
+
+    <g>
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">no phantom workers</text>
+    </g>
+    <g transform="translate(260 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">order preserved on retry</text>
+    </g>
+    <g transform="translate(580 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">renew lease for long jobs</text>
+    </g>
+    <g transform="translate(880 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">DLQ replay from dashboard</text>
+    </g>
+  </g>
+</svg>

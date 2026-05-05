@@ -21,6 +21,7 @@
     <nav class="topnav-links" aria-label="Primary">
       <a href="quickstart.html">Quickstart</a>
       <a href="concepts.html" class="current">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
       <a href="architecture.html">Architecture</a>
       <a href="clients.html">Clients</a>
       <a href="server.html">Server</a>
@@ -111,6 +112,17 @@
   user, tenant, chat, video, or device. Tens of thousands per queue is normal.
 </p>
 
+<figure class="diagram-figure">
+  <img src="assets/queen-partitions.svg" alt="Four producers (chat ui, scheduler, webhook, replay) push into one queue (agent-tasks). The queue is split into five ordered partitions per agent session. Two consumer groups (agent runner, tracer) each read every message independently. One slow session running a 28-second tool call stalls only its own partition; the other lanes keep flowing." />
+  <figcaption>
+    <strong>One slow session stalls only its own lane.</strong>
+    Producers push to <code>agent-tasks</code>; each session is its own FIFO partition;
+    <code>agent runner</code> and <code>tracer</code> each consume the same stream with
+    their own offset. A 28-second tool call on <code>sess:9c1d</code> never touches the
+    other 9,999 sessions.
+  </figcaption>
+</figure>
+
 <div class="card-grid-2">
   <div class="card">
     <div class="card-eyebrow">Why partitions matter</div>
@@ -179,6 +191,17 @@ await queen.queue('events').group('analytics').consume(analyticsHandler)</code><
   </tbody>
 </table>
 
+<figure class="diagram-figure">
+  <img src="assets/queen-replay.svg" alt="A long timestamped tape from September 2024 to NOW, with two consumer-group cursors. The agent-runner cursor is at the head (live, lag 0). A new report-fall-2024 group joins with subscriptionFrom Sep 1, 2024 and sweeps from that past timestamp toward the head, replaying the historical window without disturbing the live group." />
+  <figcaption>
+    <strong>Per-group offset, replay any timestamp.</strong>
+    The live <code>agent-runner</code> group keeps consuming at the head while a new
+    <code>report-fall-2024</code> group materialises at <code>subscriptionFrom: 2024-09-01</code>
+    and replays the historical window. PostgreSQL is the source of truth — there is no separate
+    log retention to manage.
+  </figcaption>
+</figure>
+
 <!-- ============== LEASES ============== -->
 <h2 id="leases">Leases &amp; retries</h2>
 <p class="muted">
@@ -200,6 +223,17 @@ await queen.queue('events').group('analytics').consume(analyticsHandler)</code><
   .each()
   .consume(async (m) => { /* long work */ })</code></pre>
 </div>
+
+<figure class="diagram-figure">
+  <img src="assets/queen-lease-dlq.svg" alt="State diagram showing the lease lifecycle. A message is popped from the queue and leased to consumer-1 with a 30-second timer. On success it moves to a completed state; on failure or lease expiry the retry counter increments and the message returns to the head of the partition. After the configured retryLimit (3) the message routes to the dead-letter queue with the original payload, error, and retry trace." />
+  <figcaption>
+    <strong>Lease &rarr; retry &rarr; DLQ.</strong>
+    Same diagram covers the failure path described in
+    <a href="#dlq">Dead-letter queue</a>: after <code>retryLimit</code> the message is
+    moved with the last error and the original payload, available to browse and replay
+    from the dashboard.
+  </figcaption>
+</figure>
 
 <!-- ============== TRANSACTIONS ============== -->
 <h2 id="transactions">Transactions</h2>
@@ -230,6 +264,16 @@ await queen.queue('events').group('analytics').consume(analyticsHandler)</code><
   ack and the insert are in the same WAL record, there's no in-between state where
   the input is acked but the output never landed.
 </p>
+
+<figure class="diagram-figure">
+  <img src="assets/queen-transaction.svg" alt="A worker pops a message from queue A (raw-events), transforms it inside a glowing BEGIN/COMMIT envelope, and pushes the derived message into queue B (processed-events). The ack of the input and the insert of the output are wrapped in one PostgreSQL transaction with a single WAL record. The SQL inset shows the actual UPDATE messages_consumed plus INSERT INTO messages, both inside one BEGIN..COMMIT block." />
+  <figcaption>
+    <strong>Atomic across queues.</strong>
+    The ack of the input and the push of the output are written in the same WAL record.
+    Either both commit, or neither does — no orphan output, no duplicate ack, no
+    separate outbox table.
+  </figcaption>
+</figure>
 
 <!-- ============== LONG POLLING ============== -->
 <h2 id="long-polling">Long polling</h2>
@@ -282,6 +326,16 @@ await queen.queue('events').group('analytics').consume(analyticsHandler)</code><
     a streaming replica + automatic failover.
   </p>
 </div>
+
+<figure class="diagram-figure">
+  <img src="assets/queen-failover.svg" alt="Three-phase loop showing disk failover. Phase 1: producers push to the broker, broker commits to PostgreSQL, all healthy. Phase 2: PostgreSQL becomes unreachable; new pushes spill to a local FILE_BUFFER on disk, the buffered counter grows, and clients still receive HTTP 201. Phase 3: PostgreSQL recovers; a background scanner drains the file buffer back into the database in order. The messages-lost counter stays at 0 throughout." />
+  <figcaption>
+    <strong>Push path always succeeds.</strong>
+    When PG is unreachable, pushes spill to <code>FILE_BUFFER</code> on local disk and
+    clients still get an HTTP 201. When PG recovers, a background scanner drains the
+    buffer back in order. Verified across 1.6B events with zero loss.
+  </figcaption>
+</figure>
 
 <!-- ============== TRACING ============== -->
 <h2 id="tracing">Tracing</h2>

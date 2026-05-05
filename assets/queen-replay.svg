@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 680" width="1280" height="680"
+     role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid meet"
+     font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <title id="title">Queen MQ: replay from any timestamp, per-group offset</title>
+  <desc id="desc">A queue's full history is visible to every consumer group. Each group keeps its own offset on every partition. The agent-runner group is at the head; a new report-fall-2024 group joins with subscriptionFrom=Sep 1, 2024 and replays the historical window without disturbing the live group.</desc>
+
+  <defs>
+    <filter id="g-cyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-green" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-amber" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <linearGradient id="card-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1d1f"/>
+      <stop offset="1" stop-color="#19191b"/>
+    </linearGradient>
+    <linearGradient id="tape-fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#22d3ee" stop-opacity="0.05"/>
+      <stop offset="0.06" stop-color="#22d3ee" stop-opacity="0.18"/>
+      <stop offset="0.94" stop-color="#22d3ee" stop-opacity="0.18"/>
+      <stop offset="1"    stop-color="#22d3ee" stop-opacity="0.05"/>
+    </linearGradient>
+
+    <g id="ic-queen">
+      <rect x="-11" y="-11" width="22" height="22" rx="6" fill="#1d1d1f" stroke="#35353a"/>
+      <text y="5" font-size="14" font-weight="700" fill="#4ade80" text-anchor="middle">Q</text>
+    </g>
+
+    <style>
+      .label    { font: 600 10.5px Inter, system-ui, sans-serif; letter-spacing: 0.18em; fill: #6a6a6a; text-transform: uppercase; }
+      .h0       { font: 600 16px Inter, system-ui, sans-serif; fill: #e6e6e6; }
+      .h1       { font: 600 22px Inter, system-ui, sans-serif; fill: #e6e6e6; letter-spacing: -0.01em; }
+      .h-eng    { font: 600 18px Inter, system-ui, sans-serif; fill: #e6e6e6; }
+      .h-sub    { font: 500 12px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .pill     { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #e6e6e6; }
+      .pill-mid { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #9a9a9a; }
+      .micro    { font: 500 10.5px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .micro-low{ font: 500 10.5px Inter, system-ui, sans-serif; fill: #6a6a6a; }
+      .num      { font: 600 13px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .ok       { fill: #4ade80; }
+      .warn     { fill: #e6b450; }
+      .cyan     { fill: #22d3ee; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="680" fill="#141415"/>
+
+  <!-- ============================ TITLE BAR ============================ -->
+  <g transform="translate(40 44)">
+    <g transform="translate(11 0)"><use href="#ic-queen"/></g>
+    <text x="32" y="-1" class="h-eng">queen-mq</text>
+    <text x="32" y="17" class="h-sub">replay from any timestamp &#8226; per-group offset</text>
+  </g>
+  <g transform="translate(1240 44)" text-anchor="end">
+    <text x="0" y="-8" class="label">RETENTION</text>
+    <text x="0" y="9"  class="num cyan">unbounded (postgres)</text>
+  </g>
+  <line x1="40" y1="80" x2="1240" y2="80" stroke="#26262a"/>
+
+  <!-- ============================ QUEUE / TAPE HEADER ============================ -->
+  <text x="40" y="110" class="label">QUEUE &#8226; chat-events</text>
+  <text x="40" y="130" class="micro-low">tape of every message ever pushed, from t=0 to NOW</text>
+
+  <!-- ============================ TAPE (the horizontal river of messages) ============================ -->
+  <!-- Tape band: x=80..1200, y=200..240 (40 tall) -->
+  <g>
+    <rect x="80" y="200" width="1120" height="40" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+    <rect x="80" y="200" width="1120" height="40" rx="6" fill="url(#tape-fade)" opacity="0.6"/>
+
+    <!-- Static message dots on the tape, scattered to look like real history.
+         Each circle = a message at that timestamp. -->
+    <g fill="#22d3ee" filter="url(#g-cyan)">
+      <!-- Sparse history: Sep'24 to Nov'24 (x=80..380) -->
+      <circle cx="98"  cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="118" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="148" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="186" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="220" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="246" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="276" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="312" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="346" cy="220" r="2.4" opacity="0.7"/>
+      <circle cx="378" cy="220" r="2.4" opacity="0.7"/>
+
+      <!-- Denser middle: Dec'24 to Feb'25 (x=380..720) -->
+      <circle cx="402" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="424" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="448" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="468" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="486" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="508" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="528" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="552" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="572" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="596" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="618" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="640" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="662" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="684" cy="220" r="2.6" opacity="0.85"/>
+      <circle cx="706" cy="220" r="2.6" opacity="0.85"/>
+
+      <!-- Recent: Mar'25 to NOW (x=720..1200) -->
+      <circle cx="730" cy="220" r="2.6" opacity="1"/>
+      <circle cx="752" cy="220" r="2.6" opacity="1"/>
+      <circle cx="772" cy="220" r="2.6" opacity="1"/>
+      <circle cx="794" cy="220" r="2.6" opacity="1"/>
+      <circle cx="816" cy="220" r="2.6" opacity="1"/>
+      <circle cx="838" cy="220" r="2.6" opacity="1"/>
+      <circle cx="860" cy="220" r="2.6" opacity="1"/>
+      <circle cx="882" cy="220" r="2.6" opacity="1"/>
+      <circle cx="904" cy="220" r="2.6" opacity="1"/>
+      <circle cx="926" cy="220" r="2.6" opacity="1"/>
+      <circle cx="948" cy="220" r="2.6" opacity="1"/>
+      <circle cx="970" cy="220" r="2.6" opacity="1"/>
+      <circle cx="992" cy="220" r="2.6" opacity="1"/>
+      <circle cx="1014" cy="220" r="2.6" opacity="1"/>
+      <circle cx="1036" cy="220" r="2.6" opacity="1"/>
+      <circle cx="1058" cy="220" r="2.6" opacity="1"/>
+      <circle cx="1080" cy="220" r="2.6" opacity="1"/>
+      <circle cx="1102" cy="220" r="2.6" opacity="1"/>
+      <circle cx="1124" cy="220" r="2.6" opacity="1"/>
+      <circle cx="1146" cy="220" r="2.6" opacity="1"/>
+      <!-- The "head" message, currently glowing -->
+      <circle cx="1170" cy="220" r="3.6" opacity="1">
+        <animate attributeName="opacity" values="0.5;1;0.5" dur="1.6s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+
+    <!-- Timestamp axis below the tape -->
+    <g>
+      <line x1="80" y1="252" x2="1200" y2="252" stroke="#26262a"/>
+      <!-- ticks -->
+      <g stroke="#26262a">
+        <line x1="80"   y1="252" x2="80"   y2="258"/>
+        <line x1="320"  y1="252" x2="320"  y2="258"/>
+        <line x1="560"  y1="252" x2="560"  y2="258"/>
+        <line x1="800"  y1="252" x2="800"  y2="258"/>
+        <line x1="1040" y1="252" x2="1040" y2="258"/>
+        <line x1="1200" y1="252" x2="1200" y2="258"/>
+      </g>
+      <g class="micro-low" text-anchor="middle">
+        <text x="80"   y="274">SEP 2024</text>
+        <text x="320"  y="274">NOV 2024</text>
+        <text x="560"  y="274">JAN 2025</text>
+        <text x="800"  y="274">MAR 2025</text>
+        <text x="1040" y="274">MAY 2025</text>
+        <text x="1200" y="274" class="micro cyan">NOW</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ============================ CURSOR 1: agent-runner (live group, near head) ============================ -->
+  <g>
+    <!-- vertical bar -->
+    <line x1="1180" y1="180" x2="1180" y2="260" stroke="#4ade80" stroke-width="2"/>
+    <!-- glow head -->
+    <circle cx="1180" cy="180" r="4" fill="#4ade80" filter="url(#g-green)">
+      <animate attributeName="opacity" values="0.6;1;0.6" dur="2s" repeatCount="indefinite"/>
+    </circle>
+    <!-- label card above the bar -->
+    <g transform="translate(1170 138)">
+      <rect x="-90" y="-22" width="100" height="32" rx="8" fill="#1d1d1f" stroke="#26262a"/>
+      <text x="-80" y="-8" class="micro-low">CONSUMER GROUP</text>
+      <text x="-80" y="6" class="num ok">agent-runner</text>
+      <text x="-80" y="20" class="pill-mid" font-size="10">lag: 0 &#8226; live</text>
+    </g>
+  </g>
+
+  <!-- ============================ CURSOR 2: report-fall-2024 (new replay group) ============================ -->
+  <g>
+    <!-- materialize-and-sweep: cx animates from x=320 to x=1140 -->
+    <line x1="320" y1="180" x2="320" y2="260" stroke="#e6b450" stroke-width="2" stroke-dasharray="4 3" opacity="0">
+      <animate attributeName="opacity" values="0;0.2;1;1;1;0;0"
+               keyTimes="0;0.06;0.12;0.55;0.85;0.9;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="x1" values="320;320;1140;1140;1140;1140"
+               keyTimes="0;0.12;0.55;0.7;0.9;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="x2" values="320;320;1140;1140;1140;1140"
+               keyTimes="0;0.12;0.55;0.7;0.9;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="stroke-dasharray" values="4 3;4 3;4 3;0;0;0"
+               keyTimes="0;0.12;0.55;0.6;0.9;1" dur="9s" repeatCount="indefinite"/>
+    </line>
+    <circle r="4" fill="#e6b450" filter="url(#g-amber)" opacity="0">
+      <animate attributeName="opacity" values="0;0.4;1;1;0.6;0"
+               keyTimes="0;0.06;0.12;0.7;0.85;0.9" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="cx" values="320;320;1140;1140;1140"
+               keyTimes="0;0.12;0.55;0.85;0.9" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="cy" values="180;180;180;180;180" dur="9s" repeatCount="indefinite"/>
+    </circle>
+
+    <!-- Floating label card that follows cursor 2 -->
+    <g opacity="0">
+      <animate attributeName="opacity" values="0;0;1;1;0"
+               keyTimes="0;0.06;0.13;0.85;0.9" dur="9s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate"
+                        values="320,138;320,138;1140,138;1140,138;1140,138"
+                        keyTimes="0;0.12;0.55;0.85;0.9" dur="9s" repeatCount="indefinite"/>
+      <rect x="10" y="-22" width="170" height="32" rx="8" fill="#1d1d1f" stroke="#3a2f1c"/>
+      <text x="20" y="-8" class="micro-low">CONSUMER GROUP &#8226; NEW</text>
+      <text x="20" y="6" class="num warn">report-fall-2024</text>
+      <text x="20" y="20" class="pill-mid" font-size="10">subscriptionFrom: 2024-09-01</text>
+    </g>
+  </g>
+
+  <!-- ============================ TAPE BRACKET INDICATING REPLAY WINDOW ============================ -->
+  <g opacity="0">
+    <animate attributeName="opacity" values="0;0;0.7;0.7;0"
+             keyTimes="0;0.13;0.2;0.55;0.6" dur="9s" repeatCount="indefinite"/>
+    <!-- bracket at top of tape from 320 to dynamically advancing position -->
+    <path d="M 320 196 L 320 192 L 540 192 L 540 196" stroke="#e6b450" stroke-width="1.2" fill="none">
+      <animate attributeName="d" values="M 320 196 L 320 192 L 540 192 L 540 196;M 320 196 L 320 192 L 1140 192 L 1140 196"
+               keyTimes="0;1" dur="9s" begin="1.2s" repeatCount="indefinite"/>
+    </path>
+    <text x="430" y="186" class="micro warn" text-anchor="middle">replaying historical window</text>
+  </g>
+
+  <!-- ============================ SUBSCRIPTION MODES PANEL ============================ -->
+  <g transform="translate(40 320)">
+    <text class="label">SUBSCRIPTION MODES</text>
+    <text x="0" y="20" class="micro-low">where each new consumer group starts</text>
+
+    <!-- 3 mode cards, side-by-side -->
+    <g transform="translate(0 50)">
+      <!-- all -->
+      <g>
+        <rect width="380" height="120" rx="10" fill="url(#card-bg)" stroke="#26262a"/>
+        <text x="20" y="32" class="num">all</text>
+        <text x="20" y="56" class="micro">process every message ever pushed</text>
+        <text x="20" y="78" class="micro-low">starts at t=0, includes the entire backlog</text>
+        <!-- mini-tape with cursor at left -->
+        <g transform="translate(20 92)">
+          <line x1="0" y1="0" x2="340" y2="0" stroke="#26262a"/>
+          <circle cx="6" cy="0" r="3.5" fill="#22d3ee"/>
+          <text x="20" y="14" class="pill-mid" font-size="10">starts here</text>
+        </g>
+      </g>
+
+      <!-- new -->
+      <g transform="translate(400 0)">
+        <rect width="380" height="120" rx="10" fill="url(#card-bg)" stroke="#26262a"/>
+        <text x="20" y="32" class="num">new</text>
+        <text x="20" y="56" class="micro">only messages pushed after the group joins</text>
+        <text x="20" y="78" class="micro-low">skip the backlog, live-tail forward</text>
+        <g transform="translate(20 92)">
+          <line x1="0" y1="0" x2="340" y2="0" stroke="#26262a"/>
+          <circle cx="334" cy="0" r="3.5" fill="#4ade80"/>
+          <text x="334" y="14" class="pill-mid" font-size="10" text-anchor="end">starts here</text>
+        </g>
+      </g>
+
+      <!-- from:timestamp -->
+      <g transform="translate(800 0)">
+        <rect width="400" height="120" rx="10" fill="url(#card-bg)" stroke="#3a2f1c"/>
+        <text x="20" y="32" class="num">from:&lt;timestamp&gt;</text>
+        <text x="20" y="56" class="micro">replay the window starting at any past time</text>
+        <text x="20" y="78" class="micro-low">retro-analytics, debugging, sandbox replay</text>
+        <g transform="translate(20 92)">
+          <line x1="0" y1="0" x2="360" y2="0" stroke="#3a2f1c"/>
+          <circle cx="100" cy="0" r="3.5" fill="#e6b450">
+            <animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/>
+          </circle>
+          <text x="100" y="14" class="pill-mid" font-size="10" text-anchor="middle" fill="#e6b450">starts at any past timestamp</text>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ============================ FOOTER TAGS ============================ -->
+  <g transform="translate(40 615)">
+    <line x1="0" y1="-22" x2="1200" y2="-22" stroke="#26262a"/>
+
+    <g>
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">per-group offset</text>
+    </g>
+    <g transform="translate(280 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">replay any timestamp</text>
+    </g>
+    <g transform="translate(580 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">independent progress</text>
+    </g>
+    <g transform="translate(880 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">no log retention to manage</text>
+    </g>
+  </g>
+</svg>

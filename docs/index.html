@@ -28,32 +28,6 @@
   color: var(--text-hi);
   font-weight: 500;
 }
-
-/* Animated pipeline figure under the hero. */
-.pipeline-figure {
-  margin: 0 auto;
-  max-width: 1180px;
-  border: 1px solid var(--bd);
-  border-radius: 14px;
-  background: var(--ink-0);
-  overflow: hidden;
-}
-.pipeline-figure img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-.pipeline-figure figcaption {
-  border-top: 1px solid var(--bd);
-  padding: 12px 18px;
-  font-size: 12.5px;
-  color: var(--text-mid);
-  line-height: 1.55;
-}
-.pipeline-figure figcaption strong {
-  color: var(--text-hi);
-  font-weight: 500;
-}
 </style>
 </head>
 <body>
@@ -68,6 +42,7 @@
     <nav class="topnav-links" aria-label="Primary">
       <a href="quickstart.html">Quickstart</a>
       <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
       <a href="architecture.html">Architecture</a>
       <a href="clients.html">Clients</a>
       <a href="server.html">Server</a>
@@ -371,6 +346,26 @@ await queen.queue('test-queue')
       Picking infrastructure honestly matters more than picking the &ldquo;winner&rdquo;
       of every benchmark. Here's the truth, in three columns:
     </p>
+
+    <figure class="compare-figure" style="margin: 22px 0 12px;">
+      <img src="assets/queen-vs-kafka.svg" alt="Side-by-side comparison: 12 entities feed Kafka (left) and Queen (right). Kafka hash-mods them into 4 fixed partitions, so 3 unrelated entities share each partition. When user:003 (in p2) goes slow, user:007 and user:011 are blocked because they share that partition. Queen gives every entity its own logical lane, so user:003 stalls only itself; the other 11 lanes keep flowing." />
+      <figcaption>
+        <strong>Queen vs Kafka &middot; head-of-line blocking at high entity cardinality.</strong>
+        Kafka's fixed shards force unrelated entities to share a partition; one slow
+        entity drags the others. Queen's logical lanes are one per entity, so a slow
+        entity stalls only itself. Same input, very different blast radius.
+      </figcaption>
+    </figure>
+
+    <figure class="compare-figure" style="margin: 12px 0 22px;">
+      <img src="assets/queen-vs-rabbitmq.svg" alt="Side-by-side comparison of operational cost at 10,000 ordered streams. RabbitMQ requires one queue per entity, so 10,000 entities means 10,000 Erlang processes, around 2.4 GB of process heap, and 10,000+ file handles. Queen achieves the same per-entity ordering with one queue containing 10,000 logical partitions, costing 52 MB total broker memory and zero extra processes." />
+      <figcaption>
+        <strong>Queen vs RabbitMQ &middot; 10,000 ordered streams without 10,000 Erlang processes.</strong>
+        RabbitMQ wants a queue per entity to get per-entity ordering; that proliferates
+        Erlang processes and file handles. Queen treats partitions as index rows in
+        PostgreSQL, so 10k partitions cost roughly the same as 10.
+      </figcaption>
+    </figure>
 
     <div class="card-grid" style="grid-template-columns: 1fr 1fr 1fr;">
       <div class="card" style="border-color: rgba(34,211,238,0.4);">

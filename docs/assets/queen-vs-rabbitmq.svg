@@ -1,0 +1,427 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 760" width="1600" height="760"
+     role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid meet"
+     font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <title id="title">Queen MQ vs RabbitMQ: 10k ordered streams without 10k Erlang processes</title>
+  <desc id="desc">To get per-entity ordering in RabbitMQ you allocate one queue per entity, which means one Erlang process, file handle, and memory footprint per entity. With 10k entities that is 10k processes and roughly 2.4 GB of RAM. Queen gets the same per-entity ordering with one queue containing 10k logical partitions, costing 52 MB total and zero extra processes.</desc>
+
+  <defs>
+    <filter id="g-soft" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-warn" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <linearGradient id="card-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1d1f"/>
+      <stop offset="1" stop-color="#19191b"/>
+    </linearGradient>
+    <linearGradient id="cost-bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"   stop-color="#fb7185" stop-opacity="0.55"/>
+      <stop offset="0.6" stop-color="#e6b450" stop-opacity="0.55"/>
+      <stop offset="1"   stop-color="#e6b450" stop-opacity="0.20"/>
+    </linearGradient>
+    <linearGradient id="lane-fade-c" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="0.06" stop-color="#22d3ee" stop-opacity="0.45"/>
+      <stop offset="0.94" stop-color="#22d3ee" stop-opacity="0.45"/>
+      <stop offset="1"    stop-color="#22d3ee" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- RabbitMQ-evocative mark: a small queue-of-boxes glyph -->
+    <symbol id="ic-rabbit" viewBox="0 0 24 24" overflow="visible">
+      <rect x="3"  y="9"  width="4" height="6" rx="0.6" fill="none" stroke="#9a9a9a" stroke-width="1.2"/>
+      <rect x="9"  y="9"  width="4" height="6" rx="0.6" fill="none" stroke="#9a9a9a" stroke-width="1.2"/>
+      <rect x="15" y="9"  width="4" height="6" rx="0.6" fill="none" stroke="#9a9a9a" stroke-width="1.2"/>
+      <path d="M 3 18 L 21 18" stroke="#9a9a9a" stroke-width="1.2" stroke-linecap="round"/>
+      <path d="M 19 5 L 21 7 L 17 9" fill="none" stroke="#9a9a9a" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="3" y1="6" x2="19" y2="6" stroke="#9a9a9a" stroke-width="1.2"/>
+    </symbol>
+    <!-- Per-queue process glyph -->
+    <symbol id="ic-proc" viewBox="0 0 16 16" overflow="visible">
+      <rect x="2" y="3" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/>
+      <line x1="4" y1="6" x2="12" y2="6"  stroke="currentColor" stroke-width="1.0"/>
+      <line x1="4" y1="9" x2="10" y2="9"  stroke="currentColor" stroke-width="1.0"/>
+      <line x1="4" y1="11" x2="8" y2="11" stroke="currentColor" stroke-width="1.0"/>
+    </symbol>
+    <g id="ic-queen">
+      <rect x="-11" y="-11" width="22" height="22" rx="6" fill="#1d1d1f" stroke="#35353a"/>
+      <text y="5" font-size="14" font-weight="700" fill="#4ade80" text-anchor="middle">Q</text>
+    </g>
+
+    <style>
+      .label    { font: 600 10.5px Inter, system-ui, sans-serif; letter-spacing: 0.18em; fill: #6a6a6a; text-transform: uppercase; }
+      .h-eng    { font: 600 18px Inter, system-ui, sans-serif; letter-spacing: -0.005em; fill: #e6e6e6; }
+      .h-sub    { font: 500 12px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .pill     { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #e6e6e6; }
+      .pill-mid { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #9a9a9a; }
+      .micro    { font: 500 10.5px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .micro-low{ font: 500 10.5px Inter, system-ui, sans-serif; fill: #6a6a6a; }
+      .num      { font: 600 13px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .num-big  { font: 600 36px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+      .num-med  { font: 600 18px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .ok       { fill: #4ade80; }
+      .warn     { fill: #e6b450; }
+      .bad      { fill: #fb7185; }
+      .cyan     { fill: #22d3ee; }
+    </style>
+  </defs>
+
+  <!-- =================== BACKGROUND =================== -->
+  <rect width="1600" height="760" fill="#141415"/>
+
+  <!-- =================== TITLE BAR =================== -->
+  <g transform="translate(40 44)">
+    <use href="#ic-rabbit" x="-6" y="-14" width="28" height="28"/>
+    <text x="32" y="-1" class="h-eng">rabbitmq</text>
+    <text x="32" y="17" class="h-sub">queue-per-entity &#8226; 10,000 erlang processes</text>
+  </g>
+  <g transform="translate(840 44)">
+    <g transform="translate(11 0)"><use href="#ic-queen"/></g>
+    <text x="32" y="-1" class="h-eng">queen-mq</text>
+    <text x="32" y="17" class="h-sub">one queue &#8226; logical partitions per entity</text>
+  </g>
+
+  <line x1="40"  y1="80" x2="780"  y2="80" stroke="#26262a"/>
+  <line x1="820" y1="80" x2="1560" y2="80" stroke="#26262a"/>
+  <line x1="800" y1="40" x2="800"  y2="640" stroke="#26262a"/>
+
+  <!-- =================== LEFT PANEL: RABBITMQ =================== -->
+  <g>
+    <text x="40"  y="106" class="label">10,000 ORDERED STREAMS NEEDED</text>
+    <text x="40"  y="124" class="micro-low">to give every chat / user / tenant its own FIFO lane, you allocate one queue per entity</text>
+
+    <!-- Wall of queue-per-entity cards. 12 visible, then "+ 9,988 more" hint. -->
+    <!-- Each card: 320x32, x=40..360. Stacked from y=150 with gap=8 -->
+    <g font-family="ui-monospace, JetBrains Mono, monospace">
+      <g transform="translate(40 150)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.001</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~242 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.4s" begin="0s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 188)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.002</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~248 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.6s" begin="0.2s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 226)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.003</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~244 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.5s" begin="0.4s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 264)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.004</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~245 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.7s" begin="0.6s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 302)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.005</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~241 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.4s" begin="0.8s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 340)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.006</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~243 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.6s" begin="1.0s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 378)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.007</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~246 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.5s" begin="1.2s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 416)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.008</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~244 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.7s" begin="1.4s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 454)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.009</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~242 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.4s" begin="1.6s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 492)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.010</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~245 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.6s" begin="1.8s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 530)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.011</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~243 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.5s" begin="2.0s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g transform="translate(40 568)" color="#9a9a9a">
+        <rect width="320" height="32" rx="6" fill="url(#card-bg)" stroke="#26262a"/>
+        <use href="#ic-proc" x="10" y="8" width="16" height="16"/>
+        <text x="34" y="20" class="pill">q.user.012</text>
+        <text x="200" y="20" class="pill-mid" text-anchor="end">~244 KB &#8226; 1 proc</text>
+        <circle cx="306" cy="16" r="3" fill="#e6b450" filter="url(#g-warn)">
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.7s" begin="2.2s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+
+      <!-- "+ 9,988 more" hint -->
+      <g transform="translate(40 612)">
+        <text class="micro-low">+ 9,988 more queues</text>
+        <text x="0" y="14" class="micro-low">each = 1 erlang process &#8226; 1 file handle &#8226; ~244 KB heap</text>
+      </g>
+    </g>
+
+    <!-- Stats card on the right of left panel -->
+    <g transform="translate(420 150)">
+      <rect width="340" height="430" rx="12" fill="url(#card-bg)" stroke="#26262a"/>
+
+      <text x="20" y="32" class="label">OPERATIONAL COST AT 10K ENTITIES</text>
+
+      <!-- RAM big number -->
+      <g transform="translate(20 56)">
+        <text class="micro-low">PROCESS HEAP RAM</text>
+        <text y="42" class="num-big bad">2.4 <tspan font-size="20">GB</tspan></text>
+        <text x="0" y="62" class="micro-low">10,000 erlang procs &#215; ~244 KB</text>
+        <!-- tiny growing-cost bar -->
+        <rect x="0" y="74" width="300" height="4" rx="2" fill="#26262a"/>
+        <rect x="0" y="74" width="270" height="4" rx="2" fill="url(#cost-bar)"/>
+      </g>
+
+      <!-- Procs counter -->
+      <g transform="translate(20 200)">
+        <text class="micro-low">ERLANG PROCESSES</text>
+        <text y="32" class="num-med bad">10,000</text>
+        <text x="0" y="50" class="micro-low">scheduler load &#8226; per-process state &#8226; per-process gc</text>
+      </g>
+
+      <!-- File handles -->
+      <g transform="translate(20 280)">
+        <text class="micro-low">FILE HANDLES</text>
+        <text y="32" class="num-med warn">10,000+</text>
+        <text x="0" y="50" class="micro-low">one per persistent queue, hits ulimit fast</text>
+      </g>
+
+      <!-- Mini comparison row -->
+      <g transform="translate(20 365)">
+        <text class="micro-low">MGMT-UI ENUMERATION</text>
+        <text x="0" y="22" class="num warn">slow at 10k+</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- =================== RIGHT PANEL: QUEEN =================== -->
+  <g>
+    <text x="840"  y="106" class="label">10,000 ORDERED STREAMS, ONE QUEUE</text>
+    <text x="840"  y="124" class="micro-low">every entity gets its own FIFO partition inside a single queue. partitions = index rows.</text>
+
+    <!-- One queue card containing logical partitions -->
+    <g transform="translate(840 150)">
+      <rect width="340" height="450" rx="12" fill="url(#card-bg)" stroke="#26262a"/>
+      <rect width="340" height="450" rx="12" fill="none" stroke="#22d3ee" stroke-opacity="0.10"/>
+
+      <g transform="translate(20 32)">
+        <text class="num">user-events</text>
+        <text x="100" y="0" class="micro-low">queue</text>
+      </g>
+      <line x1="20" y1="48" x2="320" y2="48" stroke="#26262a"/>
+
+      <text x="20" y="72" class="label">PARTITIONS &#8226; ORDERED LANES</text>
+
+      <!-- 12 partition pills, much denser than the queue cards on the left -->
+      <g font-family="ui-monospace, JetBrains Mono, monospace">
+        <g transform="translate(20 96)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:001</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 124)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:002</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 152)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:003</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 180)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:004</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 208)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:005</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 236)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:006</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 264)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:007</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 292)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:008</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 320)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:009</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 348)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:010</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 376)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:011</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+        <g transform="translate(20 404)">
+          <rect width="300" height="22" rx="11" fill="#1a1a1c" stroke="#26262a"/>
+          <circle cx="11" cy="11" r="3" fill="#4ade80"/>
+          <text x="22" y="15" class="pill">user:012</text>
+          <text x="290" y="15" class="pill-mid" text-anchor="end">1 row</text>
+        </g>
+      </g>
+
+      <!-- "+ 9,988 more" hint -->
+      <text x="20" y="438" class="micro-low">+ 9,988 more partitions &#8226; just index rows in PostgreSQL</text>
+    </g>
+
+    <!-- Queen stats card -->
+    <g transform="translate(1220 150)">
+      <rect width="340" height="430" rx="12" fill="url(#card-bg)" stroke="#26262a"/>
+
+      <text x="20" y="32" class="label">OPERATIONAL COST AT 10K ENTITIES</text>
+
+      <!-- RAM big number -->
+      <g transform="translate(20 56)">
+        <text class="micro-low">BROKER RSS</text>
+        <text y="42" class="num-big ok">52 <tspan font-size="20">MB</tspan></text>
+        <text x="0" y="62" class="micro-low">measured under 104k msg/s peak push</text>
+        <rect x="0" y="74" width="300" height="4" rx="2" fill="#26262a"/>
+        <rect x="0" y="74" width="6" height="4" rx="2" fill="#4ade80"/>
+      </g>
+
+      <!-- Extra procs -->
+      <g transform="translate(20 200)">
+        <text class="micro-low">EXTRA PROCESSES</text>
+        <text y="32" class="num-med ok">0</text>
+        <text x="0" y="50" class="micro-low">one C++ binary regardless of partition count</text>
+      </g>
+
+      <!-- File handles -->
+      <g transform="translate(20 280)">
+        <text class="micro-low">FILE HANDLES</text>
+        <text y="32" class="num-med ok">~30</text>
+        <text x="0" y="50" class="micro-low">db pool + acceptors, fixed regardless of cardinality</text>
+      </g>
+
+      <!-- Mgmt UI -->
+      <g transform="translate(20 365)">
+        <text class="micro-low">DASHBOARD ENUMERATION</text>
+        <text x="0" y="22" class="num ok">indexed &#8226; instant</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- =================== FOOTER COMPARISON =================== -->
+  <line x1="40" y1="660" x2="1560" y2="660" stroke="#26262a"/>
+
+  <g transform="translate(40 695)">
+    <text class="label">MEMORY</text>
+    <g transform="translate(0 28)">
+      <text class="num bad">2.4 GB</text>
+      <text x="80" y="0" class="micro-low">vs</text>
+      <text x="110" y="0" class="num ok">52 MB</text>
+      <text x="0" y="22" class="micro-low">~46&#215; less</text>
+    </g>
+  </g>
+
+  <g transform="translate(440 695)">
+    <text class="label">PROCESSES</text>
+    <g transform="translate(0 28)">
+      <text class="num bad">10,000</text>
+      <text x="80" y="0" class="micro-low">vs</text>
+      <text x="110" y="0" class="num ok">0 extra</text>
+      <text x="0" y="22" class="micro-low">no per-entity scheduler load</text>
+    </g>
+  </g>
+
+  <g transform="translate(840 695)">
+    <text class="label">CARDINALITY HEADROOM</text>
+    <g transform="translate(0 28)">
+      <text class="num warn">hits ulimit at ~32k</text>
+      <text x="0" y="22" class="micro-low">file-handle &amp; scheduler ceilings on a single node</text>
+    </g>
+  </g>
+
+  <g transform="translate(1220 695)">
+    <text class="label">CARDINALITY HEADROOM</text>
+    <g transform="translate(0 28)">
+      <text class="num ok">flat to 1M+ partitions</text>
+      <text x="0" y="22" class="micro-low">PostgreSQL btree on (queue_id, partition)</text>
+    </g>
+  </g>
+</svg>

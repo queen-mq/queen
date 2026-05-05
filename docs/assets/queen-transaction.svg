@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720"
+     role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid meet"
+     font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <title id="title">Queen MQ: atomic ack + push in one PostgreSQL transaction</title>
+  <desc id="desc">A worker pops a message from queue A, transforms it, and pushes the derived message into queue B. The ack of the input and the push of the output are wrapped in a single PostgreSQL BEGIN..COMMIT, so either both happen or neither does. No orphan outputs, no duplicated inputs, no separate outbox table.</desc>
+
+  <defs>
+    <filter id="g-cyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-green" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-warn" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <linearGradient id="card-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1d1f"/>
+      <stop offset="1" stop-color="#19191b"/>
+    </linearGradient>
+    <linearGradient id="env-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1a1c"/>
+      <stop offset="1" stop-color="#161617"/>
+    </linearGradient>
+    <radialGradient id="env-glow" cx="0.5" cy="0.5" r="0.7">
+      <stop offset="0"   stop-color="#22d3ee" stop-opacity="0.05"/>
+      <stop offset="1"   stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+
+    <g id="ic-queen">
+      <rect x="-11" y="-11" width="22" height="22" rx="6" fill="#1d1d1f" stroke="#35353a"/>
+      <text y="5" font-size="14" font-weight="700" fill="#4ade80" text-anchor="middle">Q</text>
+    </g>
+    <symbol id="ic-worker" viewBox="0 0 16 16" overflow="visible">
+      <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <path d="M 5 8 L 7 10 L 11 6" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="ic-pg" viewBox="0 0 24 24" overflow="visible">
+      <ellipse cx="12" cy="6" rx="9" ry="3" fill="none" stroke="#9a9a9a" stroke-width="1.4"/>
+      <path d="M 3 6 L 3 18 A 9 3 0 0 0 21 18 L 21 6" fill="none" stroke="#9a9a9a" stroke-width="1.4"/>
+      <path d="M 3 12 A 9 3 0 0 0 21 12" fill="none" stroke="#9a9a9a" stroke-width="1.4"/>
+    </symbol>
+
+    <style>
+      .label    { font: 600 10.5px Inter, system-ui, sans-serif; letter-spacing: 0.18em; fill: #6a6a6a; text-transform: uppercase; }
+      .h0       { font: 600 16px Inter, system-ui, sans-serif; letter-spacing: -0.005em; fill: #e6e6e6; }
+      .h1       { font: 600 22px Inter, system-ui, sans-serif; letter-spacing: -0.01em; fill: #e6e6e6; }
+      .h-eng    { font: 600 18px Inter, system-ui, sans-serif; fill: #e6e6e6; }
+      .h-sub    { font: 500 12px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .pill     { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #e6e6e6; }
+      .pill-mid { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #9a9a9a; }
+      .micro    { font: 500 10.5px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .micro-low{ font: 500 10.5px Inter, system-ui, sans-serif; fill: #6a6a6a; }
+      .num      { font: 600 13px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .code     { font: 500 12px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #e6e6e6; }
+      .code-key { font: 500 12px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #22d3ee; }
+      .code-mid { font: 500 12px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #9a9a9a; }
+      .ok       { fill: #4ade80; }
+      .warn     { fill: #e6b450; }
+      .bad      { fill: #fb7185; }
+      .cyan     { fill: #22d3ee; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="720" fill="#141415"/>
+
+  <!-- ============================ TITLE BAR ============================ -->
+  <g transform="translate(40 44)">
+    <g transform="translate(11 0)"><use href="#ic-queen"/></g>
+    <text x="32" y="-1" class="h-eng">queen-mq</text>
+    <text x="32" y="17" class="h-sub">transactional ack + push &#8226; one postgres transaction</text>
+  </g>
+  <g transform="translate(1240 44)" text-anchor="end">
+    <text x="0" y="-8" class="label">DURABILITY</text>
+    <text x="0" y="9"  class="num ok">synchronous_commit=on</text>
+  </g>
+
+  <line x1="40" y1="80" x2="1240" y2="80" stroke="#26262a"/>
+
+  <!-- ============================ COLUMN HEADERS ============================ -->
+  <text x="40"   y="110" class="label">QUEUE A &#8226; INPUT</text>
+  <text x="370"  y="110" class="label">TRANSACTION ENVELOPE</text>
+  <text x="940"  y="110" class="label">QUEUE B &#8226; OUTPUT</text>
+
+  <!-- ============================ QUEUE A (left) ============================ -->
+  <g>
+    <rect x="40" y="130" width="260" height="380" rx="12" fill="url(#card-bg)" stroke="#26262a"/>
+
+    <g transform="translate(58 162)">
+      <text class="num">raw-events</text>
+      <text x="116" y="0" class="micro-low">queue</text>
+    </g>
+    <line x1="58" y1="178" x2="282" y2="178" stroke="#26262a"/>
+
+    <text x="58" y="200" class="label">FIFO &#8226; HEAD AT TOP</text>
+
+    <!-- Stacked message pills (head = m1 at top) -->
+    <g transform="translate(58 220)" font-family="ui-monospace, JetBrains Mono, monospace">
+      <!-- head: m1 (about to be popped, highlighted) -->
+      <g>
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#22d3ee" stroke-opacity="0.45"/>
+        <circle cx="14" cy="17" r="4" fill="#22d3ee" filter="url(#g-cyan)">
+          <animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/>
+        </circle>
+        <text x="26" y="21" class="pill">msg-A1</text>
+        <text x="214" y="21" class="pill-mid" text-anchor="end">head</text>
+      </g>
+      <g transform="translate(0 42)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-A2</text>
+      </g>
+      <g transform="translate(0 84)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-A3</text>
+      </g>
+      <g transform="translate(0 126)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-A4</text>
+      </g>
+      <g transform="translate(0 168)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-A5</text>
+      </g>
+    </g>
+
+    <!-- Subtle "...+ more" hint -->
+    <text x="58" y="490" class="micro-low">+ more in this partition</text>
+  </g>
+
+  <!-- ============================ INBOUND ARROW (queue A -> envelope) ============================ -->
+  <g>
+    <line x1="300" y1="237" x2="350" y2="237" stroke="#26262a" stroke-width="1" stroke-dasharray="2 4"/>
+    <text x="320" y="225" class="micro-low" text-anchor="middle">pop</text>
+  </g>
+
+  <!-- ============================ TRANSACTION ENVELOPE ============================ -->
+  <g>
+    <!-- envelope bg -->
+    <rect x="350" y="130" width="540" height="380" rx="14" fill="url(#env-bg)" stroke="#26262a"/>
+    <ellipse cx="620" cy="320" rx="220" ry="160" fill="url(#env-glow)"/>
+
+    <!-- Pulsing transaction border (animates between cyan idle and green commit) -->
+    <rect x="350" y="130" width="540" height="380" rx="14" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-opacity="0.18">
+      <animate attributeName="stroke-opacity" values="0.18;0.18;0.55;0.18;0.18"
+               keyTimes="0;0.5;0.55;0.62;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="stroke" values="#22d3ee;#22d3ee;#4ade80;#22d3ee;#22d3ee"
+               keyTimes="0;0.5;0.55;0.62;1" dur="9s" repeatCount="indefinite"/>
+    </rect>
+
+    <!-- BEGIN label (top of envelope) -->
+    <g transform="translate(620 130)">
+      <rect x="-44" y="-12" width="88" height="24" rx="12" fill="#141415" stroke="#26262a"/>
+      <text y="4" class="code-key" font-size="11" text-anchor="middle">BEGIN</text>
+    </g>
+
+    <!-- COMMIT label (bottom of envelope) -->
+    <g transform="translate(620 510)">
+      <rect x="-50" y="-12" width="100" height="24" rx="12" fill="#141415" stroke="#26262a">
+        <animate attributeName="stroke" values="#26262a;#26262a;#4ade80;#26262a;#26262a"
+                 keyTimes="0;0.5;0.6;0.7;1" dur="9s" repeatCount="indefinite"/>
+      </rect>
+      <text y="4" font-size="11" text-anchor="middle" font-family="ui-monospace, JetBrains Mono, monospace">
+        <tspan class="code-key">
+          <animate attributeName="fill" values="#22d3ee;#22d3ee;#4ade80;#22d3ee;#22d3ee"
+                   keyTimes="0;0.5;0.6;0.7;1" dur="9s" repeatCount="indefinite"/>COMMIT</tspan>
+      </text>
+    </g>
+
+    <!-- Inside envelope -->
+    <text x="370" y="170" class="label">PG TRANSACTION</text>
+
+    <!-- Input slot -->
+    <g transform="translate(384 240)">
+      <rect width="140" height="44" rx="8" fill="#1d1d1f" stroke="#26262a"/>
+      <text x="12" y="18" class="micro-low">INPUT</text>
+      <text x="12" y="34" class="pill">msg-A1</text>
+    </g>
+
+    <!-- Worker icon -->
+    <g transform="translate(620 262)" color="#4ade80">
+      <circle r="22" fill="#1d1d1f" stroke="#35353a"/>
+      <use href="#ic-worker" x="-10" y="-10" width="20" height="20"/>
+      <circle r="22" fill="none" stroke="#22d3ee" stroke-opacity="0">
+        <animate attributeName="stroke-opacity" values="0;0.5;0" keyTimes="0;0.4;0.55" dur="9s" repeatCount="indefinite"/>
+        <animate attributeName="r" values="22;30;22" keyTimes="0;0.45;0.55" dur="9s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+    <text x="620" y="312" class="micro-low" text-anchor="middle">transform</text>
+
+    <!-- Output slot -->
+    <g transform="translate(716 240)">
+      <rect width="140" height="44" rx="8" fill="#1d1d1f" stroke="#26262a"/>
+      <text x="12" y="18" class="micro-low">OUTPUT</text>
+      <text x="12" y="34" class="pill">
+        <tspan opacity="0">
+          <animate attributeName="opacity" values="0;0;1;1;0"
+                   keyTimes="0;0.4;0.45;0.92;1" dur="9s" repeatCount="indefinite"/>msg-A1' (transformed)</tspan>
+      </text>
+    </g>
+
+    <!-- ack arrow -->
+    <g transform="translate(384 360)">
+      <text class="micro-low">ack(input)</text>
+      <line x1="0" y1="14" x2="120" y2="14" stroke="#26262a" stroke-dasharray="2 4"/>
+      <circle cx="60" cy="14" r="3.5" fill="#4ade80" filter="url(#g-green)" opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0"
+                 keyTimes="0;0.5;0.55;0.65;0.7;1" dur="9s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+    <!-- push arrow -->
+    <g transform="translate(716 360)">
+      <text class="micro-low">push(output)</text>
+      <line x1="0" y1="14" x2="120" y2="14" stroke="#26262a" stroke-dasharray="2 4"/>
+      <circle cx="60" cy="14" r="3.5" fill="#4ade80" filter="url(#g-green)" opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0"
+                 keyTimes="0;0.5;0.55;0.65;0.7;1" dur="9s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+
+    <!-- PG marker (lower-right inside envelope) -->
+    <g transform="translate(820 460)">
+      <use href="#ic-pg" x="-10" y="-12" width="20" height="20"/>
+      <text x="14" y="2" class="micro-low">postgres</text>
+    </g>
+
+    <!-- "1 wal record" tag -->
+    <g transform="translate(384 460)">
+      <rect x="-4" y="-12" width="120" height="22" rx="11" fill="#141415" stroke="#26262a"/>
+      <circle cx="6" cy="-1" r="3" fill="#4ade80"/>
+      <text x="16" y="3" class="pill-mid" font-size="10.5">1 WAL record</text>
+    </g>
+  </g>
+
+  <!-- ============================ FLOWING DOT: input msg traveling into envelope ============================ -->
+  <g>
+    <!-- The "popped" dot leaves queue A head (right edge x=298 y=237) and travels into envelope -->
+    <circle cx="298" cy="237" r="5" fill="#22d3ee" filter="url(#g-cyan)" opacity="0">
+      <animate attributeName="cx" values="298;454;454"
+               keyTimes="0;0.18;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="cy" values="237;262;262"
+               keyTimes="0;0.18;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0;0;1;1;0;0"
+               keyTimes="0;0.05;0.1;0.4;0.45;1" dur="9s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- ============================ ENVELOPE -> QUEUE B (output dot traveling out) ============================ -->
+  <g>
+    <line x1="890" y1="237" x2="940" y2="237" stroke="#26262a" stroke-width="1" stroke-dasharray="2 4"/>
+    <text x="915" y="225" class="micro-low" text-anchor="middle">push</text>
+
+    <circle cx="786" cy="262" r="5" fill="#4ade80" filter="url(#g-green)" opacity="0">
+      <animate attributeName="cx" values="786;786;940;940"
+               keyTimes="0;0.6;0.78;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="cy" values="262;262;237;237"
+               keyTimes="0;0.6;0.78;1" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0;0;1;1;0;0"
+               keyTimes="0;0.6;0.62;0.76;0.8;1" dur="9s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- ============================ QUEUE B (right) ============================ -->
+  <g>
+    <rect x="940" y="130" width="260" height="380" rx="12" fill="url(#card-bg)" stroke="#26262a"/>
+
+    <g transform="translate(958 162)">
+      <text class="num">processed-events</text>
+    </g>
+    <line x1="958" y1="178" x2="1182" y2="178" stroke="#26262a"/>
+
+    <text x="958" y="200" class="label">FIFO &#8226; HEAD AT TOP</text>
+
+    <g transform="translate(958 220)" font-family="ui-monospace, JetBrains Mono, monospace">
+      <!-- head: msg-B1 -->
+      <g>
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-B1</text>
+      </g>
+      <g transform="translate(0 42)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-B2</text>
+      </g>
+      <g transform="translate(0 84)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-B3</text>
+      </g>
+      <!-- tail (slot for the new arrival) -->
+      <g transform="translate(0 126)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#26262a"/>
+        <circle cx="14" cy="17" r="4" fill="#26262a"/>
+        <text x="26" y="21" class="pill-mid">msg-B4</text>
+      </g>
+      <!-- newly arrived (highlighted at right time in the loop) -->
+      <g transform="translate(0 168)">
+        <rect width="224" height="34" rx="6" fill="#1a1a1c" stroke="#4ade80" stroke-opacity="0">
+          <animate attributeName="stroke-opacity" values="0;0;0.6;0.4;0"
+                   keyTimes="0;0.78;0.82;0.92;1" dur="9s" repeatCount="indefinite"/>
+        </rect>
+        <circle cx="14" cy="17" r="4" fill="#4ade80" opacity="0">
+          <animate attributeName="opacity" values="0;0;1;1;0.4"
+                   keyTimes="0;0.78;0.82;0.92;1" dur="9s" repeatCount="indefinite"/>
+        </circle>
+        <text x="26" y="21" class="pill-mid">
+          <tspan>
+            <animate attributeName="fill" values="#9a9a9a;#9a9a9a;#e6e6e6;#e6e6e6;#9a9a9a"
+                     keyTimes="0;0.78;0.82;0.92;1" dur="9s" repeatCount="indefinite"/>msg-A1' (just arrived)</tspan>
+        </text>
+      </g>
+    </g>
+
+    <text x="958" y="490" class="micro-low">tail accepts new arrivals atomically</text>
+  </g>
+
+  <!-- ============================ SQL INSET (bottom) ============================ -->
+  <g transform="translate(40 540)">
+    <rect width="1200" height="120" rx="10" fill="url(#card-bg)" stroke="#26262a"/>
+
+    <text x="20" y="22" class="label">UNDER THE HOOD &#8226; ONE PG TRANSACTION</text>
+
+    <g font-family="ui-monospace, JetBrains Mono, monospace">
+      <text x="20"  y="48" class="code-key">BEGIN<tspan class="code-mid">;</tspan></text>
+      <text x="20"  y="70" class="code">  <tspan class="code-key">UPDATE</tspan> messages_consumed <tspan class="code-key">SET</tspan> status = <tspan class="cyan">'completed'</tspan> <tspan class="code-key">WHERE</tspan> id = msg_a1<tspan class="code-mid">;</tspan>          <tspan class="code-mid">-- ack(input)</tspan></text>
+      <text x="20"  y="90" class="code">  <tspan class="code-key">INSERT INTO</tspan> messages (queue_id, partition_id, payload) <tspan class="code-key">VALUES</tspan> (queue_b, p1, transformed)<tspan class="code-mid">;  -- push(output)</tspan></text>
+      <text x="20"  y="110" class="code-key">COMMIT<tspan class="code-mid">;  <tspan class="micro-low">either both rows commit, or neither does. no orphan output, no duplicate ack.</tspan></tspan></text>
+    </g>
+  </g>
+
+  <!-- ============================ FOOTER TAGS ============================ -->
+  <g transform="translate(40 698)">
+    <line x1="0" y1="-22" x2="1200" y2="-22" stroke="#26262a"/>
+
+    <g>
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">atomic across queues</text>
+    </g>
+    <g transform="translate(280 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">exactly-once between queen ops</text>
+    </g>
+    <g transform="translate(640 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">no separate outbox table</text>
+    </g>
+    <g transform="translate(940 0)">
+      <circle cx="5" cy="-4" r="3.2" fill="#4ade80" filter="url(#g-green)"/>
+      <text x="16" class="num">crash-safe: rollback or commit</text>
+    </g>
+  </g>
+</svg>
