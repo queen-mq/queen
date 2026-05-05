@@ -1,0 +1,791 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1120" width="1280" height="1120"
+     role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid meet"
+     font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <title id="title">Prototype: dashboard scaled to 50 queues with attention list + grouped compact tail</title>
+  <desc id="desc">Dashboard view scaled to 50 queues. Three queues that need attention are promoted to full-fidelity 120px rows with mini-pipelines. The remaining 47 queues are grouped by namespace and rendered as 32px compact rows with a one-line spark-pipeline that still expresses state via colour and motion frequency. Two namespaces are expanded, two are collapsed.</desc>
+
+  <defs>
+    <filter id="g-cyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-amber" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-red" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="g-green" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <linearGradient id="card-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1d1f"/>
+      <stop offset="1" stop-color="#19191b"/>
+    </linearGradient>
+    <linearGradient id="row-hover" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1d1f" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#1a1a1c" stop-opacity="0.6"/>
+    </linearGradient>
+    <linearGradient id="lane-fade-c" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="0.06" stop-color="#22d3ee" stop-opacity="0.4"/>
+      <stop offset="0.94" stop-color="#22d3ee" stop-opacity="0.4"/>
+      <stop offset="1"    stop-color="#22d3ee" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="lane-fade-amber" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#e6b450" stop-opacity="0"/>
+      <stop offset="0.06" stop-color="#e6b450" stop-opacity="0.5"/>
+      <stop offset="0.55" stop-color="#e6b450" stop-opacity="0.5"/>
+      <stop offset="0.6"  stop-color="#e6b450" stop-opacity="0.18"/>
+      <stop offset="1"    stop-color="#e6b450" stop-opacity="0.10"/>
+    </linearGradient>
+    <linearGradient id="lane-fade-dim" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#464649" stop-opacity="0"/>
+      <stop offset="0.06" stop-color="#464649" stop-opacity="0.35"/>
+      <stop offset="0.94" stop-color="#464649" stop-opacity="0.35"/>
+      <stop offset="1"    stop-color="#464649" stop-opacity="0"/>
+    </linearGradient>
+    <!-- Compact spark-pipeline gradient: subtle, no filter overhead -->
+    <linearGradient id="spark-c" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#22d3ee" stop-opacity="0"/>
+      <stop offset="0.1"  stop-color="#22d3ee" stop-opacity="0.3"/>
+      <stop offset="0.9"  stop-color="#22d3ee" stop-opacity="0.3"/>
+      <stop offset="1"    stop-color="#22d3ee" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="spark-dim" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#3a3a3e" stop-opacity="0"/>
+      <stop offset="0.1"  stop-color="#3a3a3e" stop-opacity="0.5"/>
+      <stop offset="0.9"  stop-color="#3a3a3e" stop-opacity="0.5"/>
+      <stop offset="1"    stop-color="#3a3a3e" stop-opacity="0"/>
+    </linearGradient>
+
+    <g id="ic-queen">
+      <rect x="-9" y="-9" width="18" height="18" rx="5" fill="#1d1d1f" stroke="#35353a"/>
+      <text y="4" font-size="11" font-weight="700" fill="#4ade80" text-anchor="middle">Q</text>
+    </g>
+
+    <symbol id="ic-prod" viewBox="0 0 12 12" overflow="visible">
+      <rect x="1.5" y="2" width="9" height="3" rx="0.5" fill="none" stroke="currentColor" stroke-width="1"/>
+      <rect x="1.5" y="6" width="9" height="3" rx="0.5" fill="none" stroke="currentColor" stroke-width="1"/>
+      <circle cx="3" cy="3.5" r="0.5" fill="currentColor"/>
+    </symbol>
+    <symbol id="ic-cg" viewBox="0 0 12 12" overflow="visible">
+      <circle cx="6" cy="6" r="4.5" fill="none" stroke="currentColor" stroke-width="1"/>
+      <path d="M 4 6 L 5.5 7.5 L 8.2 4.6" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+
+    <style>
+      .label    { font: 600 9.5px Inter, system-ui, sans-serif; letter-spacing: 0.16em; fill: #6a6a6a; text-transform: uppercase; }
+      .label-mid{ font: 600 10.5px Inter, system-ui, sans-serif; letter-spacing: 0.16em; fill: #9a9a9a; text-transform: uppercase; }
+      .h-eng    { font: 600 15px Inter, system-ui, sans-serif; fill: #e6e6e6; }
+      .h-sub    { font: 500 12px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .pill     { font: 500 12px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #e6e6e6; }
+      .pill-mid { font: 500 11px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #9a9a9a; }
+      .pill-low { font: 500 10.5px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #6a6a6a; }
+      .micro    { font: 500 10.5px Inter, system-ui, sans-serif; fill: #9a9a9a; }
+      .micro-low{ font: 500 10.5px Inter, system-ui, sans-serif; fill: #6a6a6a; }
+      .num      { font: 600 13px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .num-big  { font: 600 16px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; letter-spacing: -0.005em; }
+      .num-mid  { font: 500 12px Inter, system-ui, sans-serif; fill: #9a9a9a; font-variant-numeric: tabular-nums; }
+      .compact-name { font: 500 12px ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace; fill: #e6e6e6; }
+      .compact-num  { font: 500 12px Inter, system-ui, sans-serif; fill: #e6e6e6; font-variant-numeric: tabular-nums; }
+      .compact-low  { font: 500 11px Inter, system-ui, sans-serif; fill: #9a9a9a; font-variant-numeric: tabular-nums; }
+      .ok       { fill: #4ade80; }
+      .warn     { fill: #e6b450; }
+      .bad      { fill: #fb7185; }
+      .cyan     { fill: #22d3ee; }
+      .input    { font: 500 12px Inter, system-ui, sans-serif; fill: #6a6a6a; }
+    </style>
+  </defs>
+
+  <!-- =================== APP BG =================== -->
+  <rect width="1280" height="1120" fill="#141415"/>
+
+  <!-- =================== TOP NAV =================== -->
+  <rect x="0" y="0" width="1280" height="52" fill="#1a1a1b" stroke="#26262a"/>
+  <g transform="translate(20 26)">
+    <use href="#ic-queen" x="0" y="0"/>
+    <text x="16" y="4" class="h-eng">queen-mq</text>
+    <text x="106" y="4" class="micro-low">/ default cluster</text>
+  </g>
+  <g transform="translate(280 26)">
+    <text x="0"   y="4" class="micro" fill="#e6e6e6">Queues</text>
+    <rect x="-10" y="14" width="56" height="2" fill="#22d3ee"/>
+    <text x="76"  y="4" class="micro">Consumer groups</text>
+    <text x="194" y="4" class="micro">Tracing</text>
+    <text x="252" y="4" class="micro">DLQ</text>
+    <text x="290" y="4" class="micro">Settings</text>
+  </g>
+  <g transform="translate(1260 26)" text-anchor="end">
+    <circle cx="-110" cy="0" r="3" fill="#4ade80" filter="url(#g-green)">
+      <animate attributeName="opacity" values="0.5;1;0.5" dur="2s" repeatCount="indefinite"/>
+    </circle>
+    <text x="-100" y="4" class="micro-low">live &#8226; next poll in 4s</text>
+    <text x="0" y="4" class="micro" text-anchor="end">alice@smartness</text>
+  </g>
+
+  <!-- =================== SUB-TOOLBAR (with density toggle) =================== -->
+  <g transform="translate(0 52)">
+    <rect width="1280" height="44" fill="#141415"/>
+    <line x1="0" y1="44" x2="1280" y2="44" stroke="#26262a"/>
+
+    <g transform="translate(20 12)">
+      <rect width="220" height="22" rx="6" fill="#1d1d1f" stroke="#26262a"/>
+      <text x="10" y="15" class="input">Filter queues by name, namespace...</text>
+    </g>
+
+    <g transform="translate(260 12)">
+      <rect width="78" height="22" rx="11" fill="#1d1d1f" stroke="#26262a"/>
+      <text x="10" y="15" class="micro" fill="#9a9a9a">namespace</text>
+      <text x="68" y="15" class="micro-low" text-anchor="end">all</text>
+    </g>
+    <g transform="translate(350 12)">
+      <rect width="64" height="22" rx="11" fill="#1d1d1f" stroke="#26262a"/>
+      <text x="10" y="15" class="micro" fill="#9a9a9a">status</text>
+      <text x="54" y="15" class="micro-low" text-anchor="end">any</text>
+    </g>
+    <g transform="translate(426 12)">
+      <rect width="76" height="22" rx="11" fill="#1d1d1f" stroke="#26262a"/>
+      <text x="10" y="15" class="micro" fill="#9a9a9a">group by</text>
+      <text x="66" y="15" class="micro-low" text-anchor="end">ns</text>
+    </g>
+
+    <!-- DENSITY TOGGLE: 3 segmented buttons -->
+    <g transform="translate(514 12)">
+      <rect width="180" height="22" rx="6" fill="#1d1d1f" stroke="#26262a"/>
+      <!-- detail -->
+      <text x="30" y="15" class="micro" text-anchor="middle" fill="#9a9a9a">detail</text>
+      <line x1="60" y1="2" x2="60" y2="20" stroke="#26262a"/>
+      <!-- comfortable -->
+      <text x="90" y="15" class="micro" text-anchor="middle" fill="#9a9a9a">comfortable</text>
+      <line x1="120" y1="2" x2="120" y2="20" stroke="#26262a"/>
+      <!-- compact (active) -->
+      <rect x="120" y="0" width="60" height="22" rx="6" fill="#22d3ee" fill-opacity="0.12" stroke="#22d3ee" stroke-opacity="0.4"/>
+      <text x="150" y="15" class="micro" text-anchor="middle" fill="#22d3ee">hybrid</text>
+    </g>
+
+    <g transform="translate(1260 12)" text-anchor="end">
+      <text x="-130" y="15" class="micro-low">window: last 1h</text>
+      <text x="0" y="15" class="micro-low">50 queues &#8226; 14 lagging</text>
+    </g>
+  </g>
+
+  <!-- =================== COLUMN HEADER =================== -->
+  <g transform="translate(0 110)">
+    <text x="20"   y="0" class="label">QUEUE</text>
+    <text x="250"  y="0" class="label">PIPELINE / SPARK</text>
+    <text x="700"  y="0" class="label">THROUGHPUT</text>
+    <text x="850"  y="0" class="label">LAG p99 / DLQ</text>
+    <text x="1000" y="0" class="label">TREND (1h)</text>
+    <line x1="20" y1="14" x2="1260" y2="14" stroke="#26262a"/>
+  </g>
+
+  <!-- ============================================================
+       ATTENTION SECTION HEADER
+       ============================================================ -->
+  <g transform="translate(0 130)">
+    <rect width="1280" height="28" fill="#1a1a1c"/>
+    <line x1="0" y1="28" x2="1280" y2="28" stroke="#26262a"/>
+    <g transform="translate(20 18)">
+      <circle cx="6" cy="0" r="4" fill="#fb7185" filter="url(#g-red)">
+        <animate attributeName="opacity" values="0.5;1;0.5" dur="1.4s" repeatCount="indefinite"/>
+      </circle>
+      <text x="20" y="4" class="label-mid bad">ATTENTION</text>
+      <text x="100" y="4" class="micro-low">3 queues need a look &#8226; auto-promoted from the namespace tail below</text>
+    </g>
+    <text x="1260" y="22" class="micro-low" text-anchor="end">stuck &#8226; backpressure &#8226; dlq-growing</text>
+  </g>
+
+  <!-- ============================================================
+       ATTENTION ROW 1 &middot; chat-events &middot; PARTITION STUCK
+       (taken from the partitions diagram, condensed)
+       ============================================================ -->
+  <g>
+    <rect x="0" y="158" width="1280" height="120" fill="#141415"/>
+    <line x1="20" y1="278" x2="1260" y2="278" stroke="#26262a"/>
+
+    <g transform="translate(20 192)">
+      <circle cx="6" cy="0" r="4.5" fill="#e6b450" filter="url(#g-amber)">
+        <animate attributeName="opacity" values="0.6;1;0.6" dur="1.4s" repeatCount="indefinite"/>
+      </circle>
+      <text x="20" y="4" class="num">chat-events</text>
+      <text x="20" y="22" class="pill-low">9,847 partitions &#8226; 2 cgroups &#8226; ns:chat</text>
+      <g transform="translate(20 38)">
+        <rect width="106" height="16" rx="8" fill="#2f2516" stroke="#3a2f1c"/>
+        <text x="53" y="11" class="micro warn" font-size="10" text-anchor="middle">PARTITION STUCK</text>
+      </g>
+    </g>
+
+    <g transform="translate(250 176)">
+      <g color="#9a9a9a" transform="translate(8 18)">
+        <use href="#ic-prod" x="0"  y="0"  width="12" height="12"/>
+        <use href="#ic-prod" x="0"  y="20" width="12" height="12"/>
+        <use href="#ic-prod" x="0"  y="40" width="12" height="12"/>
+      </g>
+      <rect x="40" y="6" width="290" height="80" rx="8" fill="#1a1a1c" stroke="#26262a"/>
+      <text x="50" y="18" class="label">chat-events</text>
+
+      <line x1="60" y1="32" x2="320" y2="32" stroke="url(#lane-fade-c)" stroke-width="1"/>
+      <line x1="60" y1="32" x2="320" y2="32" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 5" opacity="0.18"/>
+
+      <line x1="60" y1="48" x2="320" y2="48" stroke="url(#lane-fade-amber)" stroke-width="1"/>
+      <line x1="60" y1="48" x2="200" y2="48" stroke="#e6b450" stroke-width="1" stroke-dasharray="2 5" opacity="0.30"/>
+      <line x1="200" y1="48" x2="320" y2="48" stroke="#e6b450" stroke-width="1" stroke-dasharray="2 5" opacity="0.10"/>
+
+      <line x1="60" y1="64" x2="320" y2="64" stroke="url(#lane-fade-c)" stroke-width="1"/>
+      <line x1="60" y1="64" x2="320" y2="64" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 5" opacity="0.18"/>
+
+      <text x="320" y="76" class="pill-low" text-anchor="end">sess:9c1d &#8226; tool call &#8226; 28s</text>
+
+      <circle cx="60" cy="32" r="3" fill="#22d3ee" filter="url(#g-cyan)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="3s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="3s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="60" cy="32" r="3" fill="#22d3ee" filter="url(#g-cyan)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="3s" begin="1.5s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="3s" begin="1.5s" repeatCount="indefinite"/>
+      </circle>
+
+      <circle cy="48" r="4" fill="#e6b450" filter="url(#g-amber)">
+        <animate attributeName="cx" values="60;200;200;200;60"
+                 keyTimes="0;0.18;0.85;0.94;1" dur="9s" repeatCount="indefinite"/>
+        <animate attributeName="r" values="4;4;5.5;4;5.5;4;4;0"
+                 keyTimes="0;0.18;0.32;0.45;0.58;0.7;0.94;1" dur="9s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;1;0"
+                 keyTimes="0;0.06;0.85;0.93;1" dur="9s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="60" cy="48" r="3" fill="#e6b450" filter="url(#g-amber)" opacity="0">
+        <animate attributeName="cx" values="60;180;180;60" keyTimes="0;0.32;0.92;1" dur="9s" begin="2.2s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;0.85;0.85;0" keyTimes="0;0.32;0.92;1" dur="9s" begin="2.2s" repeatCount="indefinite"/>
+      </circle>
+
+      <circle cx="60" cy="64" r="3" fill="#22d3ee" filter="url(#g-cyan)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="3s" begin="0.7s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="3s" begin="0.7s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="60" cy="64" r="3" fill="#22d3ee" filter="url(#g-cyan)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="3s" begin="2.2s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="3s" begin="2.2s" repeatCount="indefinite"/>
+      </circle>
+
+      <g color="#4ade80" transform="translate(340 18)">
+        <use href="#ic-cg" x="0"  y="0"  width="14" height="14"/>
+        <use href="#ic-cg" x="0"  y="22" width="14" height="14"/>
+      </g>
+      <text x="358" y="28" class="pill-low">agent-runner</text>
+      <text x="358" y="50" class="pill-low">tracer</text>
+    </g>
+
+    <g transform="translate(700 192)">
+      <text class="num-big">89 <tspan font-size="11" class="micro">/s</tspan></text>
+      <text x="0" y="20" class="pill-mid warn">push &gt; ack</text>
+      <text x="0" y="38" class="pill-low warn">depth 14.3k &#8593;</text>
+    </g>
+    <g transform="translate(850 192)">
+      <text class="num-big warn">28<tspan font-size="11" class="warn">s</tspan></text>
+      <text x="0" y="20" class="pill-mid">lag p99</text>
+      <text x="0" y="38" class="pill-low">DLQ <tspan class="ok">0</tspan></text>
+    </g>
+    <g transform="translate(1000 168)">
+      <rect width="240" height="76" rx="6" fill="#161618" stroke="#1f1f22"/>
+      <polyline points="10,60 30,58 50,55 70,52 90,50 110,46 130,42 150,38 170,32 190,28 210,24 230,22"
+                fill="none" stroke="#e6b450" stroke-width="1.5"/>
+      <text x="232" y="14" class="pill-low warn" text-anchor="end">depth rising</text>
+    </g>
+  </g>
+
+  <!-- ============================================================
+       ATTENTION ROW 2 &middot; payment-events &middot; BACKPRESSURE
+       ============================================================ -->
+  <g>
+    <rect x="0" y="278" width="1280" height="120" fill="url(#row-hover)"/>
+    <line x1="20" y1="398" x2="1260" y2="398" stroke="#26262a"/>
+
+    <g transform="translate(20 312)">
+      <circle cx="6" cy="0" r="4.5" fill="#e6b450" filter="url(#g-amber)">
+        <animate attributeName="opacity" values="0.6;1;0.6" dur="1.6s" repeatCount="indefinite"/>
+      </circle>
+      <text x="20" y="4" class="num">payment-events</text>
+      <text x="20" y="22" class="pill-low">142 partitions &#8226; 3 cgroups &#8226; ns:billing</text>
+      <g transform="translate(20 38)">
+        <rect width="98" height="16" rx="8" fill="#2f2516" stroke="#3a2f1c"/>
+        <text x="49" y="11" class="micro warn" font-size="10" text-anchor="middle">BACKPRESSURE</text>
+      </g>
+    </g>
+
+    <g transform="translate(250 296)">
+      <g color="#9a9a9a" transform="translate(8 18)">
+        <use href="#ic-prod" x="0"  y="0"  width="12" height="12"/>
+        <use href="#ic-prod" x="0"  y="20" width="12" height="12"/>
+      </g>
+      <rect x="40" y="6" width="290" height="80" rx="8" fill="#1a1a1c" stroke="#26262a"/>
+      <text x="50" y="18" class="label">payment-events</text>
+
+      <!-- All 3 lanes flowing but downstream is amber (lag tinted) -->
+      <line x1="60" y1="32" x2="320" y2="32" stroke="url(#lane-fade-amber)" stroke-width="1"/>
+      <line x1="60" y1="32" x2="320" y2="32" stroke="#e6b450" stroke-width="1" stroke-dasharray="2 5" opacity="0.20"/>
+
+      <line x1="60" y1="48" x2="320" y2="48" stroke="url(#lane-fade-amber)" stroke-width="1"/>
+      <line x1="60" y1="48" x2="320" y2="48" stroke="#e6b450" stroke-width="1" stroke-dasharray="2 5" opacity="0.20"/>
+
+      <line x1="60" y1="64" x2="320" y2="64" stroke="url(#lane-fade-amber)" stroke-width="1"/>
+      <line x1="60" y1="64" x2="320" y2="64" stroke="#e6b450" stroke-width="1" stroke-dasharray="2 5" opacity="0.20"/>
+
+      <text x="320" y="76" class="pill-low" text-anchor="end">push faster than consumer</text>
+
+      <!-- amber dots flowing slowly across all 3 lanes -->
+      <circle cx="60" cy="32" r="3" fill="#e6b450" filter="url(#g-amber)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="5s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="5s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="60" cy="32" r="3" fill="#e6b450" filter="url(#g-amber)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="5s" begin="2.5s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="5s" begin="2.5s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="60" cy="48" r="3" fill="#e6b450" filter="url(#g-amber)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="5s" begin="0.8s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="5s" begin="0.8s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="60" cy="48" r="3" fill="#e6b450" filter="url(#g-amber)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="5s" begin="3.3s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="5s" begin="3.3s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="60" cy="64" r="3" fill="#e6b450" filter="url(#g-amber)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="5s" begin="1.6s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="5s" begin="1.6s" repeatCount="indefinite"/>
+      </circle>
+
+      <g color="#e6b450" transform="translate(340 18)">
+        <use href="#ic-cg" x="0"  y="0"  width="14" height="14"/>
+        <use href="#ic-cg" x="0"  y="22" width="14" height="14"/>
+        <use href="#ic-cg" x="0"  y="44" width="14" height="14"/>
+      </g>
+      <text x="358" y="28" class="pill-low">charges</text>
+      <text x="358" y="50" class="pill-low">refunds</text>
+      <text x="358" y="72" class="pill-low warn">audit (lag 12s)</text>
+    </g>
+
+    <g transform="translate(700 312)">
+      <text class="num-big">412 <tspan font-size="11" class="micro">/s</tspan></text>
+      <text x="0" y="20" class="pill-mid warn">push &gt; ack</text>
+      <text x="0" y="38" class="pill-low warn">depth 28k &#8593;</text>
+    </g>
+    <g transform="translate(850 312)">
+      <text class="num-big warn">12<tspan font-size="11" class="warn">s</tspan></text>
+      <text x="0" y="20" class="pill-mid">lag p99</text>
+      <text x="0" y="38" class="pill-low">DLQ <tspan class="ok">0</tspan></text>
+    </g>
+    <g transform="translate(1000 288)">
+      <rect width="240" height="76" rx="6" fill="#161618" stroke="#1f1f22"/>
+      <polyline points="10,55 30,52 50,48 70,46 90,44 110,40 130,38 150,32 170,28 190,24 210,20 230,18"
+                fill="none" stroke="#e6b450" stroke-width="1.5"/>
+      <text x="232" y="14" class="pill-low warn" text-anchor="end">depth rising</text>
+    </g>
+  </g>
+
+  <!-- ============================================================
+       ATTENTION ROW 3 &middot; legacy-jobs &middot; DLQ GROWING
+       ============================================================ -->
+  <g>
+    <rect x="0" y="398" width="1280" height="120" fill="#141415"/>
+    <line x1="20" y1="518" x2="1260" y2="518" stroke="#26262a"/>
+
+    <g transform="translate(20 432)">
+      <circle cx="6" cy="0" r="4.5" fill="#fb7185" filter="url(#g-red)">
+        <animate attributeName="opacity" values="0.5;1;0.5" dur="1.2s" repeatCount="indefinite"/>
+      </circle>
+      <text x="20" y="4" class="num">legacy-jobs</text>
+      <text x="20" y="22" class="pill-low">8 partitions &#8226; 1 cgroup &#8226; idle &#8226; ns:jobs</text>
+      <g transform="translate(20 38)">
+        <rect width="80" height="16" rx="8" fill="#2f1818" stroke="#3a2222"/>
+        <text x="40" y="11" class="micro bad" font-size="10" text-anchor="middle">DLQ GROWING</text>
+      </g>
+    </g>
+
+    <g transform="translate(250 416)">
+      <g color="#6a6a6a" transform="translate(8 18)">
+        <use href="#ic-prod" x="0"  y="0"  width="12" height="12"/>
+        <use href="#ic-prod" x="0"  y="20" width="12" height="12"/>
+      </g>
+      <rect x="40" y="6" width="290" height="80" rx="8" fill="#1a1a1c" stroke="#26262a"/>
+      <text x="50" y="18" class="label">legacy-jobs</text>
+
+      <line x1="60" y1="32" x2="320" y2="32" stroke="url(#lane-fade-dim)" stroke-width="1"/>
+      <line x1="60" y1="32" x2="320" y2="32" stroke="#3a3a3e" stroke-width="1" stroke-dasharray="2 5" opacity="0.5"/>
+      <line x1="60" y1="48" x2="320" y2="48" stroke="url(#lane-fade-dim)" stroke-width="1"/>
+      <line x1="60" y1="48" x2="320" y2="48" stroke="#3a3a3e" stroke-width="1" stroke-dasharray="2 5" opacity="0.5"/>
+      <line x1="60" y1="64" x2="320" y2="64" stroke="url(#lane-fade-dim)" stroke-width="1"/>
+      <line x1="60" y1="64" x2="320" y2="64" stroke="#3a3a3e" stroke-width="1" stroke-dasharray="2 5" opacity="0.5"/>
+
+      <circle cx="60" cy="48" r="2.5" fill="#fb7185" filter="url(#g-red)" opacity="0">
+        <animate attributeName="cx" values="60;320" dur="6s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;0.6;0.6;0" keyTimes="0;0.1;0.9;1" dur="6s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+
+      <text x="320" y="76" class="pill-low" text-anchor="end">no consumers attached</text>
+
+      <g transform="translate(340 18)">
+        <rect x="0" y="0" width="48" height="50" rx="6" fill="#1d1414" stroke="#3a2222"/>
+        <text x="24" y="14" class="micro bad" font-size="9" text-anchor="middle">DLQ</text>
+        <text x="24" y="34" font-family="Inter, system-ui, sans-serif" font-size="16" font-weight="700"
+              fill="#fb7185" text-anchor="middle" font-variant-numeric="tabular-nums">12</text>
+        <text x="24" y="46" class="micro-low" font-size="8" text-anchor="middle">+3 today</text>
+      </g>
+    </g>
+
+    <g transform="translate(700 432)">
+      <text class="num-big">0.1 <tspan font-size="11" class="micro">/s</tspan></text>
+      <text x="0" y="20" class="pill-mid bad">push &gt;&gt; ack</text>
+      <text x="0" y="38" class="pill-low bad">depth 234 &#8593;</text>
+    </g>
+    <g transform="translate(850 432)">
+      <text class="num-big bad">4h+</text>
+      <text x="0" y="20" class="pill-mid">lag p99</text>
+      <text x="0" y="38" class="pill-low bad">DLQ 12 (+3)</text>
+    </g>
+    <g transform="translate(1000 408)">
+      <rect width="240" height="76" rx="6" fill="#161618" stroke="#1f1f22"/>
+      <polyline points="10,68 30,68 50,68 70,68 90,68 110,68 130,68 150,68 170,68 190,68 210,68 230,68"
+                fill="none" stroke="#3a3a3e" stroke-width="1"/>
+      <polyline points="130,60 150,52 170,46 190,40 210,34 230,28"
+                fill="none" stroke="#fb7185" stroke-width="1.5"/>
+      <text x="232" y="14" class="pill-low bad" text-anchor="end">errors trending</text>
+    </g>
+  </g>
+
+  <!-- ============================================================
+       SECTION DIVIDER
+       ============================================================ -->
+  <g transform="translate(0 518)">
+    <rect width="1280" height="30" fill="#1a1a1c"/>
+    <line x1="0" y1="30" x2="1280" y2="30" stroke="#26262a"/>
+    <text x="20" y="20" class="label-mid">ALL QUEUES &#8226; 47 OF 50 &#8226; GROUPED BY NAMESPACE</text>
+    <text x="1260" y="20" class="micro-low" text-anchor="end">click row to expand &#8226; click ns to collapse</text>
+  </g>
+
+  <!-- ============================================================
+       NAMESPACE GROUP: chat (expanded, 5 visible + "+ 6 more")
+       ============================================================ -->
+  <g transform="translate(0 548)">
+    <!-- group header -->
+    <rect width="1280" height="28" fill="#1d1d1f"/>
+    <line x1="0" y1="28" x2="1280" y2="28" stroke="#26262a"/>
+    <g transform="translate(14 18)">
+      <path d="M 0 -3 L 6 0 L 0 3 Z" fill="#9a9a9a" transform="rotate(90)"/>
+      <text x="14" y="4" class="num">chat</text>
+      <text x="60" y="4" class="micro-low">12 queues &#8226; 1 in attention &#8226; 10 healthy &#8226; 1 idle</text>
+    </g>
+    <text x="1260" y="22" class="num-mid" text-anchor="end">push 4.2k /s &#8226; ack 4.2k /s</text>
+
+    <!-- 5 compact rows -->
+    <!-- ROW A: chat-replies (healthy) -->
+    <g transform="translate(0 28)">
+      <rect width="1280" height="32" fill="#141415"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">chat-replies</text>
+      <!-- spark-pipeline -->
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.20"/>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="2.5s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="2.5s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="2.5s" begin="1.25s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="2.5s" begin="1.25s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">218 <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">38 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,24 1030,22 1050,24 1070,20 1090,22 1110,18 1130,22 1150,20 1170,22 1190,24 1210,22 1230,20"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.7"/>
+    </g>
+    <!-- ROW B: chat-translations (healthy) -->
+    <g transform="translate(0 60)">
+      <rect width="1280" height="32" fill="url(#row-hover)"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">chat-translations</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.20"/>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="3.5s" begin="0.4s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="3.5s" begin="0.4s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">94 <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">112 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,22 1030,24 1050,22 1070,24 1090,20 1110,22 1130,24 1150,22 1170,20 1190,22 1210,24 1230,22"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.7"/>
+    </g>
+    <!-- ROW C: chat-attachments (healthy, low TP) -->
+    <g transform="translate(0 92)">
+      <rect width="1280" height="32" fill="#141415"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">chat-attachments</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.18"/>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="4.5s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="4.5s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">12 <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">186 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,24 1030,24 1050,22 1070,24 1090,24 1110,22 1130,24 1150,24 1170,22 1190,24 1210,24 1230,22"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+    </g>
+    <!-- ROW D: chat-presence (high throughput) -->
+    <g transform="translate(0 124)">
+      <rect width="1280" height="32" fill="url(#row-hover)"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">chat-presence</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.28"/>
+      <!-- 4 fast dots -->
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="1.2s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="1.2s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="1.2s" begin="0.3s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="1.2s" begin="0.3s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="1.2s" begin="0.6s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="1.2s" begin="0.6s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="1.2s" begin="0.9s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="1.2s" begin="0.9s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">3.8k <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">6 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,18 1030,16 1050,14 1070,18 1090,12 1110,16 1130,14 1150,18 1170,12 1190,16 1210,14 1230,18"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.8"/>
+    </g>
+    <!-- ROW E: chat-typing (idle) -->
+    <g transform="translate(0 156)">
+      <rect width="1280" height="32" fill="#141415"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#464649"/>
+      <text x="34" y="20" class="compact-name" fill="#9a9a9a">chat-typing</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-dim)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#3a3a3e" stroke-width="1" stroke-dasharray="2 4" opacity="0.6"/>
+      <text x="700" y="20" class="compact-num" fill="#6a6a6a">0 <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num" fill="#6a6a6a">- <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low" fill="#6a6a6a">DLQ 0</text>
+      <polyline points="1010,24 1030,24 1050,24 1070,24 1090,24 1110,24 1130,24 1150,24 1170,24 1190,24 1210,24 1230,24"
+                fill="none" stroke="#3a3a3e" stroke-width="1" opacity="0.6"/>
+      <text x="34" y="29" class="micro-low" font-size="9" fill="#6a6a6a">idle</text>
+    </g>
+    <!-- "+ 6 more" footer -->
+    <g transform="translate(0 188)">
+      <rect width="1280" height="22" fill="url(#row-hover)" opacity="0.4"/>
+      <text x="34" y="14" class="pill-low">+ 6 more chat queues &#8226; click ns header to expand</text>
+    </g>
+  </g>
+
+  <!-- ============================================================
+       NAMESPACE GROUP: analytics (expanded, 5 visible + "+ 3 more")
+       ============================================================ -->
+  <g transform="translate(0 758)">
+    <rect width="1280" height="28" fill="#1d1d1f"/>
+    <line x1="0" y1="28" x2="1280" y2="28" stroke="#26262a"/>
+    <g transform="translate(14 18)">
+      <path d="M 0 -3 L 6 0 L 0 3 Z" fill="#9a9a9a" transform="rotate(90)"/>
+      <text x="14" y="4" class="num">analytics</text>
+      <text x="68" y="4" class="micro-low">10 queues &#8226; 10 healthy</text>
+    </g>
+    <text x="1260" y="22" class="num-mid" text-anchor="end">push 14.2k /s &#8226; ack 14.2k /s</text>
+
+    <!-- ROW A: analytics-pageviews (very high throughput) -->
+    <g transform="translate(0 28)">
+      <rect width="1280" height="32" fill="#141415"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">analytics-pageviews</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.32"/>
+      <!-- 5 very fast dots -->
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="0.9s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="0.9s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="0.9s" begin="0.18s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="0.9s" begin="0.18s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="0.9s" begin="0.36s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="0.9s" begin="0.36s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="0.9s" begin="0.54s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="0.9s" begin="0.54s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="0.9s" begin="0.72s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="0.9s" begin="0.72s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">8.2k <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">8 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,18 1030,12 1050,14 1070,10 1090,16 1110,12 1130,14 1150,8 1170,12 1190,16 1210,12 1230,10"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.8"/>
+    </g>
+    <!-- ROW B: analytics-events -->
+    <g transform="translate(0 60)">
+      <rect width="1280" height="32" fill="url(#row-hover)"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">analytics-events</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.22"/>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="1.6s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="1.6s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="1.6s" begin="0.8s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="1.6s" begin="0.8s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">2.4k <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">14 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,20 1030,18 1050,16 1070,20 1090,18 1110,16 1130,20 1150,18 1170,16 1190,20 1210,18 1230,16"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.7"/>
+    </g>
+    <!-- ROW C: analytics-funnel -->
+    <g transform="translate(0 92)">
+      <rect width="1280" height="32" fill="#141415"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">analytics-funnel</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.18"/>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="3s" begin="0s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="3s" begin="0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="3s" begin="1.5s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="3s" begin="1.5s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">186 <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">42 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,22 1030,20 1050,22 1070,20 1090,22 1110,18 1130,20 1150,22 1170,20 1190,22 1210,20 1230,22"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.7"/>
+    </g>
+    <!-- ROW D: analytics-cohorts -->
+    <g transform="translate(0 124)">
+      <rect width="1280" height="32" fill="url(#row-hover)"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">analytics-cohorts</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.18"/>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="4s" begin="0.5s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="4s" begin="0.5s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">42 <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">86 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,24 1030,22 1050,24 1070,22 1090,24 1110,22 1130,24 1150,22 1170,24 1190,22 1210,24 1230,22"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+    </g>
+    <!-- ROW E: analytics-exports -->
+    <g transform="translate(0 156)">
+      <rect width="1280" height="32" fill="#141415"/>
+      <line x1="20" y1="32" x2="1260" y2="32" stroke="#26262a" stroke-opacity="0.5"/>
+      <circle cx="20" cy="16" r="3.5" fill="#4ade80"/>
+      <text x="34" y="20" class="compact-name">analytics-exports</text>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="url(#spark-c)" stroke-width="1"/>
+      <line x1="250" y1="16" x2="440" y2="16" stroke="#22d3ee" stroke-width="1" stroke-dasharray="2 4" opacity="0.18"/>
+      <circle cx="250" cy="16" r="2.5" fill="#22d3ee" opacity="0">
+        <animate attributeName="cx" values="250;440" dur="5s" begin="1s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.05;0.92;1" dur="5s" begin="1s" repeatCount="indefinite"/>
+      </circle>
+      <text x="700" y="20" class="compact-num">8 <tspan class="compact-low">/s</tspan></text>
+      <text x="850" y="20" class="compact-num">240 <tspan class="compact-low">ms</tspan></text>
+      <text x="950" y="20" class="compact-low ok">DLQ 0</text>
+      <polyline points="1010,24 1030,22 1050,24 1070,24 1090,22 1110,24 1130,22 1150,24 1170,24 1190,22 1210,24 1230,24"
+                fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+    </g>
+    <!-- "+ 3 more" -->
+    <g transform="translate(0 188)">
+      <rect width="1280" height="22" fill="url(#row-hover)" opacity="0.4"/>
+      <text x="34" y="14" class="pill-low">+ 3 more analytics queues</text>
+    </g>
+  </g>
+
+  <!-- ============================================================
+       NAMESPACE GROUP: infra (collapsed, 1 in attention)
+       ============================================================ -->
+  <g transform="translate(0 968)">
+    <rect width="1280" height="32" fill="#1d1d1f"/>
+    <line x1="0" y1="32" x2="1280" y2="32" stroke="#26262a"/>
+    <g transform="translate(14 20)">
+      <path d="M 0 -3 L 6 0 L 0 3 Z" fill="#9a9a9a"/>
+      <text x="14" y="4" class="num">infra</text>
+      <text x="60" y="4" class="micro-low">10 queues &#8226; 10 healthy</text>
+    </g>
+    <text x="1260" y="22" class="num-mid" text-anchor="end">push 1.6k /s &#8226; ack 1.6k /s &#8226; <tspan class="micro-low">collapsed</tspan></text>
+  </g>
+
+  <!-- ============================================================
+       NAMESPACE GROUP: jobs (collapsed, 1 in attention)
+       ============================================================ -->
+  <g transform="translate(0 1000)">
+    <rect width="1280" height="32" fill="#1d1d1f"/>
+    <line x1="0" y1="32" x2="1280" y2="32" stroke="#26262a"/>
+    <g transform="translate(14 20)">
+      <path d="M 0 -3 L 6 0 L 0 3 Z" fill="#9a9a9a"/>
+      <text x="14" y="4" class="num">jobs</text>
+      <text x="60" y="4" class="micro-low">17 queues &#8226; 1 in attention &#8226; 16 healthy</text>
+    </g>
+    <text x="1260" y="22" class="num-mid" text-anchor="end">push 240 /s &#8226; ack 0.1 /s &#8226; <tspan class="bad">DLQ growing</tspan></text>
+  </g>
+
+  <!-- =================== FOOTER SYSTEM STRIP =================== -->
+  <g transform="translate(0 1040)">
+    <rect width="1280" height="44" fill="#1a1a1b" stroke="#26262a"/>
+    <text x="20" y="18" class="label-mid">SYSTEM &#8226; LAST 1 MIN</text>
+
+    <g transform="translate(20 38)">
+      <text class="num-mid"><tspan class="num" fill="#e6e6e6">22.5k</tspan> /s total</text>
+    </g>
+    <g transform="translate(160 38)">
+      <text class="num-mid"><tspan class="num" fill="#e6e6e6">50</tspan> queues &#8226; <tspan class="warn">14 lagging</tspan></text>
+    </g>
+    <g transform="translate(360 38)">
+      <text class="num-mid"><tspan class="num" fill="#e6e6e6">52 MB</tspan> rss &#8226; <tspan class="num" fill="#e6e6e6">2.5/9</tspan> db</text>
+    </g>
+    <g transform="translate(560 38)">
+      <text class="num-mid"><tspan class="num" fill="#e6e6e6">54%</tspan> cpu &#8226; <tspan class="num" fill="#e6e6e6">0</tspan> errors &#8226; <tspan class="bad">12</tspan> dlq</text>
+    </g>
+    <g transform="translate(1260 38)" text-anchor="end">
+      <text class="num-mid">snapshot &#8226; <tspan class="cyan">live</tspan></text>
+    </g>
+  </g>
+
+  <!-- =================== ANNOTATION =================== -->
+  <g transform="translate(20 1090)">
+    <rect width="1240" height="22" rx="6" fill="#1a1a1c" stroke="#3a2f1c" stroke-dasharray="3 4"/>
+    <text x="14" y="14" class="micro-low" font-size="10">
+      <tspan class="warn">PROTOTYPE &#8226;</tspan>
+      attention list auto-promotes queues with state != healthy &#8226; compact rows use spark-pipeline at 32px height &#8226; namespace groups collapse non-interesting tail &#8226; ~80 active animations on this view, all client-driven from one snapshot poll
+    </text>
+  </g>
+</svg>
