@@ -1,0 +1,13 @@
+{
+  "name": "queen-svg-to-mp4",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Convert animated SMIL SVGs from queenmq.com docs into LinkedIn-ready MP4 videos (1920x1080, H.264, yuv420p, +faststart).",
+  "scripts": {
+    "convert": "node convert.mjs"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0"
+  }
+}
