@@ -23,6 +23,7 @@ Stable releases drop the `.beta.N` suffix. The same version applies (with one ca
 | Go client           | `clients/client-go/`                  | Go modules (Git tag)               | tag: `client-go/v0.14.0` |
 | PHP/Laravel client  | `clients/client-laravel/`             | Packagist: `smartpricing/queen-mq` | `0.14.0`                 |
 | C++ client          | `clients/client-cpp/`                 | header-only, in repo               | tracked by repo tag      |
+| `queenctl` CLI      | `clients/client-cli/`                 | GitHub Releases + Homebrew tap     | tag: `client-cli/v0.1.0` |
 | K8s templates       | `helm/`, `helm_queen/`, `proxy/helm/` (no `Chart.yaml` — not stock Helm charts) | git refs | aligned with broker image |
 
 
@@ -56,16 +57,17 @@ Before bumping any version:
 
 ## Bumping versions
 
-The version lives in **eight places**. Update them all together (find/replace `0.14.0` is the fast path):
+The version lives in **nine places**. Update them all together (find/replace `0.14.0` is the fast path):
 
 1. `server/server.json` — `version`
 2. `clients/client-js/package.json` — `version`
 3. `clients/client-py/pyproject.toml` — `version`
 4. `clients/client-laravel/composer.json` — `version`
 5. `clients/client-go/` — *no file change*; the Go version comes from the Git tag
-6. `README.md` — Docker run examples (`smartnessai/queen-mq:0.14.0`)
-7. `docs/index.html`, `docs/quickstart.html` — same
-8. `Dockerfile` — there's no version in here directly, but if you tag the image, ensure CI passes the right `--tag`
+6. `clients/client-cli/` — *no file change*; the CLI version comes from the `client-cli/v*` Git tag and `-ldflags`
+7. `README.md` — Docker run examples (`smartnessai/queen-mq:0.14.0`)
+8. `docs/index.html`, `docs/quickstart.html` — same
+9. `Dockerfile` — there's no version in here directly, but if you tag the image, ensure CI passes the right `--tag`
 
 A grep before pushing:
 
@@ -86,7 +88,8 @@ The order matters for downstream consumers:
 4. **Tag the Go client** (`client-go/v0.14.0` — the path is monorepo-style: see Go's [submodule tagging convention](https://go.dev/ref/mod#vcs-version)).
 5. **Publish the PHP client** (Packagist auto-pulls from the Git tag — no separate publish step).
 6. **Publish the C++ client** — nothing to publish; consumers use the header from the same tag.
-7. **Update Helm charts** if any default values reference the new image tag.
+7. **Tag the CLI** (`client-cli/v0.X.Y`). The `Release CLI` workflow (`.github/workflows/release-cli.yml`) runs goreleaser, attaches binaries to GitHub Releases, and updates the Homebrew tap.
+8. **Update Helm charts** if any default values reference the new image tag.
 
 ---
 
@@ -94,14 +97,33 @@ The order matters for downstream consumers:
 
 ### Broker Docker image
 
+The image bundles three things: the C++ broker binary, the Vue dashboard,
+and the `queenctl` operator CLI as a static Go binary. Pass
+`QUEENCTL_VERSION` and `QUEENCTL_COMMIT` so `queenctl version` inside the
+container reports the same string the broker's `/health` endpoint does:
+
 ```bash
 DOCKER_BUILDKIT=1 docker build \
+  --build-arg QUEENCTL_VERSION=$(jq -r .version server/server.json) \
+  --build-arg QUEENCTL_COMMIT=$(git rev-parse --short HEAD) \
   -t smartnessai/queen-mq:0.14.0 \
   -t smartnessai/queen-mq:latest .
 
 docker push smartnessai/queen-mq:0.14.0
 docker push smartnessai/queen-mq:latest
 ```
+
+Operators get the CLI for free with no extra install:
+
+```bash
+docker exec -it queen queenctl status
+docker exec -it queen queenctl tail orders --cg debug --follow
+```
+
+`QUEEN_SERVER=http://localhost:6632` is baked into the image so in-container
+invocations need no flags. The `.github/workflows/docker-build.yml`
+workflow passes both `--build-arg` values automatically from
+`server/server.json` + the commit SHA.
 
 ### npm (`queen-mq`)
 
@@ -146,6 +168,27 @@ After ~5 minutes, `https://pkg.go.dev/github.com/smartpricing/queen/client-go@v0
 GOPROXY=https://proxy.golang.org go install \
   github.com/smartpricing/queen/client-go@v0.14.0
 ```
+
+### `queenctl` CLI
+
+The CLI lives at `clients/client-cli/` with its own `go.mod` and is released
+on a `client-cli/vX.Y.Z` tag, just like `client-go`:
+
+```bash
+git tag -a client-cli/v0.1.0 -m "queenctl 0.1.0"
+git push origin client-cli/v0.1.0
+```
+
+The push triggers `.github/workflows/release-cli.yml` which:
+
+1. Cross-compiles for linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64
+2. Generates checksums and shell-completion scripts
+3. Uploads tar.gz / zip archives to GitHub Releases
+4. Updates the Homebrew formula at `smartpricing/homebrew-tap` (requires the
+   `HOMEBREW_TAP_TOKEN` repository secret)
+
+The version + commit + build date are embedded via `-ldflags` and surfaced
+by `queenctl version`. See [15-cli.md](15-cli.md) for the full architecture.
 
 ### Packagist (`smartpricing/queen-mq`)
 

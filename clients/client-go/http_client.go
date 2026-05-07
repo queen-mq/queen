@@ -149,11 +149,18 @@ func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body i
 			"attempt": attempt,
 		})
 
-		// Execute request
+		// Execute request.
+		//
+		// IMPORTANT: do NOT cancel() here. http.Client.Do returns once the
+		// response headers are received; the body keeps streaming on the
+		// same request context. Cancelling now races against io.ReadAll
+		// below and surfaces as "context canceled" for any response that
+		// isn't fully buffered (chunked transfer-encoding, large bodies).
+		// We cancel after the body has been read+closed.
 		resp, err := hc.client.Do(req)
-		cancel()
 
 		if err != nil {
+			cancel()
 			lastErr = err
 			hc.loadBalancer.MarkUnhealthy(baseURL)
 
@@ -193,9 +200,11 @@ func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body i
 			continue
 		}
 
-		// Read response body
+		// Read response body. Body must be fully read before cancel() so the
+		// per-attempt timeout context doesn't cut the stream short.
 		respBody, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		cancel()
 
 		if err != nil {
 			lastErr = fmt.Errorf("failed to read response body: %w", err)

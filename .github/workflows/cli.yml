@@ -1,0 +1,135 @@
+name: CLI
+
+on:
+  push:
+    branches: [master, cli]
+    paths:
+      - 'clients/client-cli/**'
+      - 'clients/client-go/**'
+      - '.github/workflows/cli.yml'
+  pull_request:
+    paths:
+      - 'clients/client-cli/**'
+      - 'clients/client-go/**'
+      - '.github/workflows/cli.yml'
+  workflow_dispatch:
+    inputs:
+      load_total:
+        description: 'QUEEN_LOAD_TOTAL (override the default 2000 for load tests)'
+        required: false
+        default: ''
+
+defaults:
+  run:
+    working-directory: clients/client-cli
+
+jobs:
+  unit:
+    name: build + unit (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: clients/client-cli/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (unit, no e2e)
+        run: go test ./...
+
+      - name: build
+        run: make build
+
+      - name: --help smoke
+        run: ./bin/queenctl --help
+
+      - name: completion smoke
+        run: |
+          ./bin/queenctl completion bash       > /tmp/queenctl.bash
+          ./bin/queenctl completion zsh        > /tmp/queenctl.zsh
+          ./bin/queenctl completion fish       > /tmp/queenctl.fish
+          ./bin/queenctl completion powershell > /tmp/queenctl.ps1
+          test -s /tmp/queenctl.bash
+          test -s /tmp/queenctl.zsh
+          test -s /tmp/queenctl.fish
+          test -s /tmp/queenctl.ps1
+
+  e2e:
+    name: end-to-end suite (Linux)
+    runs-on: ubuntu-latest
+    # The e2e suite is the parity port of clients/client-js/test-v2/* and
+    # clients/client-py/tests/* - it boots Postgres + the Queen broker via
+    # Docker and runs ~60 Go tests against them. Heavy compared to unit, so
+    # only on master / cli pushes and on manual dispatch (not every PR).
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || github.event_name == 'push'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: clients/client-cli/go.sum
+
+      - name: Start Queen broker (RETENTION_INTERVAL=2000 for retention tests)
+        run: |
+          docker run -d --name queen \
+            --network host \
+            -e PG_HOST=localhost -e PG_PORT=5432 \
+            -e PG_USER=postgres -e PG_PASSWORD=postgres -e PG_DB=postgres \
+            -e RETENTION_INTERVAL=2000 \
+            smartnessai/queen-mq:0.14.3
+          # Wait for /health to come up.
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:6632/health > /dev/null; then
+              echo "broker is up"
+              break
+            fi
+            echo "waiting for broker..."
+            sleep 1
+          done
+          curl -fsS http://localhost:6632/health
+
+      - name: Build queenctl
+        run: make build
+
+      - name: Run e2e suite
+        env:
+          QUEEN_SERVER: http://localhost:6632
+          PG_HOST: localhost
+          PG_PORT: '5432'
+          PG_USER: postgres
+          PG_PASSWORD: postgres
+          PG_DB: postgres
+          QUEEN_RETENTION_INTERVAL_MS: '2000'
+          QUEEN_LOAD_TOTAL: ${{ github.event.inputs.load_total }}
+        run: make e2e
+
+      - name: Broker logs on failure
+        if: failure()
+        run: docker logs queen | tail -200

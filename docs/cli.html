@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>queenctl CLI: Queen MQ</title>
+<meta name="description" content="queenctl is the operator command-line client for Queen MQ. Single static binary, kubectl-style command tree, NDJSON pipelines, multi-context config.">
+<meta name="theme-color" content="#141415">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      Queen MQ
+    </a>
+    <nav class="topnav-links" aria-label="Primary">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="clients.html">Clients</a>
+      <a href="cli.html" class="current">CLI</a>
+      <a href="server.html">Server</a>
+      <a href="http-api.html">HTTP API</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="sizing.html">Sizing</a>
+      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+    </nav>
+    <div class="topnav-right">
+      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="shell-narrow" style="padding-top: 48px;">
+
+<span class="label-xs">CLI</span>
+<h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
+  queenctl
+</h1>
+<p class="muted">
+  <strong>One static binary</strong>, kubectl-style command tree, NDJSON pipelines.
+  Built on top of the Go SDK so any new endpoint exposed in
+  <code>client-go</code> is one Cobra file away from a CLI flag.
+</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#install">Install</a>
+  <a href="#contexts">Contexts</a>
+  <a href="#auth">Auth</a>
+  <a href="#shortcuts">Top-level shortcuts</a>
+  <a href="#resources">Resources</a>
+  <a href="#ops">Ops &amp; analytics</a>
+  <a href="#output">Output formats</a>
+  <a href="#exit">Exit codes</a>
+  <a href="#completion">Shell completion</a>
+</nav>
+
+<h2 id="install">Install</h2>
+<pre><code class="language-bash"># Homebrew
+brew install smartpricing/tap/queenctl
+
+# Go modules
+go install github.com/smartpricing/queen/client-cli@latest
+
+# From source
+cd clients/client-cli &amp;&amp; make build  # ./bin/queenctl</code></pre>
+<p class="muted">
+  Pre-built archives for linux/{amd64,arm64}, darwin/{amd64,arm64} and
+  windows/amd64 ship on
+  <a href="https://github.com/smartpricing/queen/releases">GitHub Releases</a>
+  under tag prefix <code>client-cli/v*</code>.
+</p>
+
+<h2 id="contexts">Contexts</h2>
+<p>
+  <code>~/.queen/config.yaml</code> follows the kubectl model: many contexts,
+  one default, easy switching.
+</p>
+<pre><code class="language-bash">queenctl config set-context local --server http://localhost:6632
+queenctl config set-context prod  --server https://queen.prod.internal:6632 --token "$JWT"
+queenctl config use-context prod
+queenctl config get-contexts</code></pre>
+<p>
+  Precedence: file &lt; <code>$QUEEN_CONTEXT</code> &lt; <code>--context</code>
+  &lt; <code>$QUEEN_SERVER</code>/<code>$QUEEN_TOKEN</code> &lt;
+  <code>--server</code>/<code>--token</code>. Tokens are stored in the OS
+  keychain by default.
+</p>
+
+<h2 id="auth">Auth</h2>
+<pre><code class="language-bash">queenctl login --method password -u alice
+queenctl login --method google
+queenctl login --method token   # paste a JWT (works for any IdP / JWKS)
+queenctl logout</code></pre>
+<p class="muted">
+  The proxy's <code>POST /api/login</code> sets a <code>token</code> cookie;
+  queenctl scrapes it and stores the JWT in the keychain. Google flow opens
+  the proxy's OAuth URL in your browser and prompts you to paste the JWT
+  back.
+</p>
+
+<h2 id="shortcuts">Top-level shortcuts</h2>
+<table>
+  <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>queenctl ping</code></td><td>Health probe; exit 0 on healthy, 2 otherwise. Liveness in CI scripts.</td></tr>
+    <tr><td><code>queenctl version</code></td><td>CLI build info + server version.</td></tr>
+    <tr><td><code>queenctl status [queue]</code></td><td>Cluster overview, or a single-queue depth + lag table with <code>--partitions</code>.</td></tr>
+    <tr><td><code>queenctl lag</code></td><td>Every consumer group with current lag; <code>--min-seconds</code> for alerts.</td></tr>
+    <tr><td><code>queenctl tail &lt;q&gt; -f --cg &lt;cg&gt;</code></td><td>Live-stream messages as NDJSON. Composes with <code>jq</code>.</td></tr>
+    <tr><td><code>queenctl push &lt;q&gt;</code></td><td>NDJSON on stdin, batched. <code>--partition-key</code> reads a JSON path per message.</td></tr>
+    <tr><td><code>queenctl pop &lt;q&gt; -n N --auto-ack</code></td><td>One-shot pop, NDJSON output.</td></tr>
+    <tr><td><code>queenctl ack &lt;tx&gt; / --batch -</code></td><td>Single or batched acks; reads NDJSON straight from <code>tail</code>/<code>pop</code>.</td></tr>
+    <tr><td><code>queenctl apply -f file.yaml</code></td><td>Declarative queue / consumer-group manifests.</td></tr>
+    <tr><td><code>queenctl replay &lt;q&gt; --cg c --to '15m ago'</code></td><td>Top-level alias for the cg-seek workflow.</td></tr>
+  </tbody>
+</table>
+
+<h3>Pipeline example</h3>
+<pre><code class="language-bash"># Replay from src into dst, transforming on the way
+queenctl tail src --cg replay --auto-ack \
+  | jq -c '.data | .processed = true' \
+  | queenctl push dst --batch 500</code></pre>
+
+<h3>Declarative apply</h3>
+<pre><code class="language-yaml">kind: Queue
+name: orders
+namespace: billing
+config:
+  leaseTime: 60
+  retryLimit: 5
+  maxSize: 100000
+---
+kind: ConsumerGroup
+name: analyzer
+queue: orders
+seek-to: beginning</code></pre>
+
+<h2 id="resources">Resources</h2>
+<table>
+  <thead><tr><th>Subcommand</th><th>Verbs</th></tr></thead>
+  <tbody>
+    <tr><td><code>queue</code></td><td><code>list</code> · <code>describe</code> · <code>configure</code> · <code>delete</code> · <code>clear</code> · <code>stats</code></td></tr>
+    <tr><td><code>partition</code></td><td><code>list</code> · <code>describe</code> · <code>seek</code> · <code>clear</code></td></tr>
+    <tr><td><code>messages</code></td><td><code>list</code> · <code>get</code> · <code>delete</code> · <code>retry</code> · <code>dlq</code> · <code>traces</code></td></tr>
+    <tr><td><code>cg</code></td><td><code>list</code> · <code>describe</code> · <code>lag</code> · <code>seek</code> · <code>delete</code> · <code>refresh-stats</code></td></tr>
+    <tr><td><code>dlq</code></td><td><code>list</code> · <code>describe</code> · <code>requeue</code> · <code>drain</code></td></tr>
+    <tr><td><code>namespace</code> · <code>task</code></td><td><code>list</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="ops">Ops &amp; analytics</h2>
+<table>
+  <thead><tr><th>Subcommand</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>tx -f bundle.json</code></td><td>Atomic ack+push transaction posted to <code>/api/v1/transaction</code>.</td></tr>
+    <tr><td><code>lease extend &lt;leaseId&gt;</code></td><td>Renew a message lease (long-running consumers).</td></tr>
+    <tr><td><code>maintenance get / on / off [--pop]</code></td><td>Inspect / toggle broker (or pop-only) maintenance mode.</td></tr>
+    <tr><td><code>metrics [--prometheus]</code></td><td>Fetch <code>/metrics</code> JSON or the Prometheus exposition.</td></tr>
+    <tr><td><code>analytics overview / queue-lag / queue-ops / queue-parked / retention / system / worker / postgres</code></td><td>The full <code>/api/v1/analytics/*</code> series, dumped as JSON or YAML.</td></tr>
+    <tr><td><code>traces names / by-name / by-message</code></td><td>Inspect message trace events.</td></tr>
+    <tr><td><code>bench --total N --partitions K</code></td><td>Smoke benchmark: push N messages, pop them, report p50/p95/p99 RTT.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="output">Output formats</h2>
+<p>
+  <code>-o</code> is auto-detected: <strong>table</strong> when stdout is a
+  TTY, <strong>json</strong> when piped. Override explicitly:
+</p>
+<ul>
+  <li><code>-o table</code> humanised columns</li>
+  <li><code>-o wide</code> table + columns hidden by default</li>
+  <li><code>-o json</code> pretty-printed</li>
+  <li><code>-o ndjson</code> one JSON object per line — composes with <code>jq</code> and <code>queenctl push</code></li>
+  <li><code>-o yaml</code></li>
+  <li><code>-o jsonpath=.queues[0].name</code> kubectl-style accessor</li>
+</ul>
+<p class="muted">
+  <code>tail</code> always emits NDJSON regardless of <code>-o</code> so
+  pipelines stay deterministic.
+</p>
+
+<h2 id="exit">Exit codes</h2>
+<table>
+  <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td>0</td><td>Success</td></tr>
+    <tr><td>1</td><td>User error (bad flag, missing arg)</td></tr>
+    <tr><td>2</td><td>Server unreachable / 5xx</td></tr>
+    <tr><td>3</td><td>Auth failed</td></tr>
+    <tr><td>4</td><td>Successful no-op (empty pop, no DLQ rows)</td></tr>
+  </tbody>
+</table>
+
+<h2 id="completion">Shell completion</h2>
+<pre><code class="language-bash">source &lt;(queenctl completion bash)
+source &lt;(queenctl completion zsh)
+queenctl completion fish | source
+queenctl completion powershell | Out-String | Invoke-Expression</code></pre>
+
+</main>
+<script src="prism.min.js"></script>
+<script src="site.js"></script>
+</body>
+</html>

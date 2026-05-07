@@ -52,6 +52,10 @@ jobs:
         docker push ${{ secrets.DOCKER_REGISTRY }}/test:latest || echo "Push failed"
         docker rmi ${{ secrets.DOCKER_REGISTRY }}/test:latest || true
     
+    - name: Resolve commit short SHA
+      id: gitmeta
+      run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
     - name: Build and push multi-platform image
       uses: docker/build-push-action@v5
       with:
@@ -62,6 +66,11 @@ jobs:
         tags: |
           ${{ secrets.DOCKER_REGISTRY }}/${{ steps.version.outputs.name }}:${{ steps.version.outputs.tag }}
           ${{ secrets.DOCKER_REGISTRY }}/${{ steps.version.outputs.name }}:latest
+        # Embed the same version string into queenctl so `queenctl version`
+        # inside the running container matches the broker's release tag.
+        build-args: |
+          QUEENCTL_VERSION=${{ steps.version.outputs.tag }}
+          QUEENCTL_COMMIT=${{ steps.gitmeta.outputs.sha }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
     

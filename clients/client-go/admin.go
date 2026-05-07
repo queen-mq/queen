@@ -72,27 +72,34 @@ func (a *Admin) GetQueue(ctx context.Context, name string) (map[string]interface
 	return a.httpClient.Get(ctx, path, 0, "")
 }
 
-// ClearQueue clears all messages from a queue.
+// ClearQueue clears all messages from a queue (or one partition).
+//
+// NOTE: there is no server-side endpoint for this operation today. The
+// closest the broker offers is a full DELETE /api/v1/resources/queues/:queue
+// which drops the queue together with its messages and partition records.
+//
+// This method is preserved as a stub so existing callers keep compiling, but
+// it always returns an error. To clear a queue, drop and recreate it via
+// Queue(name).Delete() + Queue(name).Config(...).Create() or use the
+// dashboard's drop flow.
 func (a *Admin) ClearQueue(ctx context.Context, name string, partition string) (map[string]interface{}, error) {
-	path := fmt.Sprintf("/api/v1/queues/%s/clear", url.PathEscape(name))
-	if partition != "" {
-		path += "?partition=" + url.QueryEscape(partition)
-	}
-	return a.httpClient.Delete(ctx, path)
+	return nil, fmt.Errorf("ClearQueue is not implemented server-side; drop and recreate the queue, or delete messages individually via DeleteMessage")
 }
 
-// GetPartitions returns partitions matching the parameters.
+// GetPartitions returns the partitions of a queue.
+//
+// There is no dedicated /api/v1/resources/partitions endpoint on the
+// server. Partition data is bundled into the queue-detail view, so this
+// method calls GET /api/v1/status/queues/:queue?includePartitions=true and
+// returns the full {queue, partitions, totals} payload.
+//
+// queueName is required.
 func (a *Admin) GetPartitions(ctx context.Context, queueName string) (map[string]interface{}, error) {
-	query := url.Values{}
-	if queueName != "" {
-		query.Set("queue", queueName)
+	if queueName == "" {
+		return nil, fmt.Errorf("queue name is required")
 	}
-
-	path := "/api/v1/resources/partitions"
-	if encoded := query.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-
+	path := fmt.Sprintf("/api/v1/status/queues/%s?includePartitions=true",
+		url.PathEscape(queueName))
 	return a.httpClient.Get(ctx, path, 0, "")
 }
 
@@ -153,17 +160,23 @@ func (a *Admin) DeleteMessage(ctx context.Context, partitionID, transactionID st
 }
 
 // RetryMessage retries a failed message.
+//
+// NOTE: not implemented server-side. The corresponding endpoint
+// POST /api/v1/messages/:partitionId/:transactionId/retry is not registered
+// in server/src/routes/messages.cpp - only GET and DELETE exist there. The
+// method is kept as a stub for SDK API stability; calling it returns a
+// clear error so callers don't silently misinterpret 404s.
 func (a *Admin) RetryMessage(ctx context.Context, partitionID, transactionID string) (map[string]interface{}, error) {
-	path := fmt.Sprintf("/api/v1/messages/%s/%s/retry",
-		url.PathEscape(partitionID), url.PathEscape(transactionID))
-	return a.httpClient.Post(ctx, path, nil)
+	return nil, fmt.Errorf("RetryMessage is not implemented server-side; messages must be re-published from the DLQ via push")
 }
 
 // MoveMessageToDLQ moves a message to the dead letter queue.
+//
+// NOTE: not implemented server-side (same situation as RetryMessage). The
+// broker moves messages to the DLQ automatically when retryLimit is
+// exceeded - manual force-move is currently unsupported.
 func (a *Admin) MoveMessageToDLQ(ctx context.Context, partitionID, transactionID string) (map[string]interface{}, error) {
-	path := fmt.Sprintf("/api/v1/messages/%s/%s/dlq",
-		url.PathEscape(partitionID), url.PathEscape(transactionID))
-	return a.httpClient.Post(ctx, path, nil)
+	return nil, fmt.Errorf("MoveMessageToDLQ is not implemented server-side; ack with --failed to drive a message into the DLQ via the retry-limit path")
 }
 
 // === Traces ===
@@ -318,22 +331,39 @@ func (a *Admin) DeleteConsumerGroupForQueue(ctx context.Context, consumerGroup, 
 }
 
 // SeekConsumerGroupOptions contains options for seeking a consumer group.
+//
+// The server accepts EXACTLY ONE of:
+//   - ToEnd: true  -- seek the cursor past every existing message
+//   - Timestamp: a non-empty RFC3339 string  -- seek to that point in time
+//
+// "Seek to beginning" is expressed by passing a very early timestamp such
+// as "1970-01-01T00:00:00Z".
 type SeekConsumerGroupOptions struct {
+	// Timestamp is an RFC3339 string. Mutually exclusive with ToEnd.
 	Timestamp string
-	Mode      string // "beginning", "end", or specific timestamp
+	// ToEnd jumps the cursor past the latest message. Mutually exclusive
+	// with Timestamp.
+	ToEnd bool
 }
 
 // SeekConsumerGroup seeks a consumer group to a specific position.
+//
+// Wire shape (POST /api/v1/consumer-groups/:cg/queues/:queue/seek):
+//
+//	{ "toEnd": true }            // jump past the latest message
+//	{ "timestamp": "2026-…" }    // jump to a specific time
 func (a *Admin) SeekConsumerGroup(ctx context.Context, consumerGroup, queueName string, opts SeekConsumerGroupOptions) (map[string]interface{}, error) {
 	path := fmt.Sprintf("/api/v1/consumer-groups/%s/queues/%s/seek",
 		url.PathEscape(consumerGroup), url.PathEscape(queueName))
 
 	body := map[string]interface{}{}
-	if opts.Timestamp != "" {
+	switch {
+	case opts.ToEnd:
+		body["toEnd"] = true
+	case opts.Timestamp != "":
 		body["timestamp"] = opts.Timestamp
-	}
-	if opts.Mode != "" {
-		body["mode"] = opts.Mode
+	default:
+		return nil, fmt.Errorf("seek requires either ToEnd or Timestamp")
 	}
 
 	return a.httpClient.Post(ctx, path, body)
@@ -419,4 +449,117 @@ func (a *Admin) GetWorkerMetrics(ctx context.Context, from, to string) (map[stri
 // GetPostgresStats returns PostgreSQL statistics.
 func (a *Admin) GetPostgresStats(ctx context.Context) (map[string]interface{}, error) {
 	return a.httpClient.Get(ctx, "/api/v1/analytics/postgres-stats", 0, "")
+}
+
+// SeekConsumerGroupPartition seeks a single partition of a consumer group
+// to its end. The server-side implementation is fixed: there is no
+// timestamp variant for partition-scoped seek - the SP signature is
+// queen.seek_partition_v1($cg, $queue, $partition). The server route is
+// POST /api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek.
+//
+// The opts argument is accepted for API symmetry with SeekConsumerGroup
+// but its fields are ignored by the server.
+func (a *Admin) SeekConsumerGroupPartition(ctx context.Context, consumerGroup, queueName, partition string, opts SeekConsumerGroupOptions) (map[string]interface{}, error) {
+	_ = opts
+	path := fmt.Sprintf("/api/v1/consumer-groups/%s/queues/%s/partitions/%s/seek",
+		url.PathEscape(consumerGroup), url.PathEscape(queueName), url.PathEscape(partition))
+	return a.httpClient.Post(ctx, path, map[string]interface{}{})
+}
+
+// PrometheusMetrics returns the raw text/plain Prometheus exposition served
+// at /metrics/prometheus. The HTTP client surfaces non-JSON bodies via the
+// "raw" key, which we unwrap here.
+func (a *Admin) PrometheusMetrics(ctx context.Context) (string, error) {
+	result, err := a.httpClient.Get(ctx, "/metrics/prometheus", 0, "")
+	if err != nil {
+		return "", err
+	}
+	if raw, ok := result["raw"].(string); ok {
+		return raw, nil
+	}
+	return "", nil
+}
+
+// ListDLQParams contains filters for the DLQ inspection endpoint.
+type ListDLQParams struct {
+	Queue         string
+	ConsumerGroup string
+	Partition     string
+	From          string
+	To            string
+	Limit         int
+	Offset        int
+}
+
+// ListDLQ returns dead-lettered messages matching the filters.
+// Server route: GET /api/v1/dlq
+func (a *Admin) ListDLQ(ctx context.Context, params ListDLQParams) (map[string]interface{}, error) {
+	query := url.Values{}
+	if params.Queue != "" {
+		query.Set("queue", params.Queue)
+	}
+	if params.ConsumerGroup != "" {
+		query.Set("consumerGroup", params.ConsumerGroup)
+	}
+	if params.Partition != "" {
+		query.Set("partition", params.Partition)
+	}
+	if params.From != "" {
+		query.Set("from", params.From)
+	}
+	if params.To != "" {
+		query.Set("to", params.To)
+	}
+	if params.Limit > 0 {
+		query.Set("limit", strconv.Itoa(params.Limit))
+	}
+	if params.Offset > 0 {
+		query.Set("offset", strconv.Itoa(params.Offset))
+	}
+	path := "/api/v1/dlq"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return a.httpClient.Get(ctx, path, 0, "")
+}
+
+// GetQueueLagAnalytics returns the per-queue pop-lag time series.
+// Server route: GET /api/v1/analytics/queue-lag.
+func (a *Admin) GetQueueLagAnalytics(ctx context.Context, from, to string) (map[string]interface{}, error) {
+	return a.getAnalytics(ctx, "/api/v1/analytics/queue-lag", from, to)
+}
+
+// GetQueueOpsAnalytics returns the per-queue push/pop/ack ops time series.
+// Server route: GET /api/v1/analytics/queue-ops.
+func (a *Admin) GetQueueOpsAnalytics(ctx context.Context, from, to string) (map[string]interface{}, error) {
+	return a.getAnalytics(ctx, "/api/v1/analytics/queue-ops", from, to)
+}
+
+// GetQueueParkedReplicas returns the parked-consumer counts per queue.
+// Server route: GET /api/v1/analytics/queue-parked-replicas.
+func (a *Admin) GetQueueParkedReplicas(ctx context.Context, from, to string) (map[string]interface{}, error) {
+	return a.getAnalytics(ctx, "/api/v1/analytics/queue-parked-replicas", from, to)
+}
+
+// GetRetentionAnalytics returns the retention/cleanup analytics series.
+// Server route: GET /api/v1/analytics/retention.
+func (a *Admin) GetRetentionAnalytics(ctx context.Context, from, to string) (map[string]interface{}, error) {
+	return a.getAnalytics(ctx, "/api/v1/analytics/retention", from, to)
+}
+
+// getAnalytics is the common shape for /api/v1/analytics/* endpoints which
+// all accept ?from=&to= and return a JSON object with a series array.
+func (a *Admin) getAnalytics(ctx context.Context, basePath, from, to string) (map[string]interface{}, error) {
+	query := url.Values{}
+	if from != "" {
+		query.Set("from", from)
+	}
+	if to != "" {
+		query.Set("to", to)
+	}
+	path := basePath
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return a.httpClient.Get(ctx, path, 0, "")
 }

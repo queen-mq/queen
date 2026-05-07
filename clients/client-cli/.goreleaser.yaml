@@ -1,0 +1,96 @@
+version: 2
+
+project_name: queenctl
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: queenctl
+    main: .
+    binary: queenctl
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/smartpricing/queen/client-cli/cmd.BuildVersion={{ .Version }}
+      - -X github.com/smartpricing/queen/client-cli/cmd.BuildCommit={{ .ShortCommit }}
+      - -X github.com/smartpricing/queen/client-cli/cmd.BuildDate={{ .CommitDate }}
+
+archives:
+  - id: queenctl-archive
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macos
+      {{- else }}{{ .Os }}{{ end }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE.md
+      - README.md
+      - completions/*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+release:
+  github:
+    owner: smartpricing
+    name: queen
+  prerelease: auto
+  draft: false
+  name_template: 'queenctl {{ .Version }}'
+  header: |
+    queenctl is the Queen MQ operator CLI.
+
+    Install:
+      brew install smartpricing/tap/queenctl
+      go install github.com/smartpricing/queen/client-cli@v{{ .Version }}
+
+brews:
+  - name: queenctl
+    repository:
+      owner: smartpricing
+      name: homebrew-tap
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    directory: Formula
+    homepage: https://queenmq.com
+    description: 'Operator CLI for Queen MQ - the partitioned message queue backed by PostgreSQL'
+    license: Apache-2.0
+    test: |
+      system "#{bin}/queenctl version --short"
+    install: |
+      bin.install "queenctl"
+      generate_completions_from_executable(bin/"queenctl", "completion")
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+
+git:
+  tag_sort: -version:refname
+
+env_files:
+  github_token: ~/.config/goreleaser/github_token

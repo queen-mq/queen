@@ -109,6 +109,7 @@ Then go to the dashboard ([http://localhost:6632](http://localhost:6632)) to see
 
 - [Client libraries overview](https://queenmq.com/clients.html) — JavaScript, Python, Go, PHP / Laravel, C++ (same fluent grammar across all five)
 - [HTTP API Reference](https://queenmq.com/http-api.html)
+- [`queenctl` CLI](https://queenmq.com/cli.html) — single-binary operator CLI built on `client-go`
 
 ### Operate
 
@@ -129,6 +130,7 @@ The repository is structured as follows:
 - `clients/client-go`: Go client library (go 1.24+)
 - `clients/client-laravel`: PHP / Laravel client library (php 8.3+)
 - `clients/client-cpp`: C++ client library (cpp 17)
+- `clients/client-cli`: `queenctl` operator CLI (Go binary built on `client-go`)
 - `proxy`: Proxy server (authentication)
 - `app`: Vue.js dashboard (vue 3)
 - `website`: Documentation website (vitepress)

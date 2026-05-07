@@ -10,8 +10,12 @@ clients/
 ├── client-py/        Python 3.8+         queen-mq          PyPI
 ├── client-go/        Go 1.24+            client-go         Go modules
 ├── client-laravel/   PHP 8.3+ + Laravel  smartpricing/queen-mq  Packagist
-└── client-cpp/       C++17               header-only       in-repo
+├── client-cpp/       C++17               header-only       in-repo
+└── client-cli/       Go 1.24+            queenctl          GitHub Releases + Homebrew
 ```
+
+The `client-cli/` package is the operator CLI built on top of `client-go`.
+It is not an SDK in itself - see [15-cli.md](15-cli.md) for the architecture.
 
 A running Queen broker on `http://localhost:6632` is the only common runtime dependency.
 
