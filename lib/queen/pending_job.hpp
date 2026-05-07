@@ -25,6 +25,16 @@ enum class JobType : uint8_t {
     TRANSACTION,     // Atomic transaction (NOT batchable - serial)
     RENEW_LEASE,     // Renew message lease (batchable)
     CUSTOM,          // Custom SQL query (NOT batchable - per-job SQL)
+    // queen-streams v0.1: per-type queues for streaming engine cycles.
+    // Appended here (before _COUNT) per the comment above; numeric order
+    // affects round-robin fairness in the drain orchestrator only.
+    //
+    //   STREAMS_REGISTER_QUERY  one-shot at SDK startup; not on hot path
+    //   STREAMS_CYCLE           atomic per-partition cycle (state + sink + ack)
+    //   STREAMS_STATE_GET       batched reads of queen_streams.state (mirrors POP shape)
+    STREAMS_REGISTER_QUERY,
+    STREAMS_CYCLE,
+    STREAMS_STATE_GET,
     _COUNT,          // sentinel - array size, not a real type
     _SENTINEL = 0xFF // "no type" sentinel (idle slot)
 };
@@ -47,27 +57,41 @@ job_type_from_index(size_t i) noexcept {
 inline const char*
 job_type_name(JobType t) noexcept {
     switch (t) {
-        case JobType::PUSH:        return "push";
-        case JobType::POP:         return "pop";
-        case JobType::ACK:         return "ack";
-        case JobType::TRANSACTION: return "transaction";
-        case JobType::RENEW_LEASE: return "renew_lease";
-        case JobType::CUSTOM:      return "custom";
-        default:                   return "?";
+        case JobType::PUSH:                   return "push";
+        case JobType::POP:                    return "pop";
+        case JobType::ACK:                    return "ack";
+        case JobType::TRANSACTION:            return "transaction";
+        case JobType::RENEW_LEASE:            return "renew_lease";
+        case JobType::CUSTOM:                 return "custom";
+        case JobType::STREAMS_REGISTER_QUERY: return "streams_register";
+        case JobType::STREAMS_CYCLE:          return "streams_cycle";
+        case JobType::STREAMS_STATE_GET:      return "streams_state_get";
+        default:                              return "?";
     }
 }
 
 // SQL dispatch table for batchable types. CUSTOM is dispatched per-job
 // (each job carries its own `sql`), so its value is a sentinel.
+//
+// queen-streams entries (STREAMS_*) point to procedures shipped under
+// lib/schema/procedures/02{0,1,2}_streams_*.sql. The libqueen drain
+// orchestrator merges multiple jobs of the same type into a single SP call
+// (see _fire_batched in lib/queen.hpp). Per-type batchability for
+// STREAMS_CYCLE is set to max_batch_size=1 below via the BatchPolicy table
+// to mirror TRANSACTION semantics; STREAMS_STATE_GET is left batchable
+// (the SP accepts an array of requests with idx, just like POP/PUSH/ACK).
 inline const std::map<JobType, std::string>&
 JobTypeToSqlTable() {
     static const std::map<JobType, std::string> table = {
-        {JobType::PUSH,        "SELECT queen.push_messages_v3($1::jsonb)"},
-        {JobType::POP,         "SELECT queen.pop_unified_batch_v4($1::jsonb)"},
-        {JobType::ACK,         "SELECT queen.ack_messages_v2($1::jsonb)"},
-        {JobType::TRANSACTION, "SELECT queen.execute_transaction_v2($1::jsonb)"},
-        {JobType::RENEW_LEASE, "SELECT queen.renew_lease_v2($1::jsonb)"},
-        {JobType::CUSTOM,      "CUSTOM"},
+        {JobType::PUSH,                   "SELECT queen.push_messages_v3($1::jsonb)"},
+        {JobType::POP,                    "SELECT queen.pop_unified_batch_v4($1::jsonb)"},
+        {JobType::ACK,                    "SELECT queen.ack_messages_v2($1::jsonb)"},
+        {JobType::TRANSACTION,            "SELECT queen.execute_transaction_v2($1::jsonb)"},
+        {JobType::RENEW_LEASE,            "SELECT queen.renew_lease_v2($1::jsonb)"},
+        {JobType::CUSTOM,                 "CUSTOM"},
+        {JobType::STREAMS_REGISTER_QUERY, "SELECT queen.streams_register_query_v1($1::jsonb)"},
+        {JobType::STREAMS_CYCLE,          "SELECT queen.streams_cycle_v1($1::jsonb)"},
+        {JobType::STREAMS_STATE_GET,      "SELECT queen.streams_state_get_v1($1::jsonb)"},
     };
     return table;
 }

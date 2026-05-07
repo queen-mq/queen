@@ -30,6 +30,9 @@
 | **Status** | `/api/v1/status/queues/:queue` | GET | Queue detail stats |
 | **Status** | `/api/v1/status/queues/:queue/messages` | GET | Queue messages |
 | **Status** | `/api/v1/status/analytics` | GET | Analytics time-series |
+| **Streams** | `/streams/v1/queries` | POST | Register / re-register a streaming query |
+| **Streams** | `/streams/v1/cycle` | POST | Atomic per-partition state + sink + ack commit |
+| **Streams** | `/streams/v1/state/get` | POST | Read state for a (query, partition, keys[]) shard |
 
 ---
 
@@ -525,6 +528,145 @@ Returns an array of consumer groups with:
 - `maxTimeLag` - Maximum time lag in seconds
 - `state` - Group state: "Stable", "Lagging", or "Dead"
 - `queues` - Detailed per-queue partition information
+
+---
+
+### Streams (queen-streams v0.1)
+
+The `/streams/v1/` namespace is served by the same Queen binary but is
+intended for the [`@queenmq/streams`](../streams/README.md) Node/TypeScript
+SDK. State for streaming queries lives in the `queen_streams` schema in the
+same Postgres as the broker, so a streaming cycle commits state mutations,
+sink-queue pushes, and source-message acks **in one PG transaction** —
+exactly-once with no two-phase commit dance.
+
+Each route submits a `JobRequest` to libqueen with a new `JobType`
+(`STREAMS_REGISTER_QUERY`, `STREAMS_CYCLE`, `STREAMS_STATE_GET`) and lets
+libqueen's drain orchestrator dispatch the matching stored procedure
+(`queen.streams_register_query_v1`, `queen.streams_cycle_v1`,
+`queen.streams_state_get_v1`).
+
+#### `POST /streams/v1/queries`
+
+Idempotently register a streaming query. Called once per worker at the start
+of `Stream.run({ queryId })`.
+
+```bash
+curl -X POST http://localhost:6632/streams/v1/queries \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name":         "orders.per_customer_per_min",
+    "source_queue": "orders",
+    "sink_queue":   "orders.totals_per_customer_per_min",
+    "config_hash":  "sha256:..."
+  }'
+```
+
+Response:
+
+```json
+{
+  "success":     true,
+  "query_id":    "00000000-0000-0000-0000-000000000000",
+  "name":        "orders.per_customer_per_min",
+  "config_hash": "sha256:...",
+  "fresh":       true,
+  "reset":       false
+}
+```
+
+If a query with the same `name` already exists with a different `config_hash`
+and the request did not include `"reset": true`, the response is **409
+Conflict** with a `success: false` body explaining the mismatch. The SDK
+surfaces this as a thrown exception so users notice an operator-shape change
+at startup rather than silently corrupting state.
+
+When `reset: true` is supplied alongside a hash mismatch, all rows in
+`queen_streams.state` for that query are deleted and the new operator chain
+takes over with a clean slate.
+
+#### `POST /streams/v1/cycle`
+
+Atomically commit one streaming cycle for one partition.
+
+```bash
+curl -X POST http://localhost:6632/streams/v1/cycle \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query_id":       "00000000-0000-0000-0000-000000000000",
+    "partition_id":   "11111111-1111-1111-1111-111111111111",
+    "consumer_group": "streams.orders.per_customer_per_min",
+    "state_ops": [
+      {"type": "upsert", "key": "win:2026-05-06T10:01", "value": {"sum": 1234.5}}
+    ],
+    "push_items": [
+      {"queue": "orders.totals_per_customer_per_min",
+       "partition": "cust-42",
+       "payload": {"customerId": "cust-42", "minute": "2026-05-06T10:01", "total": 1234.5}}
+    ],
+    "ack": {
+      "transactionId": "<source-message-tx-id>",
+      "leaseId":       "<worker-id>",
+      "status":        "completed"
+    }
+  }'
+```
+
+All three sections are optional:
+
+- `state_ops` — `{"type": "upsert"|"delete", "key": "...", "value": {...}}`. Scoped to `(query_id, partition_id)`.
+- `push_items` — emitted to the sink queue using the same primitives as `/api/v1/push`. `partition_lookup` is updated inline so downstream consumers wake up immediately.
+- `ack` — advances the source partition's consumer cursor. Statuses: `completed` / `success` (cursor advance), `failed` / `dlq` (move to DLQ + lease release).
+
+Response:
+
+```json
+{
+  "success":           true,
+  "query_id":          "...",
+  "partition_id":      "...",
+  "state_ops_applied": 1,
+  "push_results":      [ { "queueName": "orders.totals_per_customer_per_min", "messageId": "..." } ],
+  "ack_result":        { "success": true, "lease_released": true, "dlq": false }
+}
+```
+
+On failure, the entire cycle is rolled back (state, push, and ack) and
+`success: false` is returned with an `error` field.
+
+#### `POST /streams/v1/state/get`
+
+Read state rows for a `(query_id, partition_id, keys[])` shard. Used by
+stateful operators at the start of a cycle.
+
+```bash
+curl -X POST http://localhost:6632/streams/v1/state/get \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query_id":     "00000000-0000-0000-0000-000000000000",
+    "partition_id": "11111111-1111-1111-1111-111111111111",
+    "keys":         ["win:2026-05-06T10:01", "win:2026-05-06T10:02"]
+  }'
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "rows": [
+    {"key": "win:2026-05-06T10:01", "value": {"sum": 1234.5}, "updated_at": "2026-05-06T10:01:42.000Z"}
+  ]
+}
+```
+
+Missing keys are simply absent from `rows`. An empty `keys` array returns
+all rows for the `(query_id, partition_id)` shard — useful for
+introspection but rarely the right thing on the hot path.
+
+This endpoint is **batchable** in libqueen: many concurrent state reads
+across workers are merged into one drain pass and one SP call, mirroring
+the per-type batching of `POP`/`PUSH`/`ACK`.
 
 ---
 

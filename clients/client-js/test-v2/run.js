@@ -15,6 +15,7 @@ import * as bootstrapTests from './bootstrap.js'
 import * as loggerTests from './logger.js'
 import * as watermarkTests from './watermark.js'
 import * as authTests from './auth.js'
+import * as streamTests from './stream/index.js'
 import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
 
 
@@ -88,8 +89,17 @@ function printResults() {
 
 export const cleanupTestData = async () => {
     try {
+      // Drop streaming queries first (CASCADE removes their state rows).
+      // Safe even when queen_streams isn't installed yet — we swallow the
+      // error if the schema doesn't exist.
+      try {
+        await dbPool.query(`DELETE FROM queen_streams.queries WHERE name LIKE 'test-%'`);
+      } catch (e) {
+        // queen_streams schema not installed — ignore.
+      }
+
       await dbPool.query(`DELETE FROM queen.queues WHERE name LIKE 'test-%' OR name LIKE 'edge-%' OR name LIKE 'pattern-%' OR name LIKE 'workflow-%'`);
-      
+
       log('Test data cleaned up');
     } catch (error) {
       log(`Cleanup error: ${error.message}`, 'warning');
@@ -126,10 +136,15 @@ async function main() {
 
     ]
 
-    const allTests = [...humanTests, ...aiTests]
+    // Streaming tests (queen-streams). Run via `node run.js stream`.
+    // Require Queen v0.2+ with the queen_streams schema applied.
+    const streamGroupTests = [streamTests]
+
+    const allTests = [...humanTests, ...aiTests, ...streamGroupTests]
     const allTestFunctions = allTests.map(x => Object.values(x)).flat()
     const humanTestFunctions = humanTests.map(x => Object.values(x)).flat()
     const aiTestFunctions = aiTests.map(x => Object.values(x)).flat()
+    const streamTestFunctions = streamGroupTests.map(x => Object.values(x)).flat()
 
     // Check command line arguments
     const firstArg = process.argv[2]
@@ -146,6 +161,10 @@ async function main() {
         testsToRun = humanTestFunctions
         mode = 'human'
         log(true, `Running human-written tests only (${humanTestFunctions.length} tests)...`)
+    } else if (firstArg === 'stream' || firstArg === 'streams') {
+        testsToRun = streamTestFunctions
+        mode = 'stream'
+        log(true, `Running queen-streams tests only (${streamTestFunctions.length} tests)...`)
     } else if (firstArg && firstArg !== 'all') {
         // Check if it's a specific test name
         const testFunc = allTestFunctions.find(t => t.name === firstArg)
@@ -155,12 +174,15 @@ async function main() {
             console.log('  node run.js              # Run all tests')
             console.log('  node run.js ai           # Run only AI-generated tests')
             console.log('  node run.js human        # Run only human-written tests')
+            console.log('  node run.js stream       # Run only queen-streams tests')
             console.log('  node run.js <testName>   # Run specific test')
             console.log('\nAvailable tests:')
             console.log('\n🤖 AI-generated tests:')
             aiTestFunctions.forEach(t => console.log(`  - ${t.name}`))
             console.log('\n👤 Human-written tests:')
             humanTestFunctions.forEach(t => console.log(`  - ${t.name}`))
+            console.log('\n🌊 queen-streams tests:')
+            streamTestFunctions.forEach(t => console.log(`  - ${t.name}`))
             await closeDb()
             process.exit(1)
         }
@@ -196,6 +218,8 @@ async function main() {
     } else if (mode === 'human') {
         console.log('\n💡 Tip: Run "node run.js ai" to test AI-generated tests')
         console.log('💡 Tip: Run "node run.js" to test all tests')
+    } else if (mode === 'stream') {
+        console.log('\n💡 Tip: Run "node run.js" to test all tests')
     }
     
     //await cleanupTestData()

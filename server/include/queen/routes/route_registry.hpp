@@ -65,6 +65,25 @@ void setup_ack_routes(uWS::App* app, const RouteContext& ctx);
 void setup_transaction_routes(uWS::App* app, const RouteContext& ctx);
 
 /**
+ * Setup queen-streams endpoints
+ *
+ * Routes:
+ *   POST /streams/v1/queries        - register / re-register a streaming query
+ *   POST /streams/v1/cycle          - atomic per-partition state+sink+ack commit
+ *   POST /streams/v1/state/get      - batched per-partition state read
+ *
+ * Each route submits a JobRequest to libqueen with a new JobType
+ * (STREAMS_REGISTER_QUERY, STREAMS_CYCLE, STREAMS_STATE_GET) and dispatches
+ * the matching SP through the existing async-PG drain orchestrator. The
+ * URL prefix /streams/v1/ is intentionally separate from /api/v1/ so a
+ * future extracted streams binary can take over this namespace without
+ * breaking SDK clients.
+ */
+void setup_streams_register_query_routes(uWS::App* app, const RouteContext& ctx);
+void setup_streams_cycle_routes(uWS::App* app, const RouteContext& ctx);
+void setup_streams_state_get_routes(uWS::App* app, const RouteContext& ctx);
+
+/**
  * Setup lease management endpoints
  * Routes: POST /api/v1/lease/:leaseId/extend
  */

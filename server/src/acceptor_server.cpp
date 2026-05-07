@@ -156,7 +156,12 @@ static void setup_worker_routes(uWS::App* app,
     
     spdlog::debug("[Worker {}] Setting up transaction routes...", worker_id);
     queen::routes::setup_transaction_routes(app, ctx);
-    
+
+    spdlog::debug("[Worker {}] Setting up queen-streams routes...", worker_id);
+    queen::routes::setup_streams_register_query_routes(app, ctx);
+    queen::routes::setup_streams_cycle_routes(app, ctx);
+    queen::routes::setup_streams_state_get_routes(app, ctx);
+
     spdlog::debug("[Worker {}] Setting up lease routes...", worker_id);
     queen::routes::setup_lease_routes(app, ctx);
     

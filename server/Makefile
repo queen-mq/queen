@@ -66,6 +66,7 @@ SOURCES = $(SRC_DIR)/main_acceptor.cpp \
           $(wildcard $(SRC_DIR)/managers/*.cpp) \
           $(wildcard $(SRC_DIR)/services/*.cpp) \
           $(wildcard $(SRC_DIR)/routes/*.cpp) \
+          $(wildcard $(SRC_DIR)/routes/streams/*.cpp) \
           $(wildcard $(SRC_DIR)/auth/*.cpp)
 OBJECTS = $(SOURCES:$(SRC_DIR)/%.cpp=$(BUILD_DIR)/%.o)
 DEPS = $(OBJECTS:.o=.d)

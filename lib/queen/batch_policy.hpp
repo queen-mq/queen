@@ -57,13 +57,16 @@ env_int(const char* name, int fallback) noexcept {
 inline const char*
 job_type_env_segment(JobType t) noexcept {
     switch (t) {
-        case JobType::PUSH:        return "PUSH";
-        case JobType::POP:         return "POP";
-        case JobType::ACK:         return "ACK";
-        case JobType::TRANSACTION: return "TRANSACTION";
-        case JobType::RENEW_LEASE: return "RENEW_LEASE";
-        case JobType::CUSTOM:      return "CUSTOM";
-        default:                   return "UNKNOWN";
+        case JobType::PUSH:                   return "PUSH";
+        case JobType::POP:                    return "POP";
+        case JobType::ACK:                    return "ACK";
+        case JobType::TRANSACTION:            return "TRANSACTION";
+        case JobType::RENEW_LEASE:            return "RENEW_LEASE";
+        case JobType::CUSTOM:                 return "CUSTOM";
+        case JobType::STREAMS_REGISTER_QUERY: return "STREAMS_REGISTER";
+        case JobType::STREAMS_CYCLE:          return "STREAMS_CYCLE";
+        case JobType::STREAMS_STATE_GET:      return "STREAMS_STATE_GET";
+        default:                              return "UNKNOWN";
     }
 }
 
@@ -89,14 +92,27 @@ default_batch_policy_for(JobType t) noexcept {
     //     because their advisory-lock contention caps usable parallelism.
     //
     // Layout: {preferred, max_hold_ms, max_batch, max_concurrent}.
+    //
+    // queen-streams entries:
+    //   STREAMS_REGISTER_QUERY: one-shot at SDK startup; {1, 0, 1, 2} mirrors
+    //     TRANSACTION shape — single, no hold, low concurrency.
+    //   STREAMS_CYCLE: per-partition atomic cycle. v0.1 keeps max_batch_size=1
+    //     (plan requirement) but max_concurrent=16 because Queen's
+    //     per-partition lease exclusivity means many partitions' cycles can
+    //     commit in parallel without contending. Vegas adapts down if PG
+    //     pushes back.
+    //   STREAMS_STATE_GET: pure read, batchable like POP; mirrors POP shape.
     switch (t) {
-        case JobType::PUSH:        return {50,  20,  500, 24};
-        case JobType::POP:         return {20,   5,  500, 16};
-        case JobType::ACK:         return {50,  20,  500, 16};
-        case JobType::TRANSACTION: return { 1,   0,    1,  1};
-        case JobType::RENEW_LEASE: return {10, 100,  100,  2};
-        case JobType::CUSTOM:      return { 1,   0,    1,  1};
-        default:                   return { 1,   5,    1,  1};
+        case JobType::PUSH:                   return {50,  20,  500, 24};
+        case JobType::POP:                    return {20,   5,  500, 16};
+        case JobType::ACK:                    return {50,  20,  500, 16};
+        case JobType::TRANSACTION:            return { 1,   0,    1,  1};
+        case JobType::RENEW_LEASE:            return {10, 100,  100,  2};
+        case JobType::CUSTOM:                 return { 1,   0,    1,  1};
+        case JobType::STREAMS_REGISTER_QUERY: return { 1,   0,    1,  2};
+        case JobType::STREAMS_CYCLE:          return { 1,   0,    1, 16};
+        case JobType::STREAMS_STATE_GET:      return {20,   5,  500, 16};
+        default:                              return { 1,   5,    1,  1};
     }
 }
 

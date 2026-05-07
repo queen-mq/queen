@@ -1518,6 +1518,72 @@ class Queen {
                             job->callback(job_results.dump());
                             break;
                         }
+                        case JobType::STREAMS_CYCLE: {
+                            // queen-streams cycles ack the source partition's
+                            // cursor AND push to the sink queue inside one PG
+                            // transaction (queen.streams_cycle_v1). The raw
+                            // ack/push primitives are NOT exposed here, so we
+                            // re-credit them to the dashboard's metrics manually
+                            // — otherwise streaming workloads show up as
+                            // "push > ack" indefinitely (cf PR-streams-metrics).
+                            //
+                            // Each result item shape:
+                            //   { idx,
+                            //     result: {
+                            //       success, query_id, partition_id, queueName,
+                            //       push_results: [{queueName,...}, ...],
+                            //       ack_result: {success, count, dlq, ...} | null
+                            //     } }
+                            if (_metrics) {
+                                for (const auto& outer : job_results) {
+                                    if (!outer.contains("result") || !outer["result"].is_object()) continue;
+                                    const auto& r = outer["result"];
+
+                                    // Source ack — counts streamed messages as
+                                    // "consumed" on the per-queue Ack/s chart.
+                                    if (r.contains("ack_result")
+                                        && r["ack_result"].is_object()
+                                        && r["ack_result"].value("success", false)) {
+                                        size_t ack_count = r["ack_result"].value("count", 1);
+                                        _metrics->record_ack_request();
+                                        _metrics->record_ack_messages(ack_count, ack_count, 0);
+                                        if (r.contains("queueName") && r["queueName"].is_string()) {
+                                            _metrics->record_ack_with_queue(
+                                                r["queueName"].get<std::string>(),
+                                                ack_count, 0);
+                                        }
+                                        if (r["ack_result"].value("dlq", false)) {
+                                            _metrics->record_dlq();
+                                        }
+                                    }
+
+                                    // Sink push — queen.streams_cycle_v1 invokes
+                                    // queen.push_messages_v3 internally, and its
+                                    // items array (in push_results) carries the
+                                    // sink queueName per row. Mirror what
+                                    // JobType::PUSH does.
+                                    if (r.contains("push_results") && r["push_results"].is_array()) {
+                                        const auto& pushes = r["push_results"];
+                                        if (!pushes.empty()) {
+                                            _metrics->record_push_request();
+                                            _metrics->record_push_messages(pushes.size());
+                                            std::unordered_map<std::string, size_t> by_queue;
+                                            for (const auto& p : pushes) {
+                                                if (p.contains("queueName") && p["queueName"].is_string()) {
+                                                    by_queue[p["queueName"].get<std::string>()]++;
+                                                }
+                                            }
+                                            for (const auto& [qn, cnt] : by_queue) {
+                                                _metrics->record_push_per_queue(qn, cnt);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _jobs_done++;
+                            job->callback(job_results.dump());
+                            break;
+                        }
                         default: {
                             _jobs_done++;
                             job->callback(job_results.dump());

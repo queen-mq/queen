@@ -49,6 +49,16 @@ export class QueueBuilder {
     this.#queueName = queueName
   }
 
+  /**
+   * Public read-only accessor for the queue name. Useful for tooling that
+   * holds a QueueBuilder reference and needs to know the underlying name —
+   * e.g. @queenmq/streams resolves sink-queue names from the QueueBuilder
+   * passed to .to(...).
+   */
+  get name() {
+    return this.#queueName
+  }
+
   // ===========================
   // Affinity Key Generation
   // ===========================
