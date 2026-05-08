@@ -12,14 +12,18 @@
  * messages remain visible for redelivery via Queen's existing lease/retry.
  */
 
-export async function commitCycle({ http, queryId, partitionId, consumerGroup, stateOps, pushItems, ack }) {
+export async function commitCycle({ http, queryId, partitionId, consumerGroup, stateOps, pushItems, ack, releaseLease }) {
   const body = {
     query_id: queryId,
     partition_id: partitionId,
     consumer_group: consumerGroup,
     state_ops: stateOps || [],
     push_items: pushItems || [],
-    ack: ack || null
+    ack: ack || null,
+    // Default true preserves the historical "atomic full-batch" cycle.
+    // Pass false from gate operators that want to keep the source lease
+    // alive so the un-acked tail of the batch is redelivered in order.
+    release_lease: releaseLease === false ? false : true
   }
   const res = await http.post('/streams/v1/cycle', body)
   if (!res || res.success === false) {

@@ -20,6 +20,7 @@ import { WindowSessionOperator } from './operators/WindowSessionOperator.js'
 import { WindowCronOperator } from './operators/WindowCronOperator.js'
 import { ReduceOperator } from './operators/ReduceOperator.js'
 import { AggregateOperator } from './operators/AggregateOperator.js'
+import { GateOperator } from './operators/GateOperator.js'
 import { SinkOperator } from './operators/SinkOperator.js'
 import { ForeachOperator } from './operators/ForeachOperator.js'
 import { Runner } from './runtime/Runner.js'
@@ -164,6 +165,63 @@ export class Stream {
     return this._extend(new AggregateOperator(extractors))
   }
 
+  // ---------------------------------------------------------------------- Gate
+
+  /**
+   * Per-message ALLOW/DENY decision with persistent per-key state.
+   *
+   * Used to build rate limiters, throttlers, fairness gates, circuit
+   * breakers — anything where the semantics is "should this message
+   * proceed RIGHT NOW given the recent history of this key?".
+   *
+   * The user fn receives `(value, ctx)` where:
+   *   - value: the message payload (post any pre-stage map/filter)
+   *   - ctx.state: mutable per-key state (loaded from queen_streams.state,
+   *                persisted only if you return ALLOW for this message)
+   *   - ctx.streamTimeMs: system clock for the cycle (use for refill math)
+   *   - ctx.partitionId: source partition_id (= state shard)
+   *
+   * Return `true` (or `{allow:true}`) to let the message through.
+   * Return `false` (or `{allow:false}`) to halt the batch here. The runner
+   * commits an ack for the prefix that was allowed and DOES NOT release the
+   * source lease, so the denied message and its successors get redelivered
+   * in their original order when the lease expires. FIFO per partition is
+   * preserved without any deferred queue.
+   *
+   * Example (token bucket rate limiter):
+   *
+   *   .gate((req, ctx) => {
+   *     const cfg = { capacity: 10, refillPerSec: 5 }
+   *     const now = ctx.streamTimeMs
+   *     ctx.state.tokens       ??= cfg.capacity
+   *     ctx.state.lastRefillAt ??= now
+   *     const elapsedSec = (now - ctx.state.lastRefillAt) / 1000
+   *     ctx.state.tokens = Math.min(
+   *       cfg.capacity,
+   *       ctx.state.tokens + elapsedSec * cfg.refillPerSec
+   *     )
+   *     ctx.state.lastRefillAt = now
+   *     if (ctx.state.tokens >= 1) {
+   *       ctx.state.tokens -= 1
+   *       return true
+   *     }
+   *     return false   // halt batch, lease expires, redelivered in order
+   *   })
+   *
+   * Constraints
+   *  - At most one .gate() per stream (multiple gates would compose
+   *    awkwardly with the partial-ack semantics; chain serially via two
+   *    streams if needed).
+   *  - .gate() is incompatible with windowing/reducing in the same stream.
+   *    The window+reducer model assumes the FULL batch is consumed atomically;
+   *    gating breaks that. Run them as two separate streams.
+   *
+   * @param {(value:any, ctx:{state:object, streamTimeMs:number, partitionId:string}) => boolean | {allow:boolean} | Promise<boolean | {allow:boolean}>} fn
+   */
+  gate(fn) {
+    return this._extend(new GateOperator(fn))
+  }
+
   // ---------------------------------------------------------------------- Sink
 
   /**
@@ -265,6 +323,7 @@ export class Stream {
       keyBy: null,
       window: null,
       reducer: null,
+      gate: null,
       post: [],
       sink
     }
@@ -278,17 +337,20 @@ export class Stream {
           // (they see the windowed envelope but have no reducer state to act on).
           stages.pre.push(op)
         } else {
-          // post-reducer: operates on each emit value.
+          // post-reducer or post-gate: operates on each emit value.
           stages.post.push(op)
         }
       } else if (op.kind === 'keyBy') {
         if (stages.keyBy) throw new Error('only one .keyBy() per stream')
-        if (phase === 'reducer') throw new Error('.keyBy() must come before window/reduce')
+        if (phase === 'reducer' || phase === 'gate') {
+          throw new Error('.keyBy() must come before window/reduce/gate')
+        }
         stages.keyBy = op
         if (phase === 'pre') phase = 'keyed'
       } else if (op.kind === 'window') {
         if (stages.window) throw new Error('only one window operator per stream')
         if (phase === 'reducer') throw new Error('window must come before reduce/aggregate')
+        if (stages.gate) throw new Error('window+reduce is incompatible with .gate() in the same stream')
         stages.window = op
         phase = 'window'
       } else if (op.kind === 'reduce' || op.kind === 'aggregate') {
@@ -296,8 +358,16 @@ export class Stream {
         if (!stages.window) {
           throw new Error('reduce/aggregate requires a preceding window operator')
         }
+        if (stages.gate) throw new Error('reduce/aggregate is incompatible with .gate() in the same stream')
         stages.reducer = op
         phase = 'reducer'
+      } else if (op.kind === 'gate') {
+        if (stages.gate) throw new Error('only one .gate() per stream')
+        if (stages.window || stages.reducer) {
+          throw new Error('.gate() is incompatible with windowing/reduce in the same stream')
+        }
+        stages.gate = op
+        phase = 'gate'
       } else {
         throw new Error(`unsupported operator: ${op.kind}`)
       }

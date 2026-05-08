@@ -1,11 +1,16 @@
 {
   "name": "queen-mq",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "type": "module",
-  "description": "High-performance C++ message queue backed by PostgreSQL",
+  "description": "Partitioned message queue on PostgreSQL — broker client + fluent streaming SDK (windows, joins, gates) in one package",
   "main": "client-v2/index.js",
   "scripts": {
-    "test": "node test-v2/run.js human"
+    "test":             "node --test test-v2/streams-unit/configHash.test.js test-v2/streams-unit/operators.test.js test-v2/streams-unit/cycle.test.js test-v2/streams-unit/eventTime.test.js && node test-v2/run.js human",
+    "test:unit":        "node --test test-v2/streams-unit/configHash.test.js test-v2/streams-unit/operators.test.js test-v2/streams-unit/cycle.test.js test-v2/streams-unit/eventTime.test.js",
+    "test:unit:e2e":    "node --test test-v2/streams-unit/e2e.test.js",
+    "test:integration": "node test-v2/run.js human",
+    "test:streams":     "node test-v2/run.js stream",
+    "test:all":         "npm run test:unit && npm run test:integration && npm run test:streams"
   },
   "files": [
     "client-v2/**/*",
@@ -31,6 +36,11 @@
     "queue",
     "broker",
     "message-queue-system",
-    "fifo"
+    "fifo",
+    "streaming",
+    "stream-processing",
+    "rate-limiter",
+    "exactly-once",
+    "windowed-aggregation"
   ]
 }

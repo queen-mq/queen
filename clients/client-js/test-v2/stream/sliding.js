@@ -2,12 +2,12 @@
  * Sliding / hopping windows.
  */
 
-import { Stream } from '../../../../streams/index.js'
+import { Stream } from '../../client-v2/index.js'
 import {
   STREAMS_URL, mkName, sleep, drainSink, drainUntil,
   expect, summarise
 } from './_helpers.js'
-import { WindowSlidingOperator } from '../../../../streams/src/operators/WindowSlidingOperator.js'
+import { WindowSlidingOperator } from '../../client-v2/streams/operators/WindowSlidingOperator.js'
 
 // ----------------------------------------------------------------------------
 // Validation — size must be a multiple of slide.

@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rate limiter — Queen MQ Use Cases</title>
+<meta name="description" content="Build a production-grade rate limiter on Queen MQ + the streams SDK. FIFO order on retries, multi-tenant isolation, scales to 9k+ msg/s with multiple consumers.">
+<meta name="theme-color" content="#141415">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="stylesheet" href="style.css">
+<style>
+.rl-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 16px 0 28px;
+}
+.rl-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.rl-stat-num {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.01em;
+}
+.rl-stat-label {
+  font-size: 11.5px;
+  color: var(--text-mid);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+.rl-ascii {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 14px 0;
+}
+.rl-table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rl-table th, .rl-table td {
+  border: 1px solid var(--border-mid);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.rl-table th {
+  background: var(--bg-card);
+  font-weight: 500;
+  color: var(--text-hi);
+}
+.rl-table code {
+  font-size: 12px;
+}
+</style>
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      Queen MQ
+    </a>
+    <nav class="topnav-links" aria-label="Primary">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="use-cases.html" class="current">Use cases</a>
+      <a href="clients.html">Clients</a>
+      <a href="cli.html">CLI</a>
+      <a href="server.html">Server</a>
+      <a href="http-api.html">HTTP API</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="sizing.html">Sizing</a>
+      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+    </nav>
+    <div class="topnav-right">
+      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="shell-narrow" style="padding-top: 48px;">
+
+<p style="font-size: 12.5px; color: var(--text-low); margin: 0 0 8px;">
+  <a href="use-cases.html" style="color: var(--text-low);">← Use cases</a>
+</p>
+
+<span class="label-xs">Recipe · backpressure</span>
+<h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
+  Rate limiter for external APIs.
+</h1>
+<p class="muted">
+  Build a production-grade rate limiter that throttles outbound calls to a
+  third-party API (an OTA, an LLM provider, a payment gateway), preserves
+  per-tenant FIFO order on retries, has zero coordination overhead between
+  multiple   consumers, and scales linearly. The pattern uses the
+  <code>.gate()</code> primitive shipped in the
+  <a href="https://www.npmjs.com/package/queen-mq"><code>queen-mq</code></a>
+  package, with the per-partition lease as natural backpressure — no
+  deferred queue, no timers, no Redis.
+</p>
+
+<div class="rl-stat-grid">
+  <div class="rl-stat">
+    <div class="rl-stat-num">9,431 msg/s</div>
+    <div class="rl-stat-label">aggregate throughput<br/>(8 runners, 100 tenants)</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">500,000</div>
+    <div class="rl-stat-label">events processed in<br/>53s · 0 errors</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">±3%</div>
+    <div class="rl-stat-label">per-tenant rate accuracy<br/>vs. configured target</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">94%</div>
+    <div class="rl-stat-label">efficiency vs. theoretical<br/>minimum drain time</div>
+  </div>
+</div>
+
+<p class="muted" style="font-size: 12px; font-style: italic;">
+  Numbers are from a stress run on a single 10-core M-series Mac with one
+  PostgreSQL 18 container. Reproduce with
+  <code>streams/examples/08-rate-limiter-stress.js</code>.
+</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#problem">1. The problem</a>
+  <a href="#pattern">2. The pattern</a>
+  <a href="#quickstart">3. Quickstart</a>
+  <a href="#models">4. Four canonical models</a>
+  <a href="#cascade">5. Two limits at once</a>
+  <a href="#sliding">6. Sliding-window quotas</a>
+  <a href="#sizing">7. Sizing rule</a>
+  <a href="#scaling">8. Scaling with multiple consumers</a>
+  <a href="#stress">9. Stress test results</a>
+  <a href="#inspecting">10. Inspecting state</a>
+  <a href="#pitfalls">11. Common pitfalls</a>
+  <a href="#references">12. References</a>
+</nav>
+
+<!-- ====================================================================== -->
+<h2 id="problem">1. The problem</h2>
+<p class="muted">
+  Many APIs we depend on impose strict rate limits, and exceeding them costs
+  money or service:
+</p>
+<ul>
+  <li><strong>OTAs</strong> (Booking, Airbnb, VRBO/Expedia, Hotel-Nerds, Google
+    Hotel) — typically X req/min or Y operations/min per partner key, with
+    suspension as the penalty.</li>
+  <li><strong>WhatsApp Cloud / SendGrid / Twilio</strong> — per-phone-number
+    or per-IP tiers; exceeding triggers throttling or temporary bans.</li>
+  <li><strong>LLM providers</strong> (OpenAI, Anthropic) — TPM (tokens / min)
+    and RPM (requests / min) per API key; exceeding returns 429 and a
+    Retry-After.</li>
+</ul>
+<p class="muted">
+  A naïve approach (fire requests as fast as they arrive, retry on 429) is
+  brittle: it floods the upstream, burns retries, and cannot enforce
+  fairness across tenants. A correct rate limiter has to:
+</p>
+<ol>
+  <li>Hold the surplus durably (no in-memory queue that dies on restart).</li>
+  <li>Preserve <strong>per-key FIFO order</strong> across retries
+    (otherwise a stale "set room available = false" can overwrite a fresh
+    "set true").</li>
+  <li>Coordinate across multiple worker processes without race conditions
+    on the budget counter.</li>
+  <li>Expose state for ops debugging.</li>
+</ol>
+<p class="muted">
+  Queen + streams gives all four properties out of the box.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="pattern">2. The pattern</h2>
+<p class="muted">
+  A producer pushes outbound API calls onto a Queen queue partitioned by
+  the rate-limit key (typically <code>tenant</code>, or
+  <code>tenant + endpoint</code>). A streaming pipeline reads that queue
+  through a <code>.gate()</code> operator that runs a token bucket per
+  partition. Allowed messages are forwarded to a sink queue from which the
+  actual API caller drains.
+</p>
+
+<div class="rl-ascii">producer ──► requests   (Queen, partitioned by tenant key, leaseTime=2s)
+                  │
+                  ▼
+           Stream .gate(tokenBucketGate({ capacity, refillPerSec, costFn }))
+                  │
+       ALLOWED ───┼─── DENIED
+                  │       │
+                  ▼       └─► no ack, no commit
+              approved        lease expires
+              (Queen)         message redelivered
+                  │           in original FIFO order
+                  ▼
+           OTA worker calls the upstream API
+</div>
+
+<p class="muted">
+  When the gate denies a message, the runner skips the cycle entirely
+  (no state mutation, no ack, no sink push) and lets the source-queue
+  lease expire naturally. The broker then redelivers the un-acked tail of
+  the batch in its original order. This is what makes ordering FIFO
+  on retries — the same partition lease sits with the runner across the
+  deny → expiry → redeliver cycle, so denied messages can never overtake
+  later messages.
+</p>
+
+<div class="callout callout-info">
+  <div class="callout-title">Why not a deferred queue?</div>
+  <p>
+    Pushing denied messages onto a "retry later" queue (the typical
+    Kafka-shaped pattern) <em>breaks per-key FIFO order</em>: by the time
+    the deferred message rejoins the main queue, newer messages may have
+    already passed through. Queen's per-partition lease lets us avoid
+    this entirely — the broker itself is the backpressure mechanism.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="quickstart">3. Quickstart</h2>
+<p class="muted">
+  The smallest working example. One tenant, 30 messages pushed in burst,
+  bucket of 10 with 5/sec refill. The first 10 should arrive almost
+  instantly, the rest at 5/sec.
+</p>
+
+<div class="callout callout-info">
+  <div class="callout-title">Verified end-to-end</div>
+  <p>
+    Every snippet on this page was run against a live Queen server at
+    <code>http://localhost:6632</code> before being included. The
+    quickstart drains in ~6 seconds with all 30 messages arriving in
+    seq order.
+  </p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-title">One install, one import</div>
+  <p>
+    The broker client and the streaming SDK ship in the same npm package:
+  </p>
+<pre style="margin-top: 8px;"><code class="language-bash">npm install queen-mq</code></pre>
+<pre><code class="language-javascript">import { Queen, Stream, tokenBucketGate, slidingWindowGate } from 'queen-mq'</code></pre>
+  <p style="margin-top: 8px;">
+    ESM named exports + tree-shaking mean bundlers drop the streaming
+    code from your output if you only use broker symbols (<code>Queen</code>,
+    <code>Admin</code>). The streaming source lives under
+    <code>client-v2/streams/</code> in the package.
+  </p>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · single-tenant token bucket</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// npm install queen-mq        (Node 22+)
+import { Queen, Stream, tokenBucketGate } from 'queen-mq'
+
+const url = 'http://localhost:6632'
+const q = new Queen({ url, handleSignals: false })
+
+await q.queue('rl.requests').config({ leaseTime: 2, retryLimit: 1000 }).create()
+await q.queue('rl.approved').create()
+
+// Push 30 messages on partition 'tenant-A' as a burst.
+await q.queue('rl.requests').partition('tenant-A').push(
+  Array.from({ length: 30 }, (_, i) => ({ data: { seq: i } }))
+)
+
+// Token bucket: burst 10, refill 5/sec.
+const stream = await Stream
+  .from(q.queue('rl.requests'))
+  .gate(tokenBucketGate({ capacity: 10, refillPerSec: 5 }))
+  .to(q.queue('rl.approved'))
+  .run({
+    queryId:   'docs-rl-quickstart',
+    url,
+    batchSize: 10,
+    reset:     true
+  })
+
+// Drain the approved queue and observe arrival order + timing.
+const t0 = Date.now()
+const arrivals = []
+const cg = 'docs-rl-quickstart-cg'
+while (arrivals.length &lt; 30) {
+  const batch = await q.queue('rl.approved')
+    .group(cg).batch(10).wait(true).timeoutMillis(2000).pop()
+  if (!batch || batch.length === 0) continue
+  for (const m of batch) arrivals.push({ seq: m.data.seq, at: Date.now() - t0 })
+  await q.ack(batch, true, { group: cg })
+}
+await stream.stop()
+
+console.log('first 10 ms:', arrivals.slice(0, 10).map(a =&gt; a.at).join(' '))
+console.log('last  10 ms:', arrivals.slice(-10).map(a =&gt; a.at).join(' '))
+// Output (verified):
+//   first 10 ms: 128 128 128 128 128 128 128 128 128 128
+//   last  10 ms: 5961 5961 5961 5961 5961 5961 5961 5961 5961 5961
+//   30 messages, all in seq order [0..29].</code></pre>
+</div>
+
+<p class="muted">
+  The bucket takes ~6s to drain 30 messages: 10 burst (instant) + 20 more
+  at 5/sec ≈ 4s. The remaining ~2s is broker round-trip overhead from the
+  lease cycle.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="models">4. Four canonical models</h2>
+<p class="muted">
+  Real APIs measure rate limits in different units. The same
+  <code>.gate()</code> primitive expresses all four common shapes —
+  what changes is only the <code>costFn</code> and the queue contents:
+</p>
+
+<table class="rl-table">
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Real-world example</th>
+      <th>Queue contains</th>
+      <th><code>costFn</code></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>A</strong> — req/sec<br/><code>"100 calls/sec, batch arbitrary inside"</code></td>
+      <td>Airbnb StandardCalendars; Google Hotel uploads</td>
+      <td>Pre-batched HTTP requests<br/>each carrying an <code>items[]</code></td>
+      <td><code>() =&gt; 1</code></td>
+    </tr>
+    <tr>
+      <td><strong>B</strong> — msg/sec<br/><code>"100 ops/sec, regardless of batching"</code></td>
+      <td>WhatsApp Cloud per-phone tier; Twilio; SendGrid</td>
+      <td>Individual messages<br/>(one logical operation per item)</td>
+      <td><code>() =&gt; 1</code></td>
+    </tr>
+    <tr>
+      <td><strong>C</strong> — 1:1<br/><code>"each call carries exactly one op"</code></td>
+      <td>Legacy VRBO/Expedia "one operation per call" endpoints</td>
+      <td>Individual operations</td>
+      <td><code>() =&gt; 1</code></td>
+    </tr>
+    <tr>
+      <td><strong>D</strong> — cost-based<br/><code>"weight per request varies"</code></td>
+      <td>Expedia weight-per-endpoint; OpenAI TPM</td>
+      <td>Requests with a <code>weight</code> field</td>
+      <td><code>msg =&gt; msg.weight</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted">
+  Models A, B, and C share the same <code>costFn</code> — they differ
+  only in what you put on the queue. Model D shows the only place where
+  the gate code itself changes: the cost function reads the message
+  payload to compute how many tokens to charge.
+</p>
+
+<h3>Model D — cost-based example</h3>
+<p class="muted">
+  100 requests with weights 1..5 (avg 3, total 300). Bucket of 100,
+  refill 50/sec. Drains in ~6 seconds.
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · variable-cost token bucket</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">import { Queen, Stream, tokenBucketGate } from 'queen-mq'
+
+const q = new Queen({ url: 'http://localhost:6632', handleSignals: false })
+
+await q.queue('rl.cost.requests').config({ leaseTime: 2, retryLimit: 1000 }).create()
+await q.queue('rl.cost.approved').create()
+
+// 100 requests, weight 1..5 each (deterministic for reproducibility).
+const items = Array.from({ length: 100 }, (_, i) =&gt; ({
+  data: { seq: i, weight: (i % 5) + 1 }
+}))
+await q.queue('rl.cost.requests').partition('tenant-A').push(items)
+
+const stream = await Stream
+  .from(q.queue('rl.cost.requests'))
+  .gate(tokenBucketGate({
+    capacity:     100,
+    refillPerSec: 50,
+    costFn:       msg =&gt; msg.weight        // ★ cost varies per request
+  }))
+  .to(q.queue('rl.cost.approved'))
+  .run({ queryId: 'docs-rl-cost', url: 'http://localhost:6632', batchSize: 30, reset: true })
+
+// Verified: drained 100 requests, 300 total weight in 5.71s
+//           weight rate sustained: 52.6 weight/sec (target 50)
+//           order intact: true</code></pre>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="cascade">5. Two limits at once (model A + B cascade)</h2>
+<p class="muted">
+  Some APIs impose <em>both</em> a request-per-second limit AND an
+  operations-per-second limit at the same time. Booking.com is the
+  canonical example: <code>"≤ 100 calls/sec AND ≤ 1000 ops/sec per
+  partner"</code>. Both must be satisfied simultaneously.
+</p>
+<p class="muted">
+  Solution: chain two <code>.gate()</code> stages via an intermediate
+  queue. The MIN of the two binding rates wins. Per-partition order is
+  preserved across the chain because each stage maintains its own
+  lease on the same partition key.
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · two gates in series</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">import { Queen, Stream, tokenBucketGate } from 'queen-mq'
+
+const q = new Queen({ url: 'http://localhost:6632', handleSignals: false })
+
+await q.queue('rl.cascade.src').config({ leaseTime: 2, retryLimit: 1000 }).create()
+await q.queue('rl.cascade.mid').config({ leaseTime: 2, retryLimit: 1000 }).create()
+await q.queue('rl.cascade.ok').create()
+
+// 60 requests, each carrying 5 items.
+const items = Array.from({ length: 60 }, (_, i) =&gt; ({
+  data: {
+    seq: i,
+    items: Array.from({ length: 5 }, (_, j) =&gt; ({ id: `${i}-${j}` }))
+  }
+}))
+await q.queue('rl.cascade.src').partition('tenant-A').push(items)
+
+// Gate 1: 10 req/sec
+const gate1 = await Stream
+  .from(q.queue('rl.cascade.src'))
+  .gate(tokenBucketGate({
+    capacity:     20,
+    refillPerSec: 10,
+    costFn:       () =&gt; 1                     // 1 token per request
+  }))
+  .to(q.queue('rl.cascade.mid'))
+  .run({ queryId: 'docs-rl-casc-1', url: 'http://localhost:6632',
+         batchSize: 50, reset: true })
+
+// Gate 2: 30 msg/sec (cost = items.length)
+const gate2 = await Stream
+  .from(q.queue('rl.cascade.mid'))
+  .gate(tokenBucketGate({
+    capacity:     60,
+    refillPerSec: 30,
+    costFn:       msg =&gt; msg.items.length     // weight by batch size
+  }))
+  .to(q.queue('rl.cascade.ok'))
+  .run({ queryId: 'docs-rl-casc-2', url: 'http://localhost:6632',
+         batchSize: 50, reset: true })
+
+// Verified: 60 requests in 10.00s
+//           req rate: 6.0/sec (gate1 limit 10)   ← gate2 is binding
+//           msg rate: 30.0/sec (gate2 limit 30)
+//           order intact: true</code></pre>
+</div>
+
+<p class="muted">
+  In the verified run, <strong>gate 2 is the binding limit</strong>:
+  the request rate stabilises at 6/sec (well below gate 1's limit of
+  10) precisely because each request carries 5 items and gate 2 caps
+  the total at 30 msg/sec ⇒ 30/5 = 6 req/sec.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="sliding">6. Sliding-window quotas (model E)</h2>
+<p class="muted">
+  Some APIs impose <em>quota-style</em> limits — "max N events in any
+  rolling window of W seconds" — typically used for daily caps
+  ("max 1000 emails/day per IP") or hourly bursts. The
+  <code>slidingWindowGate</code> helper implements an efficient 2-bucket
+  approximation that is accurate within ±1× the rate at boundaries
+  (precise enough for rate-limiting; for billing-grade precision keep
+  per-event timestamps in state).
+</p>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Critical sizing rule</div>
+  <p>
+    For sliding windows, <strong><code>WINDOW_SEC ≥ 5 × LEASE_SEC</code></strong>.
+    If they're comparable (e.g. lease=2s ≈ window=2s) every lease expiry
+    lands at a window boundary and the previous-bucket weight blocks the
+    entire next window, collapsing throughput to ~half of nominal. Real
+    quota use cases (windows of minutes, hours, days) are far above
+    typical lease times, so this is mostly an issue for synthetic tests.
+  </p>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · sliding-window quota</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">import { Queen, Stream, slidingWindowGate } from 'queen-mq'
+
+const q = new Queen({ url: 'http://localhost:6632', handleSignals: false })
+
+// IMPORTANT: leaseTime should be much smaller than the window (rule of thumb: ×5).
+await q.queue('rl.sw.requests').config({ leaseTime: 1, retryLimit: 1000 }).create()
+await q.queue('rl.sw.approved').create()
+
+await q.queue('rl.sw.requests').partition('tenant-A').push(
+  Array.from({ length: 60 }, (_, i) =&gt; ({ data: { seq: i } }))
+)
+
+const stream = await Stream
+  .from(q.queue('rl.sw.requests'))
+  .gate(slidingWindowGate({ limit: 20, windowSec: 5 }))   // max 20 in any 5s window
+  .to(q.queue('rl.sw.approved'))
+  .run({ queryId: 'docs-rl-sw', url: 'http://localhost:6632',
+         batchSize: 50, reset: true })
+
+// Verified: drained 60 messages in 12.41s
+//           max arrivals in any 5s window: 29 (limit 20)
+//           sustained rate: 4.75 msg/sec (target 4 = 20/5)
+//           order intact: true</code></pre>
+</div>
+
+<p class="muted">
+  The 29 messages observed in the worst 5-second window (vs. the
+  configured limit of 20) is the documented ±1× boundary inaccuracy of
+  the 2-bucket approximation. For real-world quotas (e.g. 1000/day) the
+  same approximation gives 1000-1500 across any 24h window, which is
+  acceptable in nearly all use cases.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="sizing">7. Sizing rule</h2>
+<p class="muted">
+  For the token bucket, the <strong>maximum sustainable rate</strong>
+  per partition is:
+</p>
+<div class="rl-ascii">effective_rate = min(refillPerSec, capacity / leaseSec)
+</div>
+<p class="muted">
+  The reason: each lease cycle, the runner can drain at most
+  <code>capacity</code> tokens before being denied; after the deny the
+  partition is parked for <code>leaseSec</code> seconds before the next
+  cycle. So if <code>capacity</code> is too small, the deny cadence
+  becomes the bottleneck rather than the refill rate.
+</p>
+<p class="muted">
+  <strong>Recommendation:</strong> always set
+  <code>capacity ≥ refillPerSec × leaseSec</code>. This guarantees the
+  cycle quantum doesn't artificially clamp the bucket. The default
+  config in <code>streams/examples/08-rate-limiter-stress.js</code> uses
+  <code>capacity = refillPerSec × leaseSec</code> exactly.
+</p>
+
+<div class="callout callout-info">
+  <div class="callout-title">Quick formula</div>
+  <p>
+    For a target of <em>R</em> ops/sec/tenant on a 2-second source-queue
+    lease, set <code>refillPerSec: R</code> and
+    <code>capacity: 2 × R</code>. Then set
+    <code>batchSize</code> on the streaming runner to at least
+    <code>capacity</code> so a full bucket can be drained in a single
+    cycle.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="scaling">8. Scaling with multiple consumers</h2>
+<p class="muted">
+  A single Node process running <code>Stream.run()</code> sustains
+  roughly 1500–2500 msg/sec end-to-end on a modest setup, limited by
+  HTTP round-trips and PG cycle latency. To scale higher, run multiple
+  consumers in parallel — each calls <code>.run()</code> with the same
+  <code>queryId</code>. Queen's per-partition lease guarantees that a
+  given partition is processed by AT MOST ONE runner at any moment, so
+  per-key state writes never collide and ordering stays intact.
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · 4 parallel runners on the same query</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// Same gate definition, run N times. Only the FIRST runner uses reset:true
+// so a re-run of the program starts clean. The rest attach with reset:false
+// so they don't wipe state the first one already started building.
+async function spawnRateLimiter({ runners, queryId, sourceQueue, sinkQueue,
+                                 capacity, refillPerSec, costFn }) {
+  const url = 'http://localhost:6632'
+  const q = new Queen({ url, handleSignals: false })
+
+  const buildStream = () =&gt; Stream
+    .from(q.queue(sourceQueue))
+    .gate(tokenBucketGate({ capacity, refillPerSec, costFn }))
+    .to(q.queue(sinkQueue))
+
+  const streams = []
+  streams.push(await buildStream().run({
+    queryId, url, batchSize: capacity, maxPartitions: 16, reset: true
+  }))
+  for (let i = 1; i &lt; runners; i++) {
+    streams.push(await buildStream().run({
+      queryId, url, batchSize: capacity, maxPartitions: 16, reset: false
+    }))
+  }
+  return streams
+}
+
+// Spawn 4 runners locally; throughput scales ~linearly.
+const streams = await spawnRateLimiter({
+  runners:      4,
+  queryId:      'ota-rate-limiter.v1',
+  sourceQueue:  'ota.requests',
+  sinkQueue:    'ota.approved',
+  capacity:     200,
+  refillPerSec: 100,
+  costFn:       () =&gt; 1
+})</code></pre>
+</div>
+
+<p class="muted">
+  In production each runner is typically its own Pod. The state coordination
+  is fully handled by PostgreSQL: every gate decision reads the bucket
+  state from <code>queen_streams.state</code> within the same transaction
+  that mutates it, and the partition lease enforces single-writer
+  semantics across all runners.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="stress">9. Stress test results</h2>
+<p class="muted">
+  The pattern was stress-tested at three scales. Source:
+  <code>streams/examples/08-rate-limiter-stress.js</code>.
+</p>
+
+<table class="rl-table">
+  <thead>
+    <tr>
+      <th>Config</th>
+      <th>Total msgs</th>
+      <th>Time</th>
+      <th>Aggregate throughput</th>
+      <th>Per-tenant rate (avg)</th>
+      <th>Errors</th>
+      <th>Efficiency</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>10 tenants × 500 msg, 1 runner</td>
+      <td>5,000</td>
+      <td>6.4s</td>
+      <td>785 msg/s</td>
+      <td>101.4 (target 100)</td>
+      <td>0</td>
+      <td>78%</td>
+    </tr>
+    <tr>
+      <td>50 tenants × 2,000 msg, 4 runners</td>
+      <td>100,000</td>
+      <td>22.6s</td>
+      <td><strong>4,426 msg/s</strong></td>
+      <td>96.9 (target 100)</td>
+      <td>0</td>
+      <td>89%</td>
+    </tr>
+    <tr>
+      <td>100 tenants × 5,000 msg, 8 runners</td>
+      <td><strong>500,000</strong></td>
+      <td>53.0s</td>
+      <td><strong>9,431 msg/s</strong></td>
+      <td>100.5 (target 100)</td>
+      <td>0</td>
+      <td>94%</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted">
+  Throughput scales nearly linearly with the number of runners. The same
+  test was repeated for all four canonical models (A, B, C, D) plus the
+  cascade and sliding window — all 5 verifiable against
+  <code>streams/examples/09-rate-limiter-all-models.js</code>:
+</p>
+
+<table class="rl-table">
+  <thead>
+    <tr>
+      <th>Model</th>
+      <th>Description</th>
+      <th>Drained</th>
+      <th>Per-tenant rate (target)</th>
+      <th>Aggregate</th>
+      <th>Time</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>A</td><td>req/s</td><td>100,000</td><td>104.0 (100)</td><td>4,702/s</td><td>21.3s</td><td>✅</td>
+    </tr>
+    <tr>
+      <td>B</td><td>msg/s</td><td>100,000</td><td>106.0 (100)</td><td>4,713/s</td><td>21.2s</td><td>✅</td>
+    </tr>
+    <tr>
+      <td>D</td><td>cost-based</td><td>100,000 reqs<br/>(550k weight)</td><td>1,051 weight/s (1,000)</td><td>42,953 w/s</td><td>12.8s</td><td>✅</td>
+    </tr>
+    <tr>
+      <td>A+B</td><td>cascading</td><td>50,000</td><td>119.9 req/s (100)<br/>+ 511 msg/s (500)</td><td>4,671/s</td><td>10.7s</td><td>✅</td>
+    </tr>
+    <tr>
+      <td>E</td><td>sliding-window<br/>(20 / 10s)</td><td>10,000</td><td>11.2 (10)</td><td>518/s</td><td>19.3s</td><td>✅</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ====================================================================== -->
+<h2 id="inspecting">10. Inspecting state</h2>
+<p class="muted">
+  All gate state lives in the <code>queen_streams.state</code> table — a
+  plain PostgreSQL table you can query directly for ops debugging.
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>sql · current bucket state per tenant</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-sql">-- All keys for a query, sorted by remaining tokens (lowest = closest to throttle).
+SELECT
+    s.key                         AS tenant_or_partition,
+    (s.value-&gt;&gt;'tokens')::float   AS tokens_remaining,
+    (s.value-&gt;&gt;'allowedTotal')::int AS lifetime_allowed,
+    (s.value-&gt;&gt;'consumedTotal')::int AS lifetime_cost,
+    s.updated_at
+FROM queen_streams.state s
+JOIN queen_streams.queries q ON q.id = s.query_id
+WHERE q.name = 'ota-rate-limiter.v1'
+ORDER BY tokens_remaining ASC
+LIMIT 20;</code></pre>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>sql · throttle alert: who is empty?</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-sql">SELECT s.key, (s.value-&gt;&gt;'tokens')::float AS tokens
+FROM queen_streams.state s
+JOIN queen_streams.queries q ON q.id = s.query_id
+WHERE q.name = 'ota-rate-limiter.v1'
+  AND (s.value-&gt;&gt;'tokens')::float &lt; 1
+ORDER BY s.updated_at DESC;</code></pre>
+</div>
+
+<p class="muted">
+  Because the state is plain SQL, you can hook it directly into Grafana,
+  Metabase, or your existing alerting pipeline — no extra metrics
+  exporter required.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="pitfalls">11. Common pitfalls</h2>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Don't use <code>.gate()</code> with windowing in the same stream</div>
+  <p>
+    The gate's partial-ack-on-deny semantics are incompatible with the
+    full-batch atomic-cycle model that windows + reducers assume. The
+    <code>Stream</code> compiler enforces this with a clear error. If you
+    need both rate limiting AND windowed aggregation, run them as two
+    sequential streams with an intermediate queue.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Partition by the rate-limit key, not by something else</div>
+  <p>
+    The bucket state is sharded by <code>partition_id</code> in
+    <code>queen_streams.state</code>. If you partition the source queue
+    by <code>tenant</code> but rate-limit by <code>tenant + endpoint</code>
+    (via <code>.keyBy()</code>), two different runners can hold different
+    partition leases yet write the same logical key, causing cross-worker
+    contention. Always partition by exactly the rate-limit key. The
+    runtime warns you if you use <code>.keyBy()</code> to override.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Set <code>retryLimit</code> to a large number</div>
+  <p>
+    A denied message goes back into the queue via lease expiry — Queen
+    reads that as a "retry". On a heavily throttled tenant a single
+    message can be redelivered hundreds of times before its bucket
+    refills enough. Set <code>retryLimit</code> to ≥ 1000 on the source
+    queue or messages will end up in the DLQ unfairly. (We use 100,000
+    in the stress tests.)
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Sliding-window: window must dwarf the lease</div>
+  <p>
+    Repeating from the sizing callout: for
+    <code>slidingWindowGate</code>, ensure
+    <code>windowSec ≥ 5 × leaseSec</code> on the source queue. Otherwise
+    deny→retry round-trips collide with window boundaries and effective
+    throughput collapses.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="references">12. References</h2>
+
+<p class="muted" style="font-size: 13px; margin-bottom: 6px;">
+  All helpers used in this recipe are tiny pure-JavaScript factories
+  defined in a single file (~140 lines). You can read the full source
+  in the time it takes to read this page:
+</p>
+
+<table class="rl-table">
+  <thead>
+    <tr><th>What</th><th>Where</th><th>Re-exported from</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>tokenBucketGate({ capacity, refillPerSec, costFn })</code></td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/helpers/rateLimiter.js#L49"><code>client-v2/streams/helpers/rateLimiter.js</code></a> (function declaration)</td>
+      <td><code>queen-mq</code> top-level<br/>(see <a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/index.js"><code>client-v2/index.js</code></a>)</td>
+    </tr>
+    <tr>
+      <td><code>slidingWindowGate({ limit, windowSec, costFn })</code></td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/helpers/rateLimiter.js#L114"><code>client-v2/streams/helpers/rateLimiter.js</code></a> (function declaration)</td>
+      <td><code>queen-mq</code> top-level<br/>(same)</td>
+    </tr>
+    <tr>
+      <td>Minimal example (used in §3 quickstart)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/07-rate-limiter.js"><code>streams/examples/07-rate-limiter.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Stress test (used in §9 numbers)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/08-rate-limiter-stress.js"><code>streams/examples/08-rate-limiter-stress.js</code></a></td>
+    </tr>
+    <tr>
+      <td>All-models test (A / B / C / D / cascade / sliding-window)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/09-rate-limiter-all-models.js"><code>streams/examples/09-rate-limiter-all-models.js</code></a></td>
+    </tr>
+    <tr>
+      <td>The <code>.gate()</code> operator (compiler integration)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/operators/GateOperator.js"><code>client-v2/streams/operators/GateOperator.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Stored procedure (SP) implementing the cycle commit</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/021_streams_cycle_v1.sql"><code>lib/schema/procedures/021_streams_cycle_v1.sql</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top: 28px;">
+  <a href="use-cases.html">← Back to use cases</a>
+</p>
+
+</main>
+
+<footer class="site-foot">
+  <div class="shell site-foot-inner">
+    <div>
+      <div class="brand" style="margin-bottom: 10px;">
+        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        Queen MQ
+      </div>
+      <p class="muted" style="font-size: 12.5px; max-width: 320px;">
+        Partitioned message queue backed by PostgreSQL.<br>
+        Built with ❤︎ by <a href="https://www.linkedin.com/company/smartness-com/">Smartness</a>.
+      </p>
+    </div>
+    <div>
+      <h5>Docs</h5>
+      <ul>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="use-cases.html">Use cases</a></li>
+        <li><a href="clients.html">Clients</a></li>
+        <li><a href="cli.html">CLI</a></li>
+        <li><a href="http-api.html">HTTP API</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Operate</h5>
+      <ul>
+        <li><a href="server.html">Server setup</a></li>
+        <li><a href="dashboard.html">Web dashboard</a></li>
+        <li><a href="benchmarks.html">Benchmarks</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
+        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="shell site-foot-bottom">
+    <span>© 2025 Smartness. Released under the Apache 2.0 License.</span>
+  </div>
+</footer>
+
+<script src="prism.min.js" defer></script>
+<script src="site.js" defer></script>
+</body>
+</html>

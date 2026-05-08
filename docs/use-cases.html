@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Use cases: Queen MQ</title>
+<meta name="description" content="Patterns and recipes built on Queen MQ + the streams SDK: rate limiters, windowed aggregations, cross-stream joins, anomaly detection, and more.">
+<meta name="theme-color" content="#141415">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="stylesheet" href="style.css">
+<style>
+.uc-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin: 18px 0;
+}
+@media (max-width: 900px) {
+  .uc-card-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 600px) {
+  .uc-card-grid { grid-template-columns: 1fr; }
+}
+.uc-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 10px;
+  padding: 18px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s, transform 0.15s;
+}
+.uc-card.uc-live {
+  border-color: var(--accent-mid, #4a7);
+}
+.uc-card.uc-live:hover {
+  border-color: var(--accent-hi, #5b8);
+  transform: translateY(-1px);
+}
+.uc-card.uc-soon {
+  opacity: 0.65;
+}
+.uc-card-eyebrow {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-mid);
+}
+.uc-card.uc-live .uc-card-eyebrow {
+  color: var(--accent-hi, #5b8);
+}
+.uc-card.uc-soon .uc-card-eyebrow {
+  color: var(--text-low);
+}
+.uc-card h3 {
+  font-size: 17px;
+  font-weight: 500;
+  margin: 0;
+  color: var(--text-hi);
+}
+.uc-card p {
+  font-size: 13px;
+  color: var(--text-mid);
+  line-height: 1.55;
+  margin: 0;
+}
+.uc-card .uc-cta {
+  margin-top: auto;
+  padding-top: 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.uc-card.uc-live .uc-cta a {
+  color: var(--accent-hi, #5b8);
+  text-decoration: none;
+}
+.uc-card.uc-live .uc-cta a:hover {
+  text-decoration: underline;
+}
+.uc-card.uc-soon .uc-cta {
+  color: var(--text-low);
+}
+.uc-mini {
+  font-size: 11.5px;
+  color: var(--text-low);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.01em;
+  margin-top: 4px;
+}
+</style>
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      Queen MQ
+    </a>
+    <nav class="topnav-links" aria-label="Primary">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="use-cases.html" class="current">Use cases</a>
+      <a href="clients.html">Clients</a>
+      <a href="cli.html">CLI</a>
+      <a href="server.html">Server</a>
+      <a href="http-api.html">HTTP API</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="sizing.html">Sizing</a>
+      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+    </nav>
+    <div class="topnav-right">
+      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="shell-narrow" style="padding-top: 48px;">
+
+<span class="label-xs">Use cases</span>
+<h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
+  Patterns and recipes built on Queen.
+</h1>
+<p class="muted">
+  Queen on its own is a partitioned message broker. The same
+  <a href="https://www.npmjs.com/package/queen-mq"><code>queen-mq</code></a>
+  npm package also ships a fluent stream-processing SDK — windows, joins,
+  stateful reducers, and gates — that runs in your own Node process and
+  commits state, sink emissions, and source acks atomically in PostgreSQL.
+  The pages below are end-to-end recipes that combine the broker with the
+  streaming SDK to solve real production problems.
+</p>
+
+<p class="muted" style="margin-top: 12px;">
+  Each "Live" card links to a dedicated page with code you can copy-paste and
+  numbers from real stress runs. Cards marked "Coming soon" describe patterns
+  the engine already supports today; their dedicated pages are being written
+  next.
+</p>
+
+<!-- ===================================================================== -->
+<h2 id="canonical">Canonical recipes</h2>
+
+<div class="uc-card-grid">
+
+  <div class="uc-card uc-live">
+    <div class="uc-card-eyebrow">Live · backpressure</div>
+    <h3>Rate limiter for external APIs</h3>
+    <p>
+      Throttle outbound calls to OTAs, LLM providers, or any third-party API
+      with a token-bucket gate. Per-key state, FIFO order on retries, no
+      deferred queue, scales linearly with multiple stream consumers.
+    </p>
+    <div class="uc-mini">.gate(tokenBucketGate({ capacity, refillPerSec, costFn }))</div>
+    <div class="uc-mini">stress-tested: 9,431 msg/sec, 500k events, 0 errors</div>
+    <div class="uc-cta"><a href="use-case-rate-limiter.html">Read recipe →</a></div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon · analytics</div>
+    <h3>Real-time windowed aggregations</h3>
+    <p>
+      Tumbling, sliding, session, and cron-aligned windows. Maintain rolling
+      sums, counts, p95s per key, and emit them to a sink queue or push them
+      onto a live dashboard.
+    </p>
+    <div class="uc-mini">.windowTumbling({ seconds: 60 }).aggregate({ count, sum, max })</div>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon · enrichment</div>
+    <h3>Cross-stream joins</h3>
+    <p>
+      Join two streams keyed by the same entity (reservations × messages,
+      orders × payments, users × events) over a session window. Common
+      pattern for proactive workflows and CDP-style guest profiles.
+    </p>
+    <div class="uc-mini">.keyBy(m => m.guestId).windowSession({ gap: '14d' }).reduce(merge)</div>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon · safety</div>
+    <h3>Anti-spam &amp; anomaly detection</h3>
+    <p>
+      Per-sender velocity windows, urgency-keyword detection, sentiment-streak
+      escalation. Routes flagged messages to a quarantine queue or fires
+      escalation alerts within the second.
+    </p>
+    <div class="uc-mini">.keyBy(m => m.from).windowSliding({ size: '5m', hop: '30s' })</div>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon · ETL</div>
+    <h3>Continuous deduplication</h3>
+    <p>
+      Drop duplicate events arriving on flaky webhooks (Octorate, Booking,
+      Stripe) by externalId within a short window. Per-partition state shard,
+      exactly-once forward.
+    </p>
+    <div class="uc-mini">.windowTumbling({ seconds: 30 }).reduce(seenSet)</div>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon · ops</div>
+    <h3>Heartbeat &amp; liveness monitoring</h3>
+    <p>
+      Each component publishes a heartbeat; an idle-flush stream detects
+      missed beats per (component, host) and emits alerts. The trigger is the
+      absence of events — only streaming engines handle this natively.
+    </p>
+    <div class="uc-mini">.windowTumbling({ seconds: 30, idleFlushMs: 5000 })</div>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="adjacent">Adjacent patterns</h2>
+<p class="muted">
+  A few more patterns the engine supports today; recipes are forthcoming.
+</p>
+
+<div class="uc-card-grid">
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon</div>
+    <h3>Workflow orchestration</h3>
+    <p>
+      Multi-stage pipeline (router → translation → history → outgoing) with a
+      transactional ack-and-push between every stage. Already used in
+      production at <a href="https://github.com/smartpricing/smartchat-core"><code>smartchat-core</code></a>.
+    </p>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon</div>
+    <h3>Continuous summarisation</h3>
+    <p>
+      Maintain a per-entity rolling summary state (last N events, derived
+      score, status flags) updated on every message. Read by the application
+      via plain SQL on <code>queen_streams.state</code>.
+    </p>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon</div>
+    <h3>Smart workload routing</h3>
+    <p>
+      Adaptive routing based on observed worker state (current load, recent
+      response time, working hours). Dynamic where rule engines are static.
+    </p>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+  <div class="uc-card uc-soon">
+    <div class="uc-card-eyebrow">Coming soon</div>
+    <h3>Bot training-data pipeline</h3>
+    <p>
+      Stream-stream join of (AI suggestion, human-edited reply) pairs over a
+      session window. Emits structured training tuples to a downstream queue
+      that feeds the learner.
+    </p>
+    <div class="uc-cta">Recipe being written</div>
+  </div>
+
+</div>
+
+<!-- ===================================================================== -->
+<h2 id="contributing">A pattern you'd like to see?</h2>
+<p class="muted">
+  These pages are written from real production code — not idealised examples.
+  If you have built something on Queen + streams that fits a generalisable
+  pattern, please open an issue at
+  <a href="https://github.com/smartpricing/queen/issues">github.com/smartpricing/queen</a>
+  with a short description and we'll add a recipe page for it.
+</p>
+
+</main>
+
+<footer class="site-foot">
+  <div class="shell site-foot-inner">
+    <div>
+      <div class="brand" style="margin-bottom: 10px;">
+        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        Queen MQ
+      </div>
+      <p class="muted" style="font-size: 12.5px; max-width: 320px;">
+        Partitioned message queue backed by PostgreSQL.<br>
+        Built with ❤︎ by <a href="https://www.linkedin.com/company/smartness-com/">Smartness</a>.
+      </p>
+    </div>
+    <div>
+      <h5>Docs</h5>
+      <ul>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="use-cases.html">Use cases</a></li>
+        <li><a href="clients.html">Clients</a></li>
+        <li><a href="cli.html">CLI</a></li>
+        <li><a href="http-api.html">HTTP API</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Operate</h5>
+      <ul>
+        <li><a href="server.html">Server setup</a></li>
+        <li><a href="dashboard.html">Web dashboard</a></li>
+        <li><a href="benchmarks.html">Benchmarks</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
+        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="shell site-foot-bottom">
+    <span>© 2025 Smartness. Released under the Apache 2.0 License.</span>
+  </div>
+</footer>
+
+<script src="prism.min.js" defer></script>
+<script src="site.js" defer></script>
+</body>
+</html>

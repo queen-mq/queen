@@ -21,9 +21,7 @@
  *   QUEEN_URL=http://localhost:6632 node examples/00-demo.js
  */
 
-import { Queen } from 'queen-mq'
-import { Stream } from '../index.js'
-
+import { Queen, Stream } from 'queen-mq'
 const url = process.env.QUEEN_URL || 'http://localhost:6632'
 const tag = Date.now().toString(36)
 const SOURCE_QUEUE = `streams_demo_orders_${tag}`

@@ -30,9 +30,7 @@
  * queues with non-zero activity, and the runner stats at /metrics.
  */
 
-import { Queen } from 'queen-mq'
-import { Stream } from '../index.js'
-
+import { Queen, Stream } from 'queen-mq'
 const url = process.env.QUEEN_URL || 'http://localhost:6632'
 const durationMs = parseInt(process.env.DURATION_MS || '30000', 10)
 

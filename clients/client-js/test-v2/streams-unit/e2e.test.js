@@ -24,7 +24,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { Stream } from '../src/Stream.js'
+import { Stream } from '../../client-v2/streams/Stream.js'
 
 const QUEEN_URL = process.env.QUEEN_URL || 'http://localhost:6632'
 

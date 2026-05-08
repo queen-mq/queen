@@ -10,7 +10,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { Stream } from '../src/Stream.js'
+import { Stream } from '../../client-v2/streams/Stream.js'
 import { createFakeStreamsServer, createFakeSource, fakeMessage } from './fakeServer.js'
 
 async function runUntilDrained(handle, server, deltaCycles, timeoutMs = 3000) {

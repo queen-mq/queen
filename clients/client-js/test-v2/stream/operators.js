@@ -4,7 +4,7 @@
  * basic plumbing works against a live Queen.
  */
 
-import { Stream } from '../../../../streams/index.js'
+import { Stream } from '../../client-v2/index.js'
 import {
   STREAMS_URL, mkName, sleep, pushSpread, drainSink, drainUntil,
   expect, summarise, runStreamFor

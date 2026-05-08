@@ -49,6 +49,7 @@
 #include "queen/routes/route_registry.hpp"
 #include "queen/routes/route_context.hpp"
 #include "queen/routes/route_helpers.hpp"
+#include "queen/async_queue_manager.hpp"   // for ctx.async_queue_manager->generate_uuid()
 #include "queen.hpp"  // libqueen
 #include "queen/response_queue.hpp"
 #include <spdlog/spdlog.h>
@@ -86,6 +87,40 @@ void setup_streams_cycle_routes(uWS::App* app, const RouteContext& ctx) {
 
                     nlohmann::json request_item = body;
                     request_item["idx"] = 0;
+
+                    // Stamp a UUIDv7 messageId on every sink push item that
+                    // doesn't already have one. Mirrors what /api/v1/push
+                    // (push.cpp ~line 211) does for normal HTTP pushes.
+                    //
+                    // Why here and not in the SP: the cycle's sink push goes
+                    // through queen.push_messages_v3 which falls back to PG's
+                    // gen_random_uuid() (UUIDv4 — random) when messageId is
+                    // absent. UUIDv4 ids tie-break (created_at, id) ordering
+                    // randomly when many messages in the same cycle share the
+                    // same created_at (PG's transaction_timestamp). UUIDv7
+                    // generation here uses async_queue_manager->generate_uuid(),
+                    // which has a per-ms sequence counter, so messageIds are
+                    // strictly monotonic across calls inside one cycle AND
+                    // across concurrent cycles on the same worker. The pop's
+                    // ORDER BY (created_at, id) then preserves the SinkOperator's
+                    // emit order, which is the source partition FIFO order.
+                    //
+                    // Without this, .gate()-style streams (rate limiters) would
+                    // see correctly-ordered allows on the source side but
+                    // randomly-ordered arrivals on the sink side.
+                    if (request_item.contains("push_items")
+                        && request_item["push_items"].is_array()) {
+                        for (auto& pi : request_item["push_items"]) {
+                            if (pi.is_object()
+                                && (!pi.contains("messageId")
+                                    || pi["messageId"].is_null()
+                                    || (pi["messageId"].is_string()
+                                        && pi["messageId"].get<std::string>().empty()))) {
+                                pi["messageId"] = ctx.async_queue_manager->generate_uuid();
+                            }
+                        }
+                    }
+
                     nlohmann::json requests_array = nlohmann::json::array();
                     requests_array.push_back(std::move(request_item));
 

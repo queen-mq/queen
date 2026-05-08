@@ -17,9 +17,7 @@
  *   QUEEN_URL=http://localhost:6632 node examples/03-threshold-alerting.js
  */
 
-import { Queen } from 'queen-mq'
-import { Stream } from '@queenmq/streams'
-
+import { Queen, Stream } from 'queen-mq'
 const url = process.env.QUEEN_URL || 'http://localhost:6632'
 const q = new Queen(url)
 

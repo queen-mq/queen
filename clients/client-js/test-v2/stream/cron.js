@@ -7,8 +7,8 @@
  * granularity (fast enough to test in seconds rather than hours).
  */
 
-import { Stream } from '../../../../streams/index.js'
-import { WindowCronOperator } from '../../../../streams/src/operators/WindowCronOperator.js'
+import { Stream } from '../../client-v2/index.js'
+import { WindowCronOperator } from '../../client-v2/streams/operators/WindowCronOperator.js'
 import {
   STREAMS_URL, mkName, sleep, drainUntil,
   expect, summarise

@@ -2,7 +2,7 @@
  * Session windows — per-key activity-based.
  */
 
-import { Stream } from '../../../../streams/index.js'
+import { Stream } from '../../client-v2/index.js'
 import {
   STREAMS_URL, mkName, sleep, drainSink, drainUntil,
   expect, summarise

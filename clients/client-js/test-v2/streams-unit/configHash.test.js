@@ -8,7 +8,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { Stream } from '../src/Stream.js'
+import { Stream } from '../../client-v2/streams/Stream.js'
 
 // Minimal queue-builder stub: anything with a name suffices for compile.
 const fakeQueue = (name) => ({ _queueName: name, queueName: name })

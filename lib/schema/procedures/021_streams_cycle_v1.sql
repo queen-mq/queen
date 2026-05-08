@@ -28,6 +28,7 @@
 --     "query_id":     "<uuid>",
 --     "partition_id": "<uuid>",                 -- source partition being acked
 --     "consumer_group": "streams.<queryId>",     -- defaults to "__QUEUE_MODE__"
+--     "release_lease": true | false,             -- default true; see below
 --     "state_ops":  [
 --        {"type":"upsert","key":"...","value":{...}},
 --        {"type":"delete","key":"..."}
@@ -37,9 +38,32 @@
 --         "transactionId":"...","traceId":"..."}
 --     ],
 --     "ack": {                                   -- source ack, optional
---        "transactionId":"...","leaseId":"...","status":"completed"
+--        "transactionId":"...","leaseId":"...","status":"completed",
+--        "count": <int>                          -- # of messages acked in this cycle
 --     }
 --   }
+--
+-- release_lease semantics
+-- -----------------------
+-- DEFAULT (release_lease = true): the cycle commits state + sink push + ack
+-- AND clears the source partition's lease (lease_expires_at = NULL,
+-- worker_id = NULL, batch_size = 0, acked_count = 0). This is the classic
+-- "the cycle owns the full popped batch atomically" model — the runner
+-- considers the partition fully drained and immediately releases it for
+-- the next pop on the next loop iteration.
+--
+-- release_lease = false: the cycle still commits state + sink push + ack
+-- (advancing last_consumed_id to the acked message), but DOES NOT touch
+-- any of the lease fields. The lease persists until its natural expiry,
+-- after which the broker will redeliver any messages strictly after
+-- last_consumed_id. This is the "ordered partial-ack" mode used by gating
+-- operators (.gate()) where:
+--   - K of N popped messages were allowed → ack count=K, release_lease=false
+--   - The remaining N-K messages stay leased & untouched in the partition
+--   - When the lease times out, they're re-popped in their original order
+--     (the partition stream order is preserved by construction)
+-- This is how a rate limiter built on streams preserves FIFO per partition
+-- without a deferred queue.
 --
 -- Output shape: JSONB ARRAY mirroring input idx.
 --
@@ -105,6 +129,7 @@ DECLARE
     v_one_result          JSONB;
     v_source_queue_name   TEXT;
     v_acked_count         INT;
+    v_release_lease       BOOLEAN;
 BEGIN
     IF p_requests IS NULL OR jsonb_array_length(p_requests) = 0 THEN
         RETURN '[]'::jsonb;
@@ -125,6 +150,7 @@ BEGIN
         v_ack_lease_released  := false;
         v_source_queue_name   := NULL;
         v_acked_count         := 0;
+        v_release_lease       := COALESCE((v_req->>'release_lease')::BOOLEAN, TRUE);
 
         BEGIN
             v_query_id       := (v_req->>'query_id')::uuid;
@@ -246,27 +272,48 @@ BEGIN
                 END IF;
 
                 IF v_ack_status IN ('completed', 'success') THEN
-                    -- Streaming-cycle ack semantics: every cycle corresponds
-                    -- to the FULL popped batch (the cycle's atomic unit), so
-                    -- we always release the lease here regardless of
-                    -- partition_consumers.batch_size. ack_messages_v2's
-                    -- per-message accumulator model doesn't apply.
+                    -- Streaming-cycle ack semantics:
+                    --   release_lease = true  (default): full-batch atomic
+                    --     unit. Advance cursor + clear all lease fields.
+                    --   release_lease = false (gating mode): partial ack of
+                    --     a prefix of the batch. Advance cursor by `count`
+                    --     but leave the lease fields untouched so the
+                    --     remaining suffix gets redelivered when the lease
+                    --     naturally expires (preserves FIFO per partition).
                     v_acked_count := COALESCE((v_ack->>'count')::INT, 1);
-                    UPDATE queen.partition_consumers
-                    SET last_consumed_id          = v_ack_message_id,
-                        last_consumed_created_at  = v_ack_message_created_at,
-                        last_consumed_at          = NOW(),
-                        total_messages_consumed   = COALESCE(total_messages_consumed, 0)
-                                                     + COALESCE((v_ack->>'count')::INT, 1),
-                        acked_count               = 0,
-                        batch_size                = 0,
-                        lease_expires_at          = NULL,
-                        lease_acquired_at         = NULL,
-                        worker_id                 = NULL
-                    WHERE partition_id   = v_partition_id
-                      AND consumer_group = v_consumer_group;
 
-                    v_ack_lease_released := true;
+                    IF v_release_lease THEN
+                        UPDATE queen.partition_consumers
+                        SET last_consumed_id          = v_ack_message_id,
+                            last_consumed_created_at  = v_ack_message_created_at,
+                            last_consumed_at          = NOW(),
+                            total_messages_consumed   = COALESCE(total_messages_consumed, 0)
+                                                         + v_acked_count,
+                            acked_count               = 0,
+                            batch_size                = 0,
+                            lease_expires_at          = NULL,
+                            lease_acquired_at         = NULL,
+                            worker_id                 = NULL
+                        WHERE partition_id   = v_partition_id
+                          AND consumer_group = v_consumer_group;
+
+                        v_ack_lease_released := true;
+                    ELSE
+                        -- Partial ack, lease retained: advance cursor and
+                        -- counters only; lease fields stay as-is so the
+                        -- remaining un-acked messages return to the queue
+                        -- on lease expiry, in their original order.
+                        UPDATE queen.partition_consumers
+                        SET last_consumed_id          = v_ack_message_id,
+                            last_consumed_created_at  = v_ack_message_created_at,
+                            last_consumed_at          = NOW(),
+                            total_messages_consumed   = COALESCE(total_messages_consumed, 0)
+                                                         + v_acked_count
+                        WHERE partition_id   = v_partition_id
+                          AND consumer_group = v_consumer_group;
+
+                        v_ack_lease_released := false;
+                    END IF;
 
                     IF NOT FOUND THEN
                         INSERT INTO queen.partition_consumers (
@@ -277,12 +324,12 @@ BEGIN
                         VALUES (
                             v_partition_id, v_consumer_group,
                             v_ack_message_id, v_ack_message_created_at, NOW(),
-                            COALESCE((v_ack->>'count')::INT, 1)
+                            v_acked_count
                         );
                     END IF;
 
                     INSERT INTO queen.messages_consumed (partition_id, consumer_group, messages_completed)
-                    VALUES (v_partition_id, v_consumer_group, COALESCE((v_ack->>'count')::INT, 1))
+                    VALUES (v_partition_id, v_consumer_group, v_acked_count)
                     ON CONFLICT DO NOTHING;
                 ELSIF v_ack_status IN ('failed', 'dlq') THEN
                     INSERT INTO queen.dead_letter_queue (

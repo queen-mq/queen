@@ -293,6 +293,14 @@ export class Runner {
       envelopes = next
     }
 
+    // 3. GATE stage takes a different path: serial evaluation, possibly
+    //    partial ack, no lease release on partial.
+    if (stages.gate) {
+      return await this._processGateCycle({
+        stages, envelopes, orderedMessages, group, partitionId, partitionName
+      })
+    }
+
     // 3. Window operator + reducer (if present).
     let stateOps = []
     let emits = []
@@ -350,6 +358,167 @@ export class Runner {
       pushItems,
       ack
     })
+  }
+
+  // --------------------------------------------------------------- gate path
+
+  /**
+   * Gate-cycle path: serial per-message ALLOW/DENY decision with persistent
+   * per-key state. On the first DENY, halt and commit a partial ack with
+   * release_lease=false so the un-acked tail returns when the lease expires
+   * (preserving FIFO per partition without a deferred queue).
+   *
+   * State model: load ALL state rows for the partition once, evaluate the
+   * gate in order, mutate in-memory state, then upsert only the keys whose
+   * ALLOWED messages mutated them.
+   */
+  async _processGateCycle({ stages, envelopes, orderedMessages, group, partitionId, partitionName }) {
+    const gate = stages.gate
+
+    // Load all state rows for this partition. Cheap: usually one row per
+    // (rate-limit key) — for the canonical rate-limiter pattern that's a
+    // single row, since partition == limit key.
+    const loadedAll = await getState({
+      http: this.http,
+      queryId: this._serverQueryId,
+      partitionId,
+      keys: []
+    })
+
+    // Working in-memory state, keyed by envelope.key. We only persist
+    // entries that actually changed via an ALLOW.
+    //   liveState[key]: the current mutable object the user fn sees
+    //   touchedKeys: keys whose state was mutated by an allowed eval
+    const liveState = new Map()
+    const touchedKeys = new Set()
+
+    const ensureState = (key) => {
+      if (liveState.has(key)) return liveState.get(key)
+      const initial = loadedAll.has(key)
+        ? this._cloneState(loadedAll.get(key))
+        : {}
+      liveState.set(key, initial)
+      return initial
+    }
+
+    const streamTimeMs = Date.now()
+    let allowedCount = 0
+    let firstDenyIdx = -1
+    const allowedEnvelopes = []
+
+    for (let i = 0; i < envelopes.length; i++) {
+      const env = envelopes[i]
+      const key = env.key
+      const stateForKey = ensureState(key)
+      const ctx = {
+        state:        stateForKey,
+        streamTimeMs,
+        partitionId,
+        partition:    partitionName,
+        key
+      }
+      let decision
+      try {
+        decision = await gate.evaluate(env, ctx)
+      } catch (err) {
+        // Gate threw: treat as a transient cycle error. Don't commit
+        // anything. The lease will time out and the broker redelivers.
+        this._reportError(err, { phase: 'gate-eval', partition: partitionId, message: env.msg })
+        return
+      }
+      if (decision.allow) {
+        // Mutated state on this key is committable.
+        touchedKeys.add(key)
+        allowedCount++
+        allowedEnvelopes.push(env)
+      } else {
+        firstDenyIdx = i
+        break
+      }
+    }
+
+    if (allowedCount === 0) {
+      // Nothing to commit: skip the cycle entirely. The lease stays held
+      // by us until it naturally expires; the messages are then
+      // redelivered (to us or another worker) in their original order.
+      this._stats.gateDenialsTotal = (this._stats.gateDenialsTotal || 0) + envelopes.length
+      return
+    }
+
+    // Build state ops for keys that were touched (only by allowed messages).
+    const stateOps = []
+    for (const key of touchedKeys) {
+      stateOps.push({
+        type:  'upsert',
+        key,
+        value: liveState.get(key)
+      })
+    }
+
+    // Apply post-stages to allowed emits (post-stages here see the original
+    // message value, since gate doesn't transform it — same as a no-window
+    // pass-through).
+    let emits = allowedEnvelopes.map(env => ({
+      key: env.key, value: env.value, sourceMsg: env.msg
+    }))
+    emits = await this._applyPostStages(stages.post, emits, partitionId, partitionName)
+
+    // Build sink push items / run foreach for allowed emits.
+    let pushItems = []
+    if (stages.sink && stages.sink.kind === 'sink') {
+      pushItems = stages.sink.buildPushItems(
+        emits.map(e => ({ key: e.key, value: e.value, sourceMsg: e.sourceMsg })),
+        partitionName
+      )
+    } else if (stages.sink && stages.sink.kind === 'foreach') {
+      await stages.sink.runEffects(emits.map(e => ({
+        value: e.value,
+        ctx:   this._buildEmitCtx(e, partitionName, partitionId)
+      })))
+    }
+
+    // Ack the LAST allowed message (cursor advances to it). The count
+    // tells the SP how many messages this commit covers.
+    const lastAllowedSrc = allowedEnvelopes[allowedEnvelopes.length - 1].msg
+    const ack = {
+      transactionId: lastAllowedSrc.transactionId,
+      leaseId:       lastAllowedSrc.leaseId || group.leaseId,
+      status:        'completed',
+      count:         allowedCount
+    }
+
+    const partial = firstDenyIdx >= 0   // some message was denied
+    const releaseLease = !partial
+
+    if (firstDenyIdx >= 0) {
+      const tailUnacked = envelopes.length - allowedCount
+      this._stats.gateDenialsTotal = (this._stats.gateDenialsTotal || 0) + tailUnacked
+    }
+    this._stats.gateAllowsTotal = (this._stats.gateAllowsTotal || 0) + allowedCount
+
+    this._stats.stateOpsTotal  += stateOps.length
+    this._stats.pushItemsTotal += pushItems.length
+    await commitCycle({
+      http: this.http,
+      queryId: this._serverQueryId,
+      partitionId,
+      consumerGroup: group.consumerGroup,
+      stateOps,
+      pushItems,
+      ack,
+      releaseLease
+    })
+  }
+
+  /**
+   * Deep-copy state value before handing it to user code so the loaded
+   * cache (loadedAll) isn't mutated in-place by gate evaluations that we
+   * later decide to discard.
+   */
+  _cloneState(v) {
+    if (v == null) return {}
+    if (typeof v !== 'object') return v
+    try { return JSON.parse(JSON.stringify(v)) } catch { return { ...v } }
   }
 
   // --------------------- stateless window path (tumbling / sliding / cron)

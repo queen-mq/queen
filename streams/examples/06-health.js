@@ -1,6 +1,4 @@
-import { Queen } from 'queen-mq'
-import { Stream } from '../index.js'
-
+import { Queen, Stream } from 'queen-mq'
 const url = process.env.QUEEN_URL || 'http://localhost:6632'
 
 const q = new Queen({ url, handleSignals: false })

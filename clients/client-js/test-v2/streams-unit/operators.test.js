@@ -9,17 +9,17 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { MapOperator } from '../src/operators/MapOperator.js'
-import { FilterOperator } from '../src/operators/FilterOperator.js'
-import { FlatMapOperator } from '../src/operators/FlatMapOperator.js'
-import { KeyByOperator } from '../src/operators/KeyByOperator.js'
-import { WindowTumblingOperator } from '../src/operators/WindowTumblingOperator.js'
-import { WindowSlidingOperator } from '../src/operators/WindowSlidingOperator.js'
-import { WindowSessionOperator } from '../src/operators/WindowSessionOperator.js'
-import { WindowCronOperator } from '../src/operators/WindowCronOperator.js'
-import { ReduceOperator, stateKeyFor } from '../src/operators/ReduceOperator.js'
-import { AggregateOperator } from '../src/operators/AggregateOperator.js'
-import { configHashOf } from '../src/util/configHash.js'
+import { MapOperator } from '../../client-v2/streams/operators/MapOperator.js'
+import { FilterOperator } from '../../client-v2/streams/operators/FilterOperator.js'
+import { FlatMapOperator } from '../../client-v2/streams/operators/FlatMapOperator.js'
+import { KeyByOperator } from '../../client-v2/streams/operators/KeyByOperator.js'
+import { WindowTumblingOperator } from '../../client-v2/streams/operators/WindowTumblingOperator.js'
+import { WindowSlidingOperator } from '../../client-v2/streams/operators/WindowSlidingOperator.js'
+import { WindowSessionOperator } from '../../client-v2/streams/operators/WindowSessionOperator.js'
+import { WindowCronOperator } from '../../client-v2/streams/operators/WindowCronOperator.js'
+import { ReduceOperator, stateKeyFor } from '../../client-v2/streams/operators/ReduceOperator.js'
+import { AggregateOperator } from '../../client-v2/streams/operators/AggregateOperator.js'
+import { configHashOf } from '../../client-v2/streams/util/configHash.js'
 
 const env = (msg, key = 'p1') => ({ msg, key, value: msg.data })
 
