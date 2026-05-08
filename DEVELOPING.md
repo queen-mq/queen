@@ -31,7 +31,7 @@ queen/
 ├── clients/
 │   ├── client-js/         queen-mq on npm (Node 22+)
 │   ├── client-py/         queen-mq on PyPI (Python 3.8+)
-│   ├── client-go/         github.com/smartpricing/queen/client-go
+│   ├── client-go/         github.com/smartpricing/queen/clients/client-go
 │   ├── client-laravel/    smartpricing/queen-mq on Packagist (PHP 8.3+)
 │   └── client-cpp/        header-only, ships with the repo
 ├── pg_qpubsub/            experimental Postgres extension (separate project)

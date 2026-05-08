@@ -162,7 +162,7 @@ pytest tests/test_push.py -v
 
 ```
 clients/client-go/
-├── go.mod                            module: github.com/smartpricing/queen/client-go
+├── go.mod                            module: github.com/smartpricing/queen/clients/client-go
 ├── queen.go, http_client.go, …       package source (top-level)
 ├── push_builder.go, consume_builder.go, …    fluent builders
 ├── transaction_builder.go, dlq_builder.go, queue_builder.go
@@ -193,14 +193,14 @@ go test ./tests -run TestPush -v
 If you're hacking on the client alongside an application that consumes it, add a `replace` directive to your application's `go.mod`:
 
 ```go
-replace github.com/smartpricing/queen/client-go => /Users/alice/Work/queen/clients/client-go
+replace github.com/smartpricing/queen/clients/client-go => /Users/alice/Work/queen/clients/client-go
 ```
 
 ### Notes for developers
 
 - Public surface is the top-level package only. Helpers are unexported.
 - The runtime PG client (`jackc/pgx/v5`) is only required for transactional-outbox features (`Transaction` builder); push-only consumers don't need a PG-reachable network.
-- Module path is `github.com/smartpricing/queen/client-go` even though the tag is repo-wide; releases are tagged as `client-go/vX.Y.Z`.
+- Module path is `github.com/smartpricing/queen/clients/client-go` even though the tag is repo-wide; releases are tagged as `client-go/vX.Y.Z`.
 
 ---
 

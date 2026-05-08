@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	queen "github.com/smartpricing/queen/client-go"
-	"github.com/smartpricing/queen/client-go/streams"
-	"github.com/smartpricing/queen/client-go/streams/helpers"
+	queen "github.com/smartpricing/queen/clients/client-go"
+	"github.com/smartpricing/queen/clients/client-go/streams"
+	"github.com/smartpricing/queen/clients/client-go/streams/helpers"
 )
 
 // TestGateTokenBucketBasic validates that a token-bucket gate lets every

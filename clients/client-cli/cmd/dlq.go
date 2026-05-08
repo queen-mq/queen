@@ -7,7 +7,7 @@ import (
 	clierr "github.com/smartpricing/queen/client-cli/internal/errors"
 	"github.com/smartpricing/queen/client-cli/internal/output"
 	"github.com/smartpricing/queen/client-cli/internal/timefmt"
-	queen "github.com/smartpricing/queen/client-go"
+	queen "github.com/smartpricing/queen/clients/client-go"
 	"github.com/spf13/cobra"
 )
 

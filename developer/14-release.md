@@ -162,11 +162,11 @@ git tag -a client-go/v0.14.0 -m "client-go 0.14.0"
 git push origin client-go/v0.14.0
 ```
 
-After ~5 minutes, `https://pkg.go.dev/github.com/smartpricing/queen/client-go@v0.14.0` will resolve. To force-refresh:
+After ~5 minutes, `https://pkg.go.dev/github.com/smartpricing/queen/clients/client-go@v0.14.0` will resolve. To force-refresh:
 
 ```bash
 GOPROXY=https://proxy.golang.org go install \
-  github.com/smartpricing/queen/client-go@v0.14.0
+  github.com/smartpricing/queen/clients/client-go@v0.14.0
 ```
 
 ### `queenctl` CLI
@@ -229,7 +229,7 @@ If you want to convert these to real Helm charts, you'll need to add a `Chart.ya
   # Go
   cd /tmp && mkdir queen-go && cd queen-go
   go mod init smoke
-  go get github.com/smartpricing/queen/client-go@v0.14.0
+  go get github.com/smartpricing/queen/clients/client-go@v0.14.0
   ```
 - Update `[docs/](../docs/)` version numbers (search for the previous version)
 - Add release notes to GitHub Releases. Highlight: schema additions, new env vars, performance numbers from the contention benchmark, breaking changes.

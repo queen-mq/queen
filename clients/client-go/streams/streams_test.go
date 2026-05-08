@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smartpricing/queen/client-go/streams/operators"
+	"github.com/smartpricing/queen/clients/client-go/streams/operators"
 )
 
 type fakeQueue struct{ name string }

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	queen "github.com/smartpricing/queen/client-go"
+	queen "github.com/smartpricing/queen/clients/client-go"
 )
 
 func TestConsumer(t *testing.T) {

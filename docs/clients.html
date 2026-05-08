@@ -97,7 +97,7 @@
     <tr>
       <td><strong>Go</strong> <span class="muted">+ Streaming SDK</span></td>
       <td>Go 1.24+</td>
-      <td><code>go get github.com/smartpricing/queen/client-go</code></td>
+      <td><code>go get github.com/smartpricing/queen/clients/client-go</code></td>
       <td><a href="https://github.com/smartpricing/queen/tree/master/clients/client-go">client-go/</a></td>
     </tr>
     <tr>
@@ -133,7 +133,7 @@
   <div class="tabs-panes">
     <div class="tab-pane pane-js"><pre><code class="language-bash">npm install queen-mq</code></pre><div class="pane-foot">Pure ESM. Works in Node 22+ and modern browsers (no native deps).</div></div>
     <div class="tab-pane pane-py"><pre><code class="language-bash">pip install queen-mq</code></pre><div class="pane-foot">Async-first (httpx). Sync wrappers available where natural.</div></div>
-    <div class="tab-pane pane-go"><pre><code class="language-bash">go get github.com/smartpricing/queen/client-go</code></pre><div class="pane-foot">Single module. No CGO.</div></div>
+    <div class="tab-pane pane-go"><pre><code class="language-bash">go get github.com/smartpricing/queen/clients/client-go</code></pre><div class="pane-foot">Single module. No CGO.</div></div>
     <div class="tab-pane pane-laravel"><pre><code class="language-bash">composer require smartpricing/queen-mq
 
 # Laravel only, publish config and set env:
@@ -202,7 +202,7 @@ queen = Queen({
     'bearer_token': os.environ.get('QUEEN_TOKEN'),
 })</code></pre></div>
 
-    <div class="tab-pane pane-go"><pre><code class="language-go">import queen "github.com/smartpricing/queen/client-go"
+    <div class="tab-pane pane-go"><pre><code class="language-go">import queen "github.com/smartpricing/queen/clients/client-go"
 
 // Single
 client, _ := queen.New("http://localhost:6632")
@@ -1041,7 +1041,7 @@ fmt.Println("failed:", dlq.Total)</code></pre></div>
   <a class="card" href="https://github.com/smartpricing/queen/tree/master/clients/client-go#readme">
     <div class="card-eyebrow">Go</div>
     <h3>client-go / README</h3>
-    <p>Idiomatic <code>context.Context</code>, builder-style API, batch consumers. <code>go get github.com/smartpricing/queen/client-go</code>.</p>
+    <p>Idiomatic <code>context.Context</code>, builder-style API, batch consumers. <code>go get github.com/smartpricing/queen/clients/client-go</code>.</p>
   </a>
   <a class="card" href="https://github.com/smartpricing/queen/tree/master/clients/client-laravel#readme">
     <div class="card-eyebrow">PHP / Laravel</div>

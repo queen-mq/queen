@@ -1,4 +1,4 @@
-module github.com/smartpricing/queen/client-go
+module github.com/smartpricing/queen/clients/client-go
 
 go 1.24.0
 

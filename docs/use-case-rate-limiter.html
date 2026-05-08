@@ -274,16 +274,16 @@ npm install queen-mq
 pip install queen-mq
 
 # Go
-go get github.com/smartpricing/queen/client-go</code></pre>
+go get github.com/smartpricing/queen/clients/client-go</code></pre>
 <pre><code class="language-javascript">// JavaScript
 import { Queen, Stream, tokenBucketGate, slidingWindowGate } from 'queen-mq'</code></pre>
 <pre><code class="language-python"># Python
 from queen import Queen, Stream, token_bucket_gate, sliding_window_gate</code></pre>
 <pre><code class="language-go">// Go
 import (
-    queen "github.com/smartpricing/queen/client-go"
-    "github.com/smartpricing/queen/client-go/streams"
-    "github.com/smartpricing/queen/client-go/streams/helpers"
+    queen "github.com/smartpricing/queen/clients/client-go"
+    "github.com/smartpricing/queen/clients/client-go/streams"
+    "github.com/smartpricing/queen/clients/client-go/streams/helpers"
 )</code></pre>
   <p style="margin-top: 8px;">
     The same <code>.gate()</code> primitive, helper factories, and
@@ -395,16 +395,16 @@ asyncio.run(main())</code></pre>
 <!-- Go equivalent ================================================ -->
 <div class="code-meta-wrap with-copy">
   <div class="code-meta"><span>go · single-tenant token bucket</span><button class="copy-btn" type="button">copy</button></div>
-<pre><code class="language-go">// go get github.com/smartpricing/queen/client-go
+<pre><code class="language-go">// go get github.com/smartpricing/queen/clients/client-go
 package main
 
 import (
     "context"
     "fmt"
 
-    queen "github.com/smartpricing/queen/client-go"
-    "github.com/smartpricing/queen/client-go/streams"
-    "github.com/smartpricing/queen/client-go/streams/helpers"
+    queen "github.com/smartpricing/queen/clients/client-go"
+    "github.com/smartpricing/queen/clients/client-go/streams"
+    "github.com/smartpricing/queen/clients/client-go/streams/helpers"
 )
 
 func main() {

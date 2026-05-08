@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/smartpricing/queen/client-go/streams/operators"
+	"github.com/smartpricing/queen/clients/client-go/streams/operators"
 )
 
 // RegisterResult holds /streams/v1/queries response.

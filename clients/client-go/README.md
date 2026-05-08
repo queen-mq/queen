@@ -5,7 +5,7 @@ A high-performance Go client for [Queen MQ](https://github.com/smartpricing/quee
 ## Installation
 
 ```bash
-go get github.com/smartpricing/queen/client-go
+go get github.com/smartpricing/queen/clients/client-go
 ```
 
 ## Quick Start
@@ -18,7 +18,7 @@ import (
     "fmt"
     "log"
 
-    queen "github.com/smartpricing/queen/client-go"
+    queen "github.com/smartpricing/queen/clients/client-go"
 )
 
 func main() {
@@ -67,9 +67,9 @@ streaming SDKs.
 
 ```go
 import (
-    queen "github.com/smartpricing/queen/client-go"
-    "github.com/smartpricing/queen/client-go/streams"
-    "github.com/smartpricing/queen/client-go/streams/helpers"
+    queen "github.com/smartpricing/queen/clients/client-go"
+    "github.com/smartpricing/queen/clients/client-go/streams"
+    "github.com/smartpricing/queen/clients/client-go/streams/helpers"
 )
 
 q, _ := queen.New("http://localhost:6632")

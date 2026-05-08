@@ -8,7 +8,7 @@
 package helpers
 
 import (
-	"github.com/smartpricing/queen/client-go/streams/operators"
+	"github.com/smartpricing/queen/clients/client-go/streams/operators"
 )
 
 // CostFn maps a message to its cost in tokens (default: 1 token per message).
