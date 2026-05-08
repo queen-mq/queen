@@ -27,14 +27,25 @@ BEGIN
         v_lease_id := v_item->>'leaseId';
         v_extend_seconds := COALESCE((v_item->>'extendSeconds')::int, 60);
         
-        UPDATE queen.partition_consumers
-        SET lease_expires_at = GREATEST(
-            lease_expires_at, 
-            NOW() + (v_extend_seconds || ' seconds')::interval
+        -- v4 multi-partition pops produce N partition_consumers rows
+        -- sharing the same worker_id (= leaseId). The UPDATE intentionally
+        -- fans out to all of them. PL/pgSQL forbids
+        -- "UPDATE ... RETURNING ... INTO scalar" when more than one row is
+        -- returned (even without STRICT), so we wrap the UPDATE in a CTE
+        -- and aggregate. MIN is the conservative choice: it reports the
+        -- earliest deadline among the renewed rows, which is what a
+        -- caller needs to schedule the next renew.
+        WITH updated AS (
+            UPDATE queen.partition_consumers
+            SET lease_expires_at = GREATEST(
+                lease_expires_at,
+                NOW() + (v_extend_seconds || ' seconds')::interval
+            )
+            WHERE worker_id = v_lease_id
+              AND lease_expires_at > NOW()
+            RETURNING lease_expires_at
         )
-        WHERE worker_id = v_lease_id
-          AND lease_expires_at > NOW()
-        RETURNING lease_expires_at INTO v_new_expires;
+        SELECT MIN(lease_expires_at) INTO v_new_expires FROM updated;
         
         IF v_new_expires IS NOT NULL THEN
             v_success := true;
