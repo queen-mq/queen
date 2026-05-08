@@ -43,6 +43,12 @@ func NewQueueBuilder(queen *Queen, queueName string) *QueueBuilder {
 	}
 }
 
+// Name returns the queue name. Used by the streaming SDK to wire .From()
+// and .To() targets without exposing the unexported queueName field.
+func (qb *QueueBuilder) Name() string {
+	return qb.queueName
+}
+
 // Namespace sets the namespace for the queue.
 func (qb *QueueBuilder) Namespace(name string) *QueueBuilder {
 	qb.namespace = name

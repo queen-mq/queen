@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "queen-mq"
-version = "0.14.0"
-description = "High-performance message queue client for Python backed by PostgreSQL"
+version = "0.15.0"
+description = "High-performance message queue client + fluent streaming SDK for Python, backed by PostgreSQL"
 readme = "README.md"
 authors = [
     {name = "Smartness", email = "info@smartness.com"}
@@ -24,7 +24,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Distributed Computing",
 ]
-keywords = ["message-queue", "queue", "broker", "message-queue-system", "fifo"]
+keywords = [
+    "message-queue", "queue", "broker", "message-queue-system", "fifo",
+    "streaming", "stream-processing", "rate-limiter",
+    "tumbling-window", "sliding-window", "session-window", "event-time",
+    "watermark", "exactly-once", "postgres",
+]
 requires-python = ">=3.8"
 dependencies = [
     "httpx>=0.27.0",

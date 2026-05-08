@@ -236,6 +236,11 @@ class QueueBuilder:
         self._idle_millis = millis
         return self
 
+    def timeout_millis(self, millis: int) -> "QueueBuilder":
+        """Set the long-poll timeout in milliseconds (mirrors JS .timeoutMillis())."""
+        self._timeout_millis = millis
+        return self
+
     def auto_ack(self, enabled: bool) -> "QueueBuilder":
         """Set auto-ack"""
         self._auto_ack = enabled

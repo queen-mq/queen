@@ -58,6 +58,55 @@ func main() {
 }
 ```
 
+## Streaming SDK (`streams` subpackage)
+
+The `streams` subpackage adds a fluent streaming pipeline builder with
+windowing, aggregation, gates (rate limiting), and exactly-once semantics
+via `/streams/v1/cycle`. 1:1 feature-equivalent with the JS / Python
+streaming SDKs.
+
+```go
+import (
+    queen "github.com/smartpricing/queen/client-go"
+    "github.com/smartpricing/queen/client-go/streams"
+    "github.com/smartpricing/queen/client-go/streams/helpers"
+)
+
+q, _ := queen.New("http://localhost:6632")
+
+// Token-bucket rate limiter via .Gate()
+gateFn := helpers.TokenBucketGate(helpers.TokenBucketGateOptions{
+    Capacity:     100,
+    RefillPerSec: 100,
+})
+
+stream := streams.From(q.Queue("requests").AsStreamSource()).
+    Gate(gateFn).
+    To(q.Queue("approved"))
+
+runner, _ := stream.Run(context.Background(), streams.RunOptions{
+    QueryID: "rate-limiter.airbnb",
+    URL:     "http://localhost:6632",
+})
+defer runner.Stop()
+```
+
+**Available operators:** `Map`, `Filter`, `FlatMap`, `KeyBy`,
+`WindowTumbling`, `WindowSliding`, `WindowSession`, `WindowCron`,
+`Reduce`, `Aggregate`, `Gate`, `To`, `Foreach`.
+
+**Helpers:** `helpers.TokenBucketGate(...)`, `helpers.SlidingWindowGate(...)`.
+
+**Cross-language compatibility:** the SHA-256 `config_hash` of an operator
+chain is identical across the JS, Python, and Go SDKs for the same logical
+shape, so a query registered by one client can be resumed by a worker
+written in another. Pass an explicit `fieldOrder` to `Aggregate` to
+guarantee deterministic hashing across languages.
+
+See [`examples/00-demo`](examples/00-demo/main.go) and
+[`examples/01-stateless-enrichment`](examples/01-stateless-enrichment/main.go)
+for runnable starting points.
+
 ## Features
 
 - **Fluent API** - Intuitive builder pattern for all operations

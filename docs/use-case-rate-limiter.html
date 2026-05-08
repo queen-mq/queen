@@ -262,17 +262,35 @@
 </div>
 
 <div class="callout callout-info">
-  <div class="callout-title">One install, one import</div>
+  <div class="callout-title">One install, one import — JavaScript / Python / Go</div>
   <p>
-    The broker client and the streaming SDK ship in the same npm package:
+    The broker client and the streaming SDK ship in the same package on
+    every supported runtime:
   </p>
-<pre style="margin-top: 8px;"><code class="language-bash">npm install queen-mq</code></pre>
-<pre><code class="language-javascript">import { Queen, Stream, tokenBucketGate, slidingWindowGate } from 'queen-mq'</code></pre>
+<pre style="margin-top: 8px;"><code class="language-bash"># Node.js (npm)
+npm install queen-mq
+
+# Python (pip)
+pip install queen-mq
+
+# Go
+go get github.com/smartpricing/queen/client-go</code></pre>
+<pre><code class="language-javascript">// JavaScript
+import { Queen, Stream, tokenBucketGate, slidingWindowGate } from 'queen-mq'</code></pre>
+<pre><code class="language-python"># Python
+from queen import Queen, Stream, token_bucket_gate, sliding_window_gate</code></pre>
+<pre><code class="language-go">// Go
+import (
+    queen "github.com/smartpricing/queen/client-go"
+    "github.com/smartpricing/queen/client-go/streams"
+    "github.com/smartpricing/queen/client-go/streams/helpers"
+)</code></pre>
   <p style="margin-top: 8px;">
-    ESM named exports + tree-shaking mean bundlers drop the streaming
-    code from your output if you only use broker symbols (<code>Queen</code>,
-    <code>Admin</code>). The streaming source lives under
-    <code>client-v2/streams/</code> in the package.
+    The same <code>.gate()</code> primitive, helper factories, and
+    <code>config_hash</code> wire format work identically across all three
+    languages. A query registered by the JS client can be resumed by a
+    worker written in Go (or vice versa) — the SHA-256 of the operator
+    chain matches across runtimes.
   </p>
 </div>
 
@@ -329,6 +347,115 @@ console.log('last  10 ms:', arrivals.slice(-10).map(a =&gt; a.at).join(' '))
   The bucket takes ~6s to drain 30 messages: 10 burst (instant) + 20 more
   at 5/sec ≈ 4s. The remaining ~2s is broker round-trip overhead from the
   lease cycle.
+</p>
+
+<!-- Python equivalent ============================================ -->
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>python · single-tenant token bucket</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-python"># pip install queen-mq        (Python 3.10+)
+import asyncio
+from queen import Queen, Stream, token_bucket_gate
+
+URL = "http://localhost:6632"
+
+async def main():
+    async with Queen(url=URL) as q:
+        await q.queue("rl.requests").config(lease_time=2, retry_limit=1000).create()
+        await q.queue("rl.approved").create()
+
+        # Push 30 messages on partition 'tenant-A' as a burst.
+        await q.queue("rl.requests").partition("tenant-A").push(
+            [{"data": {"seq": i}} for i in range(30)]
+        )
+
+        # Token bucket: burst 10, refill 5/sec.
+        stream = await (
+            Stream.from_(q.queue("rl.requests"))
+            .gate(token_bucket_gate(capacity=10, refill_per_sec=5))
+            .to(q.queue("rl.approved"))
+            .run(query_id="docs-rl-quickstart-py", url=URL, batch_size=10, reset=True)
+        )
+
+        cg = "docs-rl-quickstart-cg"
+        arrivals = []
+        while len(arrivals) &lt; 30:
+            batch = await q.queue("rl.approved").group(cg).batch(10).wait(True).timeout_millis(2000).pop()
+            if not batch:
+                continue
+            for m in batch:
+                arrivals.append(m.get("data", {}).get("seq"))
+            await q.ack(batch, True, {"group": cg})
+        await stream.stop()
+        print("seqs:", arrivals)
+        # All 30 messages, in seq order [0..29].
+
+asyncio.run(main())</code></pre>
+</div>
+
+<!-- Go equivalent ================================================ -->
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>go · single-tenant token bucket</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-go">// go get github.com/smartpricing/queen/client-go
+package main
+
+import (
+    "context"
+    "fmt"
+
+    queen "github.com/smartpricing/queen/client-go"
+    "github.com/smartpricing/queen/client-go/streams"
+    "github.com/smartpricing/queen/client-go/streams/helpers"
+)
+
+func main() {
+    url := "http://localhost:6632"
+    q, _ := queen.New(url)
+    defer q.Close(context.Background())
+
+    _, _ = q.Queue("rl.requests").Config(queen.QueueConfig{
+        LeaseTime: 2, RetryLimit: 1000,
+    }).Create().Execute(context.Background())
+    _, _ = q.Queue("rl.approved").Create().Execute(context.Background())
+
+    // Push 30 messages on partition 'tenant-A' as a burst.
+    for i := 0; i &lt; 30; i++ {
+        _, _ = q.Queue("rl.requests").Partition("tenant-A").Push(
+            map[string]interface{}{"seq": i},
+        ).Execute(context.Background())
+    }
+
+    // Token bucket: burst 10, refill 5/sec.
+    gateFn := helpers.TokenBucketGate(helpers.TokenBucketGateOptions{
+        Capacity: 10, RefillPerSec: 5,
+    })
+    stream := streams.From(q.Queue("rl.requests").AsStreamSource()).
+        Gate(gateFn).
+        To(q.Queue("rl.approved"))
+
+    runner, _ := stream.Run(context.Background(), streams.RunOptions{
+        QueryID: "docs-rl-quickstart-go", URL: url, BatchSize: 10, Reset: true,
+    })
+
+    cg := "docs-rl-quickstart-cg"
+    drained := 0
+    for drained &lt; 30 {
+        batch, _ := q.Queue("rl.approved").Group(cg).Batch(10).Wait(true).TimeoutMillis(2000).Pop(context.Background())
+        if len(batch) == 0 { continue }
+        for _, m := range batch {
+            fmt.Println("seq:", m.Data["seq"])
+        }
+        drained += len(batch)
+        _, _ = q.Ack(context.Background(), batch, true, queen.AckOptions{ConsumerGroup: cg})
+    }
+    runner.Stop()
+}</code></pre>
+</div>
+
+<p class="muted" style="margin-top: 16px;">
+  Same wire protocol, same <code>config_hash</code>, same
+  per-partition lease back-pressure semantics. Pick whichever runtime
+  fits your service; the bucket state is shared via PostgreSQL so workers
+  written in different languages can co-process the same query.
 </p>
 
 <!-- ====================================================================== -->

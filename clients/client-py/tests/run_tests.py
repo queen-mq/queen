@@ -210,27 +210,46 @@ async def main():
         test_complete.test_complete,
     ]
     
+    # Streaming integration tests are loaded lazily via pytest, since they
+    # follow pytest conventions (fixtures, async support). To run them:
+    #     python -m pytest tests/streams_integration/   (live broker required)
+    #     python -m pytest tests/streams_unit/          (no broker needed)
+    # The "streams" arg below shells out to pytest for the integration suite.
+
     # Parse command line arguments
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         if arg == "human":
             tests_to_run = human_tests
             log(True, f"Running human-written tests only ({len(human_tests)} tests)...")
+        elif arg == "streams":
+            # Hand off to pytest for the streaming integration suite.
+            import subprocess
+            await close_db()
+            await client.close()
+            ret = subprocess.call(
+                [sys.executable, "-m", "pytest", "tests/streams_integration/", "-v"],
+            )
+            sys.exit(ret)
         elif arg in [func.__name__ for func in human_tests]:
-            # Run specific test
             test_func = next(func for func in human_tests if func.__name__ == arg)
             tests_to_run = [test_func]
             log(True, f"Running single test: {arg}")
         else:
             print(f"❌ Test '{arg}' not found")
             print("\nUsage:")
-            print("  python run_tests.py              # Run all tests")
-            print("  python run_tests.py human        # Run human-written tests")
-            print("  python run_tests.py <testName>   # Run specific test")
+            print("  python run_tests.py              # Run all human-written queue tests")
+            print("  python run_tests.py human        # Run all human-written queue tests")
+            print("  python run_tests.py streams      # Run streaming integration tests via pytest")
+            print("  python run_tests.py <testName>   # Run a specific named test")
             print("\nAvailable tests:")
             print("\n👤 Human-written tests:")
             for func in human_tests:
                 print(f"  - {func.__name__}")
+            print("\n🌊 Streaming integration tests (via pytest):")
+            print("  python -m pytest tests/streams_integration/ -v")
+            print("\n⚙ Streaming unit tests (no broker needed):")
+            print("  python -m pytest tests/streams_unit/ -v")
             await close_db()
             sys.exit(1)
     else:

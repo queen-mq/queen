@@ -327,16 +327,6 @@ func (q *Queen) UpdateConsumerGroupTimestamp(ctx context.Context, consumerGroup 
 	return nil
 }
 
-// Stream returns a StreamBuilder for defining a stream.
-func (q *Queen) Stream(name, namespace string) *StreamBuilder {
-	return NewStreamBuilder(q.httpClient, name, namespace)
-}
-
-// Consumer returns a StreamConsumer for consuming from a stream.
-func (q *Queen) Consumer(streamName, consumerGroup string) *StreamConsumer {
-	return NewStreamConsumer(q.httpClient, streamName, consumerGroup)
-}
-
 // Close gracefully shuts down the Queen client.
 // It flushes all buffers before closing.
 func (q *Queen) Close(ctx context.Context) error {

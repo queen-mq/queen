@@ -15,8 +15,6 @@ from .builders.queue_builder import QueueBuilder
 from .builders.transaction_builder import TransactionBuilder
 from .http.http_client import HttpClient
 from .http.load_balancer import LoadBalancer
-from .stream.stream_builder import StreamBuilder
-from .stream.stream_consumer import StreamConsumer
 from .utils import logger
 from .utils.defaults import CLIENT_DEFAULTS
 from .utils.validation import validate_url, validate_urls
@@ -563,37 +561,6 @@ class Queen:
         logger.log("Queen.updateConsumerGroupTimestamp", {"success": True, "consumer_group": consumer_group})
         return response or {"success": True}
 
-    # ===========================
-    # Streaming API
-    # ===========================
-
-    def stream(self, name: str, namespace: str) -> StreamBuilder:
-        """
-        Define a stream for windowed processing
-
-        Args:
-            name: Stream name
-            namespace: Stream namespace
-
-        Returns:
-            StreamBuilder instance
-        """
-        logger.log("Queen.stream", {"name": name, "namespace": namespace})
-        return StreamBuilder(self._http_client, self, name, namespace)
-
-    def consumer(self, stream_name: str, consumer_group: str) -> StreamConsumer:
-        """
-        Create a consumer for a stream
-
-        Args:
-            stream_name: Stream name
-            consumer_group: Consumer group
-
-        Returns:
-            StreamConsumer instance
-        """
-        logger.log("Queen.consumer", {"stream_name": stream_name, "consumer_group": consumer_group})
-        return StreamConsumer(self._http_client, self, stream_name, consumer_group)
 
     # ===========================
     # Graceful Shutdown
