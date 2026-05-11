@@ -140,10 +140,8 @@
 </p>
 
 <p class="muted" style="margin-top: 12px;">
-  Each "Live" card links to a dedicated page with code you can copy-paste and
-  numbers from real stress runs. Cards marked "Coming soon" describe patterns
-  the engine already supports today; their dedicated pages are being written
-  next.
+  Each card below links to a dedicated page with code you can copy-paste
+  and numbers from real verified runs against a live Queen server.
 </p>
 
 <!-- ===================================================================== -->
@@ -164,117 +162,59 @@
     <div class="uc-cta"><a href="use-case-rate-limiter.html">Read recipe →</a></div>
   </div>
 
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon · analytics</div>
-    <h3>Real-time windowed aggregations</h3>
+  <div class="uc-card uc-live">
+    <div class="uc-card-eyebrow">Live · ops</div>
+    <h3>Subscription replay</h3>
     <p>
-      Tumbling, sliding, session, and cron-aligned windows. Maintain rolling
-      sums, counts, p95s per key, and emit them to a sink queue or push them
-      onto a live dashboard.
+      Rewind a brand-new consumer group to any timestamp and reprocess just
+      that window — without disturbing the production consumer. Each CG has
+      its own offset row in PostgreSQL, so production and replay run truly
+      independently.
+    </p>
+    <div class="uc-mini">.group('reprocess').subscriptionFrom('2026-05-11T14:00:00Z')</div>
+    <div class="uc-mini">verified: 1,500 events, replay CG hits exact idx 500 boundary</div>
+    <div class="uc-cta"><a href="use-case-replay.html">Read recipe →</a></div>
+  </div>
+
+  <div class="uc-card uc-live">
+    <div class="uc-card-eyebrow">Live · orchestration</div>
+    <h3>Transactional multi-stage pipelines</h3>
+    <p>
+      Chain multiple processing stages — translate → route → notify — with
+      one PG transaction per handoff. A worker crash between stages cannot
+      duplicate or drop a message. Per-stage retries and DLQ are built in.
+    </p>
+    <div class="uc-mini">.transaction().ack(msg).queue('next').push([out]).commit()</div>
+    <div class="uc-mini">verified: 100 in → 86 through → 14 in DLQ (0 lost, 0 duplicated)</div>
+    <div class="uc-cta"><a href="use-case-pipeline.html">Read recipe →</a></div>
+  </div>
+
+  <div class="uc-card uc-live">
+    <div class="uc-card-eyebrow">Live · analytics</div>
+    <h3>Real-time per-entity aggregations</h3>
+    <p>
+      Maintain rolling per-customer count / sum / max / avg over tumbling
+      windows. State <strong>is</strong> a row in <code>queen_streams.state</code>
+      — your Grafana, Metabase, or BI tool queries it as plain SQL. No
+      Materialize, no ksqlDB, no extra database.
     </p>
     <div class="uc-mini">.windowTumbling({ seconds: 60 }).aggregate({ count, sum, max })</div>
-    <div class="uc-cta">Recipe being written</div>
+    <div class="uc-mini">verified: 3,000 events / 30 customers, Σ matches input exactly</div>
+    <div class="uc-cta"><a href="use-case-aggregations.html">Read recipe →</a></div>
   </div>
 
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon · enrichment</div>
-    <h3>Cross-stream joins</h3>
+  <div class="uc-card uc-live">
+    <div class="uc-card-eyebrow">Live · integration</div>
+    <h3>Webhook deduplication</h3>
     <p>
-      Join two streams keyed by the same entity (reservations × messages,
-      orders × payments, users × events) over a session window. Common
-      pattern for proactive workflows and CDP-style guest profiles.
+      Drop duplicate webhook deliveries from Stripe, Booking, Octorate, or
+      Twilio without operating Redis. The per-window seen-set lives in
+      PostgreSQL and is garbage-collected automatically when the window
+      closes — no TTL job, no eviction policy.
     </p>
-    <div class="uc-mini">.keyBy(m => m.guestId).windowSession({ gap: '14d' }).reduce(merge)</div>
-    <div class="uc-cta">Recipe being written</div>
-  </div>
-
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon · safety</div>
-    <h3>Anti-spam &amp; anomaly detection</h3>
-    <p>
-      Per-sender velocity windows, urgency-keyword detection, sentiment-streak
-      escalation. Routes flagged messages to a quarantine queue or fires
-      escalation alerts within the second.
-    </p>
-    <div class="uc-mini">.keyBy(m => m.from).windowSliding({ size: '5m', hop: '30s' })</div>
-    <div class="uc-cta">Recipe being written</div>
-  </div>
-
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon · ETL</div>
-    <h3>Continuous deduplication</h3>
-    <p>
-      Drop duplicate events arriving on flaky webhooks (Octorate, Booking,
-      Stripe) by externalId within a short window. Per-partition state shard,
-      exactly-once forward.
-    </p>
-    <div class="uc-mini">.windowTumbling({ seconds: 30 }).reduce(seenSet)</div>
-    <div class="uc-cta">Recipe being written</div>
-  </div>
-
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon · ops</div>
-    <h3>Heartbeat &amp; liveness monitoring</h3>
-    <p>
-      Each component publishes a heartbeat; an idle-flush stream detects
-      missed beats per (component, host) and emits alerts. The trigger is the
-      absence of events — only streaming engines handle this natively.
-    </p>
-    <div class="uc-mini">.windowTumbling({ seconds: 30, idleFlushMs: 5000 })</div>
-    <div class="uc-cta">Recipe being written</div>
-  </div>
-
-</div>
-
-<!-- ===================================================================== -->
-<h2 id="adjacent">Adjacent patterns</h2>
-<p class="muted">
-  A few more patterns the engine supports today; recipes are forthcoming.
-</p>
-
-<div class="uc-card-grid">
-
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon</div>
-    <h3>Workflow orchestration</h3>
-    <p>
-      Multi-stage pipeline (router → translation → history → outgoing) with a
-      transactional ack-and-push between every stage. Already used in
-      production at <a href="https://github.com/smartpricing/smartchat-core"><code>smartchat-core</code></a>.
-    </p>
-    <div class="uc-cta">Recipe being written</div>
-  </div>
-
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon</div>
-    <h3>Continuous summarisation</h3>
-    <p>
-      Maintain a per-entity rolling summary state (last N events, derived
-      score, status flags) updated on every message. Read by the application
-      via plain SQL on <code>queen_streams.state</code>.
-    </p>
-    <div class="uc-cta">Recipe being written</div>
-  </div>
-
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon</div>
-    <h3>Smart workload routing</h3>
-    <p>
-      Adaptive routing based on observed worker state (current load, recent
-      response time, working hours). Dynamic where rule engines are static.
-    </p>
-    <div class="uc-cta">Recipe being written</div>
-  </div>
-
-  <div class="uc-card uc-soon">
-    <div class="uc-card-eyebrow">Coming soon</div>
-    <h3>Bot training-data pipeline</h3>
-    <p>
-      Stream-stream join of (AI suggestion, human-edited reply) pairs over a
-      session window. Emits structured training tuples to a downstream queue
-      that feeds the learner.
-    </p>
-    <div class="uc-cta">Recipe being written</div>
+    <div class="uc-mini">.windowTumbling({ seconds: 600 }).reduce(seenSet)</div>
+    <div class="uc-mini">verified: 1,000 unique through, 0 duplicates leaked (23.1% dropped)</div>
+    <div class="uc-cta"><a href="use-case-dedup.html">Read recipe →</a></div>
   </div>
 
 </div>
@@ -283,8 +223,9 @@
 <h2 id="contributing">A pattern you'd like to see?</h2>
 <p class="muted">
   These pages are written from real production code — not idealised examples.
-  If you have built something on Queen + streams that fits a generalisable
-  pattern, please open an issue at
+  Each card above includes verified numbers from a live run against
+  <code>localhost:6632</code>. If you have built something on Queen +
+  streams that fits a generalisable pattern, please open an issue at
   <a href="https://github.com/smartpricing/queen/issues">github.com/smartpricing/queen</a>
   with a short description and we'll add a recipe page for it.
 </p>

@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subscription replay — Queen MQ Use Cases</title>
+<meta name="description" content="Rewind a brand-new consumer group to any timestamp and reprocess. Your production consumers never notice. Zero coordination, just Queen.">
+<meta name="theme-color" content="#141415">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="stylesheet" href="style.css">
+<style>
+.rl-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 16px 0 28px;
+}
+.rl-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.rl-stat-num {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.01em;
+}
+.rl-stat-label {
+  font-size: 11.5px;
+  color: var(--text-mid);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+.rl-ascii {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 14px 0;
+}
+.rl-table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rl-table th, .rl-table td {
+  border: 1px solid var(--border-mid);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.rl-table th {
+  background: var(--bg-card);
+  font-weight: 500;
+  color: var(--text-hi);
+}
+.rl-table code {
+  font-size: 12px;
+}
+</style>
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      Queen MQ
+    </a>
+    <nav class="topnav-links" aria-label="Primary">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="use-cases.html" class="current">Use cases</a>
+      <a href="clients.html">Clients</a>
+      <a href="cli.html">CLI</a>
+      <a href="server.html">Server</a>
+      <a href="http-api.html">HTTP API</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="sizing.html">Sizing</a>
+      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+    </nav>
+    <div class="topnav-right">
+      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="shell-narrow" style="padding-top: 48px;">
+
+<p style="font-size: 12.5px; color: var(--text-low); margin: 0 0 8px;">
+  <a href="use-cases.html" style="color: var(--text-low);">← Use cases</a>
+</p>
+
+<span class="label-xs">Recipe · ops</span>
+<h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
+  Subscription replay — rewind a stream to any timestamp.
+</h1>
+<p class="muted">
+  Your consumer had a bug last Tuesday. You shipped a fix today. You need
+  to reprocess every message since the bug went live — without disturbing
+  the production consumer that's still running. With Queen this is one
+  line of configuration: spawn a new consumer group with
+  <code>subscriptionFrom</code> set to the moment the bug went live. The
+  new group reads from that exact timestamp; the production group's
+  offset is untouched.
+</p>
+
+<div class="rl-stat-grid">
+  <div class="rl-stat">
+    <div class="rl-stat-num">1,500</div>
+    <div class="rl-stat-label">events pushed<br/>across 16 partitions</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">1,000</div>
+    <div class="rl-stat-label">received by the<br/>rewound CG (exact)</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">idx 500</div>
+    <div class="rl-stat-label">first event seen<br/>(matches deploy boundary)</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">0</div>
+    <div class="rl-stat-label">interference with the<br/>production consumer group</div>
+  </div>
+</div>
+
+<p class="muted" style="font-size: 12px; font-style: italic;">
+  Numbers are from a verified run on a single Mac with one PostgreSQL 18
+  container. Reproduce with
+  <code>examples/use-case-replay.js</code>.
+</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#problem">1. The problem</a>
+  <a href="#pattern">2. The pattern</a>
+  <a href="#quickstart">3. Quickstart</a>
+  <a href="#cleanup">4. Cleaning up a CG metadata</a>
+  <a href="#modes">5. Three subscription modes</a>
+  <a href="#independence">6. Why offsets stay independent</a>
+  <a href="#pitfalls">7. Common pitfalls</a>
+  <a href="#references">8. References</a>
+</nav>
+
+<!-- ====================================================================== -->
+<h2 id="problem">1. The problem</h2>
+<p class="muted">
+  The "I need to reprocess events from a point in time" problem comes
+  up constantly:
+</p>
+<ul>
+  <li>A consumer had a bug for the last 18 hours; you deployed a fix and
+    need to re-run every message since the bug landed.</li>
+  <li>A downstream system was down for 2 hours; you need to replay only
+    that window into a new pipeline.</li>
+  <li>You added a new analytics consumer and want it to backfill the
+    last week of traffic before going live.</li>
+  <li>You're debugging in staging by replaying production traffic from a
+    specific incident timestamp.</li>
+</ul>
+<p class="muted">
+  How the major alternatives handle it:
+</p>
+<table class="rl-table">
+  <thead>
+    <tr><th>System</th><th>Reprocess from timestamp?</th><th>Affects production?</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>SQS</td>
+      <td>No — messages are deleted on ack</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td>Kafka</td>
+      <td>Yes (new consumer group + seek)</td>
+      <td>Possibly — seek on the same group disturbs production</td>
+    </tr>
+    <tr>
+      <td>RabbitMQ</td>
+      <td>No — messages are gone after consumption</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td>Pulsar</td>
+      <td>Yes (subscription seek)</td>
+      <td>Same caveat as Kafka</td>
+    </tr>
+    <tr>
+      <td><strong>Queen</strong></td>
+      <td><strong>Yes</strong> — new CG with <code>subscriptionFrom</code></td>
+      <td><strong>Zero</strong> — each CG has its own offset row in PG</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ====================================================================== -->
+<h2 id="pattern">2. The pattern</h2>
+<p class="muted">
+  Queen stores each consumer group's progress as a row in
+  <code>queen.partition_consumers</code> keyed by
+  <code>(partition_id, consumer_group)</code>. To replay, you spawn a
+  brand-new consumer group that's never been seen before. The first pop
+  registers it in <code>queen.consumer_groups_metadata</code> with the
+  subscription anchor — either <code>'all'</code>, <code>'new'</code>, or
+  a specific ISO timestamp.
+</p>
+
+<div class="rl-ascii">    queue: order-events (16 partitions, all messages retained)
+                  │
+        ┌─────────┴─────────┐
+        │                   │
+        ▼                   ▼
+   CG 'prod'           CG 'reprocess'   ← new, never seen before
+   (subscription      (subscription
+    mode='all')        anchor: '2026-05-11T14:00:00Z')
+        │                   │
+   own offset row      own offset row
+   in PG               in PG
+        │                   │
+        ▼                   ▼
+   sees everything     sees only events
+   (no disruption)     created at-or-after the anchor
+</div>
+
+<p class="muted">
+  Because the two consumer groups have separate offset rows, they read
+  the same partitions completely independently. The production worker
+  doesn't pause, restart, or notice anything. The replay worker is
+  isolated by construction.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="quickstart">3. Quickstart</h2>
+<p class="muted">
+  Minimal reproducible setup: push 1,500 events with a deploy boundary
+  marked between idx 499 and idx 500. One CG reads everything; a new CG
+  spawned afterwards reads only what came at or after the boundary.
+</p>
+
+<div class="callout callout-info">
+  <div class="callout-title">Verified end-to-end</div>
+  <p>
+    Every snippet on this page was run against a live Queen server at
+    <code>http://localhost:6632</code> before being included. The
+    full demo lives at
+    <a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-replay.js"><code>examples/use-case-replay.js</code></a>
+    and is run as part of the docs build.
+  </p>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · production CG sees everything</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// npm install queen-mq        (Node 22+)
+import { Queen } from 'queen-mq'
+
+const url = 'http://localhost:6632'
+const q   = new Queen({ url, handleSignals: false })
+
+const QUEUE = 'order-events'
+
+await q.queue(QUEUE).config({
+  leaseTime:                 30,
+  retryLimit:                3,
+  retentionEnabled:          true,
+  retentionSeconds:          3600,     // keep history for 1 hour
+  completedRetentionSeconds: 600
+}).create()
+
+// Production consumer — sees every message ever pushed.
+const ac = new AbortController()
+;(async () =&gt; {
+  await q.queue(QUEUE)
+    .group('prod')
+    .batch(50)
+    .each()
+    .subscriptionMode('all')   // ★ first pop registers prod with mode='all'
+    .partitions(8)
+    .consume(async (msg) =&gt; {
+      // handle in production
+    }, { signal: ac.signal })
+})()
+
+// Producer (interleaved with prod consumer running):
+//   - push 500 events  ───►  sleep 800 ms  ───►  capture deployAt  ───►  sleep 800 ms
+//   - push 500 more events
+//   - sleep 600 ms
+//   - push 500 more events</code></pre>
+</div>
+
+<p class="muted">
+  Now the deploy fix has shipped and we want to reprocess every event
+  created at or after <code>deployAt</code>. We spawn a new consumer
+  group with that timestamp:
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · spawn a rewound consumer group</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// New CG, never seen before. First pop locks in the subscription anchor.
+const reprocessAc = new AbortController()
+;(async () =&gt; {
+  await q.queue(QUEUE)
+    .group('reprocess')
+    .batch(50)
+    .each()
+    .subscriptionFrom(deployAt)   // ★ ISO timestamp — picks up the 'timestamp' mode
+    .partitions(8)
+    .consume(async (msg) =&gt; {
+      // re-run your fixed pipeline for this message
+    }, { signal: reprocessAc.signal })
+})()
+
+// Verified run (1,500 events total, deploy boundary at idx 500):
+//   'prod' CG received:       1500  (expected 1500)
+//   'reprocess' CG received:  1000  (expected ≈ 1000)
+//   smallest idx in reprocess: 500  (matches deploy boundary)</code></pre>
+</div>
+
+<p class="muted">
+  Note that <code>'prod'</code> and <code>'reprocess'</code> consume the
+  same queue, on the same broker, against the same database — there is no
+  contention or impact between them. The same pattern works at any
+  scale: the reprocess CG can be a separate Pod, a separate cluster, a
+  notebook, or a CLI invocation.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="cleanup">4. Cleaning up a consumer group when you're done</h2>
+<p class="muted">
+  Once the reprocess completes, you typically want to delete the
+  one-shot CG so its registration doesn't linger. Use the admin API:
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · delete a consumer group's metadata</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// Delete CG state + subscription metadata for one queue:
+await q.admin.deleteConsumerGroupForQueue(
+  'reprocess',     // consumer group
+  'order-events',  // queue
+  true             // deleteMetadata: also drop the subscription_timestamp row
+)</code></pre>
+</div>
+
+<p class="muted">
+  <code>queue.delete()</code> intentionally does <strong>not</strong>
+  cascade to <code>queen.consumer_groups_metadata</code>, because
+  consumer groups subscribe across multiple queues (and across
+  namespace/task selectors). To wipe the metadata too, pass
+  <code>deleteMetadata: true</code>. This is the same pattern as
+  <code>queenctl cg delete --queue ...</code>.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="modes">5. The three subscription modes</h2>
+
+<table class="rl-table">
+  <thead>
+    <tr>
+      <th>Mode</th>
+      <th>How to set it</th>
+      <th>What the CG sees on first encounter</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>'all'</code> (default)</td>
+      <td><code>.subscriptionMode('all')</code> or omit entirely</td>
+      <td>Every message ever pushed (full history, until retention prunes it).</td>
+    </tr>
+    <tr>
+      <td><code>'new'</code></td>
+      <td><code>.subscriptionMode('new')</code></td>
+      <td>Only messages pushed <em>after</em> the CG's first pop. Skips history.</td>
+    </tr>
+    <tr>
+      <td><code>'timestamp'</code></td>
+      <td><code>.subscriptionFrom('2026-05-11T14:00:00Z')</code></td>
+      <td>Only messages whose <code>created_at &gt;= timestamp</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted">
+  The mode is locked in on the consumer group's <strong>first pop</strong>.
+  Subsequent pops by the same CG honour the recorded anchor — they ignore
+  any <code>subscriptionMode</code> / <code>subscriptionFrom</code> you
+  pass. To change the anchor, you either rename the CG, or delete it
+  via the admin API (see §4) and let the next pop re-register it.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="independence">6. Why the two CGs don't interfere</h2>
+<p class="muted">
+  Per-CG isolation is enforced at the schema level. Every
+  <code>(partition_id, consumer_group)</code> pair gets its own row in
+  <code>queen.partition_consumers</code> holding that CG's
+  <code>last_consumed_id</code>. The pop stored procedure
+  (<a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/002d_pop_unified_v4.sql"><code>pop_unified_batch_v4</code></a>)
+  filters by that row alone — no cross-CG read or write happens anywhere
+  on the hot path.
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>sql · independent offset rows per CG</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-sql">SELECT consumer_group,
+       count(*)                AS partitions_consumed,
+       sum(total_messages_consumed) AS lifetime_messages,
+       max(last_consumed_at)   AS last_seen
+FROM   queen.partition_consumers pc
+JOIN   queen.partitions p   ON p.id = pc.partition_id
+JOIN   queen.queues     q   ON q.id = p.queue_id
+WHERE  q.name = 'order-events'
+GROUP  BY consumer_group;</code></pre>
+</div>
+
+<p class="muted">
+  You'll see one row per CG. Each one advances independently as that CG
+  processes messages. There's no shared "topic offset" that one CG can
+  clobber on another.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="pitfalls">7. Common pitfalls</h2>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Subscription anchor is locked at first pop</div>
+  <p>
+    Once a consumer group has popped once, its anchor is fixed. Re-running
+    your script with a different <code>subscriptionFrom</code> against the
+    same CG name does nothing — the recorded
+    <code>subscription_timestamp</code> wins. Either rename the CG or
+    delete it via <code>q.admin.deleteConsumerGroupForQueue(cg, queue, true)</code>.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Retention can erase the data you want to replay</div>
+  <p>
+    If the source queue has aggressive <code>retentionSeconds</code> set,
+    the messages you want to rewind to may already be gone. Verify
+    <code>SELECT count(*) FROM queen.messages WHERE created_at &gt;= '...'</code>
+    before relying on replay for a critical window.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Don't reuse a "reprocess" name for permanent consumers</div>
+  <p>
+    The natural pattern is one fresh CG per replay job (e.g.
+    <code>reprocess-2026-05-11</code>). That way each replay starts
+    clean. Deleting and re-creating the same CG with a different anchor
+    is a 2-step dance you can avoid by naming.
+  </p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-title">Replay scales just like normal pop</div>
+  <p>
+    The rewound CG uses the exact same wildcard pop path
+    (<code>maxPartitions</code>, lease, batch, etc.) as production. You
+    can run multiple parallel workers on a replay CG — Queen's
+    per-partition lease guarantees no double-processing.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="references">8. References</h2>
+
+<table class="rl-table">
+  <thead>
+    <tr><th>What</th><th>Where</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Full demo (verified live)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-replay.js"><code>examples/use-case-replay.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Pop procedure that enforces subscription anchors</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/002d_pop_unified_v4.sql"><code>lib/schema/procedures/002d_pop_unified_v4.sql</code></a></td>
+    </tr>
+    <tr>
+      <td>Consumer-group admin SPs</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/008_consumer_groups.sql"><code>lib/schema/procedures/008_consumer_groups.sql</code></a></td>
+    </tr>
+    <tr>
+      <td>Consumer-group developer docs</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/developer/13-consumer-groups.md"><code>developer/13-consumer-groups.md</code></a></td>
+    </tr>
+    <tr>
+      <td><code>queenctl</code> CLI equivalents</td>
+      <td><a href="cli.html"><code>queenctl cg ls / describe / delete / seek</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top: 28px;">
+  <a href="use-cases.html">← Back to use cases</a>
+</p>
+
+</main>
+
+<footer class="site-foot">
+  <div class="shell site-foot-inner">
+    <div>
+      <div class="brand" style="margin-bottom: 10px;">
+        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        Queen MQ
+      </div>
+      <p class="muted" style="font-size: 12.5px; max-width: 320px;">
+        Partitioned message queue backed by PostgreSQL.<br>
+        Built with ❤︎ by <a href="https://www.linkedin.com/company/smartness-com/">Smartness</a>.
+      </p>
+    </div>
+    <div>
+      <h5>Docs</h5>
+      <ul>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="use-cases.html">Use cases</a></li>
+        <li><a href="clients.html">Clients</a></li>
+        <li><a href="cli.html">CLI</a></li>
+        <li><a href="http-api.html">HTTP API</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Operate</h5>
+      <ul>
+        <li><a href="server.html">Server setup</a></li>
+        <li><a href="dashboard.html">Web dashboard</a></li>
+        <li><a href="benchmarks.html">Benchmarks</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
+        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="shell site-foot-bottom">
+    <span>© 2025 Smartness. Released under the Apache 2.0 License.</span>
+  </div>
+</footer>
+
+<script src="prism.min.js" defer></script>
+<script src="site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transactional multi-stage pipelines — Queen MQ Use Cases</title>
+<meta name="description" content="Chain multiple processing stages with atomic ack-and-push between them. A worker crash never duplicates or drops a message. Per-stage retries and DLQ are built in.">
+<meta name="theme-color" content="#141415">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="stylesheet" href="style.css">
+<style>
+.rl-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 16px 0 28px;
+}
+.rl-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.rl-stat-num {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.01em;
+}
+.rl-stat-label {
+  font-size: 11.5px;
+  color: var(--text-mid);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+.rl-ascii {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 14px 0;
+}
+.rl-table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rl-table th, .rl-table td {
+  border: 1px solid var(--border-mid);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.rl-table th {
+  background: var(--bg-card);
+  font-weight: 500;
+  color: var(--text-hi);
+}
+.rl-table code {
+  font-size: 12px;
+}
+</style>
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      Queen MQ
+    </a>
+    <nav class="topnav-links" aria-label="Primary">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="use-cases.html" class="current">Use cases</a>
+      <a href="clients.html">Clients</a>
+      <a href="cli.html">CLI</a>
+      <a href="server.html">Server</a>
+      <a href="http-api.html">HTTP API</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="sizing.html">Sizing</a>
+      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+    </nav>
+    <div class="topnav-right">
+      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="shell-narrow" style="padding-top: 48px;">
+
+<p style="font-size: 12.5px; color: var(--text-low); margin: 0 0 8px;">
+  <a href="use-cases.html" style="color: var(--text-low);">← Use cases</a>
+</p>
+
+<span class="label-xs">Recipe · orchestration</span>
+<h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
+  Transactional multi-stage pipelines.
+</h1>
+<p class="muted">
+  Chain multiple processing stages together — translation → routing →
+  notification, validate → charge → ship, ingest → enrich → publish —
+  with one PostgreSQL transaction per handoff. The
+  <code>transaction().ack().push().commit()</code> primitive guarantees
+  that a worker crash, network hiccup, or PG hiccup between stages
+  cannot duplicate a message into the next stage, nor lose it from the
+  current one. Per-stage retries and DLQ are built into the queue
+  config — no orchestrator process, no Temporal cluster.
+</p>
+
+<div class="rl-stat-grid">
+  <div class="rl-stat">
+    <div class="rl-stat-num">100</div>
+    <div class="rl-stat-label">messages produced<br/>(14 poisoned on purpose)</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">86 / 86</div>
+    <div class="rl-stat-label">routed → notified<br/>(exact through-count)</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">14 / 14</div>
+    <div class="rl-stat-label">poison messages<br/>landed in DLQ</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">42</div>
+    <div class="rl-stat-label">total failed attempts<br/>(14 × 3 retries, then DLQ)</div>
+  </div>
+</div>
+
+<p class="muted" style="font-size: 12px; font-style: italic;">
+  Numbers are from a verified run with deliberately-poisoned messages.
+  Reproduce with <code>examples/use-case-pipeline.js</code>.
+</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#problem">1. The problem</a>
+  <a href="#pattern">2. The transactional handoff</a>
+  <a href="#failure">3. What happens without the transaction</a>
+  <a href="#quickstart">4. Quickstart — 3-stage pipeline</a>
+  <a href="#retries">5. Retries and DLQ per stage</a>
+  <a href="#ordering">6. Per-entity ordering via partitions</a>
+  <a href="#pitfalls">7. Common pitfalls</a>
+  <a href="#references">8. References</a>
+</nav>
+
+<!-- ====================================================================== -->
+<h2 id="problem">1. The problem</h2>
+<p class="muted">
+  Real-world workloads are rarely a single processing step. A chat
+  message goes through translation, intent routing, and delivery. An
+  order goes through validation, charging, fulfilment, and notification.
+  Each stage is a different team's code, different scaling profile,
+  different failure mode. The standard implementation is a chain of
+  queues. The standard <em>bug</em> in that implementation is one of
+  these two race windows:
+</p>
+
+<table class="rl-table">
+  <thead>
+    <tr><th>Where</th><th>Race window</th><th>Visible failure</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Push next, then ack</td>
+      <td>Worker crashes after pushing to stage N+1 but before acking stage N.</td>
+      <td>Message is delivered twice: re-popped from stage N, processed again, pushed to stage N+1 a second time.</td>
+    </tr>
+    <tr>
+      <td>Ack first, then push</td>
+      <td>Worker crashes after acking stage N but before pushing to stage N+1.</td>
+      <td>Message is lost: stage N's offset has advanced, stage N+1 never saw it.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted">
+  Both failure modes silently corrupt downstream state. They happen
+  rarely enough to escape testing — on a heavily loaded system, weekly.
+  The fix in most systems is "implement saga / outbox / 2PC" which
+  doubles the surface area. In Queen the fix is one line of code:
+  <code>transaction().ack().push().commit()</code>.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="pattern">2. The transactional handoff</h2>
+
+<div class="rl-ascii">    Worker holds lease on stage N's partition
+                  │
+                  ▼
+       result = await stageNHandler(msg)
+                  │
+                  ▼
+       q.transaction()
+         .ack(msg)                       ──┐
+         .queue('stageN+1').push([result]) ├ ONE PG TRANSACTION
+         .commit()                       ──┘
+                  │
+                  ▼
+       Either both happened, or neither did.
+       If COMMIT fails, lease expires, message redelivered.
+       If COMMIT succeeds, stage N+1's queue has it AND stage N's
+       cursor advanced.
+</div>
+
+<p class="muted">
+  The <code>queen.transaction()</code> builder packages the ack and the
+  next-stage push into a single payload posted to
+  <a href="http-api.html#transaction"><code>POST /api/v1/transaction</code></a>.
+  On the broker side this is one call to
+  <a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/004_transaction.sql"><code>queen.execute_transaction_v2</code></a>:
+  one <code>BEGIN</code>, one <code>COMMIT</code>, both operations
+  inside. The PG transaction is the integrity boundary; there is no
+  intermediate state that can leak.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="failure">3. What happens without the transaction</h2>
+<p class="muted">
+  To make the property concrete, compare the two natural orderings:
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · the wrong way (ack-then-push)</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// ❌ DANGEROUS — message can be lost between stages on a worker crash.
+await q.queue('stageN').consume(async (msg) =&gt; {
+  const out = await stageNHandler(msg)
+  await q.ack(msg, true, { group: 'stageN-worker' })
+  // ←─ worker dies HERE: msg is acked on stageN, never pushed to stageN+1
+  await q.queue('stageN+1').push([{ data: out }])
+})</code></pre>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · the also-wrong way (push-then-ack)</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// ❌ DANGEROUS — message can be duplicated to stageN+1 on a worker crash.
+await q.queue('stageN').consume(async (msg) =&gt; {
+  const out = await stageNHandler(msg)
+  await q.queue('stageN+1').push([{ data: out }])
+  // ←─ worker dies HERE: stageN+1 has it, but stageN's lease expires
+  //                      and the broker redelivers msg → another push to stageN+1
+  await q.ack(msg, true, { group: 'stageN-worker' })
+})</code></pre>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · the right way</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// ✅ Both operations commit together inside one PG transaction.
+await q.queue('stageN').autoAck(false).consume(async (msg) =&gt; {
+  const out = await stageNHandler(msg)
+  await q.transaction()
+    .ack(msg, 'completed', { consumerGroup: 'stageN-worker' })
+    .queue('stageN+1').partition(msg.data.entityId).push([{
+      transactionId: `${msg.transactionId}-next`,
+      data:          out
+    }])
+    .commit()
+})</code></pre>
+</div>
+
+<p class="muted">
+  A worker crash anywhere in this handler now rolls back to the last
+  successful <code>commit()</code>: either both the ack and the push
+  happened (the message has moved to stage N+1, exactly once) or neither
+  happened (the message stays in stage N with its retry counter intact,
+  and the broker redelivers when the lease expires).
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="quickstart">4. Quickstart — a 3-stage pipeline</h2>
+<p class="muted">
+  Setup: three queues, one for each stage, all with
+  <code>retryLimit: 2</code> and <code>dlqAfterMaxRetries: true</code>.
+  Messages are partitioned by <code>chatId</code> so all messages for one
+  conversation stay strictly ordered.
+</p>
+
+<div class="callout callout-info">
+  <div class="callout-title">Verified end-to-end</div>
+  <p>
+    Every snippet on this page was run against a live Queen server at
+    <code>http://localhost:6632</code> before being included. The
+    full demo lives at
+    <a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-pipeline.js"><code>examples/use-case-pipeline.js</code></a>
+    and runs as part of the docs build.
+  </p>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · setup</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">import { Queen } from 'queen-mq'
+
+const q = new Queen({ url: 'http://localhost:6632', handleSignals: false })
+
+const Q_TRANSLATE = 'chat.translate'
+const Q_ROUTE     = 'chat.route'
+const Q_NOTIFY    = 'chat.notify'
+
+for (const name of [Q_TRANSLATE, Q_ROUTE, Q_NOTIFY]) {
+  await q.queue(name).config({
+    leaseTime:                 8,     // fast lease for fast retries
+    retryLimit:                2,     // 1 original + 2 retries, then DLQ
+    deadLetterQueue:           true,
+    dlqAfterMaxRetries:        true,
+    retentionEnabled:          true,
+    retentionSeconds:          3600
+  }).create()
+}</code></pre>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · stage 1 (translate) with transactional handoff</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">await q.queue(Q_TRANSLATE)
+  .group('translate-worker')
+  .batch(1)
+  .each()
+  .autoAck(false)
+  .consume(async (msg) =&gt; {
+    const translated = {
+      ...msg.data,
+      translatedText: `[en] ${msg.data.text}`,
+      translatedAt:   Date.now()
+    }
+    await q.transaction()
+      .ack(msg, 'completed', { consumerGroup: 'translate-worker' })
+      .queue(Q_ROUTE).partition(msg.data.chatId).push([{
+        transactionId: `${msg.data.chatId}-routed`,
+        data:          translated
+      }])
+      .commit()
+  })
+  .onError(async (msg, err) =&gt; {
+    // Manual nack so retry/DLQ kicks in.
+    await q.ack(msg, false, {
+      group: 'translate-worker',
+      error: err.message
+    })
+  })</code></pre>
+</div>
+
+<p class="muted">
+  Stage 2 (<code>route</code>) and stage 3 (<code>notify</code>) follow
+  the same shape. Stage 3 is terminal — it doesn't push anywhere, just
+  calls a downstream API.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="retries">5. Retries and DLQ per stage</h2>
+<p class="muted">
+  Each queue's <code>retryLimit</code> applies independently to that
+  stage. When a handler throws, the manual nack
+  (<code>q.ack(msg, false)</code>) marks the attempt as failed; the
+  broker decrements the retry budget and redelivers when the lease
+  expires. On exhaustion, the message is moved to that queue's DLQ — not
+  to any global one — so debugging stays scoped to the stage that broke.
+</p>
+
+<div class="rl-ascii">  produce(100 messages, 14 are 'poisoned')
+        │
+        ▼
+  ┌───────────────┐
+  │  translate    │  retry_limit=2, DLQ=on
+  └───────────────┘
+        │              ──── 14 poisons fail × 3 attempts each = 42 attempts ────►  chat.translate DLQ
+        │   86 pass
+        ▼
+  ┌───────────────┐
+  │   route       │  retry_limit=2, DLQ=on
+  └───────────────┘
+        │   86 pass
+        ▼
+  ┌───────────────┐
+  │  notify       │
+  └───────────────┘
+        │
+        ▼  86 completed.
+</div>
+
+<p class="muted">
+  Verified live run (numbers in the stat cards at the top):
+</p>
+
+<table class="rl-table">
+  <thead>
+    <tr><th>Counter</th><th>Value</th><th>Expected</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Messages produced</td><td>100</td><td>—</td></tr>
+    <tr><td>Poisoned (every 7th)</td><td>14</td><td>—</td></tr>
+    <tr><td>Translate handler attempts (incl. retries)</td><td>128</td><td>≥ 86 + 14×3 = 128</td></tr>
+    <tr><td>Translate handler failures</td><td>42</td><td>14 × 3 = 42</td></tr>
+    <tr><td>Routed (stage 2 throughput)</td><td>86</td><td>86</td></tr>
+    <tr><td>Notified (stage 3 throughput)</td><td>86</td><td>86</td></tr>
+    <tr><td>DLQ for <code>chat.translate</code></td><td>14</td><td>14</td></tr>
+  </tbody>
+</table>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>http · inspect a stage's DLQ</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-bash">curl -s "http://localhost:6632/api/v1/dlq?queue=chat.translate&amp;limit=20" \
+  | jq '.messages[] | { transactionId, retryCount, error: .errorMessage }'</code></pre>
+</div>
+
+<p class="muted">
+  Or via the dashboard: each queue's detail page shows its DLQ inline
+  with a "Replay" action that re-pushes the message to the original
+  queue.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="ordering">6. Per-entity ordering via partitions</h2>
+<p class="muted">
+  When you call <code>.partition(msg.data.chatId)</code> on each stage's
+  push, all messages for one chat stay on the same partition through the
+  entire pipeline. Combined with Queen's per-partition lease, that
+  guarantees:
+</p>
+<ul>
+  <li>Stage N processes messages for chat-X strictly in order.</li>
+  <li>Stage N+1 receives messages for chat-X strictly in order.</li>
+  <li>Different chats are processed concurrently across partitions
+    without contention.</li>
+</ul>
+<p class="muted">
+  This is the smartchat / order-processing / IoT-per-device pattern.
+  The partition is the unit of ordered work. Add a new chat → a new
+  partition appears on first push, with no preallocation.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="pitfalls">7. Common pitfalls</h2>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Don't ack inside the handler, then transaction-push after</div>
+  <p>
+    The whole point of <code>transaction()</code> is that ack and push
+    commit together. Calling <code>q.ack(msg)</code> first defeats it.
+    Use the builder form everywhere except terminal stages.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Match <code>consumerGroup</code> on ack and consume</div>
+  <p>
+    If your consumer uses <code>.group('translate-worker')</code>, then
+    <code>transaction().ack(msg, 'completed', { consumerGroup: 'translate-worker' })</code>
+    must use the same name. Mismatches cause "Invalid or expired lease"
+    errors and the message is redelivered.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Set <code>leaseTime</code> longer than your handler's p99</div>
+  <p>
+    If the handler runs longer than <code>leaseTime</code> seconds the
+    broker assumes it crashed and redelivers — and your eventual
+    transaction commit will fail with "Invalid or expired lease". Either
+    raise <code>leaseTime</code> or use
+    <code>.renewLease(true, intervalMillis)</code> on the consumer.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">DLQ is per-queue, not per-pipeline</div>
+  <p>
+    Each stage has its own DLQ inspected at
+    <code>/api/v1/dlq?queue=&lt;name&gt;</code>. If a stage 3 handler
+    poisons every message, those poison messages land in
+    <code>chat.notify</code>'s DLQ, not in <code>chat.translate</code>'s.
+    This is deliberate — different stages have different operational
+    owners.
+  </p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-title">Why this isn't Temporal</div>
+  <p>
+    Temporal replays workflow code deterministically from an event log.
+    Queen pipelines don't — they pop a message, run the handler, commit
+    the next-stage push. There's no replay harness, no
+    determinism contract on your handler code. The trade-off is
+    simpler workers (use any library, any clock, any random number
+    generator) but no automatic time-travel debugging. Most real
+    pipelines don't need determinism; they need atomic handoffs.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="references">8. References</h2>
+
+<table class="rl-table">
+  <thead>
+    <tr><th>What</th><th>Where</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Full demo (verified live)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-pipeline.js"><code>examples/use-case-pipeline.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Older chat-style example (manual transactions)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/examples/00-chat.js"><code>examples/00-chat.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Transaction stored procedure</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/004_transaction.sql"><code>lib/schema/procedures/004_transaction.sql</code></a></td>
+    </tr>
+    <tr>
+      <td>Transaction HTTP route</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/server/src/routes/transactions.cpp"><code>server/src/routes/transactions.cpp</code></a></td>
+    </tr>
+    <tr>
+      <td>Transaction client builder</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/builders/TransactionBuilder.js"><code>client-v2/builders/TransactionBuilder.js</code></a></td>
+    </tr>
+    <tr>
+      <td>DLQ + retry developer docs</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/developer/13-consumer-groups.md"><code>developer/13-consumer-groups.md</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top: 28px;">
+  <a href="use-cases.html">← Back to use cases</a>
+</p>
+
+</main>
+
+<footer class="site-foot">
+  <div class="shell site-foot-inner">
+    <div>
+      <div class="brand" style="margin-bottom: 10px;">
+        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        Queen MQ
+      </div>
+      <p class="muted" style="font-size: 12.5px; max-width: 320px;">
+        Partitioned message queue backed by PostgreSQL.<br>
+        Built with ❤︎ by <a href="https://www.linkedin.com/company/smartness-com/">Smartness</a>.
+      </p>
+    </div>
+    <div>
+      <h5>Docs</h5>
+      <ul>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="use-cases.html">Use cases</a></li>
+        <li><a href="clients.html">Clients</a></li>
+        <li><a href="cli.html">CLI</a></li>
+        <li><a href="http-api.html">HTTP API</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Operate</h5>
+      <ul>
+        <li><a href="server.html">Server setup</a></li>
+        <li><a href="dashboard.html">Web dashboard</a></li>
+        <li><a href="benchmarks.html">Benchmarks</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
+        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="shell site-foot-bottom">
+    <span>© 2025 Smartness. Released under the Apache 2.0 License.</span>
+  </div>
+</footer>
+
+<script src="prism.min.js" defer></script>
+<script src="site.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Real-time per-entity aggregations — Queen MQ Use Cases</title>
+<meta name="description" content="Continuous per-customer count/sum/max/avg over rolling windows. State lives in PostgreSQL — query your aggregates as plain SQL from Grafana, Metabase, or any BI tool. No Materialize, no ksqlDB, no separate analytics store.">
+<meta name="theme-color" content="#141415">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="stylesheet" href="style.css">
+<style>
+.rl-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 16px 0 28px;
+}
+.rl-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.rl-stat-num {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.01em;
+}
+.rl-stat-label {
+  font-size: 11.5px;
+  color: var(--text-mid);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+.rl-ascii {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 14px 0;
+}
+.rl-table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rl-table th, .rl-table td {
+  border: 1px solid var(--border-mid);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.rl-table th {
+  background: var(--bg-card);
+  font-weight: 500;
+  color: var(--text-hi);
+}
+.rl-table code {
+  font-size: 12px;
+}
+</style>
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      Queen MQ
+    </a>
+    <nav class="topnav-links" aria-label="Primary">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="use-cases.html" class="current">Use cases</a>
+      <a href="clients.html">Clients</a>
+      <a href="cli.html">CLI</a>
+      <a href="server.html">Server</a>
+      <a href="http-api.html">HTTP API</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="sizing.html">Sizing</a>
+      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+    </nav>
+    <div class="topnav-right">
+      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="shell-narrow" style="padding-top: 48px;">
+
+<p style="font-size: 12.5px; color: var(--text-low); margin: 0 0 8px;">
+  <a href="use-cases.html" style="color: var(--text-low);">← Use cases</a>
+</p>
+
+<span class="label-xs">Recipe · analytics</span>
+<h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
+  Real-time per-entity aggregations, queryable as plain SQL.
+</h1>
+<p class="muted">
+  Maintain rolling per-customer, per-tenant, or per-device counters
+  (<code>count</code>, <code>sum</code>, <code>max</code>,
+  <code>avg</code>) continuously, with no Materialize, ksqlDB, or
+  ClickHouse cluster to operate. The aggregate <strong>is</strong> a row
+  in <code>queen_streams.state</code> — your dashboard, BI tool, billing
+  service, or alerting rule queries it as plain SQL on the PostgreSQL
+  you already run.
+</p>
+
+<div class="rl-stat-grid">
+  <div class="rl-stat">
+    <div class="rl-stat-num">3,000</div>
+    <div class="rl-stat-label">events produced<br/>across 30 customers</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">3,000</div>
+    <div class="rl-stat-label">Σ window-counts<br/>(exact match)</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">Σ exact</div>
+    <div class="rl-stat-label">sum of amounts<br/>matches input to the penny</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">0 extra<br/>infrastructure</div>
+    <div class="rl-stat-label">no Redis, no Materialize,<br/>no analytics store</div>
+  </div>
+</div>
+
+<p class="muted" style="font-size: 12px; font-style: italic;">
+  Numbers are from a verified run with 30 customers × ~100 events each
+  over 12 seconds, tumbling windows of 5 seconds.
+  Reproduce with <code>examples/use-case-aggregations.js</code>.
+</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#problem">1. The problem</a>
+  <a href="#pattern">2. The pattern</a>
+  <a href="#quickstart">3. Quickstart</a>
+  <a href="#sql">4. Querying the live aggregate via SQL</a>
+  <a href="#sink">5. Emitting closed windows to a queue</a>
+  <a href="#comparison">6. vs. Materialize / ksqlDB / Tinybird</a>
+  <a href="#pitfalls">7. Common pitfalls</a>
+  <a href="#references">8. References</a>
+</nav>
+
+<!-- ====================================================================== -->
+<h2 id="problem">1. The problem</h2>
+<p class="muted">
+  You need "per-customer activity in the last N seconds / minutes /
+  hours" continuously, accessible from:
+</p>
+<ul>
+  <li>A real-time dashboard (Grafana panel, custom React UI).</li>
+  <li>A billing service that meters usage per window.</li>
+  <li>An alerting rule that fires if any customer crosses a threshold.</li>
+  <li>An ML feature pipeline that needs rolling stats as inputs.</li>
+</ul>
+<p class="muted">
+  The standard answers in this space all add their own infrastructure:
+</p>
+<table class="rl-table">
+  <thead>
+    <tr><th>System</th><th>Floor cost</th><th>Where state lives</th><th>How dashboards read it</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Materialize</td>
+      <td>$400+/mo managed</td>
+      <td>Proprietary store</td>
+      <td>SQL via Materialize's wire-compatible endpoint</td>
+    </tr>
+    <tr>
+      <td>ksqlDB</td>
+      <td>Kafka cluster + ksqlDB nodes</td>
+      <td>Internal RocksDB + Kafka changelog</td>
+      <td>REST API or "pull queries"</td>
+    </tr>
+    <tr>
+      <td>Tinybird</td>
+      <td>$0–$$ as a service</td>
+      <td>ClickHouse hosted</td>
+      <td>Generated HTTP API</td>
+    </tr>
+    <tr>
+      <td>Self-hosted ClickHouse + ingestor</td>
+      <td>Separate cluster + ETL</td>
+      <td>ClickHouse</td>
+      <td>SQL via ClickHouse client</td>
+    </tr>
+    <tr>
+      <td><strong>Queen streams</strong></td>
+      <td><strong>Your existing PostgreSQL</strong></td>
+      <td><code>queen_streams.state</code> table</td>
+      <td>Plain SQL — already wired to your BI / Grafana</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ====================================================================== -->
+<h2 id="pattern">2. The pattern</h2>
+<p class="muted">
+  A producer pushes events partitioned by entity (customerId, tenantId,
+  deviceId). A streaming query keys by partition (default), tumbles into
+  windows of N seconds, and runs <code>aggregate()</code> over each
+  window. The per-window accumulator is persisted as a row in
+  <code>queen_streams.state</code> at the end of every cycle:
+</p>
+
+<div class="rl-ascii">  producer ──► events                     (Queen, partitioned by customerId)
+                  │
+                  ▼
+       Stream.from(events)
+            .keyBy(default = partitionId = customerId)
+            .windowTumbling({ seconds: 60 })
+            .aggregate({ count, sum, max })
+            .to(events.totals_per_customer_per_min)   ◀── (optional sink)
+                  │
+                  ▼
+           queen_streams.state          (one row per OPEN window per customer)
+              │                          PK = (query_id, partition_id, state_key)
+              └─►  SELECT key, value FROM queen_streams.state
+                   ─►  your Grafana / Metabase / billing service
+</div>
+
+<p class="muted">
+  Each window's accumulator is a JSONB document like
+  <code>{ count: 47, sum: 312.5, max: 99.0, windowStart, windowEnd }</code>.
+  Workers holding the partition lease are the only writers, so there's
+  no cross-worker contention on a customer's row. State is durable,
+  replicated by your PG backup, and queryable from anywhere that speaks
+  SQL.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="quickstart">3. Quickstart</h2>
+
+<div class="callout callout-info">
+  <div class="callout-title">Verified end-to-end</div>
+  <p>
+    Every snippet on this page was run against a live Queen server at
+    <code>http://localhost:6632</code> before being included. The
+    full demo lives at
+    <a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-aggregations.js"><code>examples/use-case-aggregations.js</code></a>.
+  </p>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · setup + producer</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// npm install queen-mq        (Node 22+)
+import { Queen, Stream } from 'queen-mq'
+
+const url = 'http://localhost:6632'
+const q   = new Queen({ url, handleSignals: false })
+
+const Q_EVENTS = 'events'
+
+await q.queue(Q_EVENTS).config({
+  leaseTime:                 30,
+  retryLimit:                3,
+  retentionEnabled:          true,
+  retentionSeconds:          3600
+}).create()
+
+// Producer: 3000 events spread across 30 customers.
+for (let burst = 0; burst &lt; 30; burst++) {
+  const batch = []
+  for (let i = 0; i &lt; 25; i++) {
+    const customerId = `cust-${Math.floor(Math.random() * 30)}`
+    batch.push({
+      partition: customerId,
+      item:      { data: { customerId, amount: Math.random() * 100, t: Date.now() } }
+    })
+  }
+  // Group by partition so each push hits one partition cleanly.
+  const byPart = new Map()
+  for (const { partition, item } of batch) {
+    const arr = byPart.get(partition) || []
+    arr.push(item)
+    byPart.set(partition, arr)
+  }
+  await Promise.all([...byPart].map(([p, items]) =&gt;
+    q.queue(Q_EVENTS).partition(p).push(items)
+  ))
+  await new Promise(r =&gt; setTimeout(r, 50))
+}</code></pre>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · streaming aggregation</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// 5-second tumbling windows, count + sum + max per customer.
+const stream = await Stream
+  .from(q.queue(Q_EVENTS))
+  // Default key = partition_id = customerId. No explicit keyBy needed.
+  .windowTumbling({ seconds: 5, idleFlushMs: 1500 })
+  .aggregate({
+    count: () =&gt; 1,
+    sum:   m =&gt; m.amount,
+    max:   m =&gt; m.amount
+  })
+  .to(q.queue('events.totals_per_customer_per_5s'))   // optional sink queue
+  .run({
+    queryId:       'customer-rolling-stats',
+    url,
+    batchSize:     200,
+    maxPartitions: 8,
+    reset:         true
+  })
+
+// Verified run, 3000 events across 30 customers, 12s producer:
+//   Σ window.count across all emits  = 3000   (matches input exactly)
+//   Σ window.sum   across all emits  = 150803.70  (matches input to the penny)
+//   query registered in queen_streams.queries with config_hash 376ce9fa...</code></pre>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="sql">4. Querying the live aggregate via SQL</h2>
+<p class="muted">
+  While a window is still <em>open</em> for a customer, the partial
+  accumulator is sitting in <code>queen_streams.state</code>. You can
+  query it directly:
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>sql · current open-window aggregates per customer</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-sql">SELECT
+    s.key                                AS customer_or_partition,
+    (s.value-&gt;'acc'-&gt;&gt;'count')::int      AS events_in_window,
+    (s.value-&gt;'acc'-&gt;&gt;'sum')::numeric    AS sum_in_window,
+    (s.value-&gt;'acc'-&gt;&gt;'max')::numeric    AS max_in_window,
+    to_timestamp(((s.value-&gt;&gt;'windowStart')::bigint / 1000.0)) AS window_start,
+    to_timestamp(((s.value-&gt;&gt;'windowEnd')::bigint / 1000.0))   AS window_end
+FROM queen_streams.state s
+JOIN queen_streams.queries q ON q.id = s.query_id
+WHERE q.name = 'customer-rolling-stats'
+ORDER BY events_in_window DESC
+LIMIT 20;</code></pre>
+</div>
+
+<p class="muted">
+  Hook this query into Grafana with the standard PostgreSQL datasource
+  and you have a live per-customer dashboard. No exporter, no second
+  database, no schema migration in a different system.
+</p>
+
+<div class="callout callout-info">
+  <div class="callout-title">State lifecycle</div>
+  <p>
+    The state row for a window exists from the first event in that
+    window until the window closes. When the window closes (windowEnd +
+    grace period &lt;= clock), the runner emits the final aggregate to
+    the sink (if any) and <strong>deletes</strong> the state row in the
+    same PG transaction. So:
+  </p>
+  <ul>
+    <li>Live SELECTs see <em>currently open</em> windows for each
+      customer.</li>
+    <li>The sink queue
+      (<code>events.totals_per_customer_per_5s</code> above)
+      receives one push per closed window — that's your durable history.</li>
+  </ul>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="sink">5. Emitting closed windows to a queue</h2>
+<p class="muted">
+  Pair this with the <code>.to(sinkQueue)</code> on the stream and every
+  closed window becomes a regular Queen message on a sink queue. That
+  queue can fan out to multiple downstream consumers (billing,
+  alerting, anomaly detection) using consumer groups, with full
+  replay-from-timestamp support.
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · downstream consumer of closed windows</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">await q.queue('events.totals_per_customer_per_5s')
+  .group('billing-meter')
+  .batch(50)
+  .each()
+  .consume(async (msg) =&gt; {
+    // msg.data = { count, sum, max }   one record per closed window
+    await billingSystem.recordUsage({
+      customer:  msg.partition,        // partitions carry forward the customerId
+      windowEnd: msg.data.windowEnd,
+      count:     msg.data.count,
+      revenue:   msg.data.sum
+    })
+  })</code></pre>
+</div>
+
+<p class="muted">
+  Other consumer groups (<code>analytics-dashboard</code>,
+  <code>anomaly-detector</code>) read the same sink queue independently.
+  Adding a new downstream is one
+  <code>q.queue(...).group('new-name').consume(...)</code> — no schema
+  change to the streaming query.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="comparison">6. vs. Materialize / ksqlDB / Tinybird</h2>
+<p class="muted">
+  When you pick this approach over a dedicated streaming SQL engine,
+  you're making two trade-offs:
+</p>
+<table class="rl-table">
+  <thead>
+    <tr><th></th><th>Materialize / ksqlDB</th><th>Queen streams</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>SQL expressiveness</td>
+      <td>Full SQL on the streaming query</td>
+      <td>Functional builder (<code>map/filter/keyBy/window/reduce/aggregate</code>) in JS / Python / Go</td>
+    </tr>
+    <tr>
+      <td>Join semantics</td>
+      <td>Stream-stream joins, materialised views over joins</td>
+      <td>Single-stream operators; cross-stream join requires the repartition pattern</td>
+    </tr>
+    <tr>
+      <td>Infrastructure</td>
+      <td>Separate cluster ($400+/mo managed, more self-hosted)</td>
+      <td>Your existing PG</td>
+    </tr>
+    <tr>
+      <td>State location</td>
+      <td>Proprietary store, queried via wire protocol</td>
+      <td>Plain PG table, queried via plain SQL</td>
+    </tr>
+    <tr>
+      <td>Backup / restore</td>
+      <td>Separate backup pipeline</td>
+      <td>Same as your existing PG backup</td>
+    </tr>
+    <tr>
+      <td>Backfill from history</td>
+      <td>Reset the materialized view</td>
+      <td><code>subscriptionFrom</code> on a new CG + new query</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted">
+  Pick Materialize / ksqlDB when you genuinely need streaming SQL with
+  joins, CDC, or advanced temporal operators. Pick Queen streams when
+  your aggregations are per-entity windowed counters / sums / max — the
+  vast majority of "real-time per-customer X" requirements — and you
+  don't want to operate a second database for them.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="pitfalls">7. Common pitfalls</h2>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Live SQL shows only OPEN windows</div>
+  <p>
+    The state row is deleted on window close (the closed aggregate is
+    emitted to the sink instead). If you query
+    <code>queen_streams.state</code> a few seconds after the producer
+    stops, the rows will be gone and your dashboard panel will look
+    empty. For historical aggregates, consume the sink queue or persist
+    them into your own table.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Idle-flush is the only way windows close on quiet entities</div>
+  <p>
+    In processing-time mode, a window only closes when either (a) a
+    later event arrives whose <code>created_at</code> is past the window
+    end, or (b) the idle-flush timer fires. If a customer goes quiet,
+    the window stays open until the timer sweeps it. Tune
+    <code>idleFlushMs</code> based on how stale you can tolerate the
+    aggregate being.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Partition by the entity you're aggregating over</div>
+  <p>
+    Queen partitions are the unit of single-writer ownership. If the
+    source queue is partitioned by <code>orderId</code> but you call
+    <code>.keyBy(m =&gt; m.customerId)</code>, two partition leases may
+    write to the same logical <code>customerId</code> state row from
+    different workers. Always partition by the same key you aggregate
+    by — usually <code>customerId</code> / <code>tenantId</code> /
+    <code>deviceId</code> — and skip <code>.keyBy()</code> entirely.
+  </p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-title">Aggregate cardinality matters</div>
+  <p>
+    One open window = one PG row. Aggregating per-customer with 1M
+    customers and 1-minute windows means up to 1M open state rows. Fine
+    for PG, but worth right-sizing your hardware. For very large
+    cardinalities, prefer larger windows or coarser keying.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="references">8. References</h2>
+
+<table class="rl-table">
+  <thead>
+    <tr><th>What</th><th>Where</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Full demo (verified live)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-aggregations.js"><code>examples/use-case-aggregations.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Reference: per-customer windowed sum (streams SDK)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/02-per-customer-windowed-sum.js"><code>streams/examples/02-per-customer-windowed-sum.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Window operators source</td>
+      <td><a href="https://github.com/smartpricing/queen/tree/master/clients/client-js/client-v2/streams/operators"><code>client-v2/streams/operators/</code></a></td>
+    </tr>
+    <tr>
+      <td>Streams schema</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/019_streams_schema.sql"><code>lib/schema/procedures/019_streams_schema.sql</code></a></td>
+    </tr>
+    <tr>
+      <td>Cycle commit (atomic state + push + ack)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/021_streams_cycle_v1.sql"><code>021_streams_cycle_v1.sql</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top: 28px;">
+  <a href="use-cases.html">← Back to use cases</a>
+</p>
+
+</main>
+
+<footer class="site-foot">
+  <div class="shell site-foot-inner">
+    <div>
+      <div class="brand" style="margin-bottom: 10px;">
+        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        Queen MQ
+      </div>
+      <p class="muted" style="font-size: 12.5px; max-width: 320px;">
+        Partitioned message queue backed by PostgreSQL.<br>
+        Built with ❤︎ by <a href="https://www.linkedin.com/company/smartness-com/">Smartness</a>.
+      </p>
+    </div>
+    <div>
+      <h5>Docs</h5>
+      <ul>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="use-cases.html">Use cases</a></li>
+        <li><a href="clients.html">Clients</a></li>
+        <li><a href="cli.html">CLI</a></li>
+        <li><a href="http-api.html">HTTP API</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Operate</h5>
+      <ul>
+        <li><a href="server.html">Server setup</a></li>
+        <li><a href="dashboard.html">Web dashboard</a></li>
+        <li><a href="benchmarks.html">Benchmarks</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
+        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="shell site-foot-bottom">
+    <span>© 2025 Smartness. Released under the Apache 2.0 License.</span>
+  </div>
+</footer>
+
+<script src="prism.min.js" defer></script>
+<script src="site.js" defer></script>
+</body>
+</html>

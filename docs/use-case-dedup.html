@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Webhook deduplication — Queen MQ Use Cases</title>
+<meta name="description" content="Drop duplicate webhook deliveries from Stripe, Booking, Octorate, Twilio without Redis. Per-window seen-set state lives in PostgreSQL and is garbage-collected automatically when the window closes.">
+<meta name="theme-color" content="#141415">
+<meta name="color-scheme" content="dark">
+<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="stylesheet" href="style.css">
+<style>
+.rl-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 16px 0 28px;
+}
+.rl-stat {
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.rl-stat-num {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--text-hi);
+  letter-spacing: -0.01em;
+}
+.rl-stat-label {
+  font-size: 11.5px;
+  color: var(--text-mid);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+.rl-ascii {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-mid);
+  background: var(--bg-card);
+  border: 1px solid var(--border-mid);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 14px 0;
+}
+.rl-table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rl-table th, .rl-table td {
+  border: 1px solid var(--border-mid);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.rl-table th {
+  background: var(--bg-card);
+  font-weight: 500;
+  color: var(--text-hi);
+}
+.rl-table code {
+  font-size: 12px;
+}
+</style>
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html">
+      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      Queen MQ
+    </a>
+    <nav class="topnav-links" aria-label="Primary">
+      <a href="quickstart.html">Quickstart</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="visual-tour.html">Visual tour</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="use-cases.html" class="current">Use cases</a>
+      <a href="clients.html">Clients</a>
+      <a href="cli.html">CLI</a>
+      <a href="server.html">Server</a>
+      <a href="http-api.html">HTTP API</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="benchmarks.html">Benchmarks</a>
+      <a href="sizing.html">Sizing</a>
+      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+    </nav>
+    <div class="topnav-right">
+      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="shell-narrow" style="padding-top: 48px;">
+
+<p style="font-size: 12.5px; color: var(--text-low); margin: 0 0 8px;">
+  <a href="use-cases.html" style="color: var(--text-low);">← Use cases</a>
+</p>
+
+<span class="label-xs">Recipe · integration</span>
+<h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
+  Idempotent webhook deduplication, without Redis.
+</h1>
+<p class="muted">
+  Stripe, Booking, Octorate, Twilio, GitHub all redeliver webhooks —
+  sometimes within minutes, sometimes hours later. Your handler running
+  twice means a double charge, a duplicate email, a duplicate row. The
+  standard fix is a Redis SET with a TTL; the standard problem is that
+  now you have Redis to operate, an eviction story to design, and an
+  outage waiting when Redis fills up. Queen replaces all of that with a
+  streaming window whose seen-set state lives in PostgreSQL and is
+  garbage-collected automatically when the window closes.
+</p>
+
+<div class="rl-stat-grid">
+  <div class="rl-stat">
+    <div class="rl-stat-num">1,000</div>
+    <div class="rl-stat-label">unique webhook events<br/>across 5 providers</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">300</div>
+    <div class="rl-stat-label">duplicates interleaved<br/>(redelivery simulation)</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">1,000 / 0</div>
+    <div class="rl-stat-label">unique through · dupes<br/>leaked to downstream</div>
+  </div>
+  <div class="rl-stat">
+    <div class="rl-stat-num">23.1%</div>
+    <div class="rl-stat-label">of incoming dropped<br/>(matches injected ratio)</div>
+  </div>
+</div>
+
+<p class="muted" style="font-size: 12px; font-style: italic;">
+  Numbers are from a verified run with 1,000 events + 300 random
+  duplicates over 5 providers, 10-second tumbling windows.
+  Reproduce with <code>examples/use-case-dedup.js</code>.
+</p>
+
+<nav class="toc" aria-label="On this page">
+  <a href="#problem">1. The problem</a>
+  <a href="#pattern">2. The pattern</a>
+  <a href="#quickstart">3. Quickstart</a>
+  <a href="#sql">4. Inspecting state via SQL</a>
+  <a href="#window-sizing">5. Window sizing — how long to dedup for</a>
+  <a href="#comparison">6. vs. Redis / outbox / hand-rolled</a>
+  <a href="#pitfalls">7. Common pitfalls</a>
+  <a href="#references">8. References</a>
+</nav>
+
+<!-- ====================================================================== -->
+<h2 id="problem">1. The problem</h2>
+<p class="muted">
+  External providers retry webhook deliveries on any non-2xx response,
+  on read timeouts, and sometimes — especially during platform-side
+  incidents — at random. The contract is "at-least-once". Real
+  redelivery patterns we've seen:
+</p>
+<ul>
+  <li><strong>Stripe</strong> retries with exponential backoff for up to
+    3 days on non-2xx. <code>idempotency-key</code> is exposed but
+    optional on the consumer side.</li>
+  <li><strong>Octorate / channel managers</strong> deliver the same
+    inventory-update event twice within seconds when their multi-region
+    pipeline fans out.</li>
+  <li><strong>Twilio</strong> retries 11 times over 24h on 5xx
+    responses.</li>
+  <li><strong>GitHub</strong> redelivers any failed webhook for 8 hours,
+    and the UI offers manual redelivery — which support engineers click
+    multiple times in a panic.</li>
+</ul>
+<p class="muted">
+  The standard fix:
+</p>
+<pre><code class="language-javascript">// The naïve handler — broken under redelivery.
+app.post('/webhooks/stripe', async (req, res) =&gt; {
+  await charge(req.body)             // ← runs twice on retry
+  res.send('ok')
+})
+
+// The standard fix — adds Redis to your stack.
+app.post('/webhooks/stripe', async (req, res) =&gt; {
+  if (await redis.set(`seen:${req.body.id}`, 1, 'EX', 3600, 'NX') === null) {
+    return res.send('ok')            // already processed
+  }
+  await charge(req.body)
+  res.send('ok')
+})</code></pre>
+
+<p class="muted">
+  Now you operate Redis. You worry about its TTL policy when it
+  approaches max-memory, about eviction kicking in mid-incident, about
+  it being a SPOF for every webhook integration in your platform.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="pattern">2. The pattern</h2>
+<p class="muted">
+  A webhook ingestor pushes raw webhook bodies onto a Queen queue
+  partitioned by provider. A streaming query tumbles into N-second
+  windows per provider, holds a seen-set of <code>eventId</code>s in
+  state, and emits each event downstream only on its first observation
+  within that window. State lives in PostgreSQL; when the window
+  closes, the row is deleted in the same transaction that emits the
+  final accumulator.
+</p>
+
+<div class="rl-ascii">  HTTP ingestor ──► incoming   (Queen, partitioned by providerId)
+                       │
+                       ▼
+       Stream.from(incoming)
+            .keyBy(default = providerId)
+            .windowTumbling({ seconds: 600 })       ← 10-min dedup window
+            .reduce(
+              (acc, msg) =&gt; acc.seen.includes(msg.eventId)
+                ? acc                                ← already seen → drop
+                : { seen:  [...acc.seen,   msg.eventId],
+                    firsts: [...acc.firsts, msg] },  ← first time → keep
+              { seen: [], firsts: [] }
+            )
+            .flatMap(window =&gt; window.firsts)        ← emit only the firsts
+            .to(verified)
+                       │
+                       ▼
+       downstream consumer (charge, email, etc.)
+       sees one event per unique eventId
+</div>
+
+<p class="muted">
+  Two key properties:
+</p>
+<ul>
+  <li><strong>State is durable</strong> — the seen-set is a JSONB
+    accumulator inside <code>queen_streams.state</code>, replicated by
+    your PG backup. Restart Node, kill the worker, redeploy the broker —
+    state is untouched.</li>
+  <li><strong>State is garbage-collected automatically</strong> — when
+    the window closes, the runner emits the accumulator to the sink and
+    <strong>deletes</strong> the state row in the same PG transaction.
+    No TTL job, no Redis eviction story, no operational surface area.</li>
+</ul>
+
+<!-- ====================================================================== -->
+<h2 id="quickstart">3. Quickstart</h2>
+
+<div class="callout callout-info">
+  <div class="callout-title">Verified end-to-end</div>
+  <p>
+    Every snippet on this page was run against a live Queen server at
+    <code>http://localhost:6632</code> before being included. The
+    full demo lives at
+    <a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-dedup.js"><code>examples/use-case-dedup.js</code></a>.
+  </p>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · setup</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">import { Queen, Stream } from 'queen-mq'
+
+const url = 'http://localhost:6632'
+const q   = new Queen({ url, handleSignals: false })
+
+const Q_INCOMING = 'webhooks.incoming'
+const Q_VERIFIED = 'webhooks.verified'
+
+await q.queue(Q_INCOMING).config({
+  leaseTime:        30,
+  retryLimit:       3,
+  retentionEnabled: true,
+  retentionSeconds: 3600
+}).create()
+await q.queue(Q_VERIFIED).config({
+  leaseTime:        30,
+  retentionEnabled: true,
+  retentionSeconds: 3600
+}).create()</code></pre>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · the dedup stream</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// 10-minute tumbling windows, per-provider seen-set, emit firsts to verified.
+const stream = await Stream
+  .from(q.queue(Q_INCOMING))
+  // Default key = partition_id = providerId — what we want.
+  .windowTumbling({ seconds: 600, idleFlushMs: 5000 })
+  .reduce(
+    (acc, msg) =&gt; {
+      if (acc.seen.includes(msg.eventId)) return acc       // dup → drop
+      return {
+        seen:   [...acc.seen,   msg.eventId],
+        firsts: [...acc.firsts, msg]
+      }
+    },
+    { seen: [], firsts: [] }
+  )
+  .flatMap(window =&gt; window.firsts)                       // explode firsts
+  .to(q.queue(Q_VERIFIED))
+  .run({
+    queryId:       'webhook-dedup',
+    url,
+    batchSize:     200,
+    maxPartitions: 8,
+    maxWaitMillis: 200,
+    reset:         true
+  })</code></pre>
+</div>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>javascript · downstream consumer of verified events</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-javascript">// Downstream sees each unique webhook event exactly once per window.
+await q.queue(Q_VERIFIED)
+  .group('charge-processor')
+  .batch(50)
+  .each()
+  .consume(async (msg) =&gt; {
+    await chargeCustomer(msg.data)   // safe to run — deduplicated upstream
+  })
+
+// Verified run, 1000 unique + 300 duplicates injected over 5 providers:
+//   events arriving at incoming:  1300
+//   events through to verified:   1000   (expected 1000)
+//   duplicates leaked downstream: 0      (expected 0)
+//   dedup ratio:                  23.1%  (matches injected ratio)</code></pre>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="sql">4. Inspecting state via SQL</h2>
+<p class="muted">
+  While a window is open, the seen-set for that provider is a JSONB
+  field in <code>queen_streams.state</code>. You can monitor dedup
+  effectiveness directly:
+</p>
+
+<div class="code-meta-wrap with-copy">
+  <div class="code-meta"><span>sql · how many distinct events have we seen per provider this window</span><button class="copy-btn" type="button">copy</button></div>
+<pre><code class="language-sql">SELECT
+    s.key                                              AS provider_or_partition,
+    jsonb_array_length(s.value-&gt;'acc'-&gt;'seen')         AS distinct_events_in_window,
+    jsonb_array_length(s.value-&gt;'acc'-&gt;'firsts')       AS forwarded_downstream,
+    to_timestamp(((s.value-&gt;&gt;'windowStart')::bigint / 1000.0)) AS window_start,
+    to_timestamp(((s.value-&gt;&gt;'windowEnd')::bigint / 1000.0))   AS window_end
+FROM queen_streams.state s
+JOIN queen_streams.queries q ON q.id = s.query_id
+WHERE q.name = 'webhook-dedup'
+ORDER BY distinct_events_in_window DESC;</code></pre>
+</div>
+
+<p class="muted">
+  Connect this to your existing dashboards as you would any PG table.
+  When the window closes the row disappears; the closed-window aggregate
+  is emitted to <code>webhooks.verified</code> as a regular Queen
+  message that downstream consumers process.
+</p>
+
+<!-- ====================================================================== -->
+<h2 id="window-sizing">5. Window sizing — how long to dedup for</h2>
+<p class="muted">
+  The window size determines the maximum gap between an original
+  delivery and a redelivery that the system will still deduplicate.
+  Match it to the redelivery window of the upstream provider:
+</p>
+
+<table class="rl-table">
+  <thead>
+    <tr>
+      <th>Upstream</th>
+      <th>Redelivery window</th>
+      <th>Suggested <code>seconds</code></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Stripe</td>
+      <td>Up to 3 days</td>
+      <td>259,200 (3d) — but see below for large windows</td>
+    </tr>
+    <tr>
+      <td>Twilio</td>
+      <td>11 retries over 24h</td>
+      <td>86,400 (24h)</td>
+    </tr>
+    <tr>
+      <td>GitHub manual redelivery</td>
+      <td>Hours; manual</td>
+      <td>3,600–86,400 (1h–24h)</td>
+    </tr>
+    <tr>
+      <td>OTA channel managers</td>
+      <td>Seconds to minutes</td>
+      <td>60–600 (1min–10min)</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Large windows = large seen-sets</div>
+  <p>
+    The seen-set is held entirely in state during the window's lifetime.
+    For a provider sending 100 req/s with a 24h window, the seen-set has
+    up to 8.6M entries. PG JSONB handles this, but the per-cycle cost of
+    serialising/deserialising the accumulator grows with the set size.
+    For very long windows, consider keeping deduplication state in your
+    own application table (one row per <code>eventId</code> with a TTL
+    index) instead of in stream state.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="comparison">6. vs. Redis / outbox / hand-rolled</h2>
+
+<table class="rl-table">
+  <thead>
+    <tr>
+      <th></th>
+      <th>Redis SET + TTL</th>
+      <th>App-side DB table + TTL job</th>
+      <th><strong>Queen streams</strong></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Extra infra to operate</td>
+      <td>Yes — Redis</td>
+      <td>No, but TTL job to maintain</td>
+      <td><strong>No</strong> — same PG</td>
+    </tr>
+    <tr>
+      <td>Durability of seen-set</td>
+      <td>Volatile (unless AOF)</td>
+      <td>Durable</td>
+      <td><strong>Durable</strong> (PG-backed)</td>
+    </tr>
+    <tr>
+      <td>State eviction</td>
+      <td>TTL + max-memory policy</td>
+      <td>Your own cron job</td>
+      <td><strong>Automatic</strong> on window close</td>
+    </tr>
+    <tr>
+      <td>SPOF risk</td>
+      <td>Yes — Redis down kills dedup</td>
+      <td>Same as your DB</td>
+      <td>Same as your DB</td>
+    </tr>
+    <tr>
+      <td>Per-provider isolation</td>
+      <td>Manual (key prefixes)</td>
+      <td>Manual</td>
+      <td><strong>Free</strong> — partition by providerId</td>
+    </tr>
+    <tr>
+      <td>Audit / inspection</td>
+      <td><code>SCAN</code> with cursor</td>
+      <td>SQL on your table</td>
+      <td><strong>SQL</strong> on <code>queen_streams.state</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ====================================================================== -->
+<h2 id="pitfalls">7. Common pitfalls</h2>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Deduplication is per-window, not global</div>
+  <p>
+    An event that arrives once in window N and once again in window N+1
+    will pass through twice. The window boundary is the dedup horizon.
+    If you need stricter "exactly-once forever" semantics, use a
+    long-lived dedup table in your application schema instead.
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Partition by the provider, not by the event</div>
+  <p>
+    The seen-set is sharded by <code>partition_id</code>. If you
+    partition the source queue by <code>eventId</code> instead of
+    <code>providerId</code>, every event lands on its own partition with
+    a seen-set of size 1 — no dedup ever happens. Always partition by
+    the entity whose seen-set you want to share (the provider).
+  </p>
+</div>
+
+<div class="callout callout-warn">
+  <div class="callout-title">Tune <code>idleFlushMs</code> for quiet providers</div>
+  <p>
+    A window only closes when (a) a later event arrives that's past the
+    window end, or (b) the idle-flush timer fires. If a provider goes
+    silent, the window stays open until the timer sweeps it. The default
+    in this recipe is 5 seconds — fast enough that you see closed
+    windows promptly even on quiet providers, slow enough that the flush
+    sweep doesn't dominate CPU.
+  </p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-title">Choosing <code>eventId</code></div>
+  <p>
+    Use the most authoritative identifier the upstream gives you.
+    Stripe: <code>event.id</code>. Twilio:
+    <code>MessageSid</code>. GitHub:
+    <code>X-GitHub-Delivery</code>. If the upstream doesn't expose a
+    stable identifier, hash a canonical subset of the payload — but be
+    aware that hash collisions effectively become false-positive
+    duplicates.
+  </p>
+</div>
+
+<!-- ====================================================================== -->
+<h2 id="references">8. References</h2>
+
+<table class="rl-table">
+  <thead>
+    <tr><th>What</th><th>Where</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Full demo (verified live)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-dedup.js"><code>examples/use-case-dedup.js</code></a></td>
+    </tr>
+    <tr>
+      <td>In-window dedup reference (streams SDK)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/04-in-window-dedup.js"><code>streams/examples/04-in-window-dedup.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Reduce operator (the seen-set accumulator)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/operators/ReduceOperator.js"><code>ReduceOperator.js</code></a></td>
+    </tr>
+    <tr>
+      <td>Window operators</td>
+      <td><a href="https://github.com/smartpricing/queen/tree/master/clients/client-js/client-v2/streams/operators"><code>client-v2/streams/operators/</code></a></td>
+    </tr>
+    <tr>
+      <td>Streams schema (where the seen-set lives)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/019_streams_schema.sql"><code>019_streams_schema.sql</code></a></td>
+    </tr>
+    <tr>
+      <td>Cycle commit (atomic state + push + ack)</td>
+      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/021_streams_cycle_v1.sql"><code>021_streams_cycle_v1.sql</code></a></td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top: 28px;">
+  <a href="use-cases.html">← Back to use cases</a>
+</p>
+
+</main>
+
+<footer class="site-foot">
+  <div class="shell site-foot-inner">
+    <div>
+      <div class="brand" style="margin-bottom: 10px;">
+        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        Queen MQ
+      </div>
+      <p class="muted" style="font-size: 12.5px; max-width: 320px;">
+        Partitioned message queue backed by PostgreSQL.<br>
+        Built with ❤︎ by <a href="https://www.linkedin.com/company/smartness-com/">Smartness</a>.
+      </p>
+    </div>
+    <div>
+      <h5>Docs</h5>
+      <ul>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="use-cases.html">Use cases</a></li>
+        <li><a href="clients.html">Clients</a></li>
+        <li><a href="cli.html">CLI</a></li>
+        <li><a href="http-api.html">HTTP API</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Operate</h5>
+      <ul>
+        <li><a href="server.html">Server setup</a></li>
+        <li><a href="dashboard.html">Web dashboard</a></li>
+        <li><a href="benchmarks.html">Benchmarks</a></li>
+      </ul>
+    </div>
+    <div>
+      <h5>Project</h5>
+      <ul>
+        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
+        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="shell site-foot-bottom">
+    <span>© 2025 Smartness. Released under the Apache 2.0 License.</span>
+  </div>
+</footer>
+
+<script src="prism.min.js" defer></script>
+<script src="site.js" defer></script>
+</body>
+</html>
