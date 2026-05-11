@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/smartpricing/queen/client-cli/cmd"
+	"github.com/smartpricing/queen/clients/client-cli/cmd"
 )
 
 func main() {

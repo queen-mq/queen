@@ -10,9 +10,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/smartpricing/queen/client-cli/internal/auth"
-	"github.com/smartpricing/queen/client-cli/internal/config"
-	clierr "github.com/smartpricing/queen/client-cli/internal/errors"
+	"github.com/smartpricing/queen/clients/client-cli/internal/auth"
+	"github.com/smartpricing/queen/clients/client-cli/internal/config"
+	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )

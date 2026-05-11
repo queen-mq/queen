@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 
-	"github.com/smartpricing/queen/client-cli/internal/output"
+	"github.com/smartpricing/queen/clients/client-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 

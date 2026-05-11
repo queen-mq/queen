@@ -1,12 +1,13 @@
 name: Release CLI
 
-# Triggered by tags shaped 'client-cli/vX.Y.Z' to keep the CLI on its own
-# release cadence within the monorepo (matches the Go submodule pattern
-# documented in developer/14-release.md).
+# Triggered by tags shaped 'clients/client-cli/vX.Y.Z'. The directory-prefixed
+# pattern is required so Go's module proxy can resolve the submodule at
+# github.com/smartpricing/queen/clients/client-cli — see
+# https://go.dev/ref/mod#vcs-version and developer/14-release.md.
 on:
   push:
     tags:
-      - 'client-cli/v*'
+      - 'clients/client-cli/v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -46,4 +47,3 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

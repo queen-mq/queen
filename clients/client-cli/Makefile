@@ -1,10 +1,10 @@
 BIN_NAME      := queenctl
-PKG           := github.com/smartpricing/queen/client-cli
+PKG           := github.com/smartpricing/queen/clients/client-cli
 CMD_PKG       := $(PKG)/cmd
 BUILD_DIR     := bin
 INSTALL_DIR   := $(or $(GOBIN),$(HOME)/go/bin)
 
-VERSION       := $(shell git describe --tags --abbrev=0 --match 'client-cli/v*' 2>/dev/null | sed 's|client-cli/||')
+VERSION       := $(shell git describe --tags --abbrev=0 --match 'clients/client-cli/v*' 2>/dev/null | sed 's|clients/client-cli/||')
 ifeq ($(strip $(VERSION)),)
 VERSION := dev
 endif

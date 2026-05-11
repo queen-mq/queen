@@ -83,11 +83,13 @@ is then exercised in `.github/workflows/cli.yml` on Linux + macOS.
 
 ## Release process
 
-The CLI ships independently of the broker, on its own tag:
+The CLI ships independently of the broker, on its own directory-prefixed
+tag (required so Go's module proxy can resolve the submodule at
+`github.com/smartpricing/queen/clients/client-cli`):
 
 ```bash
-git tag -a client-cli/v0.1.0 -m "queenctl 0.1.0"
-git push origin client-cli/v0.1.0
+git tag -a clients/client-cli/v0.1.0 -m "queenctl 0.1.0"
+git push origin clients/client-cli/v0.1.0
 ```
 
 The tag triggers `.github/workflows/release-cli.yml` which runs
@@ -96,11 +98,11 @@ The tag triggers `.github/workflows/release-cli.yml` which runs
 - Cross-compile for linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64
 - Generate `checksums.txt`
 - Upload archives to GitHub Releases
-- Update the Homebrew tap (`smartpricing/homebrew-tap`) via the
-`HOMEBREW_TAP_TOKEN` secret
 
 `-ldflags` embeds version + commit + date into the binary, surfaced by
-`queenctl version`.
+`queenctl version`. End users can also `go install
+github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@vX.Y.Z`
+once the tag is published.
 
 See [14-release.md](14-release.md) for the cross-artifact release order
 (broker first, then JS, Python, Go SDK, CLI, PHP, C++).

@@ -66,11 +66,11 @@
 </nav>
 
 <h2 id="install">Install</h2>
-<pre><code class="language-bash"># Homebrew
-brew install smartpricing/tap/queenctl
+<pre><code class="language-bash"># Pre-built binary (recommended) — download from GitHub Releases,
+# extract the matching archive, and put `queenctl` on $PATH.
 
-# Go modules
-go install github.com/smartpricing/queen/client-cli@latest
+# Go modules (requires Go 1.22+)
+go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@latest
 
 # From source
 cd clients/client-cli &amp;&amp; make build  # ./bin/queenctl</code></pre>
@@ -78,7 +78,7 @@ cd clients/client-cli &amp;&amp; make build  # ./bin/queenctl</code></pre>
   Pre-built archives for linux/{amd64,arm64}, darwin/{amd64,arm64} and
   windows/amd64 ship on
   <a href="https://github.com/smartpricing/queen/releases">GitHub Releases</a>
-  under tag prefix <code>client-cli/v*</code>.
+  under tag prefix <code>clients/client-cli/v*</code>.
 </p>
 
 <h2 id="contexts">Contexts</h2>

@@ -14,19 +14,22 @@ queenctl lag --min-seconds 30  # alert-friendly view
 
 ## Install
 
-### Homebrew (macOS, Linux)
+### Pre-built binaries (recommended)
 
-```bash
-brew install smartpricing/tap/queenctl
-```
+Each tag `clients/client-cli/vX.Y.Z` ships archives on
+[GitHub Releases](https://github.com/smartpricing/queen/releases) for
+linux/{amd64,arm64}, darwin/{amd64,arm64} and windows/amd64. Download the
+matching `queenctl_<version>_<os>_<arch>.tar.gz` (or `.zip` on Windows),
+extract, and drop `queenctl` somewhere on `$PATH`.
 
 ### `go install`
 
 ```bash
-go install github.com/smartpricing/queen/client-cli@latest
-# binary is named 'queenctl' once the v1 tag lands; before that, `go build`
-# from this directory.
+go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@latest
 ```
+
+This installs a `queenctl` binary into `$GOBIN` (defaults to `~/go/bin`).
+Requires Go 1.22+.
 
 ### From source
 
@@ -35,12 +38,6 @@ cd clients/client-cli
 make build              # ./bin/queenctl
 make install            # $GOBIN/queenctl
 ```
-
-### Pre-built binaries
-
-Each tag `client-cli/vX.Y.Z` ships archives on
-[GitHub Releases](https://github.com/smartpricing/queen/releases) for
-linux/{amd64,arm64}, darwin/{amd64,arm64} and windows/amd64.
 
 ## Quick start
 

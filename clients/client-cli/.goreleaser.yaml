@@ -21,9 +21,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/smartpricing/queen/client-cli/cmd.BuildVersion={{ .Version }}
-      - -X github.com/smartpricing/queen/client-cli/cmd.BuildCommit={{ .ShortCommit }}
-      - -X github.com/smartpricing/queen/client-cli/cmd.BuildDate={{ .CommitDate }}
+      - -X github.com/smartpricing/queen/clients/client-cli/cmd.BuildVersion={{ .Version }}
+      - -X github.com/smartpricing/queen/clients/client-cli/cmd.BuildCommit={{ .ShortCommit }}
+      - -X github.com/smartpricing/queen/clients/client-cli/cmd.BuildDate={{ .CommitDate }}
 
 archives:
   - id: queenctl-archive
@@ -60,24 +60,11 @@ release:
     queenctl is the Queen MQ operator CLI.
 
     Install:
-      brew install smartpricing/tap/queenctl
-      go install github.com/smartpricing/queen/client-cli@v{{ .Version }}
+      # Pre-built binary (recommended)
+      # Download the matching tar.gz / zip from the assets below and put `queenctl` on $PATH.
 
-brews:
-  - name: queenctl
-    repository:
-      owner: smartpricing
-      name: homebrew-tap
-      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
-    directory: Formula
-    homepage: https://queenmq.com
-    description: 'Operator CLI for Queen MQ - the partitioned message queue backed by PostgreSQL'
-    license: Apache-2.0
-    test: |
-      system "#{bin}/queenctl version --short"
-    install: |
-      bin.install "queenctl"
-      generate_completions_from_executable(bin/"queenctl", "completion")
+      # Or with Go (1.22+):
+      go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@v{{ .Version }}
 
 changelog:
   sort: asc

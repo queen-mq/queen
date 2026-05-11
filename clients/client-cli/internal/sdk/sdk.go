@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/smartpricing/queen/client-cli/internal/config"
+	"github.com/smartpricing/queen/clients/client-cli/internal/config"
 	queen "github.com/smartpricing/queen/clients/client-go"
 )
 

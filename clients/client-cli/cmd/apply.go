@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	clierr "github.com/smartpricing/queen/client-cli/internal/errors"
+	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
 	queen "github.com/smartpricing/queen/clients/client-go"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"

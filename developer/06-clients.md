@@ -11,7 +11,7 @@ clients/
 ├── client-go/        Go 1.24+            client-go         Go modules
 ├── client-laravel/   PHP 8.3+ + Laravel  smartpricing/queen-mq  Packagist
 ├── client-cpp/       C++17               header-only       in-repo
-└── client-cli/       Go 1.24+            queenctl          GitHub Releases + Homebrew
+└── client-cli/       Go 1.24+            queenctl          GitHub Releases (binary + `go install`)
 ```
 
 The `client-cli/` package is the operator CLI built on top of `client-go`.

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	clierr "github.com/smartpricing/queen/client-cli/internal/errors"
+	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
 	"github.com/spf13/cobra"
 )
 

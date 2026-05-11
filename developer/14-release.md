@@ -23,7 +23,7 @@ Stable releases drop the `.beta.N` suffix. The same version applies (with one ca
 | Go client           | `clients/client-go/`                  | Go modules (Git tag)               | tag: `client-go/v0.14.0` |
 | PHP/Laravel client  | `clients/client-laravel/`             | Packagist: `smartpricing/queen-mq` | `0.14.0`                 |
 | C++ client          | `clients/client-cpp/`                 | header-only, in repo               | tracked by repo tag      |
-| `queenctl` CLI      | `clients/client-cli/`                 | GitHub Releases + Homebrew tap     | tag: `client-cli/v0.1.0` |
+| `queenctl` CLI      | `clients/client-cli/`                 | GitHub Releases (binary + `go install`) | tag: `clients/client-cli/v0.1.0` |
 | K8s templates       | `helm/`, `helm_queen/`, `proxy/helm/` (no `Chart.yaml` — not stock Helm charts) | git refs | aligned with broker image |
 
 
@@ -64,7 +64,7 @@ The version lives in **nine places**. Update them all together (find/replace `0.
 3. `clients/client-py/pyproject.toml` — `version`
 4. `clients/client-laravel/composer.json` — `version`
 5. `clients/client-go/` — *no file change*; the Go version comes from the Git tag
-6. `clients/client-cli/` — *no file change*; the CLI version comes from the `client-cli/v*` Git tag and `-ldflags`
+6. `clients/client-cli/` — *no file change*; the CLI version comes from the `clients/client-cli/v*` Git tag and `-ldflags`
 7. `README.md` — Docker run examples (`smartnessai/queen-mq:0.14.0`)
 8. `docs/index.html`, `docs/quickstart.html` — same
 9. `Dockerfile` — there's no version in here directly, but if you tag the image, ensure CI passes the right `--tag`
@@ -88,7 +88,7 @@ The order matters for downstream consumers:
 4. **Tag the Go client** (`client-go/v0.14.0` — the path is monorepo-style: see Go's [submodule tagging convention](https://go.dev/ref/mod#vcs-version)).
 5. **Publish the PHP client** (Packagist auto-pulls from the Git tag — no separate publish step).
 6. **Publish the C++ client** — nothing to publish; consumers use the header from the same tag.
-7. **Tag the CLI** (`client-cli/v0.X.Y`). The `Release CLI` workflow (`.github/workflows/release-cli.yml`) runs goreleaser, attaches binaries to GitHub Releases, and updates the Homebrew tap.
+7. **Tag the CLI** (`clients/client-cli/v0.X.Y`). The `Release CLI` workflow (`.github/workflows/release-cli.yml`) runs goreleaser and attaches binaries to GitHub Releases. The directory-prefixed tag is required so `go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@vX.Y.Z` resolves.
 8. **Update Helm charts** if any default values reference the new image tag.
 
 ---
@@ -171,12 +171,14 @@ GOPROXY=https://proxy.golang.org go install \
 
 ### `queenctl` CLI
 
-The CLI lives at `clients/client-cli/` with its own `go.mod` and is released
-on a `client-cli/vX.Y.Z` tag, just like `client-go`:
+The CLI lives at `clients/client-cli/` with its own `go.mod` (module path
+`github.com/smartpricing/queen/clients/client-cli`) and is released on a
+`clients/client-cli/vX.Y.Z` tag — directory-prefixed so Go's module proxy can
+resolve the submodule, the same convention used for `client-go`:
 
 ```bash
-git tag -a client-cli/v0.1.0 -m "queenctl 0.1.0"
-git push origin client-cli/v0.1.0
+git tag -a clients/client-cli/v0.1.0 -m "queenctl 0.1.0"
+git push origin clients/client-cli/v0.1.0
 ```
 
 The push triggers `.github/workflows/release-cli.yml` which:
@@ -184,11 +186,15 @@ The push triggers `.github/workflows/release-cli.yml` which:
 1. Cross-compiles for linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64
 2. Generates checksums and shell-completion scripts
 3. Uploads tar.gz / zip archives to GitHub Releases
-4. Updates the Homebrew formula at `smartpricing/homebrew-tap` (requires the
-   `HOMEBREW_TAP_TOKEN` repository secret)
 
 The version + commit + build date are embedded via `-ldflags` and surfaced
 by `queenctl version`. See [15-cli.md](15-cli.md) for the full architecture.
+
+After the tag is published, end users can install with:
+
+```bash
+go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@v0.1.0
+```
 
 ### Packagist (`smartpricing/queen-mq`)
 

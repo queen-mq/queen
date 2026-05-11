@@ -4,7 +4,7 @@ import (
 	"context"
 
 	queen "github.com/smartpricing/queen/clients/client-go"
-	"github.com/smartpricing/queen/client-cli/internal/output"
+	"github.com/smartpricing/queen/clients/client-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
