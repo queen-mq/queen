@@ -38,6 +38,19 @@ jobs:
           make build
           make completion
 
+      # GoReleaser parses the tag as semver. Our tags are shaped
+      # `clients/client-cli/vX.Y.Z` to satisfy Go's module proxy convention
+      # for nested modules, so we strip the directory prefix and pass the
+      # result via GORELEASER_CURRENT_TAG (and GORELEASER_PREVIOUS_TAG so
+      # the changelog computation doesn't fall back to an unrelated tag).
+      - name: Compute semver tag for goreleaser
+        id: tag
+        run: |
+          full_ref="${{ github.event.inputs.tag || github.ref_name }}"
+          semver="${full_ref#clients/client-cli/}"
+          echo "semver=$semver" >> "$GITHUB_OUTPUT"
+          echo "Resolved semver: $semver"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -47,3 +60,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.semver }}

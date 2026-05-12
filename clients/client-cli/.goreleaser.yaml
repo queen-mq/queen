@@ -4,11 +4,10 @@ project_name: queenctl
 
 # This subproject lives inside the smartpricing/queen monorepo. Release tags
 # are shaped `clients/client-cli/vX.Y.Z` to satisfy Go's module proxy
-# convention for nested modules. Without this block GoReleaser tries to parse
-# the whole tag as semver and fails with "invalid semantic version".
-monorepo:
-  tag_prefix: clients/client-cli/
-  dir: clients/client-cli
+# convention for nested modules. GoReleaser would otherwise try to parse the
+# whole tag string as semver and fail. We strip the directory prefix in the
+# release workflow by exporting GORELEASER_CURRENT_TAG; the `monorepo` block
+# that would handle this declaratively is Pro-only.
 
 before:
   hooks:
