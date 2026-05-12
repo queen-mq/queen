@@ -32,6 +32,26 @@ jobs:
           go-version: '1.24'
           cache-dependency-path: clients/client-cli/go.sum
 
+      # The in-tree go.mod has a `replace github.com/.../client-go => ../client-go`
+      # so local dev can iterate on both modules without publishing. That
+      # replace is invalid for downstream `go install`, so we rewrite go.mod
+      # to pin the published client-go version before any build step runs.
+      - name: Rewrite go.mod to drop dev-only replace
+        working-directory: clients/client-cli
+        run: |
+          # Pin to the latest published client-go tag at the time of release.
+          # Update this if a newer client-go is required by the CLI.
+          CLIENT_GO_VERSION="v0.15.0"
+          sed -i.bak \
+            -e "s|github.com/smartpricing/queen/clients/client-go v0.0.0|github.com/smartpricing/queen/clients/client-go ${CLIENT_GO_VERSION}|" \
+            -e "/^replace github\.com\/smartpricing\/queen\/clients\/client-go => /d" \
+            go.mod
+          rm -f go.mod.bak
+          # Recompute go.sum entries for the now-real require.
+          go mod tidy
+          echo "--- patched go.mod ---"
+          cat go.mod
+
       - name: Pre-build completions
         working-directory: clients/client-cli
         run: |

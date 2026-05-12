@@ -37,4 +37,8 @@ require (
 	golang.org/x/text v0.29.0 // indirect
 )
 
+// Local override so in-tree changes to client-go are visible to the CLI
+// without re-publishing. The release-cli workflow rewrites this file before
+// running goreleaser so the published module is resolvable via the public
+// Go proxy (see .github/workflows/release-cli.yml).
 replace github.com/smartpricing/queen/clients/client-go => ../client-go
