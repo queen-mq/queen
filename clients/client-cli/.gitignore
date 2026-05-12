@@ -1,0 +1,5 @@
+# Build artifacts produced by `make build` and `make completion`.
+# GoReleaser refuses to release from a dirty tree, and the release-cli
+# workflow regenerates these on each run, so they must never be tracked.
+bin/
+completions/
