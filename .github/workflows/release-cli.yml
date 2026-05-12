@@ -57,7 +57,13 @@ jobs:
           distribution: goreleaser
           version: '~> v2'
           workdir: clients/client-cli
-          args: release --clean
+          # --skip=validate is required because the override semver tag
+          # (e.g. v0.15.2) does not physically exist at the release commit;
+          # only `clients/client-cli/v0.15.2` does. The actual git state
+          # (dirty / wrong commit) is otherwise covered by the workflow:
+          # checkout is at the tagged ref, and bin/ + completions/ are
+          # gitignored so the pre-build step doesn't dirty the tree.
+          args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.semver }}
