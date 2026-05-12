@@ -205,9 +205,18 @@ bool serve_static_file(uWS::HttpResponse<false>* res,
         std::string cache_control;
         std::string file_name = normalized_path.filename().string();
         
-        // Fingerprinted assets (Vite-style: name-hash.js)
+        // Files served from /assets/ are always Vite-hashed and immutable by
+        // construction. Use the canonical path to detect this so the SPA
+        // fallback (which probes for a file before falling back to index.html)
+        // still works correctly.
+        bool under_assets = normalized_str.find(root_str + "/assets/") == 0
+                         || normalized_str.find(root_str + "\\assets\\") == 0;
+
+        // Legacy fingerprint pattern (name.<hex>.{js,css}) used by some
+        // pipelines that hash outside /assets/.
         std::regex fingerprint_regex(R"(.*\.[a-f0-9]{8,}\.(js|css)$)");
-        if (std::regex_match(file_name, fingerprint_regex)) {
+
+        if (under_assets || std::regex_match(file_name, fingerprint_regex)) {
             cache_control = "public, max-age=31536000, immutable";
         }
         // index.html - never cache

@@ -12,11 +12,12 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;450;500;550;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     
     <!-- Theme initialization (prevent flash) -->
+    <!-- App is dark-only. Force dark before any bundle loads so SPA routes
+         that don't pull the chart chunk (e.g. /messages on hard reload) still
+         render correctly. -->
     <script>
-      const theme = localStorage.getItem('queen-theme') || 
-        (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-      document.documentElement.classList.toggle('dark', theme === 'dark');
-      document.documentElement.classList.toggle('light', theme !== 'dark');
+      document.documentElement.classList.add('dark');
+      document.documentElement.classList.remove('light');
     </script>
   </head>
   <body class="antialiased">
