@@ -1,0 +1,14 @@
+// Local Go workspace so changes to clients/client-go are immediately
+// visible to clients/client-cli without having to publish a new version
+// of client-go. Replaces the previous `replace` directive in
+// clients/client-cli/go.mod which broke downstream `go install`.
+//
+// End users running `go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@vX.Y.Z`
+// are unaffected: `go install` ignores go.work and resolves modules via
+// the public Go proxy using the versions pinned in client-cli's go.mod.
+go 1.24.0
+
+use (
+	./clients/client-cli
+	./clients/client-go
+)

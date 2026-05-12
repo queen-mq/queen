@@ -7,7 +7,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/jackc/pgx/v5 v5.8.0
 	github.com/mattn/go-isatty v0.0.20
-	github.com/smartpricing/queen/clients/client-go v0.0.0
+	github.com/smartpricing/queen/clients/client-go v0.15.0
 	github.com/spf13/cobra v1.8.1
 	github.com/zalando/go-keyring v0.2.5
 	golang.org/x/term v0.35.0
@@ -36,9 +36,3 @@ require (
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 )
-
-// Local override so in-tree changes to client-go are visible to the CLI
-// without re-publishing. The release-cli workflow rewrites this file before
-// running goreleaser so the published module is resolvable via the public
-// Go proxy (see .github/workflows/release-cli.yml).
-replace github.com/smartpricing/queen/clients/client-go => ../client-go
