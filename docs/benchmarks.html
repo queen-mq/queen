@@ -129,10 +129,10 @@
       <a href="dashboard.html">Dashboard</a>
       <a href="benchmarks.html" class="current">Benchmarks</a>
       <a href="sizing.html">Sizing</a>
-      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+      <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
-      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+      <a class="icon-link" href="https://github.com/queen-mq/queen" aria-label="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
       </a>
     </div>
@@ -152,7 +152,7 @@
   Apache Kafka 3.7 (KRaft single-node), and RabbitMQ 3.12. Each test ran for 15 minutes
   against a fresh server state. The full raw data, per-minute time series, Postgres
   stats, system metrics, autocannon and perf-test output, lives in
-  <a href="https://github.com/smartpricing/queen/tree/master/benchmark-queen/2026-04-26"><code>benchmark-queen/2026-04-26</code></a>.
+  <a href="https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-04-26"><code>benchmark-queen/2026-04-26</code></a>.
 </p>
 
 <nav class="toc" aria-label="On this page">
@@ -582,9 +582,9 @@
   <strong>producer-bound, not PG-bound</strong>: adding more producer
   processes would push the rate well into the 30–50 k/s range without
   changing anything broker-side. Full writeups with reproduction recipes:
-  <a href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen.md"><code>pipeline-queen.md</code></a>
+  <a href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen.md"><code>pipeline-queen.md</code></a>
   (high-cardinality) and
-  <a href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen-throughput.md"><code>pipeline-queen-throughput.md</code></a>
+  <a href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen-throughput.md"><code>pipeline-queen-throughput.md</code></a>
   (throughput-tuned).
 </p>
 
@@ -705,8 +705,8 @@
 
 <p class="muted" style="font-size: 12.5px;">
   Detailed cross-system reports:
-  <a href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/vs-kafka.md"><code>vs-kafka.md</code></a> ·
-  <a href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/vs-rabbitmq.md"><code>vs-rabbitmq.md</code></a>
+  <a href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/vs-kafka.md"><code>vs-kafka.md</code></a> ·
+  <a href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/vs-rabbitmq.md"><code>vs-rabbitmq.md</code></a>
 </p>
 
 <!-- ============================ WORKERS ============================ -->
@@ -946,10 +946,10 @@
 <h2 id="repro">Reproduce it yourself</h2>
 <p class="muted">
   All raw data, runner scripts, configs, and analysis live in the repo:
-  <a href="https://github.com/smartpricing/queen/tree/master/benchmark-queen/2026-04-26"><code>benchmark-queen/2026-04-26</code></a>.
+  <a href="https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-04-26"><code>benchmark-queen/2026-04-26</code></a>.
   Each test directory has the per-consumer logs, queue-ops time-series JSON, postgres
   stats, system metrics, and final docker-stats output. The
-  <a href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/HOW-TO-RUN.md"><code>HOW-TO-RUN.md</code></a>
+  <a href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/HOW-TO-RUN.md"><code>HOW-TO-RUN.md</code></a>
   walks through reproducing the entire suite step by step (Docker images, PostgreSQL
   tuning, autocannon configuration).
 </p>
@@ -960,32 +960,32 @@
     <h3>How much Postgres do I need?</h3>
     <p>Interactive calculator turning your target msg/s into a PG vCPU budget, derived directly from these benchmarks. ~10 k PG ops/s/vCPU rule of thumb.</p>
   </a>
-  <a class="card" href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/README.md">
+  <a class="card" href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/README.md">
     <div class="card-eyebrow">Summary</div>
     <h3>Full README</h3>
     <p>Compacted result table for all 18 tests, key conclusions, version comparison verdict.</p>
   </a>
-  <a class="card" href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen.md">
+  <a class="card" href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen.md">
     <div class="card-eyebrow">Pipeline · ordered</div>
     <h3>pipeline-queen.md</h3>
     <p>4-stage pipeline at 1 000 partitions for per-entity ordering: 3 688 msg/s end-to-end, p99 = 1.02 s, 99.96 % completeness.</p>
   </a>
-  <a class="card" href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen-throughput.md">
+  <a class="card" href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/pipeline-queen-throughput.md">
     <div class="card-eyebrow">Pipeline · throughput</div>
     <h3>pipeline-queen-throughput.md</h3>
     <p>Same pipeline at 10 partitions for max throughput: 6 673 msg/s end-to-end, p99 = 1.10 s, 3.2× lower PG CPU.</p>
   </a>
-  <a class="card" href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/HOW-TO-RUN.md">
+  <a class="card" href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/HOW-TO-RUN.md">
     <div class="card-eyebrow">Recipe</div>
     <h3>HOW-TO-RUN.md</h3>
     <p>Step-by-step reproduction: Docker setup, PG tuning, the runner scripts, parameter sweeps.</p>
   </a>
-  <a class="card" href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/vs-kafka.md">
+  <a class="card" href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/vs-kafka.md">
     <div class="card-eyebrow">Comparison</div>
     <h3>vs-kafka.md</h3>
     <p>Direct head-to-head with Apache Kafka 3.7 at 1 000 partitions, full latency profile.</p>
   </a>
-  <a class="card" href="https://github.com/smartpricing/queen/blob/master/benchmark-queen/2026-04-26/cg-axis-comparison.md">
+  <a class="card" href="https://github.com/queen-mq/queen/blob/master/benchmark-queen/2026-04-26/cg-axis-comparison.md">
     <div class="card-eyebrow">Deep-dive</div>
     <h3>cg-axis-comparison.md</h3>
     <p>The 1 vs 5 vs 10 consumer-group sweep, including per-group fairness numbers.</p>
@@ -1029,9 +1029,9 @@
     <div>
       <h5>Project</h5>
       <ul>
-        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://github.com/queen-mq/queen">GitHub</a></li>
         <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
-        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+        <li><a href="https://github.com/queen-mq/queen/blob/master/LICENSE.md">License</a></li>
       </ul>
     </div>
   </div>

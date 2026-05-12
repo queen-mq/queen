@@ -111,7 +111,7 @@ That's the whole loop. Everything else in this guide expands on one of these ste
 
 ## Where to ask
 
-- Issues or external contributions: [github.com/smartpricing/queen](https://github.com/smartpricing/queen)
+- Issues or external contributions: [github.com/queen-mq/queen](https://github.com/queen-mq/queen)
 - Internal engineering memos (deep-dive analyses of design choices): [cdocs/](cdocs/)
 - User-facing reference: [docs/](docs/index.html)
 

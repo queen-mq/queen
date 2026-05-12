@@ -91,10 +91,10 @@
       <a href="dashboard.html">Dashboard</a>
       <a href="benchmarks.html">Benchmarks</a>
       <a href="sizing.html">Sizing</a>
-      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+      <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
-      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+      <a class="icon-link" href="https://github.com/queen-mq/queen" aria-label="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
       </a>
     </div>
@@ -259,7 +259,7 @@
     Every snippet on this page was run against a live Queen server at
     <code>http://localhost:6632</code> before being included. The
     full demo lives at
-    <a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-replay.js"><code>examples/use-case-replay.js</code></a>
+    <a href="https://github.com/queen-mq/queen/blob/master/examples/use-case-replay.js"><code>examples/use-case-replay.js</code></a>
     and is run as part of the docs build.
   </p>
 </div>
@@ -410,7 +410,7 @@ await q.admin.deleteConsumerGroupForQueue(
   <code>(partition_id, consumer_group)</code> pair gets its own row in
   <code>queen.partition_consumers</code> holding that CG's
   <code>last_consumed_id</code>. The pop stored procedure
-  (<a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/002d_pop_unified_v4.sql"><code>pop_unified_batch_v4</code></a>)
+  (<a href="https://github.com/queen-mq/queen/blob/master/lib/schema/procedures/002d_pop_unified_v4.sql"><code>pop_unified_batch_v4</code></a>)
   filters by that row alone — no cross-CG read or write happens anywhere
   on the hot path.
 </p>
@@ -488,19 +488,19 @@ GROUP  BY consumer_group;</code></pre>
   <tbody>
     <tr>
       <td>Full demo (verified live)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-replay.js"><code>examples/use-case-replay.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/examples/use-case-replay.js"><code>examples/use-case-replay.js</code></a></td>
     </tr>
     <tr>
       <td>Pop procedure that enforces subscription anchors</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/002d_pop_unified_v4.sql"><code>lib/schema/procedures/002d_pop_unified_v4.sql</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/lib/schema/procedures/002d_pop_unified_v4.sql"><code>lib/schema/procedures/002d_pop_unified_v4.sql</code></a></td>
     </tr>
     <tr>
       <td>Consumer-group admin SPs</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/008_consumer_groups.sql"><code>lib/schema/procedures/008_consumer_groups.sql</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/lib/schema/procedures/008_consumer_groups.sql"><code>lib/schema/procedures/008_consumer_groups.sql</code></a></td>
     </tr>
     <tr>
       <td>Consumer-group developer docs</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/developer/13-consumer-groups.md"><code>developer/13-consumer-groups.md</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/developer/13-consumer-groups.md"><code>developer/13-consumer-groups.md</code></a></td>
     </tr>
     <tr>
       <td><code>queenctl</code> CLI equivalents</td>
@@ -550,9 +550,9 @@ GROUP  BY consumer_group;</code></pre>
     <div>
       <h5>Project</h5>
       <ul>
-        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://github.com/queen-mq/queen">GitHub</a></li>
         <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
-        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+        <li><a href="https://github.com/queen-mq/queen/blob/master/LICENSE.md">License</a></li>
       </ul>
     </div>
   </div>

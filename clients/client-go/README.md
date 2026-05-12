@@ -1,6 +1,6 @@
 # Queen MQ Go Client
 
-A high-performance Go client for [Queen MQ](https://github.com/smartpricing/queen) - a message queue backed by PostgreSQL.
+A high-performance Go client for [Queen MQ](https://github.com/queen-mq/queen) - a message queue backed by PostgreSQL.
 
 ## Installation
 

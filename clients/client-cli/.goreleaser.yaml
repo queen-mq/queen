@@ -58,7 +58,7 @@ snapshot:
 
 release:
   github:
-    owner: smartpricing
+    owner: queen-mq
     name: queen
   prerelease: auto
   draft: false

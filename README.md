@@ -170,7 +170,7 @@ The repository is structured as follows:
 | **0.7.5**      | First stable release                                                                                                            | JS ≥0.7.4, Python ≥0.7.4                                    |
 
 
-**[Full Release Notes →](https://github.com/smartpricing/queen/releases)**
+**[Full Release Notes →](https://github.com/queen-mq/queen/releases)**
 
 ---
 

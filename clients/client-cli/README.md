@@ -17,7 +17,7 @@ queenctl lag --min-seconds 30  # alert-friendly view
 ### Pre-built binaries (recommended)
 
 Each tag `clients/client-cli/vX.Y.Z` ships archives on
-[GitHub Releases](https://github.com/smartpricing/queen/releases) for
+[GitHub Releases](https://github.com/queen-mq/queen/releases) for
 linux/{amd64,arm64}, darwin/{amd64,arm64} and windows/amd64. Download the
 matching `queenctl_<version>_<os>_<arch>.tar.gz` (or `.zip` on Windows),
 extract, and drop `queenctl` somewhere on `$PATH`.

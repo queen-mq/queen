@@ -91,10 +91,10 @@
       <a href="dashboard.html">Dashboard</a>
       <a href="benchmarks.html">Benchmarks</a>
       <a href="sizing.html">Sizing</a>
-      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+      <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
-      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+      <a class="icon-link" href="https://github.com/queen-mq/queen" aria-label="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
       </a>
     </div>
@@ -259,7 +259,7 @@ app.post('/webhooks/stripe', async (req, res) =&gt; {
     Every snippet on this page was run against a live Queen server at
     <code>http://localhost:6632</code> before being included. The
     full demo lives at
-    <a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-dedup.js"><code>examples/use-case-dedup.js</code></a>.
+    <a href="https://github.com/queen-mq/queen/blob/master/examples/use-case-dedup.js"><code>examples/use-case-dedup.js</code></a>.
   </p>
 </div>
 
@@ -526,27 +526,27 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
   <tbody>
     <tr>
       <td>Full demo (verified live)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/examples/use-case-dedup.js"><code>examples/use-case-dedup.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/examples/use-case-dedup.js"><code>examples/use-case-dedup.js</code></a></td>
     </tr>
     <tr>
       <td>In-window dedup reference (streams SDK)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/04-in-window-dedup.js"><code>streams/examples/04-in-window-dedup.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/streams/examples/04-in-window-dedup.js"><code>streams/examples/04-in-window-dedup.js</code></a></td>
     </tr>
     <tr>
       <td>Reduce operator (the seen-set accumulator)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/operators/ReduceOperator.js"><code>ReduceOperator.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/clients/client-js/client-v2/streams/operators/ReduceOperator.js"><code>ReduceOperator.js</code></a></td>
     </tr>
     <tr>
       <td>Window operators</td>
-      <td><a href="https://github.com/smartpricing/queen/tree/master/clients/client-js/client-v2/streams/operators"><code>client-v2/streams/operators/</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/tree/master/clients/client-js/client-v2/streams/operators"><code>client-v2/streams/operators/</code></a></td>
     </tr>
     <tr>
       <td>Streams schema (where the seen-set lives)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/019_streams_schema.sql"><code>019_streams_schema.sql</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/lib/schema/procedures/019_streams_schema.sql"><code>019_streams_schema.sql</code></a></td>
     </tr>
     <tr>
       <td>Cycle commit (atomic state + push + ack)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/021_streams_cycle_v1.sql"><code>021_streams_cycle_v1.sql</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/lib/schema/procedures/021_streams_cycle_v1.sql"><code>021_streams_cycle_v1.sql</code></a></td>
     </tr>
   </tbody>
 </table>
@@ -592,9 +592,9 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
     <div>
       <h5>Project</h5>
       <ul>
-        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://github.com/queen-mq/queen">GitHub</a></li>
         <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
-        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+        <li><a href="https://github.com/queen-mq/queen/blob/master/LICENSE.md">License</a></li>
       </ul>
     </div>
   </div>

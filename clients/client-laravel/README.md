@@ -1,6 +1,6 @@
 # Queen MQ - PHP/Laravel Client
 
-PHP client library for [Queen MQ](https://github.com/smartpricing/queen) with optional Laravel integration.
+PHP client library for [Queen MQ](https://github.com/queen-mq/queen) with optional Laravel integration.
 
 Works standalone with any PHP 8.3+ project. Laravel extras (service provider, facade, artisan command) are auto-discovered.
 

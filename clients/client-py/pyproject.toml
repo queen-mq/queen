@@ -47,10 +47,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/smartpricing/queen"
-Documentation = "https://github.com/smartpricing/queen"
-Repository = "https://github.com/smartpricing/queen"
-Issues = "https://github.com/smartpricing/queen/issues"
+Homepage = "https://github.com/queen-mq/queen"
+Documentation = "https://github.com/queen-mq/queen"
+Repository = "https://github.com/queen-mq/queen"
+Issues = "https://github.com/queen-mq/queen/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

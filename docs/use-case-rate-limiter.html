@@ -91,10 +91,10 @@
       <a href="dashboard.html">Dashboard</a>
       <a href="benchmarks.html">Benchmarks</a>
       <a href="sizing.html">Sizing</a>
-      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+      <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
-      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+      <a class="icon-link" href="https://github.com/queen-mq/queen" aria-label="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
       </a>
     </div>
@@ -963,33 +963,33 @@ ORDER BY s.updated_at DESC;</code></pre>
   <tbody>
     <tr>
       <td><code>tokenBucketGate({ capacity, refillPerSec, costFn })</code></td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/helpers/rateLimiter.js#L49"><code>client-v2/streams/helpers/rateLimiter.js</code></a> (function declaration)</td>
-      <td><code>queen-mq</code> top-level<br/>(see <a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/index.js"><code>client-v2/index.js</code></a>)</td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/clients/client-js/client-v2/streams/helpers/rateLimiter.js#L49"><code>client-v2/streams/helpers/rateLimiter.js</code></a> (function declaration)</td>
+      <td><code>queen-mq</code> top-level<br/>(see <a href="https://github.com/queen-mq/queen/blob/master/clients/client-js/client-v2/index.js"><code>client-v2/index.js</code></a>)</td>
     </tr>
     <tr>
       <td><code>slidingWindowGate({ limit, windowSec, costFn })</code></td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/helpers/rateLimiter.js#L114"><code>client-v2/streams/helpers/rateLimiter.js</code></a> (function declaration)</td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/clients/client-js/client-v2/streams/helpers/rateLimiter.js#L114"><code>client-v2/streams/helpers/rateLimiter.js</code></a> (function declaration)</td>
       <td><code>queen-mq</code> top-level<br/>(same)</td>
     </tr>
     <tr>
       <td>Minimal example (used in §3 quickstart)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/07-rate-limiter.js"><code>streams/examples/07-rate-limiter.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/streams/examples/07-rate-limiter.js"><code>streams/examples/07-rate-limiter.js</code></a></td>
     </tr>
     <tr>
       <td>Stress test (used in §9 numbers)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/08-rate-limiter-stress.js"><code>streams/examples/08-rate-limiter-stress.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/streams/examples/08-rate-limiter-stress.js"><code>streams/examples/08-rate-limiter-stress.js</code></a></td>
     </tr>
     <tr>
       <td>All-models test (A / B / C / D / cascade / sliding-window)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/streams/examples/09-rate-limiter-all-models.js"><code>streams/examples/09-rate-limiter-all-models.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/streams/examples/09-rate-limiter-all-models.js"><code>streams/examples/09-rate-limiter-all-models.js</code></a></td>
     </tr>
     <tr>
       <td>The <code>.gate()</code> operator (compiler integration)</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/clients/client-js/client-v2/streams/operators/GateOperator.js"><code>client-v2/streams/operators/GateOperator.js</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/clients/client-js/client-v2/streams/operators/GateOperator.js"><code>client-v2/streams/operators/GateOperator.js</code></a></td>
     </tr>
     <tr>
       <td>Stored procedure (SP) implementing the cycle commit</td>
-      <td><a href="https://github.com/smartpricing/queen/blob/master/lib/schema/procedures/021_streams_cycle_v1.sql"><code>lib/schema/procedures/021_streams_cycle_v1.sql</code></a></td>
+      <td><a href="https://github.com/queen-mq/queen/blob/master/lib/schema/procedures/021_streams_cycle_v1.sql"><code>lib/schema/procedures/021_streams_cycle_v1.sql</code></a></td>
     </tr>
   </tbody>
 </table>
@@ -1035,9 +1035,9 @@ ORDER BY s.updated_at DESC;</code></pre>
     <div>
       <h5>Project</h5>
       <ul>
-        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://github.com/queen-mq/queen">GitHub</a></li>
         <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
-        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+        <li><a href="https://github.com/queen-mq/queen/blob/master/LICENSE.md">License</a></li>
       </ul>
     </div>
   </div>

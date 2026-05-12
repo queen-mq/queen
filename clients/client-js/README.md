@@ -654,16 +654,16 @@ const messages: Message<OrderData>[] = await queen.queue('orders').pop()
 ## Documentation
 
 - **[Complete V2 Guide](client-v2/README.md)** - Full tutorial with all features (94 test examples)
-- **[HTTP API Reference](https://github.com/smartpricing/queen/blob/master/server/API.md)** - Raw HTTP endpoints
-- **[Server Guide](https://github.com/smartpricing/queen/blob/master/server/README.md)** - Server setup and configuration
-- **[Architecture Guide](https://github.com/smartpricing/queen/blob/master/documentation/ARCHITECTURE.md)** - Deep dive into internals
+- **[HTTP API Reference](https://github.com/queen-mq/queen/blob/master/server/API.md)** - Raw HTTP endpoints
+- **[Server Guide](https://github.com/queen-mq/queen/blob/master/server/README.md)** - Server setup and configuration
+- **[Architecture Guide](https://github.com/queen-mq/queen/blob/master/documentation/ARCHITECTURE.md)** - Deep dive into internals
 
 ---
 
 ## Support
 
-- **GitHub:** [smartpricing/queen](https://github.com/smartpricing/queen)
-- **Issues:** [GitHub Issues](https://github.com/smartpricing/queen/issues)
+- **GitHub:** [queen-mq/queen](https://github.com/queen-mq/queen)
+- **Issues:** [GitHub Issues](https://github.com/queen-mq/queen/issues)
 - **LinkedIn:** [Smartness](https://www.linkedin.com/company/smartness-com/)
 
 ---

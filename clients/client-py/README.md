@@ -532,9 +532,9 @@ await queen.queue('orders').consume(handler)
 ## Documentation
 
 - **[Node.js Client](../client-js/README.md)** - Node.js client documentation
-- **[HTTP API Reference](https://github.com/smartpricing/queen/blob/master/server/API.md)** - Raw HTTP endpoints
-- **[Server Guide](https://github.com/smartpricing/queen/blob/master/server/README.md)** - Server setup and configuration
-- **[Architecture Guide](https://github.com/smartpricing/queen/blob/master/documentation/ARCHITECTURE.md)** - Deep dive into internals
+- **[HTTP API Reference](https://github.com/queen-mq/queen/blob/master/server/API.md)** - Raw HTTP endpoints
+- **[Server Guide](https://github.com/queen-mq/queen/blob/master/server/README.md)** - Server setup and configuration
+- **[Architecture Guide](https://github.com/queen-mq/queen/blob/master/documentation/ARCHITECTURE.md)** - Deep dive into internals
 
 ---
 
@@ -546,7 +546,7 @@ Apache 2.0 - See [LICENSE](../LICENSE.md)
 
 ## Support
 
-- **GitHub:** [smartpricing/queen](https://github.com/smartpricing/queen)
-- **Issues:** [GitHub Issues](https://github.com/smartpricing/queen/issues)
+- **GitHub:** [queen-mq/queen](https://github.com/queen-mq/queen)
+- **Issues:** [GitHub Issues](https://github.com/queen-mq/queen/issues)
 - **LinkedIn:** [Smartness](https://www.linkedin.com/company/smartness-com/)
 

@@ -31,10 +31,10 @@
       <a href="dashboard.html">Dashboard</a>
       <a href="benchmarks.html">Benchmarks</a>
       <a href="sizing.html">Sizing</a>
-      <a href="https://github.com/smartpricing/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
+      <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
-      <a class="icon-link" href="https://github.com/smartpricing/queen" aria-label="GitHub">
+      <a class="icon-link" href="https://github.com/queen-mq/queen" aria-label="GitHub">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.6 5.6.6 11.9c0 5 3.3 9.3 7.8 10.8.6.1.8-.2.8-.6v-2c-3.2.7-3.8-1.5-3.8-1.5-.5-1.3-1.3-1.6-1.3-1.6-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.9 1.2 1.9 1.2 3.2 0 4.5-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.5-1.5 7.8-5.8 7.8-10.8C23.4 5.6 18.3.5 12 .5z"/></svg>
       </a>
     </div>
@@ -117,7 +117,7 @@ docker run -p 6632:6632 --network queen \
 <!-- ============== ENV ============== -->
 <h2 id="env">Environment variables (essentials)</h2>
 <p class="muted">
-  Full list lives in <a href="https://github.com/smartpricing/queen/blob/master/server/ENV_VARIABLES.md"><code>server/ENV_VARIABLES.md</code></a>.
+  Full list lives in <a href="https://github.com/queen-mq/queen/blob/master/server/ENV_VARIABLES.md"><code>server/ENV_VARIABLES.md</code></a>.
   These are the ones you almost always touch.
 </p>
 
@@ -193,7 +193,7 @@ export JWT_AUDIENCE=queen-api</code></pre>
   username/password login form. For machine traffic that's exactly what you want.
   But the Vue 3 dashboard is served from the same port, and you usually want a
   human-friendly login page in front of it. That's what
-  <a href="https://github.com/smartpricing/queen/tree/master/proxy">queen-mq-proxy</a>
+  <a href="https://github.com/queen-mq/queen/tree/master/proxy">queen-mq-proxy</a>
   is for.
 </p>
 <p class="muted">
@@ -413,7 +413,7 @@ export EXTERNAL_AUDIENCE=queen-mq</code></pre>
 <p class="muted">
   Deploy as a sibling release to <code>queen-mq</code> in the same namespace. The
   chart we run lives at
-  <a href="https://github.com/smartpricing/queen/tree/master/proxy/helm">proxy/helm/</a>;
+  <a href="https://github.com/queen-mq/queen/tree/master/proxy/helm">proxy/helm/</a>;
   it ships a StatefulSet, a ClusterIP Service, an HTTPRoute (Gateway API), and a
   GKE HealthCheckPolicy hitting <code>/health/ready</code>.
 </p>
@@ -619,9 +619,9 @@ export QUEEN_UDP_PEERS="queen-a:6633,queen-b:6633"</code></pre>
 <p class="muted">
   We run Queen MQ on Kubernetes as a <code>StatefulSet</code> + headless
   <code>Service</code>. The chart we run in production lives at
-  <a href="https://github.com/smartpricing/queen/tree/master/helm">helm/</a>; a flat
+  <a href="https://github.com/queen-mq/queen/tree/master/helm">helm/</a>; a flat
   manifest is at
-  <a href="https://github.com/smartpricing/queen/blob/master/server/k8s-example.yaml">server/k8s-example.yaml</a>.
+  <a href="https://github.com/queen-mq/queen/blob/master/server/k8s-example.yaml">server/k8s-example.yaml</a>.
   The headless service gives each pod a stable DNS name, which is what the UDP sync
   layer needs to find its peers, and what client-side affinity routing keys off.
 </p>
@@ -832,7 +832,7 @@ export QUEEN_POP_MAX_CONCURRENT=16</code></pre>
 </div>
 
 <p class="muted">
-  See <a href="https://github.com/smartpricing/queen/blob/master/server/README.md">server/README.md</a>
+  See <a href="https://github.com/queen-mq/queen/blob/master/server/README.md">server/README.md</a>
   for the full tuning guide and the rationale behind these defaults.
 </p>
 
@@ -882,9 +882,9 @@ export QUEEN_POP_MAX_CONCURRENT=16</code></pre>
     <div>
       <h5>Project</h5>
       <ul>
-        <li><a href="https://github.com/smartpricing/queen">GitHub</a></li>
+        <li><a href="https://github.com/queen-mq/queen">GitHub</a></li>
         <li><a href="https://hub.docker.com/r/smartnessai/queen-mq">Docker Hub</a></li>
-        <li><a href="https://github.com/smartpricing/queen/blob/master/LICENSE.md">License</a></li>
+        <li><a href="https://github.com/queen-mq/queen/blob/master/LICENSE.md">License</a></li>
       </ul>
     </div>
   </div>
