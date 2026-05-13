@@ -29,7 +29,7 @@
 
 ---
 
-Queen MQ is a partitioned message queue backed by PostgreSQL, built with uWebSockets, libuv, and libpq async API. It features unlimited FIFO partitions that process independently, consumer groups with replay, transactional delivery, tracing, and ACID-guaranteed durability — all in a single stateless binary alongside the Postgres you already run. Version 0.14.0 sustains **104k msg/s** push and **165k msg/s** fan-out on a 32-core host, with a broker RSS under 52 MB.
+Queen MQ is a partitioned message queue backed by PostgreSQL, built with uWebSockets, libuv, and libpq async API. It features unlimited FIFO partitions that process independently, consumer groups with replay, transactional delivery, tracing, and ACID-guaranteed durability all in a single stateless binary alongside the Postgres you already run. Version 0.14.0 sustains **104k msg/s** push and **165k msg/s** fan-out on a 32-core host, with a broker RSS under 52 MB.
 
 See [examples/base.js](examples/base.js) for a complete (push, consume, transactionally ack and push to another queue) example. An experimental PostgreSQL extension version is also available at [pg_qpubsub](pg_qpubsub/README.md).
 
@@ -40,7 +40,7 @@ Born at [Smartness](https://www.linkedin.com/company/smartness-com/) to power **
 Perfect for:
 
 - **One ordered lane per entity, no preallocation** — 10,000 partitions cost index rows, not 10,000 commit-log files. A partition is created on first push; a slow consumer on one partition never stalls another.
-- **Transactional integration with PostgreSQL** — `BEGIN; INSERT order; queen.push(...); COMMIT;` in a single PG transaction. The transactional-outbox pattern is built in.
+- **Transactional integration with PostgreSQL** — ACK and push in a single PG transaction.
 - **Fan-out with fairness** — consumer groups each get a full copy of every message; the adaptive engine keeps delivery fair across groups at sub-linear CPU cost.
 - **52 MB broker at 104k msg/s** — no JVM, no Erlang, no cluster to operate. One Docker container plus your existing Postgres.
 - **Replay and DLQ** — rewind any consumer group to any timestamp; failed messages surface in a per-queue dead-letter queue automatically.
@@ -133,8 +133,9 @@ The repository is structured as follows:
 - `clients/client-cli`: `queenctl` operator CLI (Go binary built on `client-go`)
 - `proxy`: Proxy server (authentication)
 - `app`: Vue.js dashboard (vue 3)
-- `website`: Documentation website (vitepress)
+- `docs`: Documentation website (vitepress)
 - `examples`: JS client examples
+- `streams`: JS client streaming examples
 
 ---
 
@@ -180,7 +181,6 @@ The repository is structured as follows:
 - Clients 0.15.0: **Exactly-once cycles via `/streams/v1/cycle`.** State mutations + sink emissions + source acks commit in a single PostgreSQL transaction. On commit failure the entire cycle rolls back; Queen redelivers via the existing lease/retry path.
 - Clients 0.15.0: **`.gate()` rate limiter with FIFO preservation.** New per-message ALLOW/DENY operator with persistent per-key state, a partial-ack on deny, and `release_lease=false` so the un-acked tail of the batch is redelivered in original order when the lease expires — no deferred queue, no reordering. The `tokenBucketGate` and `slidingWindowGate` helpers cover all four canonical rate-limit shapes (req/s, msg/s, cost-weighted, sliding-window quota) on every language.
 - Clients 0.15.0: **Tumbling, sliding, session, and cron windows.** Per-window `gracePeriod`, `idleFlushMs`, optional `eventTime` extractor with per-partition watermarks (stored under the reserved `__wm__` state key), `allowedLateness`, and `onLate: 'drop' \| 'include'`. The runner emits closed windows on idle partitions via a per-window flush timer.
-- Clients 0.15.0: **Cross-language `config_hash`.** SHA-256 of the operator chain shape (kinds + structural config — never user closures) is identical in JS, Python, and Go, so a query registered by one client can be picked up by a worker written in another. The runtime rejects re-deployment under the same `queryId` with a different chain unless the user passes `reset: true`.
 - Server 0.15.0: **Three new streaming stored procedures.** `streams_register_query_v1`, `streams_cycle_v1`, and `streams_state_get_v1` route through libqueen's existing async pipeline — same uvloop, same connection pool, same metrics attribution. Streaming cycles increment `record_ack_request` / `record_ack_messages` / `record_push_messages_with_queue` so the dashboard's per-queue Ack/s and Push/s charts include streaming throughput.
 - Server 0.15.0: **UUIDv7 message IDs in streaming push.** `/streams/v1/cycle` stamps every sink push item with a UUIDv7 server-side, matching the `/api/v1/push` route. Time-ordered IDs preserve partition FIFO order even when batched inserts share a `created_at` timestamp.
 - Tests 0.15.0: **75 Python streams tests, 33 Go subtests, 45 JS unit tests pass live.** Plus 11 examples per language ported 1:1 from the JS reference, including a "rate-limiter all canonical models" stress test (100 tenants × 10k messages, 4 runners, ~360 msg/sec aggregate sustained).
