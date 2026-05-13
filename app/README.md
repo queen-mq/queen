@@ -4,14 +4,18 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 
 ## Features
 
-- 🎨 **Beautiful Design** - Modern UI with vibrant magenta, cyan, and gold accents inspired by the Queen logo
-- 🌓 **Dark/Light Theme** - Seamless theme switching with system preference detection
-- 📊 **Real-time Charts** - Live throughput, latency, and resource monitoring
-- 📋 **Queue Management** - View, search, and manage all your queues
-- 💬 **Message Browser** - Browse, search, retry, and manage messages
-- 👥 **Consumer Groups** - Monitor consumer health and lag
-- 📈 **Analytics** - Deep performance insights and error tracking
-- ⚙️ **System Monitoring** - Server health, memory, CPU, and worker status
+- **Modern UI** — Vibrant magenta, cyan, and gold accents inspired by the Queen logo
+- **Dark/Light Theme** — Seamless theme switching with system preference detection
+- **Real-time Charts** — Live throughput, latency, and resource monitoring
+- **Queue Management** — View, search, configure, and manage queues
+- **Queue Operations** — Push / pop / ack / transaction inspector (`QueueOperations.vue`)
+- **Message Browser** — Browse, search, retry, and manage messages
+- **Dead Letter Queue** — Dedicated DLQ inspector and re-queue tools
+- **Consumer Groups** — Monitor consumer health, lag, and subscriptions
+- **Message Tracing** — Cross-message trace timeline viewer
+- **Analytics** — Per-queue / per-cg performance insights
+- **System Monitoring** — Server health, memory, CPU, worker status, PostgreSQL stats
+- **Maintenance Mode** — Toggle broker into maintenance and migrate the database (`Migration.vue`)
 
 ## Tech Stack
 
@@ -26,8 +30,8 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 
 ### Prerequisites
 
-- Node.js 18+ (we recommend using nvm)
-- npm or yarn
+- Node.js 22+ (the rest of the monorepo targets Node 22; we recommend using nvm)
+- npm
 
 ### Installation
 
@@ -74,30 +78,43 @@ In development, the Vite dev server proxies API requests to `http://localhost:66
 
 ```
 app/
-├── public/           # Static assets
+├── public/                       # Static assets
 ├── src/
-│   ├── api/          # API client and endpoints
-│   ├── components/   # Reusable Vue components
+│   ├── api/                      # API client and endpoints
+│   ├── components/               # Reusable Vue components
 │   │   ├── BaseChart.vue
+│   │   ├── ConsumerHealthGrid.vue
 │   │   ├── DataTable.vue
 │   │   ├── Header.vue
 │   │   ├── MetricCard.vue
-│   │   └── Sidebar.vue
-│   ├── composables/  # Vue composables
+│   │   ├── MetricRow.vue
+│   │   ├── MultiSelect.vue
+│   │   ├── QueueHealthGrid.vue
+│   │   ├── RowChart.vue
+│   │   ├── Sidebar.vue
+│   │   └── Sparkline.vue
+│   ├── composables/              # Vue composables
 │   │   ├── useApi.js
+│   │   ├── useChartTheme.js
+│   │   ├── useProxy.js
+│   │   ├── useRefresh.js
 │   │   └── useTheme.js
-│   ├── router/       # Vue Router configuration
-│   ├── views/        # Page components
+│   ├── router/                   # Vue Router configuration
+│   ├── views/                    # Page components
 │   │   ├── Analytics.vue
 │   │   ├── Consumers.vue
 │   │   ├── Dashboard.vue
+│   │   ├── DeadLetter.vue
 │   │   ├── Messages.vue
+│   │   ├── Migration.vue
 │   │   ├── QueueDetail.vue
+│   │   ├── QueueOperations.vue
 │   │   ├── Queues.vue
-│   │   └── System.vue
-│   ├── App.vue       # Root component
-│   ├── main.js       # Entry point
-│   └── style.css     # Global styles & design system
+│   │   ├── System.vue
+│   │   └── Traces.vue
+│   ├── App.vue                   # Root component
+│   ├── main.js                   # Entry point
+│   └── style.css                 # Global styles & design system
 ├── index.html
 ├── package.json
 ├── tailwind.config.js
@@ -124,5 +141,5 @@ The app includes several reusable components:
 
 ## License
 
-MIT
+Apache 2.0 — see [`../LICENSE.md`](../LICENSE.md).
 

@@ -40,10 +40,14 @@ spec:
           env:
             - name: DB_POOL_SIZE
               value: "{{ $.Values.dbPoolSize }}"
+            - name: SIDECAR_POOL_SIZE
+              value: "{{ $.Values.sidecarPoolSize }}"
             - name: NUM_WORKERS
               value: "{{ $.Values.numWorkers }}"
-            - name: QUEUE_POLL_INTERVAL
-              value: "{{ $.Values.pollInterval }}"
+            - name: POP_WAIT_INITIAL_INTERVAL_MS
+              value: "{{ $.Values.popWaitInitialIntervalMs }}"
+            - name: POP_WAIT_MAX_INTERVAL_MS
+              value: "{{ $.Values.popWaitMaxIntervalMs }}"
 
 ---
 apiVersion: v1

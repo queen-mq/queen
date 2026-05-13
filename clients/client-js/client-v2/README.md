@@ -1788,11 +1788,13 @@ await queen.close()
 ### Client Defaults
 ```javascript
 {
-  timeoutMillis: 30000,               // 30 seconds
+  timeoutMillis: 30000,                  // 30 seconds
   retryAttempts: 3,
   retryDelayMillis: 1000,
-  loadBalancingStrategy: 'round-robin',
-  enableFailover: true
+  loadBalancingStrategy: 'affinity',     // 'affinity' | 'round-robin' | 'session'
+  affinityHashRing: 128,
+  enableFailover: true,
+  healthRetryAfterMillis: 5000
 }
 ```
 
@@ -1993,9 +1995,10 @@ process.on('SIGINT', async () => {
 You now know everything about Queen v2! 🎉
 
 **Additional resources:**
-- [API Documentation](../../server/API.md) - Complete API reference
-- [Test Examples](../test-v2/) - 94 working test cases
-- [Architecture Guide](../../docs/) - Deep dive into Queen's internals
+- [API Documentation](../../../server/API.md) — complete HTTP API reference
+- [Test Examples](../test-v2/) — runnable test cases
+- [Architecture overview](https://queenmq.com/architecture.html) — published deep-dive
+- [libqueen design notes](../../../cdocs/LIBQUEEN_IMPROVEMENTS.md) — server internals
 
 **Need help?** Check out the test files in `test-v2/` - they're full of working examples!
 

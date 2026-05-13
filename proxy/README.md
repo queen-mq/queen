@@ -31,13 +31,24 @@ npm install
 ### 2. Set Environment Variables
 
 ```bash
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_NAME=postgres
-export DB_USER=postgres
-export DB_PASSWORD=postgres
+# PostgreSQL (uses the same PG_* names as the broker)
+export PG_HOST=localhost
+export PG_PORT=5432
+export PG_DB=postgres
+export PG_USER=postgres
+export PG_PASSWORD=postgres
+# Optional SSL
+# export PG_USE_SSL=true
+# export PG_SSL_REJECT_UNAUTHORIZED=true
+
+# Upstream broker
 export QUEEN_SERVER_URL=http://localhost:6632
+
+# Internal JWT
 export JWT_SECRET=your-secret-key-change-in-production
+export JWT_EXPIRES_IN=24h
+
+# HTTP listen
 export PORT=3000
 ```
 
@@ -79,10 +90,10 @@ docker build -t queen-proxy .
 
 ```bash
 docker run -p 3000:3000 \
-  -e DB_HOST=postgres \
-  -e DB_NAME=postgres \
-  -e DB_USER=postgres \
-  -e DB_PASSWORD=postgres \
+  -e PG_HOST=postgres \
+  -e PG_DB=postgres \
+  -e PG_USER=postgres \
+  -e PG_PASSWORD=postgres \
   -e QUEEN_SERVER_URL=http://queen-server:6632 \
   -e JWT_SECRET=your-secret-key \
   queen-proxy
@@ -108,18 +119,49 @@ helm upgrade --install queen-proxy ./helm -f helm/prod.yaml
 
 ## Environment Variables
 
+### Database (PostgreSQL)
+
+The proxy uses the **same `PG_*` variable names as the broker** so a single set of secrets can configure both.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_HOST` | `localhost` | PostgreSQL host |
-| `DB_PORT` | `5432` | PostgreSQL port |
-| `DB_NAME` | `postgres` | PostgreSQL database name |
-| `DB_USER` | `postgres` | PostgreSQL username |
-| `DB_PASSWORD` | `postgres` | PostgreSQL password |
-| `QUEEN_SERVER_URL` | `http://localhost:8080` | Queen server URL |
-| `JWT_SECRET` | ⚠️ Required | Secret key for JWT tokens |
-| `JWT_EXPIRES_IN` | `24h` | JWT token expiration |
-| `PORT` | `3000` | Proxy server port |
-| `NODE_ENV` | `development` | Environment mode |
+| `PG_HOST` | `localhost` | PostgreSQL host |
+| `PG_PORT` | `5432` | PostgreSQL port |
+| `PG_DB` | `postgres` | PostgreSQL database name |
+| `PG_USER` | `postgres` | PostgreSQL username |
+| `PG_PASSWORD` | `postgres` | PostgreSQL password |
+| `PG_USE_SSL` | _(unset)_ | If set to any truthy value, enable SSL |
+| `PG_SSL_REJECT_UNAUTHORIZED` | `false` | If `"true"`, require valid TLS certificates (otherwise allow self-signed) |
+
+### HTTP / Upstream
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | Proxy HTTP listen port |
+| `QUEEN_SERVER_URL` | `http://localhost:8080` | Upstream Queen broker URL — set this to `http://localhost:6632` for the local broker default |
+| `NODE_ENV` | `development` | Set to `production` to enable secure cookies (HTTPS-only) |
+
+### Internal JWT (issued by the proxy after password login)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JWT_SECRET` | `change-me-in-production` | ⚠️ Override in any non-dev deployment. Shared with the broker's `JWT_SECRET` when using HS256. |
+| `JWT_EXPIRES_IN` | `24h` | Token expiration ( `'never'` disables expiry) |
+
+### External SSO passthrough (verify tokens minted by an external IdP)
+
+When `EXTERNAL_JWKS_URL` is set, the proxy accepts JWTs minted by an external identity provider (Okta, Auth0, BetterAuth, Keycloak, …) and validates them via JWKS. The `JWT_*` aliases on the right of each fallback below let you reuse the broker's own JWT env names.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EXTERNAL_JWKS_URL` (or `JWT_JWKS_URL`) | _(unset)_ | JWKS endpoint URL. Setting this enables external SSO. |
+| `EXTERNAL_ISSUER` (or `JWT_ISSUER`) | _(unset)_ | Expected `iss` claim |
+| `EXTERNAL_AUDIENCE` (or `JWT_AUDIENCE`) | _(unset)_ | Expected `aud` claim |
+
+### Google Sign-In
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `GOOGLE_CLIENT_ID` | _(unset)_ | Google OAuth 2.0 client id (enables "Sign in with Google" when set together with the secret + redirect URI) |
 | `GOOGLE_CLIENT_SECRET` | _(unset)_ | Google OAuth 2.0 client secret |
 | `GOOGLE_REDIRECT_URI` | _(unset)_ | Must match the Authorized redirect URI in Google Cloud Console, e.g. `https://queen.example.com/api/auth/google/callback` |

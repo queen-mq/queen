@@ -115,15 +115,29 @@ pytest tests/ -s
 
 ### Test Count
 
-**Total: 50+ tests** covering:
-- ✅ Queue management (3 tests)
-- ✅ Push operations (13 tests)
-- ✅ Pop operations (5 tests)
-- ✅ Consume operations (15 tests)
-- ✅ Transactions (13 tests)
-- ✅ Subscription modes (6 tests)
-- ✅ Dead Letter Queue (1 test)
-- ✅ Complete workflows (1 test)
+**Total: 140+ tests** across three layers:
+
+**Core broker tests (~66):**
+- Queue management (`test_queue.py`, 3 tests)
+- Push operations (`test_push.py`, 13 tests)
+- Pop operations (`test_pop.py`, 5 tests)
+- Consume operations (`test_consume.py`, 17 tests)
+- Transactions (`test_transaction.py`, 14 tests)
+- Subscription modes (`test_subscription.py`, 6 tests)
+- JWT authentication (`test_auth.py`, 6 tests)
+- Dead Letter Queue (`test_dlq.py`, 1 test)
+- Complete workflows (`test_complete.py`, 1 test)
+
+**Streaming SDK unit tests (`tests/streams_unit/`, ~46):**
+- Operator behaviour, config-hash determinism, cycle protocol,
+  event-time / watermarks, end-to-end fake-server harness.
+
+**Streaming SDK integration tests (`tests/streams_integration/`, ~29):**
+- Tumbling / sliding / session / cron windows, operators,
+  event-time, recovery, throughput, combined pipelines.
+
+The integration tests require a running Queen server + PostgreSQL;
+unit tests run with an in-process fake server.
 
 ## Fixtures
 

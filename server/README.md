@@ -1,89 +1,127 @@
-# Queen C++ Server - Build & Tuning Guide
+# Queen C++ Server — Build & Tuning Guide
 
 Complete guide for building, configuring, and tuning the Queen C++ message queue server.
 
 ## Overview
 
-Queen uses a high-performance **asynchronous, non-blocking PostgreSQL architecture** built on:
+Queen is a high-performance, **fully non-blocking** message broker built on:
 - **uWebSockets** for event-driven HTTP/WebSocket handling
-- **libpq async API** for non-blocking database operations
-- **Event-loop concurrency** for scalable request processing
+- **libuv** event loops (one per HTTP worker, plus per-`Queen` instance)
+- **libpq async API** for non-blocking PostgreSQL I/O
+- **Two cooperating connection pools** (see [Architecture](#architecture))
+- **TCP-Vegas-style adaptive concurrency control** in libqueen
 
-**Key Features:**
-- ✅ Non-blocking I/O throughout the stack
-- ✅ Low latency (10-50ms for most operations)
-- ✅ High throughput (130K+ msg/s sustained)
-- ✅ Efficient resource utilization (14 total threads)
-- ✅ Horizontal scalability
+**Key characteristics:**
+- ✅ No blocking on database I/O on any HTTP request path
+- ✅ Adaptive batching + concurrency per `JobType` (PUSH / POP / ACK / TRANSACTION / RENEW_LEASE / CUSTOM)
+- ✅ Sustains ~104k msg/s push and ~165k msg/s fan-out on a 32-core host (see [benchmarks](../benchmark-queen/2026-04-26/README.md))
+- ✅ Broker RSS under 100 MB at peak load
+- ✅ File-buffer failover keeps PUSHes durable when PostgreSQL is unreachable
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Building the Server](#building-the-server)
 - [Architecture](#architecture)
+- [Building the Server](#building-the-server)
 - [Performance Tuning](#performance-tuning)
 - [Database Configuration](#database-configuration)
 - [PostgreSQL Failover](#postgresql-failover)
 - [Queue Optimization](#queue-optimization)
 - [Monitoring & Debugging](#monitoring--debugging)
+- [Production Deployment](#production-deployment)
+- [Benchmarking](#benchmarking)
+- [Environment Variables Reference](#environment-variables-reference)
 
 ---
 
 ## Architecture
 
-### Core Components
-
-**Network Layer:**
-- **Acceptor**: Single thread listening on port 6632, round-robin distribution
-- **Workers**: Configurable event loop threads (default: 10, configurable via `NUM_WORKERS`)
-- **WebSocket Support**: Real-time streaming capabilities
-
-**Database Layer:**
-- **AsyncDbPool** (142 connections):
-  - Non-blocking PostgreSQL connections using libpq async API
-  - Socket-based I/O with `select()` for efficient waiting
-  - RAII-based resource management
-  - Connection health monitoring with automatic reset
-  - Thread-safe operation with mutex/condition variables
-  
-- **AsyncQueueManager**:
-  - Event-loop-based queue operations
-  - Direct execution in worker threads (no thread pool overhead)
-  - Operations: PUSH, POP, ACK, TRANSACTION
-  - Batch processing with dynamic sizing
-  - Automatic failover to file buffer
-
-**Background Services:**
-- **Poll Workers** (4 threads):
-  - Handle long-polling operations (`wait=true`)
-  - Non-blocking I/O with exponential backoff (100ms→2000ms)
-  - Intention registry for efficient request grouping
-  
-- **Background Pool** (8 connections):
-  - Metrics collection
-  - Message retention and cleanup
-  - Eviction service
-  - Stream management
-
-### Request Flow
+### Process layout
 
 ```
-Client → Acceptor → Worker Thread
-                       ↓
-                   AsyncQueueManager
-                       ↓
-                   AsyncDbPool (non-blocking)
-                       ↓
-                   PostgreSQL
+Client → uWS acceptor (port 6632, single thread)
+            │  round-robin LB across workers
+            ▼
+         uWS worker thread × NUM_WORKERS
+            │
+            │  HOT PATH (PUSH / POP / ACK / TRANSACTION / RENEW_LEASE)
+            ├──▶  per-worker libqueen instance (queen::Queen)
+            │       │  - own uv_loop
+            │       │  - per-worker slice of the sidecar pool
+            │       │  - adaptive Vegas controller per JobType
+            │       └──▶  PostgreSQL (async libpq, batched stored procs)
+            │
+            │  EVERYTHING ELSE
+            └──▶  global AsyncDbPool (shared across workers)
+                    │  - schema init, retention, eviction
+                    │  - stats / analytics, /api/v1/resources/*
+                    │  - SharedStateManager queries, /metrics
+                    │  - file-buffer flush, streams routes
+                    └──▶  PostgreSQL (async libpq)
 ```
 
-**Key Characteristics:**
-- ✅ No blocking on database I/O
-- ✅ No thread pool overhead for hot paths
-- ✅ Direct response to client after async operation
-- ✅ Scalable with worker count
+### Two pools, not one
+
+The server keeps **two independent connection pools** with very different roles. This is the single most important thing to understand before tuning.
+
+#### 1. Sidecar pool (`SIDECAR_POOL_SIZE`, default **50**)
+
+The **hot path** — PUSH, POP, ACK, TRANSACTION, RENEW_LEASE — runs through a per-worker [`queen::Queen`](../lib/queen.hpp) instance ("libqueen", a.k.a. "sidecar"). At startup the total `SIDECAR_POOL_SIZE` budget is split evenly across `NUM_WORKERS`, with any remainder given to the first few workers (see `server/src/acceptor_server.cpp:597`).
+
+Each `Queen` instance:
+- owns its own libuv event loop and slot pool
+- runs an adaptive concurrency controller per `JobType` (Vegas by default, or static)
+- amortises round-trips by **fusing in-flight jobs into batches** (configured via `QUEEN_<TYPE>_*` env vars — see [ENV_VARIABLES.md](ENV_VARIABLES.md))
+- calls the v3/v4 stored procedures directly: `queen.push_messages_v3`, `queen.pop_unified_batch_v4`, `queen.ack_messages_v2`, `queen.renew_lease_v2`, `queen.execute_transaction_v2`
+
+Even at 100 k msg/s peak load, the Vegas controller typically converges to **~2.5 in-flight queries per worker** (measured in the 2026-04-26 benchmark suite). The default of 50 total connections is therefore more than enough headroom for a single-node deployment; raise it only if Vegas is saturating `QUEEN_<TYPE>_MAX_CONCURRENT` (visible in `/metrics/prometheus`).
+
+#### 2. AsyncDbPool (`DB_POOL_SIZE`, default **150**)
+
+Everything that is **not** PUSH/POP/ACK runs through the global `AsyncDbPool`:
+
+- schema initialization (worker 0 only, at startup)
+- `MetricsCollector`, `RetentionService`, `EvictionService`, `StatsService`, `PartitionLookupReconcileService`
+- `SharedStateManager` queries (queue config refresh, watermarks, cache warm-up)
+- the file-buffer flush job
+- `/api/v1/resources/*`, `/api/v1/status/*`, `/api/v1/messages`, DLQ routes, traces, migration
+- `/streams/v1/cycle`, `/streams/v1/state`, `/streams/v1/register_query`
+- `/metrics` and `/metrics/prometheus`
+
+The pool is created in `server/src/acceptor_server.cpp:278-318` with `floor(DB_POOL_SIZE × 0.95)` connections (the 5 % is a safety margin against PG `max_connections`; nothing else uses those slots). With the default 150 that means **142 async connections** available to background services.
+
+**Sizing rule of thumb:**
+
+```
+PG max_connections  ≥  DB_POOL_SIZE  +  SIDECAR_POOL_SIZE  +  (any peers / pgBouncer overhead)
+                       └─ background ┘  └─ hot path ──────┘
+```
+
+For the default `DB_POOL_SIZE=150 + SIDECAR_POOL_SIZE=50` you want `max_connections ≥ 220` (200 + headroom). If you're behind PgBouncer in transaction mode you only need PG-side capacity for active queries; pool sizes are then bounded by PgBouncer's `default_pool_size`.
+
+### Long-polling and inter-instance notification
+
+`GET /api/v1/pop/...?wait=true` doesn't spawn a dedicated poll-worker thread; it parks the request on the worker's libqueen via the `POP_WAIT_*` backoff loop and is woken either by a local pop arriving on the same worker or by a UDP `MESSAGE_AVAILABLE` packet from a peer instance. The relevant code lives in `lib/queen.hpp` (`pop_backoff_tracker`) and `server/src/services/shared_state_manager.cpp` (UDP sync). Tuning knobs:
+
+- `POP_WAIT_INITIAL_INTERVAL_MS` (default 100)
+- `POP_WAIT_BACKOFF_THRESHOLD` (default 3 consecutive empties before backoff)
+- `POP_WAIT_BACKOFF_MULTIPLIER` (default 2.0)
+- `POP_WAIT_MAX_INTERVAL_MS` (default 1000)
+
+A request that hits `wait_timeout_ms` (client-supplied, capped server-side) returns an empty batch.
+
+### Request flow (concrete example: PUSH)
+
+1. Client posts JSON to `/api/v1/push`.
+2. The worker validates input, generates UUIDv7 message IDs, optionally encrypts payloads, and registers a deferred response in the per-worker [`ResponseRegistry`](include/queen/response_queue.hpp) (lock-free across workers).
+3. `ctx.queen->submit(job_req, callback)` enqueues the job in the worker's libqueen — returns immediately, no I/O.
+4. libqueen's event loop fuses the job with any other pending PUSHes for this worker (subject to `QUEEN_PUSH_PREFERRED_BATCH_SIZE` / `QUEEN_PUSH_MAX_HOLD_MS`) and fires one `SELECT queen.push_messages_v3(...)` against an available slot.
+5. The slot's libpq socket FD is in the libuv loop; completion fires a callback that delivers the JSON result back to the worker's uWS loop via `uWS::Loop::defer`.
+6. The HTTP response is written.
+
+If step 4 fails (DB down, deadlock, etc.) the stored `items_json` is replayed into the file buffer (`push_failover_storage`) and the client gets `{success: true, failover: true}` instead of an error.
 
 ---
 
@@ -92,80 +130,73 @@ Client → Acceptor → Worker Thread
 ### Prerequisites
 
 **Ubuntu/Debian:**
+
 ```bash
 sudo apt-get update
 sudo apt-get install build-essential libpq-dev libssl-dev zlib1g-dev curl unzip
 ```
 
 **macOS:**
+
 ```bash
 brew install postgresql openssl curl unzip
 ```
 
 Or use the Makefile helpers:
-```bash
-# Ubuntu
-make install-deps-ubuntu
 
-# macOS
-make install-deps-macos
+```bash
+make install-deps-ubuntu      # Ubuntu
+make install-deps-macos       # macOS
 ```
 
 ### Quick Build
 
 ```bash
 cd server
-
-# Download dependencies and build
-make all
-
-# Or build without re-downloading dependencies
-make build-only
+make all              # download deps + build (recommended for first build)
+make build-only       # re-build without re-downloading deps
 ```
 
-The compiled binary will be at `bin/queen-server`.
+The compiled binary lands at `bin/queen-server`.
 
 ### Build Targets
 
 ```bash
-make all          # Download deps and build
-make build-only   # Build without downloading deps
-make deps         # Download dependencies only
-make clean        # Remove build artifacts
-make distclean    # Remove build artifacts and dependencies
-make test         # Run test suite
-make dev          # Build and run in development mode
-make help         # Show all available targets
+make all           # Download deps and build
+make build-only    # Build without downloading deps
+make deps          # Download dependencies only
+make clean         # Remove build artifacts
+make distclean     # Remove build artifacts and downloaded deps
+make test          # Run test suite
+make dev           # Build and run in development mode
+make help          # Show all available targets
 ```
 
 ### Build Configuration
 
-The Makefile automatically detects:
-- Operating system (macOS/Linux)
+The Makefile detects:
+- OS (macOS / Linux)
 - PostgreSQL installation path
 - OpenSSL installation path
 - Homebrew prefix (on macOS)
 
-**Debug build paths:**
+Inspect with:
+
 ```bash
-make debug-paths
+make debug-paths      # detected library paths
+make debug-objects    # build statistics
 ```
 
-**Show build statistics:**
-```bash
-make debug-objects
-```
+Default flags:
 
-### Compiler Options
-
-Default flags in `Makefile`:
 ```makefile
 CXXFLAGS = -std=c++17 -O3 -Wall -Wextra -pthread -DWITH_OPENSSL=1
 ```
 
-**Custom optimization:**
+Override per-build:
+
 ```bash
-# Maximum optimization
+# Maximum optimization (native arch)
 CXXFLAGS="-std=c++17 -O3 -march=native" make
 
 # Debug build with symbols
@@ -176,134 +207,119 @@ CXXFLAGS="-std=c++17 -g -O0" make
 
 ## Performance Tuning
 
-### Database Pool Configuration
+> **Single source of truth for env vars: [ENV_VARIABLES.md](ENV_VARIABLES.md).** This section explains the **why** — the table in `ENV_VARIABLES.md` enumerates every variable read by the server, with code-verified defaults.
 
-**The server uses a split-pool approach:**
+### Capacity planning at a glance
 
-```bash
-# Total pool budget
-DB_POOL_SIZE=150
+| Workload | `NUM_WORKERS` | `DB_POOL_SIZE` | `SIDECAR_POOL_SIZE` | PG `max_connections` |
+|---|---|---|---|---|
+| Dev / smoke test | 2 | 10 | 10 | ≥ 30 |
+| Single-node default | 10 (default) | 150 (default) | 50 (default) | ≥ 220 |
+| Heavy fan-out / many consumer groups | 10–20 | 200 | 100 | ≥ 320 |
+| Cluster member (3-node) | 10 | 100 (per node) | 50 (per node) | ≥ 320 (DB serves 3 nodes) |
 
-# Automatic split (configured in code):
-# - AsyncDbPool: 142 connections (95% of total) - for PUSH/POP/ACK/TRANSACTION
-# - Background Pool: 8 connections (5% of total) - for metrics, retention, eviction
-```
+`NUM_WORKERS` is automatically capped at the host's CPU core count.
 
-**Hot-path operations** (PUSH/POP/ACK/TRANSACTION) use **AsyncDbPool** with non-blocking I/O.
+### Tuning the hot path (libqueen / sidecar pool)
 
-**Background services** use a small synchronous pool for non-critical operations.
+The most impactful knobs are **per-`JobType`**, not the pool size. Each type exposes four variables: `QUEEN_<TYPE>_{PREFERRED_BATCH_SIZE,MAX_HOLD_MS,MAX_BATCH_SIZE,MAX_CONCURRENT}`. The defaults are calibrated from the 2026-04-22 Vegas-uncapped sweep (`benchmark-queen/test-perf/results/sweep_2026-04-22_07-41-19`):
 
-### Critical: Database Pool Size
+| Type | preferred | max_hold_ms | max_batch | max_concurrent |
+|---|---:|---:|---:|---:|
+| `PUSH` | 50 | 20 | 500 | 24 |
+| `POP` | 20 | 5 | 500 | 16 |
+| `ACK` | 50 | 20 | 500 | 16 |
+| `TRANSACTION` | 1 | 0 | 1 | 1 |
+| `RENEW_LEASE` | 10 | 100 | 100 | 2 |
+| `CUSTOM` | 1 | 0 | 1 | 1 |
 
-**The most important tuning parameter.**
+Defaults rationale (`server/include/queen/config.hpp:209-220`):
 
-```bash
-# Default configuration (good for most use cases)
-DB_POOL_SIZE=150 ./bin/queen-server          # 142 async + 8 background
+- `PUSH` / `ACK` `preferred=50` sits above the S1 break-even (~33 jobs/batch); `max_hold_ms=20` is the sweet spot found by the perf campaign.
+- `POP` is latency-sensitive — tighter hold, smaller preferred batch.
+- `TRANSACTION` and `CUSTOM` are atomic, so they never fuse: batch size 1, concurrency 1.
+- `RENEW_LEASE` is background work: modest batch, longer hold.
 
-# High load with many workers
-DB_POOL_SIZE=200 ./bin/queen-server          # 190 async + 10 background
+If you've raised `QUEEN_<TYPE>_MAX_CONCURRENT` you must keep `QUEEN_VEGAS_BETA < MAX_CONCURRENT` — otherwise the Vegas controller never grows. Default `BETA=12` works up to `MAX_CONCURRENT=24` (`config.hpp:197` + 2026-04-22 sweep notes).
 
-# Very high load
-DB_POOL_SIZE=300 ./bin/queen-server          # 285 async + 15 background
-```
+### Tuning the background pool (AsyncDbPool)
 
-**Why?** The async pool handles many concurrent operations efficiently with non-blocking I/O. Pool exhaustion can still occur under extreme load or with misconfigured PostgreSQL `max_connections`.
+`DB_POOL_SIZE` mostly affects:
 
-### Worker Thread Configuration
+- recovery throughput from the file buffer (the flush job opens up to `FILE_BUFFER_MAX_BATCH × N` concurrent transactions)
+- analytics endpoints under heavy dashboard refresh
+- stats reconciliation on queues with millions of messages
 
-Edit `server/src/acceptor_server.cpp`:
+Raise it if the dashboard times out, if `StatsService` log lines show `statement_timeout` errors during reconciliation, or if file-buffer flush throughput stalls below ~10k events/sec on a healthy PG. **Raising it will not help raw push/pop throughput**, which is bounded by `SIDECAR_POOL_SIZE` and Vegas.
 
-```cpp
-export NUM_WORKERS=10  # Configurable via environment (default: 10, max: CPU cores)
-```
-
-**Recommendations:**
-- **Light load**: `NUM_WORKERS=4`, `DB_POOL_SIZE=25`
-- **Medium load**: `NUM_WORKERS=10` (default), `DB_POOL_SIZE=50`
-- **High load**: `NUM_WORKERS=20`, `DB_POOL_SIZE=100`
-- **Maximum**: `NUM_WORKERS=50`, `DB_POOL_SIZE=150`
-
-**Note:** The number of workers is automatically capped at your CPU core count.
-
-### Acceptor/Worker Pattern
-
-```
-Client → Acceptor (listens on port 6632)
-           ↓ (round-robin distribution)
-        Worker 1 (event loop + AsyncQueueManager → AsyncDbPool)
-        Worker 2 (event loop + AsyncQueueManager → AsyncDbPool)
-        Worker 3 (event loop + AsyncQueueManager → AsyncDbPool)
-        ...
-        Worker N (event loop + AsyncQueueManager → AsyncDbPool)
-                                   ↓
-                         AsyncDbPool (142 connections)
-                              Non-blocking I/O
-                              Socket-based waiting
-```
-
-**Benefits:**
-- ✅ True parallelism across CPU cores
-- ✅ Non-blocking async database I/O
-- ✅ No thread pool overhead for hot-path operations
-- ✅ Cross-platform (macOS, Linux, Windows)
-- ✅ Event-driven concurrency (unlimited scalability)
-- ✅ Low latency (10-50ms for most operations)
-
-### High-Throughput Configuration
+### Worker thread configuration
 
 ```bash
-export DB_POOL_SIZE=300                       # 285 async + 15 background
-export NUM_WORKERS=10                         # Worker threads (default)
-export BATCH_INSERT_SIZE=2000                 # Batch insert size
-export BATCH_PUSH_TARGET_SIZE_MB=4            # Target batch size (MB)
-export BATCH_PUSH_MAX_SIZE_MB=8               # Max batch size (MB)
-export POLL_WORKER_INTERVAL=50                # Poll worker interval (ms)
-export POLL_DB_INTERVAL=100                   # DB polling interval (ms)
-export MAX_PARTITION_CANDIDATES=200           # Partition candidates
-export RETENTION_BATCH_SIZE=2000              # Retention batch size
-export EVICTION_BATCH_SIZE=2000               # Eviction batch size
-export DEFAULT_BATCH_SIZE=100                 # Default batch size
+export NUM_WORKERS=10          # default
+```
+
+- **Light load**: `NUM_WORKERS=2`, `DB_POOL_SIZE=10`, `SIDECAR_POOL_SIZE=10`
+- **Medium load** (default): `NUM_WORKERS=10`, `DB_POOL_SIZE=150`, `SIDECAR_POOL_SIZE=50`
+- **Heavy fan-out**: `NUM_WORKERS=20`, `DB_POOL_SIZE=200`, `SIDECAR_POOL_SIZE=100`
+
+`NUM_WORKERS` is silently capped at `std::thread::hardware_concurrency()`.
+
+### High-throughput configuration (single node)
+
+```bash
+export NUM_WORKERS=10
+export DB_POOL_SIZE=200                # background services + analytics headroom
+export SIDECAR_POOL_SIZE=100           # ~10 sidecar conns / worker
+export RESPONSE_BATCH_SIZE=200         # response queue tick batch
+export RESPONSE_BATCH_MAX=1000
+
+# Per-type knobs (the defaults are usually fine; example shows where to push)
+export QUEEN_PUSH_MAX_CONCURRENT=32
+export QUEEN_ACK_MAX_CONCURRENT=24
+export QUEEN_VEGAS_MAX_LIMIT=48        # must be ≥ any MAX_CONCURRENT you raised
+export QUEEN_VEGAS_BETA=16             # must be < smallest MAX_CONCURRENT
 
 ./bin/queen-server
 ```
 
-**Expected Performance:**
-- **Throughput**: 130,000+ msg/s sustained
-- **Peak**: 148,000+ msg/s
-- **POP Latency**: 10-50ms
-- **ACK Latency**: 10-50ms
-- **Transaction Latency**: 50-200ms
-- **Database Threads**: 4 (poll workers only)
+Expected ballpark on a 32 vCPU host (2026-04-26 benchmarks):
 
-### Long Polling Optimization
+- **104 k msg/s** push, `batch=100`, 1 consumer group
+- **165 k msg/s** fan-out, 10 consumer groups
+- **39 k msg/s** push, production-realistic `batch=10`
+- **broker RSS** ≤ 100 MB at peak
+
+PG memory grows past `shared_buffers` (up to ~1.3× at peak) — plan for at least 1.5 × `shared_buffers` of available host RAM.
+
+### Long-polling tuning
 
 ```bash
-# Faster polling (lower latency, higher CPU)
-export QUEUE_POLL_INTERVAL=50              # Initial: 50ms
-export QUEUE_MAX_POLL_INTERVAL=1000        # Max: 1s
+# Tighter latency (higher CPU)
+export POP_WAIT_INITIAL_INTERVAL_MS=50
+export POP_WAIT_MAX_INTERVAL_MS=500
 
-# Slower polling (lower CPU, higher latency)
-export QUEUE_POLL_INTERVAL=100             # Initial: 100ms (default)
-export QUEUE_MAX_POLL_INTERVAL=2000        # Max: 2s (default)
+# Slower (lower CPU)
+export POP_WAIT_INITIAL_INTERVAL_MS=200
+export POP_WAIT_MAX_INTERVAL_MS=2000
 
-# Exponential backoff
-export QUEUE_BACKOFF_THRESHOLD=5           # Empty polls before backoff
-export QUEUE_BACKOFF_MULTIPLIER=2.0        # Backoff multiplier
+# Backoff curve
+export POP_WAIT_BACKOFF_THRESHOLD=5    # consecutive empty pops before backoff starts
+export POP_WAIT_BACKOFF_MULTIPLIER=2.0
 ```
 
-**How it works:**
-1. Initial poll at `QUEUE_POLL_INTERVAL` (100ms default)
-2. If empty, wait again (exponential backoff)
-3. Interval doubles each retry: 100ms → 200ms → 400ms → 800ms → 1600ms
-4. Caps at `QUEUE_MAX_POLL_INTERVAL` (2000ms default)
-5. Returns empty after timeout
+How it works (`lib/queen.hpp::pop_backoff_tracker`):
+
+1. Initial poll at `POP_WAIT_INITIAL_INTERVAL_MS` (default 100 ms).
+2. After `POP_WAIT_BACKOFF_THRESHOLD` consecutive empty results the interval doubles each retry.
+3. Capped at `POP_WAIT_MAX_INTERVAL_MS` (default 1000 ms).
+4. Reset to the initial interval immediately when a message arrives (locally) or a UDP notification fires.
+5. The client-side `wait_timeout_ms` parameter bounds the total time before returning an empty batch.
 
 ---
 
 ## Database Configuration
 
-### Connection Settings
+### Connection settings
 
 ```bash
 export PG_HOST=localhost
@@ -313,52 +329,74 @@ export PG_USER=postgres
 export PG_PASSWORD=your_password
 ```
 
-### SSL Configuration
+### SSL configuration
 
-**For production (Cloud SQL, RDS, Azure Database, etc):**
-```bash
-export PG_USE_SSL=true                      # Enable SSL
-export PG_SSL_REJECT_UNAUTHORIZED=true      # Require valid certificates (recommended)
-```
-
-**For development or self-signed certificates:**
-```bash
-export PG_USE_SSL=true                      # Enable SSL
-export PG_SSL_REJECT_UNAUTHORIZED=false     # Allow self-signed certs
-```
-
-**For local development (no SSL):**
-```bash
-export PG_USE_SSL=false                     # Disable SSL (default)
-```
-
-**SSL Mode Mapping:**
-- `PG_USE_SSL=true` + `PG_SSL_REJECT_UNAUTHORIZED=true` → `sslmode=require`
-- `PG_USE_SSL=true` + `PG_SSL_REJECT_UNAUTHORIZED=false` → `sslmode=prefer`
-- `PG_USE_SSL=false` → `sslmode=disable`
-
-### Pool Tuning
+For managed PostgreSQL (Cloud SQL, RDS, Azure Database):
 
 ```bash
-export DB_POOL_SIZE=50                     # Pool size (CRITICAL!)
-export DB_IDLE_TIMEOUT=30000               # Idle timeout (ms)
-export DB_CONNECTION_TIMEOUT=2000          # Connection timeout (ms)
-export DB_POOL_ACQUISITION_TIMEOUT=10000   # Pool acquisition timeout (ms)
-export DB_STATEMENT_TIMEOUT=30000          # Statement timeout (ms)
-export DB_QUERY_TIMEOUT=30000              # Query timeout (ms)
-export DB_LOCK_TIMEOUT=10000               # Lock timeout (ms)
-export DB_MAX_RETRIES=3                    # Max retry attempts
+export PG_USE_SSL=true                       # enable SSL
+export PG_SSL_REJECT_UNAUTHORIZED=true       # require valid certs (production)
 ```
 
-### PostgreSQL Server Tuning
+Development with self-signed certs:
 
-Recommended `postgresql.conf` settings for Queen:
+```bash
+export PG_USE_SSL=true
+export PG_SSL_REJECT_UNAUTHORIZED=false      # falls back to sslmode=prefer
+```
+
+Local dev (no SSL):
+
+```bash
+export PG_USE_SSL=false                      # default → sslmode=disable
+```
+
+SSL mode mapping (`config.hpp::DatabaseConfig::connection_string`):
+
+- `PG_USE_SSL=true`  + `PG_SSL_REJECT_UNAUTHORIZED=true`  → `sslmode=require`
+- `PG_USE_SSL=true`  + `PG_SSL_REJECT_UNAUTHORIZED=false` → `sslmode=prefer`
+- `PG_USE_SSL=false`                                      → `sslmode=disable`
+
+### Pool tuning
+
+```bash
+export DB_POOL_SIZE=150                # background-services pool (default 150)
+export DB_IDLE_TIMEOUT=30000           # ms before idle conn is recycled
+export DB_CONNECTION_TIMEOUT=2000      # ms for initial PG connect (libpq connect_timeout)
+export DB_STATEMENT_TIMEOUT=30000      # ms (SET statement_timeout on every conn)
+export DB_LOCK_TIMEOUT=10000           # ms (SET lock_timeout on every conn)
+
+export SIDECAR_POOL_SIZE=50            # hot-path pool (split across workers)
+```
+
+There is no `DB_POOL_ACQUISITION_TIMEOUT`, `DB_QUERY_TIMEOUT`, or `DB_MAX_RETRIES` — those were retired with the synchronous `DatabasePool`. See [ENV_VARIABLES.md](ENV_VARIABLES.md) for the complete current list.
+
+### Silent-drop detection (TCP keepalive + `TCP_USER_TIMEOUT`)
+
+For cloud-managed PG where maintenance windows can black-hole an existing connection:
+
+```bash
+export DB_TCP_USER_TIMEOUT_MS=30000    # Linux only; ignored on macOS/Windows
+export DB_KEEPALIVES_IDLE=60           # seconds idle before first probe
+export DB_KEEPALIVES_INTERVAL=10       # seconds between probes
+export DB_KEEPALIVES_COUNT=3           # probes before declaring dead
+```
+
+With these defaults the kernel raises an error on a black-holed socket within ~30 s, surfacing as a poll error in libqueen and an `AsyncDbPool` health-check failure. Without them you inherit Linux's `tcp_retries2` default (~14 min) — longer than any realistic maintenance window. See `config.hpp::DatabaseConfig::connection_string()` for the full rationale.
+
+### PostgreSQL server tuning
+
+Recommended `postgresql.conf` for Queen:
 
 ```ini
-# Connection settings
-max_connections = 200                      # Should be > DB_POOL_SIZE × workers
+# Connections
+max_connections = 220                      # ≥ DB_POOL_SIZE (150) + SIDECAR_POOL_SIZE (50) + headroom
+
+# Memory (these are baseline; tune to host RAM)
 shared_buffers = 4GB                       # 25% of RAM
 effective_cache_size = 12GB                # 75% of RAM
+work_mem = 64MB
+maintenance_work_mem = 512MB
 
 # Write performance
 wal_buffers = 16MB
@@ -367,111 +405,121 @@ max_wal_size = 4GB
 min_wal_size = 1GB
 
 # Query performance
-random_page_cost = 1.1                     # For SSD
-effective_io_concurrency = 200             # For SSD
-work_mem = 64MB                            # Per operation
-maintenance_work_mem = 512MB
+random_page_cost = 1.1                     # for SSD
+effective_io_concurrency = 200             # for SSD
 
 # Parallelism
 max_worker_processes = 8
 max_parallel_workers_per_gather = 4
 max_parallel_workers = 8
 
+# Autovacuum (Queen is append-heavy; tune more aggressively)
+autovacuum_naptime = 10s
+autovacuum_vacuum_scale_factor = 0.05
+
 # Logging (production)
 log_line_prefix = '%m [%p] %u@%d '
-log_min_duration_statement = 1000          # Log slow queries > 1s
+log_min_duration_statement = 1000          # log slow queries > 1s
 ```
 
 After changes:
+
 ```bash
 sudo systemctl restart postgresql
 ```
+
+The 2026-04-26 benchmark host used `shared_buffers=24GB` with `max_connections=300` on 32 vCPU / 62 GiB.
 
 ---
 
 ## PostgreSQL Failover
 
-Queen provides **zero-message-loss failover** using a file-based buffer system. When PostgreSQL becomes unavailable, messages are automatically buffered to disk and replayed when the database recovers.
+Queen provides **zero-message-loss failover** via a file-based buffer system. When PostgreSQL becomes unavailable, PUSHes are buffered to disk and replayed on recovery.
 
-### How Failover Works
+### How failover works
 
-#### 1. Normal Operation
-```
-Client → Server → PostgreSQL (direct write) → Success
-```
-
-#### 2. PostgreSQL Goes Down
-
-**First Request (Detection):**
-```
-Client → Server → PostgreSQL → Timeout (2-30s) → File Buffer → Success
-                                  ↓
-                            Mark DB unhealthy
-```
-
-**Subsequent Requests (Fast Path):**
-```
-Client → Server → Check db_healthy_ → File Buffer → Success (instant!)
-                       ↓ (false)
-                  Skip DB attempt
-```
-
-#### 3. PostgreSQL Recovers
+#### 1. Normal operation
 
 ```
-Background Processor (every 100ms):
+Client → Worker → libqueen → PostgreSQL → 201 Created
+```
+
+#### 2. PostgreSQL goes down
+
+First request (detection):
+
+```
+Client → Worker → libqueen → timeout (DB_STATEMENT_TIMEOUT) → File Buffer
+                                ↓
+                          AsyncDbPool marks DB unhealthy
+                          SharedStateManager broadcasts state to peers (if any)
+```
+
+Subsequent requests (fast path):
+
+```
+Client → Worker → SharedStateManager says "unhealthy" → File Buffer (instant)
+```
+
+#### 3. PostgreSQL recovers
+
+```
+Background flusher (every FILE_BUFFER_FLUSH_MS):
   ↓
-Try to flush buffer → Success!
+Try queen.push_messages_v3() on AsyncDbPool → Success
   ↓
-Mark DB healthy → Resume normal operation
+Mark DB healthy, broadcast → resume normal operation
 ```
 
-### File Buffer Architecture
+### File buffer architecture
 
-**Buffer Files:** UUIDv7-based for guaranteed ordering
+Buffer files are UUIDv7-named for guaranteed ordering:
+
 ```
-/var/lib/queen/buffers/
-├── failover_019a0c11-7fe8.buf.tmp   ← Being written (active)
-├── failover_019a0c11-8021.buf       ← Complete, ready to process
-├── failover_019a0c11-8054.buf       ← Queued
+$FILE_BUFFER_DIR/
+├── failover_019a0c11-7fe8.buf.tmp     ← currently being written
+├── failover_019a0c11-8021.buf         ← complete, ready to flush
+├── failover_019a0c11-8054.buf         ← queued
 └── failed/
-    └── failover_019a0c11-7abc.buf   ← Failed, will retry in 5s
+    └── failover_019a0c11-7abc.buf     ← failed, retried every 5s
 ```
 
-**File Lifecycle:**
-1. **Write**: Events written to `.buf.tmp` file
-2. **Finalize**: When file reaches 10,000 events OR 200ms idle → rename to `.buf` (atomic)
-3. **Process**: Background processor picks up `.buf` files, flushes to DB
-4. **Delete**: File removed after successful flush
-5. **Retry**: Failed files moved to `failed/`, retried every 5 seconds
+File lifecycle:
 
-**Benefits:**
-- ✅ **Zero message loss** - Even if server crashes, messages on disk
-- ✅ **No rotation conflicts** - Each file is independent
-- ✅ **Automatic recovery** - Replays on startup
-- ✅ **Transaction ID preservation** - Duplicates detected and skipped
-- ✅ **FIFO ordering** - Messages processed in order (within partitions)
+1. **Write** — events appended to `.buf.tmp` (one buffer file shared across all workers via `FileBufferManager` owned by worker 0).
+2. **Finalize** — at `FILE_BUFFER_EVENTS_PER_FILE` events **or** 200 ms idle, atomic rename to `.buf`.
+3. **Flush** — background processor batches `.buf` events into `FILE_BUFFER_MAX_BATCH`-sized transactions against `AsyncDbPool`.
+4. **Delete** — file removed after a successful flush.
+5. **Retry** — failed files move to `failed/`, retried every 5 seconds.
+
+Properties:
+
+- ✅ Zero message loss — even server crash mid-write leaves events on disk
+- ✅ FIFO ordering preserved within partitions (UUIDv7 sort order)
+- ✅ Transaction-ID-based dedup catches duplicates from client retries
+- ✅ Startup recovery replays any leftover `.buf` files before serving traffic
 
 ### Configuration
 
 ```bash
 # Buffer directory
-FILE_BUFFER_DIR=/var/lib/queen/buffers   # Linux (default)
-FILE_BUFFER_DIR=/tmp/queen                # macOS (default)
+FILE_BUFFER_DIR=/var/lib/queen/buffers     # Linux default
+FILE_BUFFER_DIR=/tmp/queen                  # macOS default
 
-# Processing intervals
-FILE_BUFFER_FLUSH_MS=100                  # Scan for complete files every 100ms
-FILE_BUFFER_MAX_BATCH=100                 # Events per DB transaction
-FILE_BUFFER_EVENTS_PER_FILE=10000         # Create new file after N events
+# Processing
+FILE_BUFFER_FLUSH_MS=100                    # scan interval for .buf files
+FILE_BUFFER_MAX_BATCH=100                   # events per DB transaction
+FILE_BUFFER_EVENTS_PER_FILE=10000           # finalize after N events
 
 # Fast failover detection
-DB_STATEMENT_TIMEOUT=2000                 # Detect DB down in 2s (default: 30s)
-DB_POOL_ACQUISITION_TIMEOUT=10000         # Pool timeout
+DB_STATEMENT_TIMEOUT=2000                   # detect DB down in 2 s
+DB_CONNECTION_TIMEOUT=1000                  # 1 s connect attempt
 ```
 
-### Failover Scenarios
+### Failover scenarios
 
-#### Scenario 1: DB Down During Push
+**Scenario 1: DB down during push**
+
 ```
 [Worker 0] PUSH: 1000 items to [orders/Default] | Pool: 5/5 conn (0 in use)
 ... 2 seconds timeout ...
@@ -479,18 +527,18 @@ DB_POOL_ACQUISITION_TIMEOUT=10000         # Pool timeout
 [Worker 0] DB known to be down, using file buffer immediately
 ```
 
-**Result:** Messages buffered, client gets `{pushed: true, dbHealthy: false, failover: true}`
+Result: messages buffered; client gets `{pushed: true, dbHealthy: false, failover: true}`.
 
-#### Scenario 2: DB Recovers
+**Scenario 2: DB recovers**
+
 ```
 [Background] Failover: Processing 10000 events from failover_019a0c11.buf
 [Background] PostgreSQL recovered! Database is healthy again
 [Background] Failover: Completed 10000 events in 850ms (11765 events/sec) - file removed
 ```
 
-**Result:** All buffered messages flushed to DB, normal operation resumes
+**Scenario 3: Duplicate detection**
 
-#### Scenario 3: Duplicate Detection
 ```
 [Background] Failover: Processing 10000 events...
 [ERROR] Batch push failed: duplicate key constraint
@@ -498,22 +546,17 @@ DB_POOL_ACQUISITION_TIMEOUT=10000         # Pool timeout
 [INFO] Recovery complete: 1000 new, 9000 duplicates, 0 deleted queues
 ```
 
-**Result:** Only new messages inserted, duplicates safely skipped
+Only the truly new messages are inserted; duplicates from client retries are safely skipped.
 
-### Monitoring Failover
+### Monitoring failover
 
-**Check buffer status:**
 ```bash
+# Buffer + DB health status
 curl http://localhost:6632/api/v1/status/buffers
 ```
 
-**Response:**
 ```json
 {
-  "qos0": {
-    "pending": 0,
-    "failed": 0
-  },
   "failover": {
     "pending": 50000,
     "failed": 0
@@ -522,258 +565,199 @@ curl http://localhost:6632/api/v1/status/buffers
 }
 ```
 
-**Check buffer files:**
 ```bash
+# File-system view
 ls -lh /var/lib/queen/buffers/
+du -sh /var/lib/queen/buffers
 ```
 
-### Best Practices
+### Best practices
 
-**1. Fast Failover Detection**
-```bash
-# Recommended for production
-DB_STATEMENT_TIMEOUT=2000     # 2 second timeout
-DB_CONNECTION_TIMEOUT=1000    # 1 second connection attempt
-```
+1. **Fast failover detection** — production should run with `DB_STATEMENT_TIMEOUT=2000` and `DB_CONNECTION_TIMEOUT=1000` so the broker fails over within 2 s instead of 30 s.
+2. **Sufficient disk space** — at ~170 B/message, 1 M msg/hr ≈ 170 MB/hr of buffer. Monitor `du -sh $FILE_BUFFER_DIR`.
+3. **Alert on growth** — `du -sh $FILE_BUFFER_DIR > 100 MB` is a strong signal the DB has been unreachable for an extended period.
+4. **Client-side transaction IDs** — all official clients generate UUIDv7 `transactionId`s for every PUSH so retries during failover dedupe correctly.
 
-**2. Sufficient Disk Space**
-```bash
-# Calculate required space:
-# 1M messages/hour × 170 bytes/message = ~170 MB/hour buffer
-df -h /var/lib/queen/buffers
-```
-
-**3. Monitor Buffer Growth**
-```bash
-# Alert if buffer > 100 MB (indicates DB is down)
-watch -n 5 'du -sh /var/lib/queen/buffers'
-```
-
-**4. Transaction ID Generation**
-The client **always generates UUIDv7 transaction IDs** before sending to server. This ensures:
-- IDs are stable across retries
-- Duplicate detection works correctly
-- Exactly-once semantics guaranteed
-
-### Tuning for High Throughput
+### Tuning for high recovery throughput
 
 ```bash
-# Process buffer files faster
-FILE_BUFFER_FLUSH_MS=50                  # Scan every 50ms
-FILE_BUFFER_MAX_BATCH=1000               # Larger DB batches
-FILE_BUFFER_EVENTS_PER_FILE=50000        # Larger buffer files
-
-# High-throughput failover configuration
-DB_POOL_SIZE=300                         # More connections for recovery
-DB_STATEMENT_TIMEOUT=2000                # Fast detection
+FILE_BUFFER_FLUSH_MS=50                  # scan more often
+FILE_BUFFER_MAX_BATCH=1000               # larger DB transactions
+FILE_BUFFER_EVENTS_PER_FILE=50000        # bigger files = fewer renames
+DB_POOL_SIZE=300                         # more conns for parallel recovery
 ```
 
 ### Troubleshooting
 
-**Problem:** "Buffered event missing transactionId"
-- **Cause:** Corrupted buffer file or old client version
-- **Fix:** Update client to latest version (auto-generates transaction IDs)
-
-**Problem:** Duplicate messages after failover
-- **Cause:** Transaction IDs regenerated on retry (old versions)
-- **Fix:** Ensure client generates transaction IDs (v0.2.9+)
-
-**Problem:** Buffer files not being processed
-- **Cause:** DB still down or files in `.tmp` state
-- **Fix:** Check DB health, files should auto-finalize after 200ms idle
-
-**Problem:** Recovery taking too long
-- **Cause:** Large buffer files (> 100,000 events)
-- **Fix:** Increase `FILE_BUFFER_MAX_BATCH` and `DB_POOL_SIZE`
+| Problem | Likely cause | Fix |
+|---|---|---|
+| "Buffered event missing transactionId" | Old client or corrupted file | Upgrade clients to ≥ 0.7.4 |
+| Duplicate messages after failover | Client regenerated IDs on retry | Upgrade clients to ≥ 0.2.9 |
+| `.tmp` files not finalizing | Workload paused mid-write | Files auto-finalize after 200 ms idle |
+| Recovery is slow | Files too large | Raise `FILE_BUFFER_MAX_BATCH` and/or `DB_POOL_SIZE` |
 
 ---
 
 ## Queue Optimization
 
-### Default Queue Settings
+### Per-queue settings
 
-```bash
-export DEFAULT_LEASE_TIME=300              # 5 minutes
-export DEFAULT_RETRY_LIMIT=3               # Max retries
-export DEFAULT_RETRY_DELAY=1000            # Retry delay (ms)
-export DEFAULT_MAX_SIZE=10000              # Max queue size
-export DEFAULT_BATCH_SIZE=1                # Default batch size
+Queue-level settings (lease time, retry limit, retention, encryption, max size, priority, DLQ on/off, …) are **stored in the `queen.queues` row**, not configured by environment variable. Set them via any client:
+
+```javascript
+await queen.queue('orders').config({
+  leaseTime: 300,
+  retryLimit: 3,
+  retentionSeconds: 86400,
+  dlqAfterMaxRetries: true,
+  encryptionEnabled: false,
+  priority: 5,
+  maxSize: 0
+}).create()
 ```
 
-### Batch Processing
+See [API.md](API.md) and any client README (e.g. [`clients/client-js/client-v2/README.md`](../clients/client-js/client-v2/README.md#part-11-queue-configuration---fine-tuning)) for the full list of per-queue fields. The server-side defaults applied at queue creation are in `lib/schema/procedures/012_configure.sql`.
+
+### Server-wide defaults
 
 ```bash
-export BATCH_INSERT_SIZE=1000              # Bulk insert size
-export DEFAULT_BATCH_SIZE=100              # Default pop batch
-export MAX_TIMEOUT=60000                   # Max pop timeout (ms)
+export DEFAULT_TIMEOUT=30000             # max ms a long-poll can wait
+export DEFAULT_BATCH_SIZE=1              # batch size when client doesn't pass one
+export DEFAULT_SUBSCRIPTION_MODE=""      # "" = all messages, "new" = skip history
 ```
 
-**For high throughput:**
-- Set `BATCH_INSERT_SIZE=2000` (or higher)
-- Use larger batch sizes when consuming (10-100 messages)
-- Reduce `QUEUE_POLL_INTERVAL` to 50ms
+### Retention & eviction services
 
-### Partition Selection
+These services run on `AsyncDbPool` and respect per-queue retention settings:
 
 ```bash
-export MAX_PARTITION_CANDIDATES=100        # Candidate partitions for lease
-```
-
-**Tuning:**
-- **Low partition count** (<50): Keep at 100
-- **High partition count** (>200): Increase to 200-500
-- **Very high** (>1000): Increase to 1000
-
-### Retention & Cleanup
-
-```bash
-# Retention settings
-export DEFAULT_RETENTION_SECONDS=0         # 0 = disabled
-export DEFAULT_COMPLETED_RETENTION_SECONDS=0
-export RETENTION_INTERVAL=300000           # 5 minutes
+# Retention (deletes old messages + cleans partition_consumers / messages_consumed tables)
+export RETENTION_INTERVAL=300000              # 5 minutes
 export RETENTION_BATCH_SIZE=1000
+export PARTITION_CLEANUP_DAYS=30              # delete empty partitions older than N days
+export METRICS_RETENTION_DAYS=90              # delete metrics older than N days
 
-# Partition cleanup
-export PARTITION_CLEANUP_DAYS=7
-export METRICS_RETENTION_DAYS=90
+# Eviction (moves stuck messages that exceeded their max_wait_time)
+export EVICTION_INTERVAL=60000                # 1 minute
+export EVICTION_BATCH_SIZE=1000
+
+# Stats reconciliation
+export STATS_INTERVAL_MS=10000                # fast aggregation
+export STATS_RECONCILE_INTERVAL_MS=120000     # full scan of queen.messages
+export STATS_HISTORY_RETENTION_DAYS=7
 ```
 
-### Eviction Settings
+### Partition_lookup safety net (PUSHPOPLOOKUPSOL)
+
+A reconcile service catches `queen.update_partition_lookup_v1` calls missed during crashes or transient failures of the per-push follow-up call. Only the elected stats leader runs the actual reconcile query (gated on `queen.is_stats_leader`):
 
 ```bash
-export DEFAULT_MAX_WAIT_TIME_SECONDS=0     # 0 = disabled
-export EVICTION_INTERVAL=60000             # 1 minute
-export EVICTION_BATCH_SIZE=1000
+export PARTITION_LOOKUP_RECONCILE_INTERVAL_MS=5000        # 5 seconds
+export PARTITION_LOOKUP_RECONCILE_LOOKBACK_SECONDS=60
 ```
 
 ---
 
 ## Monitoring & Debugging
 
-### Logging Configuration
+### Logging
 
 ```bash
 # Development
 export LOG_LEVEL=debug
-export LOG_FORMAT=text
-export LOG_TIMESTAMP=true
 
 # Production
 export LOG_LEVEL=info
-export LOG_FORMAT=json
-export LOG_TIMESTAMP=true
 ```
 
-**Log Levels:**
-- `trace` - Extremely verbose
-- `debug` - Detailed debugging
-- `info` - General information (default)
-- `warn` - Warnings only
-- `error` - Errors only
-- `critical` - Critical errors
-- `off` - Disable logging
+Levels: `trace`, `debug`, `info` (default), `warn`, `error`, `critical`, `off`. The server only respects `LOG_LEVEL` — there is no `LOG_FORMAT` or `LOG_TIMESTAMP` env var (spdlog is configured with a fixed format).
 
-### Health & Metrics Endpoints
+### Health & metrics endpoints
 
 ```bash
-# Health check
+# Liveness
 curl http://localhost:6632/health
 
-# Performance metrics
+# Prometheus scrape
+curl http://localhost:6632/metrics/prometheus
+
+# Human-readable summary (JSON)
 curl http://localhost:6632/metrics
 
-# System overview
+# Resources
 curl http://localhost:6632/api/v1/resources/overview
-
-# Queue statistics
+curl http://localhost:6632/api/v1/resources/queues
+curl http://localhost:6632/api/v1/status/buffers
 curl http://localhost:6632/api/v1/status/queues
 ```
 
-### Request & Message Counting
+`/metrics/prometheus` exposes per-`JobType` counters (push/pop/ack request rates, latency histograms, Vegas limit, in-flight slots), shared-state cache hit ratios, AsyncDbPool stats, and worker metrics.
+
+### Development mode
 
 ```bash
-export ENABLE_REQUEST_COUNTING=true
-export ENABLE_MESSAGE_COUNTING=true
-export METRICS_ENDPOINT_ENABLED=true
-export HEALTH_CHECK_ENABLED=true
-```
-
-### Development Mode
-
-```bash
-# Start with debug logging
 LOG_LEVEL=debug ./bin/queen-server --dev
-
-# Or use make target
+# or
 make dev
 ```
 
-### Common Issues & Solutions
+### Common issues & solutions
 
-#### 1. "mutex lock failed: Invalid argument"
-**Cause:** `DB_POOL_SIZE` too small  
-**Fix:**
+#### 1. High CPU usage when idle
+
+**Cause:** poll interval too aggressive.
+
 ```bash
-DB_POOL_SIZE=50 ./bin/queen-server
+export POP_WAIT_INITIAL_INTERVAL_MS=200
+export POP_WAIT_MAX_INTERVAL_MS=2000
 ```
 
-#### 2. High CPU usage
-**Cause:** Polling interval too aggressive  
-**Fix:**
+#### 2. Slow message delivery
+
+**Cause:** poll interval too conservative.
+
 ```bash
-export QUEUE_POLL_INTERVAL=200
-export QUEUE_MAX_POLL_INTERVAL=3000
+export POP_WAIT_INITIAL_INTERVAL_MS=50
+export POP_WAIT_MAX_INTERVAL_MS=500
 ```
 
-#### 3. Slow message delivery
-**Cause:** Polling interval too conservative  
-**Fix:**
+#### 3. PG `too many clients already` at startup
+
+**Cause:** `max_connections` < `DB_POOL_SIZE + SIDECAR_POOL_SIZE + headroom`.
+
 ```bash
-export QUEUE_POLL_INTERVAL=50
-export QUEUE_MAX_POLL_INTERVAL=1000
+# Either raise PG:
+ALTER SYSTEM SET max_connections = 300;
+
+# Or shrink Queen:
+export DB_POOL_SIZE=50
+export SIDECAR_POOL_SIZE=20
 ```
 
-#### 4. "Database connection pool timeout"
-**Cause:** Pool exhaustion during high concurrent long-polling operations  
-**Symptoms:** Errors like "Database connection pool timeout (waited 10000ms)"  
-**Fix:**
-```bash
-# Option 1: Increase pool size (recommended)
-export DB_POOL_SIZE=200
+#### 4. `StatsService` `statement_timeout` in logs
 
-# Option 2: Increase acquisition timeout for more patience
-export DB_POOL_ACQUISITION_TIMEOUT=20000  # 20 seconds
+**Cause:** reconciliation query exceeded `DB_STATEMENT_TIMEOUT` on a very large `queen.messages` table.
 
-# Option 3: Reduce POP timeout to release connections faster
-export DEFAULT_TIMEOUT=10000  # 10 seconds instead of 30
-```
+This is **cosmetic** — an advisory lock prevents pile-up and the fast-path stats keep working. Long-term fix: shorten retention, partition by time, or raise `DB_STATEMENT_TIMEOUT`. Tracked in the 2026-04-26 benchmark notes.
 
-**Note:** The server was optimized (v1.x+) to reuse connections within POP operations, reducing from 3 connections per POP to 1. If you still see this error, increase `DB_POOL_SIZE`.
+#### 5. PG `deadlock detected` during high-concurrency push
 
-#### 5. Database connection errors (general)
-**Cause:** Pool exhaustion or PostgreSQL `max_connections`  
-**Fix:**
-```bash
-# Increase pool
-DB_POOL_SIZE=100 ./bin/queen-server
+**Cause:** observed on `0.12` at 10 000+ partitions; rare on `0.14+` under multi-cg fan-out.
 
-# And in postgresql.conf
-max_connections = 200
-```
+**Mitigation:** Queen's file-buffer failover catches the rolled-back transaction, retries individually, and the messages land safely. Zero data loss in any benchmarked scenario. The `[error]` log lines will alert in production but are not correctness issues.
 
 #### 6. Build errors on macOS
-**Cause:** PostgreSQL/OpenSSL not found  
-**Fix:**
+
 ```bash
 brew install postgresql openssl
-make debug-paths  # Check detected paths
+make debug-paths    # verify detected paths
 ```
 
 ---
 
 ## Production Deployment
 
-### Systemd Service
+### Systemd service
 
 Create `/etc/systemd/system/queen-server.service`:
 
@@ -792,20 +776,27 @@ ExecStart=/opt/queen/bin/queen-server
 Restart=always
 RestartSec=10
 
-# Environment variables
+# Core
 Environment=PORT=6632
 Environment=HOST=0.0.0.0
+Environment=NUM_WORKERS=10
+
+# Database
 Environment=PG_HOST=localhost
 Environment=PG_PORT=5432
 Environment=PG_DB=queen_production
 Environment=PG_USER=queen
 Environment=PG_PASSWORD=secure_password
-Environment=DB_POOL_SIZE=100
+Environment=DB_POOL_SIZE=150
+Environment=SIDECAR_POOL_SIZE=50
+
+# Logging
 Environment=LOG_LEVEL=info
-Environment=LOG_FORMAT=json
+
+# Encryption at rest (64 hex chars / 32 bytes)
 Environment=QUEEN_ENCRYPTION_KEY=your_64_char_hex_key_here
 
-# Security
+# Hardening
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -817,21 +808,56 @@ LimitNPROC=4096
 WantedBy=multi-user.target
 ```
 
-**Start the service:**
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable queen-server
 sudo systemctl start queen-server
-sudo systemctl status queen-server
+sudo journalctl -u queen-server -f
 ```
 
-### Docker Deployment
+### Docker
 
-See the root `Dockerfile` and `build.sh` for containerized deployment.
+See the repo-root `Dockerfile` and `build.sh`. Single-image deployment example (also in the main README):
 
-### Load Balancing
+```bash
+docker network create queen
+docker run --name qpg --network queen \
+  -e POSTGRES_PASSWORD=postgres -p 5433:5432 -d postgres
+docker run -p 6632:6632 --network queen \
+  -e PG_HOST=qpg -e PG_PORT=5432 -e PG_PASSWORD=postgres \
+  -e NUM_WORKERS=2 -e DB_POOL_SIZE=5 -e SIDECAR_POOL_SIZE=30 \
+  smartnessai/queen-mq:0.15.0
+```
 
-For horizontal scaling, run multiple Queen servers behind a load balancer:
+### Kubernetes (with optional UDP sync for multi-instance)
+
+For a 3-pod cluster that shares cache state via UDP:
+
+```yaml
+env:
+  - name: NUM_WORKERS
+    value: "10"
+  - name: DB_POOL_SIZE
+    value: "100"
+  - name: SIDECAR_POOL_SIZE
+    value: "50"
+  # Inter-instance notification + shared cache
+  - name: QUEEN_UDP_PEERS
+    value: "queen-0.queen-hl.ns.svc.cluster.local:6633,queen-1.queen-hl.ns.svc.cluster.local:6633"
+  - name: QUEEN_UDP_NOTIFY_PORT
+    value: "6633"
+  - name: QUEEN_SYNC_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: queen-secrets
+        key: sync-secret
+```
+
+A more complete StatefulSet example (with Helm templating) lives at [`k8s-example.yaml`](k8s-example.yaml).
+
+### Load balancing
+
+Queen is **stateless** — any HTTP request can hit any instance. Behind a load balancer:
 
 ```nginx
 upstream queen_cluster {
@@ -853,77 +879,86 @@ server {
 }
 ```
 
+For best consumer-group dispatch consolidation, prefer an **affinity** load-balancing strategy on the client (`loadBalancingStrategy: 'affinity'`) so the same `queue:partition:consumerGroup` key always hits the same backend.
+
 ---
 
 ## Benchmarking
 
-### Built-in Benchmarks
+### Reproducible perf harness
 
-Located in `clients/client-js/benchmark/`:
+The current performance harness lives at [`benchmark-queen/test-perf/`](../benchmark-queen/test-perf/README.md). It spins up a fresh PG container, the locally-built `queen-server`, runs producer + consumer in parallel for a configurable window, and emits PG-stats-truth metrics (not just autocannon).
+
+```bash
+nvm use 22
+cd ..    # repo root
+./benchmark-queen/test-perf/scripts/run-all.sh                # all scenarios × 3 runs
+RUNS_PER_SCENARIO=1 ./benchmark-queen/test-perf/scripts/run-all.sh    # quick smoke
+```
+
+### Quick client-side benchmarks
+
+Lightweight JS benchmarks for sanity checks live at [`clients/client-js/benchmark/`](../clients/client-js/benchmark/):
 
 ```bash
 cd clients/client-js
-
-# Producer benchmark
-node benchmark/producer.js
-
-# Consumer benchmark
-node benchmark/consumer.js
-
-# Multi-producer
-node benchmark/producer_multi.js
-
-# Multi-consumer
-node benchmark/consumer_multi.js
+node benchmark/producer.js          # single-producer
+node benchmark/consumer.js          # single-consumer
+node benchmark/producer_multi.js    # multi-producer
+node benchmark/consumer_multi.js    # multi-consumer
 ```
 
-### Expected Results
+### Published results
 
-**Single server, NUM_WORKERS=10 (default), DB_POOL_SIZE=50:**
-- Throughput: 129,000+ msg/s (sustained)
-- Peak: 148,000+ msg/s
-- ACK latency: < 1ms
-- 1M messages: ~7.7 seconds
+The 2026-04-26 campaign on a 32 vCPU / 62 GiB host with `NUM_WORKERS=10`, `DB_POOL_SIZE=50`, `SIDECAR_POOL_SIZE=250`, `PG max_connections=300`:
+
+- **104 k msg/s** push (`batch=100`)
+- **165 k msg/s** fan-out (10 consumer groups)
+- **39 k msg/s** push (production-realistic `batch=10`)
+- broker RSS 30–170 MB across the entire suite
+- zero message loss across 1.6 B events
+
+Full report: [`benchmark-queen/2026-04-26/README.md`](../benchmark-queen/2026-04-26/README.md).
 
 ---
 
 ## Environment Variables Reference
 
-See [ENV_VARIABLES.md](ENV_VARIABLES.md) for the complete list of all 100+ configuration options.
+**The full, code-verified table is in [ENV_VARIABLES.md](ENV_VARIABLES.md).** This README intentionally does not duplicate it.
 
-**Quick reference:**
+Quick reference for the variables most operators touch:
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `NUM_WORKERS` | 10 | Number of worker threads (max: CPU cores) |
-| `DB_POOL_SIZE` | 150 | **CRITICAL** - Pool size (2.5× workers) |
-| `PORT` | 6632 | Server port |
-| `HOST` | 0.0.0.0 | Server host |
-| `LOG_LEVEL` | info | Log level (debug, info, warn, error) |
-| `QUEUE_POLL_INTERVAL` | 100 | Initial poll interval (ms) |
-| `BATCH_INSERT_SIZE` | 1000 | Bulk insert batch size |
-| `QUEEN_ENCRYPTION_KEY` | - | Encryption key (64 hex chars) |
+|---|---|---|
+| `PORT` | `6632` | HTTP listen port |
+| `HOST` | `0.0.0.0` | HTTP bind host |
+| `NUM_WORKERS` | `10` | uWS worker threads (capped at CPU cores) |
+| `DB_POOL_SIZE` | `150` | Background-services pool; 95 % used (5 % safety margin) |
+| `SIDECAR_POOL_SIZE` | `50` | Hot-path pool (PUSH/POP/ACK), split across workers |
+| `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` / `PG_PASSWORD` | local defaults | PostgreSQL connection |
+| `PG_USE_SSL` / `PG_SSL_REJECT_UNAUTHORIZED` | `false` / `true` | SSL configuration |
+| `LOG_LEVEL` | `info` | `trace` / `debug` / `info` / `warn` / `error` / `critical` / `off` |
+| `POP_WAIT_INITIAL_INTERVAL_MS` | `100` | Long-poll initial interval |
+| `POP_WAIT_MAX_INTERVAL_MS` | `1000` | Long-poll max interval (after backoff) |
+| `QUEEN_ENCRYPTION_KEY` | (unset) | 64 hex chars; enables per-queue payload encryption |
+| `QUEEN_UDP_PEERS` | (unset) | Comma-separated `host:port` list for multi-instance sync |
+| `JWT_ENABLED` | `false` | Enable JWT auth (HS256 / RS256 / EdDSA via JWKS) |
 
 ---
 
 ## Further Reading
 
-### Core Documentation
-- [ENV_VARIABLES.md](ENV_VARIABLES.md) - Complete environment variable reference
-- [API.md](API.md) - HTTP API documentation
-- [../README.md](../README.md) - Main project README
-- [../documentation/STREAMING_USAGE.md](../documentation/STREAMING_USAGE.md) - Streaming guide
-- [../documentation/RETENTION.md](../documentation/RETENTION.md) - Retention & cleanup
-
-### Technical Documentation
-- [ASYNC_DATABASE_IMPLEMENTATION.md](ASYNC_DATABASE_IMPLEMENTATION.md) - AsyncDbPool internals
+- [ENV_VARIABLES.md](ENV_VARIABLES.md) — complete env var reference (single source of truth)
+- [API.md](API.md) — HTTP API documentation
+- [`../README.md`](../README.md) — project README & release history
+- [`../benchmark-queen/`](../benchmark-queen/) — published benchmark sessions
+- [`../cdocs/LIBQUEEN_IMPROVEMENTS.md`](../cdocs/LIBQUEEN_IMPROVEMENTS.md) — design notes for the adaptive engine (§9 covers per-type batching + Vegas)
 
 ---
 
 ## Support
 
-For issues or questions:
-- Check logs: `journalctl -u queen-server -f`
-- Enable debug logging: `LOG_LEVEL=debug`
-- Review metrics: `curl http://localhost:6632/metrics`
-
+- Logs: `journalctl -u queen-server -f`
+- Debug: `LOG_LEVEL=debug`
+- Metrics: `curl http://localhost:6632/metrics/prometheus`
+- Issues: [github.com/queen-mq/queen/issues](https://github.com/queen-mq/queen/issues)

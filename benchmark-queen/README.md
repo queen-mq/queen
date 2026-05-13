@@ -1,6 +1,6 @@
 # Queen benchmarks
 
-Results from benchmarking [Queen MQ](https://github.com/smartness-ai/queen) on a 32 vCPU / 62 GiB host with PostgreSQL.
+Results from benchmarking [Queen MQ](https://github.com/queen-mq/queen) on a 32 vCPU / 62 GiB host with PostgreSQL.
 
 ## Sessions
 

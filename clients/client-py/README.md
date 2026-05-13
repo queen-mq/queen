@@ -22,7 +22,7 @@ Queen MQ is a PostgreSQL-backed message queue system with a powerful feature set
 - **Consumer Groups** - Kafka-style consumer groups for scalability
 - **Flexible Semantics** - Exactly-once, at-least-once, and at-most-once delivery
 - **Transactions** - Atomic operations across push and ack
-- **High Performance** - 200K+ messages/sec with proper batching
+- **High Performance** — 104K msg/s push, 165K msg/s fan-out with consumer groups on a single 32-core node ([benchmarks](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-04-26))
 - **Subscription Modes** - Process from beginning, new messages only, or from timestamp
 - **Dead Letter Queue** - Automatic failure handling and monitoring
 - **Message Tracing** - Debug distributed workflows with trace timelines
@@ -49,22 +49,23 @@ pip install queen-mq
 import asyncio
 from queen import Queen
 
+async def process(message):
+    print('Processing:', message['data'])
+    # Auto-ack on success, auto-retry on error
+
 async def main():
     # Connect to Queen server
     async with Queen('http://localhost:6632') as queen:
         # Create a queue
         await queen.queue('tasks').create()
-        
+
         # Push messages
         await queen.queue('tasks').push([
             {'data': {'task': 'send-email', 'to': 'alice@example.com'}}
         ])
-        
-        # Consume messages
-        await queen.queue('tasks').consume(async def process(message):
-            print('Processing:', message['data'])
-            # Auto-ack on success, auto-retry on error
-        )
+
+        # Consume messages (handler is a regular async function)
+        await queen.queue('tasks').consume(process)
 
 asyncio.run(main())
 ```
@@ -104,15 +105,17 @@ await queen.queue('user-events').partition('user-123').push([
 Multiple consumers sharing work:
 
 ```python
-# Worker 1 & 2 share the load
-await queen.queue('emails').group('processors').consume(async def handler(msg):
+async def send_handler(msg):
     await send_email(msg['data'])
-)
+
+async def analytics_handler(msg):
+    await log_metrics(msg['data'])
+
+# Worker 1 & 2 share the load
+await queen.queue('emails').group('processors').consume(send_handler)
 
 # Separate group processes same messages independently
-await queen.queue('emails').group('analytics').consume(async def handler(msg):
-    await log_metrics(msg['data'])
-)
+await queen.queue('emails').group('analytics').consume(analytics_handler)
 ```
 
 ### Subscription Modes
@@ -120,6 +123,9 @@ await queen.queue('emails').group('analytics').consume(async def handler(msg):
 Control whether consumer groups process historical messages:
 
 ```python
+async def handler(msg):
+    ...
+
 # Default: Process ALL messages (including backlog)
 await queen.queue('events').group('batch-analytics').consume(handler)
 
@@ -186,22 +192,22 @@ await queen.queue('tasks').push([
 ```python
 # Single message processing (batch=1, default)
 # Handler receives a single message
-await queen.queue('tasks').concurrency(10).consume(async def handler(message):
+async def single_handler(message):
     await process_task(message['data'])
     # Auto-ack on success, auto-retry on error
-)
+
+await queen.queue('tasks').concurrency(10).consume(single_handler)
 
 # Batch processing (batch>1)
 # Handler receives an array of messages
-await queen.queue('tasks').batch(20).concurrency(5).consume(async def handler(messages):
+async def batch_handler(messages):
     for message in messages:
         await process_task(message['data'])
-)
+
+await queen.queue('tasks').batch(20).concurrency(5).consume(batch_handler)
 
 # Process with limit and stop
-await queen.queue('tasks').limit(100).consume(async def handler(message):
-    await process_task(message['data'])
-)
+await queen.queue('tasks').limit(100).consume(single_handler)
 ```
 
 ### Pop Messages (On-Demand Processing)
@@ -307,24 +313,25 @@ for msg in dlq['messages']:
 ### Message Tracing
 
 ```python
-await queen.queue('orders').consume(async def handler(msg):
+async def order_handler(msg):
     order_id = msg['data']['orderId']
-    
+
     # Record trace with name for cross-service correlation
     await msg['trace']({
         'traceName': f"order-{order_id}",
         'eventType': 'info',
         'data': {'text': 'Order processing started'}
     })
-    
+
     await process_order(msg['data'])
-    
+
     await msg['trace']({
         'traceName': f"order-{order_id}",
         'eventType': 'processing',
         'data': {'text': 'Order completed', 'total': msg['data']['total']}
     })
-)
+
+await queen.queue('orders').consume(order_handler)
 
 # View traces in webapp: Traces → Search "order-12345"
 ```
@@ -365,15 +372,21 @@ msgs = await queen.queue('q').batch(200).partitions(50).pop()  # multi-partition
 
 ```python
 # batch=1 (default): handler receives single message
-await queen.queue('q').consume(async def handler(msg): ...)
+async def single_handler(msg):
+    ...
+
+await queen.queue('q').consume(single_handler)
 
 # batch>1: handler receives array of messages
-await queen.queue('q').batch(10).consume(async def handler(msgs): ...)
+async def batch_handler(msgs):
+    ...
+
+await queen.queue('q').batch(10).consume(batch_handler)
 
 # Other options
-await queen.queue('q').limit(10).consume(handler)
-await queen.queue('q').concurrency(5).consume(handler)
-await queen.queue('q').group('my-group').consume(handler)
+await queen.queue('q').limit(10).consume(single_handler)
+await queen.queue('q').concurrency(5).consume(single_handler)
+await queen.queue('q').group('my-group').consume(single_handler)
 ```
 
 ### Acknowledgment
@@ -400,6 +413,9 @@ await (queen.transaction()
 ```python
 await queen.renew(message)
 await queen.renew([msg1, msg2, msg3])
+
+async def handler(msg):
+    ...
 await queen.queue('q').renew_lease(True, 60000).consume(handler)
 ```
 
@@ -531,10 +547,11 @@ await queen.queue('orders').consume(handler)
 
 ## Documentation
 
-- **[Node.js Client](../client-js/README.md)** - Node.js client documentation
-- **[HTTP API Reference](https://github.com/queen-mq/queen/blob/master/server/API.md)** - Raw HTTP endpoints
-- **[Server Guide](https://github.com/queen-mq/queen/blob/master/server/README.md)** - Server setup and configuration
-- **[Architecture Guide](https://github.com/queen-mq/queen/blob/master/documentation/ARCHITECTURE.md)** - Deep dive into internals
+- **[Node.js Client](../client-js/README.md)** — Node.js client documentation
+- **[HTTP API Reference](https://github.com/queen-mq/queen/blob/master/server/API.md)** — raw HTTP endpoints
+- **[Server Guide](https://github.com/queen-mq/queen/blob/master/server/README.md)** — server setup and configuration
+- **[Architecture & internals](https://queenmq.com/architecture.html)** — published architecture overview
+- **[libqueen design notes](https://github.com/queen-mq/queen/blob/master/cdocs/LIBQUEEN_IMPROVEMENTS.md)** — adaptive engine deep-dive
 
 ---
 

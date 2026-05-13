@@ -22,7 +22,7 @@ Queen MQ is a PostgreSQL-backed message queue system with a powerful feature set
 - **Consumer Groups** - Kafka-style consumer groups for scalability
 - **Flexible Semantics** - Exactly-once, at-least-once, and at-most-once delivery
 - **Transactions** - Atomic operations across push and ack
-- **High Performance** - 200K+ messages/sec with proper batching
+- **High Performance** — 104K msg/s push, 165K msg/s fan-out with consumer groups on a single 32-core node ([benchmarks](https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-04-26))
 - **Subscription Modes** - Process from beginning, new messages only, or from timestamp
 - **Dead Letter Queue** - Automatic failure handling and monitoring
 - **Message Tracing** - Debug distributed workflows with trace timelines
@@ -179,7 +179,7 @@ const queen = new Queen({
   urls: ['http://server1:6632', 'http://server2:6632'],
   timeoutMillis: 30000,
   retryAttempts: 3,
-  loadBalancingStrategy: 'round-robin',  // or 'session'
+  loadBalancingStrategy: 'affinity',  // or 'round-robin', 'session'
   enableFailover: true
 })
 ```
@@ -564,8 +564,10 @@ await queen.close()  // Flush buffers and close connections
   timeoutMillis: 30000,
   retryAttempts: 3,
   retryDelayMillis: 1000,
-  loadBalancingStrategy: 'round-robin',
-  enableFailover: true
+  loadBalancingStrategy: 'affinity',   // 'affinity' | 'round-robin' | 'session'
+  affinityHashRing: 128,
+  enableFailover: true,
+  healthRetryAfterMillis: 5000
 }
 ```
 
@@ -653,10 +655,11 @@ const messages: Message<OrderData>[] = await queen.queue('orders').pop()
 
 ## Documentation
 
-- **[Complete V2 Guide](client-v2/README.md)** - Full tutorial with all features (94 test examples)
-- **[HTTP API Reference](https://github.com/queen-mq/queen/blob/master/server/API.md)** - Raw HTTP endpoints
-- **[Server Guide](https://github.com/queen-mq/queen/blob/master/server/README.md)** - Server setup and configuration
-- **[Architecture Guide](https://github.com/queen-mq/queen/blob/master/documentation/ARCHITECTURE.md)** - Deep dive into internals
+- **[Complete V2 Guide](client-v2/README.md)** — full tutorial with all features
+- **[HTTP API Reference](https://github.com/queen-mq/queen/blob/master/server/API.md)** — raw HTTP endpoints
+- **[Server Guide](https://github.com/queen-mq/queen/blob/master/server/README.md)** — server setup and configuration
+- **[Architecture & internals](https://queenmq.com/architecture.html)** — published architecture overview
+- **[libqueen design notes](https://github.com/queen-mq/queen/blob/master/cdocs/LIBQUEEN_IMPROVEMENTS.md)** — adaptive engine deep-dive
 
 ---
 

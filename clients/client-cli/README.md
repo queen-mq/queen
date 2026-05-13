@@ -177,7 +177,7 @@ docker run -d --name qpg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
 docker run -d --name queen --network host \
   -e PG_HOST=localhost -e PG_USER=postgres -e PG_PASSWORD=postgres \
   -e RETENTION_INTERVAL=2000 \
-  smartnessai/queen-mq:0.14.3
+  smartnessai/queen-mq:0.15.0
 
 cd clients/client-cli
 QUEEN_E2E=1 QUEEN_SERVER=http://localhost:6632 \
@@ -185,6 +185,9 @@ QUEEN_E2E=1 QUEEN_SERVER=http://localhost:6632 \
   QUEEN_RETENTION_INTERVAL_MS=2000 \
   make e2e
 ```
+
+> `RETENTION_INTERVAL=2000` (2s) is a **test-only** override so retention tests
+> finish in real time; production uses the default `300000` (5 min).
 
 The same suite runs in CI on push to `master`/`cli` and on `workflow_dispatch`
 via [`.github/workflows/cli.yml`](../../.github/workflows/cli.yml). Each

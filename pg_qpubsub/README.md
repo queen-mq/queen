@@ -41,7 +41,9 @@ For SQL usage, psql, triggers, and simple cases.
 
 ### Note on JSONB API
 
-The JSONB functions (`produce`, `consume`, `commit`, `renew`) are thin wrappers around the core libqueen procedures (`push_messages_v2`, `pop_unified_batch`, `ack_messages_v2`, `renew_lease_v2`). They return immediately after executing the operation.
+The JSONB functions (`produce`, `consume`, `commit`, `renew`) are thin wrappers around the broker's stored procedures (`push_messages_v2`, `pop_unified_batch`, `ack_messages_v2`, `renew_lease_v2`). They return immediately after executing the operation.
+
+> **Note:** `pg_qpubsub` intentionally targets the **v2 path** (`push_messages_v2` + `pop_unified_batch`) so the extension is usable directly from psql / triggers without the libqueen application-side scheduler that the main broker uses to drive the v3 / v4 procedures. Functionality is equivalent; performance will be lower than the broker's adaptive engine on heavy fan-out workloads.
 
 Features like **LISTEN/NOTIFY** for real-time notifications must be implemented at the application level:
 
