@@ -345,10 +345,26 @@
 
         const params = new URLSearchParams(window.location.search);
         const oauthError = params.get('error');
+        // Capture redirect_uri once at page load so a server-side error retry
+        // doesn't lose it. Server-side sanitization is the source of truth;
+        // we only echo it back through /api/login and /api/auth/google?next.
+        const redirectUriParam = params.get('redirect_uri') || '';
+
         if (oauthError) {
             errorText.textContent = OAUTH_ERROR_MESSAGES[oauthError] || `Sign-in error: ${oauthError}`;
             errorDiv.classList.add('show');
-            history.replaceState(null, '', window.location.pathname);
+            // Preserve redirect_uri across the URL cleanup so a retry still works.
+            const cleanQs = redirectUriParam
+                ? '?redirect_uri=' + encodeURIComponent(redirectUriParam)
+                : '';
+            history.replaceState(null, '', window.location.pathname + cleanQs);
+        }
+
+        // Wire the Google button's `next` param so cross-host SSO returns to
+        // the originating upstream after the OAuth bounce.
+        if (redirectUriParam) {
+            const href = '/api/auth/google?next=' + encodeURIComponent(redirectUriParam);
+            googleBtn.setAttribute('href', href);
         }
 
         (async () => {
@@ -374,15 +390,21 @@
             btnText.textContent = 'Signing in…';
 
             try {
+                const body = { username, password };
+                if (redirectUriParam) body.redirect_uri = redirectUriParam;
                 const response = await fetch('/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password })
+                    body: JSON.stringify(body)
                 });
                 const data = await response.json();
                 if (response.ok) {
                     btnText.textContent = 'Success';
-                    setTimeout(() => { window.location.href = '/'; }, 200);
+                    // Server returns the sanitized redirect_uri (or null if it
+                    // refused the supplied one); fall back to '/' so a bad
+                    // input never strands the user on the login page.
+                    const target = (data && data.redirect_uri) ? data.redirect_uri : '/';
+                    setTimeout(() => { window.location.href = target; }, 200);
                 } else {
                     throw new Error(data.error || 'Login failed');
                 }

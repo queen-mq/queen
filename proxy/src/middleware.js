@@ -70,3 +70,33 @@ export function checkMethodAccess(req, res, next) {
   });
 }
 
+/**
+ * Pure-function variant of `checkMethodAccess` for the ForwardAuth handler.
+ * Returns true when the method is allowed for the role embedded in `claims`,
+ * false otherwise. No HTTP I/O so it is trivial to unit test and cannot
+ * accidentally write a body — Traefik discards ForwardAuth response bodies
+ * anyway.
+ *
+ * Mirrors `checkMethodAccess`:
+ *  - admin       → all methods
+ *  - read-write  → all methods
+ *  - read-only   → GET only
+ *  - missing role → denied
+ *
+ * Also accepts a `roles` array (external IdPs typically emit one); any
+ * matching role wins.
+ */
+export function enforceMethodRBACFromClaims(method, claims) {
+  const m = String(method || '').toUpperCase();
+  const roles = new Set();
+  if (claims?.role) roles.add(claims.role);
+  if (Array.isArray(claims?.roles)) {
+    for (const r of claims.roles) if (r) roles.add(r);
+  }
+  if (roles.size === 0) return false;
+  if (roles.has('admin')) return true;
+  if (roles.has('read-write')) return true;
+  if (roles.has('read-only')) return m === 'GET' || m === 'HEAD' || m === 'OPTIONS';
+  return false;
+}
+

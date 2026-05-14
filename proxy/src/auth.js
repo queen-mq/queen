@@ -78,11 +78,13 @@ export async function verifyExternalToken(token) {
     return {
       id: payload.sub || payload.id,
       username: payload.preferred_username || payload.username || payload.name || payload.sub,
+      email: payload.email,
       role: payload.role || (payload.roles && payload.roles[0]) || 'read-only',
       roles: payload.roles || (payload.role ? [payload.role] : ['read-only']),
       subject: payload.sub,
       issuer: payload.iss,
-      isExternal: true  // Flag to indicate this is an external token
+      isExternal: true,  // Flag to indicate this is an external token
+      raw: payload       // Full payload for callers that need non-standard claims
     };
   } catch (error) {
     // Don't log expected failures (invalid/expired tokens)
@@ -146,5 +148,53 @@ export async function hashPassword(password) {
  */
 export function isExternalAuthEnabled() {
   return !!EXTERNAL_JWKS_URL;
+}
+
+/**
+ * Normalize an arbitrary token (external IDP-minted or internal HS256) into a
+ * single claim bag that downstream code can pass to `mintInternalToken` or
+ * `selectResponseHeaders`. External tokens are tried first when JWKS is
+ * configured (matches the precedence in the global cookie auth middleware).
+ *
+ * Returns null if neither path validates the token. The `raw` field carries
+ * the original verified payload so callers can pull non-standard claims
+ * (e.g. `groups`) without us having to enumerate them here.
+ *
+ * Used by the ForwardAuth handler only — existing flows keep using
+ * `verifyExternalToken` / `verifyToken` directly so their behavior is unchanged.
+ */
+export async function extractClaimsFromAnyToken(token) {
+  if (!token) return null;
+
+  if (isExternalAuthEnabled()) {
+    const ext = await verifyExternalToken(token);
+    if (ext) {
+      return {
+        sub: ext.subject || ext.id,
+        username: ext.username,
+        email: ext.email,
+        role: ext.role,
+        roles: ext.roles,
+        groups: ext.raw?.groups,
+        isExternal: true,
+        raw: ext.raw,
+      };
+    }
+  }
+
+  const internal = verifyToken(token);
+  if (internal) {
+    return {
+      sub: internal.id != null ? String(internal.id) : internal.username,
+      username: internal.username,
+      email: internal.email,
+      role: internal.role,
+      roles: internal.role ? [internal.role] : [],
+      isExternal: false,
+      raw: internal,
+    };
+  }
+
+  return null;
 }
 

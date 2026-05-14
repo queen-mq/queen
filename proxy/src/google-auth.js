@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import * as jose from 'jose';
 import {
   createGoogleUser,
@@ -10,6 +11,14 @@ import {
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || '';
+
+// When COOKIE_DOMAIN is set we operate in cross-host mode (auth.example.com
+// kicks the OAuth flow on behalf of grafana.example.com etc.). In that mode we
+// CANNOT round-trip state via a cookie set on the auth host before the bounce,
+// so we encode it as a short-lived signed JWT in the `state` query param
+// instead. The HS256 secret is the same JWT_SECRET used for session tokens.
+const OAUTH_STATE_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+const OAUTH_STATE_TTL_SECONDS = 5 * 60;
 
 // Comma-separated list of allowed Google Workspace domains (matched against the
 // `hd` claim). Empty = allow any verified email.
@@ -57,17 +66,36 @@ function randomToken(bytes = 32) {
 
 /**
  * Build the URL the browser should be redirected to in order to start the
- * Google OAuth 2.0 Authorization Code flow. Returns the URL plus the `state`
- * and `nonce` values that the caller MUST persist (e.g. in a short-lived
- * httpOnly cookie) so they can be cross-checked in the callback.
+ * Google OAuth 2.0 Authorization Code flow.
+ *
+ * Two modes:
+ *  - Cookie mode (legacy single-host): returns plain `state` + `nonce` random
+ *    tokens that the caller MUST persist in short-lived httpOnly cookies and
+ *    cross-check in the callback.
+ *  - Signed mode (cross-host, opt-in via `signed: true`): encodes nonce +
+ *    redirect_uri inside the `state` query param itself as a short-lived HS256
+ *    JWT. No cookie write required before the bounce, which is what cross-host
+ *    SSO needs (the auth host issues the redirect on behalf of a different
+ *    upstream host that has no cookie yet).
  */
-export function buildAuthorizeUrl({ redirectAfterLogin } = {}) {
+export function buildAuthorizeUrl({ redirectAfterLogin, signed = false } = {}) {
   if (!isGoogleAuthEnabled()) {
     throw new Error('Google auth is not configured');
   }
 
-  const state = randomToken();
   const nonce = randomToken();
+  const next = redirectAfterLogin || '/';
+
+  let state;
+  if (signed) {
+    state = jwt.sign(
+      { nonce, next },
+      OAUTH_STATE_SECRET,
+      { algorithm: 'HS256', expiresIn: OAUTH_STATE_TTL_SECONDS }
+    );
+  } else {
+    state = randomToken();
+  }
 
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
@@ -90,8 +118,27 @@ export function buildAuthorizeUrl({ redirectAfterLogin } = {}) {
     url: `${GOOGLE_AUTHORIZE_URL}?${params.toString()}`,
     state,
     nonce,
-    redirectAfterLogin: redirectAfterLogin || '/',
+    redirectAfterLogin: next,
+    signed,
   };
+}
+
+/**
+ * Verify a signed OAuth `state` JWT produced by `buildAuthorizeUrl({signed:true})`.
+ * Returns the decoded `{ nonce, next }` payload, or null if verification fails
+ * (expired, tampered, or just not a JWT — e.g. a legacy cookie-mode random
+ * token routed through this helper by mistake).
+ */
+export function verifyOauthState(state) {
+  if (!state || typeof state !== 'string') return null;
+  try {
+    const payload = jwt.verify(state, OAUTH_STATE_SECRET, { algorithms: ['HS256'] });
+    if (!payload || typeof payload !== 'object') return null;
+    if (typeof payload.nonce !== 'string' || !payload.nonce) return null;
+    return { nonce: payload.nonce, next: typeof payload.next === 'string' ? payload.next : '/' };
+  } catch {
+    return null;
+  }
 }
 
 async function exchangeCodeForTokens(code) {

@@ -194,6 +194,149 @@ runs the OAuth 2.0 Authorization Code flow:
    `/api/auth/google/callback` path).
 3. Request scopes `openid email profile` (the proxy does this automatically).
 
+## Traefik ForwardAuth
+
+When `FORWARD_AUTH_ENABLED=true`, the proxy exposes
+`GET /api/auth/forward-auth` — a stateless endpoint compatible with Traefik's
+[ForwardAuth](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/forwardauth/)
+middleware. Any service routed through Traefik can be SSO‑protected by adding
+the middleware to its router (Grafana, Prometheus, the Traefik dashboard,
+QueenMQ itself, …).
+
+### Behavior
+
+- `Authorization: Bearer <ext-jwt>` present → verified against `EXTERNAL_JWKS_URL`,
+  passed through unchanged. The IdP is the source of truth (no local user
+  lookup).
+- No bearer, but a session cookie (`token`) on the configured `COOKIE_DOMAIN`
+  → cookie is verified, a fresh short‑lived `internal JWT` is minted, and that
+  is forwarded as `Authorization: Bearer …` to the upstream. The long‑lived
+  session cookie value never leaves the proxy.
+- No credentials → bounce. Browser navigations get a `302` to
+  `https://${AUTH_HOST}/login?redirect_uri=<original>`; API/XHR callers
+  (`Accept: application/json` or `X-Requested-With`) get a `401` plus an
+  `X-Forward-Auth-Location` header pointing at the same login URL.
+
+The handler reads `X-Forwarded-Method`, `X-Forwarded-Proto`, `X-Forwarded-Host`
+and `X-Forwarded-Uri` to reconstruct the original client‑facing URL — never its
+own `req.url`. That's how Traefik tells it what the client actually asked for.
+
+### Topology
+
+```
+                     ┌──────────────────────────────────┐
+                     │        auth.example.com          │
+                     │  (queen-proxy: ForwardAuth +     │
+                     │   /login + /api/auth/google)     │
+                     └──────────────▲───────────────────┘
+                                    │
+   user ──► Traefik ───── 302 ──────┤   (no cookie / bad token)
+              │                     │
+              │ ForwardAuth probe   │
+              │  GET /api/auth/     │
+              │      forward-auth   │
+              ▼                     │
+   grafana.example.com ◄── 200 ─────┘   (Authorization + X-Auth-* headers)
+   prom.example.com
+   queen.example.com
+```
+
+`auth.example.com` writes the session cookie with `Domain=.example.com` so
+every protected subdomain can read it.
+
+### Compose snippet
+
+Tinyauth‑style label set on the proxy itself defines the middleware; protected
+services then opt into it on their router:
+
+```yaml
+services:
+  queen-proxy:
+    image: queen-proxy:latest
+    environment:
+      FORWARD_AUTH_ENABLED: "true"
+      AUTH_HOST: auth.example.com
+      COOKIE_DOMAIN: .example.com
+      FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS: grafana.example.com,prom.example.com,queen.example.com,traefik.example.com
+      FORWARD_AUTH_EMIT_HEADERS: Authorization,X-Auth-User,X-Auth-Email,X-Auth-Role,X-Auth-Sub
+      # plus the existing JWT_SECRET, GOOGLE_*, PG_* envs
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.auth.rule: Host(`auth.example.com`)
+      traefik.http.middlewares.queen-fa.forwardauth.address: http://queen-proxy:3000/api/auth/forward-auth
+      traefik.http.middlewares.queen-fa.forwardauth.authResponseHeaders: Authorization,X-Auth-User,X-Auth-Email,X-Auth-Role,X-Auth-Sub
+      traefik.http.middlewares.queen-fa.forwardauth.trustForwardHeader: "true"
+      # Optional: opt-in method-RBAC middleware (read-only role → GET only).
+      # Apply only to routers whose upstream tolerates it (NOT Grafana — its
+      # /login is a POST).
+      traefik.http.middlewares.queen-fa-rbac.headers.customRequestHeaders.X-Forward-Auth-RBAC: method
+
+  grafana:
+    image: grafana/grafana
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.grafana.rule: Host(`grafana.example.com`)
+      traefik.http.routers.grafana.middlewares: queen-fa@docker
+
+  queen-broker:
+    image: queen-mq:latest
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.queen.rule: Host(`queen.example.com`)
+      # Identity check + method RBAC, since the broker speaks REST.
+      traefik.http.routers.queen.middlewares: queen-fa@docker,queen-fa-rbac@docker
+```
+
+### ForwardAuth env vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FORWARD_AUTH_ENABLED` | `false` | Master switch — when `false`, the route is not registered. |
+| `AUTH_HOST` | _(unset)_ | Public hostname of the proxy. Used to build absolute redirect URLs. Required for the 302 path; without it, the handler always returns 401. |
+| `COOKIE_DOMAIN` | _(unset)_ | When set (e.g. `.example.com`), the session cookie scope is widened to all subdomains and OAuth state is encoded as a signed JWT in the `state` query param (cookies wouldn't survive the cross‑host bounce). Empty = legacy host‑only behavior, no behavior change. |
+| `FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS` | _(empty)_ | Comma list of hosts allowed in `?redirect_uri=`. Empty list denies all cross‑host redirects (fail‑closed). |
+| `FORWARD_AUTH_EMIT_HEADERS` | `Authorization` | Comma list from `Authorization`, `X-Auth-User`, `X-Auth-Email`, `X-Auth-Sub`, `X-Auth-Role`, `X-Auth-Groups`. Per‑route subset is still controlled by Traefik's `forwardauth.authResponseHeaders`. |
+
+### Internal JWT (minted for cookie‑authenticated upstream calls)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INTERNAL_JWT_SIGNING_KEY` | falls back to `JWT_SECRET` | HMAC secret (HS256) or PEM (RS256/EdDSA) used to sign internal tokens. Keeping the default lets the broker verify them with the same `JWT_SECRET` it uses today. |
+| `INTERNAL_JWT_ALG` | `HS256` | Signing algorithm. |
+| `INTERNAL_JWT_ISSUER` | `queen-proxy` | `iss` claim. |
+| `INTERNAL_JWT_AUDIENCE` | _(empty)_ | `aud` claim, omitted when empty. |
+| `INTERNAL_JWT_EXPIRES_IN` | `15m` | Short‑lived; only crosses the trust boundary to upstreams. |
+| `INTERNAL_JWT_CLAIM_MAPPING` | `sub:sub,role:role,email:email,preferred_username:username` | `<dst>:<src>` pairs projecting the source claims into the new token. |
+
+### Per‑route opt‑ins (request headers)
+
+The proxy reads these headers off the ForwardAuth probe to override
+per‑middleware behavior. Set them via Traefik label
+(`headers.customRequestHeaders.<Name>`):
+
+- `X-Forward-Auth-RBAC: method` — enforce the `checkMethodAccess` rules
+  (`read-only` → GET only). Default is identity‑only.
+- `X-Forward-Auth-Headers: X-Auth-User,X-Auth-Email` — narrow the global
+  `FORWARD_AUTH_EMIT_HEADERS` allowlist for this route. Names outside the
+  global allowlist are ignored.
+
+### Security notes
+
+- The `Authorization` header is only emitted when the route's
+  `forwardauth.authResponseHeaders` opts into it — Traefik discards anything
+  else from the response. This prevents an unrelated route from silently
+  pulling a bearer token.
+- `?redirect_uri=` is always validated against
+  `FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS`. Same‑origin relative paths
+  (`/foo`) are always allowed; protocol‑relative URLs (`//evil.com`) are
+  always rejected.
+- In cross‑host (`COOKIE_DOMAIN`) mode, OAuth `state` is a `5m` HS256 JWT
+  signed with `JWT_SECRET`; the legacy `g_state`/`g_nonce`/`g_next` cookies
+  are not written. This is required because the auth host can't pre‑seed a
+  cookie on a different upstream's domain before the OAuth bounce.
+- Logout clears the `.example.com` cookie locally only — no IdP RP‑Initiated
+  Logout call (issue #30 design choice).
+
 ## Security
 
 - Passwords are hashed using bcrypt with 10 salt rounds
