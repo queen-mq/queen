@@ -8,10 +8,30 @@
 const FORWARD_AUTH_ENABLED = (process.env.FORWARD_AUTH_ENABLED || 'false').toLowerCase() === 'true';
 const AUTH_HOST = process.env.AUTH_HOST || '';
 
+// When true, the ForwardAuth bearer path mints a fresh internal JWT instead of
+// passing the original bearer through. Lets the broker trust a single issuer
+// (the proxy) regardless of where the original token came from. Default false
+// preserves the original "central IdP is source of truth" passthrough.
+const FORWARD_AUTH_ALWAYS_MINT = (process.env.FORWARD_AUTH_ALWAYS_MINT || 'false').toLowerCase() === 'true';
+
+export function isAlwaysMintEnabled() {
+  return FORWARD_AUTH_ALWAYS_MINT;
+}
+
 const FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS = (process.env.FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS || '')
   .split(',')
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);
+
+// When COOKIE_DOMAIN is set, default-allow any host that shares that parent
+// suffix. This avoids the footgun of operators forgetting to enumerate every
+// upstream and instead landing users on the auth host's `/` after login. The
+// explicit allowlist still wins, so operators can opt out by leaving
+// COOKIE_DOMAIN unset (or by enumerating only the hosts they want).
+const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || '';
+const COOKIE_DOMAIN_SUFFIX = COOKIE_DOMAIN
+  ? (COOKIE_DOMAIN.startsWith('.') ? COOKIE_DOMAIN.toLowerCase() : '.' + COOKIE_DOMAIN.toLowerCase())
+  : '';
 
 const SUPPORTED_EMIT_HEADERS = new Set([
   'Authorization',
@@ -21,6 +41,33 @@ const SUPPORTED_EMIT_HEADERS = new Set([
   'X-Auth-Role',
   'X-Auth-Groups',
 ]);
+
+// Optional second-stage email allowlist. Applied AFTER the IdP has verified
+// the identity (Google `email_verified` or external JWT `email` claim). Empty
+// = no email-level restriction (relies on GOOGLE_ALLOWED_DOMAINS / JWKS issuer
+// alone). Match is case-insensitive against the literal email string.
+const FORWARD_AUTH_ALLOWED_EMAILS = new Set(
+  (process.env.FORWARD_AUTH_ALLOWED_EMAILS || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+/**
+ * Returns true when an email is allowed to use ForwardAuth-protected services.
+ * If no allowlist is configured, any email passes (operator opted out of this
+ * extra gate). If an allowlist IS configured but the email is empty/missing,
+ * we deny — there's no safe way to apply an allowlist to an unknown identity.
+ */
+export function isAllowedEmail(email) {
+  if (FORWARD_AUTH_ALLOWED_EMAILS.size === 0) return true;
+  if (!email || typeof email !== 'string') return false;
+  return FORWARD_AUTH_ALLOWED_EMAILS.has(email.toLowerCase());
+}
+
+export function hasEmailAllowlist() {
+  return FORWARD_AUTH_ALLOWED_EMAILS.size > 0;
+}
 
 const FORWARD_AUTH_EMIT_HEADERS = (() => {
   const raw = process.env.FORWARD_AUTH_EMIT_HEADERS || 'Authorization';
@@ -46,7 +93,9 @@ export function getForwardAuthConfig() {
     enabled: FORWARD_AUTH_ENABLED,
     authHost: AUTH_HOST,
     allowedRedirectHosts: [...FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS],
+    allowedEmails: [...FORWARD_AUTH_ALLOWED_EMAILS],
     emitHeaders: [...FORWARD_AUTH_EMIT_HEADERS],
+    alwaysMint: FORWARD_AUTH_ALWAYS_MINT,
   };
 }
 
@@ -118,13 +167,30 @@ export function wantsHtml(req) {
 }
 
 /**
- * Validate a host against the redirect allowlist. Empty allowlist denies
- * everything (fail-closed) — operators MUST opt-in to cross-host redirects.
+ * Validate a host against the redirect allowlist. Hosts pass when EITHER:
+ *   - the explicit FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS contains them, or
+ *   - COOKIE_DOMAIN is set and the host shares that parent suffix.
+ *
+ * The COOKIE_DOMAIN-derived allowance is safe because cross-host login can
+ * only succeed for hosts that already share the cookie scope — there's no
+ * meaningful additional risk in redirecting to them. With COOKIE_DOMAIN unset
+ * an empty allowlist still denies everything (fail-closed for single-host
+ * deployments).
+ *
+ * Subdomain match requires `host` to either equal `COOKIE_DOMAIN` (with the
+ * leading dot stripped) or end with `.<COOKIE_DOMAIN>` — bare suffix matching
+ * would let `evilexample.com` slip past `.example.com`.
  */
 export function isAllowedRedirect(host) {
   if (!host) return false;
   const lower = String(host).toLowerCase();
-  return FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS.includes(lower);
+  if (FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS.includes(lower)) return true;
+  if (COOKIE_DOMAIN_SUFFIX) {
+    const bare = COOKIE_DOMAIN_SUFFIX.slice(1); // drop leading "."
+    if (lower === bare) return true;
+    if (lower.endsWith(COOKIE_DOMAIN_SUFFIX)) return true;
+  }
+  return false;
 }
 
 /**

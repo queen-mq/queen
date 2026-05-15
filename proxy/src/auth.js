@@ -87,8 +87,23 @@ export async function verifyExternalToken(token) {
       raw: payload       // Full payload for callers that need non-standard claims
     };
   } catch (error) {
-    // Don't log expected failures (invalid/expired tokens)
-    if (error.code !== 'ERR_JWT_EXPIRED' && error.code !== 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED') {
+    // Don't log expected failures. The first three are routine: bad signature,
+    // expired token, or wrong audience — happens whenever the global cookie
+    // middleware probes a token that wasn't actually minted by this IdP. The
+    // last two cover the "an internal HS256 cookie was handed to an external
+    // EdDSA/RS256 JWKS verifier" case which fires on every cookie request when
+    // both EXTERNAL_JWKS_URL and the internal cookie auth are in use — that
+    // produces ERR_JOSE_NOT_SUPPORTED / ERR_JOSE_ALG_NOT_ALLOWED depending on
+    // jose internals and is not actionable.
+    const expected = new Set([
+      'ERR_JWT_EXPIRED',
+      'ERR_JWS_SIGNATURE_VERIFICATION_FAILED',
+      'ERR_JWT_CLAIM_VALIDATION_FAILED',
+      'ERR_JOSE_NOT_SUPPORTED',
+      'ERR_JOSE_ALG_NOT_ALLOWED',
+      'ERR_JWS_INVALID',
+    ]);
+    if (!expected.has(error.code)) {
       console.debug('[Auth] External token verification failed:', error.message);
     }
     return null;
