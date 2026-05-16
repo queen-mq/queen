@@ -138,7 +138,7 @@ The proxy uses the **same `PG_*` variable names as the broker** so a single set 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3000` | Proxy HTTP listen port |
-| `QUEEN_SERVER_URL` | `http://localhost:8080` | Upstream Queen broker URL — set this to `http://localhost:6632` for the local broker default |
+| `QUEEN_SERVER_URL` | _(unset)_ | Upstream Queen broker URL. **Optional** — when set the proxy runs in reverse‑proxy mode and forwards every authenticated request to the broker. When **unset** the proxy runs in pure ForwardAuth mode (no upstream is contacted, the catch‑all proxy mount is skipped, `/` returns a small JSON info page). Existing single‑host setups should keep setting this to `http://localhost:6632` (or the cluster service URL). |
 | `NODE_ENV` | `development` | Set to `production` to enable secure cookies (HTTPS-only) |
 
 ### Internal JWT (issued by the proxy after password login)
@@ -168,6 +168,7 @@ When `EXTERNAL_JWKS_URL` is set, the proxy accepts JWTs minted by an external id
 | `GOOGLE_ALLOWED_DOMAINS` | _(empty)_ | Comma-separated domain allowlist matched against the `hd` claim or the email domain. Empty = allow any verified email. |
 | `GOOGLE_AUTO_PROVISION` | `false` | If `true`, create a local user on first Google login. If `false`, the user must already exist in `queen_proxy.users` (matched by email). |
 | `GOOGLE_DEFAULT_ROLE` | `read-only` | Role assigned to auto-provisioned Google users (`admin`, `read-write`, or `read-only`). |
+| `GOOGLE_ALLOWED_EMAILS` | _(empty)_ | Comma list of literal emails (case-insensitive) and/or `/regex/` patterns that may complete the Google sign-in flow. Empty = relies on `GOOGLE_ALLOWED_DOMAINS` alone. Example: `admin@example.com,/.*@example\.com$/,/^admin\+/`. Applied **only** to the Google flow — API clients on the FA bearer path are not gated here (see issue #30 answer #3). The previous `FORWARD_AUTH_ALLOWED_EMAILS` is still accepted as a one-release deprecation alias. |
 
 ## Sign in with Google
 
@@ -222,9 +223,10 @@ QueenMQ itself, …).
   `https://${AUTH_HOST}/login?redirect_uri=<original>`; API/XHR callers
   (`Accept: application/json` or `X-Requested-With`) get a `401` plus an
   `X-Forward-Auth-Location` header pointing at the same login URL.
-- After identity is verified, an optional `FORWARD_AUTH_ALLOWED_EMAILS`
-  allowlist applies. Rejected requests get the same bounce as unauthenticated
-  ones, and the login page surfaces a `?error=not_allowed` message.
+- The Google sign-in flow honors an optional `GOOGLE_ALLOWED_EMAILS` allowlist
+  (literal emails or `/regex/` patterns). Rejected logins land back on
+  `/login?error=not_allowed`. API clients on the FA bearer path are NOT gated
+  by this — the central IdP is the source of truth there (issue #30 answer #3).
 
 The handler reads `X-Forwarded-Method`, `X-Forwarded-Proto`, `X-Forwarded-Host`
 and `X-Forwarded-Uri` to reconstruct the original client‑facing URL — never its
@@ -304,7 +306,6 @@ services:
 | `AUTH_HOST` | _(unset)_ | Public hostname of the proxy. Used to build absolute redirect URLs. Required for the 302 path; without it, the handler always returns 401. |
 | `COOKIE_DOMAIN` | _(unset)_ | When set (e.g. `.example.com`), the session cookie scope is widened to all subdomains and OAuth state is encoded as a signed JWT in the `state` query param (cookies wouldn't survive the cross‑host bounce). Also implicitly allows any host under that suffix in `?redirect_uri=` so operators don't have to enumerate every upstream. Empty = legacy host‑only behavior. |
 | `FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS` | _(empty)_ | Comma list of hosts allowed in `?redirect_uri=`. Combined with the `COOKIE_DOMAIN` implicit allowance: a host passes if it is in this list **or** shares the cookie‑domain suffix. With both empty, all cross‑host redirects are denied (fail‑closed). |
-| `FORWARD_AUTH_ALLOWED_EMAILS` | _(empty)_ | Optional second‑stage allowlist applied after identity is verified (Google `email_verified` or external JWT `email`). Empty = no email‑level restriction. Useful when `GOOGLE_ALLOWED_DOMAINS` is too broad and only a small set of admins should reach Grafana/Prometheus. |
 | `FORWARD_AUTH_ALWAYS_MINT` | `false` | When `true`, even bearer requests get a freshly minted internal JWT instead of the original token being passed through. Lets the broker trust a single issuer (the proxy) regardless of where the original token came from. |
 | `FORWARD_AUTH_EMIT_HEADERS` | `Authorization` | Comma list from `Authorization`, `X-Auth-User`, `X-Auth-Email`, `X-Auth-Sub`, `X-Auth-Role`, `X-Auth-Groups`. Per‑route subset is still controlled by Traefik's `forwardauth.authResponseHeaders`. |
 

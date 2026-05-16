@@ -42,32 +42,14 @@ const SUPPORTED_EMIT_HEADERS = new Set([
   'X-Auth-Groups',
 ]);
 
-// Optional second-stage email allowlist. Applied AFTER the IdP has verified
-// the identity (Google `email_verified` or external JWT `email` claim). Empty
-// = no email-level restriction (relies on GOOGLE_ALLOWED_DOMAINS / JWKS issuer
-// alone). Match is case-insensitive against the literal email string.
-const FORWARD_AUTH_ALLOWED_EMAILS = new Set(
-  (process.env.FORWARD_AUTH_ALLOWED_EMAILS || '')
-    .split(',')
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean)
-);
-
-/**
- * Returns true when an email is allowed to use ForwardAuth-protected services.
- * If no allowlist is configured, any email passes (operator opted out of this
- * extra gate). If an allowlist IS configured but the email is empty/missing,
- * we deny — there's no safe way to apply an allowlist to an unknown identity.
- */
-export function isAllowedEmail(email) {
-  if (FORWARD_AUTH_ALLOWED_EMAILS.size === 0) return true;
-  if (!email || typeof email !== 'string') return false;
-  return FORWARD_AUTH_ALLOWED_EMAILS.has(email.toLowerCase());
-}
-
-export function hasEmailAllowlist() {
-  return FORWARD_AUTH_ALLOWED_EMAILS.size > 0;
-}
+// Note: the email allowlist that used to live here moved to google-auth.js as
+// `GOOGLE_ALLOWED_EMAILS` (with regex support) — it only applies to the
+// Google sign-in flow now, never to API clients carrying central-IdP JWTs
+// through the FA bearer path. Issue #30 follow-up: xmlking pointed out that
+// API client emails can't be enumerated up front, and per his original
+// answer #3 the central IdP is the source of truth for those clients.
+// FORWARD_AUTH_ALLOWED_EMAILS remains supported one release as a deprecation
+// alias inside google-auth.js.
 
 const FORWARD_AUTH_EMIT_HEADERS = (() => {
   const raw = process.env.FORWARD_AUTH_EMIT_HEADERS || 'Authorization';
@@ -93,7 +75,6 @@ export function getForwardAuthConfig() {
     enabled: FORWARD_AUTH_ENABLED,
     authHost: AUTH_HOST,
     allowedRedirectHosts: [...FORWARD_AUTH_ALLOWED_REDIRECT_HOSTS],
-    allowedEmails: [...FORWARD_AUTH_ALLOWED_EMAILS],
     emitHeaders: [...FORWARD_AUTH_EMIT_HEADERS],
     alwaysMint: FORWARD_AUTH_ALWAYS_MINT,
   };

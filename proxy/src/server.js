@@ -17,6 +17,8 @@ import {
   buildAuthorizeUrl,
   verifyOauthState,
   handleGoogleCallback,
+  isGoogleEmailAllowed,
+  hasGoogleEmailAllowlist,
 } from './google-auth.js';
 import {
   mintInternalToken,
@@ -33,8 +35,6 @@ import {
   isAllowedRedirect,
   buildLoginRedirect,
   selectResponseHeaders,
-  isAllowedEmail,
-  hasEmailAllowlist,
   isAlwaysMintEnabled,
 } from './forward-auth.js';
 import path from 'path';
@@ -45,7 +45,22 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const QUEEN_SERVER_URL = process.env.QUEEN_SERVER_URL || 'http://localhost:8080';
+
+// QUEEN_SERVER_URL is OPTIONAL. Two deployment shapes:
+//
+//   1. Reverse-proxy mode (legacy / single-host):
+//      `QUEEN_SERVER_URL` set → the catch-all `/` route forwards every
+//      authenticated request to the broker. This is the original behavior
+//      and stays unchanged for existing deployments.
+//
+//   2. Pure ForwardAuth mode (issue #30 cross-host setup):
+//      `QUEEN_SERVER_URL` unset → the proxy is consulted by Traefik only as
+//      a sidecar via /api/auth/forward-auth. Traefik forwards the actual
+//      request straight to each upstream (Grafana, broker, …) rather than
+//      through this process. Mounting createProxyMiddleware in that case
+//      would just produce "Bad gateway" on any unmatched URL.
+const QUEEN_SERVER_URL = process.env.QUEEN_SERVER_URL || '';
+const UPSTREAM_PROXY_ENABLED = !!QUEEN_SERVER_URL;
 
 // Optional: parent-domain cookie scope so the session cookie is shared between
 // auth.example.com and the protected upstreams (grafana.example.com etc.).
@@ -200,12 +215,14 @@ app.get('/api/auth/jwks', jwksHandler);
 app.get('/api/auth/config', (req, res) => {
   const fa = getForwardAuthConfig();
   res.json({
-    google: { enabled: isGoogleAuthEnabled() },
+    google: {
+      enabled: isGoogleAuthEnabled(),
+      hasEmailAllowlist: hasGoogleEmailAllowlist(),
+    },
     forwardAuth: {
       enabled: fa.enabled,
       allowedRedirectHosts: fa.allowedRedirectHosts,
       cookieDomain: COOKIE_DOMAIN || null,
-      hasEmailAllowlist: hasEmailAllowlist(),
     },
   });
 });
@@ -255,12 +272,13 @@ app.get('/api/auth/google', (req, res) => {
 
 // Step 2: handle the redirect back from Google.
 //
-// Mounted at TWO paths so operators can pick the URL shape they prefer when
-// registering the redirect URI in Google Cloud Console:
+// Mounted at THREE paths so operators can pick the URL shape they prefer
+// when registering the redirect URI in Google Cloud Console:
 //   - /api/auth/google/callback   (original — kept for backwards compat)
-//   - /api/oauth/callback/google  (Better-Auth / Tinyauth style)
-// Both share the same handler; whichever URI is registered with Google is the
-// one the user actually receives the bounce on.
+//   - /api/oauth/callback/google  (Tinyauth style — `/api/oauth/callback/<provider>`)
+//   - /api/auth/callback/google   (Better-Auth style — `/api/auth/callback/<provider>`)
+// All three share the same handler; whichever URI is registered with Google
+// is the one the user actually receives the bounce on.
 async function googleCallbackHandler(req, res) {
   const clearOAuthCookies = () => {
     res.clearCookie('g_state', { path: '/api/auth/google' });
@@ -308,12 +326,14 @@ async function googleCallbackHandler(req, res) {
   try {
     const user = await handleGoogleCallback({ code, expectedNonce });
 
-    // Second-stage email allowlist for ForwardAuth-protected deployments.
-    // GOOGLE_ALLOWED_DOMAINS gates the *domain*; this gates individual
-    // addresses — useful when a small number of admins should reach Grafana
-    // even though the rest of the company has Google accounts on the same
-    // domain. Tinyauth has the same gate (TINYAUTH_OAUTH_WHITELIST).
-    if (!isAllowedEmail(user.email)) {
+    // Second-stage email allowlist for the Google sign-in flow.
+    // GOOGLE_ALLOWED_DOMAINS gates the *domain*; GOOGLE_ALLOWED_EMAILS gates
+    // individual addresses (literal or `/regex/`) — useful when a small set
+    // of admins should reach Grafana but the rest of the company has Google
+    // accounts on the same domain. Tinyauth has the same gate
+    // (TINYAUTH_OAUTH_WHITELIST). Applied here ONLY (not on the FA bearer
+    // path) because API clients can't be enumerated up front.
+    if (!isGoogleEmailAllowed(user.email)) {
       console.warn('[GoogleAuth] sign-in denied (email not allowed):', user.email);
       clearOAuthCookies();
       return res.redirect('/login?error=not_allowed');
@@ -338,6 +358,7 @@ async function googleCallbackHandler(req, res) {
 
 app.get('/api/auth/google/callback', googleCallbackHandler);
 app.get('/api/oauth/callback/google', googleCallbackHandler);
+app.get('/api/auth/callback/google', googleCallbackHandler);
 
 // Get current user info
 app.get('/api/me', requireAuth, (req, res) => {
@@ -386,16 +407,14 @@ if (isForwardAuthEnabled()) {
      * Common success path used by both the bearer and cookie branches.
      * Picks the upstream token (passthrough or freshly-minted internal),
      * sets the X-Auth-* headers Traefik will forward, and returns 200.
+     *
+     * No email allowlist is applied here:
+     *  - For cookie auth, the user already passed the GOOGLE_ALLOWED_EMAILS
+     *    gate at login time; their cookie's existence is the proof.
+     *  - For bearer auth, the central IdP is the source of truth (issue #30
+     *    answer #3) and API client emails can't be enumerated up front.
      */
     const respondAuthorized = async (claims, originalBearer) => {
-      // Email allowlist: applied after identity is verified. Empty list = pass.
-      // Returns the same 401/302 as the unauthenticated path so Traefik will
-      // bounce the user back to login (where login.html surfaces the
-      // ?error=not_allowed message).
-      if (!isAllowedEmail(claims.email)) {
-        console.warn('[ForwardAuth] rejected (email not in allowlist):', claims.email || '(no email)');
-        return respondUnauth();
-      }
       if (opts.enforceMethodRBAC && !enforceMethodRBACFromClaims(fwd.method, claims)) {
         return res.status(403).end();
       }
@@ -457,6 +476,7 @@ app.use(async (req, res, next) => {
     req.path.startsWith('/api/login') ||
     req.path.startsWith('/api/auth/google') ||
     req.path.startsWith('/api/oauth/callback/') ||
+    req.path.startsWith('/api/auth/callback/') ||
     req.path === '/api/auth/config' ||
     req.path === '/api/auth/forward-auth' ||
     req.path === '/api/auth/jwks' ||
@@ -500,57 +520,80 @@ app.use(async (req, res, next) => {
   next();
 });
 
-// Proxy all other requests to Queen server with RBAC
-app.use('/', 
-  requireAuth,
-  checkMethodAccess,
-  createProxyMiddleware({
-    target: QUEEN_SERVER_URL,
-    changeOrigin: true,
-    ws: true,
-    logLevel: 'silent',
-    onProxyReq: (proxyReq, req, res) => {
-      // Remove large/unnecessary headers that can cause "Request Header Fields Too Large" errors
-      proxyReq.removeHeader('cookie');
-      proxyReq.removeHeader('referer');
-      
-      // Forward JWT token to Queen server for authentication
-      // For external tokens (SSO), pass through the original token unchanged
-      // For internal tokens, get from cookie
-      let token;
-      if (req.originalToken) {
-        // External SSO token - pass through as-is
-        token = req.originalToken;
-      } else {
-        // Internal proxy token
-        token = req.cookies.token || req.headers.authorization?.replace('Bearer ', '');
+if (UPSTREAM_PROXY_ENABLED) {
+  // Reverse-proxy mode: forward all authenticated requests to the broker.
+  app.use('/',
+    requireAuth,
+    checkMethodAccess,
+    createProxyMiddleware({
+      target: QUEEN_SERVER_URL,
+      changeOrigin: true,
+      ws: true,
+      logLevel: 'silent',
+      onProxyReq: (proxyReq, req, res) => {
+        // Remove large/unnecessary headers that can cause "Request Header Fields Too Large" errors
+        proxyReq.removeHeader('cookie');
+        proxyReq.removeHeader('referer');
+
+        // Forward JWT token to Queen server for authentication
+        // For external tokens (SSO), pass through the original token unchanged
+        // For internal tokens, get from cookie
+        let token;
+        if (req.originalToken) {
+          // External SSO token - pass through as-is
+          token = req.originalToken;
+        } else {
+          // Internal proxy token
+          token = req.cookies.token || req.headers.authorization?.replace('Bearer ', '');
+        }
+
+        if (token) {
+          proxyReq.setHeader('Authorization', `Bearer ${token}`);
+        }
+
+        // Also add user info headers for backward compatibility / logging
+        proxyReq.setHeader('X-Proxy-User', req.user.username || req.user.subject || 'unknown');
+        proxyReq.setHeader('X-Proxy-Role', req.user.role || 'read-only');
+        if (req.user.isExternal) {
+          proxyReq.setHeader('X-Proxy-External', 'true');
+        }
+
+        // Re-stream body if it was consumed by express.json()
+        if (req.body && Object.keys(req.body).length > 0) {
+          const bodyData = JSON.stringify(req.body);
+          proxyReq.setHeader('Content-Type', 'application/json');
+          proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+          proxyReq.write(bodyData);
+        }
+      },
+      onError: (err, req, res) => {
+        console.error('Proxy error:', err);
+        res.status(502).json({ error: 'Bad gateway - Queen server unreachable' });
       }
-      
-      if (token) {
-        proxyReq.setHeader('Authorization', `Bearer ${token}`);
-      }
-      
-      // Also add user info headers for backward compatibility / logging
-      proxyReq.setHeader('X-Proxy-User', req.user.username || req.user.subject || 'unknown');
-      proxyReq.setHeader('X-Proxy-Role', req.user.role || 'read-only');
-      if (req.user.isExternal) {
-        proxyReq.setHeader('X-Proxy-External', 'true');
-      }
-      
-      // Re-stream body if it was consumed by express.json()
-      if (req.body && Object.keys(req.body).length > 0) {
-        const bodyData = JSON.stringify(req.body);
-        proxyReq.setHeader('Content-Type', 'application/json');
-        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
-        proxyReq.write(bodyData);
-      }
-    },
-    onError: (err, req, res) => {
-      console.error('Proxy error:', err);
-      res.status(502).json({ error: 'Bad gateway - Queen server unreachable' });
+    })
+  );
+} else {
+  // Pure ForwardAuth mode: nothing to proxy. Replace the catch-all with a
+  // small landing page on `/` so operators don't see a "Bad gateway" when
+  // they hit the proxy hostname directly, plus a generic 404 for everything
+  // else. The auth surface (/login, /api/auth/*, /api/auth/forward-auth,
+  // /.well-known/jwks.json, /health) still works.
+  app.get('/', (req, res) => {
+    if ((req.headers.accept || '').includes('text/html')) {
+      return res.redirect('/login');
     }
-  })
-);
+    res.status(200).json({
+      service: 'queen-proxy',
+      mode: 'forward-auth-only',
+      forwardAuth: '/api/auth/forward-auth',
+      jwks: '/.well-known/jwks.json',
+      login: '/login',
+    });
+  });
+  app.use((req, res) => {
+    res.status(404).json({ error: 'not_found', mode: 'forward-auth-only' });
+  });
+}
 
 async function startServer() {
   try {
@@ -558,7 +601,12 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`Queen Proxy listening on port ${PORT}`);
-      console.log(`  Target: ${QUEEN_SERVER_URL}`);
+      if (UPSTREAM_PROXY_ENABLED) {
+        console.log(`  Mode: reverse-proxy (forwards to upstream)`);
+        console.log(`  Target: ${QUEEN_SERVER_URL}`);
+      } else {
+        console.log(`  Mode: forward-auth only (no upstream — set QUEEN_SERVER_URL to enable reverse-proxy mode)`);
+      }
       if (isExternalAuthEnabled()) {
         console.log(`  External SSO: enabled (JWKS passthrough)`);
         console.log(`    JWKS URL: ${process.env.EXTERNAL_JWKS_URL || process.env.JWT_JWKS_URL}`);
@@ -572,6 +620,9 @@ async function startServer() {
         if (cfg.allowedDomains.length) {
           console.log(`    Allowed domains: ${cfg.allowedDomains.join(', ')}`);
         }
+        if (cfg.allowedEmails.length) {
+          console.log(`    Allowed emails: ${cfg.allowedEmails.join(', ')}`);
+        }
         console.log(`    Auto-provision: ${cfg.autoProvision} (default role: ${cfg.defaultRole})`);
       } else {
         console.log(`  Google OAuth: disabled`);
@@ -584,7 +635,6 @@ async function startServer() {
         const explicit = fa.allowedRedirectHosts.join(', ') || '(none explicit)';
         const implicit = COOKIE_DOMAIN ? ` + any host under ${COOKIE_DOMAIN}` : '';
         console.log(`    Allowed redirect hosts: ${explicit}${implicit}`);
-        console.log(`    Allowed emails: ${fa.allowedEmails.length ? fa.allowedEmails.join(', ') : '(no allowlist)'}`);
         console.log(`    Emit headers: ${fa.emitHeaders.join(', ')}`);
         console.log(`    Always mint internal JWT: ${fa.alwaysMint}`);
         console.log(`    OAuth state mode: ${COOKIE_DOMAIN ? 'signed' : 'cookie'}`);

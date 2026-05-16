@@ -30,6 +30,76 @@ const GOOGLE_ALLOWED_DOMAINS = (process.env.GOOGLE_ALLOWED_DOMAINS || '')
 const GOOGLE_AUTO_PROVISION = (process.env.GOOGLE_AUTO_PROVISION || 'false').toLowerCase() === 'true';
 const GOOGLE_DEFAULT_ROLE = process.env.GOOGLE_DEFAULT_ROLE || 'read-only';
 
+// Per-email allowlist for the Google sign-in flow. Each entry is either:
+//   - a literal email (case-insensitive exact match), e.g. `admin@example.com`
+//   - a regex wrapped in slashes, e.g. `/.*@example\.com$/` or `/^admin\+/`
+// Comma-separated. Empty = no email-level restriction (relies on
+// GOOGLE_ALLOWED_DOMAINS alone). This gate applies ONLY to the Google login
+// flow — API clients carrying central-IdP JWTs (the FA bearer path) are
+// trusted as-is per issue #30 answer #3 and the issue #30 follow-up where
+// xmlking confirmed API client emails can't be enumerated up front.
+//
+// FORWARD_AUTH_ALLOWED_EMAILS is the previous (broader-scoped) name and
+// remains supported for one release as a deprecation alias.
+const GOOGLE_ALLOWED_EMAILS_RAW =
+  process.env.GOOGLE_ALLOWED_EMAILS ||
+  process.env.FORWARD_AUTH_ALLOWED_EMAILS ||
+  '';
+
+if (process.env.FORWARD_AUTH_ALLOWED_EMAILS && !process.env.GOOGLE_ALLOWED_EMAILS) {
+  console.warn('[GoogleAuth] FORWARD_AUTH_ALLOWED_EMAILS is deprecated — use GOOGLE_ALLOWED_EMAILS instead');
+}
+
+/**
+ * Parse the comma-separated allowlist into a mix of literal lower-case strings
+ * and RegExp objects. Malformed regexes are skipped (with a console warning)
+ * rather than killing the process so a single bad entry can't take auth down.
+ */
+function parseAllowedEmails(spec) {
+  if (!spec) return [];
+  const out = [];
+  for (const raw of spec.split(',')) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    if (entry.length >= 2 && entry.startsWith('/') && entry.endsWith('/')) {
+      try {
+        out.push(new RegExp(entry.slice(1, -1), 'i'));
+      } catch (err) {
+        console.warn(`[GoogleAuth] skipping invalid GOOGLE_ALLOWED_EMAILS regex "${entry}": ${err.message}`);
+      }
+    } else {
+      out.push(entry.toLowerCase());
+    }
+  }
+  return out;
+}
+
+const GOOGLE_ALLOWED_EMAILS = parseAllowedEmails(GOOGLE_ALLOWED_EMAILS_RAW);
+
+/**
+ * Returns true when an email passes the Google sign-in allowlist. With no
+ * allowlist configured everyone whose domain passes GOOGLE_ALLOWED_DOMAINS is
+ * allowed (back-compat). With an allowlist, a missing email always denies —
+ * we have no safe way to apply an allowlist to an unknown identity.
+ */
+export function isGoogleEmailAllowed(email) {
+  if (GOOGLE_ALLOWED_EMAILS.length === 0) return true;
+  if (!email || typeof email !== 'string') return false;
+  const lower = email.toLowerCase();
+  for (const rule of GOOGLE_ALLOWED_EMAILS) {
+    if (rule instanceof RegExp) {
+      if (rule.test(email)) return true;
+    } else if (rule === lower) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function hasGoogleEmailAllowlist() {
+  return GOOGLE_ALLOWED_EMAILS.length > 0;
+}
+
 const ALLOWED_ROLES = new Set(['admin', 'read-write', 'read-only']);
 
 const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -55,6 +125,7 @@ export function getGoogleConfig() {
     clientId: GOOGLE_CLIENT_ID,
     redirectUri: GOOGLE_REDIRECT_URI,
     allowedDomains: GOOGLE_ALLOWED_DOMAINS,
+    allowedEmails: GOOGLE_ALLOWED_EMAILS.map((r) => (r instanceof RegExp ? `/${r.source}/` : r)),
     autoProvision: GOOGLE_AUTO_PROVISION,
     defaultRole: ALLOWED_ROLES.has(GOOGLE_DEFAULT_ROLE) ? GOOGLE_DEFAULT_ROLE : 'read-only',
   };

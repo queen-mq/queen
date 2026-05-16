@@ -135,15 +135,18 @@ export function generateToken(user, expiresIn = JWT_EXPIRES_IN) {
   if (expiresIn && expiresIn !== 'never') {
     options.expiresIn = expiresIn;
   }
-  return jwt.sign(
-    {
-      id: user.id,
-      username: user.username,
-      role: user.role
-    },
-    JWT_SECRET,
-    options
-  );
+  // `email` is included when the user record has one (Google-provisioned and
+  // any local user with email set). Required so the ForwardAuth handler's
+  // email allowlist can match against the cookie-authenticated user — before
+  // this fix, cookie tokens carried only {id, username, role} and the FA
+  // gate would always reject with "(no email)".
+  const payload = {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+  };
+  if (user.email) payload.email = user.email;
+  return jwt.sign(payload, JWT_SECRET, options);
 }
 
 export function verifyToken(token) {
