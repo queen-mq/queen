@@ -36,7 +36,15 @@ void send_json_response(uWS::HttpResponse<false>* res, const nlohmann::json& jso
     res->writeStatus(status_text);
     setup_cors_headers(res);
     res->writeHeader("Content-Type", "application/json");
-    res->end(json.dump());
+    // Serialize with the lenient UTF-8 error handler. A malformed UTF-8 byte
+    // reaching this point (most importantly an error string echoing invalid
+    // bytes from a bad request body via read_json_body, but also url_decode'd
+    // query params or JWT-validation messages) must never throw
+    // [json.exception.type_error.316] out of the uWS worker loop: that
+    // propagates to the acceptor catch-all and kills the worker. Replace
+    // invalid sequences with U+FFFD instead so the client gets a clean 4xx/5xx.
+    // (Mirrors the ignore/replace handling already used in response_queue.cpp.)
+    res->end(json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
 }
 
 void send_error_response(uWS::HttpResponse<false>* res, const std::string& error, int status_code) {

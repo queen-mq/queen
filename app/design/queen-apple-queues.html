@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Queen — Queues</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root{
+      --text:rgba(255,255,255,.94); --text-2:rgba(255,255,255,.56); --text-3:rgba(255,255,255,.36);
+      --hair:rgba(255,255,255,.08); --mat:rgba(255,255,255,.05); --mat-hi:rgba(255,255,255,.08);
+      --blue:#0a84ff; --cyan:#64d2ff; --pink:#ff375f; --green:#30d158; --orange:#ff9f0a; --red:#ff453a;
+      --font-text: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+      --font-disp: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      --font-round: ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif;
+      --spring: cubic-bezier(.16,1,.3,1);
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;color:var(--text);font-family:var(--font-text);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow:hidden;letter-spacing:-.01em;background:#050507}
+    .bg{position:fixed;inset:0;z-index:0;pointer-events:none;background:
+        radial-gradient(1200px 820px at 12% -12%, rgba(10,132,255,.14), transparent 56%),
+        radial-gradient(1100px 760px at 112% 6%, rgba(255,55,95,.10), transparent 55%),
+        radial-gradient(1200px 1000px at 60% 128%, rgba(48,209,88,.08), transparent 55%),#050507}
+    .num{font-family:var(--font-round);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+    ::selection{background:rgba(255,255,255,.18)}
+    *:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+    ::-webkit-scrollbar{width:9px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border:2px solid transparent;background-clip:padding-box;border-radius:9px}
+
+    .shell{position:relative;z-index:1;display:grid;grid-template-columns:236px 1fr;height:100vh}
+    .sidebar{background:rgba(255,255,255,.028);backdrop-filter:blur(40px) saturate(1.4);-webkit-backdrop-filter:blur(40px) saturate(1.4);border-right:1px solid var(--hair);display:flex;flex-direction:column;overflow:hidden}
+    .brand{display:flex;align-items:center;gap:11px;padding:20px 20px 14px}
+    .crown{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex-shrink:0;background:linear-gradient(160deg,#2c2c30,#161618);box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 2px 6px rgba(0,0,0,.4)}
+    .navwrap{padding:6px 12px;overflow-y:auto;flex:1}
+    .navsec{padding:14px 10px 5px;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text-3);text-transform:uppercase}
+    .nav{display:flex;align-items:center;gap:12px;padding:8px 11px;border-radius:10px;color:var(--text-2);font-size:14px;font-weight:500;cursor:pointer;text-decoration:none;transition:.18s var(--spring)}
+    .nav svg{width:18px;height:18px;opacity:.85;flex:0 0 18px}
+    .nav:hover{background:rgba(255,255,255,.05);color:var(--text)}
+    .nav.active{background:var(--mat-hi);color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.10)}
+    .nav.active svg{color:var(--blue);opacity:1}
+    .nav .badge{margin-left:auto;font-size:11px;font-weight:600;color:var(--text-3);font-family:var(--font-round)}
+
+    .topbar{display:flex;align-items:center;gap:14px;padding:13px 26px;border-bottom:1px solid var(--hair);background:rgba(5,5,7,.5);backdrop-filter:blur(30px) saturate(1.3);-webkit-backdrop-filter:blur(30px) saturate(1.3)}
+    .search{display:flex;align-items:center;gap:9px;padding:8px 14px;border-radius:11px;background:var(--mat);border:1px solid var(--hair);min-width:200px;max-width:360px;flex:1;color:var(--text-2);font-size:13.5px;transition:.18s}
+    .search:hover{background:var(--mat-hi)}
+    .search input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:13.5px;font-family:inherit}
+    .avatar{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:600;color:#fff;background:linear-gradient(150deg,var(--blue),#5e5ce6);box-shadow:0 2px 8px rgba(10,132,255,.4)}
+    .statuschip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-2)}
+    .dot{width:9px;height:9px;border-radius:50%}
+
+    .page{overflow-y:auto;height:100%}
+    .container{max-width:1180px;margin:0 auto;padding:34px 40px 70px}
+    .eyebrow{font-size:12.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)}
+    .btn-primary{display:inline-flex;align-items:center;gap:7px;padding:9px 16px;border-radius:11px;font-size:13.5px;font-weight:600;color:#fff;background:var(--blue);border:none;cursor:pointer;font-family:inherit;box-shadow:0 4px 14px -4px rgba(10,132,255,.6);transition:.2s var(--spring)}
+    .btn-primary:hover{filter:brightness(1.08);transform:translateY(-1px)}
+
+    .seg{display:inline-flex;padding:3px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid var(--hair);gap:2px}
+    .seg button{padding:7px 15px;border-radius:9px;font-size:13px;font-weight:550;color:var(--text-2);border:none;background:none;cursor:pointer;transition:.2s var(--spring);font-family:inherit}
+    .seg button.on{color:var(--text);background:rgba(255,255,255,.12);box-shadow:0 1px 4px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.12)}
+    .sortbtn{display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:11px;font-size:13px;font-weight:550;color:var(--text-2);background:var(--mat);border:1px solid var(--hair);cursor:pointer;font-family:inherit;transition:.18s}
+    .sortbtn:hover{background:var(--mat-hi);color:var(--text)}
+
+    .summary{display:flex;gap:30px;flex-wrap:wrap;margin:6px 2px 18px}
+    .summary .s-num{font-family:var(--font-round);font-variant-numeric:tabular-nums;font-size:26px;font-weight:700;letter-spacing:-.02em;line-height:1}
+    .summary .s-lab{font-size:13px;color:var(--text-2);margin-top:4px}
+
+    .list{background:var(--mat);border:1px solid var(--hair);border-radius:20px;backdrop-filter:blur(40px) saturate(1.4);-webkit-backdrop-filter:blur(40px) saturate(1.4);box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 24px 60px -34px rgba(0,0,0,.9);overflow:hidden}
+    .lgrid{display:grid;grid-template-columns:minmax(0,1fr) 120px 92px 80px 104px 16px;align-items:center;gap:16px}
+    .lhead{padding:13px 22px;border-bottom:1px solid var(--hair)}
+    .lhead .h{font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3)}
+    .lrow{padding:14px 22px;border-top:1px solid var(--hair);cursor:pointer;transition:background .16s var(--spring)}
+    .lrow:first-of-type{border-top:none}
+    .lrow:hover{background:rgba(255,255,255,.045)}
+    .qname{font-size:14.5px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .qname .ns{color:var(--text-3);font-weight:450}
+    .qsub{font-size:12px;color:var(--text-3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .qdot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+    .rt{text-align:right;font-family:var(--font-round);font-variant-numeric:tabular-nums;font-size:14.5px}
+    .rt .u{color:var(--text-3);font-size:12px}
+    .chev{color:var(--text-3);justify-self:end;font-size:17px}
+    .spark{height:30px}
+    .pill{display:inline-flex;align-items:center;justify-content:center;min-width:62px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:600;font-family:var(--font-round);font-variant-numeric:tabular-nums}
+    .pill-ok{color:var(--green);background:rgba(48,209,88,.14)}
+    .pill-warn{color:var(--orange);background:rgba(255,159,10,.14)}
+    .pill-bad{color:var(--red);background:rgba(255,69,58,.16)}
+    .pill-mute{color:var(--text-3);background:rgba(255,255,255,.06)}
+    .reveal{opacity:0;transform:translateY(12px);animation:reveal .7s var(--spring) forwards}
+    @keyframes reveal{to{opacity:1;transform:none}}
+
+    @media (max-width:880px){
+      .lgrid{grid-template-columns:minmax(0,1fr) 84px 96px 16px}
+      .col-spark,.col-rate{display:none}
+    }
+    @media (max-width:680px){.shell{grid-template-columns:1fr}.sidebar{display:none}}
+  </style>
+</head>
+<body>
+  <div class="bg"></div>
+  <div class="shell">
+
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="crown"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M3 18.2 4.6 8.3l4.3 4.4L12 5l3.1 7.7 4.3-4.4L21 18.2z" fill="#f5f5f7"/><rect x="3.4" y="19" width="17.2" height="2.1" rx="1" fill="#d0d0d4"/></svg></div>
+        <div style="font-family:var(--font-disp);font-size:18px;font-weight:600;letter-spacing:-.02em">Queen</div>
+      </div>
+      <nav class="navwrap">
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18"/><circle cx="12" cy="12" r="4.5"/></svg>Health</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-6 4 12 2.5-7 1.5 4H21"/></svg>Activity</a>
+        <div class="navsec">Routing</div>
+        <a class="nav active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>Queues<span class="badge">24</span></a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.2"/><path d="M3.5 19c0-3 2.5-5.5 5.5-5.5S14.5 16 14.5 19M15 19c.2-1.8 1.5-3.2 3-3.6"/></svg>Consumers<span class="badge">27</span></a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v10a2 2 0 0 1-2 2H9l-5 4V6Z"/></svg>Messages</a>
+        <div class="navsec">Observability</div>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h6M11 10h8M7 14h10M3 18h6"/></svg>Traces</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-8"/></svg>Analytics</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14l-1.2 11.2a2 2 0 0 1-2 1.8H8.2a2 2 0 0 1-2-1.8L5 7Z"/><path d="M9 4h6v3H9z"/></svg>Dead letter<span class="badge" style="color:var(--orange)">438</span></a>
+        <div class="navsec">Infrastructure</div>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/></svg>System</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Migration</a>
+      </nav>
+      <div style="padding:14px 18px;border-top:1px solid var(--hair);display:flex;align-items:center;gap:9px">
+        <span class="dot" style="background:var(--green);box-shadow:0 0 8px var(--green)"></span><span style="font-size:12.5px;color:var(--text-2)">prod · eu-west</span>
+      </div>
+    </aside>
+
+    <section style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+      <header class="topbar">
+        <div class="statuschip"><span class="dot" style="background:var(--green);box-shadow:0 0 8px var(--green)"></span> All systems operational</div>
+        <label class="search" style="margin-left:auto"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input placeholder="Search"/></label>
+        <div class="avatar">AV</div>
+      </header>
+
+      <main class="page">
+        <div class="container">
+
+          <!-- title -->
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:18px">
+            <div>
+              <div class="eyebrow">Routing</div>
+              <h1 style="font-family:var(--font-disp);font-size:34px;font-weight:700;letter-spacing:-.03em;margin:6px 0 0">Queues</h1>
+            </div>
+            <button class="btn-primary"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>New queue</button>
+          </div>
+
+          <!-- inline summary (airy, no card) -->
+          <div class="summary reveal">
+            <div><div class="s-num" data-count="24">24</div><div class="s-lab">Queues</div></div>
+            <div><div class="s-num" data-count="1265">1,265</div><div class="s-lab">Partitions</div></div>
+            <div><div class="s-num" data-count="8567">8,567</div><div class="s-lab">Pending</div></div>
+            <div><div class="s-num" data-count="2" style="color:var(--orange)">2</div><div class="s-lab">Need attention</div></div>
+          </div>
+
+          <!-- toolbar -->
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+            <label class="search" style="max-width:300px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input placeholder="Filter queues"/></label>
+            <div class="seg" id="seg"><button class="on">All</button><button>Lagging</button><button>Idle</button></div>
+            <button class="sortbtn" style="margin-left:auto">Worst first <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></svg></button>
+          </div>
+
+          <!-- the dense list -->
+          <div class="list reveal" style="animation-delay:.06s">
+            <div class="lhead lgrid">
+              <div class="h">Queue</div>
+              <div class="h col-spark" style="text-align:right">Last 24h</div>
+              <div class="h" style="text-align:right">Density</div>
+              <div class="h col-rate" style="text-align:right">Rate</div>
+              <div class="h" style="text-align:right">Lag p99</div>
+              <div></div>
+            </div>
+            <div id="rows"></div>
+          </div>
+
+          <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--text-3)">Showing 12 of 24 queues</div>
+
+        </div>
+      </main>
+    </section>
+  </div>
+
+  <script>
+  (function(){
+    /* data */
+    const C={red:'#ff453a',orange:'#ff9f0a',green:'#30d158',cyan:'#64d2ff',mute:'#5a5a60'};
+    const rows=[
+      {ns:'',         name:'queen-long-running',          sub:'1,002 partitions · long-running', dens:'2.4k', rate:'0',    rateu:'/s', lag:'2d 22h', lvl:'bad',  spark:'red',    trend:'down'},
+      {ns:'smartads.',name:'bidding.trigger.test',        sub:'3 partitions · bidding',          dens:'0.67', rate:'0',    rateu:'/s', lag:'2d 22h', lvl:'bad',  spark:'red',    trend:'flat'},
+      {ns:'smartads.',name:'safety.pacing',               sub:'36 partitions · safety',          dens:'18',   rate:'6.2',  rateu:'/s', lag:'42s',    lvl:'warn', spark:'orange', trend:'down'},
+      {ns:'smartads.',name:'searchterms.fetch',           sub:'1 partition · keyword-research',  dens:'7.3',  rate:'3.2',  rateu:'/s', lag:'2.1s',   lvl:'warn', spark:'orange', trend:'flat'},
+      {ns:'smartads.',name:'bidding.push',                sub:'4 partitions · bidding',          dens:'27',   rate:'9.4',  rateu:'/s', lag:'1.4s',   lvl:'ok',   spark:'cyan',   trend:'up'},
+      {ns:'smartads.',name:'tracking.events',             sub:'3 partitions · analytics, attribution', dens:'3.1', rate:'14.8', rateu:'/s', lag:'1.2s', lvl:'ok', spark:'green', trend:'up'},
+      {ns:'smartads.',name:'audience.sync',               sub:'37 members · audience',           dens:'1.0',  rate:'22.1', rateu:'/s', lag:'90ms',   lvl:'ok',   spark:'green',  trend:'up'},
+      {ns:'smartads.',name:'data.sync.market',            sub:'14 partitions · data-sync',       dens:'13',   rate:'9.0',  rateu:'/s', lag:'0.4s',   lvl:'ok',   spark:'cyan',   trend:'up'},
+      {ns:'smartads.',name:'data.sync.pricing',           sub:'19 partitions · data-sync',       dens:'16',   rate:'7.2',  rateu:'/s', lag:'0.6s',   lvl:'ok',   spark:'cyan',   trend:'flat'},
+      {ns:'smartads.',name:'perf.fetch.google',           sub:'20 partitions · performance',     dens:'11',   rate:'5.1',  rateu:'/s', lag:'1.0s',   lvl:'ok',   spark:'green',  trend:'up'},
+      {ns:'smartads.',name:'tracking.ingest',             sub:'1 partition · tracking',          dens:'0',    rate:'12.0', rateu:'/s', lag:'0.4s',   lvl:'ok',   spark:'green',  trend:'flat'},
+      {ns:'smartads.',name:'keyword.research',            sub:'1 partition · keyword-research',  dens:'0',    rate:'0',    rateu:'/s', lag:'idle',   lvl:'mute', spark:'mute',   trend:'flat'},
+    ];
+    const dotColor={bad:C.red,warn:C.orange,ok:C.green,mute:C.mute};
+    const pillClass={bad:'pill-bad',warn:'pill-warn',ok:'pill-ok',mute:'pill-mute'};
+
+    /* sparkline engine */
+    const mb=(a)=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
+    function spline(p){let d='M'+p[0][0]+','+p[0][1];for(let i=0;i<p.length-1;i++){const p0=p[i-1]||p[i],p1=p[i],p2=p[i+1],p3=p[i+2]||p[i+1];const c1x=p1[0]+(p2[0]-p0[0])/6,c1y=p1[1]+(p2[1]-p0[1])/6,c2x=p2[0]-(p3[0]-p1[0])/6,c2y=p2[1]-(p3[1]-p1[1])/6;d+=` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;}return d;}
+    let UID=0;
+    function sparkSVG(color,trend,seed){
+      const W=120,H=30,n=26,rng=mb(seed),drift=trend==='up'?.5:trend==='down'?-.5:0;let v=trend==='down'?70:trend==='up'?28:50;const data=[];
+      for(let i=0;i<n;i++){v+=(rng()-.5)*9+drift;v=Math.max(8,Math.min(92,v));data.push(v);}
+      const mx=Math.max(...data),mn=Math.min(...data),rg=(mx-mn)||1,st=W/(n-1);
+      const pts=data.map((d,i)=>[i*st,4+(H-8)-((d-mn)/rg)*(H-8)]);const lp=spline(pts);const id='sp'+(UID++);
+      return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+        <defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".30"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>
+        <path d="${lp} L${W},${H} L0,${H} Z" fill="url(#${id})"/>
+        <path d="${lp}" fill="none" stroke="${color}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    }
+
+    /* render rows */
+    const host=document.getElementById('rows');
+    rows.forEach((q,i)=>{
+      const el=document.createElement('div');
+      el.className='lrow lgrid reveal';
+      el.style.animationDelay=(.1+i*.03)+'s';
+      const glow=(q.lvl==='bad')?`box-shadow:0 0 8px ${C.red}99`:(q.lvl==='warn'?`box-shadow:0 0 7px ${C.orange}88`:'');
+      el.innerHTML=`
+        <div style="display:flex;align-items:center;gap:13px;min-width:0">
+          <span class="qdot" style="background:${dotColor[q.lvl]};${glow}"></span>
+          <div style="min-width:0"><div class="qname"><span class="ns">${q.ns}</span>${q.name}</div><div class="qsub">${q.sub}</div></div>
+        </div>
+        <div class="spark col-spark">${sparkSVG(C[q.spark],q.trend,7+i*131)}</div>
+        <div class="rt">${q.dens}<span class="u">/p</span></div>
+        <div class="rt col-rate">${q.rate}<span class="u">${q.rateu}</span></div>
+        <div style="text-align:right"><span class="pill ${pillClass[q.lvl]}">${q.lag}</span></div>
+        <div class="chev">›</div>`;
+      host.appendChild(el);
+    });
+
+    /* count-up summary */
+    function fmt(v,dec){return v.toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});}
+    document.querySelectorAll('[data-count]').forEach(el=>{const target=parseFloat(el.dataset.count),dur=1100,t0=performance.now();function tick(t){let p=Math.min(1,(t-t0)/dur);p=1-Math.pow(1-p,3);el.textContent=fmt(target*p,0);if(p<1)requestAnimationFrame(tick);}requestAnimationFrame(tick);});
+
+    document.getElementById('seg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;[...e.currentTarget.children].forEach(x=>x.classList.remove('on'));b.classList.add('on');});
+  })();
+  </script>
+</body>
+</html>

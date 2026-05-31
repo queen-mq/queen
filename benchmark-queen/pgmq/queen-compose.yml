@@ -1,0 +1,94 @@
+name: queen-bench
+
+# Queen stack for the Mac head-to-head vs the pgmq stack.
+#
+#   examples/long-running clustered autocannon ──HTTP──▶ Queen broker ──▶ Postgres
+#                                                          :6632             :5432
+#
+# Resource budget is IDENTICAL to the pgmq stack, per corresponding container:
+#   postgres : 3 CPU / 3 GiB   (same -c tuning as pgmq's postgres)
+#   broker   : 3 CPU / 2 GiB   (the "sidecar" slot == pgbouncer's slot)
+# Total per stack: 6 CPU / 5 GiB. Run sequentially so neither competes.
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: queen-pg
+    cpus: 3.0
+    mem_limit: 3g
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    # BYTE-IDENTICAL to the pgmq stack's postgres tuning -> the DB substrate is
+    # the same; only the access pattern (broker+cursor vs library+SKIP LOCKED) differs.
+    command:
+      - postgres
+      - -c
+      - max_connections=400
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-3GB}
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - synchronous_commit=on
+      - -c
+      - autovacuum_naptime=10s
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - autovacuum_vacuum_cost_delay=0
+      - -c
+      - track_io_timing=on
+    ports:
+      - "${QUEEN_PG_HOST_PORT:-55433}:5432"
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  queen:
+    image: ${QUEEN_IMAGE:-smartnessai/queen-mq:0.15.0}
+    container_name: queen-broker
+    # Overridable: on the arm64 Mac the broker runs EMULATED (amd64), so it's
+    # CPU-starved at 3 CPU. Raise QUEEN_CPUS to isolate that bottleneck.
+    cpus: ${QUEEN_CPUS:-3.0}
+    mem_limit: 2g
+    environment:
+      PG_HOST: queen-pg
+      PG_PORT: "5432"
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: postgres
+      # Total PG connections from Queen ≈ DB_POOL_SIZE + SIDECAR_POOL_SIZE
+      # (sidecar is split across workers; NOT multiplied by NUM_WORKERS).
+      # 10 + 30 = ~40 total backends -> clean "few connections" story.
+      NUM_WORKERS: "${QUEEN_NUM_WORKERS:-2}"
+      DB_POOL_SIZE: "${QUEEN_DB_POOL_SIZE:-10}"
+      SIDECAR_POOL_SIZE: "${QUEEN_SIDECAR_POOL_SIZE:-30}"
+      # Long-poll (wait=true) backoff: start checking at 5 ms so newly-arrived
+      # messages on an empty partition are picked up fast (lowers pop tail latency
+      # vs the 100 ms default), then exponential backoff.
+      POP_WAIT_INITIAL_INTERVAL_MS: "${QUEEN_POP_WAIT_INITIAL_INTERVAL_MS:-5}"
+      POP_WAIT_BACKOFF_THRESHOLD: "${QUEEN_POP_WAIT_BACKOFF_THRESHOLD:-3}"
+      POP_WAIT_BACKOFF_MULTIPLIER: "${QUEEN_POP_WAIT_BACKOFF_MULTIPLIER:-2.0}"
+      # Micro-batch hold window (the low-load latency knob). Default 5ms; set 0
+      # to fire immediately when there's nothing to coalesce.
+      SIDECAR_MICRO_BATCH_WAIT_MS: "${QUEEN_MICRO_BATCH_WAIT_MS:-5}"
+      # Per-type hold + the new load-adaptive latency-bypass threshold (0.15.2).
+      # Empty => server default. Set PUSH hold=20 to mirror production.
+      QUEEN_PUSH_MAX_HOLD_MS: "${QUEEN_PUSH_MAX_HOLD_MS:-}"
+      QUEEN_POP_MAX_HOLD_MS: "${QUEEN_POP_MAX_HOLD_MS:-}"
+      QUEEN_PUSH_BATCH_INFLIGHT_THRESHOLD: "${QUEEN_PUSH_BATCH_INFLIGHT_THRESHOLD:-}"
+      QUEEN_POP_BATCH_INFLIGHT_THRESHOLD: "${QUEEN_POP_BATCH_INFLIGHT_THRESHOLD:-}"
+    # Host port 6633 (not 6632) to avoid colliding with any other local Queen.
+    ports:
+      - "${QUEEN_HOST_PORT:-6633}:6632"
+    depends_on:
+      postgres:
+        condition: service_healthy

@@ -1,0 +1,12 @@
+{
+  "name": "pgmq-bench",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Closed-loop SQL load harness for benchmarking pgmq (vs Queen) through PgBouncer",
+  "dependencies": {
+    "autocannon": "^8.0.0",
+    "axios": "^1.13.2",
+    "pg": "^8.13.1"
+  }
+}

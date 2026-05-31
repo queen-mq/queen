@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Queen — Health</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root{
+      --text:    rgba(255,255,255,.94);
+      --text-2:  rgba(255,255,255,.56);
+      --text-3:  rgba(255,255,255,.34);
+      --hair:    rgba(255,255,255,.08);
+      --mat:     rgba(255,255,255,.055);
+      --mat-hi:  rgba(255,255,255,.085);
+      --blue:#0a84ff; --cyan:#64d2ff; --pink:#ff375f; --green:#30d158; --orange:#ff9f0a; --mint:#63e6be;
+      --font-text: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+      --font-disp: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+      --font-round: ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif;
+      --spring: cubic-bezier(.16,1,.3,1);
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; color:var(--text); font-family:var(--font-text);
+      -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; overflow:hidden;
+      letter-spacing:-.01em;
+      background:#050507;
+    }
+    /* ambient aurora behind the frosted materials */
+    .bg{position:fixed; inset:0; z-index:0; pointer-events:none;
+      background:
+        radial-gradient(1200px 820px at 12% -12%, rgba(10,132,255,.16), transparent 56%),
+        radial-gradient(1100px 760px at 112% 6%, rgba(255,55,95,.13), transparent 55%),
+        radial-gradient(1200px 1000px at 60% 128%, rgba(48,209,88,.10), transparent 55%),
+        #050507;
+    }
+    .num{font-family:var(--font-round); font-variant-numeric:tabular-nums; letter-spacing:-.02em}
+    ::selection{background:rgba(255,255,255,.18)}
+    *:focus-visible{outline:2px solid var(--blue); outline-offset:2px}
+    ::-webkit-scrollbar{width:9px}
+    ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border:2px solid transparent;background-clip:padding-box;border-radius:9px}
+
+    .shell{position:relative;z-index:1;display:grid;grid-template-columns:236px 1fr;height:100vh}
+
+    /* ---- frosted sidebar (macOS vibrancy) ---- */
+    .sidebar{
+      background:rgba(255,255,255,.028); backdrop-filter:blur(40px) saturate(1.4); -webkit-backdrop-filter:blur(40px) saturate(1.4);
+      border-right:1px solid var(--hair); display:flex; flex-direction:column; overflow:hidden;
+    }
+    .brand{display:flex;align-items:center;gap:11px;padding:20px 20px 14px}
+    .crown{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex-shrink:0;
+      background:linear-gradient(160deg,#2c2c30,#161618);box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 2px 6px rgba(0,0,0,.4)}
+    .navwrap{padding:6px 12px;overflow-y:auto;flex:1}
+    .navsec{padding:14px 10px 5px;font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text-3);text-transform:uppercase}
+    .nav{display:flex;align-items:center;gap:12px;padding:8px 11px;border-radius:10px;color:var(--text-2);
+      font-size:14px;font-weight:500;cursor:pointer;text-decoration:none;transition:.18s var(--spring)}
+    .nav svg{width:18px;height:18px;opacity:.85;flex:0 0 18px}
+    .nav:hover{background:rgba(255,255,255,.05);color:var(--text)}
+    .nav.active{background:var(--mat-hi);color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.10)}
+    .nav.active svg{color:var(--blue);opacity:1}
+    .nav .badge{margin-left:auto;font-size:11px;font-weight:600;color:var(--text-3);font-family:var(--font-round)}
+
+    /* ---- topbar ---- */
+    .topbar{display:flex;align-items:center;gap:14px;padding:13px 26px;border-bottom:1px solid var(--hair);
+      background:rgba(5,5,7,.5);backdrop-filter:blur(30px) saturate(1.3);-webkit-backdrop-filter:blur(30px) saturate(1.3)}
+    .search{display:flex;align-items:center;gap:9px;padding:8px 14px;border-radius:11px;background:var(--mat);
+      border:1px solid var(--hair);min-width:240px;max-width:420px;flex:1;color:var(--text-2);font-size:13.5px;transition:.18s}
+    .search:hover{background:var(--mat-hi)}
+    .search input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:13.5px;font-family:inherit}
+    .avatar{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:600;color:#fff;
+      background:linear-gradient(150deg,var(--blue),#5e5ce6);box-shadow:0 2px 8px rgba(10,132,255,.4)}
+    .statuschip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-2)}
+
+    /* ---- materials / tiles ---- */
+    .page{overflow-y:auto;height:100%}
+    .container{max-width:1200px;margin:0 auto;padding:34px 40px 70px}
+    .eyebrow{font-size:12.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3)}
+    .tile{
+      background:var(--mat); border:1px solid var(--hair); border-radius:24px;
+      backdrop-filter:blur(40px) saturate(1.4); -webkit-backdrop-filter:blur(40px) saturate(1.4);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 24px 60px -34px rgba(0,0,0,.9);
+      padding:24px; position:relative; overflow:hidden;
+      transition:transform .3s var(--spring), background .3s var(--spring);
+    }
+    .tile:hover{transform:translateY(-3px);background:var(--mat-hi)}
+    .tile-label{font-size:13px;font-weight:600;color:var(--text-2);letter-spacing:-.01em}
+    .tile-sub{font-size:12.5px;color:var(--text-3)}
+    .seg{display:inline-flex;padding:3px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid var(--hair);gap:2px}
+    .seg button{padding:6px 15px;border-radius:9px;font-size:13px;font-weight:550;color:var(--text-2);border:none;background:none;cursor:pointer;transition:.2s var(--spring);font-family:inherit}
+    .seg button.on{color:var(--text);background:rgba(255,255,255,.12);box-shadow:0 1px 4px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.12)}
+    .pill{display:inline-flex;align-items:center;gap:5px;padding:4px 11px;border-radius:999px;font-size:12px;font-weight:600}
+    .pill-up{color:var(--green);background:rgba(48,209,88,.14)}
+    .pill-warn{color:var(--orange);background:rgba(255,159,10,.14)}
+    .pill-info{color:var(--cyan);background:rgba(100,210,255,.14)}
+    .dot{width:9px;height:9px;border-radius:50%}
+
+    .bento{display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:minmax(116px,auto);gap:16px}
+    .reveal{opacity:0;transform:translateY(14px) scale(.985);animation:reveal .8s var(--spring) forwards}
+    @keyframes reveal{to{opacity:1;transform:none}}
+
+    .flowrow{display:flex;align-items:center;gap:16px;padding:14px 4px;border-top:1px solid var(--hair)}
+    .flowrow:first-of-type{border-top:none}
+    .minibar{height:6px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden;flex:1;max-width:230px}
+    .minibar > i{display:block;height:100%;border-radius:4px}
+
+    @media (max-width:1080px){
+      .bento{grid-template-columns:repeat(2,1fr)}
+      .span-hero,.span-wide{grid-column:span 2!important}
+      .span-tall{grid-row:span 1!important;grid-column:span 2!important}
+    }
+    @media (max-width:680px){ .shell{grid-template-columns:1fr} .sidebar{display:none} .bento{grid-template-columns:1fr} .bento>*{grid-column:span 1!important} }
+  </style>
+</head>
+<body>
+  <div class="bg"></div>
+  <div class="shell">
+
+    <!-- ===== SIDEBAR ===== -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="crown">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M3 18.2 4.6 8.3l4.3 4.4L12 5l3.1 7.7 4.3-4.4L21 18.2z" fill="#f5f5f7"/><rect x="3.4" y="19" width="17.2" height="2.1" rx="1" fill="#d0d0d4"/></svg>
+        </div>
+        <div style="font-family:var(--font-disp);font-size:18px;font-weight:600;letter-spacing:-.02em">Queen</div>
+      </div>
+      <nav class="navwrap">
+        <a class="nav active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18"/><circle cx="12" cy="12" r="4.5"/></svg>Health</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-6 4 12 2.5-7 1.5 4H21"/></svg>Activity</a>
+
+        <div class="navsec">Routing</div>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>Queues<span class="badge">24</span></a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.2"/><path d="M3.5 19c0-3 2.5-5.5 5.5-5.5S14.5 16 14.5 19M15 19c.2-1.8 1.5-3.2 3-3.6"/></svg>Consumers<span class="badge">27</span></a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v10a2 2 0 0 1-2 2H9l-5 4V6Z"/></svg>Messages</a>
+
+        <div class="navsec">Observability</div>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h6M11 10h8M7 14h10M3 18h6"/></svg>Traces</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-8"/></svg>Analytics</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14l-1.2 11.2a2 2 0 0 1-2 1.8H8.2a2 2 0 0 1-2-1.8L5 7Z"/><path d="M9 4h6v3H9z"/></svg>Dead letter<span class="badge" style="color:var(--orange)">438</span></a>
+
+        <div class="navsec">Infrastructure</div>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/></svg>System</a>
+        <a class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>Migration</a>
+      </nav>
+      <div style="padding:14px 18px;border-top:1px solid var(--hair);display:flex;align-items:center;gap:9px">
+        <span class="dot" style="background:var(--green);box-shadow:0 0 8px var(--green)"></span>
+        <span style="font-size:12.5px;color:var(--text-2)">prod · eu-west</span>
+      </div>
+    </aside>
+
+    <!-- ===== MAIN ===== -->
+    <section style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+      <header class="topbar">
+        <div class="statuschip"><span class="dot" style="background:var(--green);box-shadow:0 0 8px var(--green)"></span> All systems operational</div>
+        <label class="search" style="margin-left:auto">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input placeholder="Search"/>
+        </label>
+        <div class="avatar">AV</div>
+      </header>
+
+      <main class="page">
+        <div class="container">
+
+          <!-- title row -->
+          <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:22px">
+            <div>
+              <div class="eyebrow" id="today">Saturday, May 30</div>
+              <h1 style="font-family:var(--font-disp);font-size:34px;font-weight:700;letter-spacing:-.03em;margin:6px 0 0">Overview</h1>
+            </div>
+            <div class="seg" id="seg">
+              <button>1H</button><button class="on">24H</button><button>7D</button>
+            </div>
+          </div>
+
+          <!-- HERO: status + flow rings -->
+          <div class="tile span-hero reveal" style="grid-column:span 4;padding:30px 34px;margin-bottom:16px;display:flex;align-items:center;gap:40px;flex-wrap:wrap">
+            <div style="flex:1;min-width:260px">
+              <div class="eyebrow">System status</div>
+              <div style="display:flex;align-items:center;gap:14px;margin-top:10px">
+                <span class="dot" style="width:15px;height:15px;background:var(--green);box-shadow:0 0 14px var(--green)"></span>
+                <span style="font-family:var(--font-disp);font-size:46px;font-weight:700;letter-spacing:-.03em;line-height:1">Healthy</span>
+              </div>
+              <p style="font-size:17px;color:var(--text-2);margin:16px 0 0;max-width:440px;line-height:1.5">
+                <span class="num" style="color:var(--text)">2.36M</span> messages moving today.
+                <span class="num" style="color:var(--text)">98.7%</span> delivered, longest lag
+                <span class="num" style="color:var(--text)">1m&nbsp;51s</span>.
+              </p>
+              <div style="display:flex;gap:10px;margin-top:20px">
+                <span class="pill pill-up">▲ Throughput +12%</span>
+                <span class="pill pill-info">Backlog draining</span>
+              </div>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:26px">
+              <div style="position:relative;width:208px;height:208px">
+                <svg id="rings" viewBox="0 0 220 220" style="width:208px;height:208px;transform:rotate(-90deg)"></svg>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:16px">
+                <div>
+                  <div style="display:flex;align-items:center;gap:8px"><span class="dot" style="background:var(--cyan)"></span><span style="font-size:13px;color:var(--text-2)">Delivery</span></div>
+                  <div class="num" style="font-size:22px;font-weight:600;margin-top:2px">98.7<span style="font-size:14px;color:var(--text-2)">%</span></div>
+                </div>
+                <div>
+                  <div style="display:flex;align-items:center;gap:8px"><span class="dot" style="background:var(--pink)"></span><span style="font-size:13px;color:var(--text-2)">Throughput</span></div>
+                  <div class="num" style="font-size:22px;font-weight:600;margin-top:2px">8.7<span style="font-size:14px;color:var(--text-2)"> ev/s</span></div>
+                </div>
+                <div>
+                  <div style="display:flex;align-items:center;gap:8px"><span class="dot" style="background:var(--green)"></span><span style="font-size:13px;color:var(--text-2)">Freshness</span></div>
+                  <div class="num" style="font-size:22px;font-weight:600;margin-top:2px">1m 51s<span style="font-size:14px;color:var(--text-2)"> lag</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- BENTO -->
+          <div class="bento">
+
+            <!-- Throughput (tall, wide) -->
+            <div class="tile span-tall reveal" style="grid-column:span 2;grid-row:span 2;display:flex;flex-direction:column;animation-delay:.06s">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between">
+                <div>
+                  <div class="tile-label">Throughput</div>
+                  <div class="tile-sub" style="margin-top:3px">push · pop · ack — last 24 h</div>
+                </div>
+                <span class="pill pill-up">▲ 12%</span>
+              </div>
+              <div style="display:flex;align-items:baseline;gap:8px;margin-top:18px">
+                <span class="num" data-count="8.7" data-decimals="1" style="font-size:52px;font-weight:700;line-height:1">8.7</span>
+                <span style="font-size:17px;color:var(--text-2)">events / sec</span>
+              </div>
+              <div style="flex:1;min-height:120px;margin:14px -10px -10px;position:relative">
+                <div id="wave" style="position:absolute;inset:0"></div>
+              </div>
+            </div>
+
+            <!-- Backlog -->
+            <div class="tile reveal" style="animation-delay:.1s">
+              <div class="tile-label">Backlog</div>
+              <div class="num" data-count="8567" style="font-size:38px;font-weight:700;margin-top:14px;line-height:1">8,567</div>
+              <div class="tile-sub" style="margin-top:8px;color:var(--green)">↓ 14.3k · draining</div>
+            </div>
+
+            <!-- Latency -->
+            <div class="tile reveal" style="animation-delay:.14s">
+              <div class="tile-label">Latency p99</div>
+              <div class="num" style="font-size:38px;font-weight:700;margin-top:14px;line-height:1">1<span style="font-size:20px;color:var(--text-2)">m</span> 51<span style="font-size:20px;color:var(--text-2)">s</span></div>
+              <div class="tile-sub" style="margin-top:8px;color:var(--orange)">▲ slightly elevated</div>
+            </div>
+
+            <!-- Dead letter -->
+            <div class="tile reveal" style="animation-delay:.18s">
+              <div class="tile-label">Dead letter</div>
+              <div class="num" data-count="438" style="font-size:38px;font-weight:700;margin-top:14px;line-height:1;color:var(--orange)">438</div>
+              <div class="tile-sub" style="margin-top:8px">0.02% of all messages</div>
+            </div>
+
+            <!-- Fleet -->
+            <div class="tile reveal" style="animation-delay:.22s">
+              <div class="tile-label">Fleet</div>
+              <div style="display:flex;gap:18px;margin-top:16px">
+                <div><div class="num" style="font-size:28px;font-weight:700;line-height:1">24</div><div class="tile-sub" style="margin-top:5px">queues</div></div>
+                <div><div class="num" style="font-size:28px;font-weight:700;line-height:1">27</div><div class="tile-sub" style="margin-top:5px">groups</div></div>
+                <div><div class="num" style="font-size:28px;font-weight:700;line-height:1">3</div><div class="tile-sub" style="margin-top:5px">nodes</div></div>
+              </div>
+            </div>
+
+            <!-- Busiest flows (wide list, borderless rows) -->
+            <div class="tile span-wide reveal" style="grid-column:span 4;animation-delay:.26s">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+                <div class="tile-label">Busiest flows</div>
+                <div class="tile-sub">by throughput</div>
+              </div>
+              <div class="flowrow">
+                <div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:550">queen-long-running</div><div class="tile-sub" style="margin-top:2px">1,002 partitions</div></div>
+                <div class="minibar"><i style="width:92%;background:linear-gradient(90deg,var(--pink),#ff7aa2)"></i></div>
+                <div class="num" style="width:78px;text-align:right;color:var(--text-2)">7,920</div>
+                <span class="pill pill-warn" style="width:80px;justify-content:center">2d 22h</span>
+              </div>
+              <div class="flowrow">
+                <div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:550">smartads.tracking.events</div><div class="tile-sub" style="margin-top:2px">analytics · attribution</div></div>
+                <div class="minibar"><i style="width:64%;background:linear-gradient(90deg,var(--cyan),#9be4ff)"></i></div>
+                <div class="num" style="width:78px;text-align:right;color:var(--text-2)">14.8/s</div>
+                <span class="pill pill-up" style="width:80px;justify-content:center">1.2s</span>
+              </div>
+              <div class="flowrow">
+                <div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:550">smartads.audience.sync</div><div class="tile-sub" style="margin-top:2px">37 members</div></div>
+                <div class="minibar"><i style="width:48%;background:linear-gradient(90deg,var(--green),#7ef0a6)"></i></div>
+                <div class="num" style="width:78px;text-align:right;color:var(--text-2)">22.1/s</div>
+                <span class="pill pill-up" style="width:80px;justify-content:center">90ms</span>
+              </div>
+              <div class="flowrow">
+                <div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:550">smartads.safety.pacing</div><div class="tile-sub" style="margin-top:2px">36 partitions</div></div>
+                <div class="minibar"><i style="width:30%;background:linear-gradient(90deg,var(--orange),#ffca6b)"></i></div>
+                <div class="num" style="width:78px;text-align:right;color:var(--text-2)">6.2/s</div>
+                <span class="pill pill-warn" style="width:80px;justify-content:center">42s</span>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </main>
+    </section>
+  </div>
+
+  <!-- ===== motion + viz ===== -->
+  <script>
+  (function(){
+    const spring='cubic-bezier(.16,1,.3,1)';
+
+    /* ---------- flow rings (Activity-style) ---------- */
+    const ringDefs=[
+      {r:94, val:.987, a:'#5ac8fa', b:'#0a84ff'},  // Delivery
+      {r:72, val:.64,  a:'#ff7aa2', b:'#ff375f'},  // Throughput
+      {r:50, val:.88,  a:'#7ef0a6', b:'#30d158'},  // Freshness
+    ];
+    const RW=18, cx=110, cy=110;
+    const svg=document.getElementById('rings');
+    let defs='<defs>';
+    ringDefs.forEach((g,i)=>{ defs+=`<linearGradient id="rg${i}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${g.a}"/><stop offset="1" stop-color="${g.b}"/></linearGradient>`; });
+    defs+='</defs>';
+    let body='';
+    const arcs=[];
+    ringDefs.forEach((g,i)=>{
+      const C=2*Math.PI*g.r;
+      body+=`<circle cx="${cx}" cy="${cy}" r="${g.r}" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="${RW}"/>`;
+      body+=`<circle id="arc${i}" cx="${cx}" cy="${cy}" r="${g.r}" fill="none" stroke="url(#rg${i})" stroke-width="${RW}"
+              stroke-linecap="round" stroke-dasharray="${C}" stroke-dashoffset="${C}"
+              style="transition:stroke-dashoffset 1.35s ${spring}; transition-delay:${i*.12}s; filter:drop-shadow(0 0 5px ${g.b}66)"/>`;
+      arcs.push({C, target:C*(1-g.val)});
+    });
+    svg.innerHTML=defs+body;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      arcs.forEach((a,i)=>{ document.getElementById('arc'+i).style.strokeDashoffset=a.target; });
+    }));
+
+    /* ---------- throughput wave (borderless, no axes) ---------- */
+    const mb=(a)=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
+    function spline(p){let d='M'+p[0][0]+','+p[0][1];for(let i=0;i<p.length-1;i++){const p0=p[i-1]||p[i],p1=p[i],p2=p[i+1],p3=p[i+2]||p[i+1];const c1x=p1[0]+(p2[0]-p0[0])/6,c1y=p1[1]+(p2[1]-p0[1])/6,c2x=p2[0]-(p3[0]-p1[0])/6,c2y=p2[1]-(p3[1]-p1[1])/6;d+=` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;}return d;}
+    function wave(seed){
+      const el=document.getElementById('wave'); if(!el) return;
+      const W=560,H=150,n=52,rng=mb(seed); let v=55;const data=[];
+      for(let i=0;i<n;i++){v+=(rng()-.45)*16;v=Math.max(12,Math.min(96,v));data.push(v);}
+      const mx=Math.max(...data),mn=Math.min(...data),rg=(mx-mn)||1,st=W/(n-1);
+      const pts=data.map((d,i)=>[i*st, 12+(H-24)-((d-mn)/rg)*(H-24)]);
+      const line=spline(pts), last=pts[n-1];
+      el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+        <defs><linearGradient id="wv" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff375f" stop-opacity=".42"/><stop offset="1" stop-color="#ff375f" stop-opacity="0"/></linearGradient></defs>
+        <path d="${line} L${W},${H} L0,${H} Z" fill="url(#wv)"/>
+        <path d="${line}" fill="none" stroke="#ff5a7e" stroke-width="2.5" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="4" fill="#fff" stroke="#ff375f" stroke-width="2.5" vector-effect="non-scaling-stroke" style="filter:drop-shadow(0 0 6px #ff375f)"/>
+      </svg>`;
+    }
+    wave(24);
+    document.getElementById('seg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;[...e.currentTarget.children].forEach(x=>x.classList.remove('on'));b.classList.add('on');wave(b.textContent.length*7+Math.random()*40|0);});
+
+    /* ---------- count-up numbers ---------- */
+    function fmt(v,dec){return v.toLocaleString('en-US',{minimumFractionDigits:dec,maximumFractionDigits:dec});}
+    document.querySelectorAll('[data-count]').forEach(el=>{
+      const target=parseFloat(el.dataset.count),dec=+(el.dataset.decimals||0),suf=el.dataset.suffix||'';
+      const dur=1200,t0=performance.now();
+      function tick(t){let p=Math.min(1,(t-t0)/dur);p=1-Math.pow(1-p,3);el.textContent=fmt(target*p,dec)+suf;if(p<1)requestAnimationFrame(tick);}
+      requestAnimationFrame(tick);
+    });
+  })();
+  </script>
+</body>
+</html>

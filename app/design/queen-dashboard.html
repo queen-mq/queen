@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Queen · Dashboard — Design Concept</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Tailwind (Play CDN — for the concept only) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            ink:  { 0:'#0b0b0c', 1:'#proxy', 2:'#151517', 3:'#1b1b1e', 4:'#212126', 5:'#2a2a31' },
+            txt:  { hi:'#ededed', mid:'#9b9b9b', low:'#6a6a6a', faint:'#4a4a4f' },
+            brand:{ cyan:'#22d3ee', pink:'#fb7185', amber:'#e6b450', green:'#4ade80' },
+          },
+          fontFamily: {
+            sans: ['Inter','ui-sans-serif','system-ui','sans-serif'],
+            mono: ['"JetBrains Mono"','ui-monospace','monospace'],
+          },
+        }
+      }
+    }
+    // fix the typo'd token without re-declaring
+    tailwind.config.theme.extend.colors.ink[1] = '#0f0f11';
+  </script>
+
+  <style>
+    :root{
+      --ink-0:#0b0b0c; --ink-1:#0f0f11; --ink-2:#151517; --ink-3:#1b1b1e; --ink-4:#212126; --ink-5:#2a2a31;
+      --txt-hi:#ededed; --txt-mid:#9b9b9b; --txt-low:#6a6a6a; --txt-faint:#4a4a4f;
+      --cyan:#22d3ee; --pink:#fb7185; --amber:#e6b450; --green:#4ade80;
+      --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12);
+      --ease:cubic-bezier(.2,.7,.2,1);
+    }
+    html,body{height:100%}
+    body{
+      margin:0; background:var(--ink-0); color:var(--txt-hi);
+      font-family:'Inter',ui-sans-serif,system-ui,sans-serif;
+      letter-spacing:-.006em; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+      overflow:hidden;
+    }
+    /* subtle ambient depth */
+    body::before{
+      content:''; position:fixed; inset:0; z-index:0; pointer-events:none;
+      background:
+        radial-gradient(900px 500px at 12% -8%, rgba(34,211,238,.05), transparent 60%),
+        radial-gradient(900px 600px at 100% 110%, rgba(251,113,133,.045), transparent 60%);
+    }
+    .mono{font-family:'JetBrains Mono',ui-monospace,monospace; font-variant-numeric:tabular-nums}
+    ::selection{background:rgba(255,255,255,.15)}
+    *:focus-visible{outline:1px solid rgba(255,255,255,.3); outline-offset:1px}
+
+    /* scrollbars */
+    ::-webkit-scrollbar{width:10px;height:10px}
+    ::-webkit-scrollbar-track{background:transparent}
+    ::-webkit-scrollbar-thumb{background:#26262b;border:2px solid transparent;background-clip:padding-box;border-radius:10px}
+    ::-webkit-scrollbar-thumb:hover{background:#34343b;background-clip:padding-box}
+
+    /* shell */
+    .shell{position:relative;z-index:1;display:grid;grid-template-columns:248px 1fr;height:100vh}
+    .scroll-y{overflow-y:auto;scroll-behavior:smooth}
+
+    /* card */
+    .card{
+      position:relative;background:var(--ink-2);border:1px solid var(--line);border-radius:12px;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.04), 0 10px 30px -22px rgba(0,0,0,.9);
+      transition:border-color .15s var(--ease), transform .15s var(--ease);
+    }
+    .card-head{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line)}
+    .card-title{font-size:13px;font-weight:600;color:var(--txt-hi);letter-spacing:-.01em}
+    .card-note{margin-left:auto;font-size:11px;color:var(--txt-low)}
+
+    /* nav */
+    .navlabel{padding:6px 10px;font-size:10px;letter-spacing:.13em;text-transform:uppercase;font-weight:600;color:var(--txt-faint)}
+    .navitem{display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:7px;color:var(--txt-mid);
+      font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;border:1px solid transparent;transition:.13s var(--ease);position:relative}
+    .navitem svg{width:16px;height:16px;opacity:.8;flex:0 0 16px}
+    .navitem:hover{color:var(--txt-hi);background:var(--ink-3)}
+    .navitem.active{color:var(--txt-hi);background:var(--ink-4);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+    .navitem.active::before{content:'';position:absolute;left:-8px;top:7px;bottom:7px;width:2px;border-radius:2px;background:#fff;opacity:.85}
+    .navitem.active svg{opacity:1}
+    .navcount{margin-left:auto;font-size:10px;padding:1px 6px;border-radius:5px;background:var(--ink-4);
+      color:var(--txt-low);border:1px solid var(--line)}
+    .navitem.active .navcount{color:var(--txt-mid)}
+
+    /* topbar */
+    .iconbtn{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:var(--txt-mid);
+      border:1px solid transparent;background:transparent;cursor:pointer;transition:.13s var(--ease)}
+    .iconbtn:hover{color:var(--txt-hi);background:var(--ink-3);border-color:var(--line)}
+    .iconbtn svg{width:15px;height:15px}
+    .kbd{font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 6px;border-radius:5px;background:var(--ink-4);
+      border:1px solid var(--line);color:var(--txt-mid)}
+
+    /* chips */
+    .chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:500;
+      border:1px solid transparent;line-height:1.4}
+    .chip .dot{width:5px;height:5px;border-radius:99px}
+    .chip-ok{color:var(--green);background:rgba(74,222,128,.08);border-color:rgba(74,222,128,.22)} .chip-ok .dot{background:var(--green)}
+    .chip-warn{color:var(--amber);background:rgba(230,180,80,.08);border-color:rgba(230,180,80,.22)} .chip-warn .dot{background:var(--amber)}
+    .chip-bad{color:var(--pink);background:rgba(251,113,133,.08);border-color:rgba(251,113,133,.25)} .chip-bad .dot{background:var(--pink)}
+    .chip-cyan{color:var(--cyan);background:rgba(34,211,238,.08);border-color:rgba(34,211,238,.22)} .chip-cyan .dot{background:var(--cyan)}
+    .chip-mute{color:var(--txt-mid);background:var(--ink-3);border-color:var(--line)}
+
+    /* trend pill */
+    .trend{display:inline-flex;align-items:center;gap:3px;font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:500}
+    .trend.up{color:var(--green)} .trend.down{color:var(--pink)} .trend.flat{color:var(--txt-low)}
+
+    /* segmented */
+    .seg{display:inline-flex;padding:2px;border-radius:9px;border:1px solid var(--line);background:var(--ink-2);gap:2px}
+    .seg button{padding:4px 11px;border-radius:7px;font-size:12px;color:var(--txt-mid);font-weight:500;cursor:pointer;border:none;background:transparent;transition:.12s}
+    .seg button:hover{color:var(--txt-hi)}
+    .seg button.on{color:var(--txt-hi);background:var(--ink-4);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+
+    /* buttons */
+    .btn{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:8px;font-size:12.5px;font-weight:500;
+      border:1px solid var(--line-2);color:var(--txt-hi);background:rgba(255,255,255,.03);cursor:pointer;transition:.13s var(--ease)}
+    .btn:hover{border-color:rgba(255,255,255,.24);background:rgba(255,255,255,.05)}
+    .btn svg{width:14px;height:14px}
+    .btn-ghost{border-color:transparent;background:transparent;color:var(--txt-mid)}
+    .btn-ghost:hover{color:var(--txt-hi);background:var(--ink-3)}
+
+    /* stat tile */
+    .stat{position:relative;padding:14px 15px;border-radius:12px;border:1px solid var(--line);background:var(--ink-2);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.04);overflow:hidden;display:flex;flex-direction:column;gap:7px}
+    .stat-label{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--txt-low);font-weight:600;display:flex;align-items:center;gap:6px}
+    .stat-value{font-family:'JetBrains Mono',monospace;font-variant-numeric:tabular-nums;font-size:25px;font-weight:600;line-height:1;color:var(--txt-hi);letter-spacing:-.02em}
+    .stat-value small{font-size:12px;color:var(--txt-mid);font-weight:500;margin-left:3px}
+    .stat-spark{position:absolute;right:0;bottom:0;left:0;height:34px;opacity:.9}
+
+    /* bars */
+    .bar{height:5px;border-radius:3px;background:var(--ink-4);overflow:hidden}
+    .bar > i{display:block;height:100%;border-radius:3px;background:#dcdcdc}
+    .bar.cyan > i{background:var(--cyan)} .bar.amber > i{background:var(--amber)} .bar.pink > i{background:var(--pink)} .bar.green > i{background:var(--green)}
+
+    /* table */
+    .t{width:100%;border-collapse:collapse;font-size:12.5px}
+    .t th{text-align:left;font-weight:600;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--txt-low);padding:9px 14px}
+    .t td{padding:9px 14px;border-top:1px solid var(--line);color:var(--txt-hi);vertical-align:middle}
+    .t tbody tr{transition:background .12s} .t tbody tr:hover{background:rgba(255,255,255,.025)}
+
+    /* live pulse */
+    .pulse{position:relative;display:inline-block;width:7px;height:7px;border-radius:99px;background:var(--green)}
+    .pulse::after{content:'';position:absolute;inset:-4px;border-radius:99px;background:var(--green);opacity:.3;animation:ring 2.4s ease-out infinite}
+    @keyframes ring{0%{transform:scale(.5);opacity:.4}100%{transform:scale(1.9);opacity:0}}
+
+    /* list rows */
+    .row{display:flex;align-items:center;gap:11px;padding:9px 16px;transition:background .12s}
+    .row:hover{background:rgba(255,255,255,.025)}
+
+    /* entrance */
+    @keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+    .rise{animation:rise .5s var(--ease) both}
+
+    .glasshover:hover{transform:translateY(-1px)}
+
+    @media (max-width:860px){ .shell{grid-template-columns:64px 1fr} .sb-full{display:none} .navitem{justify-content:center} .navitem.active::before{display:none} .navlabel{display:none} }
+  </style>
+</head>
+
+<body>
+  <div class="shell">
+
+    <!-- ============ SIDEBAR ============ -->
+    <aside style="background:var(--ink-1);border-right:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden">
+      <!-- brand -->
+      <div style="display:flex;align-items:center;gap:10px;padding:14px 14px 12px">
+        <div style="position:relative;width:30px;height:30px;border-radius:9px;flex-shrink:0;display:grid;place-items:center;
+             background:linear-gradient(160deg,#26262c,#141417);border:1px solid var(--line-2);box-shadow:inset 0 1px 0 rgba(255,255,255,.08)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+            <path d="M3 18.2 4.6 8.3l4.3 4.4L12 5l3.1 7.7 4.3-4.4L21 18.2z" fill="#f3f3f3"/>
+            <rect x="3.4" y="19" width="17.2" height="2.1" rx="1" fill="#cfcfcf"/>
+          </svg>
+          <span style="position:absolute;bottom:-2px;right:-2px;width:9px;height:9px;border-radius:99px;background:var(--green);border:2px solid var(--ink-1)"></span>
+        </div>
+        <div class="sb-full" style="line-height:1">
+          <div style="font-size:15px;font-weight:600;letter-spacing:-.02em">Queen<span class="mono" style="font-size:10px;color:var(--txt-mid);font-weight:500;margin-left:4px;letter-spacing:.05em">MQ</span></div>
+        </div>
+      </div>
+
+      <!-- nav -->
+      <nav class="scroll-y" style="flex:1;padding:6px 14px">
+        <div class="navlabel">Overview</div>
+        <a class="navitem active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+          <span class="sb-full">Dashboard</span>
+        </a>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-6 4 12 2.5-7 1.5 4H21"/></svg>
+          <span class="sb-full">Queue Operations</span>
+        </a>
+
+        <div class="navlabel" style="margin-top:10px">Routing</div>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h18M3 12h18M3 17h18"/><circle cx="6" cy="7" r="1.2" fill="currentColor"/><circle cx="10" cy="12" r="1.2" fill="currentColor"/><circle cx="8" cy="17" r="1.2" fill="currentColor"/></svg>
+          <span class="sb-full">Queues</span><span class="navcount sb-full mono">24</span>
+        </a>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M15 20c.2-2 1.6-3.5 3.3-3.9"/></svg>
+          <span class="sb-full">Consumers</span><span class="navcount sb-full mono">27</span>
+        </a>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 6h16v10a2 2 0 0 1-2 2H9l-5 4V6Z"/><path d="M8 11h8M8 14h5"/></svg>
+          <span class="sb-full">Messages</span>
+        </a>
+
+        <div class="navlabel" style="margin-top:10px">Observability</div>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 6h6M11 10h8M7 14h10M3 18h6"/><circle cx="9" cy="6" r="1.5" fill="currentColor"/><circle cx="19" cy="10" r="1.5" fill="currentColor"/><circle cx="17" cy="14" r="1.5" fill="currentColor"/><circle cx="9" cy="18" r="1.5" fill="currentColor"/></svg>
+          <span class="sb-full">Traces</span>
+        </a>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/></svg>
+          <span class="sb-full">Analytics</span>
+        </a>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 7h14l-1.2 11.2a2 2 0 0 1-2 1.8H8.2a2 2 0 0 1-2-1.8L5 7Z"/><path d="M9 4h6v3H9z"/></svg>
+          <span class="sb-full">Dead letter</span><span class="navcount sb-full mono" style="color:var(--pink)">438</span>
+        </a>
+
+        <div class="navlabel" style="margin-top:10px">Infrastructure</div>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="6" rx="1.6"/><rect x="3" y="14" width="18" height="6" rx="1.6"/><circle cx="7" cy="7" r=".9" fill="currentColor"/><circle cx="7" cy="17" r=".9" fill="currentColor"/></svg>
+          <span class="sb-full">System</span>
+        </a>
+        <a class="navitem">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+          <span class="sb-full">Migration</span>
+        </a>
+      </nav>
+
+      <!-- footer -->
+      <div style="padding:10px 14px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px">
+        <div class="sb-full" style="display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:8px;border:1px solid var(--line);background:var(--ink-2)">
+          <span class="pulse" style="width:6px;height:6px"></span>
+          <span class="mono" style="font-size:11px;color:var(--txt-mid)">prod · eu-west</span>
+          <span class="mono" style="margin-left:auto;font-size:10px;color:var(--txt-faint)">v0.15.1</span>
+        </div>
+        <button class="iconbtn" style="width:100%;height:28px;border:1px solid var(--line);background:var(--ink-2)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M15 6l-6 6 6 6"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ============ MAIN ============ -->
+    <section style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+
+      <!-- topbar -->
+      <header style="display:flex;align-items:center;gap:12px;padding:9px 18px;border-bottom:1px solid var(--line);background:rgba(11,11,12,.7);backdrop-filter:blur(8px)">
+        <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt-mid);white-space:nowrap">
+          <span>Queen</span><span style="color:var(--txt-faint)">/</span><span style="color:var(--txt-hi);font-weight:500">Dashboard</span>
+        </div>
+
+        <!-- command search -->
+        <label style="margin-left:8px;display:flex;align-items:center;gap:9px;flex:1;max-width:520px;min-width:200px;
+               padding:7px 12px;border-radius:9px;border:1px solid var(--line);background:var(--ink-2);cursor:text;transition:.13s var(--ease)"
+               onmouseover="this.style.borderColor='var(--line-2)'" onmouseout="this.style.borderColor='var(--line)'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--txt-low)" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input placeholder="Jump to a queue, consumer group, trace…" style="flex:1;background:transparent;border:none;outline:none;color:var(--txt-hi);font-size:12.5px"/>
+          <span class="kbd">⌘K</span>
+        </label>
+
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+          <button class="iconbtn" title="Refresh">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path stroke-linecap="round" stroke-linejoin="round" d="M16 9h5V4M3 20v-5h5M19 9a8.2 8.2 0 0 0-14-3.2L3 8m0 8 2 2.2A8.2 8.2 0 0 0 19 15"/></svg>
+          </button>
+          <div style="width:1px;height:22px;background:var(--line)"></div>
+          <!-- maintenance is a CLEAR status, not ambiguous Push/Pop buttons -->
+          <button class="chip chip-ok" style="cursor:pointer" title="Push & pop operational — click to manage maintenance">
+            <span class="pulse" style="width:6px;height:6px"></span> Operational
+          </button>
+          <div style="width:30px;height:30px;border-radius:99px;display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--txt-mid);
+               background:var(--ink-3);border:1px solid var(--line-2)">AV</div>
+        </div>
+      </header>
+
+      <!-- page -->
+      <main class="scroll-y" style="min-height:0">
+        <div style="max-width:1640px;margin:0 auto;padding:16px 22px 48px">
+
+          <!-- slim toolbar (replaces the empty 'Range' card) -->
+          <div class="rise" style="display:flex;align-items:center;gap:14px;margin-bottom:16px;flex-wrap:wrap">
+            <div class="seg" id="rangeSeg">
+              <button data-n="60">1h</button>
+              <button data-n="72" class="on">6h</button>
+              <button data-n="96">24h</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--txt-mid)">
+              <span class="pulse"></span> Live <span style="color:var(--txt-faint)">·</span> <span class="mono">30s</span> autorefresh
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+              <span style="font-size:11.5px;color:var(--txt-low)" class="mono">updated 28s ago</span>
+              <button class="btn btn-ghost"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path stroke-linecap="round" stroke-linejoin="round" d="M7 10l5 5 5-5"/></svg>Expand all</button>
+            </div>
+          </div>
+
+          <!-- KPI grid (unified stat tiles, populated, with sparklines) -->
+          <div class="grid gap-3 mb-3 rise" style="grid-template-columns:repeat(6,1fr);animation-delay:.04s">
+            <div class="stat glasshover">
+              <div class="stat-label">Throughput</div>
+              <div class="stat-value">8.7<small>ev/s</small></div>
+              <div style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--txt-low)"><span class="trend up">▲ 12%</span> vs prev 1h</div>
+              <div class="stat-spark spark" data-color="#22d3ee" data-trend="up"></div>
+            </div>
+            <div class="stat glasshover">
+              <div class="stat-label">Pending</div>
+              <div class="stat-value">8,567</div>
+              <div style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--txt-low)"><span class="trend up">▼ 14.3k</span> catching up</div>
+              <div class="stat-spark spark" data-color="#4ade80" data-trend="down"></div>
+            </div>
+            <div class="stat glasshover">
+              <div class="stat-label">p99 time lag</div>
+              <div class="stat-value">1<small>m</small> 51<small>s</small></div>
+              <div style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--txt-low)"><span class="chip chip-warn" style="padding:0 7px">elevated</span></div>
+              <div class="stat-spark spark" data-color="#e6b450" data-trend="up"></div>
+            </div>
+            <div class="stat glasshover">
+              <div class="stat-label">Errors</div>
+              <div class="stat-value">0</div>
+              <div style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--txt-low)"><span class="chip chip-ok" style="padding:0 7px">all clear</span></div>
+              <div class="stat-spark spark" data-color="#57575e" data-trend="flat"></div>
+            </div>
+            <div class="stat glasshover">
+              <div class="stat-label">Queen CPU</div>
+              <div class="stat-value">41<small>%</small></div>
+              <div style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--txt-low)"><span class="mono">3 replicas</span></div>
+              <div class="stat-spark spark" data-color="#cfcfcf" data-trend="flat"></div>
+            </div>
+            <div class="stat glasshover" style="justify-content:space-between">
+              <div class="stat-label">Fill ratio</div>
+              <div class="stat-value">79<small>%</small></div>
+              <div class="bar cyan" style="margin-top:2px"><i style="width:79%"></i></div>
+              <div style="font-size:11px;color:var(--txt-low)">batch efficiency · balanced</div>
+            </div>
+          </div>
+
+          <!-- Throughput + Status -->
+          <div class="grid gap-3 mb-3" style="grid-template-columns:2fr 1fr">
+            <div class="card rise" style="animation-delay:.08s">
+              <div class="card-head">
+                <span class="card-title">Throughput</span>
+                <div style="display:flex;gap:12px;margin-left:14px">
+                  <span style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--txt-mid)"><span style="width:9px;height:3px;border-radius:2px;background:var(--cyan)"></span>Push</span>
+                  <span style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--txt-mid)"><span style="width:9px;height:3px;border-radius:2px;background:#e8e8e8"></span>Ack</span>
+                </div>
+                <span class="card-note mono">peak 28/s</span>
+              </div>
+              <div style="padding:14px 8px 8px">
+                <div id="chart-throughput" style="height:228px"></div>
+                <div class="mono" style="display:flex;justify-content:space-between;padding:8px 12px 2px;font-size:10.5px;color:var(--txt-faint)">
+                  <span>11:30</span><span>11:45</span><span>12:00</span><span>12:15</span><span>12:30</span><span>12:45</span><span>13:00</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card rise" style="animation-delay:.12s">
+              <div class="card-head"><span class="card-title">Message status</span><span class="card-note mono">2.36M total</span></div>
+              <div style="padding:18px 16px;display:flex;flex-direction:column;align-items:center;gap:16px">
+                <div style="position:relative">
+                  <div id="donut"></div>
+                  <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+                    <div class="mono" style="font-size:21px;font-weight:600;letter-spacing:-.02em">98.7<span style="font-size:12px;color:var(--txt-mid)">%</span></div>
+                    <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt-low)">completed</div>
+                  </div>
+                </div>
+                <div style="width:100%;display:flex;flex-direction:column;gap:9px">
+                  <div style="display:flex;align-items:center;gap:9px;font-size:12px">
+                    <span style="width:8px;height:8px;border-radius:3px;background:var(--green)"></span><span style="color:var(--txt-mid)">Completed</span><span class="mono" style="margin-left:auto;color:var(--txt-hi)">2.33M</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:9px;font-size:12px">
+                    <span style="width:8px;height:8px;border-radius:3px;background:#5a5a61"></span><span style="color:var(--txt-mid)">Pending</span><span class="mono" style="margin-left:auto;color:var(--txt-hi)">8,567</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:9px;font-size:12px">
+                    <span style="width:8px;height:8px;border-radius:3px;background:var(--pink)"></span><span style="color:var(--txt-mid)">Dead letter</span><span class="mono" style="margin-left:auto;color:var(--pink)">438</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Queue health + Consumer lag -->
+          <div class="grid gap-3 mb-3" style="grid-template-columns:2fr 1fr">
+            <div class="card rise" style="animation-delay:.16s">
+              <div class="card-head"><span class="card-title">Queue health</span><span class="card-note">top queues by pending · <span class="mono">24 total</span></span></div>
+              <table class="t">
+                <thead><tr><th>Queue</th><th style="width:170px">Backlog</th><th class="mono" style="text-align:right">Density</th><th class="mono" style="text-align:right">Rate</th><th style="text-align:right">Lag p99</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td><div style="display:flex;align-items:center;gap:9px"><span style="width:6px;height:6px;border-radius:99px;background:var(--pink)"></span><span class="mono" style="font-size:12px">queen-long-running</span></div></td>
+                    <td><div style="display:flex;align-items:center;gap:8px"><div class="bar pink" style="flex:1"><i style="width:92%"></i></div><span class="mono" style="font-size:11px;color:var(--txt-mid)">7,920</span></div></td>
+                    <td class="mono" style="text-align:right">2.4k<span style="color:var(--txt-low)">/p</span></td>
+                    <td class="mono" style="text-align:right;color:var(--txt-mid)">0/s</td>
+                    <td style="text-align:right"><span class="chip chip-bad">2d 22h</span></td>
+                  </tr>
+                  <tr>
+                    <td><div style="display:flex;align-items:center;gap:9px"><span style="width:6px;height:6px;border-radius:99px;background:var(--amber)"></span><span class="mono" style="font-size:12px"><span style="color:var(--txt-low)">smartads.</span>safety.pacing</span></div></td>
+                    <td><div style="display:flex;align-items:center;gap:8px"><div class="bar amber" style="flex:1"><i style="width:34%"></i></div><span class="mono" style="font-size:11px;color:var(--txt-mid)">645</span></div></td>
+                    <td class="mono" style="text-align:right">18<span style="color:var(--txt-low)">/p</span></td>
+                    <td class="mono" style="text-align:right;color:var(--txt-hi)">6.2/s</td>
+                    <td style="text-align:right"><span class="chip chip-warn">42s</span></td>
+                  </tr>
+                  <tr>
+                    <td><div style="display:flex;align-items:center;gap:9px"><span style="width:6px;height:6px;border-radius:99px;background:var(--green)"></span><span class="mono" style="font-size:12px"><span style="color:var(--txt-low)">smartads.</span>tracking.events</span></div></td>
+                    <td><div style="display:flex;align-items:center;gap:8px"><div class="bar" style="flex:1"><i style="width:12%"></i></div><span class="mono" style="font-size:11px;color:var(--txt-mid)">112</span></div></td>
+                    <td class="mono" style="text-align:right">3.1<span style="color:var(--txt-low)">/p</span></td>
+                    <td class="mono" style="text-align:right;color:var(--txt-hi)">14.8/s</td>
+                    <td style="text-align:right"><span class="chip chip-ok">1.2s</span></td>
+                  </tr>
+                  <tr>
+                    <td><div style="display:flex;align-items:center;gap:9px"><span style="width:6px;height:6px;border-radius:99px;background:var(--green)"></span><span class="mono" style="font-size:12px"><span style="color:var(--txt-low)">smartads.</span>data.sync.market</span></div></td>
+                    <td><div style="display:flex;align-items:center;gap:8px"><div class="bar" style="flex:1"><i style="width:8%"></i></div><span class="mono" style="font-size:11px;color:var(--txt-mid)">61</span></div></td>
+                    <td class="mono" style="text-align:right">13<span style="color:var(--txt-low)">/p</span></td>
+                    <td class="mono" style="text-align:right;color:var(--txt-hi)">9.0/s</td>
+                    <td style="text-align:right"><span class="chip chip-ok">0.4s</span></td>
+                  </tr>
+                  <tr>
+                    <td><div style="display:flex;align-items:center;gap:9px"><span style="width:6px;height:6px;border-radius:99px;background:var(--green)"></span><span class="mono" style="font-size:12px"><span style="color:var(--txt-low)">smartads.</span>audience.sync</span></div></td>
+                    <td><div style="display:flex;align-items:center;gap:8px"><div class="bar" style="flex:1"><i style="width:4%"></i></div><span class="mono" style="font-size:11px;color:var(--txt-mid)">8</span></div></td>
+                    <td class="mono" style="text-align:right">1.0<span style="color:var(--txt-low)">/p</span></td>
+                    <td class="mono" style="text-align:right;color:var(--txt-hi)">22.1/s</td>
+                    <td style="text-align:right"><span class="chip chip-ok">90ms</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="card rise" style="animation-delay:.2s">
+              <div class="card-head"><span class="card-title">Consumer groups by lag</span><span class="card-note mono">27 · 2 lagging</span></div>
+              <div style="padding:4px 0">
+                <div class="row">
+                  <div style="min-width:0;flex:1">
+                    <div class="mono" style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">test-reader</div>
+                    <div style="font-size:10.5px;color:var(--txt-low);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">smartads.bidding.trigger · 1 member</div>
+                  </div>
+                  <span class="chip chip-bad">2d 22h</span>
+                </div>
+                <div class="row">
+                  <div style="min-width:0;flex:1">
+                    <div class="mono" style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">tx-verifier</div>
+                    <div style="font-size:10.5px;color:var(--txt-low);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">smartads.bidding.push · 1 member</div>
+                  </div>
+                  <span class="chip chip-bad">2d 22h</span>
+                </div>
+                <div class="row">
+                  <div style="min-width:0;flex:1">
+                    <div class="mono" style="font-size:12px;font-weight:500">analytics</div>
+                    <div style="font-size:10.5px;color:var(--txt-low)">smartads.tracking.events · 3 members</div>
+                  </div>
+                  <span class="chip chip-warn">3.4s</span>
+                </div>
+                <div class="row">
+                  <div style="min-width:0;flex:1">
+                    <div class="mono" style="font-size:12px;font-weight:500">attribution</div>
+                    <div style="font-size:10.5px;color:var(--txt-low)">smartads.tracking.events · 3 members</div>
+                  </div>
+                  <span class="chip chip-ok">0.8s</span>
+                </div>
+                <div class="row">
+                  <div style="min-width:0;flex:1">
+                    <div class="mono" style="font-size:12px;font-weight:500">audience-sync-google</div>
+                    <div style="font-size:10.5px;color:var(--txt-low)">smartads.audience.sync · 37 members</div>
+                  </div>
+                  <span class="chip chip-ok">120ms</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- System strip (4 mini area charts) -->
+          <div class="grid gap-3" style="grid-template-columns:repeat(4,1fr)">
+            <div class="card rise glasshover" style="animation-delay:.24s">
+              <div style="padding:13px 15px 0;display:flex;align-items:baseline;justify-content:space-between">
+                <span class="stat-label">CPU</span><span class="mono" style="font-size:17px;font-weight:600">41%</span>
+              </div>
+              <div class="areachart" data-color="#22d3ee" data-trend="flat" style="height:58px;margin-top:6px"></div>
+            </div>
+            <div class="card rise glasshover" style="animation-delay:.27s">
+              <div style="padding:13px 15px 0;display:flex;align-items:baseline;justify-content:space-between">
+                <span class="stat-label">Memory</span><span class="mono" style="font-size:17px;font-weight:600">612<span style="font-size:11px;color:var(--txt-mid)">MB</span></span>
+              </div>
+              <div class="areachart" data-color="#e8e8e8" data-trend="up" style="height:58px;margin-top:6px"></div>
+            </div>
+            <div class="card rise glasshover" style="animation-delay:.3s">
+              <div style="padding:13px 15px 0;display:flex;align-items:baseline;justify-content:space-between">
+                <span class="stat-label">DB pool</span><span class="mono" style="font-size:17px;font-weight:600">7<span style="font-size:11px;color:var(--txt-mid)">/9</span></span>
+              </div>
+              <div class="areachart" data-color="#4ade80" data-trend="flat" style="height:58px;margin-top:6px"></div>
+            </div>
+            <div class="card rise glasshover" style="animation-delay:.33s">
+              <div style="padding:13px 15px 0;display:flex;align-items:baseline;justify-content:space-between">
+                <span class="stat-label">Event loop</span><span class="mono" style="font-size:17px;font-weight:600">1.2<span style="font-size:11px;color:var(--txt-mid)">ms</span></span>
+              </div>
+              <div class="areachart" data-color="#e6b450" data-trend="flat" style="height:58px;margin-top:6px"></div>
+            </div>
+          </div>
+
+        </div>
+      </main>
+    </section>
+  </div>
+
+  <!-- ============ CHART ENGINE (inline, dependency-free SVG) ============ -->
+  <script>
+  (function(){
+    let UID = 0;
+    const mulberry32 = (a)=>()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
+    function walk(n,{base=50,vol=7,drift=0,min=4,max=96,rng=Math.random}={}){
+      const out=[]; let v=base;
+      for(let i=0;i<n;i++){ v += (rng()-0.5)*vol*2 + drift; if(v<min){v=min;} if(v>max){v=max;} out.push(v);} return out;
+    }
+    function toPts(d,w,h,pt=4,pb=4){
+      const mx=Math.max(...d),mn=Math.min(...d),rg=(mx-mn)||1,ih=h-pt-pb,st=w/(d.length-1);
+      return d.map((v,i)=>[i*st, pt+ih-((v-mn)/rg)*ih]);
+    }
+    function spline(p){
+      if(p.length<3) return 'M'+p.map(q=>q.join(',')).join(' L');
+      let d='M'+p[0][0].toFixed(1)+','+p[0][1].toFixed(1);
+      for(let i=0;i<p.length-1;i++){
+        const p0=p[i-1]||p[i],p1=p[i],p2=p[i+1],p3=p[i+2]||p[i+1];
+        const c1x=p1[0]+(p2[0]-p0[0])/6,c1y=p1[1]+(p2[1]-p0[1])/6;
+        const c2x=p2[0]-(p3[0]-p1[0])/6,c2y=p2[1]-(p3[1]-p1[1])/6;
+        d+=` C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+      } return d;
+    }
+    function svg(inner,w,h){return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:100%;display:block">${inner}</svg>`;}
+
+    function spark(el){
+      const c=el.dataset.color||'#cfcfcf', tr=el.dataset.trend||'flat';
+      const drift=tr==='up'?0.3:tr==='down'?-0.3:0;
+      const data=walk(44,{base:48,vol:6,drift,rng:mulberry32(101+(UID))});
+      const w=120,h=34,id='s'+(UID++);
+      const lp=spline(toPts(data,w,h,5,4));
+      el.innerHTML=svg(`<defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0" stop-color="${c}" stop-opacity=".28"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></linearGradient></defs>
+        <path d="${lp} L${w},${h} L0,${h} Z" fill="url(#${id})"/>
+        <path d="${lp}" fill="none" stroke="${c}" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>`,w,h);
+    }
+
+    function area(el){
+      const c=el.dataset.color||'#cfcfcf', tr=el.dataset.trend||'flat';
+      const drift=tr==='up'?0.25:tr==='down'?-0.25:0;
+      const data=walk(48,{base:50,vol:5,drift,rng:mulberry32(303+(UID))});
+      const w=240,h=80,id='a'+(UID++);
+      const lp=spline(toPts(data,w,h,8,2));
+      el.innerHTML=svg(`<defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0" stop-color="${c}" stop-opacity=".22"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></linearGradient></defs>
+        <path d="${lp} L${w},${h} L0,${h} Z" fill="url(#${id})"/>
+        <path d="${lp}" fill="none" stroke="${c}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>`,w,h);
+    }
+
+    function throughput(n){
+      const el=document.getElementById('chart-throughput'); if(!el) return;
+      const w=1000,h=228;
+      const push=walk(n,{base:58,vol:7,drift:.04,rng:mulberry32(7)});
+      const ack =walk(n,{base:50,vol:6,drift:.03,rng:mulberry32(31)});
+      const lpP=spline(toPts(push,w,h,14,16)), lpA=spline(toPts(ack,w,h,14,16));
+      let grid=''; for(let i=0;i<=3;i++){const y=14+(h-30)*(i/3); grid+=`<line x1="0" x2="${w}" y1="${y}" y2="${y}" stroke="rgba(255,255,255,.05)" stroke-width="1" vector-effect="non-scaling-stroke"/>`;}
+      el.innerHTML=svg(`<defs>
+        <linearGradient id="tgC" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#22d3ee" stop-opacity=".22"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></linearGradient>
+        </defs>${grid}
+        <path d="${lpP} L${w},${h} L0,${h} Z" fill="url(#tgC)"/>
+        <path d="${lpA}" fill="none" stroke="#e8e8e8" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/>
+        <path d="${lpP}" fill="none" stroke="#22d3ee" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>`,w,h);
+    }
+
+    function donut(){
+      const el=document.getElementById('donut'); if(!el) return;
+      const segs=[{v:98.7,c:'#4ade80'},{v:0.95,c:'#5a5a61'},{v:0.35,c:'#fb7185'}];
+      const r=58,cx=72,cy=72,C=2*Math.PI*r,tot=segs.reduce((a,s)=>a+s.v,0); let off=0;
+      let arcs=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="13"/>`;
+      segs.forEach(s=>{const len=C*(s.v/tot); const seg=Math.max(len-1.5,0.6);
+        arcs+=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.c}" stroke-width="13"
+        stroke-dasharray="${seg.toFixed(2)} ${(C-seg).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})" stroke-linecap="round"/>`; off+=len;});
+      el.innerHTML=`<svg viewBox="0 0 144 144" style="width:148px;height:148px;display:block">${arcs}</svg>`;
+    }
+
+    function renderAll(n){
+      UID=0;
+      document.querySelectorAll('.spark').forEach(spark);
+      document.querySelectorAll('.areachart').forEach(area);
+      throughput(n); donut();
+    }
+
+    // time-range interactivity
+    const seg=document.getElementById('rangeSeg');
+    seg.addEventListener('click',e=>{const b=e.target.closest('button'); if(!b) return;
+      [...seg.children].forEach(x=>x.classList.remove('on')); b.classList.add('on');
+      throughput(+b.dataset.n);
+    });
+
+    renderAll(72);
+  })();
+  </script>
+</body>
+</html>

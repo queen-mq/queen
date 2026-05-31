@@ -900,7 +900,17 @@ class Queen {
                 auto snap = ts.queue.snapshot(now);
                 if (snap.size == 0) break;
 
-                if (ts.policy.should_fire(snap.size, snap.oldest_age) == FireDecision::HOLD) {
+                auto decision = ts.policy.should_fire(snap.size, snap.oldest_age);
+                // Load-adaptive latency bypass (Nagle-style): when in-flight load
+                // is below the threshold there is nothing to coalesce behind, so
+                // fire this sub-`preferred` batch now instead of waiting out
+                // max_hold_ms. threshold==0 disables the bypass (always hold).
+                if (decision == FireDecision::HOLD
+                    && ts.policy.batch_inflight_threshold > 0
+                    && ts.concurrency->in_flight() < ts.policy.batch_inflight_threshold) {
+                    decision = FireDecision::FIRE;
+                }
+                if (decision == FireDecision::HOLD) {
                     // Schedule safety wakeup for when max_hold elapses.
                     auto front_t = ts.queue.front_enqueue_time();
                     if (front_t.time_since_epoch().count() != 0) {

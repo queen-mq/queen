@@ -1,0 +1,83 @@
+name: pgmq-bench
+
+# Stack for the Queen-vs-pgmq benchmark.
+#
+#   harness ──(N client conns)──▶ PgBouncer (transaction pool) ──▶ Postgres+pgmq
+#                                      :6432                            :5432
+#
+# The whole point of routing pgmq through PgBouncer is the honest comparison:
+# PgBouncer *pools* connections, but it does NOT *coalesce* requests. Each
+# logical send/read stays its own statement+transaction. Queen merges N
+# requests into one stored-procedure call. That difference is what the
+# benchmark measures.
+
+services:
+  postgres:
+    image: ${PGMQ_IMAGE:-ghcr.io/pgmq/pg17-pgmq:latest}
+    container_name: pgmq-postgres
+    # Equal Docker budget vs the Queen stack: PG gets 3 CPU / 3 GiB in BOTH
+    # stacks, and identical PG config (see -c flags). This is the fairness knob.
+    cpus: 3.0
+    mem_limit: 3g
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    # PG tuning. Defaults are laptop-friendly (smoke test). For the real run on
+    # the 32 vCPU / 62 GiB host used for the Kafka/RabbitMQ benchmarks, override:
+    #   PG_SHARED_BUFFERS=24GB PG_EFFECTIVE_CACHE=48GB docker compose up -d
+    # synchronous_commit=on matches Queen's durability tier exactly (both fsync
+    # the WAL on commit) -> this is the fairest durability comparison in the suite.
+    command:
+      - postgres
+      - -c
+      - max_connections=400
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-1GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-3GB}
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - synchronous_commit=on
+      - -c
+      - autovacuum_naptime=10s
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - autovacuum_vacuum_cost_delay=0
+      - -c
+      - track_io_timing=on
+    # Host port only for manual debugging; the harness talks to PgBouncer, and
+    # the sampler uses `docker exec`. Default avoids the common 5432 collision.
+    ports:
+      - "${PG_HOST_PORT:-55432}:5432"
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: pgmq-pgbouncer
+    # Sidecar budget == Queen broker budget (3 CPU / 2 GiB) in both stacks.
+    # PgBouncer won't use it all; Queen's broker will. That's the genuine
+    # architectural difference, not a resource-allocation asymmetry.
+    cpus: 3.0
+    mem_limit: 2g
+    # Bypass the image's env-templating entrypoint and run our explicit config,
+    # so the pool settings are transparent and reproducible for the benchmark.
+    entrypoint: ["pgbouncer", "/etc/pgbouncer/pgbouncer.ini"]
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - "${PGB_HOST_PORT:-6432}:6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
