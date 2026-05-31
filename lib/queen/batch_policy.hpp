@@ -29,10 +29,15 @@ struct BatchPolicy {
     // Load-adaptive latency bypass (Nagle-style). The drain orchestrator fires a
     // sub-`preferred` batch immediately (ignoring max_hold_ms) while
     // in_flight < batch_inflight_threshold — i.e. "favor latency until there is
-    // enough load to coalesce". 1 = fire whenever nothing is in flight (default);
-    // 0 = disable (always honor the hold); N = stay latency-first until N batches
-    // are concurrently in flight, then batch for throughput.
-    size_t                   batch_inflight_threshold = 1;
+    // enough load to coalesce".
+    //   0 = DISABLED (default): always honor the hold (pre-0.15.3 behavior).
+    //   1 = fire whenever nothing is in flight; N = stay latency-first until N
+    //       batches are concurrently in flight, then batch for throughput.
+    // Defaults to 0: the eager zero-hold fire opens a read-after-write window
+    // (a non-blocking pop issued right after an acked push can fire before the
+    // pushed row is visible, intermittently returning empty). Opt in per type
+    // via QUEEN_<TYPE>_BATCH_INFLIGHT_THRESHOLD once that race is addressed.
+    size_t                   batch_inflight_threshold = 0;
 
     // Fire iff queue_size >= preferred OR oldest queued job has waited max_hold_ms.
     // Empty queue always HOLDs.
@@ -155,8 +160,9 @@ make_batch_policy_from_env(JobType t, int legacy_wait_ms_override = -1) noexcept
     p.max_concurrent = static_cast<size_t>(detail::env_int(
         name("MAX_CONCURRENT").c_str(), static_cast<int>(d.max_concurrent)));
     // QUEEN_<TYPE>_BATCH_INFLIGHT_THRESHOLD: load level (in-flight batches) below
-    // which we favor latency. Default 1 (Nagle). 0 disables the bypass.
-    int inflight_thr = detail::env_int(name("BATCH_INFLIGHT_THRESHOLD").c_str(), 1);
+    // which we favor latency. Default 0 (disabled = pre-0.15.3 hold behavior).
+    // Set to 1 (Nagle) or N to opt into the eager-fire latency bypass.
+    int inflight_thr = detail::env_int(name("BATCH_INFLIGHT_THRESHOLD").c_str(), 0);
     if (inflight_thr < 0) inflight_thr = 0;
     p.batch_inflight_threshold = static_cast<size_t>(inflight_thr);
 
