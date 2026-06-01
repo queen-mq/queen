@@ -177,7 +177,7 @@ docker run -d --name qpg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
 docker run -d --name queen --network host \
   -e PG_HOST=localhost -e PG_USER=postgres -e PG_PASSWORD=postgres \
   -e RETENTION_INTERVAL=2000 \
-  smartnessai/queen-mq:0.15.0
+  smartnessai/queen-mq:0.15.5
 
 cd clients/client-cli
 QUEEN_E2E=1 QUEEN_SERVER=http://localhost:6632 \

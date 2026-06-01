@@ -25,13 +25,20 @@ export async function initDatabase() {
       id SERIAL PRIMARY KEY,
       username VARCHAR(255) UNIQUE NOT NULL,
       password_hash VARCHAR(255) NOT NULL,
-      role VARCHAR(50) NOT NULL CHECK (role IN ('admin', 'read-write', 'read-only')),
+      role VARCHAR(50) NOT NULL CHECK (role IN ('admin', 'read-write', 'read-only', 'write-only')),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
   
   await query('CREATE INDEX IF NOT EXISTS idx_users_username ON queen_proxy.users(username)');
+
+  // Migration: widen the role CHECK to include 'write-only' (issue #31).
+  // CREATE TABLE IF NOT EXISTS won't touch an existing table's constraint, so
+  // drop and re-add it under a stable name. Postgres auto-names the inline
+  // single-column check `users_role_check`, which is what we drop here.
+  await query('ALTER TABLE queen_proxy.users DROP CONSTRAINT IF EXISTS users_role_check');
+  await query(`ALTER TABLE queen_proxy.users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'read-write', 'read-only', 'write-only'))`);
 
   // Migration: relax password_hash and add OAuth columns. All idempotent.
   await query('ALTER TABLE queen_proxy.users ALTER COLUMN password_hash DROP NOT NULL');

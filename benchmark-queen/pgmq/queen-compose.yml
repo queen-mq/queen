@@ -53,7 +53,7 @@ services:
       retries: 40
 
   queen:
-    image: ${QUEEN_IMAGE:-smartnessai/queen-mq:0.15.0}
+    image: ${QUEEN_IMAGE:-smartnessai/queen-mq:0.15.5}
     container_name: queen-broker
     # Overridable: on the arm64 Mac the broker runs EMULATED (amd64), so it's
     # CPU-starved at 3 CPU. Raise QUEEN_CPUS to isolate that bottleneck.

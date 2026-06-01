@@ -712,17 +712,28 @@ void setup_prometheus_routes(uWS::App* app, const RouteContext& ctx) {
         job_req.request_id = "prom_" + queen::generate_uuidv7();
         job_req.sql        = "SELECT queen.get_prometheus_metrics_v1()";
 
-        ctx.queen->submit(std::move(job_req),
-            [res, worker_loop, aborted, live = std::move(live)](std::string result) {
-                worker_loop->defer(
-                    [res, aborted, live = std::move(live), result = std::move(result)]() mutable {
-                        if (aborted->load(std::memory_order_relaxed)) return;
-
-                        std::string db_block = format_db_metrics(result);
-                        if (!db_block.empty()) live.append(db_block);
-                        send_prometheus(res, live);
-                    });
-            });
+        try {
+            ctx.queen->submit(std::move(job_req),
+                [res, worker_loop, aborted, live = std::move(live)](std::string result) {
+                    worker_loop->defer(
+                        [res, aborted, live = std::move(live), result = std::move(result)]() mutable {
+                            if (aborted->load(std::memory_order_relaxed)) return;
+                            // Deferred callbacks run on the uWS loop: a throw here would
+                            // escape to the acceptor catch-all and kill the worker.
+                            try {
+                                std::string db_block = format_db_metrics(result);
+                                if (!db_block.empty()) live.append(db_block);
+                                send_prometheus(res, live);
+                            } catch (const std::exception& e) {
+                                spdlog::warn("[/metrics/prometheus] defer failed: {}", e.what());
+                                if (!aborted->load(std::memory_order_relaxed)) send_prometheus(res, live);
+                            }
+                        });
+                });
+        } catch (const std::exception& e) {
+            spdlog::warn("[/metrics/prometheus] submit failed: {}", e.what());
+            if (!aborted->load(std::memory_order_relaxed)) send_prometheus(res, std::string());
+        }
     });
 }
 

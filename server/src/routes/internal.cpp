@@ -51,14 +51,18 @@ void setup_internal_routes(uWS::App* app, const RouteContext& ctx) {
         // Check authentication - ADMIN required for internal operations
         REQUIRE_AUTH(res, req, ctx, auth::AccessLevel::ADMIN);
         
-        nlohmann::json stats;
-        if (global_shared_state) {
-            stats = global_shared_state->get_stats();
-        } else {
-            stats = {{"enabled", false}, {"reason", "not_initialized"}};
+        try {
+            nlohmann::json stats;
+            if (global_shared_state) {
+                stats = global_shared_state->get_stats();
+            } else {
+                stats = {{"enabled", false}, {"reason", "not_initialized"}};
+            }
+            
+            send_json_response(res, stats, 200);
+        } catch (const std::exception& e) {
+            send_error_response(res, e.what(), 500);
         }
-        
-        send_json_response(res, stats, 200);
     });
     
     // Legacy alias for backward compatibility
@@ -66,14 +70,18 @@ void setup_internal_routes(uWS::App* app, const RouteContext& ctx) {
         // Check authentication - ADMIN required for internal operations
         REQUIRE_AUTH(res, req, ctx, auth::AccessLevel::ADMIN);
         
-        nlohmann::json stats;
-        if (global_shared_state) {
-            stats = global_shared_state->get_stats();
-        } else {
-            stats = {{"enabled", false}, {"reason", "not_initialized"}};
+        try {
+            nlohmann::json stats;
+            if (global_shared_state) {
+                stats = global_shared_state->get_stats();
+            } else {
+                stats = {{"enabled", false}, {"reason", "not_initialized"}};
+            }
+            
+            send_json_response(res, stats, 200);
+        } catch (const std::exception& e) {
+            send_error_response(res, e.what(), 500);
         }
-        
-        send_json_response(res, stats, 200);
     });
     
     spdlog::debug("Internal routes configured (shared state endpoints)");

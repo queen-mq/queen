@@ -590,16 +590,20 @@ void setup_migration_routes(uWS::App* app, const RouteContext& ctx) {
     app->post("/api/v1/migration/reset", [ctx](auto* res, auto* req) {
         REQUIRE_AUTH(res, req, ctx, auth::AccessLevel::ADMIN);
 
-        int current = g_migration_state.status.load();
-        if (current == static_cast<int>(MigrationStatus::DUMPING) ||
-            current == static_cast<int>(MigrationStatus::RESTORING)) {
-            send_error_response(res, "Cannot reset while migration is in progress", 409);
-            return;
-        }
+        try {
+            int current = g_migration_state.status.load();
+            if (current == static_cast<int>(MigrationStatus::DUMPING) ||
+                current == static_cast<int>(MigrationStatus::RESTORING)) {
+                send_error_response(res, "Cannot reset while migration is in progress", 409);
+                return;
+            }
 
-        g_migration_state.reset();
-        nlohmann::json response = {{"status", "idle"}, {"message", "Migration state reset"}};
-        send_json_response(res, response);
+            g_migration_state.reset();
+            nlohmann::json response = {{"status", "idle"}, {"message", "Migration state reset"}};
+            send_json_response(res, response);
+        } catch (const std::exception& e) {
+            send_error_response(res, e.what(), 500);
+        }
     });
 }
 

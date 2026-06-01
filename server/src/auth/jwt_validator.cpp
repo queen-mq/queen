@@ -45,6 +45,15 @@ bool JwtClaims::is_read_only(const AuthConfig& config) const {
            has_role(config.role_read_only);
 }
 
+bool JwtClaims::is_write_only(const AuthConfig& config) const {
+    // Anyone who can write: explicit write-only, plus read-write and admin.
+    // Deliberately excludes read-only — a write-only client must not be able
+    // to read, and a read-only client must not be able to write.
+    return has_role(config.role_admin) ||
+           has_role(config.role_read_write) ||
+           has_role(config.role_write_only);
+}
+
 // ============================================================================
 // JwtValidator Implementation
 // ============================================================================

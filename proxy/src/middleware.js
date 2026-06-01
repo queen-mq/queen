@@ -1,4 +1,5 @@
 import { verifyToken } from './auth.js';
+import { SESSION_COOKIE_NAME } from './cookies.js';
 
 // Authentication middleware - checks if user has valid JWT
 // Supports both internal (proxy-generated) and external (SSO) tokens
@@ -9,7 +10,7 @@ export function requireAuth(req, res, next) {
     return next();
   }
 
-  const token = req.cookies.token || req.headers.authorization?.replace('Bearer ', '');
+  const token = req.cookies[SESSION_COOKIE_NAME] || req.headers.authorization?.replace('Bearer ', '');
 
   if (!token) {
     return res.status(401).json({ error: 'Authentication required' });
@@ -64,6 +65,16 @@ export function checkMethodAccess(req, res, next) {
     return next();
   }
 
+  // Write-only can produce (POST/PUT/PATCH) but not read or delete. This is
+  // intentionally coarse: the proxy is method-based and cannot tell POST
+  // /api/v1/push (produce) from POST /api/v1/pop (consume). The broker does
+  // that precisely (push=WRITE_ONLY, pop=READ_WRITE), so a write-only client
+  // is still blocked from consuming there even though the proxy lets the POST
+  // through (issue #31).
+  if (role === 'write-only' && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
+    return next();
+  }
+
   return res.status(403).json({ 
     error: 'Insufficient permissions',
     detail: `Role '${role}' cannot perform ${method} operations`
@@ -80,7 +91,8 @@ export function checkMethodAccess(req, res, next) {
  * Mirrors `checkMethodAccess`:
  *  - admin       → all methods
  *  - read-write  → all methods
- *  - read-only   → GET only
+ *  - write-only  → POST/PUT/PATCH only (produce, no read)
+ *  - read-only   → GET/HEAD/OPTIONS only
  *  - missing role → denied
  *
  * Also accepts a `roles` array (external IdPs typically emit one); any
@@ -96,6 +108,7 @@ export function enforceMethodRBACFromClaims(method, claims) {
   if (roles.size === 0) return false;
   if (roles.has('admin')) return true;
   if (roles.has('read-write')) return true;
+  if (roles.has('write-only')) return m === 'POST' || m === 'PUT' || m === 'PATCH';
   if (roles.has('read-only')) return m === 'GET' || m === 'HEAD' || m === 'OPTIONS';
   return false;
 }

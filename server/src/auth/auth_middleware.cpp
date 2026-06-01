@@ -136,8 +136,12 @@ bool AuthMiddleware::check_access_level(const JwtClaims& claims, AccessLevel req
             return true;
             
         case AccessLevel::READ_ONLY:
-            // Any authenticated user with a valid role passes
+            // Any reader (read-only, read-write, admin). Excludes write-only.
             return claims.is_read_only(config_);
+            
+        case AccessLevel::WRITE_ONLY:
+            // Any writer (write-only, read-write, admin). Excludes read-only.
+            return claims.is_write_only(config_);
             
         case AccessLevel::READ_WRITE:
             return claims.is_read_write(config_);
@@ -240,13 +244,19 @@ AccessLevel get_route_access_level(std::string_view method, std::string_view pat
     }
     
     // =========================================================================
-    // READ_WRITE endpoints (everything else - push, pop, ack, etc.)
+    // WRITE_ONLY endpoints (pure produce — no read/consume)
     // =========================================================================
     
-    // Push messages
+    // Push messages. WRITE_ONLY so a `write-only` producer can publish, while
+    // still allowing read-write/admin. Pop/ack/transaction below stay
+    // READ_WRITE because they consume (issue #31).
     if (p == "/api/v1/push") {
-        return AccessLevel::READ_WRITE;
+        return AccessLevel::WRITE_ONLY;
     }
+    
+    // =========================================================================
+    // READ_WRITE endpoints (everything else - pop, ack, transaction, etc.)
+    // =========================================================================
     
     // Pop messages
     if (p.find("/api/v1/pop") == 0) {

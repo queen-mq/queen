@@ -9,7 +9,7 @@ Mainly intended for exposing the Webapp.
 - JWT-based authentication
 - Optional Sign in with Google (OAuth 2.0 / OIDC)
 - Optional external SSO passthrough (verify any IDP via JWKS)
-- Role-based access control (admin, read-write, read-only)
+- Role-based access control (admin, read-write, read-only, write-only)
 - Auto-initializes database schema on startup
 - Strips large headers to prevent upstream errors
 - WebSocket support
@@ -70,6 +70,10 @@ Follow the prompts to create users with different roles:
 - **admin**: Full access to all operations
 - **read-write**: Can perform GET, POST, PUT, DELETE
 - **read-only**: Can only perform GET operations
+- **write-only**: Produce-only — can push but not read or consume. At the proxy
+  this maps coarsely to "write methods only" (POST/PUT/PATCH); the broker
+  enforces the precise distinction (`push` allowed, `pop`/`ack` denied). See
+  issue #31.
 
 ## Usage
 
@@ -80,10 +84,27 @@ Follow the prompts to create users with different roles:
 
 ## Docker
 
+The image is a hardened, multi-stage build (issue #32): production deps are
+installed on a Debian/glibc Node 22 builder, then copied into a **distroless**
+runtime (`gcr.io/distroless/nodejs22-debian12:nonroot`). Distroless ships no
+shell, package manager, or busybox, so the attack surface and CVE count are far
+lower than the default `node:22(-alpine)` images, and the container runs as a
+non-root user (uid 65532).
+
 ### Build
 
 ```bash
 docker build -t queen-proxy .
+```
+
+To build on a different hardened base (e.g. [Docker Hardened Images](https://hub.docker.com/hardened-images)
+or [Chainguard](https://images.chainguard.dev/directory/image/node/overview))
+without editing the Dockerfile, override the build args. Builder and runtime
+must share libc because `bcrypt` is a native addon:
+
+```bash
+docker build -t queen-proxy \
+  --build-arg RUNTIME_IMAGE=cgr.dev/chainguard/node:latest .
 ```
 
 ### Run
@@ -140,6 +161,7 @@ The proxy uses the **same `PG_*` variable names as the broker** so a single set 
 | `PORT` | `3000` | Proxy HTTP listen port |
 | `QUEEN_SERVER_URL` | _(unset)_ | Upstream Queen broker URL. **Optional** — when set the proxy runs in reverse‑proxy mode and forwards every authenticated request to the broker. When **unset** the proxy runs in pure ForwardAuth mode (no upstream is contacted, the catch‑all proxy mount is skipped, `/` returns a small JSON info page). Existing single‑host setups should keep setting this to `http://localhost:6632` (or the cluster service URL). |
 | `NODE_ENV` | `development` | Set to `production` to enable secure cookies (HTTPS-only) |
+| `COOKIE_NAME` | `queen_token` | Name of the session cookie. Defaults to the prefixed `queen_token` rather than the bare `token` to avoid colliding with other apps behind the same parent domain that also set a `token` cookie (e.g. MinIO — issue #30). Set `COOKIE_NAME=token` to keep the pre‑0.0.19 name (no forced re‑login). |
 
 ### Internal JWT (issued by the proxy after password login)
 
@@ -167,7 +189,7 @@ When `EXTERNAL_JWKS_URL` is set, the proxy accepts JWTs minted by an external id
 | `GOOGLE_REDIRECT_URI` | _(unset)_ | Must match the Authorized redirect URI in Google Cloud Console, e.g. `https://queen.example.com/api/auth/google/callback` |
 | `GOOGLE_ALLOWED_DOMAINS` | _(empty)_ | Comma-separated domain allowlist matched against the `hd` claim or the email domain. Empty = allow any verified email. |
 | `GOOGLE_AUTO_PROVISION` | `false` | If `true`, create a local user on first Google login. If `false`, the user must already exist in `queen_proxy.users` (matched by email). |
-| `GOOGLE_DEFAULT_ROLE` | `read-only` | Role assigned to auto-provisioned Google users (`admin`, `read-write`, or `read-only`). |
+| `GOOGLE_DEFAULT_ROLE` | `read-only` | Role assigned to auto-provisioned Google users (`admin`, `read-write`, `read-only`, or `write-only`). |
 | `GOOGLE_ALLOWED_EMAILS` | _(empty)_ | Comma list of literal emails (case-insensitive) and/or `/regex/` patterns that may complete the Google sign-in flow. Empty = relies on `GOOGLE_ALLOWED_DOMAINS` alone. Example: `admin@example.com,/.*@example\.com$/,/^admin\+/`. Applied **only** to the Google flow — API clients on the FA bearer path are not gated here (see issue #30 answer #3). The previous `FORWARD_AUTH_ALLOWED_EMAILS` is still accepted as a one-release deprecation alias. |
 
 ## Sign in with Google
@@ -215,10 +237,10 @@ QueenMQ itself, …).
   internal JWT carrying the same claims — useful when you want the broker to
   trust a single issuer (the proxy) regardless of where the original token
   came from.
-- No bearer, but a session cookie (`token`) on the configured `COOKIE_DOMAIN`
-  → cookie is verified, a fresh short‑lived `internal JWT` is minted, and that
-  is forwarded as `Authorization: Bearer …` to the upstream. The long‑lived
-  session cookie value never leaves the proxy.
+- No bearer, but a session cookie (`COOKIE_NAME`, default `queen_token`) on the
+  configured `COOKIE_DOMAIN` → cookie is verified, a fresh short‑lived
+  `internal JWT` is minted, and that is forwarded as `Authorization: Bearer …`
+  to the upstream. The long‑lived session cookie value never leaves the proxy.
 - No credentials → bounce. Browser navigations get a `302` to
   `https://${AUTH_HOST}/login?redirect_uri=<original>`; API/XHR callers
   (`Accept: application/json` or `X-Requested-With`) get a `401` plus an

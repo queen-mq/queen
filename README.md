@@ -25,7 +25,7 @@
 
 </div>
 
-> **Version 0.15.0** — Cross-language streaming SDK on JS, Python, and Go. Built on the same 0.14.x engine — see table below for full history.
+> **Version 0.15.5** — Resolves #30 (proxy compatible with Traefik forward-auth middleware), #31 (write-only role), and #32 (hardened Node base image); plus robustness hardening — malformed payloads (invalid UTF‑8 bytes / unpaired UTF‑16 surrogates) can no longer crash a worker — they are rejected with a clean HTTP 400. Built on the 0.15.x cross-language streaming engine (JS, Python, Go) — see table below for full history.
 
 ---
 
@@ -61,7 +61,7 @@ docker run --name qpg --network queen -e POSTGRES_PASSWORD=postgres -p 5433:5432
 sleep 2
 
 # Start Queen Server
-docker run -p 6632:6632 --network queen -e PG_HOST=qpg -e PG_PORT=5432 -e PG_PASSWORD=postgres -e NUM_WORKERS=2 -e DB_POOL_SIZE=5 -e SIDECAR_POOL_SIZE=30 smartnessai/queen-mq:0.15.0
+docker run -p 6632:6632 --network queen -e PG_HOST=qpg -e PG_PORT=5432 -e PG_PASSWORD=postgres -e NUM_WORKERS=2 -e DB_POOL_SIZE=5 -e SIDECAR_POOL_SIZE=30 smartnessai/queen-mq:0.15.5
 ```
 
 Then in another terminal, use cURL (or the client libraries) to push and consume messages
@@ -146,6 +146,7 @@ The repository is structured as follows:
 
 | Server Version | Description                                                                                                                     | Compatible Clients                                          |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| **0.15.5**     | Resolves **#30** (proxy compatible with Traefik forward-auth middleware), **#31** (write-only access role), **#32** (hardened Node base image). Robustness: malformed payloads can no longer crash a worker. Invalid UTF‑8 bytes and unpaired UTF‑16 surrogates — in a request body or in DB‑returned data — are serialized leniently and rejected with a clean **400** instead of throwing out of the event loop. Previously‑unguarded admin/metrics routes wrapped in error handling. | All ≥0.14.0 clients work unchanged |
 | **0.15.0**     | Cross-language streaming SDK: fluent `Stream` builder + `.gate()` rate limiter + tumbling/sliding/session/cron windows + event-time + watermarks shipping in `queen-mq` (JS), `queen-mq` (Python), and `client-go` — all backed by the same `/streams/v1/*` endpoints and three new stored procedures (`streams_register_query_v1`, `streams_cycle_v1`, `streams_state_get_v1`). Identical SHA-256 `config_hash` across runtimes so a query registered by one client can be resumed by a worker written in another. UUIDv7 stamping in `streams_cycle_v1` push items to preserve FIFO order in batched sink emits. | All ≥0.14.0 clients work unchanged — upgrade clients to 0.15.0 to use the streaming SDK |
 | **0.14.3**     | Improved frontend. | All ≥0.14.0 clients work unchanged |
 | **0.14.1**     | Updated frontend: new metrics views and embedded developer guide; Google OAuth on the proxy; Prometheus metrics route (`/metrics`); significantly optimized lease renewal (reduced lock contention and DB round-trips); delete partition and delete messages API. | All ≥0.14.0 clients work unchanged |
@@ -177,6 +178,11 @@ The repository is structured as follows:
 
 ## Latest bug fixing and improvements
 
+- Proxy 0.15.5: **Traefik forward-auth compatibility (#30).** The Queen proxy can now be used as a Traefik external/forward-auth middleware, not only behind its own login flow.
+- Server 0.15.5: **Write-only role (#31).** A new write-only access level lets producers push without being able to read or consume.
+- Build 0.15.5: **Hardened Node base image (#32).** The proxy and dashboard images now build on a hardened, minimal Node base.
+- Server 0.15.5: **Malformed‑payload hardening.** A request body — or DB‑returned content — containing invalid UTF‑8 or an unpaired UTF‑16 surrogate no longer throws out of the worker event loop. JSON is now serialized with a lenient error handler on every HTTP response and on the libqueen result/callback path, so such input is rejected with a clean **400** instead of crashing the worker (previously a `json.exception.type_error.316` could take a worker down and loop on retry).
+- Server 0.15.5: **Defensive error handling on admin/metrics routes.** The shared‑state, partition‑seek, migration‑reset, and `/metrics/prometheus` handlers (including the deferred callback that runs on the event loop) are wrapped in try/catch, so an unexpected exception returns a 500 instead of killing a worker.
 - Clients 0.15.0: **Streaming SDK on every runtime.** Ships a fluent `Stream` builder + composable operators (`.map`, `.filter`, `.flat_map`, `.key_by`, `.window_tumbling`, `.window_sliding`, `.window_session`, `.window_cron`, `.reduce`, `.aggregate`, `.gate`, `.to`, `.foreach`) and helper factories (`token_bucket_gate`, `sliding_window_gate`) in JS, Python, and Go. All three packages export the SDK from the same package as the broker client (`queen-mq` on npm/PyPI; `client-go/streams` subpackage in Go) — one install, one import.
 - Clients 0.15.0: **Exactly-once cycles via `/streams/v1/cycle`.** State mutations + sink emissions + source acks commit in a single PostgreSQL transaction. On commit failure the entire cycle rolls back; Queen redelivers via the existing lease/retry path.
 - Clients 0.15.0: **`.gate()` rate limiter with FIFO preservation.** New per-message ALLOW/DENY operator with persistent per-key state, a partial-ack on deny, and `release_lease=false` so the un-acked tail of the batch is redelivered in original order when the lease expires — no deferred queue, no reordering. The `tokenBucketGate` and `slidingWindowGate` helpers cover all four canonical rate-limit shapes (req/s, msg/s, cost-weighted, sliding-window quota) on every language.

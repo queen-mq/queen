@@ -16,12 +16,23 @@ namespace auth {
 // ============================================================================
 
 /**
- * Access levels for route protection
- * Each level includes all lower levels (ADMIN > READ_WRITE > READ_ONLY > PUBLIC)
+ * Access levels for route protection.
+ *
+ * Mostly hierarchical (ADMIN > READ_WRITE > READ_ONLY > PUBLIC), with one
+ * deliberately non-hierarchical capability:
+ *
+ *   WRITE_ONLY — grants producing (e.g. POST /api/v1/push) WITHOUT granting
+ *   the ability to read or consume. A `write-only` token therefore passes
+ *   WRITE_ONLY endpoints but is rejected by READ_ONLY (can't read) and
+ *   READ_WRITE (can't pop/ack) endpoints. `read-write` and `admin` still
+ *   satisfy WRITE_ONLY since they can write too. This lets untrusted external
+ *   producers push events without being able to read other clients' data
+ *   (issue #31).
  */
 enum class AccessLevel {
     PUBLIC,       // No authentication required
-    READ_ONLY,    // Any valid token (read-only, read-write, or admin)
+    READ_ONLY,    // Any reader token (read-only, read-write, or admin)
+    WRITE_ONLY,   // write-only, read-write, or admin role (produce, no consume)
     READ_WRITE,   // read-write or admin role required
     ADMIN         // admin role required
 };
@@ -31,6 +42,7 @@ inline std::string access_level_to_string(AccessLevel level) {
     switch (level) {
         case AccessLevel::PUBLIC: return "PUBLIC";
         case AccessLevel::READ_ONLY: return "READ_ONLY";
+        case AccessLevel::WRITE_ONLY: return "WRITE_ONLY";
         case AccessLevel::READ_WRITE: return "READ_WRITE";
         case AccessLevel::ADMIN: return "ADMIN";
         default: return "UNKNOWN";

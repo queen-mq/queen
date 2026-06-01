@@ -480,6 +480,7 @@ struct AuthConfig {
     std::string role_admin = "admin";          // Role value for admin access
     std::string role_read_write = "read-write";// Role value for read-write access
     std::string role_read_only = "read-only";  // Role value for read-only access
+    std::string role_write_only = "write-only";// Role value for write-only (produce-only) access
     
     static AuthConfig from_env() {
         AuthConfig config;
@@ -527,6 +528,7 @@ struct AuthConfig {
         config.role_admin = get_env_string("JWT_ROLE_ADMIN", "admin");
         config.role_read_write = get_env_string("JWT_ROLE_READ_WRITE", "read-write");
         config.role_read_only = get_env_string("JWT_ROLE_READ_ONLY", "read-only");
+        config.role_write_only = get_env_string("JWT_ROLE_WRITE_ONLY", "write-only");
         
         return config;
     }

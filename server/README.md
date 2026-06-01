@@ -826,7 +826,7 @@ docker run --name qpg --network queen \
 docker run -p 6632:6632 --network queen \
   -e PG_HOST=qpg -e PG_PORT=5432 -e PG_PASSWORD=postgres \
   -e NUM_WORKERS=2 -e DB_POOL_SIZE=5 -e SIDECAR_POOL_SIZE=30 \
-  smartnessai/queen-mq:0.15.0
+  smartnessai/queen-mq:0.15.5
 ```
 
 ### Kubernetes (with optional UDP sync for multi-instance)

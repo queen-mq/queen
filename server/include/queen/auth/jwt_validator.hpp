@@ -52,6 +52,13 @@ struct JwtClaims {
      * Check if user has read-only role (or higher)
      */
     bool is_read_only(const AuthConfig& config) const;
+    
+    /**
+     * Check if the user may WRITE (produce). True for write-only, read-write,
+     * and admin. Note this is intentionally NOT implied by is_read_only: a
+     * write-only token can write but cannot read/consume (issue #31).
+     */
+    bool is_write_only(const AuthConfig& config) const;
 };
 
 // ============================================================================

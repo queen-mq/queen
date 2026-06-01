@@ -23,12 +23,14 @@ namespace routes {
 void setup_push_routes(uWS::App* app, const RouteContext& ctx) {
     // PUSH endpoint - uses per-worker sidecar for true async non-blocking operation
     app->post("/api/v1/push", [ctx](auto* res, auto* req) {
-        // Check authentication - READ_WRITE required for push.
+        // Check authentication - WRITE_ONLY required for push: produce-only
+        // clients (write-only role) are allowed, read-write/admin still pass,
+        // but read-only is rejected (issue #31).
         // Capture claims so we can stamp the authenticated producer 'sub' onto each message.
         // This closes the impersonation hole described in issue #23: the client's claimed
         // identity cannot be forged because the server derives it from the validated JWT.
         std::optional<auth::JwtClaims> auth_claims;
-        REQUIRE_AUTH_WITH_CLAIMS(res, req, ctx, auth::AccessLevel::READ_WRITE, auth_claims);
+        REQUIRE_AUTH_WITH_CLAIMS(res, req, ctx, auth::AccessLevel::WRITE_ONLY, auth_claims);
 
         read_json_body(res,
             [res, ctx, auth_claims = std::move(auth_claims)](const nlohmann::json& body) {

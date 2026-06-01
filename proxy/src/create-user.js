@@ -34,14 +34,16 @@ async function main() {
   console.log('\nRoles:');
   console.log('  1) admin       - Full access');
   console.log('  2) read-write  - Read-write access');
-  console.log('  3) read-only   - Read-only access');
+  console.log('  3) read-only   - Read-only access (GET only)');
+  console.log('  4) write-only  - Produce-only access (push, no read/consume)');
   
-  const roleChoice = await question('\nSelect role (1-3): ');
+  const roleChoice = await question('\nSelect role (1-4): ');
   
   const roleMap = {
     '1': 'admin',
     '2': 'read-write',
-    '3': 'read-only'
+    '3': 'read-only',
+    '4': 'write-only'
   };
 
   const role = roleMap[roleChoice.trim()];

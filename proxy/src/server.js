@@ -10,6 +10,7 @@ import {
   extractClaimsFromAnyToken,
 } from './auth.js';
 import { requireAuth, checkMethodAccess, enforceMethodRBACFromClaims } from './middleware.js';
+import { SESSION_COOKIE_NAME } from './cookies.js';
 import { initDatabase } from './db.js';
 import {
   isGoogleAuthEnabled,
@@ -151,7 +152,7 @@ app.post('/api/login', async (req, res) => {
 
     const token = generateToken(user);
 
-    res.cookie('token', token, sessionCookieOpts());
+    res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOpts());
 
     // Round-trip a redirect target so the login UI can navigate after success.
     // We sanitize here so the client never sees a value that would later be
@@ -178,7 +179,7 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/logout', (req, res) => {
   // Clear with explicit domain so the cross-host cookie is actually invalidated.
   const opts = COOKIE_DOMAIN ? { domain: COOKIE_DOMAIN } : {};
-  res.clearCookie('token', opts);
+  res.clearCookie(SESSION_COOKIE_NAME, opts);
   res.json({ success: true });
 });
 
@@ -341,7 +342,12 @@ async function googleCallbackHandler(req, res) {
 
     const token = generateToken(user);
 
-    res.cookie('token', token, sessionCookieOpts());
+    // Log success for parity with the external-token path ("[Auth] External
+    // token verified ..."). Without this the Google sign-in flow was silent,
+    // making it hard to tell from the logs whether SSO actually worked (#30).
+    console.log('[GoogleAuth] sign-in success:', user.email, '(role:', user.role + ')');
+
+    res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOpts());
 
     clearOAuthCookies();
     res.redirect(next);
@@ -447,7 +453,7 @@ if (isForwardAuthEnabled()) {
       // 2) Cookie-based session (browser SSO users). Only valid in cross-host
       //    mode (otherwise the cookie wouldn't reach us anyway), but we still
       //    accept it in single-host mode for direct testing.
-      const cookieToken = req.cookies?.token;
+      const cookieToken = req.cookies?.[SESSION_COOKIE_NAME];
       if (cookieToken) {
         const claims = await extractClaimsFromAnyToken(cookieToken);
         if (claims) {
@@ -485,7 +491,7 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  const token = req.cookies.token || req.headers.authorization?.replace('Bearer ', '');
+  const token = req.cookies[SESSION_COOKIE_NAME] || req.headers.authorization?.replace('Bearer ', '');
 
   if (!token) {
     // If it's an API call, return 401
@@ -544,7 +550,7 @@ if (UPSTREAM_PROXY_ENABLED) {
           token = req.originalToken;
         } else {
           // Internal proxy token
-          token = req.cookies.token || req.headers.authorization?.replace('Bearer ', '');
+          token = req.cookies[SESSION_COOKIE_NAME] || req.headers.authorization?.replace('Bearer ', '');
         }
 
         if (token) {
@@ -601,6 +607,7 @@ async function startServer() {
     
     app.listen(PORT, () => {
       console.log(`Queen Proxy listening on port ${PORT}`);
+      console.log(`  Session cookie: ${SESSION_COOKIE_NAME}`);
       if (UPSTREAM_PROXY_ENABLED) {
         console.log(`  Mode: reverse-proxy (forwards to upstream)`);
         console.log(`  Target: ${QUEEN_SERVER_URL}`);

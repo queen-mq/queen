@@ -100,7 +100,7 @@ export function hasGoogleEmailAllowlist() {
   return GOOGLE_ALLOWED_EMAILS.length > 0;
 }
 
-const ALLOWED_ROLES = new Set(['admin', 'read-write', 'read-only']);
+const ALLOWED_ROLES = new Set(['admin', 'read-write', 'read-only', 'write-only']);
 
 const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';

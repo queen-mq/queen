@@ -1121,7 +1121,7 @@ class Queen {
             idx_ranges.push_back({start_idx, count});
         }
 
-        std::string merged_jsonb = combined.dump();
+        std::string merged_jsonb = combined.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         const char* param_ptrs[] = { merged_jsonb.c_str() };
 
         const std::string& sql = JobTypeToSqlTable().at(type);
@@ -1285,7 +1285,7 @@ class Queen {
                         }
                     }
                     for (auto& job : slot.jobs) {
-                        job->callback(json_results.dump());
+                        job->callback(json_results.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                         _jobs_done++;
                     }
                     slot.jobs.clear();
@@ -1296,7 +1296,7 @@ class Queen {
 
                 if (!json_results.is_array()) {
                     for (auto& job : slot.jobs) {
-                        job->callback(json_results.dump());
+                        job->callback(json_results.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                         _jobs_done++;
                     }
                     slot.jobs.clear();
@@ -1428,7 +1428,7 @@ class Queen {
                                 nlohmann::json wrapped = nlohmann::json::array();
                                 wrapped.push_back(result_item);
                                 _jobs_done++;
-                                job->callback(wrapped.dump());
+                                job->callback(wrapped.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                             }
                             break;
                         }
@@ -1471,7 +1471,7 @@ class Queen {
                                 }
                             }
                             _jobs_done++;
-                            job->callback(job_results.dump());
+                            job->callback(job_results.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                             break;
                         }
                         case JobType::ACK: {
@@ -1502,7 +1502,7 @@ class Queen {
                                 }
                             }
                             _jobs_done++;
-                            job->callback(job_results.dump());
+                            job->callback(job_results.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                             break;
                         }
                         case JobType::TRANSACTION: {
@@ -1525,7 +1525,7 @@ class Queen {
                                 }
                             }
                             _jobs_done++;
-                            job->callback(job_results.dump());
+                            job->callback(job_results.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                             break;
                         }
                         case JobType::STREAMS_CYCLE: {
@@ -1591,12 +1591,12 @@ class Queen {
                                 }
                             }
                             _jobs_done++;
-                            job->callback(job_results.dump());
+                            job->callback(job_results.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                             break;
                         }
                         default: {
                             _jobs_done++;
-                            job->callback(job_results.dump());
+                            job->callback(job_results.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                             break;
                         }
                     }
@@ -1612,7 +1612,7 @@ class Queen {
                     pl_job.op_type    = JobType::CUSTOM;
                     pl_job.request_id = "pl-refresh";
                     pl_job.sql        = "SELECT queen.update_partition_lookup_v1($1::jsonb)";
-                    pl_job.params     = { partition_updates.dump() };
+                    pl_job.params     = { partition_updates.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) };
                     pl_job.item_count = partition_updates.size();
                     uint16_t wid = _worker_id;
                     submit(std::move(pl_job), [wid](std::string result) {
@@ -1645,7 +1645,7 @@ class Queen {
                 nlohmann::json error_result = {{"success", false}, {"error", error_msg}};
 
                 for (auto& job : slot.jobs) {
-                    job->callback(error_result.dump());
+                    job->callback(error_result.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
                     _jobs_done++;
                 }
                 slot.jobs.clear();
@@ -1741,7 +1741,7 @@ class Queen {
         }
 
         if (!slot.jobs.empty()) {
-            slot.jobs[0]->callback(result.dump());
+            slot.jobs[0]->callback(result.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
             _jobs_done++;
         }
         slot.jobs.clear();
@@ -1835,7 +1835,7 @@ class Queen {
                 {"messages", nlohmann::json::array()}
             }}
         });
-        job->callback(response.dump());
+        job->callback(response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
     }
 
     //  ___                            _    _

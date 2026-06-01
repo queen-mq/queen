@@ -91,7 +91,7 @@ docker run -p 6632:6632 --network queen \
 </div>
 
 <p class="muted" style="font-size: 12.5px; margin-top: -6px;">
-  Current stable release: <strong>0.15.0</strong>. Pin with <code>smartnessai/queen-mq:0.15.0</code> for reproducible deployments.
+  Current stable release: <strong>0.15.5</strong>. Pin with <code>smartnessai/queen-mq:0.15.5</code> for reproducible deployments. 0.15.5 hardens JSON handling against malformed payloads (invalid UTF-8 / unpaired UTF-16 surrogates are rejected with a clean 400 instead of crashing a worker).
 </p>
 
 <div class="callout callout-info">
