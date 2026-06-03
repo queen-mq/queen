@@ -1,0 +1,6 @@
+stamp=20260603-174332
+profile_window_s=25
+pg_messages_inserted_in_window=676940
+push_msg_per_s_ground_truth=12296
+broker_cpus=3.0 num_workers=3
+load: conns=200 workers=4 batch=10 parts=200 payload=4096B

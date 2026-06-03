@@ -68,7 +68,6 @@ void setup_streams_state_get_routes(uWS::App* app, const RouteContext& ctx) {
                     );
 
                     nlohmann::json request_item = body;
-                    request_item["idx"] = 0;
                     if (!request_item.contains("keys") || !request_item["keys"].is_array()) {
                         request_item["keys"] = nlohmann::json::array();
                     }

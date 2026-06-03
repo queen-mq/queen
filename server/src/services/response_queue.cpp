@@ -86,6 +86,21 @@ std::string ResponseRegistry::register_response(uWS::HttpResponse<false>* res, i
 
 bool ResponseRegistry::send_response(const std::string& request_id, const nlohmann::json& data,
                                    [[maybe_unused]] bool is_error, int status_code) {
+    // Null/empty -> 204-style empty body; otherwise serialize once and deliver.
+    std::string body;
+    if (!(data.is_null() || data.empty())) {
+        body = data.dump(-1, ' ', false, nlohmann::json::error_handler_t::ignore);
+    }
+    return deliver_string(request_id, std::move(body), status_code);
+}
+
+bool ResponseRegistry::send_response_raw(const std::string& request_id, std::string json_body,
+                                         int status_code) {
+    return deliver_string(request_id, std::move(json_body), status_code);
+}
+
+bool ResponseRegistry::deliver_string(const std::string& request_id, std::string json_str,
+                                      int status_code) {
     std::shared_ptr<ResponseEntry> entry;
 
     // Find and remove from registry
@@ -117,15 +132,13 @@ bool ResponseRegistry::send_response(const std::string& request_id, const nlohma
         entry->response->writeStatus(std::to_string(status_code));
 
         // Handle empty responses (like 204 No Content)
-        if (data.is_null() || data.empty()) {
+        if (json_str.empty()) {
             entry->response->end();
             entry->response = nullptr;
             entry->valid = false;
             return true;
         }
 
-        std::string json_str = data.dump(-1, ' ', false, nlohmann::json::error_handler_t::ignore);
-        
         // Log warning for very large responses
         if (json_str.length() > 10 * 1024 * 1024) { // 10MB threshold
             spdlog::warn("Very large response being sent: {} bytes for request {}", json_str.length(), request_id);

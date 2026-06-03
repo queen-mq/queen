@@ -102,6 +102,21 @@ void read_json_body(
     std::function<void(const std::string&)> error_callback
 );
 
+/**
+ * Read the raw request body WITHOUT parsing it.
+ *
+ * Accumulates chunks into a std::string and, on the final chunk, guarantees at
+ * least 64 bytes of readable slack past the data (so SIMD parsers such as
+ * simdjson can over-read safely without an extra copy). The buffer is handed to
+ * `on_complete` by reference and stays alive for the duration of that call.
+ * Used by hot routes that parse with simdjson and pass payloads through raw.
+ */
+void read_body_raw(
+    uWS::HttpResponse<false>* res,
+    std::function<void(std::string&)> on_complete,
+    std::function<void(const std::string&)> error_callback
+);
+
 // ============================================================================
 // Query Parameter Helpers
 // ============================================================================

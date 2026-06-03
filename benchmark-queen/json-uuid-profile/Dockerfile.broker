@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+#
+# Profiling build of queen-server for JSON / UUID CPU attribution.
+#
+# Identical optimization level to production (-O3) PLUS debug info and frame
+# pointers so the gperftools CPU profiler can attribute samples to functions
+# and source lines. The profiler (libprofiler) is LD_PRELOADed at runtime by
+# entrypoint.sh in signal-toggle mode, so NO source changes are required.
+#
+# Build context is the repo root (see docker-compose.yml).
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+      build-essential libpq-dev libssl-dev zlib1g-dev \
+      curl unzip ca-certificates cmake ccache \
+      google-perftools libgoogle-perftools-dev binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# ccache transparently wraps g++/gcc to speed up rebuilds.
+ENV PATH="/usr/lib/ccache:${PATH}"
+
+WORKDIR /usr/build/server
+
+# Layer 1: only the Makefile, so the (slow) dependency download/build is cached
+# independently of source changes.
+COPY server/Makefile ./Makefile
+RUN make deps
+
+# Layer 2: sources (change frequently).
+COPY server/src/ ./src/
+COPY server/include/ ./include/
+COPY lib/ /usr/build/lib/
+
+# Build with production -O3 plus -g and frame pointers. The base flags mirror
+# server/Makefile's CXXFLAGS exactly; we only append -g -fno-omit-frame-pointer
+# so the sampler can unwind and symbolize at -O3.
+RUN --mount=type=cache,target=/root/.ccache \
+    make -j"$(nproc)" build-only \
+      CXXFLAGS="-std=c++17 -O3 -g -fno-omit-frame-pointer -Wall -Wextra -pthread -DWITH_OPENSSL=1 -DCPPHTTPLIB_OPENSSL_SUPPORT" \
+ && test -f bin/queen-server \
+ && echo "profiling build OK"
+
+# Run from /usr/build so the schema discovery (which probes lib/schema/schema.sql)
+# resolves to /usr/build/lib/schema.
+WORKDIR /usr/build
+COPY benchmark-queen/json-uuid-profile/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# gperftools CPU profiler config (read by libprofiler at init):
+#  - CPUPROFILE       : output path for the sampled profile
+#  - CPUPROFILESIGNAL : profiling is OFF at startup; SIGUSR2 (12) toggles it on/off
+#                       and flushes CPUPROFILE when toggled off.
+ENV CPUPROFILE=/profiles/queen.prof \
+    CPUPROFILESIGNAL=12
+
+EXPOSE 6632
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

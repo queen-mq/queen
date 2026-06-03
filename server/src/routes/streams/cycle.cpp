@@ -86,7 +86,6 @@ void setup_streams_cycle_routes(uWS::App* app, const RouteContext& ctx) {
                     );
 
                     nlohmann::json request_item = body;
-                    request_item["idx"] = 0;
 
                     // Stamp a UUIDv7 messageId on every sink push item that
                     // doesn't already have one. Mirrors what /api/v1/push

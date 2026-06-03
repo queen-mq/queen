@@ -86,7 +86,6 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
             
             nlohmann::json pop_params = nlohmann::json::array();
             pop_params.push_back({
-                {"idx", 0},
                 {"queue_name", queue_name},
                 {"partition_name", partition_name},
                 {"consumer_group", consumer_group},
@@ -248,7 +247,6 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
             
             nlohmann::json pop_params = nlohmann::json::array();
             pop_params.push_back({
-                {"idx", 0},
                 {"queue_name", queue_name},
                 {"partition_name", ""},  // Any partition
                 {"consumer_group", consumer_group},

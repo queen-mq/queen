@@ -62,13 +62,10 @@ void setup_ack_routes(uWS::App* app, const RouteContext& ctx) {
                         res, ctx.worker_id, nullptr
                     );
                         
-                    // Build JSON array with index for result routing
+                    // libqueen injects idx/index during the batched merge.
                     nlohmann::json ack_json = nlohmann::json::array();
-                    int idx = 0;
                     for (const auto& ack : ack_items) {
-                        nlohmann::json ack_item = ack;
-                        ack_item["index"] = idx++;
-                        ack_json.push_back(ack_item);
+                        ack_json.push_back(ack);
                     }
                     
                     // Build Queen job request
@@ -167,7 +164,6 @@ void setup_ack_routes(uWS::App* app, const RouteContext& ctx) {
                     // Build JSON array with single ACK
                     nlohmann::json ack_json = nlohmann::json::array();
                     ack_json.push_back({
-                        {"index", 0},
                         {"transactionId", transaction_id},
                         {"partitionId", partition_id.value()},
                         {"leaseId", lease_id.value_or("")},

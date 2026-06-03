@@ -81,6 +81,34 @@ void read_json_body(uWS::HttpResponse<false>* res,
     });
 }
 
+void read_body_raw(uWS::HttpResponse<false>* res,
+                   std::function<void(std::string&)> on_complete,
+                   std::function<void(const std::string&)> error_callback) {
+    auto buffer = std::make_shared<std::string>();
+    auto completed = std::make_shared<bool>(false);
+
+    res->onData([on_complete, error_callback, buffer, completed](std::string_view chunk, bool is_last) {
+        buffer->append(chunk);
+
+        if (is_last && !*completed) {
+            *completed = true;
+            if (buffer->empty()) {
+                error_callback("Empty request body");
+                return;
+            }
+            // Guarantee >= 64 bytes (SIMDJSON_PADDING) of readable slack past the
+            // data so a SIMD parser can over-read without copying. reserve()
+            // allocates the slack; the bytes are masked by simdjson on read.
+            buffer->reserve(buffer->size() + 64);
+            on_complete(*buffer);
+        }
+    });
+
+    res->onAborted([completed]() {
+        *completed = true;
+    });
+}
+
 std::string url_decode(const std::string& str) {
     std::string result;
     result.reserve(str.length());

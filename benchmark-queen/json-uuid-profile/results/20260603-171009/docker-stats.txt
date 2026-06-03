@@ -1,0 +1,36 @@
+qjup-broker: cpu=232.28% mem=60.62MiB / 2GiB
+qjup-pg: cpu=265.17% mem=1.345GiB / 4GiB
+---
+qjup-broker: cpu=218.32% mem=43.82MiB / 2GiB
+qjup-pg: cpu=247.74% mem=1.333GiB / 4GiB
+---
+qjup-broker: cpu=229.82% mem=49.1MiB / 2GiB
+qjup-pg: cpu=315.95% mem=1.399GiB / 4GiB
+---
+qjup-broker: cpu=130.42% mem=49.37MiB / 2GiB
+qjup-pg: cpu=270.83% mem=1.416GiB / 4GiB
+---
+qjup-broker: cpu=226.75% mem=49.64MiB / 2GiB
+qjup-pg: cpu=313.18% mem=1.416GiB / 4GiB
+---
+qjup-broker: cpu=89.86% mem=50.67MiB / 2GiB
+qjup-pg: cpu=271.16% mem=1.427GiB / 4GiB
+---
+qjup-broker: cpu=232.80% mem=42.5MiB / 2GiB
+qjup-pg: cpu=294.06% mem=1.433GiB / 4GiB
+---
+qjup-broker: cpu=196.50% mem=43.1MiB / 2GiB
+qjup-pg: cpu=302.94% mem=1.435GiB / 4GiB
+---
+qjup-broker: cpu=231.63% mem=43.1MiB / 2GiB
+qjup-pg: cpu=285.94% mem=1.438GiB / 4GiB
+---
+qjup-broker: cpu=0.25% mem=44.54MiB / 2GiB
+qjup-pg: cpu=117.64% mem=1.45GiB / 4GiB
+---
+qjup-broker: cpu=0.26% mem=43.82MiB / 2GiB
+qjup-pg: cpu=6.70% mem=1.411GiB / 4GiB
+---
+qjup-broker: cpu=0.29% mem=43.82MiB / 2GiB
+qjup-pg: cpu=115.98% mem=1.42GiB / 4GiB
+---

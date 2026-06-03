@@ -1,0 +1,99 @@
+name: queen-json-uuid-profile
+
+# Minimal, self-contained stack to measure the broker's JSON + UUID CPU cost
+# under hard push load:
+#
+#   loadgen (autocannon) ──HTTP──▶ broker (queen-server, profiling build) ──▶ postgres
+#
+# The broker is CPU-capped so it (not PG) is the thing under pressure, which is
+# exactly the regime where per-request broker overhead (JSON parse/dump, UUID
+# stringstream + global lock) becomes a visible fraction of CPU. Drive it with
+# ./run.sh, then read ./analyze.sh output.
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: qjup-pg
+    cpus: ${PG_CPUS:-4.0}
+    mem_limit: ${PG_MEM:-4g}
+    shm_size: "1gb"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: queen
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - synchronous_commit=on
+      - -c
+      - track_io_timing=on
+    ports:
+      - "${PG_HOST_PORT:-55444}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d queen"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  broker:
+    build:
+      context: ../..
+      dockerfile: benchmark-queen/json-uuid-profile/Dockerfile.broker
+    image: queen-mq-profile:latest
+    container_name: qjup-broker
+    # Cap the broker low enough that it saturates before PG does, so JSON/UUID
+    # CPU is measurable. Tune via BROKER_CPUS.
+    cpus: ${BROKER_CPUS:-3.0}
+    mem_limit: ${BROKER_MEM:-2g}
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DB: queen
+      HOST: "0.0.0.0"
+      PORT: "6632"
+      NUM_WORKERS: ${NUM_WORKERS:-3}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      SIDECAR_POOL_SIZE: ${SIDECAR_POOL_SIZE:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Stage 1: simdjson + raw payload pass-through on POST /api/v1/push.
+      # 0 = legacy nlohmann path (baseline), 1 = simd fast path (treatment).
+      QUEEN_PUSH_SIMD: ${QUEEN_PUSH_SIMD:-0}
+      # Stage 2: stream the stored-procedure result straight to the client on the
+      # success path (skip nlohmann parse + re-serialize). Independent of Stage 1.
+      QUEEN_PUSH_RAW_RESULT: ${QUEEN_PUSH_RAW_RESULT:-0}
+    ports:
+      - "${BROKER_HOST_PORT:-6634}:6632"
+    volumes:
+      - ./profiles:/profiles
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # One-off load generator. Not started by `up`; run.sh invokes it via
+  # `docker compose run` so it can bracket the profiler toggle.
+  loadgen:
+    build:
+      context: ./loadgen
+    image: queen-mq-loadgen:latest
+    profiles: ["load"]
+    environment:
+      SERVER_URL: http://broker:6632
+      QUEUE_NAME: ${QUEUE_NAME:-perf-json-uuid}
+      CONNECTIONS: ${CONNECTIONS:-200}
+      WORKERS: ${LOADGEN_WORKERS:-4}
+      DURATION: ${DURATION:-60}
+      PUSH_BATCH: ${PUSH_BATCH:-10}
+      MAX_PARTITIONS: ${MAX_PARTITIONS:-200}
+      PAYLOAD_SIZE_BYTES: ${PAYLOAD_SIZE_BYTES:-256}
+    depends_on:
+      broker:
+        condition: service_started

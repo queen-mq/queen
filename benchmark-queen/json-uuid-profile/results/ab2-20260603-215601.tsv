@@ -1,0 +1,5 @@
+simd	raw	payload_B	msg_per_s	broker_cpu%	cpu_per_1k_msg	non2xx
+0	0	1024	28639	134	4.68	0
+0	0	4096	18967	228	12.02	0
+1	1	1024	30540	79	2.59	0
+1	1	4096	23532	91	3.87	0

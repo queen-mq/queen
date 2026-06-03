@@ -81,7 +81,6 @@ void setup_streams_register_query_routes(uWS::App* app, const RouteContext& ctx)
                     // Wrap the single registration in a one-element array so
                     // libqueen's _fire_batched parses it as the SP expects.
                     nlohmann::json request_item = body;
-                    request_item["idx"] = 0;
                     nlohmann::json requests_array = nlohmann::json::array();
                     requests_array.push_back(std::move(request_item));
 

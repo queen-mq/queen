@@ -4,6 +4,7 @@
 #include <uv.h>
 #include <libpq-fe.h>
 #include <json.hpp>
+#include "simdjson.h"
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -1093,35 +1094,63 @@ class Queen {
     bool
     _fire_batched(DBConnection& slot, JobType type,
                   std::vector<std::shared_ptr<PendingJob>> batch) noexcept(false) {
-        nlohmann::json combined = nlohmann::json::array();
+        // simdjson fast merge: stream each job's pre-serialized items array,
+        // injecting a freshly renumbered idx/index at the front of every item
+        // object (so result dispatch works across merged batches) WITHOUT
+        // parsing+rebuilding the payloads. Routes no longer emit idx/index, so
+        // a front-inject can never duplicate a key.
+        thread_local simdjson::ondemand::parser fire_parser;
+        std::string merged_jsonb;
+        {
+            size_t est = 16;
+            for (const auto& pending : batch)
+                if (!pending->job.params.empty()) est += pending->job.params[0].size() + 32;
+            merged_jsonb.reserve(est);
+        }
         std::vector<std::pair<int,int>> idx_ranges;
         int sequential_idx = 0;
+        bool first_item = true;
+        merged_jsonb.push_back('[');
 
         for (const auto& pending : batch) {
             int start_idx = sequential_idx;
             int count = 0;
             if (!pending->job.params.empty()) {
-                try {
-                    auto arr = nlohmann::json::parse(pending->job.params[0]);
-                    for (auto& item : arr) {
-                        // Renumber idx/index so result dispatch works across
-                        // merged batches. POP uses "idx", PUSH/ACK use
-                        // "index" — set both to be safe.
-                        item["idx"]   = sequential_idx;
-                        item["index"] = sequential_idx;
+                const std::string& src = pending->job.params[0];
+                simdjson::padded_string padded(src);
+                simdjson::ondemand::document doc;
+                simdjson::ondemand::array arr;
+                if (!fire_parser.iterate(padded).get(doc) && !doc.get_array().get(arr)) {
+                    for (auto el : arr) {
+                        std::string_view raw;
+                        if (el.raw_json().get(raw)) continue;
+                        size_t b = raw.find('{');
+                        if (b == std::string_view::npos) continue;  // skip non-objects
+                        if (!first_item) merged_jsonb.push_back(',');
+                        first_item = false;
+                        merged_jsonb += "{\"idx\":";
+                        merged_jsonb += std::to_string(sequential_idx);
+                        merged_jsonb += ",\"index\":";
+                        merged_jsonb += std::to_string(sequential_idx);
+                        std::string_view body = raw.substr(b + 1);  // after '{', includes trailing '}'
+                        size_t nb = body.find_first_not_of(" \t\r\n");
+                        if (nb != std::string_view::npos && body[nb] != '}') {
+                            merged_jsonb.push_back(',');
+                            merged_jsonb.append(body.data(), body.size());
+                        } else {
+                            merged_jsonb.push_back('}');
+                        }
                         sequential_idx++;
-                        combined.push_back(std::move(item));
                         count++;
                     }
-                } catch (const std::exception& e) {
-                    spdlog::error("[Worker {}] [libqueen] Failed to parse job params JSON: {}",
-                                  _worker_id, e.what());
+                } else {
+                    spdlog::error("[Worker {}] [libqueen] _fire_batched: failed to parse job params",
+                                  _worker_id);
                 }
             }
             idx_ranges.push_back({start_idx, count});
         }
-
-        std::string merged_jsonb = combined.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        merged_jsonb.push_back(']');
         const char* param_ptrs[] = { merged_jsonb.c_str() };
 
         const std::string& sql = JobTypeToSqlTable().at(type);
@@ -1214,6 +1243,401 @@ class Queen {
     // ------------------------------------------------------------------
     // Completion dispatch: called from _uv_socket_event_cb once PG has a result.
     // ------------------------------------------------------------------
+    // simdjson fast path for the homogeneous "pass-through" job types
+    // (PUSH / ACK / RENEW_LEASE / STREAMS_STATE_GET / STREAMS_REGISTER_QUERY).
+    // Parses the PG result once with simdjson, demultiplexes items to their
+    // owning jobs by idx, streams each item through RAW (no re-serialization),
+    // accumulates the same per-type metrics as the nlohmann path, and (for
+    // PUSH) fires the partition_updates follow-up. Clears slot.jobs.
+    //
+    // POP (per-message partitionId/leaseId mutation + lag), TRANSACTION (object
+    // wrapper) and STREAMS_CYCLE (nested ack/push metrics) intentionally stay on
+    // the nlohmann path in _process_slot_result.
+    void
+    _process_results_simd(DBConnection& slot, PGresult* res) noexcept(false) {
+        const char*  data = PQgetvalue(res, 0, 0);
+        const size_t dlen = static_cast<size_t>(PQgetlength(res, 0, 0));
+        const JobType type = slot.jobs[0]->job.op_type;
+
+        thread_local simdjson::ondemand::parser od_parser;
+        thread_local simdjson::dom::parser      item_parser;
+
+        auto deliver_raw_to_all = [&]() {
+            std::string raw(data, dlen);
+            for (auto& job : slot.jobs) { job->callback(raw); _jobs_done++; }
+            slot.jobs.clear();
+            slot.job_idx_ranges.clear();
+        };
+
+        simdjson::padded_string padded(data, dlen);
+        simdjson::ondemand::document doc;
+        if (od_parser.iterate(padded).get(doc)) { deliver_raw_to_all(); return; }
+
+        // Resolve the items array. PUSH returns {items:[...], partition_updates:[...]};
+        // the other types return a bare array.
+        std::string partition_updates_raw;
+        simdjson::ondemand::array items;
+        bool have_items = false;
+
+        simdjson::ondemand::json_type jt;
+        if (!doc.type().get(jt) && jt == simdjson::ondemand::json_type::object) {
+            simdjson::ondemand::object root;
+            if (!doc.get_object().get(root)) {
+                simdjson::ondemand::value iv;
+                if (!root["items"].get(iv) && !iv.get_array().get(items)) have_items = true;
+            }
+        } else if (!doc.get_array().get(items)) {
+            have_items = true;
+        }
+        if (!have_items) { deliver_raw_to_all(); return; }
+
+        const size_t njobs = slot.jobs.size();
+        std::vector<std::string> out(njobs);
+        std::vector<char> started(njobs, 0);
+        std::vector<size_t> cnt(njobs, 0);
+        // PUSH: per-job per-queue counts. ACK: per-job per-queue (success, failed).
+        std::vector<std::unordered_map<std::string, size_t>> push_by_queue(njobs);
+        std::vector<std::unordered_map<std::string, std::pair<size_t,size_t>>> ack_by_queue(njobs);
+        std::vector<size_t> ack_s(njobs, 0), ack_f(njobs, 0), ack_dlq(njobs, 0);
+        for (size_t j = 0; j < njobs; ++j) { out[j].reserve(128); out[j].push_back('['); }
+
+        auto find_job = [&](int idx) -> int {
+            for (size_t j = 0; j < slot.job_idx_ranges.size(); ++j) {
+                const auto& r = slot.job_idx_ranges[j];
+                if (idx >= r.first && idx < r.first + r.second) return static_cast<int>(j);
+            }
+            return -1;
+        };
+
+        for (auto el : items) {
+            std::string_view raw;
+            if (el.raw_json().get(raw)) continue;
+            simdjson::dom::element item;
+            if (item_parser.parse(raw.data(), raw.size()).get(item)) continue;
+
+            int idx = -1; int64_t iv64 = 0;
+            if (item["idx"].get_int64().get(iv64) == simdjson::SUCCESS) idx = static_cast<int>(iv64);
+            else if (item["index"].get_int64().get(iv64) == simdjson::SUCCESS) idx = static_cast<int>(iv64);
+            int j = find_job(idx);
+            if (j < 0) continue;
+
+            if (started[j]) out[j].push_back(',');
+            started[j] = 1;
+            out[j].append(raw.data(), raw.size());
+            cnt[j]++;
+
+            if (type == JobType::PUSH) {
+                std::string_view qn;
+                if (item["queueName"].get_string().get(qn) == simdjson::SUCCESS)
+                    push_by_queue[j][std::string(qn)]++;
+            } else if (type == JobType::ACK) {
+                bool ok = false;
+                item["success"].get_bool().get(ok);
+                if (ok) ack_s[j]++; else ack_f[j]++;
+                bool d = false;
+                if (item["dlq"].get_bool().get(d) == simdjson::SUCCESS && d) ack_dlq[j]++;
+                std::string_view qn;
+                if (item["queueName"].get_string().get(qn) == simdjson::SUCCESS) {
+                    auto& e = ack_by_queue[j][std::string(qn)];
+                    if (ok) e.first++; else e.second++;
+                }
+            }
+        }
+
+        // PUSH: capture partition_updates raw for the follow-up (after items are
+        // consumed). A miss is self-healed by the reconcile service.
+        if (type == JobType::PUSH) {
+            simdjson::ondemand::object root2;
+            simdjson::padded_string padded2(data, dlen);
+            simdjson::ondemand::document doc2;
+            if (!od_parser.iterate(padded2).get(doc2) && !doc2.get_object().get(root2)) {
+                simdjson::ondemand::value pv;
+                if (!root2["partition_updates"].get(pv)) {
+                    std::string_view sv;
+                    if (!pv.raw_json().get(sv)) partition_updates_raw.assign(sv);
+                }
+            }
+        }
+
+        for (size_t j = 0; j < njobs; ++j) {
+            out[j].push_back(']');
+            auto& job = slot.jobs[j];
+            if (type == JobType::PUSH) {
+                _update_pop_backoff_tracker(job->job.queue_name, job->job.partition_name);
+                if (_metrics) {
+                    size_t total = job->job.item_count > 0 ? job->job.item_count : cnt[j];
+                    _metrics->record_push_request();
+                    _metrics->record_push_messages(total);
+                    if (!push_by_queue[j].empty()) {
+                        for (const auto& [qn, c] : push_by_queue[j])
+                            _metrics->record_push_per_queue(qn, c);
+                    } else if (!job->job.queue_name.empty()) {
+                        _metrics->record_push_per_queue(job->job.queue_name, total);
+                    }
+                }
+            } else if (type == JobType::ACK) {
+                if (_metrics) {
+                    size_t total = job->job.item_count > 0 ? job->job.item_count : cnt[j];
+                    _metrics->record_ack_request();
+                    _metrics->record_ack_messages(total, ack_s[j], ack_f[j]);
+                    for (size_t k = 0; k < ack_dlq[j]; ++k) _metrics->record_dlq();
+                    for (const auto& [qn, sf] : ack_by_queue[j])
+                        _metrics->record_ack_with_queue(qn, sf.first, sf.second);
+                }
+            }
+            _jobs_done++;
+            job->callback(out[j]);
+        }
+
+        if (!partition_updates_raw.empty() && partition_updates_raw != "[]") {
+            JobRequest pl_job;
+            pl_job.op_type    = JobType::CUSTOM;
+            pl_job.request_id = "pl-refresh";
+            pl_job.sql        = "SELECT queen.update_partition_lookup_v1($1::jsonb)";
+            pl_job.params     = { std::move(partition_updates_raw) };
+            uint16_t wid = _worker_id;
+            submit(std::move(pl_job), [wid](std::string result) {
+                if (result.find("\"success\":false") != std::string::npos) {
+                    spdlog::warn("[Worker {}] [libqueen] update_partition_lookup_v1 reported failure", wid);
+                }
+            });
+        }
+
+        slot.jobs.clear();
+        slot.job_idx_ranges.clear();
+    }
+
+    // simdjson TRANSACTION path. execute_transaction_v2 returns a wrapper object
+    // delivered to the (single) job verbatim; metrics are credited from the
+    // inner results[] array. Mirrors the nlohmann TRANSACTION special-case.
+    void
+    _process_transaction_simd(DBConnection& slot, PGresult* res) noexcept(false) {
+        const char*  data = PQgetvalue(res, 0, 0);
+        const size_t dlen = static_cast<size_t>(PQgetlength(res, 0, 0));
+
+        if (_metrics) {
+            thread_local simdjson::ondemand::parser txn_parser;
+            simdjson::padded_string padded(data, dlen);
+            simdjson::ondemand::document doc;
+            simdjson::ondemand::object root;
+            simdjson::ondemand::array results;
+            if (!txn_parser.iterate(padded).get(doc)
+                && !doc.get_object().get(root)
+                && !root["results"].get_array().get(results)) {
+                _metrics->record_transaction();
+                std::unordered_set<std::string> queues_touched;
+                for (auto op : results) {
+                    simdjson::ondemand::object oo;
+                    if (op.get_object().get(oo)) continue;
+                    bool d = false;
+                    if (oo["dlq"].get_bool().get(d) == simdjson::SUCCESS && d) _metrics->record_dlq();
+                    std::string_view qn;
+                    if (oo["queueName"].get_string().get(qn) == simdjson::SUCCESS)
+                        queues_touched.insert(std::string(qn));
+                }
+                for (const auto& qn : queues_touched) _metrics->record_transaction_with_queue(qn);
+            }
+        }
+
+        std::string raw(data, dlen);
+        for (auto& job : slot.jobs) { job->callback(raw); _jobs_done++; }
+        slot.jobs.clear();
+        slot.job_idx_ranges.clear();
+    }
+
+    // simdjson POP path. Demuxes result_items by idx; for each: honours the
+    // long-poll parking control flow, stamps each message's partitionId/leaseId
+    // from the parent result ONLY IF absent (so v4 self-describing multi-
+    // partition batches are preserved), records pop/lag/auto-ack metrics, and
+    // emits the wrapped result. The result_item is passed through RAW except the
+    // `messages` array, whose span is spliced with the stamped version — so all
+    // other result fields are preserved byte-for-byte. Message payloads are not
+    // value-parsed (only top-level fields are probed).
+    void
+    _process_pop_simd(DBConnection& slot, PGresult* res) noexcept(false) {
+        const char*  data = PQgetvalue(res, 0, 0);
+        const size_t dlen = static_cast<size_t>(PQgetlength(res, 0, 0));
+
+        thread_local simdjson::ondemand::parser pop_parser;
+        thread_local simdjson::ondemand::parser pop_item_parser;
+        thread_local simdjson::ondemand::parser pop_msg_parser;
+        thread_local simdjson::ondemand::parser pop_field_parser;
+
+        auto deliver_raw_to_all = [&]() {
+            std::string raw(data, dlen);
+            for (auto& job : slot.jobs) { job->callback(raw); _jobs_done++; }
+            slot.jobs.clear();
+            slot.job_idx_ranges.clear();
+        };
+
+        simdjson::padded_string padded(data, dlen);
+        simdjson::ondemand::document doc;
+        if (pop_parser.iterate(padded).get(doc)) { deliver_raw_to_all(); return; }
+        simdjson::ondemand::array items;
+        if (doc.get_array().get(items)) { deliver_raw_to_all(); return; }
+
+        auto find_job = [&](int idx) -> int {
+            for (size_t j = 0; j < slot.job_idx_ranges.size(); ++j) {
+                const auto& r = slot.job_idx_ranges[j];
+                if (idx >= r.first && idx < r.first + r.second) return static_cast<int>(j);
+            }
+            return -1;
+        };
+
+        const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+        for (auto el : items) {
+            std::string_view item_raw;
+            if (el.raw_json().get(item_raw)) continue;
+
+            simdjson::padded_string ip(item_raw);
+            simdjson::ondemand::document idoc;
+            if (pop_item_parser.iterate(ip).get(idoc)) continue;
+            simdjson::ondemand::object iobj;
+            if (idoc.get_object().get(iobj)) continue;
+
+            int idx = -1; int64_t v64 = 0;
+            if (iobj["idx"].get_int64().get(v64) == simdjson::SUCCESS) idx = static_cast<int>(v64);
+            else if (iobj["index"].get_int64().get(v64) == simdjson::SUCCESS) idx = static_cast<int>(v64);
+            int j = find_job(idx);
+            if (j < 0) continue;
+            auto& job = slot.jobs[j];
+
+            std::string pid, lid;
+            bool pid_ok = false, lid_ok = false;
+            std::string_view msgs_raw;
+            size_t msg_off = 0;
+            bool have_msgs = false, non_empty = false;
+            {
+                simdjson::ondemand::object r;
+                if (iobj["result"].get_object().get(r) == simdjson::SUCCESS) {
+                    std::string_view sv;
+                    if (r["partitionId"].get_string().get(sv) == simdjson::SUCCESS) { pid.assign(sv); pid_ok = true; }
+                    if (r["leaseId"].get_string().get(sv) == simdjson::SUCCESS) { lid.assign(sv); lid_ok = true; }
+                    simdjson::ondemand::value mv;
+                    if (r["messages"].get(mv) == simdjson::SUCCESS && mv.raw_json().get(msgs_raw) == simdjson::SUCCESS) {
+                        have_msgs = true;
+                        msg_off = static_cast<size_t>(msgs_raw.data() - ip.data());
+                        non_empty = (msgs_raw.find('{') != std::string_view::npos);
+                    }
+                }
+            }
+
+            bool has_messages = have_msgs && non_empty;
+            bool has_wait = (job->job.wait_deadline != std::chrono::steady_clock::time_point{});
+
+            if (!has_messages && has_wait) {
+                _set_next_backoff_time(job);  // park; no callback
+                continue;
+            }
+
+            std::string bkey = _get_backoff_key(job->job.queue_name, job->job.partition_name);
+            auto bit = _pop_backoff_tracker.find(bkey);
+            if (bit != _pop_backoff_tracker.end()) {
+                bit->second.erase(job->job.request_id);
+                if (bit->second.empty()) _pop_backoff_tracker.erase(bit);
+            }
+
+            std::string output;
+            output.reserve(item_raw.size() + 128);
+            output.push_back('[');
+
+            if (has_messages) {
+                if (_metrics) _metrics->record_pop_request();
+                std::string mutated;
+                mutated.reserve(msgs_raw.size() + 64);
+                mutated.push_back('[');
+                size_t mcount = 0;
+
+                simdjson::padded_string mp(msgs_raw);
+                simdjson::ondemand::document mdoc;
+                simdjson::ondemand::array marr;
+                if (!pop_msg_parser.iterate(mp).get(mdoc) && !mdoc.get_array().get(marr)) {
+                    bool first = true;
+                    for (auto m : marr) {
+                        std::string_view mraw;
+                        if (m.raw_json().get(mraw)) continue;
+
+                        bool has_pid = false, has_lid = false;
+                        std::string created;
+                        {
+                            simdjson::padded_string fp(mraw);
+                            simdjson::ondemand::document fdoc;
+                            simdjson::ondemand::object mo;
+                            if (!pop_field_parser.iterate(fp).get(fdoc) && !fdoc.get_object().get(mo)) {
+                                simdjson::ondemand::value tmp;
+                                if (mo["partitionId"].get(tmp) == simdjson::SUCCESS) has_pid = true;
+                                if (mo["leaseId"].get(tmp) == simdjson::SUCCESS) has_lid = true;
+                                std::string_view cv;
+                                if (mo["createdAt"].get_string().get(cv) == simdjson::SUCCESS) created.assign(cv);
+                            }
+                        }
+
+                        if (_metrics) {
+                            uint64_t lag_ms = 0;
+                            if (!created.empty()) {
+                                std::tm tm = {}; int ms = 0;
+                                if (sscanf(created.c_str(), "%d-%d-%dT%d:%d:%d.%d",
+                                           &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+                                           &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &ms) >= 6) {
+                                    tm.tm_year -= 1900; tm.tm_mon -= 1;
+                                    auto created_time = timegm(&tm);
+                                    auto created_ms = static_cast<int64_t>(created_time) * 1000 + ms;
+                                    lag_ms = static_cast<uint64_t>(
+                                        std::max(0LL, static_cast<long long>(now_ms - created_ms)));
+                                }
+                            }
+                            _metrics->record_pop_with_lag(job->job.queue_name, lag_ms);
+                        }
+
+                        if (!first) mutated.push_back(',');
+                        first = false;
+
+                        std::string inj;
+                        if (!has_pid && pid_ok) { inj += "\"partitionId\":\""; inj += pid; inj += "\","; }
+                        if (!has_lid && lid_ok) { inj += "\"leaseId\":\""; inj += lid; inj += "\","; }
+
+                        size_t b = mraw.find('{');
+                        std::string_view body = (b == std::string_view::npos)
+                            ? std::string_view("}") : mraw.substr(b + 1);
+                        size_t nb = body.find_first_not_of(" \t\r\n");
+                        bool empty_obj = (nb != std::string_view::npos && body[nb] == '}');
+                        if (empty_obj && !inj.empty()) inj.pop_back();  // drop trailing comma
+
+                        mutated.push_back('{');
+                        mutated += inj;
+                        mutated.append(body.data(), body.size());
+                        mcount++;
+                    }
+                }
+                mutated.push_back(']');
+
+                if (_metrics && job->job.auto_ack) {
+                    _metrics->record_ack_request();
+                    _metrics->record_ack_messages(mcount, mcount, 0);
+                    _metrics->record_ack_with_queue(job->job.queue_name, mcount, 0);
+                }
+
+                // Splice the stamped messages back into the raw result_item.
+                output.append(item_raw.data(), msg_off);
+                output.append(mutated);
+                output.append(item_raw.data() + msg_off + msgs_raw.size(),
+                              item_raw.size() - (msg_off + msgs_raw.size()));
+            } else {
+                if (_metrics) { _metrics->record_pop_request(); _metrics->record_pop_empty(job->job.queue_name); }
+                output.append(item_raw.data(), item_raw.size());
+            }
+
+            output.push_back(']');
+            _jobs_done++;
+            job->callback(output);
+        }
+
+        slot.jobs.clear();
+        slot.job_idx_ranges.clear();
+    }
+
     void
     _process_slot_result(DBConnection& slot) noexcept(false) {
         bool any_error = false;
@@ -1227,6 +1651,29 @@ class Queen {
                     _process_custom_result(slot, res);
                     PQclear(res);
                     continue;
+                }
+
+                // simdjson fast paths. STREAMS_CYCLE keeps the nlohmann path below.
+                if (!slot.jobs.empty()) {
+                    JobType st = slot.jobs[0]->job.op_type;
+                    if (st == JobType::PUSH || st == JobType::ACK
+                        || st == JobType::RENEW_LEASE
+                        || st == JobType::STREAMS_STATE_GET
+                        || st == JobType::STREAMS_REGISTER_QUERY) {
+                        _process_results_simd(slot, res);
+                        PQclear(res);
+                        continue;
+                    }
+                    if (st == JobType::POP) {
+                        _process_pop_simd(slot, res);
+                        PQclear(res);
+                        continue;
+                    }
+                    if (st == JobType::TRANSACTION) {
+                        _process_transaction_simd(slot, res);
+                        PQclear(res);
+                        continue;
+                    }
                 }
 
                 auto data = PQgetvalue(res, 0, 0);

@@ -1,0 +1,69 @@
+==================================================================
+ Profile: /profiles/queen.prof.0   (pprof: /usr/bin/google-pprof)
+==================================================================
+
+### Top 40 functions by self (flat) CPU
+------------------------------------------------------------------
+Total: 2144 samples
+    1031  48.1%  48.1%     1039  48.5% __send@GLIBC_2.17
+     215  10.0%  58.1%      215  10.0% __xpg_strerror_r@@GLIBC_2.17
+     185   8.6%  66.7%      187   8.7% simdjson::arm64::::stage1::json_structural_indexer::index
+     100   4.7%  71.4%      101   4.7% __recv@@GLIBC_PRIVATE
+      40   1.9%  73.3%       68   3.2% __default_morecore@GLIBC_2.17
+      37   1.7%  75.0%       37   1.7% __write@@GLIBC_2.17
+      33   1.5%  76.5%       33   1.5% epoll_pwait@@GLIBC_2.17
+      23   1.1%  77.6%       23   1.1% timer_settime@GLIBC_2.17
+      19   0.9%  78.5%       19   0.9% _init
+      19   0.9%  79.4%       19   0.9% std::__once_callable@@GLIBCXX_3.4.11
+      14   0.7%  80.0%      123   5.7% queen::Queen::_process_results_simd
+      13   0.6%  80.6%       13   0.6% epoll_ctl@@GLIBC_2.17
+      13   0.6%  81.2%       54   2.5% std::num_put::_M_insert_int@@GLIBCXX_3.4
+      12   0.6%  81.8%       70   3.3% std::ostream::_M_insert@@GLIBCXX_3.4.9
+      11   0.5%  82.3%       11   0.5% 0x0000ffff9352a360
+      11   0.5%  82.8%       46   2.1% malloc@@GLIBC_2.17
+      11   0.5%  83.3%       11   0.5% memcmp@@GLIBC_2.17
+      11   0.5%  83.9%      259  12.1% queen::Queen::_fire_batched
+      11   0.5%  84.4%       19   0.9% queen::routes::::append_json_escaped
+      11   0.5%  84.9%       11   0.5% simdjson::arm64::dom_parser_implementation::stage2
+      10   0.5%  85.4%      390  18.2% queen::routes::::handle_push_simd
+       9   0.4%  85.8%        9   0.4% __nss_database_lookup@GLIBC_2.17
+       8   0.4%  86.1%        8   0.4% std::__cxx11::basic_string::push_back@@GLIBCXX_3.4.21
+       8   0.4%  86.5%       12   0.6% std::__numpunct_cache::_M_cache@@GLIBCXX_3.4
+       8   0.4%  86.9%       20   0.9% std::basic_streambuf::xsputn@@GLIBCXX_3.4
+       7   0.3%  87.2%        7   0.3% __lll_lock_wake_private@@GLIBC_PRIVATE
+       7   0.3%  87.5%      973  45.4% bsd_send
+       7   0.3%  87.9%       85   4.0% queen::AsyncQueueManager::generate_uuid[abi:cxx11]
+       7   0.3%  88.2%        7   0.3% read@@GLIBC_2.17
+       7   0.3%  88.5%        7   0.3% std::num_put::do_put@@GLIBCXX_3.4@144380
+       7   0.3%  88.9%      993  46.3% uWS::AsyncSocket::write
+       6   0.3%  89.1%        9   0.4% __libc_alloca_cutoff@@GLIBC_PRIVATE
+       6   0.3%  89.4%       43   2.0% free@@GLIBC_2.17
+       6   0.3%  89.7%       51   2.4% operator new@@GLIBCXX_3.4
+       6   0.3%  90.0%      452  21.1% uWS::HttpParser::consumePostPadded [clone .isra.0]
+       6   0.3%  90.3%      983  45.8% us_socket_write
+       5   0.2%  90.5%        9   0.4% pthread_mutex_trylock@GLIBC_2.17
+       5   0.2%  90.7%       85   4.0% std::__cxx11::basic_string::_M_append@@GLIBCXX_3.4.21
+       5   0.2%  91.0%        5   0.2% std::locale::id::_M_id@@GLIBCXX_3.4
+       5   0.2%  91.2%      396  18.5% uv__io_poll
+       4   0.2%  91.4%        4   0.2% operator delete@@CXXABI_1.3.9
+
+### Bucketed CPU attribution (sum of flat %)
+------------------------------------------------------------------
+  JSON    (nlohmann parse/dump/lexer/serialize) :    0.2 %
+  UUID    (generate_uuid + stringstream fmt)    :    2.2 %
+  LOCK    (mutex/futex contention)              :    0.7 %
+  ALLOC   (new/delete/malloc, mostly JSON-driven):    3.2 %
+  IO/sys  (send/recv/epoll/timer/libpq)         :   58.0 %
+  other                                         :   32.6 %
+
+  NOTE: buckets are regex heuristics over flat%. ALLOC is largely
+        JSON-DOM-driven, so JSON+ALLOC approximates the realistic
+        upper bound on JSON-attributable CPU.
+
+### Line-level cost inside the UUID generator (stringstream hotspot)
+------------------------------------------------------------------
+(skipped; unset SKIP_LINE_LEVEL to enable the slow addr2line listing)
+
+### Collapsed stacks (for flamegraph)
+------------------------------------------------------------------
+(set COLLAPSED_OUT=path to emit collapsed stacks for a flamegraph)

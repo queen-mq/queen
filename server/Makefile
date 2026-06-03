@@ -84,6 +84,11 @@ USOCKETS_C_OBJECTS = $(patsubst $(VENDOR_DIR)/uSockets/src/%.c,$(BUILD_DIR)/usoc
 USOCKETS_CPP_OBJECTS = $(patsubst $(VENDOR_DIR)/uSockets/src/%.cpp,$(BUILD_DIR)/usockets/%.o,$(USOCKETS_CPP_SOURCES))
 USOCKETS_OBJECTS = $(USOCKETS_C_OBJECTS) $(USOCKETS_CPP_OBJECTS)
 
+# simdjson amalgamated source -> single object, compiled WITHOUT the PCH
+# (it doesn't use spdlog/json) and without -march=native so simdjson's runtime
+# CPU dispatch picks the best kernel at load time (portable build).
+SIMDJSON_OBJ = $(BUILD_DIR)/simdjson.o
+
 # Target executable (Acceptor/Worker pattern - cross-platform)
 TARGET = $(BIN_DIR)/queen-server
 
@@ -97,6 +102,10 @@ CPPHTTPLIB_URL = https://raw.githubusercontent.com/yhirose/cpp-httplib/master/ht
 SPDLOG_URL = https://github.com/gabime/spdlog/archive/refs/tags/v1.14.1.zip
 LIBUV_URL = https://github.com/libuv/libuv/archive/refs/tags/v1.48.0.zip
 JWTCPP_URL = https://github.com/Thalhammer/jwt-cpp/archive/refs/tags/v0.7.0.zip
+# simdjson amalgamated single header + source (hot-path JSON parsing / raw payload pass-through)
+SIMDJSON_VERSION = v3.10.1
+SIMDJSON_H_URL = https://raw.githubusercontent.com/simdjson/simdjson/$(SIMDJSON_VERSION)/singleheader/simdjson.h
+SIMDJSON_CPP_URL = https://raw.githubusercontent.com/simdjson/simdjson/$(SIMDJSON_VERSION)/singleheader/simdjson.cpp
 
 .PHONY: all clean deps setup test build-only debug-objects
 
@@ -170,6 +179,10 @@ $(VENDOR_DIR)/.deps_ready: setup
 		mv jwt-cpp-0.7.0 jwt-cpp && \
 		rm jwt-cpp.zip
 	
+	# Download simdjson (amalgamated single header + source)
+	@curl -L $(SIMDJSON_H_URL) -o $(VENDOR_DIR)/simdjson.h
+	@curl -L $(SIMDJSON_CPP_URL) -o $(VENDOR_DIR)/simdjson.cpp
+	
 	@touch $(VENDOR_DIR)/.deps_ready
 	@echo "Dependencies ready!"
 
@@ -181,10 +194,16 @@ $(PCH_OUT): $(PCH_SRC)
 	@$(CXX) $(CXXFLAGS) $(ALL_INCLUDES) -x c++-header $< -o $@
 
 # Build queen-server (Acceptor/Worker pattern - cross-platform)
-$(TARGET): $(OBJECTS) $(USOCKETS_OBJECTS)
-	@echo "Linking $(TARGET) with $(words $(OBJECTS)) Queen objects and $(words $(USOCKETS_OBJECTS)) uSockets objects..."
-	@$(CXX) $(OBJECTS) $(USOCKETS_OBJECTS) -o $@ $(LIBS)
+$(TARGET): $(OBJECTS) $(USOCKETS_OBJECTS) $(SIMDJSON_OBJ)
+	@echo "Linking $(TARGET) with $(words $(OBJECTS)) Queen objects, $(words $(USOCKETS_OBJECTS)) uSockets objects and simdjson..."
+	@$(CXX) $(OBJECTS) $(USOCKETS_OBJECTS) $(SIMDJSON_OBJ) -o $@ $(LIBS)
 	@echo "✅ Build complete! (Acceptor/Worker pattern - works on all platforms)"
+
+# Compile simdjson amalgamated source (no PCH include; large TU, one-time cost)
+$(SIMDJSON_OBJ): $(VENDOR_DIR)/simdjson.cpp
+	@mkdir -p $(dir $@)
+	@echo "Compiling simdjson (amalgamated)..."
+	@$(CXX) $(CXXFLAGS) $(ALL_INCLUDES) -c $< -o $@
 
 # Compile C++ source files (with PCH and automatic dependency generation)
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp $(PCH_OUT)

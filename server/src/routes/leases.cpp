@@ -41,7 +41,6 @@ void setup_lease_routes(uWS::App* app, const RouteContext& ctx) {
                     // Build JSON array with single renewal
                     nlohmann::json items_json = nlohmann::json::array();
                     items_json.push_back({
-                        {"index", 0},
                         {"leaseId", lease_id},
                         {"extendSeconds", seconds}
                     });

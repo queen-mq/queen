@@ -1,0 +1,69 @@
+==================================================================
+ Profile: /profiles/queen.prof.0   (pprof: /usr/bin/google-pprof)
+==================================================================
+
+### Top 40 functions by self (flat) CPU
+------------------------------------------------------------------
+Total: 5188 samples
+    1187  22.9%  22.9%     1191  23.0% nlohmann::json_abi_v3_11_3::detail::lexer::get@a1cb0
+    1118  21.5%  44.4%     1147  22.1% nlohmann::json_abi_v3_11_3::detail::serializer::dump_escaped
+     696  13.4%  57.8%      706  13.6% std::__cxx11::basic_string::push_back@@GLIBCXX_3.4.21
+     394   7.6%  65.4%      401   7.7% __send@GLIBC_2.17
+     345   6.6%  72.1%      345   6.6% _init
+     260   5.0%  77.1%     2109  40.7% nlohmann::json_abi_v3_11_3::detail::lexer::scan_string@a3b70
+     158   3.0%  80.1%      158   3.0% __xpg_strerror_r@@GLIBC_2.17
+     101   1.9%  82.1%      175   3.4% __default_morecore@GLIBC_2.17
+      67   1.3%  83.4%       67   1.3% timer_settime@GLIBC_2.17
+      66   1.3%  84.7%       66   1.3% nlohmann::json_abi_v3_11_3::basic_json::assert_invariant [clone .isra.0]@63b50
+      56   1.1%  85.7%       56   1.1% nlohmann::json_abi_v3_11_3::detail::lexer::get@a1bb0
+      51   1.0%  86.7%       51   1.0% memcmp@@GLIBC_2.17
+      46   0.9%  87.6%      165   3.2% malloc@@GLIBC_2.17
+      41   0.8%  88.4%      204   3.9% nlohmann::json_abi_v3_11_3::basic_json::json_value::destroy
+      38   0.7%  89.1%       38   0.7% simdjson::arm64::::stage1::json_structural_indexer::index
+      27   0.5%  89.6%       27   0.5% std::__once_callable@@GLIBCXX_3.4.11
+      26   0.5%  90.2%       92   1.8% free@@GLIBC_2.17
+      26   0.5%  90.7%      203   3.9% nlohmann::json_abi_v3_11_3::basic_json::~basic_json
+      25   0.5%  91.1%       25   0.5% __recv@@GLIBC_PRIVATE
+      24   0.5%  91.6%       24   0.5% __write@@GLIBC_2.17
+      24   0.5%  92.1%       31   0.6% nlohmann::json_abi_v3_11_3::detail::lexer::scan@a80d0
+      22   0.4%  92.5%       98   1.9% nlohmann::json_abi_v3_11_3::detail::lexer::scan_string@a2db0
+      22   0.4%  92.9%       95   1.8% std::__cxx11::basic_string::_M_append@@GLIBCXX_3.4.21
+      19   0.4%  93.3%       19   0.4% __nss_database_lookup@GLIBC_2.17
+      16   0.3%  93.6%       16   0.3% epoll_pwait@@GLIBC_2.17
+      16   0.3%  93.9%      145   2.8% nlohmann::json_abi_v3_11_3::detail::json_sax_dom_parser::key
+      15   0.3%  94.2%       15   0.3% std::_Rb_tree_insert_and_rebalance@@GLIBCXX_3.4
+      12   0.2%  94.4%       52   1.0% std::__cxx11::basic_string::_M_construct [clone .isra.0]@63e40
+      11   0.2%  94.6%       11   0.2% nlohmann::json_abi_v3_11_3::detail::lexer::scan@a4270
+      10   0.2%  94.8%       27   0.5% nlohmann::json_abi_v3_11_3::detail::json_sax_dom_parser::start_object
+      10   0.2%  95.0%     1221  23.5% nlohmann::json_abi_v3_11_3::detail::serializer::dump
+       9   0.2%  95.2%       25   0.5% std::_Rb_tree::_M_get_insert_hint_unique_pos
+       8   0.2%  95.3%     2366  45.6% nlohmann::json_abi_v3_11_3::detail::parser::sax_parse_internal@a8960
+       8   0.2%  95.5%      162   3.1% operator new@@GLIBCXX_3.4
+       7   0.1%  95.6%       11   0.2% queen::routes::::append_json_escaped
+       7   0.1%  95.8%      156   3.0% queen::routes::::handle_push_simd
+       7   0.1%  95.9%      102   2.0% std::_Rb_tree::_M_emplace_hint_unique [clone .isra.0]
+       7   0.1%  96.0%        7   0.1% std::_Rb_tree_increment@@GLIBCXX_3.4@c5540
+       6   0.1%  96.1%      435   8.4% queen::Queen::_process_slot_result
+       6   0.1%  96.3%        6   0.1% read@@GLIBC_2.17
+       5   0.1%  96.4%        5   0.1% 0x0000ffff85006360
+
+### Bucketed CPU attribution (sum of flat %)
+------------------------------------------------------------------
+  JSON    (nlohmann parse/dump/lexer/serialize) :   56.6 %
+  UUID    (generate_uuid + stringstream fmt)    :    0.1 %
+  LOCK    (mutex/futex contention)              :    0.1 %
+  ALLOC   (new/delete/malloc, mostly JSON-driven):    3.6 %
+  IO/sys  (send/recv/epoll/timer/libpq)         :   10.3 %
+  other                                         :   27.8 %
+
+  NOTE: buckets are regex heuristics over flat%. ALLOC is largely
+        JSON-DOM-driven, so JSON+ALLOC approximates the realistic
+        upper bound on JSON-attributable CPU.
+
+### Line-level cost inside the UUID generator (stringstream hotspot)
+------------------------------------------------------------------
+(skipped; unset SKIP_LINE_LEVEL to enable the slow addr2line listing)
+
+### Collapsed stacks (for flamegraph)
+------------------------------------------------------------------
+(set COLLAPSED_OUT=path to emit collapsed stacks for a flamegraph)

@@ -108,13 +108,25 @@ private:
     mutable std::mutex registry_mutex_;
     
     std::string generate_uuid() const;
-    
+
+    // Shared delivery: writes `json_str` (already serialized; empty => 204-style
+    // end()) to the registered response, with small/large (chunked) handling.
+    bool deliver_string(const std::string& request_id, std::string json_str, int status_code);
+
 public:
     std::string register_response(uWS::HttpResponse<false>* res, int worker_id, 
                                   AbortCallback on_abort = nullptr);
     
     bool send_response(const std::string& request_id, const nlohmann::json& data, 
                       bool is_error = false, int status_code = 200);
+
+    /**
+     * Deliver an already-serialized JSON string as the response body, skipping
+     * the nlohmann parse+dump round-trip. Used by hot paths that pass the
+     * stored-procedure result straight through (Stage 2 raw result pass-through).
+     */
+    bool send_response_raw(const std::string& request_id, std::string json_body,
+                           int status_code = 200);
     
     /**
      * Check if a request is still valid (not aborted)

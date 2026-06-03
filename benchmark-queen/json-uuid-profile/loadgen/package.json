@@ -1,0 +1,14 @@
+{
+  "name": "queen-json-uuid-loadgen",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Push load generator for the JSON/UUID profiling harness",
+  "dependencies": {
+    "autocannon": "^8.0.0",
+    "axios": "^1.7.2"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
