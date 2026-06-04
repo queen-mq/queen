@@ -453,6 +453,7 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
                     global_system_thread_pool,
                     config.jobs.retention_interval,
                     config.jobs.retention_batch_size,
+                    config.jobs.retention_parallelism,
                     config.jobs.partition_cleanup_days,
                     config.jobs.metrics_retention_days
                 );

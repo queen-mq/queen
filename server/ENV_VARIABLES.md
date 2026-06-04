@@ -195,9 +195,18 @@ Variable pattern: `QUEEN_<TYPE>_<KNOB>`.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `RETENTION_INTERVAL` | int | 300000 | Retention service interval (ms) |
-| `RETENTION_BATCH_SIZE` | int | 1000 | Retention batch size |
+| `RETENTION_BATCH_SIZE` | int | 1000 | Retention batch size (rows per DELETE) |
+| `RETENTION_PARALLELISM` | int | 1 | Parallel delete connections for retention. `1` = sequential (legacy). Raise (e.g. 4–8) for high sustained throughput so retention keeps the `messages` table bounded; partitions are sharded across workers via a work-stealing cursor. Each worker uses one connection from `DB_POOL_SIZE`, so keep `RETENTION_PARALLELISM` well below the pool size. |
 | `PARTITION_CLEANUP_DAYS` | int | 30 | Days before partition cleanup |
 | `METRICS_RETENTION_DAYS` | int | 90 | Days to keep metrics data |
+
+> **High-throughput tuning note:** sustained ingest above the retention delete
+> rate makes the `messages` table grow until it exceeds RAM, after which
+> throughput collapses (cold-page reads on the dedup index + autovacuum). Two
+> levers: raise `RETENTION_PARALLELISM` (4–8), and size Postgres `max_wal_size`
+> generously (e.g. 64–96 GB) — the default 16 GB triggers ~per-minute checkpoints
+> whose full-page-image WAL roughly triples write volume at ~120k msg/s. See
+> `benchmark-queen/2026-06-04/SUSTAINED-SOAK-FINDINGS.md`.
 
 ### Eviction Service
 | Variable | Type | Default | Description |

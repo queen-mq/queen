@@ -1,0 +1,20 @@
+{"role":"consumer","event":"start","queues":["bench-hi-part-100"],"queueCount":1,"consumerGroup":null,"numWorkers":2,"conns":50,"duration":300,"batchSize":100,"timestamp":"2026-06-04T09:18:42.058Z"}
+{
+  "role": "consumer",
+  "event": "result",
+  "consumerGroup": null,
+  "totalRequests": 629331,
+  "reqPerSec": 2098,
+  "maxMsgPerSecCeiling": 209800,
+  "latency": {
+    "p50": 21,
+    "p90": 137,
+    "p99": 269,
+    "avg": 47.165,
+    "max": 5284
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 300
+}

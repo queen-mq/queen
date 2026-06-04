@@ -1,0 +1,20 @@
+{"role":"consumer","event":"start","queues":["bench-q-10-1","bench-q-10-2","bench-q-10-3","bench-q-10-4","bench-q-10-5","bench-q-10-6","bench-q-10-7","bench-q-10-8","bench-q-10-9","bench-q-10-10"],"queueCount":10,"consumerGroup":null,"numWorkers":1,"conns":50,"duration":300,"batchSize":100,"timestamp":"2026-06-04T10:01:36.848Z"}
+{
+  "role": "consumer",
+  "event": "result",
+  "consumerGroup": null,
+  "totalRequests": 101575,
+  "reqPerSec": 339,
+  "maxMsgPerSecCeiling": 33900,
+  "latency": {
+    "p50": 26,
+    "p90": 38,
+    "p99": 164,
+    "avg": 54.39,
+    "max": 9356
+  },
+  "errors": 902,
+  "non2xx": 0,
+  "timeouts": 902,
+  "durationSec": 300
+}

@@ -287,6 +287,7 @@ struct JobsConfig {
     // Retention service
     int retention_interval = 300000;     // 5 minutes
     int retention_batch_size = 1000;
+    int retention_parallelism = 1;       // # of parallel delete connections (1 = sequential, legacy behavior)
     int partition_cleanup_days = 30;
     
     // Metrics retention (messages_consumed table)
@@ -316,6 +317,7 @@ struct JobsConfig {
         
         config.retention_interval = get_env_int("RETENTION_INTERVAL", 300000);
         config.retention_batch_size = get_env_int("RETENTION_BATCH_SIZE", 1000);
+        config.retention_parallelism = get_env_int("RETENTION_PARALLELISM", 1);
         config.partition_cleanup_days = get_env_int("PARTITION_CLEANUP_DAYS", 30);
         
         config.metrics_retention_days = get_env_int("METRICS_RETENTION_DAYS", 90);

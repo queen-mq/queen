@@ -74,6 +74,20 @@ ALTER TABLE queen.messages ADD COLUMN IF NOT EXISTS producer_sub TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS messages_partition_transaction_unique 
     ON queen.messages(partition_id, transaction_id);
 
+-- Aggressive per-table autovacuum for queen.messages. Under high-throughput
+-- retention (insert-new / delete-old churn) the default scale-factor lets dead
+-- tuples accumulate faster than they're reclaimed, the heap grows past RAM, and
+-- both the dedup-unique probe (on insert) and retention DELETEs start hitting
+-- cold pages -> throughput collapses. These settings keep vacuum on pace with
+-- parallel retention so the heap plateaus via slot reuse. Idempotent; storage
+-- params only (no table rewrite, safe on existing installations).
+ALTER TABLE queen.messages SET (
+    autovacuum_vacuum_scale_factor = 0.02,
+    autovacuum_vacuum_insert_scale_factor = 0.05,
+    autovacuum_vacuum_cost_limit = 4000,
+    autovacuum_vacuum_cost_delay = 0
+);
+
 CREATE TABLE IF NOT EXISTS queen.partition_consumers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     partition_id UUID REFERENCES queen.partitions(id) ON DELETE CASCADE,
