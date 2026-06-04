@@ -1,0 +1,30 @@
+>> run: cmp-0155-20260603-225846 (QUEEN)
+>> conns(per role)=100 (=2x50) msgsPerPush=10 popBatch=100 partitions=1000 duration=25s
+>> bringing up Queen stack (broker + postgres)…
+ Network queen-bench_default  Creating
+ Network queen-bench_default  Created
+ Container queen-pg  Creating
+ Container queen-pg  Created
+ Container queen-broker  Creating
+ Container queen-broker  Created
+ Container queen-pg  Starting
+ Container queen-pg  Started
+ Container queen-pg  Waiting
+ Container queen-pg  Healthy
+ Container queen-broker  Starting
+ Container queen-broker  Started
+>> waiting for Queen broker…. ready
+>> starting metrics sampler…
+>> starting producer (100 conns)…
+>> starting consumer (100 conns, batch=100)…
+>> running for 25s…
+
+==================== SUMMARY (cmp-0155-20260603-225846 / QUEEN) ====================
+./run-queen.sh: line 104: 49151 Terminated: 15          bash sample-metrics.sh "$OUTDIR/metrics.csv" 1 queen-pg queen messages
+PRODUCER:  push msg/s=8590   p50=41.00ms  p99=130.00ms
+CONSUMER:  pop  msg/s=8545    p50=132.00ms  p99=1708.50ms
+PG BACKENDS: avg_active=2.4  peak_active=5  peak_total=41
+PG CHURN:    peak_dead=0  upd=0  del=0  autovacuum_runs=3
+artifacts:   results/cmp-0155-20260603-225846/
+====================================================================
+Tear down with:  docker compose -f queen-compose.yml down -v

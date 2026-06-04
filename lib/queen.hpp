@@ -42,16 +42,14 @@
 
 namespace queen {
 
-// UUIDv7 generator - time-ordered UUIDs for proper message ordering
+// UUIDv7 generator - time-ordered UUIDs for proper message ordering.
+// Per-thread state (no global mutex); hand-rolled hex (no std::stringstream).
 inline std::string
 generate_uuidv7() {
-    static std::mutex uuid_mutex;
-    static uint64_t last_ms = 0;
-    static uint16_t sequence = 0;
-    static std::random_device rd;
-    static std::mt19937_64 gen(rd());
-
-    std::lock_guard<std::mutex> lock(uuid_mutex);
+    static thread_local uint64_t last_ms = 0;
+    static thread_local uint16_t sequence = 0;
+    static thread_local std::mt19937_64 gen(
+        (static_cast<uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}());
 
     auto now = std::chrono::system_clock::now();
     uint64_t current_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -86,14 +84,15 @@ generate_uuidv7() {
     bytes[14] = (rand_data >> 8) & 0xFF;
     bytes[15] = rand_data & 0xFF;
 
-    std::stringstream ss;
-    ss << std::hex << std::setfill('0');
+    static const char hexd[] = "0123456789abcdef";
+    char buf[36];
+    int p = 0;
     for (int i = 0; i < 16; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) ss << '-';
-        ss << std::setw(2) << static_cast<int>(bytes[i]);
+        if (i == 4 || i == 6 || i == 8 || i == 10) buf[p++] = '-';
+        buf[p++] = hexd[bytes[i] >> 4];
+        buf[p++] = hexd[bytes[i] & 0x0F];
     }
-
-    return ss.str();
+    return std::string(buf, p);
 }
 
 // ============================================================================

@@ -1,0 +1,133 @@
+==================================================================
+ Profile: /profiles/queen.prof.0   (pprof: /usr/bin/google-pprof)
+==================================================================
+
+### Top 40 functions by self (flat) CPU
+------------------------------------------------------------------
+Total: 1671 samples
+    1012  60.6%  60.6%     1021  61.1% __send@GLIBC_2.17
+      92   5.5%  66.1%       92   5.5% __xpg_strerror_r@@GLIBC_2.17
+      67   4.0%  70.1%       70   4.2% simdjson::arm64::::stage1::json_structural_indexer::index
+      65   3.9%  74.0%       65   3.9% __recv@@GLIBC_PRIVATE
+      33   2.0%  75.9%       50   3.0% __default_morecore@GLIBC_2.17
+      29   1.7%  77.7%       29   1.7% epoll_pwait@@GLIBC_2.17
+      19   1.1%  78.8%       19   1.1% _init
+      15   0.9%  79.7%       16   1.0% timer_settime@GLIBC_2.17
+      14   0.8%  80.6%      114   6.8% queen::Queen::_fire_batched
+      13   0.8%  81.3%       13   0.8% __write@@GLIBC_2.17
+      13   0.8%  82.1%       18   1.1% queen::routes::::append_json_escaped
+      13   0.8%  82.9%     1029  61.6% uWS::AsyncSocket::write
+      12   0.7%  83.6%      998  59.7% bsd_send
+      12   0.7%  84.3%       34   2.0% free@@GLIBC_2.17
+      11   0.7%  85.0%       11   0.7% simdjson::arm64::dom_parser_implementation::stage2
+      10   0.6%  85.6%      112   6.7% queen::Queen::_process_results_simd
+      10   0.6%  86.2%       54   3.2% std::__cxx11::basic_string::_M_append@@GLIBCXX_3.4.21
+       9   0.5%  86.7%        9   0.5% std::__once_callable@@GLIBCXX_3.4.11
+       9   0.5%  87.3%     1008  60.3% us_socket_write
+       8   0.5%  87.7%        8   0.5% 0x0000ffff99c2d360
+       8   0.5%  88.2%        8   0.5% read@@GLIBC_2.17
+       7   0.4%  88.6%        9   0.5% __libc_alloca_cutoff@@GLIBC_PRIVATE
+       7   0.4%  89.0%        7   0.4% std::__cxx11::basic_string::push_back@@GLIBCXX_3.4.21
+       6   0.4%  89.4%        6   0.4% memcmp@@GLIBC_2.17
+       6   0.4%  89.8%      132   7.9% queen::routes::::handle_push_simd
+       5   0.3%  90.1%        5   0.3% std::__detail::_Map_base::operator[]@131230
+       4   0.2%  90.3%        4   0.2% __nss_database_lookup@GLIBC_2.17
+       4   0.2%  90.5%        4   0.2% epoll_ctl@@GLIBC_2.17
+       4   0.2%  90.8%        4   0.2% pthread_mutex_trylock@GLIBC_2.17
+       4   0.2%  91.0%        4   0.2% std::__cxx11::basic_string::basic_string [clone .constprop.0]
+       4   0.2%  91.3%        4   0.2% std::vector::~vector
+       4   0.2%  91.5%      364  21.8% uWS::HttpResponse::internalEnd
+       4   0.2%  91.7%        4   0.2% us_loop_ext
+       4   0.2%  92.0%        4   0.2% us_socket_context
+       3   0.2%  92.2%        3   0.2% 0x0000ffff99c2d310
+       3   0.2%  92.3%        3   0.2% pthread_rwlock_unlock@@GLIBC_2.34
+       3   0.2%  92.5%     1049  62.8% queen::ResponseRegistry::deliver_string
+       3   0.2%  92.7%        3   0.2% queen::caches::CachedQueueConfig::~CachedQueueConfig
+       3   0.2%  92.9%       50   3.0% queen::routes::::finish_push_submit
+       3   0.2%  93.1%        3   0.2% std::_Hash_bytes@@CXXABI_1.3.5
+       3   0.2%  93.2%        4   0.2% std::__cxx11::basic_string::_M_replace@@GLIBCXX_3.4.21
+
+### Bucketed CPU attribution (sum of flat %)
+------------------------------------------------------------------
+  JSON    (nlohmann parse/dump/lexer/serialize) :    0.2 %
+  UUID    (generate_uuid + stringstream fmt)    :    0.0 %
+  LOCK    (mutex/futex contention)              :    0.7 %
+  ALLOC   (new/delete/malloc, mostly JSON-driven):    3.1 %
+  IO/sys  (send/recv/epoll/timer/libpq)         :   68.6 %
+  other                                         :   28.8 %
+
+  NOTE: buckets are regex heuristics over flat%. ALLOC is largely
+        JSON-DOM-driven, so JSON+ALLOC approximates the realistic
+        upper bound on JSON-attributable CPU.
+
+### Line-level cost inside the UUID generator (stringstream hotspot)
+------------------------------------------------------------------
+ROUTINE ====================== queen::AsyncQueueManager::generate_uuid[abi:cxx11] in /usr/build/server/src/managers/async_queue_manager.cpp
+     0      1 Total samples (flat / cumulative)
+     .      .   32:     }
+     .      .   33: }
+     .      .   34: 
+     .      .   35: // --- UUID Generation (same as QueueManager) ---
+     .      .   36: 
+---
+     .      .   37: std::string AsyncQueueManager::generate_uuid() {
+     .      .   38:     // Per-thread state: no global mutex (handlers run one-per-worker-thread).
+     .      .   39:     // Monotonicity is per-thread; uniqueness across threads is guaranteed by the
+     .      .   40:     // 62 random bits. Hand-rolled hex avoids std::stringstream.
+     .      .   41:     static thread_local uint64_t last_ms = 0;
+     .      .   42:     static thread_local uint16_t sequence = 0;
+     .      .   43:     static thread_local std::mt19937_64 gen(
+     .      .   44:         (static_cast<uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}());
+     .      .   45: 
+     .      1   46:     auto now = std::chrono::system_clock::now();
+     .      .   47:     uint64_t current_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+     .      .   48: 
+     .      .   49:     if (current_ms <= last_ms) {
+     .      .   50:         sequence++;
+     .      .   51:     } else {
+     .      .   52:         last_ms = current_ms;
+     .      .   53:         sequence = 0;
+     .      .   54:     }
+     .      .   55: 
+     .      .   56:     std::array<uint8_t, 16> bytes;
+     .      .   57:     bytes[0] = (last_ms >> 40) & 0xFF;
+     .      .   58:     bytes[1] = (last_ms >> 32) & 0xFF;
+     .      .   59:     bytes[2] = (last_ms >> 24) & 0xFF;
+     .      .   60:     bytes[3] = (last_ms >> 16) & 0xFF;
+     .      .   61:     bytes[4] = (last_ms >> 8) & 0xFF;
+     .      .   62:     bytes[5] = last_ms & 0xFF;
+     .      .   63: 
+     .      .   64:     uint16_t sequence_and_version = sequence & 0x0FFF;
+     .      .   65:     bytes[6] = 0x70 | (sequence_and_version >> 8);
+     .      .   66:     bytes[7] = sequence_and_version & 0xFF;
+     .      .   67: 
+     .      .   68:     uint64_t rand_data = gen();
+     .      .   69:     bytes[8]  = 0x80 | ((rand_data >> 56) & 0x3F);
+     .      .   70:     bytes[9]  = (rand_data >> 48) & 0xFF;
+     .      .   71:     bytes[10] = (rand_data >> 40) & 0xFF;
+     .      .   72:     bytes[11] = (rand_data >> 32) & 0xFF;
+     .      .   73:     bytes[12] = (rand_data >> 24) & 0xFF;
+     .      .   74:     bytes[13] = (rand_data >> 16) & 0xFF;
+     .      .   75:     bytes[14] = (rand_data >> 8) & 0xFF;
+     .      .   76:     bytes[15] = rand_data & 0xFF;
+     .      .   77: 
+     .      .   78:     static const char hexd[] = "0123456789abcdef";
+     .      .   79:     char buf[36];
+     .      .   80:     int p = 0;
+     .      .   81:     for (int i = 0; i < 16; ++i) {
+     .      .   82:         if (i == 4 || i == 6 || i == 8 || i == 10) buf[p++] = '-';
+     .      .   83:         buf[p++] = hexd[bytes[i] >> 4];
+     .      .   84:         buf[p++] = hexd[bytes[i] & 0x0F];
+     .      .   85:     }
+     .      .   86:     return std::string(buf, p);
+     .      .   87: }
+---
+     .      .   88: 
+     .      .   89: std::string AsyncQueueManager::generate_transaction_id() {
+     .      .   90:     return generate_uuid();
+     .      .   91: }
+     .      .   92: 
+
+### Collapsed stacks (for flamegraph)
+------------------------------------------------------------------
+(set COLLAPSED_OUT=path to emit collapsed stacks for a flamegraph)

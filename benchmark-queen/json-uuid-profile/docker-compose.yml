@@ -64,12 +64,6 @@ services:
       DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
       SIDECAR_POOL_SIZE: ${SIDECAR_POOL_SIZE:-30}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Stage 1: simdjson + raw payload pass-through on POST /api/v1/push.
-      # 0 = legacy nlohmann path (baseline), 1 = simd fast path (treatment).
-      QUEEN_PUSH_SIMD: ${QUEEN_PUSH_SIMD:-0}
-      # Stage 2: stream the stored-procedure result straight to the client on the
-      # success path (skip nlohmann parse + re-serialize). Independent of Stage 1.
-      QUEEN_PUSH_RAW_RESULT: ${QUEEN_PUSH_RAW_RESULT:-0}
     ports:
       - "${BROKER_HOST_PORT:-6634}:6632"
     volumes:

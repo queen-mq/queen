@@ -7,8 +7,10 @@
 #include "queen/shared_state_manager.hpp"
 #include "queen/encryption.hpp"
 #include "queen.hpp"  // libqueen
+#include "simdjson.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
+#include <string>
 
 // External globals (declared in acceptor_server.cpp)
 namespace queen {
@@ -18,6 +20,95 @@ extern std::shared_ptr<SharedStateManager> global_shared_state;
 
 namespace queen {
 namespace routes {
+
+namespace {
+
+// Decrypt encrypted message payloads in place (only when encryption is enabled).
+void pop_decrypt_messages(nlohmann::json& response) {
+    if (!response.contains("messages") || !response["messages"].is_array()) return;
+    EncryptionService* enc_service = get_encryption_service();
+    if (!enc_service || !enc_service->is_enabled()) return;
+    for (auto& msg : response["messages"]) {
+        if (msg.contains("data") && msg["data"].is_object()) {
+            auto& data = msg["data"];
+            if (data.contains("encrypted") && data.contains("iv") && data.contains("authTag")) {
+                try {
+                    EncryptionService::EncryptedData enc_data{
+                        data["encrypted"].get<std::string>(),
+                        data["iv"].get<std::string>(),
+                        data["authTag"].get<std::string>()
+                    };
+                    auto decrypted = enc_service->decrypt_payload(enc_data);
+                    if (decrypted.has_value()) msg["data"] = nlohmann::json::parse(decrypted.value());
+                } catch (...) {}
+            }
+        }
+    }
+}
+
+// True if the "messages" array inside the raw result object is empty (tolerant
+// of JSONB whitespace).
+bool pop_messages_empty(std::string_view r) {
+    size_t m = r.find("\"messages\"");
+    if (m == std::string_view::npos) return true;
+    size_t b = r.find('[', m);
+    if (b == std::string_view::npos) return true;
+    size_t i = r.find_first_not_of(" \t\r\n", b + 1);
+    return (i == std::string_view::npos || r[i] == ']');
+}
+
+// Deliver a POP result. libqueen returns [{idx, result:{...}}]; the client gets
+// the inner `result` object. With encryption OFF (the common case) we slice that
+// object out RAW with simdjson and stream it — no nlohmann parse/dump. With
+// encryption ON (rare) we fall back to nlohmann so payloads can be decrypted.
+void pop_deliver(int worker_id, const std::string& request_id, std::string result) {
+    EncryptionService* enc = get_encryption_service();
+    bool enc_on = enc && enc->is_enabled();
+
+    if (!enc_on) {
+        thread_local simdjson::ondemand::parser parser;
+        simdjson::padded_string padded(result);
+        simdjson::ondemand::document doc;
+        simdjson::ondemand::array arr;
+        if (!parser.iterate(padded).get(doc) && !doc.get_array().get(arr)) {
+            for (auto el : arr) {
+                simdjson::ondemand::object o;
+                if (el.get_object().get(o)) break;
+                simdjson::ondemand::value rv;
+                if (o["result"].get(rv) == simdjson::SUCCESS) {
+                    std::string_view rraw;
+                    if (rv.raw_json().get(rraw) == simdjson::SUCCESS) {
+                        int status = pop_messages_empty(rraw) ? 204 : 200;
+                        worker_response_registries[worker_id]->send_response_raw(
+                            request_id, std::string(rraw), status);
+                        return;
+                    }
+                }
+                break;  // only the first (and only) element
+            }
+        }
+        // any parse hiccup falls through to the nlohmann path
+    }
+
+    nlohmann::json json_response;
+    int status_code = 200;
+    bool is_error = false;
+    try {
+        json_response = nlohmann::json::parse(result);
+        if (json_response.is_array() && !json_response.empty() && json_response[0].contains("result")) {
+            json_response = json_response[0]["result"];
+        }
+        pop_decrypt_messages(json_response);
+        if (json_response.contains("messages") && json_response["messages"].empty()) status_code = 204;
+    } catch (const std::exception& e) {
+        json_response = {{"error", e.what()}};
+        status_code = 500;
+        is_error = true;
+    }
+    worker_response_registries[worker_id]->send_response(request_id, json_response, is_error, status_code);
+}
+
+} // namespace
 
 void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
     // SPECIFIC POP from queue/partition
@@ -120,64 +211,10 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
             // Capture context for callback
             auto worker_loop = ctx.worker_loop;
             auto worker_id = ctx.worker_id;
-            
-            // Helper to decrypt messages
-            auto decrypt_messages = [](nlohmann::json& response) {
-                if (!response.contains("messages") || !response["messages"].is_array()) return;
-                queen::EncryptionService* enc_service = queen::get_encryption_service();
-                if (!enc_service || !enc_service->is_enabled()) return;
-                
-                for (auto& msg : response["messages"]) {
-                    if (msg.contains("data") && msg["data"].is_object()) {
-                        auto& data = msg["data"];
-                        if (data.contains("encrypted") && data.contains("iv") && data.contains("authTag")) {
-                            try {
-                                queen::EncryptionService::EncryptedData enc_data{
-                                    data["encrypted"].get<std::string>(),
-                                    data["iv"].get<std::string>(),
-                                    data["authTag"].get<std::string>()
-                                };
-                                auto decrypted = enc_service->decrypt_payload(enc_data);
-                                if (decrypted.has_value()) {
-                                    msg["data"] = nlohmann::json::parse(decrypted.value());
-                                }
-                            } catch (...) {}
-                        }
-                    }
-                }
-            };
-            
-            // Submit to Queen
-            ctx.queen->submit(std::move(job_req), [worker_loop, worker_id, request_id, decrypt_messages](std::string result) {
-                worker_loop->defer([result = std::move(result), worker_id, request_id, decrypt_messages]() {
-                    nlohmann::json json_response;
-                    int status_code = 200;
-                    bool is_error = false;
-                    
-                    try {
-                        json_response = nlohmann::json::parse(result);
-                        
-                        // Extract result from array format
-                        if (json_response.is_array() && !json_response.empty() && 
-                            json_response[0].contains("result")) {
-                            json_response = json_response[0]["result"];
-                        }
-                        
-                        // Decrypt any encrypted payloads
-                        decrypt_messages(json_response);
-                        
-                        // Set status code based on whether messages were returned
-                        if (json_response.contains("messages") && json_response["messages"].empty()) {
-                            status_code = 204;  // No Content
-                        }
-                    } catch (const std::exception& e) {
-                        json_response = {{"error", e.what()}};
-                        status_code = 500;
-                        is_error = true;
-                    }
-                    
-                    worker_response_registries[worker_id]->send_response(
-                        request_id, json_response, is_error, status_code);
+
+            ctx.queen->submit(std::move(job_req), [worker_loop, worker_id, request_id](std::string result) {
+                worker_loop->defer([result = std::move(result), worker_id, request_id]() {
+                    pop_deliver(worker_id, request_id, std::move(result));
                 });
             });
             
@@ -281,64 +318,10 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
             // Capture context for callback
             auto worker_loop = ctx.worker_loop;
             auto worker_id = ctx.worker_id;
-            
-            // Helper to decrypt messages
-            auto decrypt_messages = [](nlohmann::json& response) {
-                if (!response.contains("messages") || !response["messages"].is_array()) return;
-                queen::EncryptionService* enc_service = queen::get_encryption_service();
-                if (!enc_service || !enc_service->is_enabled()) return;
-                
-                for (auto& msg : response["messages"]) {
-                    if (msg.contains("data") && msg["data"].is_object()) {
-                        auto& data = msg["data"];
-                        if (data.contains("encrypted") && data.contains("iv") && data.contains("authTag")) {
-                            try {
-                                queen::EncryptionService::EncryptedData enc_data{
-                                    data["encrypted"].get<std::string>(),
-                                    data["iv"].get<std::string>(),
-                                    data["authTag"].get<std::string>()
-                                };
-                                auto decrypted = enc_service->decrypt_payload(enc_data);
-                                if (decrypted.has_value()) {
-                                    msg["data"] = nlohmann::json::parse(decrypted.value());
-                                }
-                            } catch (...) {}
-                        }
-                    }
-                }
-            };
-            
-            // Submit to Queen
-            ctx.queen->submit(std::move(job_req), [worker_loop, worker_id, request_id, decrypt_messages](std::string result) {
-                worker_loop->defer([result = std::move(result), worker_id, request_id, decrypt_messages]() {
-                    nlohmann::json json_response;
-                    int status_code = 200;
-                    bool is_error = false;
-                    
-                    try {
-                        json_response = nlohmann::json::parse(result);
-                        
-                        // Extract result from array format
-                        if (json_response.is_array() && !json_response.empty() && 
-                            json_response[0].contains("result")) {
-                            json_response = json_response[0]["result"];
-                        }
-                        
-                        // Decrypt any encrypted payloads
-                        decrypt_messages(json_response);
-                        
-                        // Set status code based on whether messages were returned
-                        if (json_response.contains("messages") && json_response["messages"].empty()) {
-                            status_code = 204;
-                        }
-                    } catch (const std::exception& e) {
-                        json_response = {{"error", e.what()}};
-                        status_code = 500;
-                        is_error = true;
-                    }
-                    
-                    worker_response_registries[worker_id]->send_response(
-                        request_id, json_response, is_error, status_code);
+
+            ctx.queen->submit(std::move(job_req), [worker_loop, worker_id, request_id](std::string result) {
+                worker_loop->defer([result = std::move(result), worker_id, request_id]() {
+                    pop_deliver(worker_id, request_id, std::move(result));
                 });
             });
             

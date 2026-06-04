@@ -35,14 +35,14 @@ AsyncQueueManager::AsyncQueueManager(std::shared_ptr<AsyncDbPool> async_db_pool,
 // --- UUID Generation (same as QueueManager) ---
 
 std::string AsyncQueueManager::generate_uuid() {
-    static std::mutex uuid_mutex;
-    static uint64_t last_ms = 0;
-    static uint16_t sequence = 0;
-    static std::random_device rd;
-    static std::mt19937_64 gen(rd());
-    
-    std::lock_guard<std::mutex> lock(uuid_mutex);
-    
+    // Per-thread state: no global mutex (handlers run one-per-worker-thread).
+    // Monotonicity is per-thread; uniqueness across threads is guaranteed by the
+    // 62 random bits. Hand-rolled hex avoids std::stringstream.
+    static thread_local uint64_t last_ms = 0;
+    static thread_local uint16_t sequence = 0;
+    static thread_local std::mt19937_64 gen(
+        (static_cast<uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}());
+
     auto now = std::chrono::system_clock::now();
     uint64_t current_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
@@ -50,12 +50,10 @@ std::string AsyncQueueManager::generate_uuid() {
         sequence++;
     } else {
         last_ms = current_ms;
-        sequence = 0; 
+        sequence = 0;
     }
 
     std::array<uint8_t, 16> bytes;
-
-    // 48-bit unix_ts_ms (big-endian)
     bytes[0] = (last_ms >> 40) & 0xFF;
     bytes[1] = (last_ms >> 32) & 0xFF;
     bytes[2] = (last_ms >> 24) & 0xFF;
@@ -63,15 +61,13 @@ std::string AsyncQueueManager::generate_uuid() {
     bytes[4] = (last_ms >> 8) & 0xFF;
     bytes[5] = last_ms & 0xFF;
 
-    // 4-bit version (0111) and 12-bit sequence
     uint16_t sequence_and_version = sequence & 0x0FFF;
     bytes[6] = 0x70 | (sequence_and_version >> 8);
     bytes[7] = sequence_and_version & 0xFF;
 
-    // 2-bit variant (10) and 62-bits of random data
     uint64_t rand_data = gen();
-    bytes[8] = 0x80 | ((rand_data >> 56) & 0x3F);
-    bytes[9] = (rand_data >> 48) & 0xFF;
+    bytes[8]  = 0x80 | ((rand_data >> 56) & 0x3F);
+    bytes[9]  = (rand_data >> 48) & 0xFF;
     bytes[10] = (rand_data >> 40) & 0xFF;
     bytes[11] = (rand_data >> 32) & 0xFF;
     bytes[12] = (rand_data >> 24) & 0xFF;
@@ -79,15 +75,15 @@ std::string AsyncQueueManager::generate_uuid() {
     bytes[14] = (rand_data >> 8) & 0xFF;
     bytes[15] = rand_data & 0xFF;
 
-    // Format to string
-    std::stringstream ss;
-    ss << std::hex << std::setfill('0');
+    static const char hexd[] = "0123456789abcdef";
+    char buf[36];
+    int p = 0;
     for (int i = 0; i < 16; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) ss << '-';
-        ss << std::setw(2) << static_cast<int>(bytes[i]);
+        if (i == 4 || i == 6 || i == 8 || i == 10) buf[p++] = '-';
+        buf[p++] = hexd[bytes[i] >> 4];
+        buf[p++] = hexd[bytes[i] & 0x0F];
     }
-    
-    return ss.str();
+    return std::string(buf, p);
 }
 
 std::string AsyncQueueManager::generate_transaction_id() {

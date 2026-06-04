@@ -7,35 +7,26 @@
 namespace queen {
 
 std::string ResponseRegistry::generate_uuid() const {
-    // Simple UUID generation for request IDs
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937 gen(rd());
-    static thread_local std::uniform_int_distribution<> dis(0, 15);
-    static thread_local std::uniform_int_distribution<> dis2(8, 11);
-    
-    std::stringstream ss;
-    ss << std::hex;
-    for (int i = 0; i < 8; i++) {
-        ss << dis(gen);
+    // UUIDv4 request id. Per-thread RNG, hand-rolled hex (no std::stringstream).
+    static thread_local std::mt19937_64 gen(
+        (static_cast<uint64_t>(std::random_device{}()) << 32) ^ std::random_device{}());
+    uint64_t a = gen(), b = gen();
+    uint8_t bytes[16];
+    for (int i = 0; i < 8; ++i) {
+        bytes[i]     = (a >> (8 * (7 - i))) & 0xFF;
+        bytes[8 + i] = (b >> (8 * (7 - i))) & 0xFF;
     }
-    ss << "-";
-    for (int i = 0; i < 4; i++) {
-        ss << dis(gen);
+    bytes[6] = 0x40 | (bytes[6] & 0x0F);  // version 4
+    bytes[8] = 0x80 | (bytes[8] & 0x3F);  // variant 10xx
+    static const char hexd[] = "0123456789abcdef";
+    char buf[36];
+    int p = 0;
+    for (int i = 0; i < 16; ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) buf[p++] = '-';
+        buf[p++] = hexd[bytes[i] >> 4];
+        buf[p++] = hexd[bytes[i] & 0x0F];
     }
-    ss << "-4";
-    for (int i = 0; i < 3; i++) {
-        ss << dis(gen);
-    }
-    ss << "-";
-    ss << dis2(gen);
-    for (int i = 0; i < 3; i++) {
-        ss << dis(gen);
-    }
-    ss << "-";
-    for (int i = 0; i < 12; i++) {
-        ss << dis(gen);
-    }
-    return ss.str();
+    return std::string(buf, p);
 }
 
 std::string ResponseRegistry::register_response(uWS::HttpResponse<false>* res, int worker_id, 

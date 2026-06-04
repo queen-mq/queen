@@ -28,26 +28,6 @@ namespace routes {
 
 namespace {
 
-// Whether the simdjson fast path is enabled (QUEEN_PUSH_SIMD=1). Read once.
-bool push_simd_enabled() {
-    static const bool enabled = []() {
-        const char* e = std::getenv("QUEEN_PUSH_SIMD");
-        return e && (std::strcmp(e, "1") == 0 || std::strcmp(e, "true") == 0);
-    }();
-    return enabled;
-}
-
-// Whether raw result pass-through is enabled (QUEEN_PUSH_RAW_RESULT=1). On the
-// success path this skips re-parsing + re-serializing the stored-procedure
-// result and streams it straight to the client. Read once.
-bool push_raw_result_enabled() {
-    static const bool enabled = []() {
-        const char* e = std::getenv("QUEEN_PUSH_RAW_RESULT");
-        return e && (std::strcmp(e, "1") == 0 || std::strcmp(e, "true") == 0);
-    }();
-    return enabled;
-}
-
 // Append `s` as a JSON string literal (with surrounding quotes) to `out`,
 // escaping the characters JSON requires. Multi-byte UTF-8 passes through.
 void append_json_escaped(std::string& out, std::string_view s) {
@@ -116,12 +96,12 @@ void finish_push_submit(uWS::HttpResponse<false>* res,
             // for safe response delivery.
             worker_loop->defer([result = std::move(result), worker_id, request_id,
                                 push_failover_storage, file_buffer, notify_pairs]() {
-                // Stage 2 fast path: a successful push procedure returns a JSON
-                // array (the per-message status). Detect that cheaply (first
-                // non-ws char is '[') and stream the result string straight to
-                // the client, skipping the nlohmann parse + re-serialize. The
-                // DB-error sentinel is an object ('{') and falls through.
-                if (push_raw_result_enabled()) {
+                // A successful push procedure returns a JSON array (the
+                // per-message status). Detect that cheaply (first non-ws char is
+                // '[') and stream the result straight to the client, skipping
+                // the nlohmann parse + re-serialize. The DB-error sentinel is an
+                // object ('{') and falls through to the failover handling below.
+                {
                     size_t p = result.find_first_not_of(" \t\r\n");
                     if (p != std::string::npos && result[p] == '[') {
                         if (push_failover_storage) {
@@ -631,23 +611,15 @@ void setup_push_routes(uWS::App* app, const RouteContext& ctx) {
         std::optional<auth::JwtClaims> auth_claims;
         REQUIRE_AUTH_WITH_CLAIMS(res, req, ctx, auth::AccessLevel::WRITE_ONLY, auth_claims);
 
-        if (push_simd_enabled()) {
-            read_body_raw(res,
-                [res, ctx, auth_claims = std::move(auth_claims)](std::string& body) {
-                    handle_push_simd(res, ctx, auth_claims, body);
-                },
-                [res](const std::string& error) {
-                    send_error_response(res, error, 400);
-                });
-        } else {
-            read_json_body(res,
-                [res, ctx, auth_claims = std::move(auth_claims)](const nlohmann::json& body) {
-                    handle_push_json(res, ctx, auth_claims, body);
-                },
-                [res](const std::string& error) {
-                    send_error_response(res, error, 400);
-                });
-        }
+        // simdjson ingest + raw payload pass-through is the only path.
+        // (handle_push_simd falls back to handle_push_json for maintenance mode.)
+        read_body_raw(res,
+            [res, ctx, auth_claims = std::move(auth_claims)](std::string& body) {
+                handle_push_simd(res, ctx, auth_claims, body);
+            },
+            [res](const std::string& error) {
+                send_error_response(res, error, 400);
+            });
     });
 }
 

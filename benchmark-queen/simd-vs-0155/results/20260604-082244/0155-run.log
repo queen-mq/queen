@@ -1,0 +1,20 @@
+>> run: cmp-0155-20260604-082244 (QUEEN)
+>> conns(per role)=100 (=2x50) msgsPerPush=10 popBatch=100 partitions=1000 duration=60s
+>> bringing up Queen stack (broker + postgres)…
+ Network queen-bench_default  Creating
+ Network queen-bench_default  Created
+ Container queen-pg  Creating
+ Container queen-pg  Created
+ Container queen-broker  Creating
+ Container queen-broker  Created
+ Container queen-pg  Starting
+ Container queen-pg  Started
+ Container queen-pg  Waiting
+ Container queen-pg  Healthy
+ Container queen-broker  Starting
+ Container queen-broker  Started
+>> waiting for Queen broker…. ready
+>> starting metrics sampler…
+>> starting producer (100 conns)…
+>> starting consumer (100 conns, batch=100)…
+>> running for 60s…

@@ -313,6 +313,81 @@ follow-ups) and **STREAMS_CYCLE** result metrics — lower-frequency paths. (The
 dashboard/services layer in `server/src/services/`* still uses nlohmann; that's
 outside libqueen.)
 
+## Head-to-head vs released 0.15.5 (2026-06-04)
+
+`queen-mq:simd` (this branch, production `-O3` build) vs `smartnessai/queen-mq:0.15.5`
+(arm64-native, no emulation), identical PG/resources/workload via
+`benchmark-queen/simd-vs-0155/`.
+
+**Broker-capped (1 CPU, 1 worker, 25s)** — broker is the bottleneck → throughput
+signal (client-side, authoritative):
+
+| metric | 0.15.5 | simd |
+|--------|:--:|:--:|
+| consumer req/s | 404 | **469 (+16%)** |
+| consumer p99 | 1708 ms | **1330 ms (−22%)** |
+| producer push p99 | 130 ms | **92 ms (−29%)** |
+| broker CPU (of 1) | 89% | **66% (−26%)** |
+
+**Equal resources (3 CPU, 40s, closed-loop `queen-bench.js`)** — broker is
+PG-bound → CPU signal:
+
+| ver | push msg/s | pop msg/s | cons p99 | broker CPU% |
+|-----|:--:|:--:|:--:|:--:|
+| 0.15.5 | 19,251 | 19,251 | 88.8 ms | **110** |
+| **simd** | **20,191** | **20,089** | **82.6 ms** | **72** |
+
+→ At equal resources, ~+5% throughput and **−35% broker CPU** (0.72 vs 1.10
+cores) with lower tail latency; when the broker is the bottleneck, **+16%**
+consumer throughput. Exactly the predicted shape: PG-bound → broker-CPU win;
+broker-bound → throughput win. Zero client errors in all runs.
+
+### Note on `/api/v1/status` = 0
+
+The auto-summary's status-derived throughput read 0 for short/under-load runs.
+This is **StatsService aggregation lag** (`stats_interval_ms=10000`, the
+background thread is starved under a 1-CPU cap / sustained load) — it affects
+**0.15.5 identically**, and an idle 0.15.5 broker reported `messages.total=338710`
+correctly. NOT a regression from the simdjson conversion (the status SP reads
+`queen.*` tables the conversion never touches). Client-side numbers above are
+the authoritative measurement.
+
+## Flag removal + pop raw-result + UUID (2026-06-04)
+
+Three follow-ups from the profile, then re-measured under load:
+
+1. **Removed the `QUEEN_PUSH_SIMD` / `QUEEN_PUSH_RAW_RESULT` flags** — simd ingest +
+   raw-result are now the **only** push path (dead nlohmann dispatch removed;
+   `handle_push_json` kept solely as the maintenance-mode fallback).
+2. **Pop route raw pass-through** (`pop_deliver`): slice the inner `result`
+   object out of libqueen's output with simdjson and stream it; nlohmann only
+   when encryption is on.
+3. **UUID generators** (3 sites: `generate_uuid`, `generate_uuidv7`,
+   `ResponseRegistry::generate_uuid`): `thread_local` state + hand-rolled hex —
+   no `std::stringstream`, no process-global mutex.
+
+Correctness re-verified: push (valid UUIDv7), pop round-trip (full response,
+payload + `partitionId`/`leaseId` stamping intact), ACK `success:true`.
+
+### Profile before → after (broker CPU buckets, flat %)
+
+| bucket | push (1:1 before) | **push (now)** | mixed before | **mixed (now)** |
+|--------|--:|--:|--:|--:|
+| IO/syscall+libpq | 64.6 | **67.7** | 47.8 | **61.4** |
+| nlohmann | 0.2 | **0.2** | **11.6** | **0.7** |
+| UUID (stringstream) | 2.4 | **0.0** | 1.5 | **0.1** |
+| simdjson | 4.4 | 5.0 | 3.1 | 5.2 |
+| string / alloc | 3.4 / 3.7 | 2.4 / 3.1 | 5.8 / 6.3 | 2.3 / 3.9 |
+
+- **pop-route nlohmann 11.6% → 0.7%** (raw pass-through), **UUID → ~0%**
+  (stringstream/mutex gone). Broker is now cleanly I/O-bound (`__send`).
+- Broker CPU under mixed load fell **79% → 57%** of 3 cores for the same load.
+
+Minor: an empty/non-existent-partition pop now returns **200** (with
+`{...,"messages":[]}`) instead of 204 (`partition_not_found` is `success:false`).
+Cosmetic — consumers key off the empty `messages` array, not the status — but a
+204-parity tweak is a tiny follow-up if desired.
+
 ## Caveats
 
 - Bucket sums are **regex heuristics** over symbol names; treat them as

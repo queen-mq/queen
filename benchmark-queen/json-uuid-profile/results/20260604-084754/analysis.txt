@@ -1,0 +1,138 @@
+==================================================================
+ Profile: /profiles/queen.prof.0   (pprof: /usr/bin/google-pprof)
+==================================================================
+
+### Top 40 functions by self (flat) CPU
+------------------------------------------------------------------
+Total: 3965 samples
+     900  22.7%  22.7%      904  22.8% __send@GLIBC_2.17
+     445  11.2%  33.9%      450  11.3% nlohmann::json_abi_v3_11_3::detail::lexer::get
+     376   9.5%  43.4%      394   9.9% nlohmann::json_abi_v3_11_3::detail::serializer::dump_escaped
+     236   6.0%  49.4%      240   6.1% std::__cxx11::basic_string::push_back@@GLIBCXX_3.4.21
+     226   5.7%  55.1%      313   7.9% __default_morecore@GLIBC_2.17
+     160   4.0%  59.1%      160   4.0% __xpg_strerror_r@@GLIBC_2.17
+     133   3.4%  62.4%      805  20.3% nlohmann::json_abi_v3_11_3::detail::lexer::scan_string
+     131   3.3%  65.8%      131   3.3% _init
+      84   2.1%  67.9%      308   7.8% nlohmann::json_abi_v3_11_3::basic_json::json_value::destroy
+      71   1.8%  69.7%       71   1.8% timer_settime@GLIBC_2.17
+      69   1.7%  71.4%      276   7.0% malloc@@GLIBC_2.17
+      68   1.7%  73.1%       68   1.7% __recv@@GLIBC_PRIVATE
+      53   1.3%  74.5%       53   1.3% std::__once_callable@@GLIBCXX_3.4.11
+      51   1.3%  75.7%       52   1.3% epoll_pwait@@GLIBC_2.17
+      46   1.2%  76.9%       47   1.2% simdjson::arm64::::stage1::json_structural_indexer::index
+      43   1.1%  78.0%      159   4.0% free@@GLIBC_2.17
+      41   1.0%  79.0%       41   1.0% memcmp@@GLIBC_2.17
+      41   1.0%  80.1%       45   1.1% nlohmann::json_abi_v3_11_3::detail::lexer::scan@beee0
+      38   1.0%  81.0%       38   1.0% nlohmann::json_abi_v3_11_3::basic_json::assert_invariant [clone .isra.0]@63c90
+      37   0.9%  81.9%       37   0.9% __write@@GLIBC_2.17
+      27   0.7%  82.6%       27   0.7% __nss_database_lookup@GLIBC_2.17
+      27   0.7%  83.3%      258   6.5% nlohmann::json_abi_v3_11_3::basic_json::~basic_json
+      22   0.6%  83.9%      166   4.2% std::__cxx11::basic_string::_M_append@@GLIBCXX_3.4.21
+      17   0.4%  84.3%       56   1.4% std::_Rb_tree::_M_erase [clone .isra.0]
+      17   0.4%  84.7%       74   1.9% std::__cxx11::basic_string::_M_construct [clone .isra.0]@63f90
+      16   0.4%  85.1%       45   1.1% std::vector::emplace_back [clone .isra.0]@6aa90
+      14   0.4%  85.5%      885  22.3% bsd_send
+      14   0.4%  85.8%      114   2.9% queen::Queen::_process_results_simd
+      14   0.4%  86.2%       14   0.4% std::_Rb_tree_insert_and_rebalance@@GLIBCXX_3.4
+      13   0.3%  86.5%      501  12.6% nlohmann::json_abi_v3_11_3::detail::serializer::dump
+      13   0.3%  86.8%      281   7.1% operator new@@GLIBCXX_3.4
+      12   0.3%  87.1%      103   2.6% nlohmann::json_abi_v3_11_3::detail::json_sax_dom_parser::key
+      12   0.3%  87.4%       12   0.3% std::_Rb_tree_increment@@GLIBCXX_3.4@c5540
+      12   0.3%  87.7%       47   1.2% std::ostream::_M_insert@@GLIBCXX_3.4.9
+      12   0.3%  88.0%      904  22.8% uWS::AsyncSocket::write
+      11   0.3%  88.3%     1068  26.9% nlohmann::json_abi_v3_11_3::detail::parser::sax_parse_internal
+      10   0.3%  88.6%       10   0.3% __lll_lock_wait_private@@GLIBC_PRIVATE
+       9   0.2%  88.8%       20   0.5% nlohmann::json_abi_v3_11_3::detail::lexer::scan_number
+       9   0.2%  89.0%       28   0.7% std::_Rb_tree::_M_emplace_hint_unique
+       9   0.2%  89.3%       19   0.5% std::_Rb_tree::_M_get_insert_hint_unique_pos
+       9   0.2%  89.5%       17   0.4% std::basic_streambuf::xsputn@@GLIBCXX_3.4
+
+### Bucketed CPU attribution (sum of flat %)
+------------------------------------------------------------------
+  JSON    (nlohmann parse/dump/lexer/serialize) :   33.9 %
+  UUID    (generate_uuid + stringstream fmt)    :    1.0 %
+  LOCK    (mutex/futex contention)              :    0.7 %
+  ALLOC   (new/delete/malloc, mostly JSON-driven):    9.1 %
+  IO/sys  (send/recv/epoll/timer/libpq)         :   28.6 %
+  other                                         :   27.5 %
+
+  NOTE: buckets are regex heuristics over flat%. ALLOC is largely
+        JSON-DOM-driven, so JSON+ALLOC approximates the realistic
+        upper bound on JSON-attributable CPU.
+
+### Line-level cost inside the UUID generator (stringstream hotspot)
+------------------------------------------------------------------
+ROUTINE ====================== queen::AsyncQueueManager::generate_uuid[abi:cxx11] in /usr/build/server/src/managers/async_queue_manager.cpp
+     8     83 Total samples (flat / cumulative)
+     .      .   32:     }
+     .      .   33: }
+     .      .   34: 
+     .      .   35: // --- UUID Generation (same as QueueManager) ---
+     .      .   36: 
+---
+     2      2   37: std::string AsyncQueueManager::generate_uuid() {
+     .      .   38:     static std::mutex uuid_mutex;
+     .      .   39:     static uint64_t last_ms = 0;
+     .      .   40:     static uint16_t sequence = 0;
+     .      .   41:     static std::random_device rd;
+     .      .   42:     static std::mt19937_64 gen(rd());
+     .      .   43:     
+     .      .   44:     std::lock_guard<std::mutex> lock(uuid_mutex);
+     .      .   45:     
+     .     12   46:     auto now = std::chrono::system_clock::now();
+     .      .   47:     uint64_t current_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+     .      .   48: 
+     .      .   49:     if (current_ms <= last_ms) {
+     .      .   50:         sequence++;
+     .      .   51:     } else {
+     .      .   52:         last_ms = current_ms;
+     .      .   53:         sequence = 0; 
+     .      .   54:     }
+     .      .   55: 
+     .      .   56:     std::array<uint8_t, 16> bytes;
+     .      .   57: 
+     .      .   58:     // 48-bit unix_ts_ms (big-endian)
+     .      .   59:     bytes[0] = (last_ms >> 40) & 0xFF;
+     .      .   60:     bytes[1] = (last_ms >> 32) & 0xFF;
+     .      .   61:     bytes[2] = (last_ms >> 24) & 0xFF;
+     .      .   62:     bytes[3] = (last_ms >> 16) & 0xFF;
+     .      .   63:     bytes[4] = (last_ms >> 8) & 0xFF;
+     .      .   64:     bytes[5] = last_ms & 0xFF;
+     .      .   65: 
+     .      .   66:     // 4-bit version (0111) and 12-bit sequence
+     .      .   67:     uint16_t sequence_and_version = sequence & 0x0FFF;
+     .      .   68:     bytes[6] = 0x70 | (sequence_and_version >> 8);
+     .      .   69:     bytes[7] = sequence_and_version & 0xFF;
+     .      .   70: 
+     .      .   71:     // 2-bit variant (10) and 62-bits of random data
+     .      .   72:     uint64_t rand_data = gen();
+     .      .   73:     bytes[8] = 0x80 | ((rand_data >> 56) & 0x3F);
+     .      .   74:     bytes[9] = (rand_data >> 48) & 0xFF;
+     .      .   75:     bytes[10] = (rand_data >> 40) & 0xFF;
+     .      .   76:     bytes[11] = (rand_data >> 32) & 0xFF;
+     .      .   77:     bytes[12] = (rand_data >> 24) & 0xFF;
+     .      .   78:     bytes[13] = (rand_data >> 16) & 0xFF;
+     .      .   79:     bytes[14] = (rand_data >> 8) & 0xFF;
+     .      .   80:     bytes[15] = rand_data & 0xFF;
+     .      .   81: 
+     .      .   82:     // Format to string
+     .      .   83:     std::stringstream ss;
+     .      .   84:     ss << std::hex << std::setfill('0');
+     .      .   85:     for (int i = 0; i < 16; ++i) {
+     .      .   86:         if (i == 4 || i == 6 || i == 8 || i == 10) ss << '-';
+     .      .   87:         ss << std::setw(2) << static_cast<int>(bytes[i]);
+     .      .   88:     }
+     .      .   89:     
+     .      .   90:     return ss.str();
+     6     69   91: }
+---
+     .      .   92: 
+     .      .   93: std::string AsyncQueueManager::generate_transaction_id() {
+     .      .   94:     return generate_uuid();
+     .      .   95: }
+     .      .   96: 
+ROUTINE ====================== queen::ResponseRegistry::generate_uuid[abi:cxx11] in /usr/build/server/src/services/response_queue.cpp
+
+### Collapsed stacks (for flamegraph)
+------------------------------------------------------------------
+(set COLLAPSED_OUT=path to emit collapsed stacks for a flamegraph)
