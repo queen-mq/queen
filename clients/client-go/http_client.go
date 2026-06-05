@@ -121,7 +121,14 @@ func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body i
 		timeout = timeoutMs
 	}
 
-	for attempt := 0; attempt <= hc.config.RetryAttempts; attempt++ {
+	// A negative RetryAttempts means "no retries". The zero value is coerced to
+	// the default in NewHttpClient, so a negative sentinel is the only way for a
+	// caller to request exactly one attempt. Clamp here so the loop runs once.
+	maxRetries := hc.config.RetryAttempts
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		// Get URL from load balancer
 		baseURL := hc.loadBalancer.GetURL(affinityKey)
 		if baseURL == "" {
@@ -197,7 +204,7 @@ func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body i
 			}
 
 			// Retry with exponential backoff
-			if attempt < hc.config.RetryAttempts {
+			if attempt < maxRetries {
 				delay := hc.getRetryDelay(attempt)
 				logWarn("HttpClient.doRequest", map[string]interface{}{
 					"status":     "retry",
@@ -249,7 +256,7 @@ func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body i
 			}
 
 			// Retry with exponential backoff
-			if attempt < hc.config.RetryAttempts {
+			if attempt < maxRetries {
 				delay := hc.getRetryDelay(attempt)
 				logWarn("HttpClient.doRequest", map[string]interface{}{
 					"status":     resp.StatusCode,
@@ -291,7 +298,7 @@ func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body i
 		return result, nil
 	}
 
-	return nil, fmt.Errorf("request failed after %d attempts: %w", hc.config.RetryAttempts+1, lastErr)
+	return nil, fmt.Errorf("request failed after %d attempts: %w", maxRetries+1, lastErr)
 }
 
 // getRetryDelay calculates the retry delay with exponential backoff.

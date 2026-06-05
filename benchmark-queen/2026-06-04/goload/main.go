@@ -32,6 +32,10 @@ func main() {
 	consumers := flag.Int("consumers", 150, "consumer goroutines")
 	pushBatch := flag.Int("push-batch", 10, "messages per push request")
 	popBatch := flag.Int("pop-batch", 200, "max messages per pop request")
+	popWildcard := flag.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop (broker drains any partition -> full batches, few consumers) instead of pinned per-partition pop")
+	popPartitions := flag.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard -> up to pop-batch msgs gathered across N partitions)")
+	popWait := flag.Bool("pop-wait", false, "long-poll pop (Wait=true): an empty pop parks server-side and re-checks (POP_WAIT_* cadence) instead of spinning a wasted round-trip")
+	popTimeout := flag.Int("pop-timeout", 2000, "pop long-poll timeout ms (used when -pop-wait)")
 	payloadBytes := flag.Int("payload", 256, "payload size in bytes")
 	durationSec := flag.Int("duration", 0, "run duration seconds (0 = run until SIGINT)")
 	idleConns := flag.Int("idle-conns", 512, "MaxIdleConnsPerHost for the client")
@@ -40,18 +44,26 @@ func main() {
 	pendingRet := flag.Int("pending-retention", 0, "retention_seconds for pending (un-consumed) messages; 0 = keep forever")
 	timeoutMs := flag.Int("timeout", 30000, "request timeout ms")
 	emptySleepMs := flag.Int("empty-sleep", 2, "consumer sleep ms on empty pop")
+	retries := flag.Int("retries", 2, "producer/consumer client RetryAttempts (0 = disable retries; used to test the push>pop dedup gap)")
 	flag.Parse()
 
-	fmt.Printf("goload -> %s queue=%s partitions=%d producers=%d consumers=%d pushBatch=%d popBatch=%d payload=%dB idleConns=%d\n",
-		*url, *queueName, *partitions, *producers, *consumers, *pushBatch, *popBatch, *payloadBytes, *idleConns)
+	fmt.Printf("goload -> %s queue=%s partitions=%d producers=%d consumers=%d pushBatch=%d popBatch=%d payload=%dB idleConns=%d retries=%d\n",
+		*url, *queueName, *partitions, *producers, *consumers, *pushBatch, *popBatch, *payloadBytes, *idleConns, *retries)
 
 	payload := map[string]interface{}{"data": strings.Repeat("x", *payloadBytes), "src": "goload"}
+
+	// client-go coerces RetryAttempts==0 to the default (3); a negative value is
+	// the sentinel for "no retries" (clamped to a single attempt in doRequest).
+	retryAttempts := *retries
+	if retryAttempts <= 0 {
+		retryAttempts = -1
+	}
 
 	q, err := queen.New(queen.ClientConfig{
 		URL:                 *url,
 		TimeoutMillis:       *timeoutMs,
 		MaxIdleConnsPerHost: *idleConns,
-		RetryAttempts:       2,
+		RetryAttempts:       retryAttempts,
 	})
 	if err != nil {
 		fmt.Printf("client init failed: %v\n", err)
@@ -119,7 +131,21 @@ func main() {
 		go func(part string) {
 			defer wg.Done()
 			for ctx.Err() == nil {
-				msgs, e := q.Queue(*queueName).Partition(part).Batch(*popBatch).AutoAck(true).Wait(false).Pop(ctx)
+				qb := q.Queue(*queueName)
+				if *popPartitions > 1 {
+					// multi-partition wildcard: one pop gathers up to pop-batch msgs
+					// across up to N partitions (v4 global budget) -> full batches.
+					qb = qb.Partitions(*popPartitions)
+				} else if !*popWildcard {
+					qb = qb.Partition(part) // pinned single-partition pop (only that partition's ~few msgs)
+				}
+				// else: plain wildcard -> /pop/queue/{q} -> one partition per call.
+				if *popWait {
+					qb = qb.Wait(true).TimeoutMillis(*popTimeout)
+				} else {
+					qb = qb.Wait(false)
+				}
+				msgs, e := qb.Batch(*popBatch).AutoAck(true).Pop(ctx)
 				if e != nil {
 					if ctx.Err() != nil {
 						return
