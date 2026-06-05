@@ -84,6 +84,13 @@ type ClientConfig struct {
 	BearerToken string
 	// Headers is a map of custom headers to include in every request
 	Headers map[string]string
+	// MaxIdleConnsPerHost caps idle keep-alive connections retained per host.
+	// Go's net/http default is 2, which cripples high-concurrency, single-host
+	// workloads (load generators, hot producer pools) by forcing per-request
+	// connection setup/teardown. When <= 0, the client uses a high default (256).
+	MaxIdleConnsPerHost int
+	// MaxConnsPerHost optionally caps total connections per host (0 = unlimited).
+	MaxConnsPerHost int
 }
 
 // QueueConfig contains configuration for queue creation.

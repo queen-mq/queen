@@ -64,9 +64,24 @@ func NewHttpClient(config ClientConfig) (*HttpClient, error) {
 		config.EnableFailover,
 	)
 
-	// Create HTTP client with timeout
+	// Create HTTP client with a tuned transport. Go's default
+	// MaxIdleConnsPerHost is 2, which throttles high-concurrency single-host
+	// workloads (load generators, busy producer pools) by forcing constant
+	// connection churn. Default to a generous idle pool; allow explicit override.
+	maxIdlePerHost := config.MaxIdleConnsPerHost
+	if maxIdlePerHost <= 0 {
+		maxIdlePerHost = 256
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = maxIdlePerHost
+	transport.MaxIdleConns = maxIdlePerHost * 4
+	if config.MaxConnsPerHost > 0 {
+		transport.MaxConnsPerHost = config.MaxConnsPerHost
+	}
+
 	httpClient := &http.Client{
-		Timeout: time.Duration(config.TimeoutMillis) * time.Millisecond,
+		Timeout:   time.Duration(config.TimeoutMillis) * time.Millisecond,
+		Transport: transport,
 	}
 
 	return &HttpClient{
@@ -328,7 +343,11 @@ func (hc *HttpClient) GetLoadBalancer() *LoadBalancer {
 
 // Close closes the HTTP client.
 func (hc *HttpClient) Close() {
-	// HTTP client doesn't need explicit closing in Go
-	// but we reset the load balancer state
+	// Release pooled keep-alive connections, then reset load balancer state.
+	if hc.client != nil {
+		if tr, ok := hc.client.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+	}
 	hc.loadBalancer.Reset()
 }
