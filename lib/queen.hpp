@@ -1084,7 +1084,9 @@ class Queen {
         slot.current_type = type;
         slot.current_fire = fire;
 
-        if (type == JobType::CUSTOM) {
+        if (type == JobType::CUSTOM || type == JobType::PARTITION_LOOKUP) {
+            // PARTITION_LOOKUP carries its own fixed sql + one jsonb param,
+            // exactly like CUSTOM — reuse the per-job fire path (no idx demux).
             return _fire_custom(slot, std::move(batch));
         }
         return _fire_batched(slot, type, std::move(batch));
@@ -1389,8 +1391,15 @@ class Queen {
         }
 
         if (!partition_updates_raw.empty() && partition_updates_raw != "[]") {
+            // Fire on the dedicated PARTITION_LOOKUP lane (NOT the shared CUSTOM
+            // lane) so the data path's partition_lookup upsert is never queued
+            // FIFO behind a slow analytics CUSTOM read. Submitted IMMEDIATELY
+            // (no coalescing delay): pop_unified_batch_v4 discovers partitions
+            // via queen.partition_lookup, so its freshness is correctness-
+            // critical for read-after-write (a non-blocking pop right after a
+            // push must see the new partition/message).
             JobRequest pl_job;
-            pl_job.op_type    = JobType::CUSTOM;
+            pl_job.op_type    = JobType::PARTITION_LOOKUP;
             pl_job.request_id = "pl-refresh";
             pl_job.sql        = "SELECT queen.update_partition_lookup_v1($1::jsonb)";
             pl_job.params     = { std::move(partition_updates_raw) };
@@ -1646,7 +1655,9 @@ class Queen {
         while ((res = PQgetResult(slot.conn)) != NULL) {
             ExecStatusType status = PQresultStatus(res);
             if (status == PGRES_TUPLES_OK || status == PGRES_COMMAND_OK) {
-                if (!slot.jobs.empty() && slot.jobs[0]->job.op_type == JobType::CUSTOM) {
+                if (!slot.jobs.empty()
+                    && (slot.jobs[0]->job.op_type == JobType::CUSTOM
+                        || slot.jobs[0]->job.op_type == JobType::PARTITION_LOOKUP)) {
                     _process_custom_result(slot, res);
                     PQclear(res);
                     continue;
@@ -2054,8 +2065,10 @@ class Queen {
                 // Fire-and-forget: failures are logged and healed by the
                 // periodic PartitionLookupReconcileService.
                 if (partition_updates.is_array() && !partition_updates.empty()) {
+                    // Dedicated PARTITION_LOOKUP lane, submitted immediately
+                    // (see the simd PUSH path for the freshness rationale).
                     JobRequest pl_job;
-                    pl_job.op_type    = JobType::CUSTOM;
+                    pl_job.op_type    = JobType::PARTITION_LOOKUP;
                     pl_job.request_id = "pl-refresh";
                     pl_job.sql        = "SELECT queen.update_partition_lookup_v1($1::jsonb)";
                     pl_job.params     = { partition_updates.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) };

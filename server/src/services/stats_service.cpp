@@ -144,18 +144,47 @@ void StatsService::run_full_reconciliation() {
 
     try {
         auto conn = db_pool_->acquire();
-        
-        // Call the full refresh stored procedure (force=false for background job)
-        std::string sql = "SELECT queen.refresh_all_stats_v1(false)";
-        
-        sendQueryParamsAsync(conn.get(), sql, {});
-        auto result = getTuplesResult(conn.get());
-        
-        if (PQntuples(result.get()) > 0) {
-            const char* json_result = PQgetvalue(result.get(), 0, 0);
-            spdlog::info("StatsService: Full reconciliation complete: {}", json_result);
+
+        // STEP 1: partition stats, CHUNKED by partition id (keyset pagination).
+        // Each chunk is its own statement => its own transaction, so a 30s
+        // statement_timeout (or a crash) cancels only the in-flight chunk and
+        // every committed chunk keeps its advanced last_scanned_at /
+        // last_computed_at watermark. This breaks the "timeout -> rollback ->
+        // rescan-from-old-watermark -> bigger -> timeout again" spiral the
+        // single-transaction refresh_all_stats_v1 suffered under high load.
+        const std::string kNilUuid = "00000000-0000-0000-0000-000000000000";
+        const int kChunkSize = 200;
+        std::string after = kNilUuid;  // nil uuid sorts below any real partition id
+        int chunks = 0;
+        while (running_) {
+            sendQueryParamsAsync(conn.get(),
+                "SELECT queen.compute_partition_stats_chunk_v1($1::uuid, $2::int, false)",
+                {after, std::to_string(kChunkSize)});
+            auto result = getTuplesResult(conn.get());
+            // NULL return => no partitions past the cursor => done.
+            if (PQntuples(result.get()) == 0 || PQgetisnull(result.get(), 0, 0)) {
+                break;
+            }
+            after = PQgetvalue(result.get(), 0, 0);
+            chunks++;
         }
-        
+
+        // STEP 2..N: roll-ups, each its own statement/transaction so a slow or
+        // timed-out roll-up can never roll back the (already committed)
+        // partition compute above.
+        for (const char* sql : {
+            "SELECT queen.aggregate_queue_stats_v2()",
+            "SELECT queen.aggregate_namespace_stats_v1()",
+            "SELECT queen.aggregate_task_stats_v1()",
+            "SELECT queen.aggregate_system_stats_v2()",
+            "SELECT queen.cleanup_orphaned_stats_v2()",
+        }) {
+            sendQueryParamsAsync(conn.get(), sql, {});
+            getTuplesResult(conn.get());
+        }
+
+        spdlog::info("StatsService: Full reconciliation complete ({} partition chunks)", chunks);
+
     } catch (const std::exception& e) {
         spdlog::error("StatsService run_full_reconciliation error: {}", e.what());
     }

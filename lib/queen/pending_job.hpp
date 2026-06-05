@@ -35,6 +35,13 @@ enum class JobType : uint8_t {
     STREAMS_REGISTER_QUERY,
     STREAMS_CYCLE,
     STREAMS_STATE_GET,
+    // Coalesced partition_lookup maintenance (PUSHPOPLOOKUPSOL). Mechanically
+    // a CUSTOM-shaped job (fixed SQL + one jsonb param, no idx demux) but on
+    // its own lane so the data path's partition_lookup upserts never sit FIFO
+    // behind a slow analytics CUSTOM read. Fed by libqueen's coalescing buffer
+    // (one flush job per ~100ms, latest-wins per partition), healed by
+    // PartitionLookupReconcileService if ever dropped.
+    PARTITION_LOOKUP,
     _COUNT,          // sentinel - array size, not a real type
     _SENTINEL = 0xFF // "no type" sentinel (idle slot)
 };
@@ -66,6 +73,7 @@ job_type_name(JobType t) noexcept {
         case JobType::STREAMS_REGISTER_QUERY: return "streams_register";
         case JobType::STREAMS_CYCLE:          return "streams_cycle";
         case JobType::STREAMS_STATE_GET:      return "streams_state_get";
+        case JobType::PARTITION_LOOKUP:       return "partition_lookup";
         default:                              return "?";
     }
 }
@@ -92,6 +100,9 @@ JobTypeToSqlTable() {
         {JobType::STREAMS_REGISTER_QUERY, "SELECT queen.streams_register_query_v1($1::jsonb)"},
         {JobType::STREAMS_CYCLE,          "SELECT queen.streams_cycle_v1($1::jsonb)"},
         {JobType::STREAMS_STATE_GET,      "SELECT queen.streams_state_get_v1($1::jsonb)"},
+        // Dispatched via the CUSTOM fire path (the flush job sets its own sql),
+        // so this entry is informational/uniform with the other types.
+        {JobType::PARTITION_LOOKUP,       "SELECT queen.update_partition_lookup_v1($1::jsonb)"},
     };
     return table;
 }

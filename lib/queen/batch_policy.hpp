@@ -78,6 +78,7 @@ job_type_env_segment(JobType t) noexcept {
         case JobType::STREAMS_REGISTER_QUERY: return "STREAMS_REGISTER";
         case JobType::STREAMS_CYCLE:          return "STREAMS_CYCLE";
         case JobType::STREAMS_STATE_GET:      return "STREAMS_STATE_GET";
+        case JobType::PARTITION_LOOKUP:       return "PARTITION_LOOKUP";
         default:                              return "UNKNOWN";
     }
 }
@@ -124,6 +125,11 @@ default_batch_policy_for(JobType t) noexcept {
         case JobType::STREAMS_REGISTER_QUERY: return { 1,   0,    1,  2};
         case JobType::STREAMS_CYCLE:          return { 1,   0,    1, 16};
         case JobType::STREAMS_STATE_GET:      return {20,   5,  500, 16};
+        // Coalesced upstream into one flush job, so batch_size stays 1; small
+        // concurrency lets a second flush proceed if one upsert is briefly slow
+        // (update_partition_lookup_v1 is monotonic + consistently lock-ordered,
+        // so overlapping calls are safe).
+        case JobType::PARTITION_LOOKUP:       return { 1,   0,    1,  2};
         default:                              return { 1,   5,    1,  1};
     }
 }

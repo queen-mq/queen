@@ -982,6 +982,250 @@ BEGIN
 END;
 $$;
 
+-- ============================================================================
+-- CHUNKED partition stats compute (keyset pagination over partitions)
+-- ============================================================================
+-- Same per-partition logic as compute_partition_stats_v3 (STEP 1..5), but
+-- restricted to a single keyset slice of partitions ordered by id. The caller
+-- (StatsService::run_full_reconciliation) loops, passing the returned id back
+-- as p_after_id, until NULL is returned.
+--
+-- WHY: each call is ONE statement = ONE transaction. A 30s statement_timeout
+-- (or a crash) therefore cancels only the in-flight chunk; every already-
+-- committed chunk keeps its advanced last_scanned_at / last_computed_at
+-- watermark. This breaks the failure mode where the single-transaction
+-- refresh_all_stats_v1 timed out, rolled back the watermark, and forced the
+-- next run to rescan an ever-growing window (the "double work" death spiral
+-- observed under sustained high load).
+--
+-- No advisory lock / debounce here: StatsService is leader-elected and runs
+-- the chunk loop sequentially, so there is no concurrent caller to guard
+-- against (mirrors the lock-free fast-aggregation path).
+--
+-- Returns: the max partition id processed in this chunk, or NULL when no
+-- partitions remain past p_after_id (caller stops). Pass the nil UUID
+-- ('00000000-0000-0000-0000-000000000000') to start.
+CREATE OR REPLACE FUNCTION queen.compute_partition_stats_chunk_v1(
+    p_after_id   UUID DEFAULT NULL,
+    p_chunk_size INT  DEFAULT 200,
+    p_force      BOOLEAN DEFAULT FALSE
+)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_now           TIMESTAMPTZ := NOW();
+    v_partition_ids UUID[];
+    v_max_id        UUID;
+BEGIN
+    -- Keyset slice of partitions to process this call.
+    -- (No MAX(uuid) aggregate exists in PG, so take the last element of the
+    -- id-ordered array as the cursor for the next chunk.)
+    SELECT array_agg(id ORDER BY id)
+    INTO v_partition_ids
+    FROM (
+        SELECT id
+        FROM queen.partitions
+        WHERE p_after_id IS NULL OR id > p_after_id
+        ORDER BY id
+        LIMIT p_chunk_size
+    ) s;
+
+    -- No more partitions past the cursor: signal the caller to stop.
+    IF v_partition_ids IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    v_max_id := v_partition_ids[array_length(v_partition_ids, 1)];
+
+    -- STEP 1: incremental new-message counts for existing stats in this slice.
+    WITH new_message_counts AS (
+        SELECT s.stat_key, s.partition_id,
+               COUNT(m.id) AS new_messages,
+               MAX(m.created_at) AS newest_at
+        FROM queen.stats s
+        JOIN queen.messages m ON m.partition_id = s.partition_id
+        WHERE s.stat_type = 'partition'
+          AND s.partition_id = ANY(v_partition_ids)
+          AND s.last_scanned_at IS NOT NULL
+          AND m.created_at > s.last_scanned_at
+        GROUP BY s.stat_key, s.partition_id
+    )
+    UPDATE queen.stats s SET
+        total_messages    = s.total_messages   + nmc.new_messages,
+        pending_messages  = s.pending_messages + nmc.new_messages,
+        newest_message_at = GREATEST(s.newest_message_at, nmc.newest_at),
+        last_scanned_at   = v_now
+    FROM new_message_counts nmc
+    WHERE s.stat_type = 'partition' AND s.stat_key = nmc.stat_key;
+
+    -- STEP 2: recompute pending/processing/completed from cursor positions.
+    -- force => every partition in the slice; else only dirty ones.
+    WITH dirty_partitions AS (
+        SELECT DISTINCT s.stat_key, s.partition_id, s.consumer_group
+        FROM queen.stats s
+        LEFT JOIN queen.partition_lookup pl ON pl.partition_id = s.partition_id
+        LEFT JOIN queen.partition_consumers pc
+            ON pc.partition_id = s.partition_id AND pc.consumer_group = s.consumer_group
+        WHERE s.stat_type = 'partition'
+          AND s.partition_id = ANY(v_partition_ids)
+          AND (
+              p_force = true
+              OR pl.updated_at > s.last_computed_at
+              OR pc.last_consumed_at > s.last_computed_at
+              OR pc.lease_acquired_at > s.last_computed_at
+              OR (s.pending_messages > 0 AND pc.total_messages_consumed >= s.total_messages)
+              OR (s.pending_messages > (s.total_messages - pc.total_messages_consumed))
+              OR (s.pending_messages > 0 AND pc.partition_id IS NULL)
+              OR (s.pending_messages > 0 AND s.last_computed_at < v_now - INTERVAL '1 hour')
+          )
+    ),
+    cursor_positions AS (
+        SELECT dp.stat_key, dp.partition_id, pc.consumer_group,
+               pc.last_consumed_id, pc.last_consumed_created_at,
+               pc.total_messages_consumed, pc.lease_expires_at,
+               pc.batch_size, pc.acked_count, cgm.subscription_timestamp
+        FROM dirty_partitions dp
+        JOIN queen.partition_consumers pc
+            ON pc.partition_id = dp.partition_id AND pc.consumer_group = dp.consumer_group
+        JOIN queen.partitions p ON p.id = dp.partition_id
+        JOIN queen.queues q ON q.id = p.queue_id
+        LEFT JOIN queen.consumer_groups_metadata cgm
+            ON cgm.consumer_group = pc.consumer_group
+            AND (
+                (cgm.queue_name = q.name AND cgm.partition_name = p.name)
+                OR (cgm.queue_name = q.name AND cgm.partition_name = '')
+                OR (cgm.queue_name = '' AND cgm.namespace = q.namespace)
+                OR (cgm.queue_name = '' AND cgm.task = q.task)
+            )
+    ),
+    pending_counts AS (
+        SELECT cp.stat_key, cp.partition_id, cp.consumer_group,
+               cp.last_consumed_created_at, cp.total_messages_consumed,
+               cp.lease_expires_at, cp.batch_size, cp.acked_count,
+               COUNT(m.id) AS actual_pending
+        FROM cursor_positions cp
+        LEFT JOIN queen.messages m
+            ON m.partition_id = cp.partition_id
+           AND (COALESCE(cp.last_consumed_created_at, cp.subscription_timestamp) IS NULL
+                OR m.created_at > COALESCE(cp.last_consumed_created_at, cp.subscription_timestamp)
+                OR (m.created_at = COALESCE(cp.last_consumed_created_at, cp.subscription_timestamp)
+                    AND m.id > COALESCE(cp.last_consumed_id, '00000000-0000-0000-0000-000000000000'::uuid)))
+        GROUP BY cp.stat_key, cp.partition_id, cp.consumer_group,
+                 cp.last_consumed_created_at, cp.total_messages_consumed,
+                 cp.lease_expires_at, cp.batch_size, cp.acked_count
+    )
+    UPDATE queen.stats s SET
+        total_messages = GREATEST(s.total_messages, pend.total_messages_consumed + COALESCE(pend.actual_pending, 0)),
+        pending_messages = COALESCE(pend.actual_pending, 0),
+        processing_messages = CASE
+            WHEN pend.lease_expires_at IS NOT NULL AND pend.lease_expires_at > v_now
+            THEN LEAST(GREATEST(0, COALESCE(pend.batch_size, 0) - COALESCE(pend.acked_count, 0)), pend.actual_pending)
+            ELSE 0
+        END,
+        completed_messages = GREATEST(0,
+            GREATEST(s.total_messages, pend.total_messages_consumed + COALESCE(pend.actual_pending, 0))
+            - COALESCE(pend.actual_pending, 0) - s.dead_letter_messages),
+        oldest_pending_at = CASE
+            WHEN pend.actual_pending > 0 THEN pend.last_consumed_created_at
+            ELSE NULL
+        END,
+        last_computed_at = v_now
+    FROM pending_counts pend
+    WHERE s.stat_type = 'partition'
+      AND s.stat_key = pend.stat_key;
+
+    -- STEP 2c: delete orphaned stats (pending > 0 but no consumer) in this slice.
+    DELETE FROM queen.stats s
+    WHERE s.stat_type = 'partition'
+      AND s.partition_id = ANY(v_partition_ids)
+      AND s.pending_messages > 0
+      AND NOT EXISTS (
+          SELECT 1 FROM queen.partition_consumers pc
+          WHERE pc.partition_id = s.partition_id
+            AND pc.consumer_group = s.consumer_group
+      );
+
+    -- STEP 3: dead_letter counts for this slice.
+    UPDATE queen.stats s SET
+        dead_letter_messages = COALESCE(dlq_counts.dlq_count, 0)
+    FROM (
+        SELECT partition_id, consumer_group, COUNT(*) AS dlq_count
+        FROM queen.dead_letter_queue
+        WHERE partition_id = ANY(v_partition_ids)
+        GROUP BY partition_id, consumer_group
+    ) dlq_counts
+    WHERE s.stat_type = 'partition'
+      AND s.partition_id = dlq_counts.partition_id
+      AND s.consumer_group = COALESCE(dlq_counts.consumer_group, '__QUEUE_MODE__');
+
+    -- STEP 4: new partitions in this slice (no stats row yet).
+    WITH message_counts AS (
+        SELECT partition_id, COUNT(*) AS msg_count
+        FROM queen.messages
+        WHERE partition_id = ANY(v_partition_ids)
+        GROUP BY partition_id
+    ),
+    dlq_counts AS (
+        SELECT partition_id, COUNT(*) AS dlq_count
+        FROM queen.dead_letter_queue
+        WHERE partition_id = ANY(v_partition_ids)
+        GROUP BY partition_id
+    )
+    INSERT INTO queen.stats (
+        stat_type, stat_key, queue_id, partition_id, consumer_group,
+        total_messages, pending_messages, processing_messages, completed_messages, dead_letter_messages,
+        oldest_pending_at, newest_message_at, last_scanned_at, last_computed_at
+    )
+    SELECT
+        'partition',
+        p.id::text || ':' || COALESCE(pc.consumer_group, '__QUEUE_MODE__'),
+        q.id,
+        p.id,
+        COALESCE(pc.consumer_group, '__QUEUE_MODE__'),
+        COALESCE(mc.msg_count, 0),
+        GREATEST(0,
+            COALESCE(mc.msg_count, 0)
+            - COALESCE(pc.total_messages_consumed, 0)
+            - COALESCE(dc.dlq_count, 0)
+        ),
+        CASE
+            WHEN pc.lease_expires_at IS NOT NULL AND pc.lease_expires_at > v_now
+            THEN GREATEST(0, COALESCE(pc.batch_size, 0) - COALESCE(pc.acked_count, 0))
+            ELSE 0
+        END,
+        COALESCE(pc.total_messages_consumed, 0),
+        COALESCE(dc.dlq_count, 0),
+        pl.last_message_created_at,
+        pl.last_message_created_at,
+        v_now,
+        v_now
+    FROM queen.partitions p
+    JOIN queen.queues q ON q.id = p.queue_id
+    LEFT JOIN queen.partition_consumers pc ON pc.partition_id = p.id
+    LEFT JOIN message_counts mc ON mc.partition_id = p.id
+    LEFT JOIN dlq_counts dc ON dc.partition_id = p.id
+    LEFT JOIN queen.partition_lookup pl ON pl.partition_id = p.id
+    WHERE p.id = ANY(v_partition_ids)
+      AND NOT EXISTS (
+        SELECT 1 FROM queen.stats s
+        WHERE s.stat_type = 'partition'
+        AND s.partition_id = p.id
+        AND s.consumer_group = COALESCE(pc.consumer_group, '__QUEUE_MODE__')
+    )
+    ON CONFLICT (stat_type, stat_key) DO NOTHING;
+
+    -- STEP 5: last_scanned_at fixup for NULL edge cases in this slice.
+    UPDATE queen.stats SET
+        last_scanned_at = v_now
+    WHERE stat_type = 'partition'
+      AND partition_id = ANY(v_partition_ids)
+      AND last_scanned_at IS NULL;
+
+    RETURN v_max_id;
+END;
+$$;
+
 -- Aggregate queue stats from partition stats
 CREATE OR REPLACE FUNCTION queen.aggregate_queue_stats_v1()
 RETURNS JSONB
@@ -2011,6 +2255,7 @@ GRANT EXECUTE ON FUNCTION queen.increment_message_counts_v1() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.compute_partition_stats_v1(BOOLEAN) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.compute_partition_stats_v2(BOOLEAN) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.compute_partition_stats_v3(BOOLEAN) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.compute_partition_stats_chunk_v1(UUID, INT, BOOLEAN) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.aggregate_queue_stats_v1() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.aggregate_queue_stats_v2() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.aggregate_namespace_stats_v1() TO PUBLIC;
