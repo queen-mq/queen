@@ -1,0 +1,21 @@
+goload -> http://localhost:6632 queue=benchq-eng partitions=100 producers=64 consumers=0 pushBatch=100 popBatch=200 payload=256B idleConns=512 retries=2
+[configure] queue=benchq-eng completedRetentionSeconds=100000
+[08:36:53] push=   75360/s pop=       0/s | tot push=376800 pop=0 | errs p=0 c=0 empty=0
+[08:36:58] push=   78080/s pop=       0/s | tot push=767200 pop=0 | errs p=0 c=0 empty=0
+[08:37:03] push=   77760/s pop=       0/s | tot push=1156000 pop=0 | errs p=0 c=0 empty=0
+[08:37:08] push=   79040/s pop=       0/s | tot push=1551200 pop=0 | errs p=0 c=0 empty=0
+[08:37:13] push=   79200/s pop=       0/s | tot push=1947200 pop=0 | errs p=0 c=0 empty=0
+[08:37:18] push=   78240/s pop=       0/s | tot push=2338400 pop=0 | errs p=0 c=0 empty=0
+[08:37:23] push=   67680/s pop=       0/s | tot push=2676800 pop=0 | errs p=0 c=0 empty=0
+[08:37:28] push=   75840/s pop=       0/s | tot push=3056000 pop=0 | errs p=0 c=0 empty=0
+[08:37:33] push=   78560/s pop=       0/s | tot push=3448800 pop=0 | errs p=0 c=0 empty=0
+[08:37:38] push=   79040/s pop=       0/s | tot push=3844000 pop=0 | errs p=0 c=0 empty=0
+[08:37:43] push=   77760/s pop=       0/s | tot push=4232800 pop=0 | errs p=0 c=0 empty=0
+[08:37:48] push=   77280/s pop=       0/s | tot push=4619200 pop=0 | errs p=0 c=0 empty=0
+[08:37:53] push=   67360/s pop=       0/s | tot push=4956000 pop=0 | errs p=0 c=0 empty=0
+[08:37:58] push=   76960/s pop=       0/s | tot push=5340800 pop=0 | errs p=0 c=0 empty=0
+[08:38:03] push=   77920/s pop=       0/s | tot push=5730400 pop=0 | errs p=0 c=0 empty=0
+[08:38:08] push=   78560/s pop=       0/s | tot push=6123200 pop=0 | errs p=0 c=0 empty=0
+[08:38:13] push=   79360/s pop=       0/s | tot push=6520000 pop=0 | errs p=0 c=0 empty=0
+[08:38:18] push=   78480/s pop=       0/s | tot push=6912400 pop=0 | errs p=0 c=0 empty=0
+[final] pushed=6916000 popped=0 pushErr=0 popErr=0 emptyPops=0

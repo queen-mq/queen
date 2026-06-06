@@ -1,0 +1,18 @@
+[2026-06-06T08:31:55Z] engine-scaling sweep: PHASE=wsweep regimes=[fusion lowfusion] WORKERS=[1 2 4 8] SIDE=240 dur=90s -> /root/queen/benchmark-queen/2026-06-06-engine-scaling/out
+[2026-06-06T08:31:55Z] CELL regime=fusion W=1 SIDE=240 parts=100 pushBatch=100 prod=64 cons=0 dur=90s
+[2026-06-06T08:33:31Z]   done: [final] pushed=3869500 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:33:31Z] CELL regime=fusion W=2 SIDE=240 parts=100 pushBatch=100 prod=64 cons=0 dur=90s
+[2026-06-06T08:35:07Z]   done: [final] pushed=3654400 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:35:07Z] CELL regime=fusion W=4 SIDE=240 parts=100 pushBatch=100 prod=64 cons=0 dur=90s
+[2026-06-06T08:36:42Z]   done: [final] pushed=5236800 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:36:42Z] CELL regime=fusion W=8 SIDE=240 parts=100 pushBatch=100 prod=64 cons=0 dur=90s
+[2026-06-06T08:38:18Z]   done: [final] pushed=6916000 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:38:18Z] CELL regime=lowfusion W=1 SIDE=240 parts=2 pushBatch=1 prod=200 cons=0 dur=90s
+[2026-06-06T08:39:55Z]   done: [final] pushed=670005 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:39:55Z] CELL regime=lowfusion W=2 SIDE=240 parts=2 pushBatch=1 prod=200 cons=0 dur=90s
+[2026-06-06T08:41:30Z]   done: [final] pushed=1019174 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:41:30Z] CELL regime=lowfusion W=4 SIDE=240 parts=2 pushBatch=1 prod=200 cons=0 dur=90s
+[2026-06-06T08:43:05Z]   done: [final] pushed=1649471 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:43:05Z] CELL regime=lowfusion W=8 SIDE=240 parts=2 pushBatch=1 prod=200 cons=0 dur=90s
+[2026-06-06T08:44:40Z]   done: [final] pushed=361954 popped=0 pushErr=0 popErr=0 emptyPops=0
+[2026-06-06T08:44:40Z] sweep complete. Summarize with: python3 /root/queen/benchmark-queen/2026-06-06-engine-scaling/summarize-engine.py /root/queen/benchmark-queen/2026-06-06-engine-scaling/out

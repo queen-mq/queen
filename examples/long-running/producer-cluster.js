@@ -5,9 +5,9 @@ import os from 'os';
 
 const SERVER_URL = process.env.SERVER_URL || 'http://localhost:6632';
 const QUEUE_NAME = 'queen-long-running';
-const NUM_WORKERS = Number(process.env.NUM_WORKERS || 2);
-const CONNECTIONS_PER_WORKER = Number(process.env.CONNECTIONS_PER_WORKER || 100);
-const DURATION = Number(process.env.DURATION || 120);
+const NUM_WORKERS = Number(process.env.NUM_WORKERS || 4);
+const CONNECTIONS_PER_WORKER = Number(process.env.CONNECTIONS_PER_WORKER || 200);
+const DURATION = Number(process.env.DURATION || 60);
 const MAX_PARTITION = Number(process.env.MAX_PARTITION || 1000);
 const NUMBER_OF_MESSAGES_PER_PER_PUSH = Number(process.env.NUMBER_OF_MESSAGES_PER_PER_PUSH || 10);
 
