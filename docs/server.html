@@ -128,7 +128,9 @@ docker run -p 6632:6632 --network queen \
   <tbody>
     <tr><td>PORT</td><td>6632</td><td>HTTP listener port.</td></tr>
     <tr><td>HOST</td><td>0.0.0.0</td><td>HTTP bind address.</td></tr>
-    <tr><td>NUM_WORKERS</td><td>10</td><td>uWebSockets event-loop threads.</td></tr>
+    <tr><td>NUM_WORKERS</td><td>10</td><td>uWebSockets HTTP I/O threads. <strong>Decoupled from the DB engine count</strong> — all workers share 3 function-split libqueen engines (push/ack, pop, rest). Size DB concurrency with the slot vars below, not this.</td></tr>
+    <tr><td>QUEEN_PUSH_SLOTS · QUEEN_POP_SLOTS · QUEEN_REST_SLOTS</td><td>~50% · 40% · 10% of <code>SIDECAR_POOL_SIZE</code></td><td>Per-engine libpq connection slots carved from the hot-path <code>SIDECAR_POOL_SIZE</code> budget.</td></tr>
+    <tr><td>QUEEN_&lt;PUSH|POP|ACK&gt;_CONCURRENCY_MODE</td><td>static</td><td>Data-path lanes run at a fixed limit (push 24, pop/ack 16). Set to <code>vegas</code> to opt a lane into adaptive control.</td></tr>
     <tr><td>PG_HOST</td><td>localhost</td><td>PostgreSQL hostname.</td></tr>
     <tr><td>PG_USER</td><td>postgres</td><td>PostgreSQL username.</td></tr>
     <tr><td>PG_PASSWORD</td><td>postgres</td><td>PostgreSQL password.</td></tr>
@@ -659,6 +661,7 @@ retentionBatchSize: 1000
 retentionInterval: 600000
 
 # libqueen tuning (PG cluster >= 16 cores). See LIBQUEEN_TUNING.md.
+# push/pop/ack run STATIC by default at these limits; Vegas is aux-only.
 queenPushMaxConcurrent: 24
 queenAckMaxConcurrent: 16
 queenPopMaxConcurrent: 16
@@ -820,15 +823,23 @@ spec:
   <div class="code-meta"><span>throughput knobs</span><button class="copy-btn" type="button">copy</button></div>
 <pre><code class="language-bash">export NUM_WORKERS=20
 export DB_POOL_SIZE=300
-export SIDECAR_POOL_SIZE=100
+export SIDECAR_POOL_SIZE=300        # hot-path budget split across the 3 engines
 export SIDECAR_MAX_ITEMS_PER_TX=2000
 export RESPONSE_BATCH_SIZE=200
 export RESPONSE_BATCH_MAX=1000
 
-# v0.13+ adaptive engine, raise per-type concurrency ceilings if needed
+# Data-path lanes run STATIC by default at these limits (push/pop/ack).
+# These are measured optima, not Vegas ceilings — push ceiling is a flat
+# ~190k (then Postgres Lock:extend on queen.messages), balanced ~110-120k.
 export QUEEN_PUSH_MAX_CONCURRENT=24
 export QUEEN_ACK_MAX_CONCURRENT=16
-export QUEEN_POP_MAX_CONCURRENT=16</code></pre>
+export QUEEN_POP_MAX_CONCURRENT=16
+
+# DB concurrency is split per engine, independent of NUM_WORKERS.
+export QUEEN_PUSH_SLOTS=150
+export QUEEN_POP_SLOTS=120
+export QUEEN_REST_SLOTS=30
+export QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH=8   # disjoint-partition push batching</code></pre>
 </div>
 
 <p class="muted">

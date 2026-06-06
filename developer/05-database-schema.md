@@ -82,13 +82,15 @@ The unique constraint `(partition_id, transaction_id)` is **partition-scoped, no
 
 The `id` is UUIDv7 — time-ordered. This is what gives us "scan for messages above `last_consumed_id`" without a separate offset table. See `queen::generate_uuidv7()` in `lib/queen.hpp`.
 
+> **`created_at` is commit-ordered per partition.** Although the column default is `NOW()` (transaction-*start* time), every push path **overrides** `created_at` with `clock_timestamp()` while holding the per-partition push advisory lock (see warning §7 below). That makes `created_at` monotonic in *commit* order within a partition — the invariant the pop cursor `(created_at, id)` depends on to never skip a not-yet-committed message.
+
 ### `queen.partition_consumers`
 
 Per (partition, consumer_group) state. Tracks `last_consumed_id`, `last_consumed_created_at`, lease state, batch state for in-flight pops, etc. This is where the FIFO offset is stored.
 
 ### `queen.partition_lookup`
 
-Per-queue index of "latest message in each partition". Maintained **out-of-band** via `update_partition_lookup_v1()` after PUSH responses are flushed (see `cdocs/PUSHPOPLOOKUPSOL.md`). Used by the wildcard pop path to find candidate partitions cheaply.
+Per-queue index of "latest message in each partition". Maintained **out-of-band**: the push engine coalesces the `partition_updates` from many commits and flushes them via `update_partition_lookup_v1()` Nagle-style (at most one flush in flight; see `cdocs/PUSHPOPLOOKUPSOL.md`). Used by the wildcard pop path to find candidate partitions cheaply.
 
 ### `queen.consumer_watermarks`
 
@@ -129,7 +131,7 @@ What's specifically delicate:
 The current pop (`pop_unified_batch_v4`) **does not** rely on a trigger to maintain `partition_lookup`. Instead:
 
 - `push_messages_v3` returns a `partition_updates` summary in its response
-- libqueen calls `update_partition_lookup_v1()` *after* responding to the client (fire-and-forget)
+- the push engine merges those into a coalescing buffer and calls `update_partition_lookup_v1()` *after* responding (Nagle-style: at most one flush in flight, immediate when idle, batched under load)
 - `PartitionLookupReconcileService` runs `reconcile_partition_lookup_v1()` every 5 s as a safety net
 - `schema.sql` explicitly drops the old `trg_update_partition_lookup` trigger on every schema apply (the trigger function body is kept around for rollback)
 
@@ -154,6 +156,12 @@ Both `RetentionService` and `EvictionService` acquire `pg_try_advisory_xact_lock
 ### 6. Transaction isolation matters
 
 Most procedures rely on the default `READ COMMITTED`. The pop path explicitly uses `pg_try_advisory_xact_lock` to avoid `SELECT ... FOR UPDATE` on hot rows. Don't change isolation level inside a procedure without measuring throughput before and after.
+
+### 7. PUSH is serialized per partition for commit-ordered `created_at`
+
+`push_messages_v3` and the push branch of `execute_transaction_v2` take `queen.lock_push_partition(partition_id)` — a `pg_advisory_xact_lock` in a **dedicated two-int keyspace** (`pg_advisory_xact_lock(1347439944, hashtext(partition_id::text))`), structurally **disjoint** from the single-`bigint` keys used by pop (partition claim), ack (`partition+group`), streams, and the retention lock — for **every** partition they write, **in ascending `partition_id` order** (deadlock-free), held until commit. Messages are then inserted with `created_at = clock_timestamp()` *under* that lock. This is the mechanism behind the commit-ordered-`created_at` invariant the pop cursor depends on. The broker also enforces "≤1 in-flight push per partition" in memory (the push engine's gate + disjoint-partition batching), so on a single instance the DB lock is essentially uncontended — it is the cross-instance backstop. The streams sink inherits this because it pushes via `push_messages_v3`.
+
+**Do not**: reuse the two-int keyspace for anything else; drop the sorted-acquisition order (reintroduces deadlocks); or move the `clock_timestamp()` stamp out from under the lock (reintroduces the cursor-skip bug — a message can commit "behind" an already-advanced pop cursor and be lost). The deterministic repro is `benchmark-queen/2026-06-06-engine-scaling/cursor-repro.sh`.
 
 ---
 

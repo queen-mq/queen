@@ -17,7 +17,8 @@ queen/
 │   ├── Makefile           build system
 │   └── README.md          operator-focused build & tuning guide
 ├── lib/                   libqueen — header-only C++ core used by the broker
-│   ├── queen.hpp          the entry header
+│   ├── queen.hpp          the entry header (per-engine drain loop)
+│   ├── queen_cluster.hpp  QueenCluster — 3 function-split engines (push/pop/rest)
 │   ├── queen/             drain orchestrator, slot pool, per-type queue, …
 │   ├── schema/            ⚠ database schema + stored procedures
 │   │   ├── schema.sql     base schema (tables + indexes)

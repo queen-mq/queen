@@ -38,7 +38,7 @@ Optional companion processes:
 
 ## Inside the broker (`server/`)
 
-### Threading model: acceptor + workers + services
+### Threading model: acceptor + HTTP workers + function-split engine cluster + services
 
 ```
                  ┌────────────┐
@@ -48,24 +48,34 @@ Optional companion processes:
               ┌────────┼───────────────┐
               ▼        ▼               ▼
          ┌────────┐ ┌────────┐    ┌────────┐
-         │Worker 1│ │Worker 2│ …  │Worker N│   N = NUM_WORKERS (default 10)
-         └───┬────┘ └───┬────┘    └───┬────┘
-             │          │             │
-             └──────────┴─────────────┘
-                        │
-              ┌─────────▼─────────────┐
-              │  AsyncQueueManager     │  one per worker
-              │  + AsyncDbPool         │  ~142 conns (95% of DB_POOL_SIZE)
-              │  + libqueen orchestr.  │
-              └─────────┬─────────────┘
-                        │
-                        ▼
-                 ┌─────────────┐
-                 │ PostgreSQL  │
-                 └─────────────┘
+         │Worker 1│ │Worker 2│ …  │Worker N│   N = NUM_WORKERS — HTTP I/O +
+         └───┬────┘ └───┬────┘    └───┬────┘   JSON parse ONLY (no DB engine)
+             │   submit(JobRequest), routed by JobType
+             └───────────────┬────────────────────────┘
+                             ▼
+   ┌───────────────────────────────────────────────────────────────┐
+   │  libqueen engine cluster  (PROCESS-GLOBAL, shared by all        │
+   │  workers, sized for the DB — NOT one-per-worker, decoupled       │
+   │  from NUM_WORKERS). Routing: PUSH/ACK/TXN→push, POP→pop, else→rest│
+   │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
+   │   │ push/ack eng │    │  pop engine  │    │  rest engine │      │
+   │   │ libuv loop + │    │ libuv loop + │    │ libuv loop + │      │
+   │   │ conn slots + │    │ conn slots   │    │ conn slots   │      │
+   │   │ per-partition│    │ (pop path    │    │ (custom /    │      │
+   │   │ in-flight    │    │  unchanged)  │    │ partition_   │      │
+   │   │ gate + pl    │    │              │    │ lookup /     │      │
+   │   │ coalescer    │    │              │    │ streams …)   │      │
+   │   └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │
+   └──────────┼───────────────────┼───────────────────┼─────────────┘
+              └───────────────────┴───────────────────┘
+                                  │  per-function connection slots
+                                  ▼ (QUEEN_PUSH/POP/REST_SLOTS)
+                           ┌─────────────┐
+                           │ PostgreSQL  │
+                           └─────────────┘
 
   ┌────────────────────────────────────────┐
-  │           Background services           │  separate threadpool, ~5% of DB_POOL_SIZE
+  │           Background services           │  separate threadpool
   ├────────────────────────────────────────┤
   │ MetricsCollector       ── stats roll-up │
   │ RetentionService       ── cleanup       │
@@ -76,15 +86,34 @@ Optional companion processes:
   └────────────────────────────────────────┘
 ```
 
+**Function-split engines (push-serialization architecture).** There are exactly
+**three** libqueen engines per broker process — push/ack, pop, and rest — created
+once and shared across all HTTP workers (`QueenCluster` in `lib/queen_cluster.hpp`).
+This replaced the old "one libqueen engine per HTTP worker" model. Two reasons:
+
+1. **Correctness needs a single owner per partition.** Push serialization (below)
+   keeps `messages.created_at` commit-ordered per partition via an in-memory
+   per-partition in-flight gate; that gate is only simple and lock-free when all
+   of a partition's pushes funnel through one engine. Routing PUSH/ACK to a single
+   push engine gives that for free.
+2. **Decoupling tuning.** `NUM_WORKERS` now sizes only HTTP I/O (TLS, parse,
+   dispatch). DB concurrency is sized independently by **per-function connection
+   slots** (`QUEEN_PUSH_SLOTS` / `QUEEN_POP_SLOTS` / `QUEEN_REST_SLOTS`) — engine
+   count is fixed at 3, not a knob. `Queen::submit` is thread-safe, so all workers
+   submit into the shared engines concurrently.
+
+POP runs on its own engine so its load never interferes with push, and the pop
+SQL/cursor path is unchanged.
+
 Where this lives in code:
 
 
 | Concern                                        | File(s)                                                          |
 | ---------------------------------------------- | ---------------------------------------------------------------- |
 | Acceptor (`uv_listen`, round-robin to workers) | `server/src/acceptor_server.cpp`, `server/src/main_acceptor.cpp` |
-| Worker event loop + HTTP routes                | `server/src/routes/*.cpp` (push, pop, ack, …)                    |
+| HTTP worker event loop + routes                | `server/src/routes/*.cpp` (push, pop, ack, …)                    |
+| Engine cluster (3 function-split engines)      | `lib/queen_cluster.hpp`, wired in `server/src/acceptor_server.cpp` |
 | Async DB pool (non-blocking libpq)             | `server/src/database/async_database.cpp`                         |
-| Per-worker queue manager                       | `server/src/managers/async_queue_manager.cpp`                    |
 | Background services                            | `server/src/services/*.cpp`                                      |
 | JWT auth (when enabled)                        | `server/src/auth/auth_middleware.cpp`, `server/src/auth/jwt_validator.cpp` |
 
@@ -107,7 +136,7 @@ Each HTTP route is one `*.cpp` file in `server/src/routes/`. Notable ones:
 | `static_files.cpp`                            | serves the embedded Vue dashboard                           |
 
 
-Each route validates input, then delegates to a stored procedure via `AsyncQueueManager`. **The actual logic of push/pop/ack lives in SQL**, not in C++. See [05 — Database schema](05-database-schema.md).
+Each route validates input, then submits a `JobRequest` to the shared engine cluster (`QueenCluster::submit`, routed by `JobType`), which batches it into a stored-procedure call. **The actual logic of push/pop/ack lives in SQL**, not in C++. See [05 — Database schema](05-database-schema.md).
 
 ---
 
@@ -116,12 +145,13 @@ Each route validates input, then delegates to a stored procedure via `AsyncQueue
 libqueen is a **header-only C++ library** that lives alongside the broker. The broker `#include`s it (`server/Makefile` adds `-I../lib`) and uses it for:
 
 - **UUIDv7 generation** (time-ordered IDs for ordering guarantees)
-- **Per-worker drain orchestrator** that batches push/pop/ack/transaction/renew requests across many concurrent HTTP connections, calls the stored procedures with one round-trip, and routes responses back to the original waiter
-- **Adaptive concurrency control** (TCP Vegas-style — grow when DB has spare capacity, shrink when overloaded) to keep latency bounded under load
+- **Function-split drain orchestrators** — three shared engines (push/ack, pop, rest) that batch requests across many concurrent HTTP connections, call the stored procedures in one round-trip, and route responses back to the original waiter
+- **Per-partition push serialization** — the push engine keeps an in-memory "≤1 in-flight push transaction per partition" gate and forms disjoint-partition concurrent batches, so `created_at` is assigned in commit order per partition (the property the pop cursor relies on)
+- **Concurrency control** — the **data-path lanes (push/pop/ack) default to STATIC** concurrency at a measured optimum (push 24, pop/ack 16); the RTT-adaptive **Vegas** controller is kept only for the auxiliary lanes (custom/renew/streams/partition_lookup). Vegas was found to *under-shoot* push (high commit RTT) and *collapse* pop (long-poll RTT misread as PG queuing), so the hot path uses static limits instead. Override per lane with `QUEEN_<PUSH|POP|ACK>_CONCURRENCY_MODE`.
 
 ### The drain orchestrator
 
-This is the trick that lets ~142 DB connections serve hundreds of thousands of concurrent in-flight HTTP requests:
+This is the trick that lets a small pool of DB connection slots (the per-function split of `SIDECAR_POOL_SIZE`) serve hundreds of thousands of concurrent in-flight HTTP requests:
 
 ```
 many HTTP handlers ──▶ PerTypeQueue (per JobType)
@@ -153,10 +183,11 @@ The relevant files (small, readable, all in `lib/queen/`):
 | `batch_policy.hpp`             | 2     | pure FIRE/HOLD decision on (size, oldest_age)         |
 | `concurrency/static_limit.hpp` | 3     | fixed concurrency cap                                 |
 | `concurrency/vegas_limit.hpp`  | 3     | adaptive cap based on RTT (TCP Vegas-style)           |
-| `slot_pool.hpp`                | —     | `DBConnection` struct (a "slot" *is* a libpq conn)    |
-| `drain_orchestrator.hpp`       | —     | `PerTypeState` aggregate + concurrency-ctrl factory   |
+| `slot_pool.hpp`                | —     | `DBConnection` struct (a "slot" *is* a libpq conn); holds the push batch's in-flight partition keys |
+| `drain_orchestrator.hpp`       | —     | `PerTypeState` aggregate + concurrency-ctrl factory + `concurrency_mode_for` (data-path lanes default static) |
+| `../queen_cluster.hpp`         | —     | `QueenCluster`: owns the 3 function-split engines, routes `submit()` by JobType |
 | `metrics.hpp`                  | —     | atomics for drain-loop stats                          |
-| (drain loop itself)            | 4     | inside the `Queen` class in `queen.hpp`               |
+| (drain loop + per-partition gate + pl coalescer) | 4 | inside the `Queen` class in `queen.hpp`        |
 
 
 See [04 — libqueen](04-libqueen.md) for a code-walkthrough.
@@ -177,7 +208,7 @@ The most important procedures:
 
 | File                      | Procedure                  | What it does                              |
 | ------------------------- | -------------------------- | ----------------------------------------- |
-| `001_push.sql`            | `push_messages_v3` (v2 also defined for rollback) | batch insert, dedup, partition upsert |
+| `001_push.sql`            | `push_messages_v3` (+ `lock_push_partition` helper) | per-partition advisory lock + batch insert with `created_at=clock_timestamp()` (commit-ordered), dedup, partition upsert |
 | `002d_pop_unified_v4.sql` | `pop_unified_batch_v4`     | wildcard multi-partition pop with leases  |
 | `003_ack.sql`             | `ack_messages_v2`          | mark consumed, advance `last_consumed_id` |
 | `004_transaction.sql`     | `execute_transaction_v2`   | atomic ack + push (transactional outbox)  |
@@ -195,12 +226,26 @@ The most important procedures:
 
 1. **Client** sends `POST /api/v1/push` to the broker.
 2. **Acceptor** picks a worker (round-robin) and hands off the connection.
-3. **Worker** parses JSON, validates, hands off to `AsyncQueueManager`.
-4. **libqueen drain loop** (Layer 4 in the `Queen` class) queues the request in the per-worker push `PerTypeQueue`. The `BatchPolicy` (Layer 2) decides when to fire — `queue.size >= preferred_batch_size` (default 50 for push) or `oldest_age >= max_hold_ms` (default 20 ms). The `ConcurrencyController` (Layer 3) decides whether there's headroom to start a new in-flight batch. If yes, the drain loop grabs an idle `DBConnection` slot.
-5. The slot is an idle libpq connection. The drain loop builds one big JSONB array of all queued push requests and calls `queen.push_messages_v3($1::jsonb)` with a single async query.
-6. **Postgres** runs the procedure: it upserts queues + partitions, deduplicates by `(partition_id, transaction_id)`, batch-inserts into `queen.messages`, and returns a JSONB summary.
-7. The worker fan-outs results back to each waiter. Each HTTP handler writes its response.
-8. **After the response is written**, libqueen fires a fire-and-forget call to `queen.update_partition_lookup_v1()` to refresh the `partition_lookup` table outside the hot path. This is the design from `[cdocs/PUSHPOPLOOKUPSOL.md](../cdocs/PUSHPOPLOOKUPSOL.md)`.
+3. **HTTP worker** parses JSON, validates, computes the distinct `(queue,partition)` keys of the batch, and `submit()`s the request — routed to the shared **push engine**.
+4. **Push engine drain loop** queues the request in the push `PerTypeQueue`. The `BatchPolicy` (Layer 2) decides when to fire — `queue.size >= preferred_batch_size` (default 50) or `oldest_age >= max_hold_ms` (default 20 ms). The `ConcurrencyController` (Layer 3, **static** for push, limit 24) decides whether there's headroom. The drain then forms a **disjoint-partition batch**: it skips jobs whose partition already has an in-flight push transaction and caps distinct partitions per batch (`QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH`, default 8), so up to N push transactions run concurrently on disjoint partition sets (≤1 in-flight per partition).
+5. The drain grabs an idle `DBConnection` slot, builds one JSONB array of the batch, and calls `queen.push_messages_v3($1::jsonb)` with a single async query.
+6. **Postgres** runs the procedure: it upserts queues + partitions, **takes the push partition advisory lock for each partition in sorted order** (two-int keyspace, disjoint from pop/ack), deduplicates by `(partition_id, transaction_id)`, batch-inserts into `queen.messages` stamping **`created_at = clock_timestamp()` under the lock** (so per-partition `created_at` is commit-ordered — see Push serialization below), and returns a JSONB summary.
+7. The push engine fans results back to each waiter; each HTTP worker writes its response on its own loop (per-worker response registry).
+8. The batch's `partition_updates` are merged into the push engine's **coalescing buffer** and flushed to `queen.update_partition_lookup_v1()` Nagle-style (at most one flush in flight; immediate when idle, batched under load). This replaced the old one-`update_partition_lookup`-call-per-push-batch, which backlogged under high push. Design lineage: `[cdocs/PUSHPOPLOOKUPSOL.md](../cdocs/PUSHPOPLOOKUPSOL.md)`.
+
+### Push serialization (why `created_at` is safe)
+
+`messages.created_at` is the pop cursor's primary sort key, but `NOW()` is the
+*transaction-start* time, decoupled from commit order — so under concurrent push
+a message could commit "behind" the cursor and be skipped forever. The fix:
+serialize pushes **per partition** (the in-memory gate above, plus a Postgres
+`pg_advisory_xact_lock` in a dedicated two-int keyspace, held until commit) and
+stamp `created_at = clock_timestamp()` *under* that lock. With one push
+transaction per partition at a time, `created_at` is monotonic in commit order
+per partition, so the `(created_at, id)` cursor can never skip. POP and ACK are
+unchanged. All message-insert paths honor the lock: `push_messages_v3`,
+`execute_transaction_v2` (push branch, sorted multi-lock), and the streams sink
+(via `push_messages_v3`).
 
 ---
 
@@ -242,7 +287,8 @@ See [12 — Failover](12-failover.md) for details. Code: `server/src/services/fi
 | Adding/changing an HTTP endpoint | `server/src/routes/<topic>.cpp`                                                                               |
 | Adding/changing a SQL procedure  | `lib/schema/procedures/`, then [05 — Database schema](05-database-schema.md)                                  |
 | Pop/push contention              | `lib/schema/procedures/002d_pop_unified_v4.sql` + `[cdocs/PUSHPOPLOOKUPSOL.md](../cdocs/PUSHPOPLOOKUPSOL.md)` |
-| Broker latency / throughput      | `lib/queen/drain_orchestrator.hpp`, `concurrency/vegas_limit.hpp`                                             |
+| Broker latency / throughput      | `lib/queen/drain_orchestrator.hpp` (per-lane concurrency mode + limits), `lib/queen_cluster.hpp` (engine split), `concurrency/{static,vegas}_limit.hpp` |
+| Push correctness / `created_at`  | `lib/schema/procedures/001_push.sql` (`lock_push_partition` + `clock_timestamp`), per-partition gate in `lib/queen.hpp` |
 | Cleanup / retention              | `server/src/services/retention_service.cpp` + [09 — Retention](09-retention.md)                               |
 | Dashboard                        | `app/src/` + [10 — Frontend dashboard](10-frontend-dashboard.md)                                              |
 | Auth                             | `proxy/` + [11 — Auth proxy](11-proxy.md)                                                                     |

@@ -6,14 +6,15 @@ Complete guide for building, configuring, and tuning the Queen C++ message queue
 
 Queen is a high-performance, **fully non-blocking** message broker built on:
 - **uWebSockets** for event-driven HTTP/WebSocket handling
-- **libuv** event loops (one per HTTP worker, plus per-`Queen` instance)
+- **libuv** event loops (one per HTTP worker, plus one per shared libqueen engine)
 - **libpq async API** for non-blocking PostgreSQL I/O
 - **Two cooperating connection pools** (see [Architecture](#architecture))
-- **TCP-Vegas-style adaptive concurrency control** in libqueen
+- **Function-split engine cluster** — 3 shared libqueen engines (push/ack, pop, rest) with **static hot-path concurrency** + TCP-Vegas adaptive control for the auxiliary lanes
 
 **Key characteristics:**
 - ✅ No blocking on database I/O on any HTTP request path
-- ✅ Adaptive batching + concurrency per `JobType` (PUSH / POP / ACK / TRANSACTION / RENEW_LEASE / CUSTOM)
+- ✅ Per-`JobType` batching; static data-path concurrency (push/pop/ack), Vegas for aux lanes (PUSH / POP / ACK / TRANSACTION / RENEW_LEASE / CUSTOM)
+- ✅ Per-partition push serialization → `created_at` is commit-ordered (pop cursor never skips)
 - ✅ Sustains ~104k msg/s push and ~165k msg/s fan-out on a 32-core host (see [benchmarks](../benchmark-queen/2026-04-26/README.md))
 - ✅ Broker RSS under 100 MB at peak load
 - ✅ File-buffer failover keeps PUSHes durable when PostgreSQL is unreachable
@@ -44,13 +45,16 @@ Queen is a high-performance, **fully non-blocking** message broker built on:
 Client → uWS acceptor (port 6632, single thread)
             │  round-robin LB across workers
             ▼
-         uWS worker thread × NUM_WORKERS
+         uWS worker thread × NUM_WORKERS   (HTTP I/O only)
             │
+            │  submit(JobRequest) — routed by JobType to a SHARED engine
             │  HOT PATH (PUSH / POP / ACK / TRANSACTION / RENEW_LEASE)
-            ├──▶  per-worker libqueen instance (queen::Queen)
-            │       │  - own uv_loop
-            │       │  - per-worker slice of the sidecar pool
-            │       │  - adaptive Vegas controller per JobType
+            ├──▶  QueenCluster: 3 process-global libqueen engines (queen::Queen)
+            │       │  push/ack · pop · rest — shared by all workers,
+            │       │                          NOT one per worker
+            │       │  - each: own uv_loop + per-function slice of SIDECAR_POOL_SIZE
+            │       │  - data-path lanes static (push 24, pop/ack 16); aux Vegas
+            │       │  - push engine: per-partition gate + partition_lookup coalescer
             │       └──▶  PostgreSQL (async libpq, batched stored procs)
             │
             │  EVERYTHING ELSE
@@ -68,15 +72,17 @@ The server keeps **two independent connection pools** with very different roles.
 
 #### 1. Sidecar pool (`SIDECAR_POOL_SIZE`, default **50**)
 
-The **hot path** — PUSH, POP, ACK, TRANSACTION, RENEW_LEASE — runs through a per-worker [`queen::Queen`](../lib/queen.hpp) instance ("libqueen", a.k.a. "sidecar"). At startup the total `SIDECAR_POOL_SIZE` budget is split evenly across `NUM_WORKERS`, with any remainder given to the first few workers (see `server/src/acceptor_server.cpp:597`).
+The **hot path** — PUSH, POP, ACK, TRANSACTION, RENEW_LEASE — runs through **three process-global** [`queen::Queen`](../lib/queen.hpp) engines ("libqueen", a.k.a. "sidecar"), wrapped in a `QueenCluster` and **shared by all HTTP workers** (this replaced the old one-engine-per-worker model). The cluster routes each `submit()` by `JobType`: PUSH/ACK/TRANSACTION → push engine, POP → pop engine, everything else → rest engine. At startup the total `SIDECAR_POOL_SIZE` budget is split **by function** — `QUEEN_PUSH_SLOTS` (default 50%), `QUEEN_POP_SLOTS` (40%), `QUEEN_REST_SLOTS` (remainder) — not across `NUM_WORKERS` (see `server/src/acceptor_server.cpp`). `NUM_WORKERS` now sizes only HTTP I/O.
 
-Each `Queen` instance:
+Why function-split: the push path keeps `messages.created_at` commit-ordered per partition via an in-memory "≤1 in-flight push per partition" gate (plus a Postgres advisory lock as the cross-instance backstop). That gate is only simple and lock-free when a partition's pushes all funnel through one engine — so PUSH/ACK get a single shared owner.
+
+Each engine:
 - owns its own libuv event loop and slot pool
-- runs an adaptive concurrency controller per `JobType` (Vegas by default, or static)
-- amortises round-trips by **fusing in-flight jobs into batches** (configured via `QUEEN_<TYPE>_*` env vars — see [ENV_VARIABLES.md](ENV_VARIABLES.md))
+- runs a concurrency controller per `JobType` — the **data-path lanes (PUSH/POP/ACK) default to static** at their measured optima (push 24, pop/ack 16); the auxiliary lanes use Vegas. Vegas mis-reads the hot path (it under-shoots push on high commit RTT and collapses pop on long-poll RTT), so static is the default there. Override with `QUEEN_<TYPE>_CONCURRENCY_MODE`.
+- amortises round-trips by **fusing in-flight jobs into batches** (configured via `QUEEN_<TYPE>_*` env vars — see [ENV_VARIABLES.md](ENV_VARIABLES.md)); the push engine additionally forms **disjoint-partition** batches and **coalesces** `partition_lookup` updates (Nagle-style)
 - calls the v3/v4 stored procedures directly: `queen.push_messages_v3`, `queen.pop_unified_batch_v4`, `queen.ack_messages_v2`, `queen.renew_lease_v2`, `queen.execute_transaction_v2`
 
-Even at 100 k msg/s peak load, the Vegas controller typically converges to **~2.5 in-flight queries per worker** (measured in the 2026-04-26 benchmark suite). The default of 50 total connections is therefore more than enough headroom for a single-node deployment; raise it only if Vegas is saturating `QUEEN_<TYPE>_MAX_CONCURRENT` (visible in `/metrics/prometheus`).
+Sizing: the validated balanced workload runs push ~110–120k/s and pop ~110–120k/s on a 32-core PG, with a push-only ceiling near ~190k/s (beyond which Postgres `Lock:extend` on `queen.messages` dominates). Raise `SIDECAR_POOL_SIZE` (and the per-function slot split) if a lane is saturating `QUEEN_<TYPE>_MAX_CONCURRENT` (visible in `/metrics/prometheus`).
 
 #### 2. AsyncDbPool (`DB_POOL_SIZE`, default **150**)
 
@@ -222,25 +228,28 @@ CXXFLAGS="-std=c++17 -g -O0" make
 
 ### Tuning the hot path (libqueen / sidecar pool)
 
-The most impactful knobs are **per-`JobType`**, not the pool size. Each type exposes four variables: `QUEEN_<TYPE>_{PREFERRED_BATCH_SIZE,MAX_HOLD_MS,MAX_BATCH_SIZE,MAX_CONCURRENT}`. The defaults are calibrated from the 2026-04-22 Vegas-uncapped sweep (`benchmark-queen/test-perf/results/sweep_2026-04-22_07-41-19`):
+The most impactful knobs are **per-`JobType`**, not the pool size. Each type exposes four variables: `QUEEN_<TYPE>_{PREFERRED_BATCH_SIZE,MAX_HOLD_MS,MAX_BATCH_SIZE,MAX_CONCURRENT}`, plus a concurrency mode:
 
-| Type | preferred | max_hold_ms | max_batch | max_concurrent |
-|---|---:|---:|---:|---:|
-| `PUSH` | 50 | 20 | 500 | 24 |
-| `POP` | 20 | 5 | 500 | 16 |
-| `ACK` | 50 | 20 | 500 | 16 |
-| `TRANSACTION` | 1 | 0 | 1 | 1 |
-| `RENEW_LEASE` | 10 | 100 | 100 | 2 |
-| `CUSTOM` | 1 | 0 | 1 | 1 |
+| Type | preferred | max_hold_ms | max_batch | max_concurrent | default mode |
+|---|---:|---:|---:|---:|---|
+| `PUSH` | 50 | 20 | 500 | 24 | **static** |
+| `POP` | 20 | 5 | 500 | 16 | **static** |
+| `ACK` | 50 | 20 | 500 | 16 | **static** |
+| `TRANSACTION` | 1 | 0 | 1 | 1 | static |
+| `RENEW_LEASE` | 10 | 100 | 100 | 2 | vegas |
+| `CUSTOM` | 1 | 0 | 1 | 1 | vegas |
 
-Defaults rationale (`server/include/queen/config.hpp:209-220`):
+Defaults rationale:
 
+- **The data-path lanes (PUSH / POP / ACK) run `static` at `max_concurrent`.** These are measured optima from the 2026-06 engine-scaling sweep, *not* Vegas ceilings: push has a flat ceiling ~186–190k from `C≈16–24` (then Postgres `Lock:extend` on `queen.messages`), and balanced push+pop lands ~110–120k each. Vegas (RTT-adaptive) mis-handles the hot path — it under-shoots push (high per-commit RTT) and *collapses* pop/ack (parked long-poll RTT read as PG queuing). Switch a lane back with `QUEEN_<TYPE>_CONCURRENCY_MODE=vegas`.
 - `PUSH` / `ACK` `preferred=50` sits above the S1 break-even (~33 jobs/batch); `max_hold_ms=20` is the sweet spot found by the perf campaign.
 - `POP` is latency-sensitive — tighter hold, smaller preferred batch.
 - `TRANSACTION` and `CUSTOM` are atomic, so they never fuse: batch size 1, concurrency 1.
-- `RENEW_LEASE` is background work: modest batch, longer hold.
+- `RENEW_LEASE` is background work: modest batch, longer hold; follows the global Vegas default.
 
-If you've raised `QUEEN_<TYPE>_MAX_CONCURRENT` you must keep `QUEEN_VEGAS_BETA < MAX_CONCURRENT` — otherwise the Vegas controller never grows. Default `BETA=12` works up to `MAX_CONCURRENT=24` (`config.hpp:197` + 2026-04-22 sweep notes).
+The hot-path budget (`SIDECAR_POOL_SIZE`) is split **by function** across the three engines: `QUEEN_PUSH_SLOTS` (default 50%), `QUEEN_POP_SLOTS` (40%), `QUEEN_REST_SLOTS` (remainder). `QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH` (default 8) caps distinct partitions per push transaction so concurrent pushes form disjoint partition sets.
+
+Vegas tuning only matters for lanes actually running Vegas (the aux lanes, or any data-path lane you flip to `vegas`): keep `QUEEN_VEGAS_BETA < MAX_CONCURRENT` or the controller never grows. Default `BETA=12` works up to `MAX_CONCURRENT=24`.
 
 ### Tuning the background pool (AsyncDbPool)
 
@@ -250,7 +259,7 @@ If you've raised `QUEEN_<TYPE>_MAX_CONCURRENT` you must keep `QUEEN_VEGAS_BETA <
 - analytics endpoints under heavy dashboard refresh
 - stats reconciliation on queues with millions of messages
 
-Raise it if the dashboard times out, if `StatsService` log lines show `statement_timeout` errors during reconciliation, or if file-buffer flush throughput stalls below ~10k events/sec on a healthy PG. **Raising it will not help raw push/pop throughput**, which is bounded by `SIDECAR_POOL_SIZE` and Vegas.
+Raise it if the dashboard times out, if `StatsService` log lines show `statement_timeout` errors during reconciliation, or if file-buffer flush throughput stalls below ~10k events/sec on a healthy PG. **Raising it will not help raw push/pop throughput**, which is bounded by `SIDECAR_POOL_SIZE` (the per-engine slot split) and the static data-path limits.
 
 ### Worker thread configuration
 
@@ -273,11 +282,17 @@ export SIDECAR_POOL_SIZE=100           # ~10 sidecar conns / worker
 export RESPONSE_BATCH_SIZE=200         # response queue tick batch
 export RESPONSE_BATCH_MAX=1000
 
-# Per-type knobs (the defaults are usually fine; example shows where to push)
-export QUEEN_PUSH_MAX_CONCURRENT=32
-export QUEEN_ACK_MAX_CONCURRENT=24
-export QUEEN_VEGAS_MAX_LIMIT=48        # must be ≥ any MAX_CONCURRENT you raised
-export QUEEN_VEGAS_BETA=16             # must be < smallest MAX_CONCURRENT
+# Hot-path lanes run STATIC; these are the fixed in-flight limits (not Vegas caps)
+export QUEEN_PUSH_MAX_CONCURRENT=24
+export QUEEN_POP_MAX_CONCURRENT=16
+export QUEEN_ACK_MAX_CONCURRENT=16
+
+# Split the SIDECAR_POOL_SIZE budget across the 3 engines (push / pop / rest)
+export QUEEN_PUSH_SLOTS=50
+export QUEEN_POP_SLOTS=40
+export QUEEN_REST_SLOTS=10
+export QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH=8   # disjoint-partition push batching
+# QUEEN_VEGAS_* only affects the auxiliary lanes (or a lane you set to vegas)
 
 ./bin/queen-server
 ```

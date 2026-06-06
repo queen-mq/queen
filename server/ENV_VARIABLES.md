@@ -9,7 +9,22 @@ This document lists all environment variables supported by the Queen C++ server.
 | `PORT` | int | 6632 | HTTP server port |
 | `HOST` | string | 0.0.0.0 | HTTP server host |
 | `WORKER_ID` | string | cpp-worker-1 | Unique identifier for this worker |
-| `NUM_WORKERS` | int | 10 | Number of worker threads |
+| `NUM_WORKERS` | int | 10 | Number of **HTTP I/O** worker threads (TLS, JSON parse, dispatch). **Decoupled from the DB engine count:** all workers share the same 3 function-split libqueen engines (push/ack, pop, rest). Size DB concurrency with the per-function slot vars below, not this. |
+
+### Engine cluster (function-split libqueen)
+
+The broker runs **3 process-global libqueen engines** — push/ack, pop, rest — shared
+by all HTTP workers (`QueenCluster`). Engine count is fixed at 3; hot-path DB concurrency
+is sized per function via connection slots carved out of the **`SIDECAR_POOL_SIZE`** budget
+(the background `AsyncDbPool` from `DB_POOL_SIZE` is separate). Slots default to a
+50% / 40% / 10% split of `SIDECAR_POOL_SIZE`.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `QUEEN_PUSH_SLOTS` | int | 50% of `SIDECAR_POOL_SIZE` | libpq slots for the push/ack engine. |
+| `QUEEN_POP_SLOTS` | int | 40% of `SIDECAR_POOL_SIZE` | libpq slots for the pop engine. |
+| `QUEEN_REST_SLOTS` | int | remainder (~10%) | libpq slots for the rest engine (custom/renew/streams/partition_lookup). |
+| `QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH` | int | 8 | Cap on distinct partitions a single push transaction may claim, so concurrent push transactions can form **disjoint** partition sets (≤1 in-flight push per partition → commit-ordered `created_at`). |
 
 ## Database Configuration
 
@@ -131,7 +146,17 @@ kicks, and a dynamic safety-net timer (re-armed at the end of each drain pass).
 #### Concurrency mode
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `QUEEN_CONCURRENCY_MODE` | string | `vegas` | `vegas` (adaptive, TCP Vegas-inspired) or `static` (fixed limit). Applies globally. |
+| `QUEEN_CONCURRENCY_MODE` | string | `vegas` | Global default for the **auxiliary** lanes (CUSTOM / RENEW_LEASE / TRANSACTION / STREAMS_* / PARTITION_LOOKUP). `vegas` (adaptive) or `static`. |
+| `QUEEN_PUSH_CONCURRENCY_MODE` | string | `static` | Per-lane override for PUSH. |
+| `QUEEN_POP_CONCURRENCY_MODE` | string | `static` | Per-lane override for POP. |
+| `QUEEN_ACK_CONCURRENCY_MODE` | string | `static` | Per-lane override for ACK. |
+
+> **Data-path lanes default to `static`.** PUSH, POP, and ACK ignore the global
+> `QUEEN_CONCURRENCY_MODE` and default to **static** at their `MAX_CONCURRENT`
+> (PUSH 24, POP/ACK 16). Vegas is RTT-adaptive and was measured to mis-handle the
+> hot path — it under-shoots PUSH (high per-commit RTT) and *collapses* POP/ACK
+> (long-poll parking inflates RTT to ~1 s, read as PG queuing → limit slammed to
+> the floor). Set a lane's `QUEEN_<TYPE>_CONCURRENCY_MODE=vegas` to opt back in.
 
 #### Vegas adaptive-controller tuning (only when mode=`vegas`)
 | Variable | Type | Default | Description |
@@ -161,7 +186,8 @@ Variable pattern: `QUEEN_<TYPE>_<KNOB>`.
 - `MAX_HOLD_MS` — fire even below preferred if the oldest job has waited this long.
 - `MAX_BATCH_SIZE` — hard cap on items per fire.
 - `MAX_CONCURRENT` — hard cap on concurrent in-flight batches for the type.
-  Under `QUEEN_CONCURRENCY_MODE=vegas`, this is the upper bound Vegas can grow to.
+  For the **data-path lanes (PUSH/POP/ACK), which default to static**, this *is*
+  the fixed in-flight limit. For Vegas lanes it is the upper bound Vegas can grow to.
 
 **Defaults rationale** (see LIBQUEEN_IMPROVEMENTS.md §9.2 + 2026-04-22 sweep):
 - `PUSH` / `ACK` `preferred=50` sits above the S1 break-even (~33); `max_hold=20`
@@ -169,14 +195,16 @@ Variable pattern: `QUEEN_<TYPE>_<KNOB>`.
 - `POP` is latency-sensitive: tighter hold, smaller preferred batch.
 - `TRANSACTION`, `CUSTOM` are atomic (no fusion): batch size 1, concurrency 1.
 - `RENEW_LEASE` is background work: modest batch, longer hold.
-- **`MAX_CONCURRENT` raised 2026-04-22** from the original plan value of 4 →
-  24 (PUSH) and 16 (ACK/POP). The Vegas-uncapped sweep
-  (`test-perf/results/sweep_2026-04-22_07-41-19`) showed the old cap throttled
-  throughput by ~74% on S1-equivalent hardware. Vegas self-limits well below
-  these ceilings in practice (converges to ~17 for 1 KB payloads, ~6 for 10 KB),
-  so the raised cap just gives Vegas room to explore. ACK/POP are lower
-  because their advisory-lock contention bounds usable parallelism independent
-  of PG core count.
+- **PUSH/POP/ACK default to static at these limits** (24/16/16) under the
+  push-serialization architecture — they are measured optima, not Vegas ceilings.
+  The 2026-06 engine-scaling sweep found a flat push ceiling of ~186–190k from
+  C≈16–24 (beyond that, Postgres relation-extension + index-buffer contention on
+  `queen.messages`, i.e. `Lock:extend`, rises with no gain), and a balanced
+  ~110–120k each for push and pop. Static avoids Vegas's hot-path pathologies
+  (push under-shoot, pop/ack long-poll collapse). The earlier 2026-04-22 sweep
+  (`test-perf/results/sweep_2026-04-22_07-41-19`) had already shown the original
+  cap of 4 throttled throughput ~74%. ACK/POP sit at 16 because advisory-lock
+  contention bounds usable parallelism independent of PG core count.
 
 ### Consumer Group Subscription
 | Variable | Type | Default | Description |

@@ -23,7 +23,7 @@ CREATE TABLE queen.partitions (
 
 That's it. A partition is a **named ordering scope inside a queue**:
 
-- Two messages in the **same** partition are ordered FIFO by their `created_at` (and tiebroken by UUIDv7 → monotonic).
+- Two messages in the **same** partition are ordered FIFO by their `created_at` (tiebroken by UUIDv7). Push stamps `created_at = clock_timestamp()` under a per-partition advisory lock, so within a partition `created_at` is monotonic in **commit** order — that's what lets the pop cursor advance safely under concurrent push. See [05 — Database schema §7](05-database-schema.md).
 - Two messages in **different** partitions have no ordering relationship and can be processed concurrently by different consumers.
 
 Compare to Kafka:

@@ -375,9 +375,10 @@
 
 <div class="takeaway takeaway-warn">
   <strong>The single-instance ceiling is closer to 32 vCPU than to "infinity".</strong>
-  Past that point, contention on the <code>messages</code> table indexes and the
-  <code>partition_lookup</code> working set starts to dominate. Queen's adaptive
-  concurrency control (TCP Vegas) holds up gracefully under contention but it
+  Past that point, contention on the <code>messages</code> table — chiefly relation-extension
+  and index-buffer locks (<code>Lock:extend</code>) plus the
+  <code>partition_lookup</code> working set — starts to dominate. Queen's static
+  data-path concurrency holds up gracefully under contention but it
   can't manufacture PG capacity that doesn't exist. If your sizing math points
   above 32 vCPU on a single PG, the right answer is architectural, not "make PG
   bigger".

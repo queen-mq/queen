@@ -13,7 +13,7 @@ Four things trigger the failover path:
 1. **Connection acquisition timeout** — the broker's `AsyncDbPool` tries to get a connection, exceeds `DB_CONNECTION_TIMEOUT` (default 2 s), gives up.
 2. **Statement timeout** — a query starts but exceeds `DB_STATEMENT_TIMEOUT` (default 2 s in failover-tuned setups, 30 s by default).
 3. **Connection error** — TCP-level error from libpq (refused, reset, RST after replication failover) — surfaces to libqueen as either a `PQconsumeInput` failure or a `uv_poll` `status < 0` error; both go through `_handle_slot_error`.
-4. **In-flight deadline exceeded** — a libqueen slot has been waiting for a query result longer than `LIBQUEEN_INFLIGHT_DEADLINE_MS` (default `DB_STATEMENT_TIMEOUT + 5 s`). This is the safety net for silent network drops where neither libpq nor the kernel raises an error on the socket. The per-worker stats timer scans every slot once per second; any slot whose `current_fire.fire_time` is older than the deadline is recycled (jobs requeued, slot disconnected, reconnect thread rebuilds it).
+4. **In-flight deadline exceeded** — a libqueen slot has been waiting for a query result longer than `LIBQUEEN_INFLIGHT_DEADLINE_MS` (default `DB_STATEMENT_TIMEOUT + 5 s`). This is the safety net for silent network drops where neither libpq nor the kernel raises an error on the socket. Each engine's stats timer scans its slots once per second; any slot whose `current_fire.fire_time` is older than the deadline is recycled (jobs requeued, slot disconnected, reconnect thread rebuilds it).
 
 In all four cases, the broker:
 

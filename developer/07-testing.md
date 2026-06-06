@@ -212,7 +212,8 @@ Important counters to watch:
 
 - `pending_jobs_total{op="push"}` — should stay near 0 in healthy steady state
 - `slot_acquisition_wait_us` — high → DB pool too small
-- `vegas_limit{op="*"}` — Vegas-controlled cap; if it's collapsing, something is overloaded
+- `vegas_limit{op="*"}` — concurrency cap per lane. The data-path lanes (push/pop/ack) run **static** by default, so this is the fixed limit there; for the aux lanes it's the Vegas-controlled cap (collapsing → overloaded)
+- `pushgate(part=… defer=…)` (stats line) — distinct partitions in flight on the push engine and the count of jobs deferred by the per-partition gate; sustained high `defer` means many pushes target the same hot partition
 - `push_waits_on_push`, `pop_waits_on_push` — should both be 0 (see `cdocs/PUSHPOPLOOKUPSOL.md`)
 
 ---
