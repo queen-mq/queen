@@ -84,6 +84,25 @@ void finish_push_submit(uWS::HttpResponse<false>* res,
     job_req.item_count = item_count;
     job_req.params     = {std::move(items_json_str)};
 
+    // PUSHSER: the distinct (queue, partition) keys this push touches, for the
+    // push engine's per-partition in-flight gate (disjoint-partition concurrent
+    // transactions). Derived from notify_pairs, which both push paths populate;
+    // the common single-partition push yields exactly one key. Computed BEFORE
+    // notify_pairs is moved into the completion lambda below.
+    {
+        std::set<std::pair<std::string, std::string>> seen;
+        job_req.partition_keys.reserve(notify_pairs.size());
+        for (const auto& qp : notify_pairs) {
+            if (qp.first.empty()) continue;
+            if (seen.insert(qp).second) {
+                std::string key = qp.first;
+                key.push_back('\x1f');
+                key += qp.second;
+                job_req.partition_keys.push_back(std::move(key));
+            }
+        }
+    }
+
     auto worker_loop           = ctx.worker_loop;
     auto worker_id             = ctx.worker_id;
     auto push_failover_storage = ctx.push_failover_storage;

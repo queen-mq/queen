@@ -12,6 +12,7 @@
 #include "queen/shared_state_manager.hpp"
 #include "queen/auth/auth_middleware.hpp"
 #include "queen.hpp"
+#include "queen_cluster.hpp"
 #include "threadpool.hpp"
 #include "queen/routes/route_registry.hpp"
 #include "queen/routes/route_context.hpp"
@@ -46,9 +47,14 @@ static std::shared_ptr<queen::PartitionLookupReconcileService> global_partition_
 // These globals need to be accessible from route files (non-static, in queen namespace)
 namespace queen {
 std::vector<std::shared_ptr<ResponseRegistry>> worker_response_registries;  // Per-worker registries (no lock contention!)
-std::vector<Queen*> worker_queen_instances;  // Per-worker Queen instances for UDP notifications
+std::vector<Queen*> worker_queen_instances;  // Engines to wake on message-available (the pop engine)
 std::mutex worker_queen_mutex;  // Protects worker_queen_instances
 }
+
+// Function-split engine cluster (push/ack | pop | rest), created once and shared
+// across all HTTP workers (push-serialization architecture). Owns the 3 libqueen
+// engines for the process lifetime.
+static std::unique_ptr<queen::QueenCluster> g_queen_cluster;
 
 static std::once_flag global_pool_init_flag;
 static int num_workers_global = 0;  // Track number of workers for queue array sizing
@@ -106,7 +112,7 @@ std::atomic<bool> g_shutdown{false};
 static void setup_worker_routes(uWS::App* app, 
                                 std::shared_ptr<queen::AsyncQueueManager> async_queue_manager,
                                 std::shared_ptr<FileBufferManager> file_buffer,
-                                queen::Queen* queen_instance,
+                                queen::QueenCluster* queen_instance,
                                 uWS::Loop* worker_loop,
                                 const Config& config,
                                 int worker_id,
@@ -331,9 +337,8 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
                 spdlog::info("  - Created response queue for worker {} (poll workers)", i);
             }
             
-            // NOTE: Per-worker Queen instances are created in worker_thread() after uWS::App
-            // Each worker gets its own Queen instance with per-job callback-based delivery
-            spdlog::info("  - Per-worker Queen instances will be created in each worker thread");
+            // Function-split engines (push/ack | pop | rest) are created below,
+            // ONCE, and shared across all HTTP workers (push-serialization arch).
             
             // Create per-worker response registries (NO lock contention between workers!)
             queen::worker_response_registries.resize(num_workers);
@@ -341,9 +346,6 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
                 queen::worker_response_registries[i] = std::make_shared<queen::ResponseRegistry>();
                 spdlog::info("  - Created response registry for worker {} (lock-free across workers)", i);
             }
-            
-            // Initialize per-worker Queen instance vector (populated in worker threads)
-            queen::worker_queen_instances.resize(num_workers, nullptr);
             
             // Get system info for metrics
             global_system_info = SystemInfo::get_current();
@@ -380,6 +382,56 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
             spdlog::info("System info: hostname={}, port={}", 
                          global_system_info.hostname, 
                          global_system_info.port);
+
+            // ----------------------------------------------------------------
+            // Function-split engine cluster (push-serialization architecture).
+            // Exactly 3 engines, decoupled from NUM_WORKERS. DB concurrency is
+            // scaled by per-function connection SLOTS (not engine count). The
+            // push engine owns the per-partition in-flight gate; all message
+            // writes (PUSH/ACK/TRANSACTION) funnel to it so the gate is single-
+            // threaded and lock-free. POP is isolated; everything else shares
+            // the rest engine.
+            // ----------------------------------------------------------------
+            auto slot_env = [](const char* name, int fallback) -> int {
+                const char* v = std::getenv(name);
+                if (!v || !*v) return fallback;
+                int x = std::atoi(v);
+                return x > 0 ? x : fallback;
+            };
+            int total_slots = config.queue.sidecar_pool_size;
+            int push_slots = slot_env("QUEEN_PUSH_SLOTS", std::max(2, total_slots / 2));
+            int pop_slots  = slot_env("QUEEN_POP_SLOTS",  std::max(2, (total_slots * 2) / 5));
+            int rest_slots = slot_env("QUEEN_REST_SLOTS", std::max(2, total_slots - push_slots - pop_slots));
+            if (rest_slots < 1) rest_slots = 1;
+            spdlog::info("Engine cluster (function-split): push={} slots, pop={} slots, rest={} slots (total budget {})",
+                         push_slots, pop_slots, rest_slots, total_slots);
+
+            auto make_engine = [&](int slots, uint16_t engine_id) {
+                return std::make_unique<queen::Queen>(
+                    config.database.connection_string(),
+                    config.database.statement_timeout,
+                    static_cast<uint16_t>(slots),
+                    config.queue.sidecar_micro_batch_wait_ms,
+                    config.queue.pop_wait_initial_interval_ms,
+                    config.queue.pop_wait_backoff_threshold,
+                    config.queue.pop_wait_backoff_multiplier,
+                    config.queue.pop_wait_max_interval_ms,
+                    engine_id,
+                    global_system_info.hostname);
+            };
+            // engine ids 0/1/2 -> push/pop/rest (distinct worker_metrics identities)
+            g_queen_cluster = std::make_unique<queen::QueenCluster>(
+                make_engine(push_slots, 0),
+                make_engine(pop_slots,  1),
+                make_engine(rest_slots, 2));
+
+            // Only the pop engine has parked POPs, so it is the sole target of
+            // message-available wake notifications (UDP / local push).
+            {
+                std::lock_guard<std::mutex> lock(queen::worker_queen_mutex);
+                queen::worker_queen_instances.assign(1, g_queen_cluster->pop_engine());
+            }
+
             spdlog::info("Global shared resources initialized successfully");
         });
         
@@ -593,46 +645,17 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
         auto push_failover_storage = std::make_shared<PushFailoverStorage>();
         spdlog::debug("[Worker {}] Created push failover storage", worker_id);
         
-        // Calculate per-worker connections (divide total among workers)
-        // Ensure at least 1 connection per worker
-        int per_worker_connections = std::max(1, config.queue.sidecar_pool_size / num_workers);
-        // Give any remainder connections to the first workers
-        if (worker_id < (config.queue.sidecar_pool_size % num_workers)) {
-            per_worker_connections++;
-        }
+        // Engines are the process-global function-split cluster (push/ack | pop
+        // | rest), created once in the call_once block above and shared across
+        // all HTTP workers. Queen::submit is thread-safe, so concurrent submits
+        // from every worker are safe by construction. NUM_WORKERS no longer
+        // affects engine count or per-engine connection slices.
+        spdlog::info("[Worker {}] Using shared function-split engine cluster", worker_id);
         
-        // Create per-worker Queen instance (libqueen) for async DB operations
-        spdlog::info("[Worker {}] Creating per-worker Queen instance ({} connections, total pool split across {} workers)...", 
-                    worker_id, per_worker_connections, num_workers);
-        
-        auto worker_queen = std::make_unique<queen::Queen>(
-            config.database.connection_string(),
-            config.database.statement_timeout,
-            per_worker_connections,
-            config.queue.sidecar_micro_batch_wait_ms,
-            config.queue.pop_wait_initial_interval_ms,
-            config.queue.pop_wait_backoff_threshold,
-            config.queue.pop_wait_backoff_multiplier,
-            config.queue.pop_wait_max_interval_ms,
-            worker_id,
-            global_system_info.hostname  // For worker metrics identification
-        );
-        
-        // Allow time for connections to be established
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        spdlog::info("[Worker {}] Queen instance ready with {} connections", worker_id, per_worker_connections);
-        
-        // Register Queen instance for UDP notifications
-        {
-            std::lock_guard<std::mutex> lock(queen::worker_queen_mutex);
-            queen::worker_queen_instances[worker_id] = worker_queen.get();
-        }
-        spdlog::info("[Worker {}] Registered Queen instance for UDP notifications", worker_id);
-        
-        // Setup routes (pass raw pointer - Queen lifetime managed by this thread)
+        // Setup routes (pass the shared cluster - lifetime is the process)
         spdlog::info("[Worker {}] Setting up routes...", worker_id);
         setup_worker_routes(worker_app, async_queue_manager, file_buffer, 
-                           worker_queen.get(), worker_loop, config, worker_id, db_thread_pool,
+                           g_queen_cluster.get(), worker_loop, config, worker_id, db_thread_pool,
                            push_failover_storage);
         spdlog::info("[Worker {}] Routes configured", worker_id);
         
@@ -676,21 +699,9 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
                     worker_id, timer_interval, timer_ctx->batch_size, timer_ctx->batch_max);
         
         // Run worker event loop (blocks forever)
-        // Will receive sockets adopted from the acceptor
-        // NOTE: worker_queen must stay alive during run() - it's owned by this thread
+        // Will receive sockets adopted from the acceptor. The engine cluster is
+        // process-global and outlives every worker loop.
         worker_app->run();
-        
-        // Cleanup Queen when event loop exits
-        spdlog::info("[Worker {}] Stopping Queen instance...", worker_id);
-        
-        // Unregister Queen instance before cleanup
-        {
-            std::lock_guard<std::mutex> lock(queen::worker_queen_mutex);
-            queen::worker_queen_instances[worker_id] = nullptr;
-        }
-        
-        // Queen destructor handles cleanup
-        worker_queen.reset();
         
         spdlog::info("[Worker {}] Event loop exited", worker_id);
         

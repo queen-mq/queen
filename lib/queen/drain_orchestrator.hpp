@@ -44,6 +44,24 @@ concurrency_mode_from_env() noexcept {
     return ConcurrencyMode::Vegas;
 }
 
+// Per-type concurrency mode. PUSH defaults to STATIC at its policy limit (~16,
+// the measured flat optimum): the per-partition gate already bounds per-
+// partition concurrency, and Vegas (RTT-adaptive) structurally under-shoots the
+// push optimum to ~10 because each disjoint coalesced commit has a higher RTT,
+// leaving ~40% throughput on the table. Override per type with
+// QUEEN_PUSH_CONCURRENCY_MODE=vegas|static. All other types follow the global
+// QUEEN_CONCURRENCY_MODE (Vegas by default) for adaptive backpressure.
+inline ConcurrencyMode
+concurrency_mode_for(JobType t, ConcurrencyMode global_default) noexcept {
+    if (t == JobType::PUSH) {
+        const char* v = std::getenv("QUEEN_PUSH_CONCURRENCY_MODE");
+        if (v && std::string(v) == "vegas")  return ConcurrencyMode::Vegas;
+        if (v && std::string(v) == "static") return ConcurrencyMode::Static;
+        return ConcurrencyMode::Static;
+    }
+    return global_default;
+}
+
 inline VegasLimit::Config
 vegas_config_from_env(uint16_t per_type_max_concurrent) noexcept {
     VegasLimit::Config c;

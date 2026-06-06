@@ -4,12 +4,15 @@
 #include <string>
 #include <App.h>
 
+// QueenCluster (and Queen) are used by value through ctx.queen->submit(...) in
+// route TUs, so the complete type must be visible here.
+#include "queen_cluster.hpp"
+
 namespace queen {
 
 // Forward declarations
 class AsyncQueueManager;
 class FileBufferManager;
-class Queen;  // From libqueen (queen.hpp)
 class PushFailoverStorage;
 class MetricsCollector;
 struct Config;
@@ -34,9 +37,11 @@ struct RouteContext {
     // File buffer for maintenance mode and failover
     std::shared_ptr<FileBufferManager> file_buffer;
     
-    // Per-worker Queen instance for async DB operations (libqueen)
-    // Raw pointer - lifetime managed by worker thread
-    Queen* queen;
+    // Function-split engine cluster (push/ack | pop | rest), shared across all
+    // HTTP workers. Raw pointer - lifetime is the process (owned by a global in
+    // acceptor_server.cpp). ctx.queen->submit()/invalidate_request() dispatch to
+    // the right engine by JobType.
+    QueenCluster* queen;
     
     // uWS worker event loop for deferred response delivery
     uWS::Loop* worker_loop;
@@ -70,7 +75,7 @@ struct RouteContext {
     RouteContext(
         std::shared_ptr<AsyncQueueManager> qm,
         std::shared_ptr<FileBufferManager> fb,
-        Queen* q,
+        QueenCluster* q,
         uWS::Loop* loop,
         const Config& cfg,
         int wid,

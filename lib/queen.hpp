@@ -294,7 +294,8 @@ class Queen {
             JobType t = job_type_from_index(i);
             _types[i].policy      = make_batch_policy_from_env(
                 t, static_cast<int>(_legacy_wait_ms));
-            _types[i].concurrency = make_concurrency_controller(_types[i].policy, mode);
+            _types[i].concurrency = make_concurrency_controller(
+                _types[i].policy, concurrency_mode_for(t, mode));
         }
 
         _metrics = std::make_unique<WorkerMetrics>(
@@ -304,6 +305,13 @@ class Queen {
                 _submit_metrics_write(sql, params);
             }
         );
+
+        // PUSHSER: distinct-partitions-per-push-batch cap (see member doc).
+        {
+            int v = detail::env_int("QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH", 8);
+            if (v < 1) v = 1;
+            _push_max_partitions_per_batch = static_cast<size_t>(v);
+        }
 
         _init();
     }
@@ -422,6 +430,33 @@ class Queen {
     // ------------------------------------------------------------------
     std::array<PerTypeState, JobTypeCount> _types;
     size_t _drain_pass_counter = 0;
+
+    // PUSHSER: partitions with an in-flight PUSH transaction. Event-loop-thread-
+    // only (mutated in _fire_batch / _on_slot_freed / _fire_failure_cleanup, all
+    // on the loop thread), so no lock. The drain forms disjoint-partition PUSH
+    // batches by excluding these, giving at most one in-flight push transaction
+    // per partition (commit-ordered created_at) while different partitions run
+    // concurrently. `_push_gate_deferrals` counts drains that found PUSH work but
+    // had all eligible partitions in flight (observability).
+    std::unordered_set<std::string> _push_inflight_partitions;
+    uint64_t _push_gate_deferrals = 0;
+    // Max DISTINCT partitions a single push batch may claim. Bounds how many
+    // partitions one transaction monopolizes so up to C concurrent push
+    // transactions run on disjoint partition subsets (preserves throughput).
+    // QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH (default 8).
+    size_t _push_max_partitions_per_batch = 8;
+
+    // PUSHSER: partition_lookup coalescing buffer (event-loop-thread-only).
+    // Push completions merge their partition_updates here keyed by partition_id,
+    // overwrite-wins - which is monotonic because the per-partition gate makes a
+    // partition's pushes commit-ordered (a later completion always carries the
+    // newer (created_at,id)). At most ONE update_partition_lookup_v1 flush is in
+    // flight; while it runs, completions accumulate, so it is Nagle-style:
+    // immediate when idle, coalesced under load. Replaces the old
+    // one-flush-per-push-batch storm that backlogged (q ~ 20k) at high push.
+    std::unordered_map<std::string, nlohmann::json> _pl_buffer;
+    bool     _pl_flush_inflight = false;
+    uint64_t _pl_flushes_total  = 0;
 
     // ------------------------------------------------------------------
     // DB connections / slots
@@ -695,6 +730,18 @@ class Queen {
                      << "/"   << ts.concurrency->current_limit()
                      << " p99rtt=" << ts.metrics.rtt_percentile_ms(99.0) << "ms)";
             }
+            // PUSHSER: per-partition in-flight gate observability. `part` is the
+            // number of partitions currently holding an in-flight push txn
+            // (disjoint-batch depth); `defer` is the count of drains this
+            // interval that found PUSH work but had all eligible partitions in
+            // flight (i.e. the gate held them back to preserve commit order).
+            if (!self->_push_inflight_partitions.empty() || self->_push_gate_deferrals > 0
+                || self->_pl_flushes_total > 0 || !self->_pl_buffer.empty()) {
+                line << " pushgate(part=" << self->_push_inflight_partitions.size()
+                     << " defer=" << self->_push_gate_deferrals
+                     << " plbuf=" << self->_pl_buffer.size()
+                     << " plflush=" << self->_pl_flushes_total << ")";
+            }
             line << " slots=" << free_slot_indexes_size << "/" << db_connections_size
                  << " jobs/s=" << static_cast<uint64_t>(jobs_per_second)
                  << " drains=" << (self->_drain_passes_submit + self->_drain_passes_slot_free
@@ -704,6 +751,7 @@ class Queen {
         }
 
         self->_jobs_done = 0;
+        self->_push_gate_deferrals = 0;  // PUSHSER: per-interval gauge
     }
 
     // Scan every slot for queries that have been in-flight longer than
@@ -932,9 +980,24 @@ class Queen {
                 }
 
                 size_t take = ts.policy.batch_size_to_take(snap.size);
-                auto batch = ts.queue.take_front(take);
+                std::vector<std::shared_ptr<PendingJob>> batch;
+                if (t == JobType::PUSH) {
+                    // PUSHSER: form a disjoint-partition batch - skip jobs whose
+                    // partition already has an in-flight push transaction, and
+                    // cap distinct partitions per batch so this batch does not
+                    // monopolize every partition (lets up to C concurrent push
+                    // transactions run on disjoint partition subsets).
+                    batch = ts.queue.take_front_disjoint(
+                        take, _push_inflight_partitions, _push_max_partitions_per_batch);
+                } else {
+                    batch = ts.queue.take_front(take);
+                }
                 if (batch.empty()) {
-                    // Race: queue drained between snapshot and take.
+                    // Either a drain race (queue emptied between snapshot and
+                    // take) or, for PUSH, every queued partition is already in
+                    // flight. Release the slot + concurrency; the next slot-free
+                    // kick re-drains once a partition's transaction commits.
+                    if (t == JobType::PUSH) ++_push_gate_deferrals;
                     ts.concurrency->release();
                     _free_slot(*slot);
                     break;
@@ -1084,6 +1147,21 @@ class Queen {
         slot.current_type = type;
         slot.current_fire = fire;
 
+        // PUSHSER: claim this batch's partitions as in-flight so concurrent PUSH
+        // batches stay disjoint (one in-flight transaction per partition). Keys
+        // are released on slot free (_on_slot_freed) or send failure
+        // (_fire_failure_cleanup). Runs on the event-loop thread.
+        if (type == JobType::PUSH) {
+            slot.push_partition_keys.clear();
+            for (const auto& pj : batch) {
+                for (const auto& k : pj->job.partition_keys) {
+                    if (_push_inflight_partitions.insert(k).second) {
+                        slot.push_partition_keys.push_back(k);
+                    }
+                }
+            }
+        }
+
         if (type == JobType::CUSTOM || type == JobType::PARTITION_LOOKUP) {
             // PARTITION_LOOKUP carries its own fixed sql + one jsonb param,
             // exactly like CUSTOM — reuse the per-job fire path (no idx demux).
@@ -1230,6 +1308,7 @@ class Queen {
                                  false, -1};
             _types[idx].concurrency->on_completion(rec);
             _types[idx].metrics.record_completion(rec);
+            _release_push_inflight(slot);  // PUSHSER: free this batch's partitions
             slot.current_type = JobType::_SENTINEL;
         }
 
@@ -1391,24 +1470,15 @@ class Queen {
         }
 
         if (!partition_updates_raw.empty() && partition_updates_raw != "[]") {
-            // Fire on the dedicated PARTITION_LOOKUP lane (NOT the shared CUSTOM
-            // lane) so the data path's partition_lookup upsert is never queued
-            // FIFO behind a slow analytics CUSTOM read. Submitted IMMEDIATELY
-            // (no coalescing delay): pop_unified_batch_v4 discovers partitions
-            // via queen.partition_lookup, so its freshness is correctness-
-            // critical for read-after-write (a non-blocking pop right after a
-            // push must see the new partition/message).
-            JobRequest pl_job;
-            pl_job.op_type    = JobType::PARTITION_LOOKUP;
-            pl_job.request_id = "pl-refresh";
-            pl_job.sql        = "SELECT queen.update_partition_lookup_v1($1::jsonb)";
-            pl_job.params     = { std::move(partition_updates_raw) };
-            uint16_t wid = _worker_id;
-            submit(std::move(pl_job), [wid](std::string result) {
-                if (result.find("\"success\":false") != std::string::npos) {
-                    spdlog::warn("[Worker {}] [libqueen] update_partition_lookup_v1 reported failure", wid);
-                }
-            });
+            // PUSHSER: coalesce into the partition_lookup buffer instead of
+            // firing one update_partition_lookup_v1 per push batch (that storm
+            // backlogged the PARTITION_LOOKUP lane at high push and hid real PG
+            // work). Stays on this (push) engine; Nagle-style flush keeps it
+            // immediate when idle and batched under load. partition_lookup
+            // freshness stays bounded by one flush RTT; the reconciler heals any
+            // miss. Parse is cheap (<= max_partitions_per_batch small entries).
+            _buffer_partition_updates(
+                nlohmann::json::parse(partition_updates_raw, nullptr, /*allow_exceptions=*/false));
         }
 
         slot.jobs.clear();
@@ -2059,35 +2129,12 @@ class Queen {
                     }
                 }
 
-                // PUSHPOPLOOKUPSOL: after all per-job callbacks for a PUSH
-                // drain have fired, enqueue a single CUSTOM job to refresh
-                // partition_lookup for the partitions this drain touched.
-                // Fire-and-forget: failures are logged and healed by the
-                // periodic PartitionLookupReconcileService.
+                // PUSHPOPLOOKUPSOL + PUSHSER: coalesce this drain's
+                // partition_updates into the partition_lookup buffer (one
+                // Nagle-style flush instead of a job per push batch). See the
+                // simd PUSH path / _maybe_flush_partition_lookup for rationale.
                 if (partition_updates.is_array() && !partition_updates.empty()) {
-                    // Dedicated PARTITION_LOOKUP lane, submitted immediately
-                    // (see the simd PUSH path for the freshness rationale).
-                    JobRequest pl_job;
-                    pl_job.op_type    = JobType::PARTITION_LOOKUP;
-                    pl_job.request_id = "pl-refresh";
-                    pl_job.sql        = "SELECT queen.update_partition_lookup_v1($1::jsonb)";
-                    pl_job.params     = { partition_updates.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) };
-                    pl_job.item_count = partition_updates.size();
-                    uint16_t wid = _worker_id;
-                    submit(std::move(pl_job), [wid](std::string result) {
-                        try {
-                            auto r = nlohmann::json::parse(result);
-                            if (r.is_object()
-                                && r.contains("success")
-                                && r["success"].is_boolean()
-                                && !r["success"].get<bool>()) {
-                                spdlog::warn("[Worker {}] [libqueen] update_partition_lookup_v1 failed: {}",
-                                             wid, r.value("error", "unknown"));
-                            }
-                        } catch (...) {
-                            // Swallowed: reconciler heals eventually.
-                        }
-                    });
+                    _buffer_partition_updates(partition_updates);
                 }
 
                 slot.jobs.clear();
@@ -2138,6 +2185,7 @@ class Queen {
             _types[idx].concurrency->release();
             _types[idx].concurrency->on_completion(rec);
             _types[idx].metrics.record_completion(rec);
+            _release_push_inflight(slot);  // PUSHSER: free this batch's partitions
             slot.current_type = JobType::_SENTINEL;
         }
 
@@ -2315,6 +2363,65 @@ class Queen {
     void
     _free_slot(DBConnection& slot) noexcept(true) {
         _free_slot_indexes.push_back(slot.idx);
+    }
+
+    // PUSHSER: release the partitions this slot's PUSH batch held in-flight.
+    // Event-loop-thread-only; idempotent (clears the slot's key vector).
+    void
+    _release_push_inflight(DBConnection& slot) noexcept(true) {
+        if (slot.push_partition_keys.empty()) return;
+        for (const auto& k : slot.push_partition_keys) {
+            _push_inflight_partitions.erase(k);
+        }
+        slot.push_partition_keys.clear();
+    }
+
+    // PUSHSER: merge a PUSH completion's partition_updates array into the
+    // coalescing buffer (overwrite per partition_id = monotonic, see member
+    // doc), then flush if no flush is already in flight. Event-loop-thread-only.
+    void
+    _buffer_partition_updates(const nlohmann::json& updates) noexcept(true) {
+        if (!updates.is_array() || updates.empty()) {
+            _maybe_flush_partition_lookup();
+            return;
+        }
+        for (const auto& u : updates) {
+            if (!u.is_object()) continue;
+            auto it = u.find("partition_id");
+            if (it == u.end() || !it->is_string()) continue;
+            _pl_buffer[it->get<std::string>()] = u;
+        }
+        _maybe_flush_partition_lookup();
+    }
+
+    // PUSHSER: if the buffer has entries and no flush is in flight, drain it into
+    // ONE update_partition_lookup_v1 call (covering every buffered partition) and
+    // mark a flush in flight. The completion re-arms a flush for anything that
+    // accumulated meanwhile. Event-loop-thread-only.
+    void
+    _maybe_flush_partition_lookup() noexcept(true) {
+        if (_pl_flush_inflight || _pl_buffer.empty()) return;
+        nlohmann::json arr = nlohmann::json::array();
+        arr.get_ref<nlohmann::json::array_t&>().reserve(_pl_buffer.size());
+        for (auto& kv : _pl_buffer) arr.push_back(std::move(kv.second));
+        _pl_buffer.clear();
+        _pl_flush_inflight = true;
+        ++_pl_flushes_total;
+
+        JobRequest pl_job;
+        pl_job.op_type    = JobType::PARTITION_LOOKUP;
+        pl_job.request_id = "pl-refresh";
+        pl_job.sql        = "SELECT queen.update_partition_lookup_v1($1::jsonb)";
+        pl_job.params     = { arr.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) };
+        pl_job.item_count = arr.size();
+        submit(std::move(pl_job), [this](std::string result) {
+            // Runs on this engine's loop thread (self-submitted PARTITION_LOOKUP).
+            _pl_flush_inflight = false;
+            if (result.find("\"success\":false") != std::string::npos) {
+                spdlog::warn("[Worker {}] [libqueen] update_partition_lookup_v1 reported failure", _worker_id);
+            }
+            _maybe_flush_partition_lookup();
+        });
     }
 
     bool _connect_all_slots() noexcept(true) {

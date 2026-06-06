@@ -31,8 +31,45 @@ DECLARE
     v_lease_id TEXT;
     v_status TEXT;
     v_op_dlq BOOLEAN;
+    v_lock_pid UUID;  -- PUSHSER: loop var for sorted per-partition lock pre-pass
 BEGIN
     v_transaction_id := gen_random_uuid()::text;
+
+    -- PUSHSER pre-pass: this transaction may push to several partitions. To make
+    -- created_at commit-ordered per partition (the pop cursor depends on it) and
+    -- to stay deadlock-free against concurrent pushes/transactions, ensure every
+    -- pushed partition exists, then take the push-partition advisory lock for all
+    -- of them in ascending partition_id order BEFORE inserting any message. The
+    -- per-op queue/partition upserts below remain (idempotent via ON CONFLICT).
+    INSERT INTO queen.queues (name, namespace, task)
+    SELECT DISTINCT
+        op->>'queue',
+        COALESCE(op->>'namespace', split_part(op->>'queue', '.', 1)),
+        COALESCE(op->>'task',
+            CASE WHEN position('.' in op->>'queue') > 0
+                 THEN split_part(op->>'queue', '.', 2) ELSE '' END)
+    FROM jsonb_array_elements(p_operations) AS op
+    WHERE op->>'type' = 'push' AND COALESCE(op->>'queue', '') <> ''
+    ON CONFLICT (name) DO NOTHING;
+
+    INSERT INTO queen.partitions (queue_id, name)
+    SELECT DISTINCT qq.id, COALESCE(op->>'partition', 'Default')
+    FROM jsonb_array_elements(p_operations) AS op
+    JOIN queen.queues qq ON qq.name = op->>'queue'
+    WHERE op->>'type' = 'push'
+    ON CONFLICT (queue_id, name) DO NOTHING;
+
+    FOR v_lock_pid IN
+        SELECT DISTINCT pp.id
+        FROM jsonb_array_elements(p_operations) AS op
+        JOIN queen.queues     qq ON qq.name     = op->>'queue'
+        JOIN queen.partitions pp ON pp.queue_id = qq.id
+                                AND pp.name     = COALESCE(op->>'partition', 'Default')
+        WHERE op->>'type' = 'push'
+        ORDER BY pp.id
+    LOOP
+        PERFORM queen.lock_push_partition(v_lock_pid);
+    END LOOP;
     
     FOR v_op IN SELECT * FROM jsonb_array_elements(p_operations)
     LOOP
@@ -69,9 +106,12 @@ BEGIN
                 ON CONFLICT (queue_id, name) DO UPDATE SET name = EXCLUDED.name
                 RETURNING id INTO v_partition_id;
                 
-                INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted)
+                -- PUSHSER: stamp created_at = clock_timestamp() under the
+                -- push-partition lock taken in the pre-pass, so per-partition
+                -- created_at is commit-ordered (not the txn-start NOW() default).
+                INSERT INTO queen.messages (id, transaction_id, partition_id, payload, trace_id, is_encrypted, created_at)
                 VALUES (v_message_id, v_txn_id, v_partition_id, v_payload, v_trace_id,
-                        COALESCE((v_op->>'is_encrypted')::boolean, false))
+                        COALESCE((v_op->>'is_encrypted')::boolean, false), clock_timestamp())
                 RETURNING created_at INTO v_message_created_at;
 
                 -- Maintain partition_lookup with the SAME semantics as

@@ -1,5 +1,29 @@
 
 -- ============================================================================
+-- PUSHSER: per-partition push serialization lock
+-- ============================================================================
+-- Serializes concurrent pushes to the SAME partition so queen.messages.created_at
+-- is assigned in commit order per partition. The pop cursor (created_at, id) only
+-- moves forward, so without this a message whose committing transaction started
+-- earlier (smaller created_at) but commits later than an already-consumed message
+-- lands below the cursor and is skipped forever.
+--
+-- Uses the TWO-INT advisory form pg_advisory_xact_lock(int4, int4), which occupies
+-- a structurally separate lock space from EVERY single-bigint advisory lock in this
+-- schema (pop's partition claim hashtextextended(partition_id, 12648430), ack/streams
+-- md5(partition||cg)::bigint, streams query:partition, stats fixed keys). So a push
+-- holding a partition NEVER blocks pop's claim, ack, streams, or stats; push-vs-push
+-- on the same partition is the only intended conflict. Class tag 1347439944 = ASCII
+-- 'PUSH'. The lock is transaction-scoped: it releases at commit, so the next push to
+-- the same partition begins only after this one commits (commit-ordered created_at).
+CREATE OR REPLACE FUNCTION queen.lock_push_partition(p_partition_id UUID)
+RETURNS void
+LANGUAGE sql
+AS $$
+    SELECT pg_advisory_xact_lock(1347439944, hashtext(p_partition_id::text));
+$$;
+
+-- ============================================================================
 -- push_messages_v2: High-performance batch push
 -- ============================================================================
 -- NOTE: Using CREATE OR REPLACE (no DROP) for zero-downtime deployments
@@ -162,6 +186,8 @@ DECLARE
     -- Empty array (not NULL) when no rows were actually inserted.
     v_partition_updates jsonb;
     v_results  jsonb;
+    -- PUSHSER: loop var for sorted per-partition advisory-lock acquisition.
+    v_lock_pid uuid;
 BEGIN
     -- Statement A: ensure queues exist (single DISTINCT scan of input).
     INSERT INTO queen.queues (name, namespace, task)
@@ -181,6 +207,24 @@ BEGIN
     FROM jsonb_array_elements(p_items) AS item
     JOIN queen.queues q ON q.name = item->>'queue'
     ON CONFLICT (queue_id, name) DO NOTHING;
+
+    -- Statement B.5 (PUSHSER): take the push-partition advisory lock for every
+    -- distinct partition in this batch, in ascending partition_id order. The
+    -- deterministic order makes concurrent multi-partition pushes (and cross-
+    -- instance pushes) deadlock-free. Held until commit; the created_at stamped
+    -- in Statement C is therefore assigned in per-partition commit order. A FOR
+    -- loop (not a set-returning PERFORM) guarantees the locks are acquired in the
+    -- sorted order regardless of planner choices.
+    FOR v_lock_pid IN
+        SELECT DISTINCT p.id
+        FROM jsonb_array_elements(p_items) AS item
+        JOIN queen.queues     q ON q.name     = item->>'queue'
+        JOIN queen.partitions p ON p.queue_id = q.id
+                               AND p.name     = COALESCE(item->>'partition', 'Default')
+        ORDER BY p.id
+    LOOP
+        PERFORM queen.lock_push_partition(v_lock_pid);
+    END LOOP;
 
     -- Statement C: parse + resolve partition_id + compute dup_rank + INSERT.
     --
@@ -251,9 +295,13 @@ BEGIN
     inserted AS (
         INSERT INTO queen.messages
             (id, transaction_id, partition_id, payload,
-             trace_id, is_encrypted, producer_sub)
+             trace_id, is_encrypted, producer_sub, created_at)
+        -- PUSHSER: created_at = clock_timestamp() (read NOW, under the partition
+        -- locks acquired in Statement B.5), NOT the txn-start NOW() default. With
+        -- the per-partition lock serializing commits, this makes created_at
+        -- monotonic in commit order per partition.
         SELECT message_id, transaction_id, partition_id, payload,
-               trace_id, is_encrypted, producer_sub
+               trace_id, is_encrypted, producer_sub, clock_timestamp()
         FROM items
         WHERE dup_rank = 1
         ON CONFLICT (partition_id, transaction_id) DO NOTHING

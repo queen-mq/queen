@@ -122,6 +122,14 @@ struct JobRequest {
     std::string partition_name;             // For grouping.
     std::string consumer_group;             // For grouping.
 
+    // PUSHSER: distinct partition keys ("queue\x1f partition") this PUSH touches.
+    // The push engine uses these for the per-partition in-flight gate (at most
+    // one in-flight push transaction per partition; disjoint-partition concurrent
+    // transactions). Empty for non-push jobs, or when the route could not derive
+    // them (the SQL advisory lock in push_messages_v3 is the correctness
+    // backstop regardless).
+    std::vector<std::string> partition_keys;
+
     size_t item_count = 0;                  // Items in this request (metrics).
     std::chrono::steady_clock::time_point queued_at;
 

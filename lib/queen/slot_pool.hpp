@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -44,6 +45,11 @@ struct DBConnection {
     JobType     current_type          = JobType::_SENTINEL;
     FireRecord  current_fire{};
 
+    // PUSHSER: distinct partition keys held in-flight by this slot's PUSH batch.
+    // Added to Queen::_push_inflight_partitions at fire, removed on slot free.
+    // Event-loop-thread-only (no synchronization needed). Empty for non-PUSH.
+    std::vector<std::string> push_partition_keys;
+
     // Lock-free reconnection signaling: set by the reconnect thread,
     // consumed by the event-loop thread (`_finalize_reconnected_slots`).
     std::atomic<bool> needs_poll_init{false};
@@ -61,6 +67,7 @@ struct DBConnection {
         , job_idx_ranges(std::move(other.job_idx_ranges))
         , current_type(other.current_type)
         , current_fire(other.current_fire)
+        , push_partition_keys(std::move(other.push_partition_keys))
         , needs_poll_init(other.needs_poll_init.load(std::memory_order_relaxed))
     {
         other.conn             = nullptr;
@@ -81,6 +88,7 @@ struct DBConnection {
             job_idx_ranges   = std::move(other.job_idx_ranges);
             current_type     = other.current_type;
             current_fire     = other.current_fire;
+            push_partition_keys = std::move(other.push_partition_keys);
             needs_poll_init.store(
                 other.needs_poll_init.load(std::memory_order_relaxed),
                 std::memory_order_relaxed);
