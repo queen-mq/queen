@@ -116,14 +116,14 @@ default_batch_policy_for(JobType t) noexcept {
     //     pushes back.
     //   STREAMS_STATE_GET: pure read, batchable like POP; mirrors POP shape.
     switch (t) {
-        // PUSH max_concurrent lowered 24 -> 16: with push-serialization (the
-        // per-partition gate + advisory lock + clock_timestamp), the measured
-        // push ceiling is a FLAT ~188k at C~=16; beyond 16, Postgres relation-
-        // extension + index-buffer contention on queen.messages rises (Lock:extend
-        // 9 -> 226 -> 514 at C 16/32/48) with NO throughput gain. 16 is the
-        // optimum. PUSH also defaults to STATIC concurrency (see
-        // concurrency_mode_for) because Vegas under-shoots this to ~10.
-        case JobType::PUSH:                   return {50,  20,  500, 16};
+        // PUSH defaults to STATIC concurrency (see concurrency_mode_for) at this
+        // limit. The push-only ceiling is a flat ~186-190k from C~=16..24 with
+        // the push-serialization path (per-partition gate + advisory lock +
+        // clock_timestamp); beyond ~24, Postgres relation-extension + index-
+        // buffer contention on queen.messages (Lock:extend) rises with no gain.
+        // 24 is the validated balanced-workload default (push keeps pace with a
+        // static pop); drop toward 16 if push lock contention competes with pop.
+        case JobType::PUSH:                   return {50,  20,  500, 24};
         case JobType::POP:                    return {20,   5,  500, 16};
         case JobType::ACK:                    return {50,  20,  500, 16};
         case JobType::TRANSACTION:            return { 1,   0,    1,  1};

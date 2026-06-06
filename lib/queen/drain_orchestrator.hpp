@@ -44,17 +44,26 @@ concurrency_mode_from_env() noexcept {
     return ConcurrencyMode::Vegas;
 }
 
-// Per-type concurrency mode. PUSH defaults to STATIC at its policy limit (~16,
-// the measured flat optimum): the per-partition gate already bounds per-
-// partition concurrency, and Vegas (RTT-adaptive) structurally under-shoots the
-// push optimum to ~10 because each disjoint coalesced commit has a higher RTT,
-// leaving ~40% throughput on the table. Override per type with
-// QUEEN_PUSH_CONCURRENCY_MODE=vegas|static. All other types follow the global
-// QUEEN_CONCURRENCY_MODE (Vegas by default) for adaptive backpressure.
+// Per-type concurrency mode. The DATA-PATH lanes (PUSH, POP, ACK) default to
+// STATIC at their policy limit, because RTT-adaptive Vegas is structurally wrong
+// for them and leaves large throughput on the table:
+//   - PUSH: each disjoint coalesced commit has a high RTT, so Vegas under-shoots
+//     the ~16-24 optimum down to ~10 (~40% loss).
+//   - POP/ACK: long-poll parking and wildcard-claim scans inflate RTT (observed
+//     pop f=6/16 at ~1.2s RTT while productive pops are ~22ms); Vegas misreads
+//     that intentional waiting as PG queuing and COLLAPSES the limit to the
+//     floor, so pop cannot keep up with push.
+// Static at the measured optimum (PUSH 24, POP/ACK 16) tracks PG without those
+// pathologies; the per-partition gate already provides push safety, and PG
+// backpressure still applies (transactions queue at PG). Override per lane with
+// QUEEN_<PUSH|POP|ACK>_CONCURRENCY_MODE=vegas|static. All non-data lanes
+// (CUSTOM/RENEW_LEASE/TRANSACTION/STREAMS_*/PARTITION_LOOKUP) follow the global
+// QUEEN_CONCURRENCY_MODE (Vegas by default).
 inline ConcurrencyMode
 concurrency_mode_for(JobType t, ConcurrencyMode global_default) noexcept {
-    if (t == JobType::PUSH) {
-        const char* v = std::getenv("QUEEN_PUSH_CONCURRENCY_MODE");
+    if (t == JobType::PUSH || t == JobType::POP || t == JobType::ACK) {
+        std::string env = std::string("QUEEN_") + detail::job_type_env_segment(t) + "_CONCURRENCY_MODE";
+        const char* v = std::getenv(env.c_str());
         if (v && std::string(v) == "vegas")  return ConcurrencyMode::Vegas;
         if (v && std::string(v) == "static") return ConcurrencyMode::Static;
         return ConcurrencyMode::Static;
