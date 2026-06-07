@@ -1,0 +1,1 @@
+{"queues":[{"createdAt":"2026-06-04T08:16:27.636Z","id":"d8e9f6f5-b57a-4872-8eb2-266e6f81f340","messages":{"pending":597835,"processing":0,"total":8512233},"name":"bench-hipart1-simd","namespace":"","partitions":3,"task":""}]}

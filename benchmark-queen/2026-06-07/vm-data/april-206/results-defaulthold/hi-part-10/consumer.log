@@ -1,0 +1,32 @@
+{"role":"consumer","event":"start","queues":["bench-hi-part-10"],"queueCount":1,"consumerGroup":null,"numWorkers":2,"conns":50,"duration":300,"batchSize":100,"timestamp":"2026-06-07T07:36:14.451Z"}
+(node:21445) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/queen/examples/bench-consumer.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/queen/examples/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:21463) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/queen/examples/bench-consumer.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/queen/examples/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:21464) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/queen/examples/bench-consumer.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/queen/examples/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+{
+  "role": "consumer",
+  "event": "result",
+  "consumerGroup": null,
+  "totalRequests": 253380,
+  "reqPerSec": 845,
+  "maxMsgPerSecCeiling": 84500,
+  "latency": {
+    "p50": 30,
+    "p90": 257,
+    "p99": 1211,
+    "avg": 117.80000000000001,
+    "max": 7247
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 300
+}

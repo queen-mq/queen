@@ -1,0 +1,14 @@
+{
+  "testName": "hi-part-10000",
+  "queenImageTag": "pushser",
+  "queueNames": "bench-hi-part-10000",
+  "queueCount": 1,
+  "maxPartition": 10000,
+  "partitionCount": 10001,
+  "msgsPerPush": 1,
+  "producer": {"workers": 5, "connectionsPerWorker": 100, "totalConnections": 500},
+  "consumer": {"processes": 1, "workersPerProcess": 2, "connectionsPerWorker": 50, "totalConnections": 100, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 300,
+  "startTime": "2026-06-07T09:30:50.000Z",
+  "endTime": "2026-06-07T09:36:36.000Z"
+}

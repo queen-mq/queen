@@ -1,0 +1,28 @@
+{"role":"consumer","event":"start","queues":["bench-bp-10-cg10"],"queueCount":1,"consumerGroup":"cg-7","numWorkers":1,"conns":50,"duration":300,"batchSize":100,"timestamp":"2026-06-07T10:20:28.005Z"}
+(node:59509) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/queen/examples/bench-consumer.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/queen/examples/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:59615) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/queen/examples/bench-consumer.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/queen/examples/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+{
+  "role": "consumer",
+  "event": "result",
+  "consumerGroup": "cg-7",
+  "totalRequests": 149546,
+  "reqPerSec": 498,
+  "maxMsgPerSecCeiling": 49800,
+  "latency": {
+    "p50": 74,
+    "p90": 185,
+    "p99": 378,
+    "avg": 99.8,
+    "max": 4455
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 300
+}

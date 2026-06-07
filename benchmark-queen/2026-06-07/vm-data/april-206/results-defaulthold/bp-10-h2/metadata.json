@@ -1,0 +1,14 @@
+{
+  "testName": "bp-10-h2",
+  "queenImageTag": "pushser",
+  "queueNames": "bench-bp-10-h2",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 10,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 1, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 50, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 120,
+  "startTime": "2026-06-07T08:54:18.000Z",
+  "endTime": "2026-06-07T08:56:54.000Z"
+}

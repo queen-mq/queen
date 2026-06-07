@@ -1,0 +1,1 @@
+{"role":"consumer","event":"start","queues":["bench-bp-100-sustained"],"queueCount":1,"consumerGroup":null,"numWorkers":1,"conns":100,"duration":2700,"batchSize":500,"timestamp":"2026-06-04T14:27:57.685Z"}

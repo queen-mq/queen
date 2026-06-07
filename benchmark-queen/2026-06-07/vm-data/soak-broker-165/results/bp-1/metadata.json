@@ -1,0 +1,14 @@
+{
+  "testName": "bp-1",
+  "queenImageTag": "0.16.0.beta.1",
+  "queueNames": "bench-bp-1",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 1,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 1, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 50, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 300,
+  "startTime": "2026-06-04T09:37:02.000Z",
+  "endTime": "2026-06-04T09:42:47.000Z"
+}

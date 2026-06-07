@@ -1,0 +1,1 @@
+{"queues":[{"createdAt":"2026-06-04T08:21:30.176Z","id":"87d6d2d2-c64c-43d8-853f-cbdc0b06c39a","messages":{"pending":469940,"processing":0,"total":6220050},"name":"bench-cg10-simd","namespace":"","partitions":1002,"task":""}]}

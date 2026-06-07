@@ -1,0 +1,20 @@
+{"role":"producer","event":"start","queues":["bench-bp100-simd"],"queueCount":1,"numWorkers":1,"conns":50,"duration":240,"maxPartition":1000,"msgsPerPush":100,"timestamp":"2026-06-04T08:11:19.389Z"}
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 324943,
+  "totalMessages": 32494300,
+  "reqPerSec": 1354,
+  "msgPerSec": 135400,
+  "latency": {
+    "p50": 35,
+    "p90": 45,
+    "p99": 65,
+    "avg": 36.5,
+    "max": 1031
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 240
+}

@@ -1,0 +1,5 @@
+goload -> http://10.114.0.2:6632 queue=ceilq partitions=1000 producers=1500 consumers=0 pushBatch=10 popBatch=200 payload=256B idleConns=512 retries=2
+[configure] queue=ceilq completedRetentionSeconds=100000
+[11:03:09] push=  158882/s pop=       0/s | tot push=3177640 pop=0 | errs p=0 c=0 empty=0
+[11:03:29] push=  158396/s pop=       0/s | tot push=6345570 pop=0 | errs p=0 c=0 empty=0
+[final] pushed=7952220 popped=0 pushErr=0 popErr=0 emptyPops=0

@@ -1,0 +1,20 @@
+{"role":"consumer","event":"start","queues":["bench-bp10-simd"],"queueCount":1,"consumerGroup":null,"numWorkers":1,"conns":50,"duration":240,"batchSize":100,"timestamp":"2026-06-04T08:06:15.342Z"}
+{
+  "role": "consumer",
+  "event": "result",
+  "consumerGroup": null,
+  "totalRequests": 202172,
+  "reqPerSec": 842,
+  "maxMsgPerSecCeiling": 84200,
+  "latency": {
+    "p50": 15,
+    "p90": 137,
+    "p99": 364,
+    "avg": 58.83,
+    "max": 7346
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 240
+}

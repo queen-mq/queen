@@ -1,0 +1,20 @@
+{"role":"producer","event":"start","queues":["bench-hi-part-100"],"queueCount":1,"numWorkers":5,"conns":100,"duration":300,"maxPartition":100,"msgsPerPush":1,"timestamp":"2026-06-04T09:18:42.110Z"}
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 9698059,
+  "totalMessages": 9698059,
+  "reqPerSec": 32329,
+  "msgPerSec": 32329,
+  "latency": {
+    "p50": 14,
+    "p90": 18,
+    "p99": 35,
+    "avg": 14.974,
+    "max": 190
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 300
+}

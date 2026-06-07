@@ -1,0 +1,1 @@
+{"queues":[{"createdAt":"2026-06-04T08:06:15.397Z","id":"a02f59d9-60e4-4b1e-a778-4c10bd8a5912","messages":{"pending":306050,"processing":0,"total":11072760},"name":"bench-bp10-simd","namespace":"","partitions":1002,"task":""}]}

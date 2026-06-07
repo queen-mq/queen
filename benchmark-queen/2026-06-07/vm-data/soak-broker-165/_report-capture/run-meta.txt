@@ -1,0 +1,11 @@
+captured_at=2026-06-07T13:12:30Z
+broker_pid_elapsed= 1-00:08:34
+--- uptime ---
+ 13:12:30 up 3 days,  5:38,  2 users,  load average: 39.64, 39.95, 40.07
+--- free ---
+               total        used        free      shared  buff/cache   available
+Mem:            62Gi        34Gi       3.2Gi        24Gi        51Gi        28Gi
+Swap:             0B          0B          0B
+--- df ---
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/vda1       387G  170G  218G  44% /

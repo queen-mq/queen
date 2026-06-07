@@ -1,0 +1,14 @@
+{
+  "testName": "q-10",
+  "queenImageTag": "pushser",
+  "queueNames": "bench-q-10-1,bench-q-10-2,bench-q-10-3,bench-q-10-4,bench-q-10-5,bench-q-10-6,bench-q-10-7,bench-q-10-8,bench-q-10-9,bench-q-10-10",
+  "queueCount": 10,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 10,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 1, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 50, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 300,
+  "startTime": "2026-06-07T10:01:49.000Z",
+  "endTime": "2026-06-07T10:07:34.000Z"
+}

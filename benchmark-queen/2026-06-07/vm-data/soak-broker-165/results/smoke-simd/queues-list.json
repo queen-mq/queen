@@ -1,0 +1,1 @@
+{"queues":[{"createdAt":"2026-06-04T07:42:52.488Z","id":"f12c336b-132d-4e2c-af9f-3ddae42e9b99","messages":{"pending":0,"processing":0,"total":0},"name":"bench-smoke-simd","namespace":"","partitions":0,"task":""}]}

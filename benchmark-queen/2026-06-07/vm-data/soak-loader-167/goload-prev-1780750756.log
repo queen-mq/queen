@@ -1,0 +1,10 @@
+goload -> http://165.232.78.92:6632 queue=benchq partitions=300 producers=250 consumers=200 pushBatch=10 popBatch=300 payload=256B idleConns=1600 retries=2
+[configure] queue=benchq completedRetentionSeconds=120
+[12:55:26] push=  103778/s pop=   43865/s | tot push=1037780 pop=438650 | errs p=0 c=0 empty=0
+[12:55:36] push=  110182/s pop=   61856/s | tot push=2139600 pop=1057210 | errs p=0 c=0 empty=0
+[12:55:46] push=  107748/s pop=   59931/s | tot push=3217080 pop=1656520 | errs p=0 c=0 empty=0
+[12:55:56] push=  104576/s pop=   68086/s | tot push=4262840 pop=2337380 | errs p=0 c=0 empty=0
+[12:56:06] push=  114457/s pop=   75691/s | tot push=5407410 pop=3094290 | errs p=0 c=0 empty=0
+[12:56:16] push=  107441/s pop=   77485/s | tot push=6481820 pop=3869140 | errs p=0 c=0 empty=0
+[12:56:26] push=  108267/s pop=   74857/s | tot push=7564490 pop=4617710 | errs p=0 c=0 empty=0
+[12:56:36] push=  109756/s pop=   78003/s | tot push=8662050 pop=5397740 | errs p=0 c=0 empty=0

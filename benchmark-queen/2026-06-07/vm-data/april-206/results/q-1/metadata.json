@@ -1,0 +1,14 @@
+{
+  "testName": "q-1",
+  "queenImageTag": "pushser",
+  "queueNames": "bench-q-1",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 10,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 1, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 50, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 300,
+  "startTime": "2026-06-07T09:55:36.000Z",
+  "endTime": "2026-06-07T10:01:21.000Z"
+}

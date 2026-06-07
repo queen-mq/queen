@@ -1,0 +1,241 @@
+[
+    {
+        "Id": "8e55f2823b36b390a4278135c683c29267dffe0ce3f32d26f77829486e0d099d",
+        "Created": "2026-06-06T13:03:56.225901339Z",
+        "Path": "./bin/queen-server",
+        "Args": [],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 1717784,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-06-06T13:03:56.260685192Z",
+            "FinishedAt": "0001-01-01T00:00:00Z"
+        },
+        "Image": "sha256:635d2bf45119bbd6ab76d12bc51a5cc41550794c3f587e7a265383f130f8fc38",
+        "ResolvConfPath": "/var/lib/docker/containers/8e55f2823b36b390a4278135c683c29267dffe0ce3f32d26f77829486e0d099d/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/8e55f2823b36b390a4278135c683c29267dffe0ce3f32d26f77829486e0d099d/hostname",
+        "HostsPath": "/var/lib/docker/containers/8e55f2823b36b390a4278135c683c29267dffe0ce3f32d26f77829486e0d099d/hosts",
+        "LogPath": "/var/lib/docker/containers/8e55f2823b36b390a4278135c683c29267dffe0ce3f32d26f77829486e0d099d/8e55f2823b36b390a4278135c683c29267dffe0ce3f32d26f77829486e0d099d-json.log",
+        "Name": "/queen",
+        "RestartCount": 0,
+        "Driver": "overlayfs",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "queen",
+            "PortBindings": {
+                "6632/tcp": [
+                    {
+                        "HostIp": "",
+                        "HostPort": "6632"
+                    }
+                ]
+            },
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": [
+                {
+                    "Name": "nofile",
+                    "Hard": 65535,
+                    "Soft": 65535
+                }
+            ],
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "Storage": {
+            "RootFS": {
+                "Snapshot": {
+                    "Name": "overlayfs"
+                }
+            }
+        },
+        "Mounts": [],
+        "Config": {
+            "Hostname": "8e55f2823b36",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "6632/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "QUEEN_PUSH_MAX_BATCH_SIZE=500",
+                "POP_WAIT_BACKOFF_THRESHOLD=5",
+                "PG_PASSWORD=postgres",
+                "RETENTION_PARALLELISM=8",
+                "POP_WAIT_INITIAL_INTERVAL_MS=10",
+                "POP_WAIT_MAX_INTERVAL_MS=100",
+                "NUM_WORKERS=10",
+                "RETENTION_BATCH_SIZE=50000",
+                "QUEEN_PUSH_MAX_CONCURRENT=24",
+                "QUEEN_PUSH_PREFERRED_BATCH_SIZE=50",
+                "QUEEN_CONCURRENCY_MODE=static",
+                "PG_HOST=postgres",
+                "DB_POOL_SIZE=50",
+                "SIDECAR_POOL_SIZE=250",
+                "RETENTION_INTERVAL=5000",
+                "QUEEN_PUSH_MAX_HOLD_MS=20",
+                "POP_WAIT_BACKOFF_MULTIPLIER=2",
+                "QUEEN_POP_MAX_CONCURRENT=16",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "QUEEN_SERVER=http://localhost:6632"
+            ],
+            "Cmd": [
+                "./bin/queen-server"
+            ],
+            "Image": "smartnessai/queen-mq:pushser",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": null,
+            "Labels": {
+                "org.opencontainers.image.version": "24.04"
+            }
+        },
+        "NetworkSettings": {
+            "SandboxID": "1a28566eff5813a06a2ac77c23d33d47ba88e57f4393a843bc921d9219172ba1",
+            "SandboxKey": "/var/run/docker/netns/1a28566eff58",
+            "Ports": {
+                "6632/tcp": [
+                    {
+                        "HostIp": "0.0.0.0",
+                        "HostPort": "6632"
+                    },
+                    {
+                        "HostIp": "::",
+                        "HostPort": "6632"
+                    }
+                ]
+            },
+            "Networks": {
+                "queen": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "884a31ad6b29de1faaa44cd31a553ddf0a6291a6114cff6a9ee032c19c568812",
+                    "EndpointID": "c6a970ec1f693aae79241b93320b7271d7660e152d83becdf8bb8a4f1ba76430",
+                    "Gateway": "172.18.0.1",
+                    "IPAddress": "172.18.0.3",
+                    "MacAddress": "32:91:64:00:43:ad",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": [
+                        "queen",
+                        "8e55f2823b36"
+                    ]
+                }
+            }
+        },
+        "ImageManifestDescriptor": {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:338b2b1c451ac9233f845992b46eb147045072a331dece72e258c2e85ecf635d",
+            "size": 1628,
+            "platform": {
+                "architecture": "amd64",
+                "os": "linux"
+            }
+        }
+    }
+]

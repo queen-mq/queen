@@ -1,0 +1,20 @@
+{"role":"producer","event":"start","queues":["bench-bp10-0.15.5"],"queueCount":1,"numWorkers":1,"conns":50,"duration":240,"maxPartition":1000,"msgsPerPush":10,"timestamp":"2026-06-04T07:45:58.996Z"}
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 992023,
+  "totalMessages": 9920230,
+  "reqPerSec": 4134,
+  "msgPerSec": 41340,
+  "latency": {
+    "p50": 11,
+    "p90": 14,
+    "p99": 31,
+    "avg": 11.61,
+    "max": 593
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 240
+}

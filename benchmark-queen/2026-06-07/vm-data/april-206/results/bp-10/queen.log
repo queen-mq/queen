@@ -1,0 +1,999 @@
+[2026-06-07 09:43:00.044] [info] Queen C++ Message Queue Server (Acceptor/Worker Pattern)
+[2026-06-07 09:43:00.044] [info] Configuration:
+[2026-06-07 09:43:00.044] [info]   - Host: 0.0.0.0
+[2026-06-07 09:43:00.044] [info]   - Port: 6632
+[2026-06-07 09:43:00.044] [info]   - Database: postgres:5432/postgres
+[2026-06-07 09:43:00.044] [warning] Encryption disabled - QUEEN_ENCRYPTION_KEY not set
+[2026-06-07 09:43:00.044] [info] Encryption: disabled
+[2026-06-07 09:43:00.044] [info] JWT Authentication: DISABLED
+[2026-06-07 09:43:00.044] [info] Starting acceptor/worker pattern with 10 workers (hardware cores: 32)
+[2026-06-07 09:43:00.044] [info] [Worker 0] Starting...
+[2026-06-07 09:43:00.044] [info] Initializing GLOBAL shared resources (ASYNC-ONLY MODE):
+[2026-06-07 09:43:00.044] [info]   - Total DB connections: 47 (95% of 50) - ALL ASYNC
+[2026-06-07 09:43:00.044] [info]   - DB ThreadPool size: 15 = 10 workers + 5 service
+[2026-06-07 09:43:00.044] [info]     * Queen instances: 10 (one per HTTP worker, each with own event loop)
+[2026-06-07 09:43:00.044] [info]     * Service DB threads: 5 (metrics, retention, eviction)
+[2026-06-07 09:43:00.044] [info]   - System ThreadPool threads: 4 (for background service scheduling)
+[2026-06-07 09:43:00.044] [info]   - Number of HTTP workers: 10
+[2026-06-07 09:43:00.044] [info]   - Creating Async DB Pool (47 connections) for ALL operations
+[2026-06-07 09:43:00.044] [info] [Worker 1] Starting...
+[2026-06-07 09:43:00.044] [info] [Worker 2] Starting...
+[2026-06-07 09:43:00.044] [info] [AsyncDbPool] Initializing 47 async connections...
+[2026-06-07 09:43:00.044] [info] [Worker 3] Starting...
+[2026-06-07 09:43:00.044] [info] [Worker 4] Starting...
+[2026-06-07 09:43:00.044] [info] [Worker 5] Starting...
+[2026-06-07 09:43:00.044] [info] [Worker 6] Starting...
+[2026-06-07 09:43:00.044] [info] [Worker 7] Starting...
+[2026-06-07 09:43:00.044] [info] [Worker 8] Starting...
+[2026-06-07 09:43:00.044] [info] Waiting for workers to initialize...
+[2026-06-07 09:43:00.044] [info] [Worker 9] Starting...
+[2026-06-07 09:43:00.409] [info] [AsyncDbPool] Initialization complete. 47 connections ready.
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 0 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 1 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 2 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 3 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 4 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 5 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 6 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 7 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 8 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response queue for worker 9 (poll workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 0 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 1 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 2 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 3 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 4 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 5 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 6 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 7 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 8 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info]   - Created response registry for worker 9 (lock-free across workers)
+[2026-06-07 09:43:00.410] [info] SharedStateManager: Disabled (no UDP peers or sync disabled)
+[2026-06-07 09:43:00.410] [info] Shared State Manager configured: Sync disabled, queue config cache will be active
+[2026-06-07 09:43:00.410] [info] System info: hostname=de2ea47aafb6, port=6632
+[2026-06-07 09:43:00.410] [info] Engine cluster (function-split): push=125 slots, pop=100 slots, rest=25 slots (total budget 250)
+[2026-06-07 09:43:00.412] [info] Global shared resources initialized successfully
+[2026-06-07 09:43:00.412] [info] [Worker 0] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 4] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 7] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 6] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 8] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 5] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 3] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 1] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 2] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 9] Using GLOBAL shared ThreadPool and Async Database Pool
+[2026-06-07 09:43:00.412] [info] [Worker 0] Database connection: OK | Pool: 38/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 0] Initializing database schema...
+[2026-06-07 09:43:00.412] [info] [Worker 7] Database connection: OK | Pool: 38/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 7] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] [Worker 6] Database connection: OK | Pool: 40/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 4] Database connection: OK | Pool: 40/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 4] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] [Worker 6] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] [Worker 5] Database connection: OK | Pool: 41/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 3] Database connection: OK | Pool: 42/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 3] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] [Worker 5] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] [Worker 8] Database connection: OK | Pool: 43/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 8] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] [Worker 1] Database connection: OK | Pool: 44/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 9] Database connection: OK | Pool: 45/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 9] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] [Worker 1] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.412] [info] Initializing schema: queen
+[2026-06-07 09:43:00.412] [info] [Worker 2] Database connection: OK | Pool: 46/47 conn available
+[2026-06-07 09:43:00.412] [info] [Worker 2] Waiting for shared file buffer from Worker 0...
+[2026-06-07 09:43:00.413] [info] Running base schema initialization...
+NOTICE:  schema "queen" already exists, skipping
+NOTICE:  column "producer_sub" of relation "messages" already exists, skipping
+NOTICE:  index "idx_messages_transaction_id" does not exist, skipping
+NOTICE:  index "idx_messages_txn_partition" does not exist, skipping
+NOTICE:  trigger "trg_update_partition_lookup" for relation "queen.messages" does not exist, skipping
+NOTICE:  function queen.pop_unified_batch_v2_noorder(jsonb) does not exist, skipping
+[2026-06-07 09:43:00.453] [info] Base schema applied successfully
+[2026-06-07 09:43:00.453] [info] Loading 25 stored procedure(s)...
+NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+NOTICE:  trigger "trg_partitions_created_counter" for relation "queen.partitions" does not exist, skipping
+NOTICE:  trigger "trg_partitions_deleted_counter" for relation "queen.partitions" does not exist, skipping
+[2026-06-07 09:43:00.502] [info] [Worker 0] Starting Shared State Manager...
+[2026-06-07 09:43:00.502] [info] SharedStateManager: Loading queue configs and maintenance modes from database...
+[2026-06-07 09:43:00.505] [info] SharedStateManager: Sync disabled, but queue config cache is available
+[2026-06-07 09:43:00.505] [info] [Worker 0] Registered MESSAGE_AVAILABLE callback for Queen instances
+[2026-06-07 09:43:00.505] [info] [Worker 0] Starting background metrics collector (sample: 1000ms, aggregate: 60s)...
+[2026-06-07 09:43:00.505] [info] MetricsCollector started: hostname=de2ea47aafb6, port=6632, worker=cpp-worker-1, sampling every 1000ms, aggregating every 60s
+[2026-06-07 09:43:00.505] [info] [Worker 0] Starting background retention service...
+[2026-06-07 09:43:00.505] [info] RetentionService started: interval=300000ms, batch_size=1000, parallelism=1, partition_cleanup_days=30, metrics_retention_days=90
+[2026-06-07 09:43:00.505] [info] [Worker 0] Starting background eviction service...
+[2026-06-07 09:43:00.505] [info] RetentionService: Running cleanup cycle
+[2026-06-07 09:43:00.505] [info] EvictionService started: interval=60000ms, batch_size=1000
+[2026-06-07 09:43:00.505] [info] [Worker 0] Starting background stats service...
+[2026-06-07 09:43:00.505] [info] StatsService started (queue/partition counts only): interval=10000ms, reconcile_interval=120000ms
+[2026-06-07 09:43:00.505] [info] [Worker 0] Starting background partition_lookup reconcile service...
+[2026-06-07 09:43:00.505] [info] PartitionLookupReconcileService started (stats-leader gated): interval=5000ms, lookback=60s, hostname=de2ea47aafb6
+[2026-06-07 09:43:00.505] [info] [Worker 0] Creating SHARED file buffer manager (dir=/var/lib/queen/buffers)...
+[2026-06-07 09:43:00.505] [info] FileBufferManager initializing: dir=/var/lib/queen/buffers, recovery=true
+[2026-06-07 09:43:00.505] [info] Creating buffer directory: /var/lib/queen/buffers
+[2026-06-07 09:43:00.505] [info] StatsService: Running initial queue/partition stats refresh...
+[2026-06-07 09:43:00.506] [info] RetentionService: cycle completed in 0ms
+[2026-06-07 09:43:00.508] [info] StatsService: Running full reconciliation (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:00.508] [info] Creating failed directory: /var/lib/queen/buffers/failed
+[2026-06-07 09:43:00.508] [info] Buffer directories ready: /var/lib/queen/buffers
+[2026-06-07 09:43:00.508] [info] Starting recovery of buffered events...
+[2026-06-07 09:43:00.508] [info] Starting recovery (max 3600s to avoid blocking server startup)...
+[2026-06-07 09:43:00.508] [info] Phase 1: Recovering failover events (FIFO order)...
+[2026-06-07 09:43:00.508] [info] Phase 2: Recovering QoS 0 events (batched)...
+[2026-06-07 09:43:00.508] [info] Startup recovery completed in 0ms: failover=0, qos0=0
+[2026-06-07 09:43:00.508] [info] Recovery complete
+[2026-06-07 09:43:00.508] [info] Buffer files initialized successfully
+[2026-06-07 09:43:00.508] [info] FileBufferManager ready
+[2026-06-07 09:43:00.508] [info] [Worker 0] File buffer ready - Pending: 0, Failed: 0, DB: healthy
+[2026-06-07 09:43:00.508] [info] [Worker 0] Sharing file buffer with other workers...
+[2026-06-07 09:43:00.508] [info] [Worker 0] File buffer shared successfully
+[2026-06-07 09:43:00.508] [info] [Worker 0] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 0] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] Background processor thread started
+[2026-06-07 09:43:00.509] [info] [Worker 6] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 6] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 8] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 2] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 7] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 7] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 7] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 4] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 4] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 4] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 5] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 5] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 5] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 9] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 9] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 9] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 7] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 7] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 1] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 1] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 1] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 3] Using shared file buffer from Worker 0
+[2026-06-07 09:43:00.509] [info] [Worker 3] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 3] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 8] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 2] File buffer connected to async queue manager for maintenance mode
+[2026-06-07 09:43:00.509] [info] [Worker 8] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 9] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 9] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 6] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 2] Creating uWS::App...
+[2026-06-07 09:43:00.509] [info] [Worker 0] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 0] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 3] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 3] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 5] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 8] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 8] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 4] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 1] Using shared function-split engine cluster
+[2026-06-07 09:43:00.509] [info] [Worker 1] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 4] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 5] Setting up routes...
+[2026-06-07 09:43:00.509] [info] [Worker 0] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 7] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 0] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 0] Registered with acceptor
+[2026-06-07 09:43:00.509] [info] [Worker 7] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 7] Registered with acceptor
+[2026-06-07 09:43:00.509] [info] [Worker 3] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 4] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 3] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 4] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 3] Registered with acceptor
+[2026-06-07 09:43:00.509] [info] [Worker 1] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 8] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 1] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 5] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 9] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.509] [info] [Worker 4] Registered with acceptor
+[2026-06-07 09:43:00.509] [info] [Worker 9] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 8] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 5] Routes configured
+[2026-06-07 09:43:00.509] [info] [Worker 9] Registered with acceptor
+[2026-06-07 09:43:00.509] [info] [Worker 8] Registered with acceptor
+[2026-06-07 09:43:00.509] [info] [Worker 1] Registered with acceptor
+[2026-06-07 09:43:00.509] [info] [Worker 5] Registered with acceptor
+[2026-06-07 09:43:00.518] [info] StatsService: Full reconciliation complete (0 partition chunks)
+[2026-06-07 09:43:00.524] [info] [Worker 4] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 7] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 9] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 0] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 0] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 5] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 6] Using shared function-split engine cluster
+[2026-06-07 09:43:00.524] [info] [Worker 6] Setting up routes...
+[2026-06-07 09:43:00.524] [info] [Worker 7] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 1] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 7] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 1] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 8] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 2] Using shared function-split engine cluster
+[2026-06-07 09:43:00.524] [info] [Worker 4] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 2] Setting up routes...
+[2026-06-07 09:43:00.524] [info] [Worker 5] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 0] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 3] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 1] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 8] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 8] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 3] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 3] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 4] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 5] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 9] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 2] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.524] [info] [Worker 9] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 2] Routes configured
+[2026-06-07 09:43:00.524] [info] [Worker 2] Registered with acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 6] Static file serving enabled from: /app/./webapp/dist
+[2026-06-07 09:43:00.524] [info] [Worker 6] Routes configured
+[2026-06-07 09:43:00.524] [info] [Worker 6] Registered with acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 2] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 2] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 2] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.524] [info] [Worker 6] Event loop ready to receive adopted sockets from acceptor
+[2026-06-07 09:43:00.524] [info] [Worker 6] Setting up response timer...
+[2026-06-07 09:43:00.524] [info] [Worker 6] Response timer configured: 25ms interval, batch size 100-500
+[2026-06-07 09:43:00.545] [info] All 10 workers initialized in 500ms
+[2026-06-07 09:43:00.545] [info] Creating acceptor app...
+[2026-06-07 09:43:00.545] [info] Registered 10 worker apps with acceptor
+[2026-06-07 09:43:00.545] [info] Acceptor listening on 0.0.0.0:6632
+[2026-06-07 09:43:00.545] [info] Round-robin load balancing across 10 workers
+[2026-06-07 09:43:00.545] [info] Starting acceptor event loop...
+[2026-06-07 09:43:00.704] [info] [Worker 2] [libqueen] Reconnection thread started
+[2026-06-07 09:43:01.412] [info] [Worker 1] [libqueen] Reconnection thread started
+[2026-06-07 09:43:01.517] [info] StatsService: cycle completed in 11ms
+[2026-06-07 09:43:01.608] [info] [Worker 0] [libqueen] Reconnection thread started
+[2026-06-07 09:43:01.704] [info] [Worker 2] [libqueen] custom(q=0 f=0/1 p99rtt=6ms) slots=25/25 jobs/s=1 drains=2 evl=0ms
+[2026-06-07 09:43:06.228] [info] [Worker 7] Configuring queue: bench-bp-10 via stored procedure
+[2026-06-07 09:43:06.709] [info] [Worker 2] [libqueen] custom(q=0 f=0/1 p99rtt=3ms) slots=25/25 jobs/s=1 drains=4 evl=0ms
+[2026-06-07 09:43:07.613] [info] [Worker 0] [libqueen] push(q=14 f=24/24 p99rtt=8ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=35 defer=6097 plbuf=3 plflush=655) slots=100/125 jobs/s=5721 drains=6344 evl=0ms
+[2026-06-07 09:43:08.417] [info] [Worker 1] [libqueen] pop(q=1 f=3/16 p99rtt=49ms) slots=97/100 jobs/s=1447 drains=1031 evl=0ms
+[2026-06-07 09:43:08.613] [info] [Worker 0] [libqueen] push(q=7 f=9/24 p99rtt=29ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=38 defer=10019 plbuf=1 plflush=1606) slots=115/125 jobs/s=10188 drains=17429 evl=0ms
+[2026-06-07 09:43:09.417] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=51ms) slots=98/100 jobs/s=1611 drains=2212 evl=0ms
+[2026-06-07 09:43:09.613] [info] [Worker 0] [libqueen] push(q=5 f=20/24 p99rtt=21ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=9002 plbuf=1 plflush=2491) slots=104/125 jobs/s=10415 drains=28396 evl=0ms
+[2026-06-07 09:43:10.417] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=52ms) slots=98/100 jobs/s=1430 drains=3261 evl=0ms
+[2026-06-07 09:43:10.613] [info] [Worker 0] [libqueen] push(q=1 f=15/24 p99rtt=30ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=38 defer=8869 plbuf=10 plflush=3404) slots=109/125 jobs/s=10176 drains=39054 evl=0ms
+[2026-06-07 09:43:11.417] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=52ms) slots=98/100 jobs/s=1353 drains=4267 evl=0ms
+[2026-06-07 09:43:11.541] [info] StatsService: cycle completed in 20ms
+[2026-06-07 09:43:11.613] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=8366 plbuf=3 plflush=4257) slots=106/125 jobs/s=10349 drains=49646 evl=0ms
+[2026-06-07 09:43:12.417] [info] [Worker 1] [libqueen] pop(q=5 f=2/16 p99rtt=52ms) slots=98/100 jobs/s=1356 drains=5193 evl=0ms
+[2026-06-07 09:43:12.533] [info] PartitionLookupReconcileService: fixed 23 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:12.613] [info] [Worker 0] [libqueen] push(q=5 f=21/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=40 defer=8924 plbuf=0 plflush=5247) slots=103/125 jobs/s=10587 drains=60757 evl=0ms
+[2026-06-07 09:43:13.417] [info] [Worker 1] [libqueen] pop(q=12 f=1/16 p99rtt=55ms) slots=99/100 jobs/s=1184 drains=5986 evl=0ms
+[2026-06-07 09:43:13.613] [info] [Worker 0] [libqueen] push(q=1 f=11/24 p99rtt=39ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=36 defer=8169 plbuf=6 plflush=6151) slots=113/125 jobs/s=10003 drains=71214 evl=0ms
+[2026-06-07 09:43:14.417] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=60ms) slots=97/100 jobs/s=1150 drains=6784 evl=0ms
+[2026-06-07 09:43:14.614] [info] [Worker 0] [libqueen] push(q=0 f=13/24 p99rtt=30ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=41 defer=8154 plbuf=4 plflush=7057) slots=111/125 jobs/s=9610 drains=81802 evl=0ms
+[2026-06-07 09:43:15.418] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=72ms) slots=97/100 jobs/s=854 drains=7351 evl=0ms
+[2026-06-07 09:43:15.613] [info] [Worker 0] [libqueen] push(q=4 f=24/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=42 defer=8693 plbuf=3 plflush=8025) slots=100/125 jobs/s=10105 drains=92952 evl=0ms
+[2026-06-07 09:43:16.418] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=77ms) slots=98/100 jobs/s=816 drains=7850 evl=0ms
+[2026-06-07 09:43:16.613] [info] [Worker 0] [libqueen] push(q=5 f=18/24 p99rtt=30ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=40 defer=8437 plbuf=2 plflush=9001) slots=106/125 jobs/s=10223 drains=104139 evl=0ms
+[2026-06-07 09:43:17.418] [info] [Worker 1] [libqueen] pop(q=15 f=1/16 p99rtt=77ms) slots=99/100 jobs/s=1040 drains=8523 evl=0ms
+[2026-06-07 09:43:17.613] [info] [Worker 0] [libqueen] push(q=5 f=18/24 p99rtt=37ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=38 defer=8077 plbuf=13 plflush=9902) slots=106/125 jobs/s=10372 drains=115252 evl=0ms
+[2026-06-07 09:43:18.418] [info] [Worker 1] [libqueen] pop(q=5 f=0/16 p99rtt=77ms) slots=100/100 jobs/s=1384 drains=9430 evl=0ms
+[2026-06-07 09:43:18.530] [info] PartitionLookupReconcileService: fixed 11 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:18.613] [info] [Worker 0] [libqueen] push(q=3 f=13/24 p99rtt=29ms) partition_lookup(q=0 f=0/2 p99rtt=2ms) pushgate(part=21 defer=8515 plbuf=0 plflush=10827) slots=112/125 jobs/s=10358 drains=125912 evl=0ms
+[2026-06-07 09:43:19.418] [info] [Worker 1] [libqueen] pop(q=8 f=2/16 p99rtt=77ms) slots=98/100 jobs/s=1062 drains=10181 evl=0ms
+[2026-06-07 09:43:19.614] [info] [Worker 0] [libqueen] push(q=4 f=22/24 p99rtt=22ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=31 defer=8579 plbuf=18 plflush=11847) slots=102/125 jobs/s=11027 drains=138311 evl=0ms
+[2026-06-07 09:43:20.418] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=77ms) slots=98/100 jobs/s=1114 drains=10968 evl=0ms
+[2026-06-07 09:43:20.613] [info] [Worker 0] [libqueen] push(q=2 f=12/24 p99rtt=27ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=8953 plbuf=1 plflush=12893) slots=112/125 jobs/s=10707 drains=149817 evl=0ms
+[2026-06-07 09:43:21.418] [info] [Worker 1] [libqueen] pop(q=10 f=1/16 p99rtt=77ms) slots=99/100 jobs/s=1158 drains=11743 evl=0ms
+[2026-06-07 09:43:21.613] [info] [Worker 0] [libqueen] push(q=3 f=14/24 p99rtt=29ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=8949 plbuf=6 plflush=13863) slots=110/125 jobs/s=10735 drains=161421 evl=0ms
+[2026-06-07 09:43:22.419] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=77ms) slots=97/100 jobs/s=1217 drains=12643 evl=0ms
+[2026-06-07 09:43:22.549] [info] StatsService: cycle completed in 28ms
+[2026-06-07 09:43:22.613] [info] [Worker 0] [libqueen] push(q=2 f=19/24 p99rtt=24ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=9125 plbuf=1 plflush=14840) slots=105/125 jobs/s=10800 drains=173238 evl=0ms
+[2026-06-07 09:43:23.419] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=77ms) slots=98/100 jobs/s=1440 drains=13660 evl=0ms
+[2026-06-07 09:43:23.613] [info] [Worker 0] [libqueen] push(q=3 f=19/24 p99rtt=25ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=45 defer=8222 plbuf=3 plflush=15789) slots=105/125 jobs/s=10846 drains=185047 evl=0ms
+[2026-06-07 09:43:24.420] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=77ms) slots=97/100 jobs/s=1075 drains=14300 evl=0ms
+[2026-06-07 09:43:24.535] [info] PartitionLookupReconcileService: fixed 19 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:24.613] [info] [Worker 0] [libqueen] push(q=2 f=14/24 p99rtt=31ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=32 defer=8182 plbuf=8 plflush=16825) slots=110/125 jobs/s=9950 drains=196153 evl=0ms
+[2026-06-07 09:43:25.420] [info] [Worker 1] [libqueen] pop(q=18 f=2/16 p99rtt=77ms) slots=98/100 jobs/s=1133 drains=15162 evl=0ms
+[2026-06-07 09:43:25.613] [info] [Worker 0] [libqueen] push(q=6 f=24/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=8091 plbuf=6 plflush=17747) slots=100/125 jobs/s=10409 drains=207553 evl=0ms
+[2026-06-07 09:43:26.420] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=73ms) slots=98/100 jobs/s=1180 drains=16012 evl=0ms
+[2026-06-07 09:43:26.614] [info] [Worker 0] [libqueen] push(q=4 f=22/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=7942 plbuf=8 plflush=18741) slots=102/125 jobs/s=10794 drains=219094 evl=0ms
+[2026-06-07 09:43:27.420] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=65ms) slots=98/100 jobs/s=1165 drains=16795 evl=0ms
+[2026-06-07 09:43:27.613] [info] [Worker 0] [libqueen] push(q=2 f=17/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=29 defer=7808 plbuf=23 plflush=19722) slots=107/125 jobs/s=10615 drains=230710 evl=0ms
+[2026-06-07 09:43:28.420] [info] [Worker 1] [libqueen] pop(q=4 f=0/16 p99rtt=64ms) slots=100/100 jobs/s=1393 drains=17723 evl=0ms
+[2026-06-07 09:43:28.613] [info] [Worker 0] [libqueen] push(q=4 f=12/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=35 defer=7728 plbuf=8 plflush=20657) slots=112/125 jobs/s=10557 drains=242002 evl=0ms
+[2026-06-07 09:43:29.421] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=63ms) slots=97/100 jobs/s=1294 drains=18640 evl=0ms
+[2026-06-07 09:43:29.613] [info] [Worker 0] [libqueen] push(q=2 f=12/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=7437 plbuf=16 plflush=21566) slots=112/125 jobs/s=10431 drains=253266 evl=0ms
+[2026-06-07 09:43:30.420] [info] [Worker 1] [libqueen] pop(q=19 f=2/16 p99rtt=64ms) slots=98/100 jobs/s=1136 drains=19424 evl=0ms
+[2026-06-07 09:43:30.535] [info] PartitionLookupReconcileService: fixed 27 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:30.613] [info] [Worker 0] [libqueen] push(q=3 f=21/24 p99rtt=41ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=25 defer=7668 plbuf=19 plflush=22518) slots=103/125 jobs/s=10363 drains=264493 evl=0ms
+[2026-06-07 09:43:31.421] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=68ms) slots=97/100 jobs/s=864 drains=19961 evl=0ms
+[2026-06-07 09:43:31.613] [info] [Worker 0] [libqueen] push(q=4 f=24/24 p99rtt=130ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=46 defer=4244 plbuf=50 plflush=23013) slots=100/125 jobs/s=5472 drains=270318 evl=0ms
+[2026-06-07 09:43:32.421] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=117ms) slots=98/100 jobs/s=799 drains=20514 evl=0ms
+[2026-06-07 09:43:32.613] [info] [Worker 0] [libqueen] push(q=4 f=20/24 p99rtt=45ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=45 defer=5793 plbuf=2 plflush=23672) slots=104/125 jobs/s=7216 drains=277634 evl=0ms
+[2026-06-07 09:43:33.422] [info] [Worker 1] [libqueen] pop(q=0 f=1/16 p99rtt=117ms) slots=99/100 jobs/s=1228 drains=21340 evl=0ms
+[2026-06-07 09:43:33.554] [info] StatsService: cycle completed in 33ms
+[2026-06-07 09:43:33.613] [info] [Worker 0] [libqueen] push(q=4 f=21/24 p99rtt=27ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=42 defer=8599 plbuf=0 plflush=24670) slots=103/125 jobs/s=10713 drains=289175 evl=0ms
+[2026-06-07 09:43:34.422] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=117ms) slots=98/100 jobs/s=1307 drains=22333 evl=0ms
+[2026-06-07 09:43:34.613] [info] [Worker 0] [libqueen] push(q=1 f=15/24 p99rtt=29ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=8069 plbuf=7 plflush=25603) slots=109/125 jobs/s=10369 drains=300635 evl=0ms
+[2026-06-07 09:43:35.422] [info] [Worker 1] [libqueen] pop(q=11 f=2/16 p99rtt=117ms) slots=98/100 jobs/s=1289 drains=23178 evl=0ms
+[2026-06-07 09:43:35.613] [info] [Worker 0] [libqueen] push(q=1 f=13/24 p99rtt=36ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=23 defer=7458 plbuf=23 plflush=26546) slots=111/125 jobs/s=10222 drains=311493 evl=0ms
+[2026-06-07 09:43:36.422] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=117ms) slots=98/100 jobs/s=1124 drains=23950 evl=0ms
+[2026-06-07 09:43:36.550] [info] PartitionLookupReconcileService: fixed 17 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:36.613] [info] [Worker 0] [libqueen] push(q=0 f=23/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=7488 plbuf=0 plflush=27491) slots=101/125 jobs/s=10447 drains=322807 evl=0ms
+[2026-06-07 09:43:37.422] [info] [Worker 1] [libqueen] pop(q=0 f=5/16 p99rtt=117ms) slots=95/100 jobs/s=1045 drains=24707 evl=0ms
+[2026-06-07 09:43:37.613] [info] [Worker 0] [libqueen] push(q=2 f=22/24 p99rtt=158ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=48 defer=4752 plbuf=12 plflush=28200) slots=102/125 jobs/s=7300 drains=330812 evl=0ms
+[2026-06-07 09:43:38.422] [info] [Worker 1] [libqueen] pop(q=0 f=1/16 p99rtt=164ms) slots=99/100 jobs/s=730 drains=25146 evl=0ms
+[2026-06-07 09:43:38.613] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=31ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=33 defer=4870 plbuf=4 plflush=28840) slots=108/125 jobs/s=7279 drains=338689 evl=0ms
+[2026-06-07 09:43:39.422] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=164ms) slots=97/100 jobs/s=1202 drains=26000 evl=0ms
+[2026-06-07 09:43:39.613] [info] [Worker 0] [libqueen] push(q=4 f=13/24 p99rtt=24ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=44 defer=7370 plbuf=2 plflush=29797) slots=111/125 jobs/s=10583 drains=349884 evl=0ms
+[2026-06-07 09:43:40.422] [info] [Worker 1] [libqueen] pop(q=19 f=2/16 p99rtt=164ms) slots=98/100 jobs/s=1407 drains=27022 evl=0ms
+[2026-06-07 09:43:40.613] [info] [Worker 0] [libqueen] push(q=1 f=13/24 p99rtt=29ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=36 defer=6776 plbuf=1 plflush=30753) slots=111/125 jobs/s=10730 drains=361260 evl=0ms
+[2026-06-07 09:43:41.423] [info] [Worker 1] [libqueen] pop(q=11 f=2/16 p99rtt=164ms) slots=98/100 jobs/s=1427 drains=28071 evl=0ms
+[2026-06-07 09:43:41.613] [info] [Worker 0] [libqueen] push(q=1 f=17/24 p99rtt=30ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=7080 plbuf=1 plflush=31727) slots=107/125 jobs/s=10601 drains=372607 evl=0ms
+[2026-06-07 09:43:42.422] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=164ms) slots=97/100 jobs/s=1114 drains=28879 evl=0ms
+[2026-06-07 09:43:42.556] [info] PartitionLookupReconcileService: fixed 41 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:42.613] [info] [Worker 0] [libqueen] push(q=2 f=11/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=21 defer=7000 plbuf=17 plflush=32727) slots=113/125 jobs/s=10430 drains=383839 evl=0ms
+[2026-06-07 09:43:43.422] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=96ms) slots=98/100 jobs/s=1176 drains=29712 evl=0ms
+[2026-06-07 09:43:43.613] [info] [Worker 0] [libqueen] push(q=0 f=19/24 p99rtt=31ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=7367 plbuf=0 plflush=33652) slots=105/125 jobs/s=10198 drains=394915 evl=0ms
+[2026-06-07 09:43:44.422] [info] [Worker 1] [libqueen] pop(q=17 f=1/16 p99rtt=96ms) slots=99/100 jobs/s=1171 drains=30550 evl=0ms
+[2026-06-07 09:43:44.542] [info] StatsService: cycle completed in 20ms
+[2026-06-07 09:43:44.613] [info] [Worker 0] [libqueen] push(q=0 f=4/24 p99rtt=29ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=12 defer=6323 plbuf=0 plflush=34613) slots=120/125 jobs/s=9797 drains=405565 evl=0ms
+[2026-06-07 09:43:45.422] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=96ms) slots=98/100 jobs/s=1300 drains=31514 evl=0ms
+[2026-06-07 09:43:45.613] [info] [Worker 0] [libqueen] push(q=4 f=13/24 p99rtt=44ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=45 defer=6778 plbuf=2 plflush=35543) slots=111/125 jobs/s=9994 drains=416341 evl=0ms
+[2026-06-07 09:43:46.423] [info] [Worker 1] [libqueen] pop(q=13 f=2/16 p99rtt=96ms) slots=98/100 jobs/s=1426 drains=32553 evl=0ms
+[2026-06-07 09:43:46.613] [info] [Worker 0] [libqueen] push(q=1 f=22/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=49 defer=6396 plbuf=10 plflush=36462) slots=102/125 jobs/s=10418 drains=427194 evl=0ms
+[2026-06-07 09:43:47.422] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=96ms) slots=97/100 jobs/s=1248 drains=33410 evl=0ms
+[2026-06-07 09:43:47.613] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=5351 plbuf=0 plflush=37401) slots=108/125 jobs/s=10460 drains=438204 evl=0ms
+[2026-06-07 09:43:48.423] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=60ms) slots=97/100 jobs/s=1135 drains=34131 evl=0ms
+[2026-06-07 09:43:48.543] [info] PartitionLookupReconcileService: fixed 24 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:48.613] [info] [Worker 0] [libqueen] push(q=0 f=15/24 p99rtt=32ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=42 defer=7159 plbuf=1 plflush=38391) slots=109/125 jobs/s=10331 drains=449204 evl=0ms
+[2026-06-07 09:43:49.423] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=61ms) slots=98/100 jobs/s=1185 drains=34945 evl=0ms
+[2026-06-07 09:43:49.613] [info] [Worker 0] [libqueen] push(q=2 f=17/24 p99rtt=32ms) partition_lookup(q=0 f=0/2 p99rtt=2ms) pushgate(part=42 defer=6934 plbuf=0 plflush=39288) slots=108/125 jobs/s=10189 drains=460158 evl=0ms
+[2026-06-07 09:43:50.424] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=62ms) slots=98/100 jobs/s=1155 drains=35747 evl=0ms
+[2026-06-07 09:43:50.613] [info] [Worker 0] [libqueen] push(q=2 f=18/24 p99rtt=30ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=7501 plbuf=7 plflush=40180) slots=106/125 jobs/s=10186 drains=470780 evl=0ms
+[2026-06-07 09:43:51.424] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=62ms) slots=98/100 jobs/s=1412 drains=36771 evl=0ms
+[2026-06-07 09:43:51.613] [info] [Worker 0] [libqueen] push(q=1 f=15/24 p99rtt=25ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=45 defer=7751 plbuf=5 plflush=41167) slots=109/125 jobs/s=10888 drains=482969 evl=0ms
+[2026-06-07 09:43:52.425] [info] [Worker 1] [libqueen] pop(q=3 f=3/16 p99rtt=62ms) slots=97/100 jobs/s=1361 drains=37741 evl=0ms
+[2026-06-07 09:43:52.613] [info] [Worker 0] [libqueen] push(q=0 f=14/24 p99rtt=29ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=6406 plbuf=6 plflush=42144) slots=110/125 jobs/s=10636 drains=494472 evl=0ms
+[2026-06-07 09:43:53.424] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=62ms) slots=98/100 jobs/s=1102 drains=38550 evl=0ms
+[2026-06-07 09:43:53.613] [info] [Worker 0] [libqueen] push(q=1 f=17/24 p99rtt=30ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=6094 plbuf=13 plflush=43095) slots=107/125 jobs/s=10514 drains=505790 evl=0ms
+[2026-06-07 09:43:54.424] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=62ms) slots=98/100 jobs/s=1177 drains=39312 evl=0ms
+[2026-06-07 09:43:54.568] [info] PartitionLookupReconcileService: fixed 6 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:43:54.613] [info] [Worker 0] [libqueen] push(q=1 f=11/24 p99rtt=36ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=31 defer=6690 plbuf=10 plflush=44116) slots=113/125 jobs/s=10341 drains=517592 evl=0ms
+[2026-06-07 09:43:55.425] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=62ms) slots=97/100 jobs/s=1151 drains=40183 evl=0ms
+[2026-06-07 09:43:55.541] [info] StatsService: cycle completed in 18ms
+[2026-06-07 09:43:55.614] [info] [Worker 0] [libqueen] push(q=3 f=22/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=6880 plbuf=0 plflush=45044) slots=102/125 jobs/s=10204 drains=528599 evl=0ms
+[2026-06-07 09:43:56.424] [info] [Worker 1] [libqueen] pop(q=5 f=2/16 p99rtt=63ms) slots=98/100 jobs/s=1317 drains=41080 evl=0ms
+[2026-06-07 09:43:56.613] [info] [Worker 0] [libqueen] push(q=2 f=11/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=28 defer=6284 plbuf=0 plflush=45942) slots=113/125 jobs/s=10397 drains=539703 evl=0ms
+[2026-06-07 09:43:57.425] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=62ms) slots=98/100 jobs/s=1359 drains=42060 evl=0ms
+[2026-06-07 09:43:57.613] [info] [Worker 0] [libqueen] push(q=0 f=18/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=7133 plbuf=2 plflush=46917) slots=106/125 jobs/s=10909 drains=551675 evl=0ms
+[2026-06-07 09:43:58.424] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=62ms) slots=98/100 jobs/s=1185 drains=42869 evl=0ms
+[2026-06-07 09:43:58.613] [info] [Worker 0] [libqueen] push(q=1 f=21/24 p99rtt=6ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=5392 plbuf=10 plflush=47917) slots=103/125 jobs/s=10860 drains=563538 evl=0ms
+[2026-06-07 09:43:59.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=62ms) slots=97/100 jobs/s=1099 drains=43633 evl=0ms
+[2026-06-07 09:43:59.613] [info] [Worker 0] [libqueen] push(q=1 f=15/24 p99rtt=7ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=38 defer=5707 plbuf=7 plflush=48921) slots=109/125 jobs/s=10384 drains=575130 evl=0ms
+[2026-06-07 09:44:00.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=61ms) custom(q=3 f=0/1 p99rtt=0ms) slots=97/100 jobs/s=1233 drains=44470 evl=0ms
+[2026-06-07 09:44:00.535] [info] PartitionLookupReconcileService: fixed 18 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:00.614] [info] [Worker 0] [libqueen] push(q=2 f=18/24 p99rtt=41ms) custom(q=2 f=0/1 p99rtt=0ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=40 defer=6647 plbuf=6 plflush=49834) slots=106/125 jobs/s=10434 drains=586618 evl=0ms
+[2026-06-07 09:44:01.424] [info] [Worker 1] [libqueen] pop(q=3 f=1/16 p99rtt=62ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1381 drains=45531 evl=0ms
+[2026-06-07 09:44:01.614] [info] [Worker 0] [libqueen] push(q=0 f=17/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=24 defer=6137 plbuf=0 plflush=50782) slots=107/125 jobs/s=10455 drains=597659 evl=0ms
+[2026-06-07 09:44:01.764] [info] [Worker 2] [libqueen] custom(q=0 f=0/1 p99rtt=3ms) slots=25/25 jobs/s=1 drains=6 evl=0ms
+[2026-06-07 09:44:02.424] [info] [Worker 1] [libqueen] pop(q=8 f=1/16 p99rtt=62ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1389 drains=46510 evl=0ms
+[2026-06-07 09:44:02.614] [info] [Worker 0] [libqueen] push(q=0 f=23/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=6818 plbuf=4 plflush=51736) slots=101/125 jobs/s=10384 drains=608920 evl=0ms
+[2026-06-07 09:44:03.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=62ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1174 drains=47330 evl=0ms
+[2026-06-07 09:44:03.614] [info] [Worker 0] [libqueen] push(q=18 f=24/24 p99rtt=165ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=32 defer=5536 plbuf=14 plflush=52508) slots=100/125 jobs/s=8230 drains=617751 evl=0ms
+[2026-06-07 09:44:04.425] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=361 drains=47569 evl=0ms
+[2026-06-07 09:44:04.614] [info] [Worker 0] [libqueen] push(q=1 f=13/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=32 defer=2085 plbuf=12 plflush=52759) slots=111/125 jobs/s=2961 drains=620815 evl=0ms
+[2026-06-07 09:44:05.425] [info] [Worker 1] [libqueen] pop(q=14 f=2/16 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1185 drains=48413 evl=0ms
+[2026-06-07 09:44:05.575] [info] PartitionLookupReconcileService: fixed 7 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:05.614] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=40 defer=6380 plbuf=1 plflush=53588) slots=108/125 jobs/s=9407 drains=630790 evl=0ms
+[2026-06-07 09:44:06.425] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1217 drains=49275 evl=0ms
+[2026-06-07 09:44:06.532] [info] StatsService: cycle completed in 25ms
+[2026-06-07 09:44:06.615] [info] [Worker 0] [libqueen] push(q=7 f=24/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=6243 plbuf=4 plflush=54602) slots=100/125 jobs/s=10468 drains=642137 evl=0ms
+[2026-06-07 09:44:07.425] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=1172 drains=50093 evl=0ms
+[2026-06-07 09:44:07.614] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=32 defer=6394 plbuf=18 plflush=55547) slots=106/125 jobs/s=10288 drains=653149 evl=0ms
+[2026-06-07 09:44:08.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1378 drains=51038 evl=0ms
+[2026-06-07 09:44:08.614] [info] [Worker 0] [libqueen] push(q=1 f=14/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=28 defer=5912 plbuf=4 plflush=56487) slots=110/125 jobs/s=10686 drains=664757 evl=0ms
+[2026-06-07 09:44:09.425] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=1270 drains=51916 evl=0ms
+[2026-06-07 09:44:09.615] [info] [Worker 0] [libqueen] push(q=1 f=23/24 p99rtt=32ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=49 defer=5832 plbuf=10 plflush=57365) slots=101/125 jobs/s=9998 drains=675291 evl=0ms
+[2026-06-07 09:44:10.424] [info] [Worker 1] [libqueen] pop(q=19 f=2/16 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=529 drains=52250 evl=0ms
+[2026-06-07 09:44:10.615] [info] [Worker 0] [libqueen] push(q=1 f=15/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=45 defer=2945 plbuf=4 plflush=57730) slots=109/125 jobs/s=4356 drains=679657 evl=0ms
+[2026-06-07 09:44:11.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1153 drains=53147 evl=0ms
+[2026-06-07 09:44:11.551] [info] PartitionLookupReconcileService: fixed 31 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:11.615] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=7676 plbuf=3 plflush=58768) slots=108/125 jobs/s=10689 drains=691057 evl=0ms
+[2026-06-07 09:44:12.425] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=1207 drains=53971 evl=0ms
+[2026-06-07 09:44:12.615] [info] [Worker 0] [libqueen] push(q=0 f=22/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=30 defer=7455 plbuf=0 plflush=59700) slots=102/125 jobs/s=10292 drains=701729 evl=0ms
+[2026-06-07 09:44:13.425] [info] [Worker 1] [libqueen] pop(q=16 f=2/16 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1364 drains=54826 evl=0ms
+[2026-06-07 09:44:13.615] [info] [Worker 0] [libqueen] push(q=2 f=14/24 p99rtt=24ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=42 defer=6532 plbuf=2 plflush=60703) slots=110/125 jobs/s=10360 drains=713033 evl=0ms
+[2026-06-07 09:44:14.425] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=166ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1396 drains=55811 evl=0ms
+[2026-06-07 09:44:14.615] [info] [Worker 0] [libqueen] push(q=4 f=20/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=7120 plbuf=3 plflush=61667) slots=104/125 jobs/s=10262 drains=723943 evl=0ms
+[2026-06-07 09:44:15.425] [info] [Worker 1] [libqueen] pop(q=19 f=2/16 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1259 drains=56701 evl=0ms
+[2026-06-07 09:44:15.615] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=35ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=5805 plbuf=1 plflush=62589) slots=108/125 jobs/s=10018 drains=734681 evl=0ms
+[2026-06-07 09:44:16.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1020 drains=57382 evl=0ms
+[2026-06-07 09:44:16.542] [info] StatsService: cycle completed in 17ms
+[2026-06-07 09:44:16.615] [info] [Worker 0] [libqueen] push(q=1 f=22/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=44 defer=6354 plbuf=4 plflush=63546) slots=102/125 jobs/s=10344 drains=745872 evl=0ms
+[2026-06-07 09:44:17.425] [info] [Worker 1] [libqueen] pop(q=2 f=1/16 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1207 drains=58218 evl=0ms
+[2026-06-07 09:44:17.552] [info] PartitionLookupReconcileService: fixed 25 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:17.615] [info] [Worker 0] [libqueen] push(q=1 f=13/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=5462 plbuf=0 plflush=64487) slots=111/125 jobs/s=10428 drains=756813 evl=0ms
+[2026-06-07 09:44:18.424] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1297 drains=59145 evl=0ms
+[2026-06-07 09:44:18.615] [info] [Worker 0] [libqueen] push(q=0 f=20/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=5913 plbuf=1 plflush=65464) slots=104/125 jobs/s=10556 drains=767993 evl=0ms
+[2026-06-07 09:44:19.424] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=113ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1343 drains=60003 evl=0ms
+[2026-06-07 09:44:19.615] [info] [Worker 0] [libqueen] push(q=3 f=24/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=45 defer=7263 plbuf=5 plflush=66435) slots=100/125 jobs/s=10660 drains=779721 evl=0ms
+[2026-06-07 09:44:20.425] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=60ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1302 drains=60937 evl=0ms
+[2026-06-07 09:44:20.615] [info] [Worker 0] [libqueen] push(q=1 f=13/24 p99rtt=35ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=23 defer=6291 plbuf=0 plflush=67348) slots=111/125 jobs/s=10234 drains=790898 evl=0ms
+[2026-06-07 09:44:21.425] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1169 drains=61715 evl=0ms
+[2026-06-07 09:44:21.615] [info] [Worker 0] [libqueen] push(q=0 f=20/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=33 defer=5823 plbuf=13 plflush=68264) slots=104/125 jobs/s=10215 drains=802082 evl=0ms
+[2026-06-07 09:44:22.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1123 drains=62530 evl=0ms
+[2026-06-07 09:44:22.615] [info] [Worker 0] [libqueen] push(q=1 f=12/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=38 defer=6116 plbuf=0 plflush=69224) slots=112/125 jobs/s=10171 drains=812761 evl=0ms
+[2026-06-07 09:44:23.424] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1213 drains=63392 evl=0ms
+[2026-06-07 09:44:23.544] [info] PartitionLookupReconcileService: fixed 14 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:23.615] [info] [Worker 0] [libqueen] push(q=8 f=24/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=42 defer=6163 plbuf=12 plflush=70172) slots=100/125 jobs/s=10469 drains=824088 evl=0ms
+[2026-06-07 09:44:24.424] [info] [Worker 1] [libqueen] pop(q=7 f=1/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1306 drains=64277 evl=0ms
+[2026-06-07 09:44:24.615] [info] [Worker 0] [libqueen] push(q=1 f=12/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=5389 plbuf=0 plflush=71169) slots=112/125 jobs/s=10320 drains=835015 evl=0ms
+[2026-06-07 09:44:25.425] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1257 drains=65173 evl=0ms
+[2026-06-07 09:44:25.615] [info] [Worker 0] [libqueen] push(q=1 f=8/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=44 defer=4359 plbuf=0 plflush=72063) slots=116/125 jobs/s=9880 drains=845610 evl=0ms
+[2026-06-07 09:44:26.424] [info] [Worker 1] [libqueen] pop(q=11 f=1/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1262 drains=66024 evl=0ms
+[2026-06-07 09:44:26.615] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=41ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=5408 plbuf=31 plflush=72957) slots=108/125 jobs/s=10149 drains=856541 evl=0ms
+[2026-06-07 09:44:27.425] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1089 drains=66794 evl=0ms
+[2026-06-07 09:44:27.579] [info] StatsService: cycle completed in 53ms
+[2026-06-07 09:44:27.615] [info] [Worker 0] [libqueen] push(q=2 f=10/24 p99rtt=32ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=14 defer=4786 plbuf=7 plflush=73874) slots=114/125 jobs/s=10198 drains=867816 evl=0ms
+[2026-06-07 09:44:28.425] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1250 drains=67636 evl=0ms
+[2026-06-07 09:44:28.615] [info] [Worker 0] [libqueen] push(q=1 f=19/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=4271 plbuf=2 plflush=74865) slots=105/125 jobs/s=10413 drains=879146 evl=0ms
+[2026-06-07 09:44:29.426] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1267 drains=68547 evl=0ms
+[2026-06-07 09:44:29.534] [info] PartitionLookupReconcileService: fixed 4 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:29.616] [info] [Worker 0] [libqueen] push(q=3 f=20/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=6013 plbuf=11 plflush=75847) slots=104/125 jobs/s=10613 drains=890842 evl=0ms
+[2026-06-07 09:44:30.425] [info] [Worker 1] [libqueen] pop(q=18 f=2/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1407 drains=69535 evl=0ms
+[2026-06-07 09:44:30.615] [info] [Worker 0] [libqueen] push(q=3 f=20/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=6264 plbuf=2 plflush=76796) slots=104/125 jobs/s=10682 drains=902299 evl=0ms
+[2026-06-07 09:44:31.426] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=59ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1317 drains=70483 evl=0ms
+[2026-06-07 09:44:31.615] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=5322 plbuf=3 plflush=77739) slots=106/125 jobs/s=10380 drains=913413 evl=0ms
+[2026-06-07 09:44:32.426] [info] [Worker 1] [libqueen] pop(q=2 f=3/16 p99rtt=59ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1084 drains=71238 evl=0ms
+[2026-06-07 09:44:32.615] [info] [Worker 0] [libqueen] push(q=1 f=12/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=21 defer=5821 plbuf=0 plflush=78724) slots=112/125 jobs/s=10494 drains=924908 evl=0ms
+[2026-06-07 09:44:33.427] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=59ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1195 drains=72069 evl=0ms
+[2026-06-07 09:44:33.615] [info] [Worker 0] [libqueen] push(q=2 f=18/24 p99rtt=28ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=5372 plbuf=4 plflush=79705) slots=106/125 jobs/s=10433 drains=936159 evl=0ms
+[2026-06-07 09:44:34.426] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=60ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1220 drains=72889 evl=0ms
+[2026-06-07 09:44:34.615] [info] [Worker 0] [libqueen] push(q=4 f=22/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=40 defer=5588 plbuf=1 plflush=80668) slots=102/125 jobs/s=10179 drains=947334 evl=0ms
+[2026-06-07 09:44:35.426] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=60ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1255 drains=73686 evl=0ms
+[2026-06-07 09:44:35.554] [info] PartitionLookupReconcileService: fixed 8 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:35.615] [info] [Worker 0] [libqueen] push(q=1 f=17/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=5856 plbuf=2 plflush=81674) slots=107/125 jobs/s=10121 drains=958306 evl=0ms
+[2026-06-07 09:44:36.426] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=116ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=474 drains=73974 evl=0ms
+[2026-06-07 09:44:36.615] [info] [Worker 0] [libqueen] push(q=0 f=9/24 p99rtt=197ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=44 defer=769 plbuf=6 plflush=81824) slots=115/125 jobs/s=1849 drains=960000 evl=0ms
+[2026-06-07 09:44:37.427] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1358 drains=74967 evl=0ms
+[2026-06-07 09:44:37.615] [info] [Worker 0] [libqueen] push(q=0 f=11/24 p99rtt=45ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=44 defer=5079 plbuf=0 plflush=82708) slots=113/125 jobs/s=9600 drains=969874 evl=0ms
+[2026-06-07 09:44:38.427] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1086 drains=75651 evl=0ms
+[2026-06-07 09:44:38.559] [info] StatsService: cycle completed in 32ms
+[2026-06-07 09:44:38.615] [info] [Worker 0] [libqueen] push(q=2 f=22/24 p99rtt=39ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=4535 plbuf=7 plflush=83610) slots=102/125 jobs/s=10000 drains=980464 evl=0ms
+[2026-06-07 09:44:39.427] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1167 drains=76449 evl=0ms
+[2026-06-07 09:44:39.615] [info] [Worker 0] [libqueen] push(q=0 f=19/24 p99rtt=41ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=36 defer=5745 plbuf=28 plflush=84475) slots=105/125 jobs/s=10254 drains=991320 evl=0ms
+[2026-06-07 09:44:40.426] [info] [Worker 1] [libqueen] pop(q=19 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1207 drains=77375 evl=0ms
+[2026-06-07 09:44:40.615] [info] [Worker 0] [libqueen] push(q=1 f=13/24 p99rtt=39ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=28 defer=6621 plbuf=2 plflush=85440) slots=111/125 jobs/s=10521 drains=1002727 evl=0ms
+[2026-06-07 09:44:41.427] [info] [Worker 1] [libqueen] pop(q=8 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1316 drains=78331 evl=0ms
+[2026-06-07 09:44:41.550] [info] PartitionLookupReconcileService: fixed 20 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:41.615] [info] [Worker 0] [libqueen] push(q=2 f=17/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=48 defer=5970 plbuf=0 plflush=86363) slots=107/125 jobs/s=10544 drains=1014163 evl=0ms
+[2026-06-07 09:44:42.426] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1317 drains=79232 evl=0ms
+[2026-06-07 09:44:42.615] [info] [Worker 0] [libqueen] push(q=1 f=13/24 p99rtt=23ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=26 defer=6273 plbuf=23 plflush=87202) slots=111/125 jobs/s=9435 drains=1024060 evl=0ms
+[2026-06-07 09:44:43.426] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1199 drains=80056 evl=0ms
+[2026-06-07 09:44:43.615] [info] [Worker 0] [libqueen] push(q=0 f=17/24 p99rtt=24ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=35 defer=6516 plbuf=27 plflush=88185) slots=107/125 jobs/s=10830 drains=1036070 evl=0ms
+[2026-06-07 09:44:44.426] [info] [Worker 1] [libqueen] pop(q=18 f=1/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1198 drains=80991 evl=0ms
+[2026-06-07 09:44:44.615] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=28ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=48 defer=6496 plbuf=3 plflush=89185) slots=108/125 jobs/s=10292 drains=1047202 evl=0ms
+[2026-06-07 09:44:45.427] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1160 drains=81873 evl=0ms
+[2026-06-07 09:44:45.615] [info] [Worker 0] [libqueen] push(q=3 f=24/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=6852 plbuf=20 plflush=90150) slots=100/125 jobs/s=10356 drains=1058549 evl=0ms
+[2026-06-07 09:44:46.427] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=140ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1313 drains=82800 evl=0ms
+[2026-06-07 09:44:46.615] [info] [Worker 0] [libqueen] push(q=2 f=15/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=6513 plbuf=3 plflush=91112) slots=109/125 jobs/s=10319 drains=1069533 evl=0ms
+[2026-06-07 09:44:47.427] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=750 drains=83250 evl=0ms
+[2026-06-07 09:44:47.615] [info] [Worker 0] [libqueen] push(q=0 f=5/24 p99rtt=301ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=12 defer=1816 plbuf=44 plflush=91434) slots=119/125 jobs/s=3394 drains=1072953 evl=0ms
+[2026-06-07 09:44:48.427] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1154 drains=84045 evl=0ms
+[2026-06-07 09:44:48.615] [info] [Worker 0] [libqueen] push(q=7 f=24/24 p99rtt=18ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=42 defer=6610 plbuf=0 plflush=92344) slots=100/125 jobs/s=10302 drains=1083676 evl=0ms
+[2026-06-07 09:44:49.431] [info] [Worker 1] [libqueen] pop(q=6 f=1/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1233 drains=84872 evl=0ms
+[2026-06-07 09:44:49.547] [info] StatsService: cycle completed in 20ms
+[2026-06-07 09:44:49.615] [info] [Worker 0] [libqueen] push(q=1 f=21/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=48 defer=6142 plbuf=7 plflush=93362) slots=103/125 jobs/s=10441 drains=1095295 evl=0ms
+[2026-06-07 09:44:50.431] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1135 drains=85656 evl=0ms
+[2026-06-07 09:44:50.616] [info] [Worker 0] [libqueen] push(q=0 f=17/24 p99rtt=20ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=30 defer=6457 plbuf=25 plflush=94348) slots=107/125 jobs/s=10906 drains=1107009 evl=0ms
+[2026-06-07 09:44:51.432] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1197 drains=86523 evl=0ms
+[2026-06-07 09:44:51.615] [info] [Worker 0] [libqueen] push(q=6 f=18/24 p99rtt=25ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=40 defer=8150 plbuf=2 plflush=95358) slots=106/125 jobs/s=10860 drains=1118681 evl=0ms
+[2026-06-07 09:44:52.431] [info] [Worker 1] [libqueen] pop(q=12 f=2/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1259 drains=87339 evl=0ms
+[2026-06-07 09:44:52.615] [info] [Worker 0] [libqueen] push(q=15 f=24/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=35 defer=6737 plbuf=2 plflush=96282) slots=100/125 jobs/s=10414 drains=1129786 evl=0ms
+[2026-06-07 09:44:53.432] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1290 drains=88150 evl=0ms
+[2026-06-07 09:44:53.565] [info] PartitionLookupReconcileService: fixed 9 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:53.615] [info] [Worker 0] [libqueen] push(q=2 f=9/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=6730 plbuf=10 plflush=97180) slots=115/125 jobs/s=10393 drains=1140655 evl=0ms
+[2026-06-07 09:44:54.432] [info] [Worker 1] [libqueen] pop(q=4 f=3/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1298 drains=89052 evl=0ms
+[2026-06-07 09:44:54.615] [info] [Worker 0] [libqueen] push(q=1 f=22/24 p99rtt=39ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=6128 plbuf=2 plflush=98135) slots=102/125 jobs/s=9790 drains=1151041 evl=0ms
+[2026-06-07 09:44:55.433] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1107 drains=89944 evl=0ms
+[2026-06-07 09:44:55.615] [info] [Worker 0] [libqueen] push(q=2 f=13/24 p99rtt=33ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=5097 plbuf=7 plflush=99080) slots=111/125 jobs/s=9986 drains=1161837 evl=0ms
+[2026-06-07 09:44:56.434] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1225 drains=90825 evl=0ms
+[2026-06-07 09:44:56.615] [info] [Worker 0] [libqueen] push(q=1 f=8/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=31 defer=6573 plbuf=4 plflush=100029) slots=116/125 jobs/s=10182 drains=1172408 evl=0ms
+[2026-06-07 09:44:57.433] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=97ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1238 drains=91756 evl=0ms
+[2026-06-07 09:44:57.615] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=28 defer=5378 plbuf=20 plflush=101074) slots=108/125 jobs/s=10695 drains=1183961 evl=0ms
+[2026-06-07 09:44:58.434] [info] [Worker 1] [libqueen] pop(q=2 f=3/16 p99rtt=59ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1312 drains=92704 evl=0ms
+[2026-06-07 09:44:58.615] [info] [Worker 0] [libqueen] push(q=2 f=12/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=46 defer=5984 plbuf=1 plflush=101968) slots=112/125 jobs/s=10012 drains=1194186 evl=0ms
+[2026-06-07 09:44:59.433] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=59ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1430 drains=93718 evl=0ms
+[2026-06-07 09:44:59.541] [info] PartitionLookupReconcileService: fixed 1 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:44:59.615] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=46 defer=5594 plbuf=6 plflush=102890) slots=106/125 jobs/s=10521 drains=1205282 evl=0ms
+[2026-06-07 09:45:00.433] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=57ms) custom(q=3 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1262 drains=94598 evl=0ms
+[2026-06-07 09:45:00.520] [info] StatsService: Running full reconciliation (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:00.615] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=29ms) custom(q=2 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=42 defer=5719 plbuf=5 plflush=103862) slots=108/125 jobs/s=10449 drains=1216361 evl=0ms
+[2026-06-07 09:45:01.434] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=58ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1098 drains=95411 evl=0ms
+[2026-06-07 09:45:01.615] [info] [Worker 0] [libqueen] push(q=1 f=8/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=23 defer=6015 plbuf=0 plflush=104850) slots=116/125 jobs/s=9874 drains=1227379 evl=0ms
+[2026-06-07 09:45:01.823] [info] [Worker 2] [libqueen] custom(q=0 f=0/1 p99rtt=3ms) slots=25/25 jobs/s=1 drains=8 evl=0ms
+[2026-06-07 09:45:02.434] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=60ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1040 drains=96221 evl=0ms
+[2026-06-07 09:45:02.615] [info] [Worker 0] [libqueen] push(q=4 f=24/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=35 defer=5858 plbuf=3 plflush=105850) slots=100/125 jobs/s=10138 drains=1238335 evl=0ms
+[2026-06-07 09:45:03.433] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1095 drains=97039 evl=0ms
+[2026-06-07 09:45:03.615] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=26ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=5963 plbuf=8 plflush=106768) slots=106/125 jobs/s=9975 drains=1249312 evl=0ms
+[2026-06-07 09:45:03.836] [info] StatsService: Full reconciliation complete (6 partition chunks)
+[2026-06-07 09:45:03.836] [info] StatsService: cycle completed in 3319ms
+[2026-06-07 09:45:04.434] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=63ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1056 drains=97683 evl=0ms
+[2026-06-07 09:45:04.616] [info] [Worker 0] [libqueen] push(q=1 f=14/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=33 defer=6244 plbuf=12 plflush=107856) slots=110/125 jobs/s=10290 drains=1261056 evl=0ms
+[2026-06-07 09:45:05.435] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=65ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1066 drains=98414 evl=0ms
+[2026-06-07 09:45:05.546] [info] PartitionLookupReconcileService: fixed 5 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:05.616] [info] [Worker 0] [libqueen] push(q=2 f=13/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=5175 plbuf=0 plflush=108854) slots=111/125 jobs/s=9966 drains=1272246 evl=0ms
+[2026-06-07 09:45:06.434] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=64ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1071 drains=99114 evl=0ms
+[2026-06-07 09:45:06.616] [info] [Worker 0] [libqueen] push(q=1 f=17/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=5426 plbuf=3 plflush=109846) slots=107/125 jobs/s=10559 drains=1283587 evl=0ms
+[2026-06-07 09:45:07.434] [info] [Worker 1] [libqueen] pop(q=3 f=1/16 p99rtt=63ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1185 drains=99940 evl=0ms
+[2026-06-07 09:45:07.616] [info] [Worker 0] [libqueen] push(q=0 f=20/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=5419 plbuf=8 plflush=110809) slots=104/125 jobs/s=10761 drains=1295198 evl=0ms
+[2026-06-07 09:45:08.434] [info] [Worker 1] [libqueen] pop(q=0 f=8/16 p99rtt=64ms) custom(q=0 f=0/1 p99rtt=2ms) slots=92/100 jobs/s=557 drains=100353 evl=0ms
+[2026-06-07 09:45:08.616] [info] [Worker 0] [libqueen] push(q=1 f=16/24 p99rtt=557ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=42 defer=1516 plbuf=3 plflush=111120) slots=108/125 jobs/s=3208 drains=1298571 evl=0ms
+[2026-06-07 09:45:09.436] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=92ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1123 drains=101108 evl=0ms
+[2026-06-07 09:45:09.616] [info] [Worker 0] [libqueen] push(q=0 f=12/24 p99rtt=27ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=5623 plbuf=6 plflush=112052) slots=112/125 jobs/s=10569 drains=1309865 evl=0ms
+[2026-06-07 09:45:10.437] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1224 drains=101960 evl=0ms
+[2026-06-07 09:45:10.543] [info] PartitionLookupReconcileService: fixed 43 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:10.616] [info] [Worker 0] [libqueen] push(q=1 f=23/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=45 defer=5805 plbuf=4 plflush=113072) slots=101/125 jobs/s=10657 drains=1320991 evl=0ms
+[2026-06-07 09:45:11.436] [info] [Worker 1] [libqueen] pop(q=2 f=1/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1287 drains=102804 evl=0ms
+[2026-06-07 09:45:11.616] [info] [Worker 0] [libqueen] push(q=4 f=18/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=6212 plbuf=0 plflush=114027) slots=106/125 jobs/s=10477 drains=1331750 evl=0ms
+[2026-06-07 09:45:12.003] [info] StatsService: cycle completed in 488ms
+[2026-06-07 09:45:12.437] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1106 drains=103706 evl=0ms
+[2026-06-07 09:45:12.616] [info] [Worker 0] [libqueen] push(q=2 f=15/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=6154 plbuf=0 plflush=115024) slots=109/125 jobs/s=10349 drains=1343063 evl=0ms
+[2026-06-07 09:45:13.436] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1202 drains=104597 evl=0ms
+[2026-06-07 09:45:13.616] [info] [Worker 0] [libqueen] push(q=1 f=24/24 p99rtt=28ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=42 defer=6149 plbuf=2 plflush=116035) slots=100/125 jobs/s=10732 drains=1354704 evl=0ms
+[2026-06-07 09:45:14.436] [info] [Worker 1] [libqueen] pop(q=10 f=1/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1230 drains=105462 evl=0ms
+[2026-06-07 09:45:14.616] [info] [Worker 0] [libqueen] push(q=0 f=7/24 p99rtt=23ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=21 defer=5953 plbuf=23 plflush=117024) slots=117/125 jobs/s=10327 drains=1365693 evl=0ms
+[2026-06-07 09:45:15.437] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1185 drains=106427 evl=0ms
+[2026-06-07 09:45:15.616] [info] [Worker 0] [libqueen] push(q=0 f=2/24 p99rtt=27ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=6 defer=4367 plbuf=1 plflush=118025) slots=122/125 jobs/s=10405 drains=1376961 evl=0ms
+[2026-06-07 09:45:16.436] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1373 drains=107363 evl=0ms
+[2026-06-07 09:45:16.616] [info] [Worker 0] [libqueen] push(q=0 f=9/24 p99rtt=28ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=31 defer=5679 plbuf=7 plflush=119015) slots=115/125 jobs/s=10811 drains=1388570 evl=0ms
+[2026-06-07 09:45:17.436] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1069 drains=108173 evl=0ms
+[2026-06-07 09:45:17.616] [info] [Worker 0] [libqueen] push(q=2 f=24/24 p99rtt=21ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=36 defer=5172 plbuf=2 plflush=119999) slots=100/125 jobs/s=10552 drains=1399711 evl=0ms
+[2026-06-07 09:45:18.436] [info] [Worker 1] [libqueen] pop(q=8 f=2/16 p99rtt=145ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1231 drains=109069 evl=0ms
+[2026-06-07 09:45:18.617] [info] [Worker 0] [libqueen] push(q=3 f=14/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=6394 plbuf=1 plflush=120934) slots=110/125 jobs/s=10505 drains=1411289 evl=0ms
+[2026-06-07 09:45:19.437] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=62ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=898 drains=109757 evl=0ms
+[2026-06-07 09:45:19.617] [info] [Worker 0] [libqueen] push(q=0 f=20/24 p99rtt=222ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=50 defer=3202 plbuf=48 plflush=121467) slots=104/125 jobs/s=5867 drains=1417518 evl=0ms
+[2026-06-07 09:45:20.436] [info] [Worker 1] [libqueen] pop(q=8 f=2/16 p99rtt=143ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=748 drains=110240 evl=0ms
+[2026-06-07 09:45:20.618] [info] [Worker 0] [libqueen] push(q=0 f=18/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=0/2 p99rtt=2ms) pushgate(part=50 defer=4367 plbuf=0 plflush=122104) slots=107/125 jobs/s=7564 drains=1425141 evl=0ms
+[2026-06-07 09:45:21.436] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=1227 drains=111134 evl=0ms
+[2026-06-07 09:45:21.617] [info] [Worker 0] [libqueen] push(q=4 f=14/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=5680 plbuf=5 plflush=123042) slots=110/125 jobs/s=10204 drains=1435659 evl=0ms
+[2026-06-07 09:45:21.996] [info] StatsService: cycle completed in 477ms
+[2026-06-07 09:45:22.436] [info] [Worker 1] [libqueen] pop(q=9 f=2/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1300 drains=112074 evl=0ms
+[2026-06-07 09:45:22.548] [info] PartitionLookupReconcileService: fixed 50 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:22.617] [info] [Worker 0] [libqueen] push(q=7 f=12/24 p99rtt=45ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=6772 plbuf=0 plflush=123942) slots=112/125 jobs/s=10052 drains=1446702 evl=0ms
+[2026-06-07 09:45:23.436] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1185 drains=112909 evl=0ms
+[2026-06-07 09:45:23.617] [info] [Worker 0] [libqueen] push(q=0 f=15/24 p99rtt=46ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=6411 plbuf=2 plflush=124857) slots=109/125 jobs/s=10185 drains=1457821 evl=0ms
+[2026-06-07 09:45:24.437] [info] [Worker 1] [libqueen] pop(q=4 f=1/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1107 drains=113652 evl=0ms
+[2026-06-07 09:45:24.617] [info] [Worker 0] [libqueen] push(q=1 f=7/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=38 defer=4857 plbuf=2 plflush=125803) slots=117/125 jobs/s=10062 drains=1468807 evl=0ms
+[2026-06-07 09:45:25.437] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1018 drains=114293 evl=0ms
+[2026-06-07 09:45:25.617] [info] [Worker 0] [libqueen] push(q=2 f=23/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=4420 plbuf=3 plflush=126826) slots=101/125 jobs/s=10588 drains=1480488 evl=0ms
+[2026-06-07 09:45:26.437] [info] [Worker 1] [libqueen] pop(q=5 f=2/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1311 drains=115144 evl=0ms
+[2026-06-07 09:45:26.617] [info] [Worker 0] [libqueen] push(q=2 f=17/24 p99rtt=6ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=37 defer=5878 plbuf=4 plflush=127774) slots=107/125 jobs/s=10606 drains=1491793 evl=0ms
+[2026-06-07 09:45:27.437] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1200 drains=116031 evl=0ms
+[2026-06-07 09:45:27.617] [info] [Worker 0] [libqueen] push(q=1 f=12/24 p99rtt=28ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=4804 plbuf=0 plflush=128712) slots=112/125 jobs/s=10483 drains=1502767 evl=0ms
+[2026-06-07 09:45:28.438] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1169 drains=116850 evl=0ms
+[2026-06-07 09:45:28.550] [info] PartitionLookupReconcileService: fixed 16 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:28.617] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=34 defer=5966 plbuf=0 plflush=129667) slots=106/125 jobs/s=10616 drains=1513898 evl=0ms
+[2026-06-07 09:45:29.437] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=129ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1149 drains=117663 evl=0ms
+[2026-06-07 09:45:29.617] [info] [Worker 0] [libqueen] push(q=0 f=21/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=4641 plbuf=11 plflush=130567) slots=103/125 jobs/s=10167 drains=1524543 evl=0ms
+[2026-06-07 09:45:30.438] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=70ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1172 drains=118442 evl=0ms
+[2026-06-07 09:45:30.617] [info] [Worker 0] [libqueen] push(q=0 f=22/24 p99rtt=175ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=32 defer=4746 plbuf=32 plflush=131352) slots=102/125 jobs/s=8495 drains=1533537 evl=0ms
+[2026-06-07 09:45:31.437] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=774 drains=118928 evl=0ms
+[2026-06-07 09:45:31.617] [info] [Worker 0] [libqueen] push(q=0 f=21/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=31 defer=3981 plbuf=4 plflush=132048) slots=103/125 jobs/s=7808 drains=1541553 evl=0ms
+[2026-06-07 09:45:32.437] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1231 drains=119778 evl=0ms
+[2026-06-07 09:45:32.617] [info] [Worker 0] [libqueen] push(q=0 f=19/24 p99rtt=43ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=41 defer=5434 plbuf=3 plflush=133015) slots=105/125 jobs/s=10256 drains=1552864 evl=0ms
+[2026-06-07 09:45:33.069] [info] StatsService: cycle completed in 549ms
+[2026-06-07 09:45:33.438] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=907 drains=120342 evl=0ms
+[2026-06-07 09:45:33.617] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=48ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=18ms) pushgate(part=40 defer=2944 plbuf=8 plflush=133520) slots=106/125 jobs/s=4985 drains=1558616 evl=0ms
+[2026-06-07 09:45:34.438] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=946 drains=121003 evl=0ms
+[2026-06-07 09:45:34.578] [info] PartitionLookupReconcileService: fixed 4 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:34.617] [info] [Worker 0] [libqueen] push(q=3 f=23/24 p99rtt=55ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=31ms) pushgate(part=47 defer=2786 plbuf=0 plflush=133924) slots=101/125 jobs/s=3780 drains=1562854 evl=0ms
+[2026-06-07 09:45:35.438] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=93ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1054 drains=121763 evl=0ms
+[2026-06-07 09:45:35.617] [info] [Worker 0] [libqueen] push(q=0 f=7/24 p99rtt=42ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=32ms) pushgate(part=29 defer=2968 plbuf=20 plflush=134397) slots=117/125 jobs/s=4312 drains=1567750 evl=0ms
+[2026-06-07 09:45:36.439] [info] [Worker 1] [libqueen] pop(q=12 f=1/16 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=736 drains=122254 evl=0ms
+[2026-06-07 09:45:36.617] [info] [Worker 0] [libqueen] push(q=0 f=19/24 p99rtt=142ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=33ms) pushgate(part=41 defer=3033 plbuf=0 plflush=134815) slots=105/125 jobs/s=3767 drains=1571872 evl=0ms
+[2026-06-07 09:45:37.440] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=991 drains=122872 evl=0ms
+[2026-06-07 09:45:37.617] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=49ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=30ms) pushgate(part=47 defer=4117 plbuf=2 plflush=135410) slots=106/125 jobs/s=5859 drains=1578139 evl=0ms
+[2026-06-07 09:45:38.440] [info] [Worker 1] [libqueen] pop(q=9 f=2/16 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1037 drains=123570 evl=0ms
+[2026-06-07 09:45:38.617] [info] [Worker 0] [libqueen] push(q=2 f=24/24 p99rtt=39ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=9ms) pushgate(part=45 defer=4132 plbuf=1 plflush=136066) slots=100/125 jobs/s=6514 drains=1584899 evl=0ms
+[2026-06-07 09:45:39.441] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1051 drains=124321 evl=0ms
+[2026-06-07 09:45:39.616] [info] [Worker 0] [libqueen] push(q=0 f=13/24 p99rtt=32ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=10ms) pushgate(part=34 defer=4025 plbuf=0 plflush=136668) slots=111/125 jobs/s=6972 drains=1592087 evl=0ms
+[2026-06-07 09:45:40.442] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1133 drains=125055 evl=0ms
+[2026-06-07 09:45:40.556] [info] PartitionLookupReconcileService: fixed 14 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:40.617] [info] [Worker 0] [libqueen] push(q=0 f=24/24 p99rtt=49ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=9ms) pushgate(part=42 defer=4865 plbuf=15 plflush=137369) slots=100/125 jobs/s=7671 drains=1599806 evl=0ms
+[2026-06-07 09:45:41.442] [info] [Worker 1] [libqueen] pop(q=2 f=3/16 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1252 drains=125881 evl=0ms
+[2026-06-07 09:45:41.617] [info] [Worker 0] [libqueen] push(q=2 f=13/24 p99rtt=44ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=43 defer=5206 plbuf=8 plflush=138125) slots=111/125 jobs/s=8591 drains=1608387 evl=0ms
+[2026-06-07 09:45:42.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=132ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1128 drains=126617 evl=0ms
+[2026-06-07 09:45:42.617] [info] [Worker 0] [libqueen] push(q=4 f=24/24 p99rtt=25ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=35 defer=5194 plbuf=5 plflush=138886) slots=100/125 jobs/s=7705 drains=1616457 evl=0ms
+[2026-06-07 09:45:43.443] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=112ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1324 drains=127488 evl=0ms
+[2026-06-07 09:45:43.617] [info] [Worker 0] [libqueen] push(q=1 f=8/24 p99rtt=47ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=34 defer=6018 plbuf=21 plflush=139771) slots=116/125 jobs/s=9213 drains=1626024 evl=0ms
+[2026-06-07 09:45:43.900] [info] StatsService: cycle completed in 379ms
+[2026-06-07 09:45:44.443] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=112ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1112 drains=128237 evl=0ms
+[2026-06-07 09:45:44.617] [info] [Worker 0] [libqueen] push(q=6 f=24/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=40 defer=4795 plbuf=3 plflush=140667) slots=100/125 jobs/s=9157 drains=1636025 evl=0ms
+[2026-06-07 09:45:45.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=112ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1110 drains=129094 evl=0ms
+[2026-06-07 09:45:45.617] [info] [Worker 0] [libqueen] push(q=2 f=15/24 p99rtt=23ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=35 defer=5458 plbuf=4 plflush=141582) slots=109/125 jobs/s=9660 drains=1646469 evl=0ms
+[2026-06-07 09:45:46.443] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=96ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1248 drains=130076 evl=0ms
+[2026-06-07 09:45:46.549] [info] PartitionLookupReconcileService: fixed 2 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:46.617] [info] [Worker 0] [libqueen] push(q=1 f=21/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=49 defer=5926 plbuf=6 plflush=142496) slots=103/125 jobs/s=9968 drains=1656858 evl=0ms
+[2026-06-07 09:45:47.443] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=96ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1273 drains=131003 evl=0ms
+[2026-06-07 09:45:47.617] [info] [Worker 0] [libqueen] push(q=2 f=15/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=40 defer=6576 plbuf=0 plflush=143351) slots=109/125 jobs/s=9568 drains=1666908 evl=0ms
+[2026-06-07 09:45:48.444] [info] [Worker 1] [libqueen] pop(q=16 f=1/16 p99rtt=68ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1170 drains=131799 evl=0ms
+[2026-06-07 09:45:48.617] [info] [Worker 0] [libqueen] push(q=2 f=19/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=34 defer=4642 plbuf=3 plflush=144208) slots=105/125 jobs/s=9472 drains=1676787 evl=0ms
+[2026-06-07 09:45:49.444] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=65ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1274 drains=132661 evl=0ms
+[2026-06-07 09:45:49.617] [info] [Worker 0] [libqueen] push(q=0 f=22/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=47 defer=5081 plbuf=3 plflush=145055) slots=102/125 jobs/s=9599 drains=1686635 evl=0ms
+[2026-06-07 09:45:50.443] [info] [Worker 1] [libqueen] pop(q=3 f=1/16 p99rtt=61ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1174 drains=133482 evl=0ms
+[2026-06-07 09:45:50.617] [info] [Worker 0] [libqueen] push(q=0 f=24/24 p99rtt=43ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=44 defer=4662 plbuf=5 plflush=145865) slots=100/125 jobs/s=9203 drains=1696456 evl=0ms
+[2026-06-07 09:45:51.443] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=60ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1208 drains=134341 evl=0ms
+[2026-06-07 09:45:51.617] [info] [Worker 0] [libqueen] push(q=1 f=12/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=44 defer=4552 plbuf=0 plflush=146730) slots=112/125 jobs/s=9826 drains=1706755 evl=0ms
+[2026-06-07 09:45:52.443] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=86ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=680 drains=134845 evl=0ms
+[2026-06-07 09:45:52.553] [info] PartitionLookupReconcileService: fixed 34 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:52.618] [info] [Worker 0] [libqueen] push(q=1 f=19/24 p99rtt=209ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=49 defer=2483 plbuf=0 plflush=147133) slots=105/125 jobs/s=5197 drains=1711855 evl=0ms
+[2026-06-07 09:45:53.443] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=76ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1347 drains=135835 evl=0ms
+[2026-06-07 09:45:53.617] [info] [Worker 0] [libqueen] push(q=0 f=22/24 p99rtt=34ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=40 defer=4125 plbuf=10 plflush=147987) slots=102/125 jobs/s=9578 drains=1721461 evl=0ms
+[2026-06-07 09:45:54.443] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=76ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1175 drains=136728 evl=0ms
+[2026-06-07 09:45:54.617] [info] [Worker 0] [libqueen] push(q=0 f=24/24 p99rtt=42ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=48 defer=5431 plbuf=6 plflush=148913) slots=100/125 jobs/s=9600 drains=1732023 evl=0ms
+[2026-06-07 09:45:54.862] [info] StatsService: cycle completed in 341ms
+[2026-06-07 09:45:55.443] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=76ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1129 drains=137628 evl=0ms
+[2026-06-07 09:45:55.617] [info] [Worker 0] [libqueen] push(q=1 f=16/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=36 defer=5654 plbuf=10 plflush=149789) slots=108/125 jobs/s=9494 drains=1742261 evl=0ms
+[2026-06-07 09:45:56.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=73ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1255 drains=138456 evl=0ms
+[2026-06-07 09:45:56.617] [info] [Worker 0] [libqueen] push(q=0 f=23/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=37 defer=4643 plbuf=36 plflush=150647) slots=101/125 jobs/s=9539 drains=1752387 evl=0ms
+[2026-06-07 09:45:57.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=74ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1103 drains=139221 evl=0ms
+[2026-06-07 09:45:57.618] [info] [Worker 0] [libqueen] push(q=3 f=24/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=47 defer=6525 plbuf=2 plflush=151528) slots=100/125 jobs/s=9741 drains=1762737 evl=0ms
+[2026-06-07 09:45:58.444] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=74ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1194 drains=140022 evl=0ms
+[2026-06-07 09:45:58.553] [info] PartitionLookupReconcileService: fixed 18 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:45:58.617] [info] [Worker 0] [libqueen] push(q=0 f=13/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=40 defer=5555 plbuf=9 plflush=152371) slots=111/125 jobs/s=9427 drains=1772524 evl=0ms
+[2026-06-07 09:45:59.444] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=81ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1175 drains=140801 evl=0ms
+[2026-06-07 09:45:59.617] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=40 defer=4882 plbuf=1 plflush=153180) slots=108/125 jobs/s=9618 drains=1782483 evl=0ms
+[2026-06-07 09:46:00.444] [info] [Worker 1] [libqueen] pop(q=1 f=3/16 p99rtt=81ms) custom(q=3 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1169 drains=141582 evl=0ms
+[2026-06-07 09:46:00.617] [info] [Worker 0] [libqueen] push(q=4 f=24/24 p99rtt=12ms) custom(q=2 f=0/1 p99rtt=1ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=46 defer=6116 plbuf=15 plflush=154087) slots=100/125 jobs/s=9866 drains=1793208 evl=0ms
+[2026-06-07 09:46:01.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=81ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1280 drains=142412 evl=0ms
+[2026-06-07 09:46:01.617] [info] [Worker 0] [libqueen] push(q=3 f=13/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=37 defer=4625 plbuf=1 plflush=154933) slots=111/125 jobs/s=9384 drains=1803289 evl=0ms
+[2026-06-07 09:46:01.883] [info] [Worker 2] [libqueen] custom(q=0 f=0/1 p99rtt=3ms) slots=25/25 jobs/s=1 drains=10 evl=0ms
+[2026-06-07 09:46:02.444] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=81ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1107 drains=143127 evl=0ms
+[2026-06-07 09:46:02.618] [info] [Worker 0] [libqueen] push(q=1 f=17/24 p99rtt=11ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=49 defer=5876 plbuf=0 plflush=155843) slots=107/125 jobs/s=9965 drains=1813616 evl=0ms
+[2026-06-07 09:46:03.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=72ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=797 drains=143687 evl=0ms
+[2026-06-07 09:46:03.617] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=0/2 p99rtt=4ms) pushgate(part=50 defer=3157 plbuf=0 plflush=156374) slots=109/125 jobs/s=6149 drains=1819578 evl=0ms
+[2026-06-07 09:46:04.445] [info] [Worker 1] [libqueen] pop(q=16 f=2/16 p99rtt=72ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1183 drains=144484 evl=0ms
+[2026-06-07 09:46:04.557] [info] PartitionLookupReconcileService: fixed 10 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:04.618] [info] [Worker 0] [libqueen] push(q=1 f=20/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=49 defer=4665 plbuf=14 plflush=157267) slots=104/125 jobs/s=9704 drains=1829781 evl=0ms
+[2026-06-07 09:46:04.845] [info] StatsService: cycle completed in 323ms
+[2026-06-07 09:46:05.445] [info] [Worker 1] [libqueen] pop(q=16 f=2/16 p99rtt=72ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1276 drains=145430 evl=0ms
+[2026-06-07 09:46:05.617] [info] [Worker 0] [libqueen] push(q=1 f=20/24 p99rtt=27ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=40 defer=3017 plbuf=2 plflush=158167) slots=104/125 jobs/s=9740 drains=1840326 evl=0ms
+[2026-06-07 09:46:06.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=72ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1197 drains=146235 evl=0ms
+[2026-06-07 09:46:06.617] [info] [Worker 0] [libqueen] push(q=0 f=10/24 p99rtt=32ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=46 defer=4386 plbuf=0 plflush=159008) slots=114/125 jobs/s=9415 drains=1849896 evl=0ms
+[2026-06-07 09:46:07.444] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=72ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1278 drains=147059 evl=0ms
+[2026-06-07 09:46:07.617] [info] [Worker 0] [libqueen] push(q=1 f=10/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=32 defer=4391 plbuf=20 plflush=159911) slots=114/125 jobs/s=9903 drains=1859995 evl=0ms
+[2026-06-07 09:46:08.444] [info] [Worker 1] [libqueen] pop(q=0 f=5/16 p99rtt=72ms) custom(q=0 f=0/1 p99rtt=2ms) slots=95/100 jobs/s=1049 drains=147766 evl=1ms
+[2026-06-07 09:46:08.617] [info] [Worker 0] [libqueen] push(q=6 f=24/24 p99rtt=191ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=44 defer=2668 plbuf=45 plflush=160490) slots=100/125 jobs/s=6546 drains=1866604 evl=0ms
+[2026-06-07 09:46:09.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1007 drains=148445 evl=0ms
+[2026-06-07 09:46:09.617] [info] [Worker 0] [libqueen] push(q=0 f=21/24 p99rtt=11ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=9ms) pushgate(part=41 defer=3918 plbuf=10 plflush=161226) slots=103/125 jobs/s=9173 drains=1875616 evl=0ms
+[2026-06-07 09:46:10.445] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1219 drains=149292 evl=0ms
+[2026-06-07 09:46:10.559] [info] PartitionLookupReconcileService: fixed 2 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:10.617] [info] [Worker 0] [libqueen] push(q=2 f=18/24 p99rtt=35ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=8ms) pushgate(part=48 defer=4158 plbuf=18 plflush=162015) slots=106/125 jobs/s=9235 drains=1885126 evl=0ms
+[2026-06-07 09:46:11.444] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1251 drains=150191 evl=0ms
+[2026-06-07 09:46:11.617] [info] [Worker 0] [libqueen] push(q=1 f=20/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=46 defer=5191 plbuf=4 plflush=162905) slots=104/125 jobs/s=9749 drains=1895264 evl=0ms
+[2026-06-07 09:46:12.444] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1169 drains=151002 evl=0ms
+[2026-06-07 09:46:12.617] [info] [Worker 0] [libqueen] push(q=0 f=6/24 p99rtt=25ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=21 defer=5214 plbuf=0 plflush=163760) slots=118/125 jobs/s=9314 drains=1904732 evl=0ms
+[2026-06-07 09:46:13.444] [info] [Worker 1] [libqueen] pop(q=3 f=3/16 p99rtt=137ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1264 drains=151947 evl=0ms
+[2026-06-07 09:46:13.617] [info] [Worker 0] [libqueen] push(q=0 f=22/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=7ms) pushgate(part=39 defer=5181 plbuf=3 plflush=164626) slots=102/125 jobs/s=9633 drains=1914791 evl=0ms
+[2026-06-07 09:46:14.444] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=126ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=931 drains=152568 evl=0ms
+[2026-06-07 09:46:14.617] [info] [Worker 0] [libqueen] push(q=2 f=22/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=7ms) pushgate(part=41 defer=4353 plbuf=2 plflush=165288) slots=102/125 jobs/s=7308 drains=1922460 evl=0ms
+[2026-06-07 09:46:15.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=126ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1146 drains=153424 evl=0ms
+[2026-06-07 09:46:15.552] [info] PartitionLookupReconcileService: fixed 24 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:15.617] [info] [Worker 0] [libqueen] push(q=2 f=19/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=43 defer=3568 plbuf=1 plflush=166108) slots=105/125 jobs/s=8827 drains=1931708 evl=0ms
+[2026-06-07 09:46:15.890] [info] StatsService: cycle completed in 367ms
+[2026-06-07 09:46:16.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=126ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1134 drains=154249 evl=0ms
+[2026-06-07 09:46:16.617] [info] [Worker 0] [libqueen] push(q=0 f=13/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=21 defer=5905 plbuf=12 plflush=166987) slots=111/125 jobs/s=9906 drains=1941861 evl=0ms
+[2026-06-07 09:46:17.444] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=126ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1265 drains=155074 evl=0ms
+[2026-06-07 09:46:17.617] [info] [Worker 0] [libqueen] push(q=1 f=19/24 p99rtt=46ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=49 defer=4237 plbuf=11 plflush=167811) slots=105/125 jobs/s=9545 drains=1951877 evl=0ms
+[2026-06-07 09:46:18.444] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=126ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1250 drains=155923 evl=0ms
+[2026-06-07 09:46:18.617] [info] [Worker 0] [libqueen] push(q=1 f=12/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=0/2 p99rtt=4ms) pushgate(part=39 defer=4555 plbuf=0 plflush=168718) slots=113/125 jobs/s=9876 drains=1962407 evl=0ms
+[2026-06-07 09:46:19.445] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1208 drains=156709 evl=0ms
+[2026-06-07 09:46:19.617] [info] [Worker 0] [libqueen] push(q=0 f=23/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=42 defer=4604 plbuf=0 plflush=169610) slots=101/125 jobs/s=10136 drains=1973137 evl=0ms
+[2026-06-07 09:46:20.445] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1160 drains=157539 evl=0ms
+[2026-06-07 09:46:20.617] [info] [Worker 0] [libqueen] push(q=0 f=1/24 p99rtt=26ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=0/2 p99rtt=3ms) pushgate(part=5 defer=4793 plbuf=0 plflush=170512) slots=124/125 jobs/s=10047 drains=1984010 evl=0ms
+[2026-06-07 09:46:21.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1159 drains=158476 evl=0ms
+[2026-06-07 09:46:21.557] [info] PartitionLookupReconcileService: fixed 7 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:21.617] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=26ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=36 defer=5498 plbuf=6 plflush=171479) slots=108/125 jobs/s=10087 drains=1994866 evl=0ms
+[2026-06-07 09:46:22.445] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1234 drains=159371 evl=0ms
+[2026-06-07 09:46:22.617] [info] [Worker 0] [libqueen] push(q=1 f=24/24 p99rtt=11ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=45 defer=6005 plbuf=6 plflush=172363) slots=100/125 jobs/s=9799 drains=2005166 evl=0ms
+[2026-06-07 09:46:23.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1301 drains=160295 evl=0ms
+[2026-06-07 09:46:23.617] [info] [Worker 0] [libqueen] push(q=0 f=17/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=34 defer=4626 plbuf=4 plflush=173183) slots=107/125 jobs/s=9814 drains=2015516 evl=0ms
+[2026-06-07 09:46:24.444] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=953 drains=160996 evl=0ms
+[2026-06-07 09:46:24.617] [info] [Worker 0] [libqueen] push(q=9 f=24/24 p99rtt=169ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=41 defer=3195 plbuf=8 plflush=173724) slots=100/125 jobs/s=5919 drains=2021790 evl=0ms
+[2026-06-07 09:46:25.444] [info] [Worker 1] [libqueen] pop(q=11 f=1/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=980 drains=161745 evl=0ms
+[2026-06-07 09:46:25.618] [info] [Worker 0] [libqueen] push(q=5 f=24/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=8ms) pushgate(part=45 defer=4265 plbuf=4 plflush=174478) slots=100/125 jobs/s=8263 drains=2030293 evl=0ms
+[2026-06-07 09:46:26.445] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1200 drains=162603 evl=0ms
+[2026-06-07 09:46:26.564] [info] PartitionLookupReconcileService: fixed 6 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:26.617] [info] [Worker 0] [libqueen] push(q=0 f=21/24 p99rtt=22ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=30 defer=4141 plbuf=2 plflush=175298) slots=103/125 jobs/s=9198 drains=2039614 evl=0ms
+[2026-06-07 09:46:26.915] [info] StatsService: cycle completed in 391ms
+[2026-06-07 09:46:27.445] [info] [Worker 1] [libqueen] pop(q=8 f=2/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1180 drains=163416 evl=0ms
+[2026-06-07 09:46:27.617] [info] [Worker 0] [libqueen] push(q=0 f=15/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=45 defer=4205 plbuf=2 plflush=176161) slots=109/125 jobs/s=9373 drains=2049268 evl=0ms
+[2026-06-07 09:46:28.445] [info] [Worker 1] [libqueen] pop(q=19 f=1/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1269 drains=164375 evl=1ms
+[2026-06-07 09:46:28.617] [info] [Worker 0] [libqueen] push(q=0 f=14/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=28 defer=4904 plbuf=9 plflush=177057) slots=110/125 jobs/s=9780 drains=2059507 evl=0ms
+[2026-06-07 09:46:29.445] [info] [Worker 1] [libqueen] pop(q=20 f=2/16 p99rtt=77ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1314 drains=165362 evl=0ms
+[2026-06-07 09:46:29.617] [info] [Worker 0] [libqueen] push(q=5 f=24/24 p99rtt=28ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=43 defer=4853 plbuf=2 plflush=177984) slots=100/125 jobs/s=10102 drains=2070335 evl=0ms
+[2026-06-07 09:46:30.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=82ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1214 drains=166149 evl=0ms
+[2026-06-07 09:46:30.617] [info] [Worker 0] [libqueen] push(q=2 f=15/24 p99rtt=11ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=48 defer=6058 plbuf=15 plflush=178874) slots=109/125 jobs/s=9835 drains=2080760 evl=0ms
+[2026-06-07 09:46:31.445] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=82ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=1267 drains=167087 evl=0ms
+[2026-06-07 09:46:31.617] [info] [Worker 0] [libqueen] push(q=1 f=24/24 p99rtt=24ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=48 defer=5381 plbuf=0 plflush=179738) slots=100/125 jobs/s=9720 drains=2090761 evl=0ms
+[2026-06-07 09:46:32.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=82ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1100 drains=167925 evl=0ms
+[2026-06-07 09:46:32.553] [info] PartitionLookupReconcileService: fixed 10 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:32.617] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=40 defer=5777 plbuf=16 plflush=180633) slots=108/125 jobs/s=10039 drains=2101229 evl=0ms
+[2026-06-07 09:46:33.446] [info] [Worker 1] [libqueen] pop(q=18 f=2/16 p99rtt=82ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1154 drains=168817 evl=0ms
+[2026-06-07 09:46:33.617] [info] [Worker 0] [libqueen] push(q=3 f=23/24 p99rtt=23ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=46 defer=5543 plbuf=5 plflush=181557) slots=101/125 jobs/s=10204 drains=2112002 evl=0ms
+[2026-06-07 09:46:34.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=82ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1275 drains=169822 evl=0ms
+[2026-06-07 09:46:34.617] [info] [Worker 0] [libqueen] push(q=0 f=12/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=24 defer=5810 plbuf=2 plflush=182561) slots=112/125 jobs/s=10218 drains=2123203 evl=0ms
+[2026-06-07 09:46:35.445] [info] [Worker 1] [libqueen] pop(q=12 f=2/16 p99rtt=69ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=698 drains=170388 evl=0ms
+[2026-06-07 09:46:35.617] [info] [Worker 0] [libqueen] push(q=0 f=19/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=49 defer=3007 plbuf=2 plflush=183052) slots=105/125 jobs/s=5494 drains=2128976 evl=0ms
+[2026-06-07 09:46:36.446] [info] [Worker 1] [libqueen] pop(q=19 f=2/16 p99rtt=69ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1220 drains=171201 evl=0ms
+[2026-06-07 09:46:36.618] [info] [Worker 0] [libqueen] push(q=0 f=10/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=37 defer=4670 plbuf=0 plflush=183846) slots=114/125 jobs/s=9433 drains=2138584 evl=0ms
+[2026-06-07 09:46:37.445] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1168 drains=172053 evl=0ms
+[2026-06-07 09:46:37.618] [info] [Worker 0] [libqueen] push(q=1 f=20/24 p99rtt=11ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=49 defer=4812 plbuf=10 plflush=184717) slots=104/125 jobs/s=9397 drains=2148418 evl=0ms
+[2026-06-07 09:46:38.134] [info] StatsService: cycle completed in 609ms
+[2026-06-07 09:46:38.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1067 drains=172811 evl=0ms
+[2026-06-07 09:46:38.554] [info] PartitionLookupReconcileService: fixed 19 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:38.617] [info] [Worker 0] [libqueen] push(q=1 f=16/24 p99rtt=26ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=32 defer=6210 plbuf=6 plflush=185710) slots=108/125 jobs/s=9954 drains=2159328 evl=0ms
+[2026-06-07 09:46:39.445] [info] [Worker 1] [libqueen] pop(q=10 f=2/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1214 drains=173648 evl=0ms
+[2026-06-07 09:46:39.617] [info] [Worker 0] [libqueen] push(q=2 f=14/24 p99rtt=24ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=46 defer=5651 plbuf=1 plflush=186605) slots=110/125 jobs/s=9768 drains=2169405 evl=0ms
+[2026-06-07 09:46:40.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=67ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1249 drains=174562 evl=0ms
+[2026-06-07 09:46:40.618] [info] [Worker 0] [libqueen] push(q=6 f=24/24 p99rtt=12ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=44 defer=4692 plbuf=5 plflush=187446) slots=100/125 jobs/s=9707 drains=2179601 evl=0ms
+[2026-06-07 09:46:41.445] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1062 drains=175304 evl=0ms
+[2026-06-07 09:46:41.617] [info] [Worker 0] [libqueen] push(q=0 f=16/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=7ms) pushgate(part=28 defer=4063 plbuf=15 plflush=188094) slots=108/125 jobs/s=7791 drains=2187363 evl=0ms
+[2026-06-07 09:46:42.446] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1273 drains=176239 evl=0ms
+[2026-06-07 09:46:42.617] [info] [Worker 0] [libqueen] push(q=3 f=13/24 p99rtt=28ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=31 defer=6503 plbuf=18 plflush=188949) slots=111/125 jobs/s=10029 drains=2198079 evl=0ms
+[2026-06-07 09:46:43.447] [info] [Worker 1] [libqueen] pop(q=5 f=2/16 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1231 drains=177084 evl=0ms
+[2026-06-07 09:46:43.617] [info] [Worker 0] [libqueen] push(q=0 f=15/24 p99rtt=33ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=28 defer=4864 plbuf=10 plflush=189818) slots=109/125 jobs/s=10034 drains=2208788 evl=0ms
+[2026-06-07 09:46:44.446] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1211 drains=177955 evl=0ms
+[2026-06-07 09:46:44.549] [info] PartitionLookupReconcileService: fixed 30 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:44.617] [info] [Worker 0] [libqueen] push(q=3 f=16/24 p99rtt=24ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=42 defer=4227 plbuf=0 plflush=190764) slots=108/125 jobs/s=9814 drains=2219356 evl=0ms
+[2026-06-07 09:46:45.446] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1097 drains=178838 evl=0ms
+[2026-06-07 09:46:45.617] [info] [Worker 0] [libqueen] push(q=0 f=17/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=29 defer=4497 plbuf=2 plflush=191724) slots=107/125 jobs/s=10163 drains=2230802 evl=0ms
+[2026-06-07 09:46:46.447] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1020 drains=179593 evl=0ms
+[2026-06-07 09:46:46.617] [info] [Worker 0] [libqueen] push(q=0 f=14/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=26 defer=4753 plbuf=22 plflush=192455) slots=110/125 jobs/s=8153 drains=2239143 evl=0ms
+[2026-06-07 09:46:47.446] [info] [Worker 1] [libqueen] pop(q=19 f=1/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1280 drains=180539 evl=0ms
+[2026-06-07 09:46:47.617] [info] [Worker 0] [libqueen] push(q=2 f=18/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=39 defer=4463 plbuf=8 plflush=193303) slots=106/125 jobs/s=9298 drains=2248735 evl=0ms
+[2026-06-07 09:46:48.447] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1177 drains=181396 evl=0ms
+[2026-06-07 09:46:48.617] [info] [Worker 0] [libqueen] push(q=0 f=14/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=45 defer=3925 plbuf=1 plflush=194155) slots=110/125 jobs/s=9950 drains=2259243 evl=0ms
+[2026-06-07 09:46:48.998] [info] StatsService: cycle completed in 472ms
+[2026-06-07 09:46:49.447] [info] [Worker 1] [libqueen] pop(q=3 f=2/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1255 drains=182349 evl=0ms
+[2026-06-07 09:46:49.617] [info] [Worker 0] [libqueen] push(q=3 f=12/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=36 defer=3885 plbuf=9 plflush=195081) slots=112/125 jobs/s=9828 drains=2269382 evl=0ms
+[2026-06-07 09:46:50.447] [info] [Worker 1] [libqueen] pop(q=9 f=2/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1182 drains=183218 evl=0ms
+[2026-06-07 09:46:50.554] [info] PartitionLookupReconcileService: fixed 8 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:50.618] [info] [Worker 0] [libqueen] push(q=3 f=20/24 p99rtt=44ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=4606 plbuf=0 plflush=195921) slots=104/125 jobs/s=9561 drains=2279643 evl=0ms
+[2026-06-07 09:46:51.448] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=60ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1089 drains=183952 evl=0ms
+[2026-06-07 09:46:51.618] [info] [Worker 0] [libqueen] push(q=2 f=22/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=48 defer=5682 plbuf=8 plflush=196794) slots=102/125 jobs/s=9979 drains=2290342 evl=0ms
+[2026-06-07 09:46:52.447] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=69ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1193 drains=184824 evl=0ms
+[2026-06-07 09:46:52.617] [info] [Worker 0] [libqueen] push(q=3 f=23/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=40 defer=5410 plbuf=8 plflush=197630) slots=101/125 jobs/s=9450 drains=2299911 evl=0ms
+[2026-06-07 09:46:53.447] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=69ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1255 drains=185678 evl=0ms
+[2026-06-07 09:46:53.617] [info] [Worker 0] [libqueen] push(q=0 f=11/24 p99rtt=25ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=23 defer=5199 plbuf=6 plflush=198513) slots=113/125 jobs/s=9950 drains=2310225 evl=0ms
+[2026-06-07 09:46:54.447] [info] [Worker 1] [libqueen] pop(q=2 f=3/16 p99rtt=69ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1148 drains=186454 evl=0ms
+[2026-06-07 09:46:54.617] [info] [Worker 0] [libqueen] push(q=2 f=24/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=44 defer=5420 plbuf=0 plflush=199448) slots=100/125 jobs/s=10011 drains=2320672 evl=0ms
+[2026-06-07 09:46:55.448] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=69ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1210 drains=187340 evl=0ms
+[2026-06-07 09:46:55.617] [info] [Worker 0] [libqueen] push(q=2 f=17/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=34 defer=4546 plbuf=6 plflush=200341) slots=107/125 jobs/s=9359 drains=2330332 evl=0ms
+[2026-06-07 09:46:56.449] [info] [Worker 1] [libqueen] pop(q=0 f=1/16 p99rtt=65ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1221 drains=188218 evl=0ms
+[2026-06-07 09:46:56.568] [info] PartitionLookupReconcileService: fixed 11 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:46:56.618] [info] [Worker 0] [libqueen] push(q=0 f=9/24 p99rtt=112ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=48 defer=4338 plbuf=0 plflush=201127) slots=115/125 jobs/s=8976 drains=2339648 evl=0ms
+[2026-06-07 09:46:57.450] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=62ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1081 drains=188985 evl=1ms
+[2026-06-07 09:46:57.617] [info] [Worker 0] [libqueen] push(q=0 f=8/24 p99rtt=29ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=15 defer=2844 plbuf=1 plflush=201991) slots=116/125 jobs/s=9677 drains=2349412 evl=0ms
+[2026-06-07 09:46:58.449] [info] [Worker 1] [libqueen] pop(q=0 f=1/16 p99rtt=63ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1184 drains=189815 evl=0ms
+[2026-06-07 09:46:58.617] [info] [Worker 0] [libqueen] push(q=2 f=15/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=27 defer=3772 plbuf=9 plflush=202857) slots=109/125 jobs/s=9870 drains=2359523 evl=0ms
+[2026-06-07 09:46:59.450] [info] [Worker 1] [libqueen] pop(q=2 f=3/16 p99rtt=65ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1224 drains=190686 evl=0ms
+[2026-06-07 09:46:59.617] [info] [Worker 0] [libqueen] push(q=3 f=12/24 p99rtt=50ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=0/2 p99rtt=5ms) pushgate(part=46 defer=4037 plbuf=0 plflush=203609) slots=113/125 jobs/s=8923 drains=2368830 evl=0ms
+[2026-06-07 09:47:00.223] [info] StatsService: cycle completed in 697ms
+[2026-06-07 09:47:00.450] [info] [Worker 1] [libqueen] pop(q=5 f=2/16 p99rtt=66ms) custom(q=3 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1049 drains=191451 evl=0ms
+[2026-06-07 09:47:00.617] [info] [Worker 0] [libqueen] push(q=4 f=24/24 p99rtt=9ms) custom(q=2 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=41 defer=4528 plbuf=5 plflush=204584) slots=100/125 jobs/s=9871 drains=2379374 evl=0ms
+[2026-06-07 09:47:01.450] [info] [Worker 1] [libqueen] pop(q=16 f=1/16 p99rtt=66ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1278 drains=192401 evl=0ms
+[2026-06-07 09:47:01.617] [info] [Worker 0] [libqueen] push(q=7 f=24/24 p99rtt=34ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=43 defer=3843 plbuf=7 plflush=205395) slots=100/125 jobs/s=8956 drains=2388588 evl=0ms
+[2026-06-07 09:47:01.943] [info] [Worker 2] [libqueen] custom(q=0 f=0/1 p99rtt=3ms) slots=25/25 jobs/s=1 drains=12 evl=0ms
+[2026-06-07 09:47:02.450] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=601 drains=192814 evl=0ms
+[2026-06-07 09:47:02.558] [info] PartitionLookupReconcileService: fixed 28 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:02.617] [info] [Worker 0] [libqueen] push(q=1 f=24/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=48 defer=2518 plbuf=1 plflush=205743) slots=100/125 jobs/s=4505 drains=2392897 evl=0ms
+[2026-06-07 09:47:03.450] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1140 drains=193607 evl=0ms
+[2026-06-07 09:47:03.617] [info] [Worker 0] [libqueen] push(q=1 f=6/24 p99rtt=22ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=16 defer=5356 plbuf=18 plflush=206654) slots=118/125 jobs/s=9719 drains=2403118 evl=0ms
+[2026-06-07 09:47:04.450] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1278 drains=194479 evl=0ms
+[2026-06-07 09:47:04.617] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=39ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=33 defer=5673 plbuf=2 plflush=207600) slots=108/125 jobs/s=9670 drains=2413686 evl=0ms
+[2026-06-07 09:47:05.450] [info] [Worker 1] [libqueen] pop(q=9 f=2/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1096 drains=195347 evl=0ms
+[2026-06-07 09:47:05.617] [info] [Worker 0] [libqueen] push(q=0 f=23/24 p99rtt=12ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=48 defer=4205 plbuf=0 plflush=208511) slots=101/125 jobs/s=9728 drains=2424220 evl=0ms
+[2026-06-07 09:47:06.450] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1215 drains=196208 evl=0ms
+[2026-06-07 09:47:06.617] [info] [Worker 0] [libqueen] push(q=0 f=19/24 p99rtt=34ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=41 defer=3754 plbuf=4 plflush=209407) slots=105/125 jobs/s=9842 drains=2434189 evl=0ms
+[2026-06-07 09:47:07.450] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1064 drains=196922 evl=0ms
+[2026-06-07 09:47:07.617] [info] [Worker 0] [libqueen] push(q=0 f=14/24 p99rtt=114ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=28 defer=2899 plbuf=9 plflush=210128) slots=110/125 jobs/s=7609 drains=2441900 evl=0ms
+[2026-06-07 09:47:08.450] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1143 drains=197651 evl=0ms
+[2026-06-07 09:47:08.560] [info] PartitionLookupReconcileService: fixed 11 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:08.617] [info] [Worker 0] [libqueen] push(q=2 f=15/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=36 defer=4023 plbuf=13 plflush=211034) slots=109/125 jobs/s=9659 drains=2452005 evl=0ms
+[2026-06-07 09:47:09.451] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1185 drains=198478 evl=0ms
+[2026-06-07 09:47:09.617] [info] [Worker 0] [libqueen] push(q=0 f=18/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=47 defer=3611 plbuf=0 plflush=211786) slots=106/125 jobs/s=8799 drains=2461068 evl=0ms
+[2026-06-07 09:47:10.451] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1120 drains=199253 evl=0ms
+[2026-06-07 09:47:10.528] [info] StatsService: Running full reconciliation (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:10.617] [info] [Worker 0] [libqueen] push(q=1 f=24/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=46 defer=3786 plbuf=0 plflush=212640) slots=100/125 jobs/s=9529 drains=2470810 evl=0ms
+[2026-06-07 09:47:11.451] [info] [Worker 1] [libqueen] pop(q=1 f=3/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1137 drains=200056 evl=0ms
+[2026-06-07 09:47:11.617] [info] [Worker 0] [libqueen] push(q=0 f=11/24 p99rtt=55ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=15 defer=2862 plbuf=1 plflush=213558) slots=113/125 jobs/s=8908 drains=2480482 evl=0ms
+[2026-06-07 09:47:12.452] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=160ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=850 drains=200660 evl=0ms
+[2026-06-07 09:47:12.617] [info] [Worker 0] [libqueen] push(q=0 f=22/24 p99rtt=35ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=32 defer=4003 plbuf=0 plflush=214441) slots=102/125 jobs/s=9295 drains=2490916 evl=0ms
+[2026-06-07 09:47:13.452] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=178ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=603 drains=201118 evl=0ms
+[2026-06-07 09:47:13.618] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=48 defer=4151 plbuf=5 plflush=214998) slots=108/125 jobs/s=6581 drains=2498507 evl=0ms
+[2026-06-07 09:47:14.453] [info] [Worker 1] [libqueen] pop(q=17 f=2/16 p99rtt=107ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=922 drains=201753 evl=0ms
+[2026-06-07 09:47:14.598] [info] PartitionLookupReconcileService: fixed 30 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:14.617] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=36 defer=3770 plbuf=14 plflush=215652) slots=108/125 jobs/s=8081 drains=2506481 evl=0ms
+[2026-06-07 09:47:15.452] [info] [Worker 1] [libqueen] pop(q=4 f=1/16 p99rtt=114ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=698 drains=202198 evl=0ms
+[2026-06-07 09:47:15.617] [info] [Worker 0] [libqueen] push(q=0 f=12/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=31 defer=3881 plbuf=17 plflush=216354) slots=112/125 jobs/s=8563 drains=2515745 evl=0ms
+[2026-06-07 09:47:16.452] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=114ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=756 drains=202612 evl=0ms
+[2026-06-07 09:47:16.617] [info] [Worker 0] [libqueen] push(q=2 f=18/24 p99rtt=40ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=30 defer=4599 plbuf=7 plflush=217144) slots=106/125 jobs/s=8803 drains=2525076 evl=0ms
+[2026-06-07 09:47:17.452] [info] [Worker 1] [libqueen] pop(q=9 f=2/16 p99rtt=114ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1048 drains=203281 evl=0ms
+[2026-06-07 09:47:17.617] [info] [Worker 0] [libqueen] push(q=0 f=15/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=41 defer=4591 plbuf=12 plflush=217868) slots=109/125 jobs/s=8687 drains=2534162 evl=0ms
+[2026-06-07 09:47:18.453] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=114ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=909 drains=203999 evl=0ms
+[2026-06-07 09:47:18.617] [info] [Worker 0] [libqueen] push(q=2 f=17/24 p99rtt=103ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=39 defer=3791 plbuf=5 plflush=218511) slots=107/125 jobs/s=7940 drains=2542355 evl=0ms
+[2026-06-07 09:47:19.452] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=903 drains=204797 evl=0ms
+[2026-06-07 09:47:19.618] [info] [Worker 0] [libqueen] push(q=0 f=13/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=46 defer=4961 plbuf=2 plflush=219205) slots=111/125 jobs/s=7832 drains=2550462 evl=0ms
+[2026-06-07 09:47:20.082] [info] StatsService: Full reconciliation complete (6 partition chunks)
+[2026-06-07 09:47:20.082] [info] StatsService: cycle completed in 9555ms
+[2026-06-07 09:47:20.453] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=969 drains=205620 evl=0ms
+[2026-06-07 09:47:20.557] [info] PartitionLookupReconcileService: fixed 21 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:20.616] [info] [Worker 0] [libqueen] push(q=1 f=20/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=47 defer=4322 plbuf=6 plflush=219923) slots=104/125 jobs/s=8218 drains=2558601 evl=0ms
+[2026-06-07 09:47:20.859] [info] StatsService: cycle completed in 326ms
+[2026-06-07 09:47:21.452] [info] [Worker 1] [libqueen] pop(q=15 f=2/16 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1118 drains=206346 evl=1ms
+[2026-06-07 09:47:21.617] [info] [Worker 0] [libqueen] push(q=0 f=15/24 p99rtt=42ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=39 defer=3601 plbuf=9 plflush=220779) slots=109/125 jobs/s=9061 drains=2568355 evl=0ms
+[2026-06-07 09:47:22.453] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1014 drains=207052 evl=0ms
+[2026-06-07 09:47:22.618] [info] [Worker 0] [libqueen] push(q=5 f=24/24 p99rtt=9ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=44 defer=4910 plbuf=7 plflush=221671) slots=100/125 jobs/s=9925 drains=2578784 evl=0ms
+[2026-06-07 09:47:23.452] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1109 drains=207804 evl=0ms
+[2026-06-07 09:47:23.617] [info] [Worker 0] [libqueen] push(q=0 f=24/24 p99rtt=41ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=49 defer=4144 plbuf=12 plflush=222550) slots=100/125 jobs/s=9612 drains=2589087 evl=0ms
+[2026-06-07 09:47:24.452] [info] [Worker 1] [libqueen] pop(q=7 f=1/16 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=1092 drains=208577 evl=0ms
+[2026-06-07 09:47:24.617] [info] [Worker 0] [libqueen] push(q=0 f=20/24 p99rtt=30ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=46 defer=5017 plbuf=4 plflush=223436) slots=104/125 jobs/s=9194 drains=2599451 evl=0ms
+[2026-06-07 09:47:25.455] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=124ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1001 drains=209351 evl=0ms
+[2026-06-07 09:47:25.617] [info] [Worker 0] [libqueen] push(q=1 f=22/24 p99rtt=25ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=32 defer=5956 plbuf=4 plflush=224346) slots=102/125 jobs/s=9628 drains=2610127 evl=0ms
+[2026-06-07 09:47:26.454] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=94ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=823 drains=209795 evl=0ms
+[2026-06-07 09:47:26.592] [info] PartitionLookupReconcileService: fixed 19 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:26.617] [info] [Worker 0] [libqueen] push(q=2 f=9/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=28 defer=4368 plbuf=1 plflush=225258) slots=115/125 jobs/s=9498 drains=2620188 evl=0ms
+[2026-06-07 09:47:27.454] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=100ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=757 drains=210218 evl=0ms
+[2026-06-07 09:47:27.617] [info] [Worker 0] [libqueen] push(q=1 f=17/24 p99rtt=47ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=46 defer=4886 plbuf=1 plflush=226209) slots=107/125 jobs/s=9482 drains=2630147 evl=0ms
+[2026-06-07 09:47:28.456] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=725 drains=210605 evl=0ms
+[2026-06-07 09:47:28.617] [info] [Worker 0] [libqueen] push(q=0 f=24/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=50 defer=3019 plbuf=0 plflush=227091) slots=100/125 jobs/s=9483 drains=2640855 evl=0ms
+[2026-06-07 09:47:29.455] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=755 drains=211091 evl=0ms
+[2026-06-07 09:47:29.617] [info] [Worker 0] [libqueen] push(q=0 f=19/24 p99rtt=54ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=43 defer=3418 plbuf=5 plflush=227950) slots=105/125 jobs/s=9085 drains=2650444 evl=0ms
+[2026-06-07 09:47:30.455] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=872 drains=211586 evl=0ms
+[2026-06-07 09:47:30.617] [info] [Worker 0] [libqueen] push(q=1 f=14/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=48 defer=4452 plbuf=0 plflush=228855) slots=110/125 jobs/s=9677 drains=2660854 evl=0ms
+[2026-06-07 09:47:31.456] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=984 drains=212186 evl=0ms
+[2026-06-07 09:47:31.559] [info] PartitionLookupReconcileService: fixed 7 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:31.617] [info] [Worker 0] [libqueen] push(q=0 f=21/24 p99rtt=37ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=43 defer=2365 plbuf=9 plflush=229745) slots=103/125 jobs/s=9603 drains=2671144 evl=0ms
+[2026-06-07 09:47:32.097] [info] StatsService: cycle completed in 568ms
+[2026-06-07 09:47:32.456] [info] [Worker 1] [libqueen] pop(q=4 f=1/16 p99rtt=108ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=828 drains=212631 evl=0ms
+[2026-06-07 09:47:32.617] [info] [Worker 0] [libqueen] push(q=2 f=24/24 p99rtt=12ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=48 defer=4298 plbuf=7 plflush=230695) slots=100/125 jobs/s=9854 drains=2682153 evl=0ms
+[2026-06-07 09:47:33.456] [info] [Worker 1] [libqueen] pop(q=2 f=2/16 p99rtt=111ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=790 drains=213028 evl=0ms
+[2026-06-07 09:47:33.617] [info] [Worker 0] [libqueen] push(q=0 f=18/24 p99rtt=33ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=42 defer=5072 plbuf=0 plflush=231583) slots=106/125 jobs/s=9338 drains=2692297 evl=0ms
+[2026-06-07 09:47:34.457] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=130ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=404 drains=213269 evl=0ms
+[2026-06-07 09:47:34.617] [info] [Worker 0] [libqueen] push(q=0 f=13/24 p99rtt=305ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=7ms) pushgate(part=50 defer=466 plbuf=46 plflush=231758) slots=111/125 jobs/s=2126 drains=2694623 evl=0ms
+[2026-06-07 09:47:35.458] [info] [Worker 1] [libqueen] pop(q=4 f=2/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=672 drains=213717 evl=0ms
+[2026-06-07 09:47:35.617] [info] [Worker 0] [libqueen] push(q=3 f=15/24 p99rtt=10ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=8ms) pushgate(part=37 defer=4033 plbuf=0 plflush=232411) slots=109/125 jobs/s=7210 drains=2702107 evl=0ms
+[2026-06-07 09:47:36.460] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=870 drains=214202 evl=0ms
+[2026-06-07 09:47:36.618] [info] [Worker 0] [libqueen] push(q=1 f=17/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=38 defer=4896 plbuf=2 plflush=233315) slots=107/125 jobs/s=9056 drains=2711809 evl=0ms
+[2026-06-07 09:47:37.459] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=825 drains=214654 evl=0ms
+[2026-06-07 09:47:37.579] [info] PartitionLookupReconcileService: fixed 49 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:37.617] [info] [Worker 0] [libqueen] push(q=1 f=11/24 p99rtt=32ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=32 defer=3524 plbuf=17 plflush=234235) slots=113/125 jobs/s=9587 drains=2722365 evl=0ms
+[2026-06-07 09:47:38.460] [info] [Worker 1] [libqueen] pop(q=6 f=2/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=942 drains=215192 evl=0ms
+[2026-06-07 09:47:38.617] [info] [Worker 0] [libqueen] push(q=1 f=11/24 p99rtt=38ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=45 defer=3872 plbuf=3 plflush=235102) slots=113/125 jobs/s=9339 drains=2731918 evl=0ms
+[2026-06-07 09:47:39.461] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=885 drains=215686 evl=0ms
+[2026-06-07 09:47:39.617] [info] [Worker 0] [libqueen] push(q=1 f=14/24 p99rtt=35ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=42 defer=5348 plbuf=2 plflush=236003) slots=110/125 jobs/s=9245 drains=2741753 evl=0ms
+[2026-06-07 09:47:40.461] [info] [Worker 1] [libqueen] pop(q=17 f=1/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=978 drains=216320 evl=0ms
+[2026-06-07 09:47:40.617] [info] [Worker 0] [libqueen] push(q=1 f=8/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=34 defer=4816 plbuf=9 plflush=236858) slots=116/125 jobs/s=9295 drains=2751255 evl=0ms
+[2026-06-07 09:47:41.461] [info] [Worker 1] [libqueen] pop(q=4 f=3/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=925 drains=216939 evl=0ms
+[2026-06-07 09:47:41.617] [info] [Worker 0] [libqueen] push(q=0 f=9/24 p99rtt=43ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=41 defer=5345 plbuf=1 plflush=237700) slots=115/125 jobs/s=9036 drains=2761007 evl=0ms
+[2026-06-07 09:47:42.461] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=161ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=940 drains=217553 evl=0ms
+[2026-06-07 09:47:42.617] [info] [Worker 0] [libqueen] push(q=1 f=18/24 p99rtt=44ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=32 defer=5074 plbuf=2 plflush=238531) slots=106/125 jobs/s=8780 drains=2769948 evl=0ms
+[2026-06-07 09:47:43.060] [info] StatsService: cycle completed in 530ms
+[2026-06-07 09:47:43.462] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=167ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=826 drains=218064 evl=0ms
+[2026-06-07 09:47:43.575] [info] PartitionLookupReconcileService: fixed 14 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:43.617] [info] [Worker 0] [libqueen] push(q=2 f=21/24 p99rtt=54ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=39 defer=3906 plbuf=6 plflush=239336) slots=103/125 jobs/s=8770 drains=2779161 evl=0ms
+[2026-06-07 09:47:44.461] [info] [Worker 1] [libqueen] pop(q=0 f=4/16 p99rtt=167ms) custom(q=0 f=0/1 p99rtt=2ms) slots=96/100 jobs/s=900 drains=218635 evl=0ms
+[2026-06-07 09:47:44.617] [info] [Worker 0] [libqueen] push(q=1 f=12/24 p99rtt=45ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=6ms) pushgate(part=31 defer=3944 plbuf=2 plflush=240134) slots=112/125 jobs/s=8834 drains=2788583 evl=0ms
+[2026-06-07 09:47:45.461] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=192ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=644 drains=218971 evl=0ms
+[2026-06-07 09:47:45.617] [info] [Worker 0] [libqueen] push(q=1 f=14/24 p99rtt=174ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=5ms) pushgate(part=47 defer=2267 plbuf=1 plflush=240749) slots=110/125 jobs/s=6635 drains=2795789 evl=0ms
+[2026-06-07 09:47:46.462] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=192ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=638 drains=219323 evl=0ms
+[2026-06-07 09:47:46.617] [info] [Worker 0] [libqueen] push(q=0 f=18/24 p99rtt=144ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=7ms) pushgate(part=50 defer=2487 plbuf=11 plflush=241264) slots=106/125 jobs/s=5749 drains=2801647 evl=0ms
+[2026-06-07 09:47:47.462] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=192ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=683 drains=219672 evl=0ms
+[2026-06-07 09:47:47.617] [info] [Worker 0] [libqueen] push(q=0 f=18/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=32 defer=4568 plbuf=4 plflush=241965) slots=106/125 jobs/s=8939 drains=2811276 evl=0ms
+[2026-06-07 09:47:48.461] [info] [Worker 1] [libqueen] pop(q=19 f=2/16 p99rtt=192ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=906 drains=220255 evl=0ms
+[2026-06-07 09:47:48.617] [info] [Worker 0] [libqueen] push(q=0 f=23/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=36 defer=3475 plbuf=27 plflush=242796) slots=101/125 jobs/s=10616 drains=2823121 evl=0ms
+[2026-06-07 09:47:49.461] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=192ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1030 drains=220872 evl=0ms
+[2026-06-07 09:47:49.587] [info] PartitionLookupReconcileService: fixed 21 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:49.617] [info] [Worker 0] [libqueen] push(q=1 f=19/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=30 defer=5839 plbuf=9 plflush=243689) slots=105/125 jobs/s=10485 drains=2834666 evl=0ms
+[2026-06-07 09:47:50.462] [info] [Worker 1] [libqueen] pop(q=13 f=2/16 p99rtt=148ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=973 drains=221441 evl=0ms
+[2026-06-07 09:47:50.617] [info] [Worker 0] [libqueen] push(q=2 f=21/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=44 defer=6667 plbuf=4 plflush=244545) slots=103/125 jobs/s=10408 drains=2846055 evl=0ms
+[2026-06-07 09:47:51.461] [info] [Worker 1] [libqueen] pop(q=17 f=2/16 p99rtt=148ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1010 drains=222038 evl=0ms
+[2026-06-07 09:47:51.617] [info] [Worker 0] [libqueen] push(q=0 f=14/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=34 defer=4987 plbuf=2 plflush=245338) slots=110/125 jobs/s=10054 drains=2856858 evl=0ms
+[2026-06-07 09:47:52.464] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=148ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=960 drains=222539 evl=0ms
+[2026-06-07 09:47:52.617] [info] [Worker 0] [libqueen] push(q=3 f=18/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=39 defer=5493 plbuf=9 plflush=246256) slots=106/125 jobs/s=10488 drains=2868104 evl=0ms
+[2026-06-07 09:47:53.465] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=148ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1087 drains=223266 evl=0ms
+[2026-06-07 09:47:53.617] [info] [Worker 0] [libqueen] push(q=0 f=23/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=5197 plbuf=11 plflush=247159) slots=101/125 jobs/s=10698 drains=2879699 evl=0ms
+[2026-06-07 09:47:54.174] [info] StatsService: cycle completed in 643ms
+[2026-06-07 09:47:54.464] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=148ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1006 drains=223899 evl=0ms
+[2026-06-07 09:47:54.617] [info] [Worker 0] [libqueen] push(q=1 f=14/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=43 defer=4912 plbuf=7 plflush=247984) slots=110/125 jobs/s=10067 drains=2890152 evl=0ms
+[2026-06-07 09:47:55.464] [info] [Worker 1] [libqueen] pop(q=1 f=2/16 p99rtt=154ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=835 drains=224431 evl=0ms
+[2026-06-07 09:47:55.561] [info] PartitionLookupReconcileService: fixed 23 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:47:55.617] [info] [Worker 0] [libqueen] push(q=0 f=8/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=3ms) pushgate(part=30 defer=4641 plbuf=18 plflush=248724) slots=116/125 jobs/s=9817 drains=2900317 evl=0ms
+[2026-06-07 09:47:56.465] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=154ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=926 drains=225000 evl=0ms
+[2026-06-07 09:47:56.617] [info] [Worker 0] [libqueen] push(q=1 f=14/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=47 defer=5261 plbuf=1 plflush=249700) slots=110/125 jobs/s=10765 drains=2911905 evl=0ms
+[2026-06-07 09:47:57.465] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=154ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1007 drains=225657 evl=0ms
+[2026-06-07 09:47:57.617] [info] [Worker 0] [libqueen] push(q=2 f=12/24 p99rtt=8ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=25 defer=5511 plbuf=40 plflush=250625) slots=112/125 jobs/s=10708 drains=2923564 evl=0ms
+[2026-06-07 09:47:58.464] [info] [Worker 1] [libqueen] pop(q=1 f=1/16 p99rtt=148ms) custom(q=0 f=0/1 p99rtt=2ms) slots=99/100 jobs/s=937 drains=226190 evl=0ms
+[2026-06-07 09:47:58.617] [info] [Worker 0] [libqueen] push(q=1 f=20/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=35 defer=5142 plbuf=16 plflush=251613) slots=104/125 jobs/s=10989 drains=2935717 evl=0ms
+[2026-06-07 09:47:59.464] [info] [Worker 1] [libqueen] pop(q=5 f=2/16 p99rtt=125ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=1035 drains=226825 evl=0ms
+[2026-06-07 09:47:59.617] [info] [Worker 0] [libqueen] push(q=0 f=13/24 p99rtt=7ms) custom(q=0 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=2ms) pushgate(part=48 defer=4575 plbuf=0 plflush=252523) slots=111/125 jobs/s=10690 drains=2947418 evl=0ms
+[2026-06-07 09:48:00.465] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=89ms) custom(q=3 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=1041 drains=227486 evl=0ms
+[2026-06-07 09:48:00.540] [info] RetentionService: Running cleanup cycle
+[2026-06-07 09:48:00.577] [info] RetentionService: cycle completed in 37ms
+[2026-06-07 09:48:00.617] [info] [Worker 0] [libqueen] push(q=2 f=21/24 p99rtt=15ms) custom(q=2 f=0/1 p99rtt=2ms) partition_lookup(q=0 f=1/2 p99rtt=4ms) pushgate(part=46 defer=5120 plbuf=2 plflush=253264) slots=103/125 jobs/s=9852 drains=2958459 evl=0ms
+[2026-06-07 09:48:01.006] [info] [Worker 2] [libqueen] custom(q=0 f=0/1 p99rtt=3ms) slots=25/25 jobs/s=1 drains=14 evl=0ms
+[2026-06-07 09:48:01.465] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=85ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=899 drains=228048 evl=0ms
+[2026-06-07 09:48:01.532] [info] PartitionLookupReconcileService: fixed 17 partition_lookup rows (stats leader, hostname=de2ea47aafb6)
+[2026-06-07 09:48:01.617] [info] [Worker 0] [libqueen] push(q=2 f=22/24 p99rtt=36ms) custom(q=0 f=0/1 p99rtt=5ms) partition_lookup(q=0 f=1/2 p99rtt=11ms) pushgate(part=48 defer=2858 plbuf=0 plflush=253587) slots=102/125 jobs/s=4283 drains=2963563 evl=0ms
+[2026-06-07 09:48:02.466] [info] [Worker 1] [libqueen] pop(q=0 f=3/16 p99rtt=88ms) custom(q=0 f=0/1 p99rtt=2ms) slots=97/100 jobs/s=812 drains=228527 evl=0ms
+[2026-06-07 09:48:02.617] [info] [Worker 0] [libqueen] push(q=2 f=24/24 p99rtt=25ms) custom(q=0 f=0/1 p99rtt=5ms) partition_lookup(q=0 f=1/2 p99rtt=16ms) pushgate(part=48 defer=3562 plbuf=1 plflush=253947) slots=100/125 jobs/s=4799 drains=2969005 evl=0ms
+[2026-06-07 09:48:03.465] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=93ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=907 drains=229089 evl=0ms
+[2026-06-07 09:48:03.617] [info] [Worker 0] [libqueen] push(q=0 f=10/24 p99rtt=27ms) custom(q=0 f=0/1 p99rtt=5ms) partition_lookup(q=0 f=1/2 p99rtt=18ms) pushgate(part=45 defer=2554 plbuf=0 plflush=254343) slots=114/125 jobs/s=5086 drains=2974968 evl=0ms
+[2026-06-07 09:48:04.466] [info] [Worker 1] [libqueen] pop(q=0 f=2/16 p99rtt=95ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=948 drains=229703 evl=0ms
+[2026-06-07 09:48:04.617] [info] [Worker 0] [libqueen] push(q=2 f=16/24 p99rtt=25ms) custom(q=0 f=0/1 p99rtt=5ms) partition_lookup(q=0 f=1/2 p99rtt=15ms) pushgate(part=43 defer=4025 plbuf=4 plflush=254752) slots=108/125 jobs/s=5442 drains=2981321 evl=0ms
+[2026-06-07 09:48:05.054] [info] StatsService: cycle completed in 523ms
+[2026-06-07 09:48:05.466] [info] [Worker 1] [libqueen] pop(q=7 f=2/16 p99rtt=95ms) custom(q=0 f=0/1 p99rtt=2ms) slots=98/100 jobs/s=809 drains=230168 evl=0ms
+[2026-06-07 09:48:05.618] [info] [Worker 0] [libqueen] push(q=1 f=19/24 p99rtt=31ms) custom(q=0 f=0/1 p99rtt=5ms) partition_lookup(q=0 f=1/2 p99rtt=15ms) pushgate(part=44 defer=3225 plbuf=4 plflush=255097) slots=105/125 jobs/s=4856 drains=2987076 evl=0ms
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 350f42d9-c06d-4033-908a-a2c3ded08e9e
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for e24836c8-e65b-4b51-916d-3a30fcd43d8f
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for dc874480-1471-4182-bd62-154898c85a3b
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 507266e4-b1ee-4a87-97dc-07f5aec763ae
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 9d9ba2e2-21d4-4ba2-989f-3b501f920f85
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for ad7c0660-b9e6-4224-9c42-41c482e0d097
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 510176c6-2ee1-4c46-a38d-9cd2689f17a2
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 60d9ae5c-ba02-4668-9fd2-360869c8063a
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 1fdd4f23-0c0c-4bb0-8209-676aa7fe1633
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 8581c910-8795-41ce-bebc-8f0e902a01c8
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for a39416a2-2903-4296-9082-8f31ff6d24d0
+[2026-06-07 09:48:06.375] [info] QPOP: Connection aborted for 263a4ad8-622f-4eef-b7e8-31812e80f000
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 4c7fd084-9bb1-40d8-b624-7ca9ebb0afac
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 98a70be3-0d2d-4fb5-8b26-7173d01ee1bd
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 477ef671-a6ca-4efa-9803-2f879bdc37f3
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 6ab9f8a4-8cf6-4f32-ad98-a300e06dd1bf
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for c9989766-899a-4a4b-b982-6e22dd018b17
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 989d81d9-3281-40f6-9fbb-0fa5324f56e2
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 96ca7291-612a-4045-9f8a-723f19139cfd
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for cf8ccacd-48d3-492e-8d89-b02d3afeee53
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 28ef82e3-938b-4ed7-a7f1-855dcd858401
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 3087565a-7f46-4db4-9b7c-f60a18f46dff
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 5c4d4a17-b1d7-414d-999f-1dc1bd0ca40a
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 68dc041d-8c94-4863-b63e-99e535595c25
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for 595c89cc-4d36-49ff-a5ad-bc2f7a23e25a
+[2026-06-07 09:48:06.376] [info] QPOP: Connection aborted for ef42d333-6ceb-414d-8d1d-234f3d6df0f1
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 01219e9c-c753-4ba6-a989-ddf7dcbbcddc
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for a25eb8cf-40ac-4b08-bce1-fa21f837bd03
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 9cbdaf41-abc7-4401-98cb-0abbf7ce4a77
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 245173d3-17bd-454f-9d43-c681d2c5f579
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for d153a8f9-4557-452c-9782-323d3497efa7
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for dc432fcd-8b2a-4705-8d4f-c2be54be759a
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 75286118-2aad-43b2-9ab4-ed4c9f8389ca
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for d785ce36-7890-4398-91e9-67691e931d45
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 4c454b4a-fa04-4262-aa30-6c56a9ff74a7
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for e85c71bf-f550-484d-a077-d51fb4086beb
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for a5b19e84-fa31-4c1b-96c1-63b4f650cfa6
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 3af51e22-8020-4917-8574-235c3abff60e
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 6eebf62c-ca39-4b16-ad21-ea9d8844280a
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 885867d6-4d26-48ea-8ea7-37293c92ab78
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 830747b7-94fd-4e42-b8f5-1a065da21f8d
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 286c8a5a-0882-42ea-a331-34f505b1889b
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 3db0ac8d-95e6-448e-9512-49c1137a5a8c
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 202fba68-3215-41b5-b0e8-1ac41bd08e4e
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 7e8ad423-e112-4478-95a7-36c70eaffcf5
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for edcfa968-1a32-4deb-8206-f4afae14e362
+[2026-06-07 09:48:06.377] [info] QPOP: Connection aborted for 09c1c8b0-a282-420e-9f98-d1ee99e92317
+[2026-06-07 09:48:06.378] [info] QPOP: Connection aborted for 11a9af32-c50a-4394-aee4-310e76624f3e
+[2026-06-07 09:48:06.380] [info] QPOP: Connection aborted for 674a8fc2-57be-4068-beed-f72d1acb8bec
+[2026-06-07 09:48:06.380] [info] QPOP: Connection aborted for 215f74dc-e5ec-4fde-a488-784587335a54
+[2026-06-07 09:48:06.465] [info] [Worker 1] [libqueen] pop(q=0 f=0/16 p99rtt=99ms) custom(q=0 f=0/1 p99rtt=2ms) slots=100/100 jobs/s=698 drains=230564 evl=0ms
+[2026-06-07 09:48:06.618] [info] [Worker 0] [libqueen] push(q=2 f=24/24 p99rtt=20ms) custom(q=0 f=0/1 p99rtt=5ms) partition_lookup(q=0 f=1/2 p99rtt=19ms) pushgate(part=47 defer=2861 plbuf=16 plflush=255347) slots=100/125 jobs/s=4100 drains=2991848 evl=0ms
+[2026-06-07 09:48:07.466] [info] [Worker 1] [libqueen] pop(q=0 f=0/16 p99rtt=99ms) custom(q=0 f=0/1 p99rtt=2ms) slots=100/100 jobs/s=2 drains=230571 evl=0ms
+[2026-06-07 09:48:07.619] [info] [Worker 0] [libqueen] push(q=0 f=0/24 p99rtt=21ms) custom(q=0 f=0/1 p99rtt=5ms) partition_lookup(q=0 f=0/2 p99rtt=20ms) pushgate(part=0 defer=1602 plbuf=0 plflush=255541) slots=125/125 jobs/s=2297 drains=2994075 evl=0ms
+[2026-06-07 09:48:15.613] [info] StatsService: cycle completed in 81ms
+[2026-06-07 09:48:26.556] [info] StatsService: cycle completed in 23ms
+[2026-06-07 09:48:37.557] [info] StatsService: cycle completed in 44ms
+[2026-06-07 09:48:47.578] [info] StatsService: cycle completed in 42ms

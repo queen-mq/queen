@@ -1,0 +1,47 @@
+[2026-06-07T10:13:55Z] =============================================
+[2026-06-07T10:13:55Z] CG MASTER START — 2 tests on image=pushser, 300s each
+[2026-06-07T10:13:55Z] estimated wall time: 32 min
+[2026-06-07T10:13:55Z] =============================================
+[2026-06-07T10:13:55Z] >>> RUN bp-10-cg5 (mp=1000 msgs=10 prod=1x50 cons=1x50*5cg cb=100)
+[2026-06-07T10:13:55Z] [bp-10-cg5] === START test=bp-10-cg5 image=pushser maxPart=1000 batch=10 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=1 cgCount=5 ===
+[2026-06-07T10:13:55Z] [bp-10-cg5] cleanup: stopping containers
+[2026-06-07T10:14:06Z] [bp-10-cg5] starting postgres
+[2026-06-07T10:14:07Z] [bp-10-cg5] waiting for postgres
+[2026-06-07T10:14:09Z] [bp-10-cg5]   postgres ready (after 3s)
+[2026-06-07T10:14:09Z] [bp-10-cg5] starting queen
+[2026-06-07T10:14:09Z] [bp-10-cg5] waiting for queen
+[2026-06-07T10:14:10Z] [bp-10-cg5]   queen ready (after 2s)
+[2026-06-07T10:14:15Z] [bp-10-cg5] settle done, launching producer/consumer (queues=1)
+[2026-06-07T10:14:15Z] [bp-10-cg5] producer pid=58020 consumer pids=58022 58023 58024 58025 58026 (n=5), waiting 300s
+[2026-06-07T10:15:18Z] [bp-10-cg5]   +1min postgres=1544.62%/3.389GiB / 62.79GiB queen=275.45%/74MiB / 62.79GiB
+[2026-06-07T10:16:21Z] [bp-10-cg5]   +2min postgres=1530.53%/5.547GiB / 62.79GiB queen=282.17%/78.04MiB / 62.79GiB
+[2026-06-07T10:17:24Z] [bp-10-cg5]   +3min postgres=1358.32%/7.706GiB / 62.79GiB queen=269.32%/81.64MiB / 62.79GiB
+[2026-06-07T10:18:27Z] [bp-10-cg5]   +4min postgres=1295.00%/9.889GiB / 62.79GiB queen=230.71%/82.01MiB / 62.79GiB
+[2026-06-07T10:19:30Z] [bp-10-cg5]   +5min postgres=0.07%/11.69GiB / 62.79GiB queen=0.37%/105.5MiB / 62.79GiB
+[2026-06-07T10:19:30Z] [bp-10-cg5] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T10:20:05Z] [bp-10-cg5] collecting metrics
+[2026-06-07T10:20:07Z] [bp-10-cg5] === DONE test=bp-10-cg5 ===
+[2026-06-07T10:20:07Z] <<< END bp-10-cg5
+[2026-06-07T10:20:07Z] ---
+[2026-06-07T10:20:07Z] >>> RUN bp-10-cg10 (mp=1000 msgs=10 prod=1x50 cons=1x50*10cg cb=100)
+[2026-06-07T10:20:07Z] [bp-10-cg10] === START test=bp-10-cg10 image=pushser maxPart=1000 batch=10 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=1 cgCount=10 ===
+[2026-06-07T10:20:07Z] [bp-10-cg10] cleanup: stopping containers
+[2026-06-07T10:20:19Z] [bp-10-cg10] starting postgres
+[2026-06-07T10:20:19Z] [bp-10-cg10] waiting for postgres
+[2026-06-07T10:20:21Z] [bp-10-cg10]   postgres ready (after 3s)
+[2026-06-07T10:20:21Z] [bp-10-cg10] starting queen
+[2026-06-07T10:20:21Z] [bp-10-cg10] waiting for queen
+[2026-06-07T10:20:22Z] [bp-10-cg10]   queen ready (after 2s)
+[2026-06-07T10:20:27Z] [bp-10-cg10] settle done, launching producer/consumer (queues=1)
+[2026-06-07T10:20:27Z] [bp-10-cg10] producer pid=59501 consumer pids=59503 59504 59505 59506 59507 59508 59509 59510 59511 59512 (n=10), waiting 300s
+[2026-06-07T10:21:30Z] [bp-10-cg10]   +1min postgres=1905.97%/3.151GiB / 62.79GiB queen=283.60%/101.7MiB / 62.79GiB
+[2026-06-07T10:22:33Z] [bp-10-cg10]   +2min postgres=1834.76%/4.809GiB / 62.79GiB queen=310.23%/103.4MiB / 62.79GiB
+[2026-06-07T10:23:37Z] [bp-10-cg10]   +3min postgres=1830.90%/6.571GiB / 62.79GiB queen=303.08%/103.7MiB / 62.79GiB
+[2026-06-07T10:24:40Z] [bp-10-cg10]   +4min postgres=1945.80%/8.291GiB / 62.79GiB queen=266.96%/102.2MiB / 62.79GiB
+[2026-06-07T10:25:43Z] [bp-10-cg10]   +5min postgres=0.68%/9.673GiB / 62.79GiB queen=0.41%/100.8MiB / 62.79GiB
+[2026-06-07T10:25:43Z] [bp-10-cg10] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T10:26:18Z] [bp-10-cg10] collecting metrics
+[2026-06-07T10:26:20Z] [bp-10-cg10] === DONE test=bp-10-cg10 ===
+[2026-06-07T10:26:20Z] <<< END bp-10-cg10
+[2026-06-07T10:26:20Z] ---
+[2026-06-07T10:26:20Z] CG MASTER COMPLETE

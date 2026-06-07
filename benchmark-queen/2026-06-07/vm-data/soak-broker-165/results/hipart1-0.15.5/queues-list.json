@@ -1,0 +1,1 @@
+{"queues":[{"createdAt":"2026-06-04T07:56:10.914Z","id":"6df21bff-2ced-4db0-a431-e9915f723101","messages":{"pending":33817,"processing":0,"total":7583059},"name":"bench-hipart1-0.15.5","namespace":"","partitions":3,"task":""}]}

@@ -1,0 +1,14 @@
+{
+  "testName": "bp100-simd",
+  "queenImageTag": "simd",
+  "queueNames": "bench-bp100-simd",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 100,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 1, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 50, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 240,
+  "startTime": "2026-06-04T08:11:19.000Z",
+  "endTime": "2026-06-04T08:16:01.000Z"
+}

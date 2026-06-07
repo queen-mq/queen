@@ -1,0 +1,27 @@
+[2026-06-04T14:27:41Z] === bp-100-sustained START tag=0.16.0.beta.1-ui dur=2700s prod=1x50 cons=1x100 parts=101 popBatch=500 retInterval=5s retParallel=8 ===
+[2026-06-04T14:27:49Z] start postgres (April tuning)
+[2026-06-04T14:27:52Z] start queen 0.16.0.beta.1-ui (RETENTION_BATCH_SIZE=20000 RETENTION_INTERVAL=30000)
+[2026-06-04T14:27:57Z] configure bench-bp-100-sustained (retentionEnabled, completedRetention=300s, retention=7200s, lease=60s)
+[2026-06-04T14:27:57Z] launching producer + consumer for 2700s
+[2026-06-04T14:28:09Z] enforce retention via direct SQL (configure coerces completed_retention to 1800)
+[2026-06-04T14:29:12Z]   +1min push=142478/s pop=141316/s pending=83200 msgsTbl=4.00GB dead=0 db=4.02GB wal=91.0MB/s qCPU=96.08% pgCPU=887.49% lockTO=0
+[2026-06-04T14:30:16Z]   +2min push=138850/s pop=138041/s pending=131700 msgsTbl=7.32GB dead=0 db=7.34GB wal=89.2MB/s qCPU=96.69% pgCPU=955.69% lockTO=0
+[2026-06-04T14:31:19Z]   +3min push=137940/s pop=137665/s pending=148200 msgsTbl=10.62GB dead=0 db=10.65GB wal=88.5MB/s qCPU=97.86% pgCPU=895.36% lockTO=0
+[2026-06-04T14:32:22Z]   +4min push=134900/s pop=134436/s pending=176000 msgsTbl=13.85GB dead=0 db=13.89GB wal=86.5MB/s qCPU=73.90% pgCPU=1004.86% lockTO=0
+[2026-06-04T14:33:25Z]   +5min push=132406/s pop=131850/s pending=209400 msgsTbl=16.85GB dead=1026545 db=16.91GB wal=89.3MB/s qCPU=103.31% pgCPU=1041.10% lockTO=0
+[2026-06-04T14:34:29Z]   +6min push=129165/s pop=128543/s pending=246700 msgsTbl=17.27GB dead=1596105 db=17.34GB wal=91.8MB/s qCPU=97.73% pgCPU=1168.75% lockTO=0
+[2026-06-04T14:35:32Z]   +7min push=131933/s pop=130721/s pending=319400 msgsTbl=17.38GB dead=0 db=17.46GB wal=95.6MB/s qCPU=100.88% pgCPU=1589.86% lockTO=0
+[2026-06-04T14:36:35Z]   +8min push=135986/s pop=135135/s pending=370500 msgsTbl=17.54GB dead=1205251 db=17.65GB wal=94.4MB/s qCPU=102.42% pgCPU=1460.06% lockTO=0
+[2026-06-04T14:37:38Z]   +9min push=135015/s pop=134176/s pending=420800 msgsTbl=17.71GB dead=1383039 db=17.82GB wal=95.7MB/s qCPU=110.68% pgCPU=1103.07% lockTO=0
+[2026-06-04T14:38:42Z]   +10min push=126948/s pop=125765/s pending=491800 msgsTbl=17.78GB dead=2126711 db=17.92GB wal=125.9MB/s qCPU=94.09% pgCPU=1423.61% lockTO=0
+[2026-06-04T14:39:45Z]   +11min push=119600/s pop=118100/s pending=581800 msgsTbl=17.59GB dead=919227 db=17.74GB wal=103.4MB/s qCPU=107.16% pgCPU=1624.57% lockTO=0
+[2026-06-04T14:40:48Z]   +12min push=127581/s pop=126401/s pending=652600 msgsTbl=17.61GB dead=1481973 db=17.78GB wal=103.2MB/s qCPU=104.46% pgCPU=1358.02% lockTO=0
+[2026-06-04T14:41:51Z]   +13min push=126481/s pop=125620/s pending=704300 msgsTbl=17.81GB dead=2299458 db=17.99GB wal=103.5MB/s qCPU=100.34% pgCPU=1055.06% lockTO=0
+[2026-06-04T14:42:55Z]   +14min push=128155/s pop=127443/s pending=747000 msgsTbl=17.82GB dead=2084218 db=18.02GB wal=103.5MB/s qCPU=106.50% pgCPU=1050.53% lockTO=0
+[2026-06-04T14:43:58Z]   +15min push=129213/s pop=128521/s pending=788500 msgsTbl=18.14GB dead=3098213 db=18.35GB wal=89.8MB/s qCPU=112.02% pgCPU=1196.24% lockTO=0
+[2026-06-04T14:45:01Z]   +16min push=126696/s pop=125705/s pending=848000 msgsTbl=18.14GB dead=1725934 db=18.38GB wal=91.9MB/s qCPU=107.97% pgCPU=1802.59% lockTO=0
+[2026-06-04T14:46:04Z]   +17min push=257096/s pop=254453/s pending=1006600 msgsTbl=18.64GB dead=0 db=18.89GB wal=89.7MB/s qCPU=115.50% pgCPU=1107.21% lockTO=0
+[2026-06-04T14:47:08Z]   +18min push=134908/s pop=134368/s pending=1039000 msgsTbl=18.65GB dead=3728175 db=18.92GB wal=129.5MB/s qCPU=103.35% pgCPU=1584.85% lockTO=0
+[2026-06-04T14:48:11Z]   +19min push=137663/s pop=137008/s pending=1078300 msgsTbl=18.67GB dead=2226433 db=18.95GB wal=113.2MB/s qCPU=120.36% pgCPU=1909.29% lockTO=0
+[2026-06-04T14:49:14Z]   +20min push=141836/s pop=140961/s pending=1130800 msgsTbl=18.70GB dead=0 db=19.00GB wal=111.2MB/s qCPU=114.84% pgCPU=1606.85% lockTO=0
+[2026-06-04T14:50:18Z]   +21min push=140723/s pop=140046/s pending=1171400 msgsTbl=18.74GB dead=455900 db=19.06GB wal=111.9MB/s qCPU=122.03% pgCPU=1159.10% lockTO=0

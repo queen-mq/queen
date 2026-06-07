@@ -1,0 +1,55 @@
+[2026-06-07T07:34:36Z] =============================================
+[2026-06-07T07:34:36Z] MASTER START — 10 tests, 300s each
+[2026-06-07T07:34:36Z] estimated wall time: 160 min
+[2026-06-07T07:34:36Z] =============================================
+[2026-06-07T07:34:36Z] >>> RUN hi-part-10 (mp=10 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED hi-part-10
+[2026-06-07T07:34:36Z] <<< END hi-part-10
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN hi-part-100 (mp=100 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED hi-part-100
+[2026-06-07T07:34:36Z] <<< END hi-part-100
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN hi-part-1000 (mp=1000 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED hi-part-1000
+[2026-06-07T07:34:36Z] <<< END hi-part-1000
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN hi-part-10000 (mp=10000 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED hi-part-10000
+[2026-06-07T07:34:36Z] <<< END hi-part-10000
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN bp-1 (mp=1000 msgs=1 prod=1x50 cons=1x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED bp-1
+[2026-06-07T07:34:36Z] <<< END bp-1
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN bp-10 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED bp-10
+[2026-06-07T07:34:36Z] <<< END bp-10
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN bp-100 (mp=1000 msgs=100 prod=1x50 cons=1x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED bp-100
+[2026-06-07T07:34:36Z] <<< END bp-100
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN q-1 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=1)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED q-1
+[2026-06-07T07:34:36Z] <<< END q-1
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN q-10 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=10)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED q-10
+[2026-06-07T07:34:36Z] <<< END q-10
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN q-100 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=100)
+run_master.sh: line 33: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED q-100
+[2026-06-07T07:34:36Z] <<< END q-100
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] MASTER COMPLETE

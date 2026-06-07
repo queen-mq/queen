@@ -1,12 +1,25 @@
-// goload — a high-throughput load generator for Queen MQ built on the official
-// Go client (github.com/smartpricing/queen/clients/client-go).
+// goload — a load generator for Queen MQ built on the official Go client
+// (github.com/smartpricing/queen/clients/client-go).
 //
-// It drives many producer goroutines (batched push) and consumer goroutines
-// (pop with server-side autoAck, == autocannon ?autoAck=true), spreading work
-// round-robin across N partitions, and reports push/pop msg/s.
+// Two modes (select with -mode):
+//
+//	-mode max  (default)  Pure broker in/out throughput. Many producer
+//	                      goroutines (batched push) and consumer goroutines
+//	                      (pop with server-side autoAck), round-robin across N
+//	                      partitions. Reports push/pop msg/s. This is the
+//	                      "max pipe" test.
+//
+//	-mode app             Realistic application workload: closed-loop target
+//	                      rate, explicit ack with simulated per-message
+//	                      processing time, N consumer groups (fan-out),
+//	                      key-skewed partitions, head-of-line slow partitions,
+//	                      failure -> retry -> DLQ, transactional ack+push
+//	                      pipeline, and end-to-end latency percentiles.
+//	                      Run `goload -mode app -h` for its flags.
 //
 // Build (static, for the loader VM):
-//   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o goload-linux-amd64 .
+//
+//	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o goload-linux-amd64 .
 package main
 
 import (
@@ -25,27 +38,67 @@ import (
 )
 
 func main() {
-	url := flag.String("url", "http://127.0.0.1:6632", "broker base URL")
-	queueName := flag.String("queue", "benchq", "queue name")
-	partitions := flag.Int("partitions", 100, "number of partitions to spread across")
-	producers := flag.Int("producers", 300, "producer goroutines")
-	consumers := flag.Int("consumers", 150, "consumer goroutines")
-	pushBatch := flag.Int("push-batch", 10, "messages per push request")
-	popBatch := flag.Int("pop-batch", 200, "max messages per pop request")
-	popWildcard := flag.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop (broker drains any partition -> full batches, few consumers) instead of pinned per-partition pop")
-	popPartitions := flag.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard -> up to pop-batch msgs gathered across N partitions)")
-	popWait := flag.Bool("pop-wait", false, "long-poll pop (Wait=true): an empty pop parks server-side and re-checks (POP_WAIT_* cadence) instead of spinning a wasted round-trip")
-	popTimeout := flag.Int("pop-timeout", 2000, "pop long-poll timeout ms (used when -pop-wait)")
-	payloadBytes := flag.Int("payload", 256, "payload size in bytes")
-	durationSec := flag.Int("duration", 0, "run duration seconds (0 = run until SIGINT)")
-	idleConns := flag.Int("idle-conns", 512, "MaxIdleConnsPerHost for the client")
-	reportSec := flag.Int("report", 5, "report interval seconds")
-	completedRet := flag.Int("completed-retention", 300, "completed_retention_seconds for the queue")
-	pendingRet := flag.Int("pending-retention", 0, "retention_seconds for pending (un-consumed) messages; 0 = keep forever")
-	timeoutMs := flag.Int("timeout", 30000, "request timeout ms")
-	emptySleepMs := flag.Int("empty-sleep", 2, "consumer sleep ms on empty pop")
-	retries := flag.Int("retries", 2, "producer/consumer client RetryAttempts (0 = disable retries; used to test the push>pop dedup gap)")
-	flag.Parse()
+	mode := scanMode(os.Args[1:])
+	switch mode {
+	case "app":
+		runAppMode(os.Args[1:])
+	case "max", "":
+		runMaxMode(os.Args[1:])
+	default:
+		fmt.Printf("goload: unknown -mode %q (want: max | app)\n", mode)
+		os.Exit(2)
+	}
+}
+
+// scanMode extracts -mode / --mode from the raw args before any FlagSet is
+// parsed, so we can dispatch to the right mode's flag set. Defaults to "max"
+// to preserve the original (pre-mode) goload invocation for existing harnesses.
+func scanMode(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if a == "-mode" || a == "--mode" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if v, ok := strings.CutPrefix(a, "-mode="); ok {
+			return v
+		}
+		if v, ok := strings.CutPrefix(a, "--mode="); ok {
+			return v
+		}
+	}
+	return "max"
+}
+
+func runMaxMode(args []string) {
+	fs := flag.NewFlagSet("goload-max", flag.ExitOnError)
+	url := fs.String("url", "http://127.0.0.1:6632", "broker base URL")
+	queueName := fs.String("queue", "benchq", "queue name")
+	partitions := fs.Int("partitions", 100, "number of partitions to spread across")
+	producers := fs.Int("producers", 300, "producer goroutines")
+	consumers := fs.Int("consumers", 150, "consumer goroutines")
+	pushBatch := fs.Int("push-batch", 10, "messages per push request")
+	popBatch := fs.Int("pop-batch", 200, "max messages per pop request")
+	popWildcard := fs.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop (broker drains any partition -> full batches, few consumers) instead of pinned per-partition pop")
+	popPartitions := fs.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard -> up to pop-batch msgs gathered across N partitions)")
+	popWait := fs.Bool("pop-wait", false, "long-poll pop (Wait=true): an empty pop parks server-side and re-checks (POP_WAIT_* cadence) instead of spinning a wasted round-trip")
+	popTimeout := fs.Int("pop-timeout", 2000, "pop long-poll timeout ms (used when -pop-wait)")
+	payloadBytes := fs.Int("payload", 256, "payload size in bytes")
+	durationSec := fs.Int("duration", 0, "run duration seconds (0 = run until SIGINT)")
+	idleConns := fs.Int("idle-conns", 512, "MaxIdleConnsPerHost for the client")
+	reportSec := fs.Int("report", 5, "report interval seconds")
+	completedRet := fs.Int("completed-retention", 300, "completed_retention_seconds for the queue")
+	pendingRet := fs.Int("pending-retention", 0, "retention_seconds for pending (un-consumed) messages; 0 = keep forever")
+	timeoutMs := fs.Int("timeout", 30000, "request timeout ms")
+	emptySleepMs := fs.Int("empty-sleep", 2, "consumer sleep ms on empty pop")
+	retries := fs.Int("retries", 2, "producer/consumer client RetryAttempts (0 = disable retries; used to test the push>pop dedup gap)")
+	_ = fs.String("mode", "max", "run mode: max | app")
+	_ = fs.Parse(args)
 
 	fmt.Printf("goload -> %s queue=%s partitions=%d producers=%d consumers=%d pushBatch=%d popBatch=%d payload=%dB idleConns=%d retries=%d\n",
 		*url, *queueName, *partitions, *producers, *consumers, *pushBatch, *popBatch, *payloadBytes, *idleConns, *retries)
@@ -71,6 +124,7 @@ func main() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Configure the queue once (retention so the table stays bounded).
 	cfgCtx, cfgCancel := context.WithTimeout(ctx, 10*time.Second)

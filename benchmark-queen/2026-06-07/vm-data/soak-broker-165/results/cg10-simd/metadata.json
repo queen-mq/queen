@@ -1,0 +1,14 @@
+{
+  "testName": "cg10-simd",
+  "queenImageTag": "simd",
+  "queueNames": "bench-cg10-simd",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 10,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 10, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 500, "batch": 100, "consumerGroupCount": 10},
+  "durationSec": 240,
+  "startTime": "2026-06-04T08:21:29.000Z",
+  "endTime": "2026-06-04T08:26:12.000Z"
+}

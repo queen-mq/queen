@@ -1,0 +1,28 @@
+{"role":"producer","event":"start","queues":["bench-q-10-1","bench-q-10-2","bench-q-10-3","bench-q-10-4","bench-q-10-5","bench-q-10-6","bench-q-10-7","bench-q-10-8","bench-q-10-9","bench-q-10-10"],"queueCount":10,"numWorkers":1,"conns":50,"duration":300,"maxPartition":1000,"msgsPerPush":10,"timestamp":"2026-06-07T10:01:49.786Z"}
+(node:55246) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/queen/examples/bench-producer.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/queen/examples/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:55277) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/queen/examples/bench-producer.js is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/queen/examples/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 2593706,
+  "totalMessages": 25937060,
+  "reqPerSec": 8646,
+  "msgPerSec": 86460,
+  "latency": {
+    "p50": 4,
+    "p90": 8,
+    "p99": 35,
+    "avg": 5.35,
+    "max": 6133
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 300
+}

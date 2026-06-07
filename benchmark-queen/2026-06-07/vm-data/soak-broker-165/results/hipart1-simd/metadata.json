@@ -1,0 +1,14 @@
+{
+  "testName": "hipart1-simd",
+  "queenImageTag": "simd",
+  "queueNames": "bench-hipart1-simd",
+  "queueCount": 1,
+  "maxPartition": 1,
+  "partitionCount": 2,
+  "msgsPerPush": 1,
+  "producer": {"workers": 5, "connectionsPerWorker": 100, "totalConnections": 500},
+  "consumer": {"processes": 1, "workersPerProcess": 2, "connectionsPerWorker": 50, "totalConnections": 100, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 240,
+  "startTime": "2026-06-04T08:16:27.000Z",
+  "endTime": "2026-06-04T08:21:09.000Z"
+}

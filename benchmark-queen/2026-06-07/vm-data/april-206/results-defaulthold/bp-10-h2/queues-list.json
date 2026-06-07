@@ -1,0 +1,1 @@
+{"queues":[{"createdAt":"2026-06-07T08:54:19.009Z","id":"ccdd4147-13c3-4ddd-ae51-207ba99945db","messages":{"pending":236660,"processing":0,"total":4105820},"name":"bench-bp-10-h2","namespace":"","partitions":1002,"task":""}]}

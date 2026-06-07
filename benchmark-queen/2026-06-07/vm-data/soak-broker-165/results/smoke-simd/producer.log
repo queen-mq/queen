@@ -1,0 +1,20 @@
+{"role":"producer","event":"start","queues":["bench-smoke-simd"],"queueCount":1,"numWorkers":1,"conns":50,"duration":60,"maxPartition":1000,"msgsPerPush":10,"timestamp":"2026-06-04T07:42:52.474Z"}
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 280706,
+  "totalMessages": 2807060,
+  "reqPerSec": 4679,
+  "msgPerSec": 46790,
+  "latency": {
+    "p50": 9,
+    "p90": 12,
+    "p99": 29,
+    "avg": 10.23,
+    "max": 590
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 60
+}

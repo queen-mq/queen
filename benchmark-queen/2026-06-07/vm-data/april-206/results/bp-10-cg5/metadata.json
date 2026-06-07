@@ -1,0 +1,14 @@
+{
+  "testName": "bp-10-cg5",
+  "queenImageTag": "pushser",
+  "queueNames": "bench-bp-10-cg5",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 10,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 5, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 250, "batch": 100, "consumerGroupCount": 5},
+  "durationSec": 300,
+  "startTime": "2026-06-07T10:14:15.000Z",
+  "endTime": "2026-06-07T10:20:00.000Z"
+}

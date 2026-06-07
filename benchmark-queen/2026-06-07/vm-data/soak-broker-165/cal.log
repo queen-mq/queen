@@ -1,0 +1,9 @@
+[2026-06-04T10:45:25Z] start postgres (April tuning)
+[2026-06-04T10:45:28Z] start queen 0.16.0.beta.1 (RETENTION_BATCH_SIZE=20000 RETENTION_INTERVAL=30000)
+[2026-06-04T10:45:32Z] === combo A prod=2x100 cons=3x100 on bench-cal-A ===
+[2026-06-04T10:47:07Z]   done A
+[2026-06-04T10:47:07Z] === combo B prod=3x100 cons=3x100 on bench-cal-B ===
+[2026-06-04T10:48:42Z]   done B
+[2026-06-04T10:48:42Z] === combo C prod=4x100 cons=3x100 on bench-cal-C ===
+[2026-06-04T10:50:18Z]   done C
+CAL-DONE

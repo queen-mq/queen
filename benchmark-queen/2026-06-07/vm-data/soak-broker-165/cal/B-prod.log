@@ -1,0 +1,20 @@
+{"role":"producer","event":"start","queues":["bench-cal-B"],"queueCount":1,"numWorkers":3,"conns":100,"duration":90,"maxPartition":1000,"msgsPerPush":100,"timestamp":"2026-06-04T10:47:07.789Z"}
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 165805,
+  "totalMessages": 16580500,
+  "reqPerSec": 1842,
+  "msgPerSec": 184200,
+  "latency": {
+    "p50": 170,
+    "p90": 219,
+    "p99": 395.3333333333333,
+    "avg": 163.95000000000002,
+    "max": 2069
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 90
+}

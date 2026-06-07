@@ -1,0 +1,15 @@
+[2026-06-07T07:34:36Z] =============================================
+[2026-06-07T07:34:36Z] CG MASTER START — 2 tests on image=pushser, 300s each
+[2026-06-07T07:34:36Z] estimated wall time: 32 min
+[2026-06-07T07:34:36Z] =============================================
+[2026-06-07T07:34:36Z] >>> RUN bp-10-cg5 (mp=1000 msgs=10 prod=1x50 cons=1x50*5cg cb=100)
+run_cg_master.sh: line 26: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED bp-10-cg5
+[2026-06-07T07:34:36Z] <<< END bp-10-cg5
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] >>> RUN bp-10-cg10 (mp=1000 msgs=10 prod=1x50 cons=1x50*10cg cb=100)
+run_cg_master.sh: line 26: /root/bench-runs/run_test_v3.sh: Permission denied
+[2026-06-07T07:34:36Z] FAILED bp-10-cg10
+[2026-06-07T07:34:36Z] <<< END bp-10-cg10
+[2026-06-07T07:34:36Z] ---
+[2026-06-07T07:34:36Z] CG MASTER COMPLETE

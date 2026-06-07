@@ -1,0 +1,20 @@
+{"role":"consumer","event":"start","queues":["bench-cal-C"],"queueCount":1,"consumerGroup":null,"numWorkers":3,"conns":100,"duration":90,"batchSize":100,"timestamp":"2026-06-04T10:48:43.115Z"}
+{
+  "role": "consumer",
+  "event": "result",
+  "consumerGroup": null,
+  "totalRequests": 100395,
+  "reqPerSec": 1116,
+  "maxMsgPerSecCeiling": 111600,
+  "latency": {
+    "p50": 100.33333333333333,
+    "p90": 447.3333333333333,
+    "p99": 3386,
+    "avg": 265.79333333333335,
+    "max": 9898
+  },
+  "errors": 9,
+  "non2xx": 0,
+  "timeouts": 9,
+  "durationSec": 90
+}

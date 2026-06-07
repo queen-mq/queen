@@ -1,0 +1,14 @@
+{
+  "testName": "cg10-0.15.5",
+  "queenImageTag": "0.15.5",
+  "queueNames": "bench-cg10-0.15.5",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 10,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 10, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 500, "batch": 100, "consumerGroupCount": 10},
+  "durationSec": 240,
+  "startTime": "2026-06-04T08:01:13.000Z",
+  "endTime": "2026-06-04T08:05:55.000Z"
+}

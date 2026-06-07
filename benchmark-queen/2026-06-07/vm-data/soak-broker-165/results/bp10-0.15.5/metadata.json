@@ -1,0 +1,14 @@
+{
+  "testName": "bp10-0.15.5",
+  "queenImageTag": "0.15.5",
+  "queueNames": "bench-bp10-0.15.5",
+  "queueCount": 1,
+  "maxPartition": 1000,
+  "partitionCount": 1001,
+  "msgsPerPush": 10,
+  "producer": {"workers": 1, "connectionsPerWorker": 50, "totalConnections": 50},
+  "consumer": {"processes": 1, "workersPerProcess": 1, "connectionsPerWorker": 50, "totalConnections": 50, "batch": 100, "consumerGroupCount": 0},
+  "durationSec": 240,
+  "startTime": "2026-06-04T07:45:58.000Z",
+  "endTime": "2026-06-04T07:50:40.000Z"
+}

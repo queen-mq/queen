@@ -1,0 +1,20 @@
+{"role":"producer","event":"start","queues":["bench-cg10-0.15.5"],"queueCount":1,"numWorkers":1,"conns":50,"duration":240,"maxPartition":1000,"msgsPerPush":10,"timestamp":"2026-06-04T08:01:13.215Z"}
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 435888,
+  "totalMessages": 4358880,
+  "reqPerSec": 1816,
+  "msgPerSec": 18160,
+  "latency": {
+    "p50": 23,
+    "p90": 45,
+    "p99": 74,
+    "avg": 27.07,
+    "max": 593
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 240
+}

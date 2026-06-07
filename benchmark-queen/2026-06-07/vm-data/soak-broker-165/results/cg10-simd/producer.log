@@ -1,0 +1,20 @@
+{"role":"producer","event":"start","queues":["bench-cg10-simd"],"queueCount":1,"numWorkers":1,"conns":50,"duration":240,"maxPartition":1000,"msgsPerPush":10,"timestamp":"2026-06-04T08:21:30.156Z"}
+{
+  "role": "producer",
+  "event": "result",
+  "totalRequests": 621915,
+  "totalMessages": 6219150,
+  "reqPerSec": 2592,
+  "msgPerSec": 25920,
+  "latency": {
+    "p50": 17,
+    "p90": 26,
+    "p99": 49,
+    "avg": 18.82,
+    "max": 642
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 240
+}

@@ -1,0 +1,215 @@
+[2026-06-07T09:12:18Z] =============================================
+[2026-06-07T09:12:18Z] MASTER START — 10 tests, 300s each
+[2026-06-07T09:12:18Z] estimated wall time: 160 min
+[2026-06-07T09:12:18Z] =============================================
+[2026-06-07T09:12:18Z] >>> RUN hi-part-10 (mp=10 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+[2026-06-07T09:12:18Z] [hi-part-10] === START test=hi-part-10 image=pushser maxPart=10 batch=1 dur=300s prod=5x100 cons=2x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:12:18Z] [hi-part-10] cleanup: stopping containers
+[2026-06-07T09:12:18Z] [hi-part-10] starting postgres
+[2026-06-07T09:12:18Z] [hi-part-10] waiting for postgres
+[2026-06-07T09:12:20Z] [hi-part-10]   postgres ready (after 3s)
+[2026-06-07T09:12:20Z] [hi-part-10] starting queen
+[2026-06-07T09:12:20Z] [hi-part-10] waiting for queen
+[2026-06-07T09:12:21Z] [hi-part-10]   queen ready (after 2s)
+[2026-06-07T09:12:26Z] [hi-part-10] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:12:26Z] [hi-part-10] producer pid=43556 consumer pids=43557 (n=1), waiting 300s
+[2026-06-07T09:13:29Z] [hi-part-10]   +1min postgres=329.75%/1.874GiB / 62.79GiB queen=541.92%/35.73MiB / 62.79GiB
+[2026-06-07T09:14:32Z] [hi-part-10]   +2min postgres=275.73%/2.615GiB / 62.79GiB queen=478.83%/35.95MiB / 62.79GiB
+[2026-06-07T09:15:35Z] [hi-part-10]   +3min postgres=271.82%/3.325GiB / 62.79GiB queen=523.63%/36.43MiB / 62.79GiB
+[2026-06-07T09:16:38Z] [hi-part-10]   +4min postgres=302.37%/4.056GiB / 62.79GiB queen=485.08%/36.86MiB / 62.79GiB
+[2026-06-07T09:17:41Z] [hi-part-10]   +5min postgres=0.56%/4.638GiB / 62.79GiB queen=0.42%/34.36MiB / 62.79GiB
+[2026-06-07T09:17:41Z] [hi-part-10] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T09:18:16Z] [hi-part-10] collecting metrics
+[2026-06-07T09:18:19Z] [hi-part-10] === DONE test=hi-part-10 ===
+[2026-06-07T09:18:19Z] <<< END hi-part-10
+[2026-06-07T09:18:19Z] ---
+[2026-06-07T09:18:19Z] >>> RUN hi-part-100 (mp=100 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+[2026-06-07T09:18:19Z] [hi-part-100] === START test=hi-part-100 image=pushser maxPart=100 batch=1 dur=300s prod=5x100 cons=2x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:18:19Z] [hi-part-100] cleanup: stopping containers
+[2026-06-07T09:18:24Z] [hi-part-100] starting postgres
+[2026-06-07T09:18:24Z] [hi-part-100] waiting for postgres
+[2026-06-07T09:18:26Z] [hi-part-100]   postgres ready (after 3s)
+[2026-06-07T09:18:26Z] [hi-part-100] starting queen
+[2026-06-07T09:18:27Z] [hi-part-100] waiting for queen
+[2026-06-07T09:18:28Z] [hi-part-100]   queen ready (after 2s)
+[2026-06-07T09:18:33Z] [hi-part-100] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:18:33Z] [hi-part-100] producer pid=45074 consumer pids=45075 (n=1), waiting 300s
+[2026-06-07T09:19:36Z] [hi-part-100]   +1min postgres=887.85%/2.291GiB / 62.79GiB queen=630.49%/42.29MiB / 62.79GiB
+[2026-06-07T09:20:39Z] [hi-part-100]   +2min postgres=882.91%/3.354GiB / 62.79GiB queen=605.36%/43.44MiB / 62.79GiB
+[2026-06-07T09:21:42Z] [hi-part-100]   +3min postgres=874.60%/4.402GiB / 62.79GiB queen=740.70%/43.43MiB / 62.79GiB
+[2026-06-07T09:22:45Z] [hi-part-100]   +4min postgres=948.61%/5.505GiB / 62.79GiB queen=755.43%/42.96MiB / 62.79GiB
+[2026-06-07T09:23:48Z] [hi-part-100]   +5min postgres=0.06%/6.342GiB / 62.79GiB queen=0.39%/41.22MiB / 62.79GiB
+[2026-06-07T09:23:48Z] [hi-part-100] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T09:24:23Z] [hi-part-100] collecting metrics
+[2026-06-07T09:24:25Z] [hi-part-100] === DONE test=hi-part-100 ===
+[2026-06-07T09:24:25Z] <<< END hi-part-100
+[2026-06-07T09:24:25Z] ---
+[2026-06-07T09:24:25Z] >>> RUN hi-part-1000 (mp=1000 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+[2026-06-07T09:24:25Z] [hi-part-1000] === START test=hi-part-1000 image=pushser maxPart=1000 batch=1 dur=300s prod=5x100 cons=2x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:24:25Z] [hi-part-1000] cleanup: stopping containers
+[2026-06-07T09:24:33Z] [hi-part-1000] starting postgres
+[2026-06-07T09:24:33Z] [hi-part-1000] waiting for postgres
+[2026-06-07T09:24:35Z] [hi-part-1000]   postgres ready (after 3s)
+[2026-06-07T09:24:35Z] [hi-part-1000] starting queen
+[2026-06-07T09:24:36Z] [hi-part-1000] waiting for queen
+[2026-06-07T09:24:37Z] [hi-part-1000]   queen ready (after 2s)
+[2026-06-07T09:24:42Z] [hi-part-1000] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:24:42Z] [hi-part-1000] producer pid=46585 consumer pids=46586 (n=1), waiting 300s
+[2026-06-07T09:25:45Z] [hi-part-1000]   +1min postgres=866.26%/2.236GiB / 62.79GiB queen=737.41%/43.12MiB / 62.79GiB
+[2026-06-07T09:26:48Z] [hi-part-1000]   +2min postgres=856.31%/3.314GiB / 62.79GiB queen=715.07%/46.64MiB / 62.79GiB
+[2026-06-07T09:27:51Z] [hi-part-1000]   +3min postgres=880.78%/4.344GiB / 62.79GiB queen=710.88%/49.01MiB / 62.79GiB
+[2026-06-07T09:28:54Z] [hi-part-1000]   +4min postgres=1035.37%/5.397GiB / 62.79GiB queen=730.87%/50.8MiB / 62.79GiB
+[2026-06-07T09:29:57Z] [hi-part-1000]   +5min postgres=0.60%/6.238GiB / 62.79GiB queen=0.38%/47.69MiB / 62.79GiB
+[2026-06-07T09:29:57Z] [hi-part-1000] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T09:30:32Z] [hi-part-1000] collecting metrics
+[2026-06-07T09:30:34Z] [hi-part-1000] === DONE test=hi-part-1000 ===
+[2026-06-07T09:30:34Z] <<< END hi-part-1000
+[2026-06-07T09:30:34Z] ---
+[2026-06-07T09:30:34Z] >>> RUN hi-part-10000 (mp=10000 msgs=1 prod=5x100 cons=2x50 cb=100 qc=1)
+[2026-06-07T09:30:34Z] [hi-part-10000] === START test=hi-part-10000 image=pushser maxPart=10000 batch=1 dur=300s prod=5x100 cons=2x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:30:34Z] [hi-part-10000] cleanup: stopping containers
+[2026-06-07T09:30:42Z] [hi-part-10000] starting postgres
+[2026-06-07T09:30:42Z] [hi-part-10000] waiting for postgres
+[2026-06-07T09:30:44Z] [hi-part-10000]   postgres ready (after 3s)
+[2026-06-07T09:30:44Z] [hi-part-10000] starting queen
+[2026-06-07T09:30:44Z] [hi-part-10000] waiting for queen
+[2026-06-07T09:30:45Z] [hi-part-10000]   queen ready (after 2s)
+[2026-06-07T09:30:50Z] [hi-part-10000] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:30:50Z] [hi-part-10000] producer pid=48156 consumer pids=48157 (n=1), waiting 300s
+[2026-06-07T09:31:54Z] [hi-part-10000]   +1min postgres=1017.09%/2.094GiB / 62.79GiB queen=683.19%/47.04MiB / 62.79GiB
+[2026-06-07T09:32:57Z] [hi-part-10000]   +2min postgres=1053.85%/3.134GiB / 62.79GiB queen=673.71%/51.46MiB / 62.79GiB
+[2026-06-07T09:34:00Z] [hi-part-10000]   +3min postgres=1071.83%/4.153GiB / 62.79GiB queen=668.80%/52.79MiB / 62.79GiB
+[2026-06-07T09:35:03Z] [hi-part-10000]   +4min postgres=1127.94%/5.161GiB / 62.79GiB queen=671.16%/59.98MiB / 62.79GiB
+[2026-06-07T09:36:06Z] [hi-part-10000]   +5min postgres=0.67%/6.147GiB / 62.79GiB queen=0.39%/52.81MiB / 62.79GiB
+[2026-06-07T09:36:06Z] [hi-part-10000] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T09:36:41Z] [hi-part-10000] collecting metrics
+[2026-06-07T09:36:43Z] [hi-part-10000] === DONE test=hi-part-10000 ===
+[2026-06-07T09:36:43Z] <<< END hi-part-10000
+[2026-06-07T09:36:43Z] ---
+[2026-06-07T09:36:43Z] >>> RUN bp-1 (mp=1000 msgs=1 prod=1x50 cons=1x50 cb=100 qc=1)
+[2026-06-07T09:36:43Z] [bp-1] === START test=bp-1 image=pushser maxPart=1000 batch=1 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:36:43Z] [bp-1] cleanup: stopping containers
+[2026-06-07T09:36:51Z] [bp-1] starting postgres
+[2026-06-07T09:36:51Z] [bp-1] waiting for postgres
+[2026-06-07T09:36:54Z] [bp-1]   postgres ready (after 3s)
+[2026-06-07T09:36:54Z] [bp-1] starting queen
+[2026-06-07T09:36:54Z] [bp-1] waiting for queen
+[2026-06-07T09:36:55Z] [bp-1]   queen ready (after 2s)
+[2026-06-07T09:37:00Z] [bp-1] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:37:00Z] [bp-1] producer pid=49600 consumer pids=49601 (n=1), waiting 300s
+[2026-06-07T09:38:03Z] [bp-1]   +1min postgres=924.60%/1.714GiB / 62.79GiB queen=429.76%/26.88MiB / 62.79GiB
+[2026-06-07T09:39:06Z] [bp-1]   +2min postgres=931.41%/2.291GiB / 62.79GiB queen=423.74%/29.65MiB / 62.79GiB
+[2026-06-07T09:40:09Z] [bp-1]   +3min postgres=957.94%/2.859GiB / 62.79GiB queen=411.24%/29.77MiB / 62.79GiB
+[2026-06-07T09:41:12Z] [bp-1]   +4min postgres=945.96%/3.411GiB / 62.79GiB queen=428.58%/33.14MiB / 62.79GiB
+[2026-06-07T09:42:15Z] [bp-1]   +5min postgres=0.54%/3.854GiB / 62.79GiB queen=0.36%/32.36MiB / 62.79GiB
+[2026-06-07T09:42:15Z] [bp-1] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T09:42:50Z] [bp-1] collecting metrics
+[2026-06-07T09:42:52Z] [bp-1] === DONE test=bp-1 ===
+[2026-06-07T09:42:52Z] <<< END bp-1
+[2026-06-07T09:42:52Z] ---
+[2026-06-07T09:42:52Z] >>> RUN bp-10 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=1)
+[2026-06-07T09:42:52Z] [bp-10] === START test=bp-10 image=pushser maxPart=1000 batch=10 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:42:52Z] [bp-10] cleanup: stopping containers
+[2026-06-07T09:42:57Z] [bp-10] starting postgres
+[2026-06-07T09:42:57Z] [bp-10] waiting for postgres
+[2026-06-07T09:42:59Z] [bp-10]   postgres ready (after 3s)
+[2026-06-07T09:42:59Z] [bp-10] starting queen
+[2026-06-07T09:43:00Z] [bp-10] waiting for queen
+[2026-06-07T09:43:01Z] [bp-10]   queen ready (after 2s)
+[2026-06-07T09:43:06Z] [bp-10] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:43:06Z] [bp-10] producer pid=50981 consumer pids=50982 (n=1), waiting 300s
+[2026-06-07T09:44:09Z] [bp-10]   +1min postgres=1103.83%/3.782GiB / 62.79GiB queen=283.26%/41.02MiB / 62.79GiB
+[2026-06-07T09:45:12Z] [bp-10]   +2min postgres=1145.65%/6.485GiB / 62.79GiB queen=279.34%/41.64MiB / 62.79GiB
+[2026-06-07T09:46:15Z] [bp-10]   +3min postgres=1025.24%/8.993GiB / 62.79GiB queen=219.15%/43.04MiB / 62.79GiB
+[2026-06-07T09:47:18Z] [bp-10]   +4min postgres=1050.79%/11.6GiB / 62.79GiB queen=228.76%/45.57MiB / 62.79GiB
+[2026-06-07T09:48:21Z] [bp-10]   +5min postgres=0.57%/13.54GiB / 62.79GiB queen=0.34%/45.76MiB / 62.79GiB
+[2026-06-07T09:48:21Z] [bp-10] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T09:48:56Z] [bp-10] collecting metrics
+[2026-06-07T09:48:58Z] [bp-10] === DONE test=bp-10 ===
+[2026-06-07T09:48:58Z] <<< END bp-10
+[2026-06-07T09:48:58Z] ---
+[2026-06-07T09:48:58Z] >>> RUN bp-100 (mp=1000 msgs=100 prod=1x50 cons=1x50 cb=100 qc=1)
+[2026-06-07T09:48:58Z] [bp-100] === START test=bp-100 image=pushser maxPart=1000 batch=100 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:48:58Z] [bp-100] cleanup: stopping containers
+[2026-06-07T09:49:10Z] [bp-100] starting postgres
+[2026-06-07T09:49:10Z] [bp-100] waiting for postgres
+[2026-06-07T09:49:13Z] [bp-100]   postgres ready (after 3s)
+[2026-06-07T09:49:13Z] [bp-100] starting queen
+[2026-06-07T09:49:13Z] [bp-100] waiting for queen
+[2026-06-07T09:49:14Z] [bp-100]   queen ready (after 2s)
+[2026-06-07T09:49:19Z] [bp-100] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:49:19Z] [bp-100] producer pid=52353 consumer pids=52354 (n=1), waiting 300s
+[2026-06-07T09:50:22Z] [bp-100]   +1min postgres=804.01%/6.326GiB / 62.79GiB queen=107.88%/71.9MiB / 62.79GiB
+[2026-06-07T09:51:25Z] [bp-100]   +2min postgres=1393.39%/11.11GiB / 62.79GiB queen=103.97%/72.29MiB / 62.79GiB
+[2026-06-07T09:52:28Z] [bp-100]   +3min postgres=1606.01%/16.13GiB / 62.79GiB queen=111.98%/73.39MiB / 62.79GiB
+[2026-06-07T09:53:31Z] [bp-100]   +4min postgres=1817.70%/21.16GiB / 62.79GiB queen=117.33%/74.5MiB / 62.79GiB
+[2026-06-07T09:54:34Z] [bp-100]   +5min postgres=0.56%/25.03GiB / 62.79GiB queen=0.37%/73.41MiB / 62.79GiB
+[2026-06-07T09:54:34Z] [bp-100] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T09:55:09Z] [bp-100] collecting metrics
+[2026-06-07T09:55:11Z] [bp-100] === DONE test=bp-100 ===
+[2026-06-07T09:55:11Z] <<< END bp-100
+[2026-06-07T09:55:11Z] ---
+[2026-06-07T09:55:11Z] >>> RUN q-1 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=1)
+[2026-06-07T09:55:11Z] [q-1] === START test=q-1 image=pushser maxPart=1000 batch=10 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=1 cgCount=0 ===
+[2026-06-07T09:55:11Z] [q-1] cleanup: stopping containers
+[2026-06-07T09:55:27Z] [q-1] starting postgres
+[2026-06-07T09:55:28Z] [q-1] waiting for postgres
+[2026-06-07T09:55:30Z] [q-1]   postgres ready (after 3s)
+[2026-06-07T09:55:30Z] [q-1] starting queen
+[2026-06-07T09:55:30Z] [q-1] waiting for queen
+[2026-06-07T09:55:31Z] [q-1]   queen ready (after 2s)
+[2026-06-07T09:55:36Z] [q-1] settle done, launching producer/consumer (queues=1)
+[2026-06-07T09:55:36Z] [q-1] producer pid=53743 consumer pids=53744 (n=1), waiting 300s
+[2026-06-07T09:56:39Z] [q-1]   +1min postgres=1157.88%/3.736GiB / 62.79GiB queen=277.73%/38.39MiB / 62.79GiB
+[2026-06-07T09:57:42Z] [q-1]   +2min postgres=535.83%/6.342GiB / 62.79GiB queen=254.16%/40.7MiB / 62.79GiB
+[2026-06-07T09:58:45Z] [q-1]   +3min postgres=1061.86%/8.826GiB / 62.79GiB queen=150.91%/43.8MiB / 62.79GiB
+[2026-06-07T09:59:48Z] [q-1]   +4min postgres=1168.28%/11.39GiB / 62.79GiB queen=236.84%/43.84MiB / 62.79GiB
+[2026-06-07T10:00:51Z] [q-1]   +5min postgres=0.07%/13.43GiB / 62.79GiB queen=0.38%/42.71MiB / 62.79GiB
+[2026-06-07T10:00:51Z] [q-1] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T10:01:26Z] [q-1] collecting metrics
+[2026-06-07T10:01:28Z] [q-1] === DONE test=q-1 ===
+[2026-06-07T10:01:28Z] <<< END q-1
+[2026-06-07T10:01:28Z] ---
+[2026-06-07T10:01:28Z] >>> RUN q-10 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=10)
+[2026-06-07T10:01:28Z] [q-10] === START test=q-10 image=pushser maxPart=1000 batch=10 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=10 cgCount=0 ===
+[2026-06-07T10:01:28Z] [q-10] cleanup: stopping containers
+[2026-06-07T10:01:40Z] [q-10] starting postgres
+[2026-06-07T10:01:41Z] [q-10] waiting for postgres
+[2026-06-07T10:01:43Z] [q-10]   postgres ready (after 3s)
+[2026-06-07T10:01:43Z] [q-10] starting queen
+[2026-06-07T10:01:43Z] [q-10] waiting for queen
+[2026-06-07T10:01:44Z] [q-10]   queen ready (after 2s)
+[2026-06-07T10:01:49Z] [q-10] settle done, launching producer/consumer (queues=10)
+[2026-06-07T10:01:49Z] [q-10] producer pid=55246 consumer pids=55247 (n=1), waiting 300s
+[2026-06-07T10:02:52Z] [q-10]   +1min postgres=1120.49%/3.719GiB / 62.79GiB queen=285.75%/40.12MiB / 62.79GiB
+[2026-06-07T10:03:55Z] [q-10]   +2min postgres=1109.12%/6.353GiB / 62.79GiB queen=240.37%/44.21MiB / 62.79GiB
+[2026-06-07T10:04:58Z] [q-10]   +3min postgres=675.13%/8.863GiB / 62.79GiB queen=216.50%/45.72MiB / 62.79GiB
+[2026-06-07T10:06:01Z] [q-10]   +4min postgres=1136.95%/11.36GiB / 62.79GiB queen=159.03%/47.1MiB / 62.79GiB
+[2026-06-07T10:07:04Z] [q-10]   +5min postgres=0.09%/13.71GiB / 62.79GiB queen=0.40%/44.97MiB / 62.79GiB
+[2026-06-07T10:07:04Z] [q-10] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T10:07:39Z] [q-10] collecting metrics
+[2026-06-07T10:07:41Z] [q-10] === DONE test=q-10 ===
+[2026-06-07T10:07:41Z] <<< END q-10
+[2026-06-07T10:07:41Z] ---
+[2026-06-07T10:07:41Z] >>> RUN q-100 (mp=1000 msgs=10 prod=1x50 cons=1x50 cb=100 qc=100)
+[2026-06-07T10:07:41Z] [q-100] === START test=q-100 image=pushser maxPart=1000 batch=10 dur=300s prod=1x50 cons=1x50 consBatch=100 queues=100 cgCount=0 ===
+[2026-06-07T10:07:41Z] [q-100] cleanup: stopping containers
+[2026-06-07T10:07:54Z] [q-100] starting postgres
+[2026-06-07T10:07:54Z] [q-100] waiting for postgres
+[2026-06-07T10:07:57Z] [q-100]   postgres ready (after 3s)
+[2026-06-07T10:07:57Z] [q-100] starting queen
+[2026-06-07T10:07:57Z] [q-100] waiting for queen
+[2026-06-07T10:07:58Z] [q-100]   queen ready (after 2s)
+[2026-06-07T10:08:03Z] [q-100] settle done, launching producer/consumer (queues=100)
+[2026-06-07T10:08:03Z] [q-100] producer pid=56638 consumer pids=56639 (n=1), waiting 300s
+[2026-06-07T10:09:06Z] [q-100]   +1min postgres=2.48%/1.079GiB / 62.79GiB queen=0.53%/17.48MiB / 62.79GiB
+[2026-06-07T10:10:09Z] [q-100]   +2min postgres=1194.76%/2.097GiB / 62.79GiB queen=238.91%/22.61MiB / 62.79GiB
+[2026-06-07T10:11:12Z] [q-100]   +3min postgres=995.43%/4.95GiB / 62.79GiB queen=241.85%/21.93MiB / 62.79GiB
+[2026-06-07T10:12:15Z] [q-100]   +4min postgres=1091.12%/7.821GiB / 62.79GiB queen=242.76%/28.77MiB / 62.79GiB
+[2026-06-07T10:13:18Z] [q-100]   +5min postgres=1163.47%/10.63GiB / 62.79GiB queen=239.70%/29.55MiB / 62.79GiB
+[2026-06-07T10:13:18Z] [q-100] duration elapsed, waiting 30s for clients to finalize
+[2026-06-07T10:13:53Z] [q-100] collecting metrics
+[2026-06-07T10:13:55Z] [q-100] === DONE test=q-100 ===
+[2026-06-07T10:13:55Z] <<< END q-100
+[2026-06-07T10:13:55Z] ---
+[2026-06-07T10:13:55Z] MASTER COMPLETE

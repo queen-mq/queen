@@ -1,0 +1,20 @@
+{"role":"consumer","event":"start","queues":["bench-bp-1"],"queueCount":1,"consumerGroup":null,"numWorkers":1,"conns":50,"duration":300,"batchSize":100,"timestamp":"2026-06-04T09:37:02.697Z"}
+{
+  "role": "consumer",
+  "event": "result",
+  "consumerGroup": null,
+  "totalRequests": 244370,
+  "reqPerSec": 815,
+  "maxMsgPerSecCeiling": 81500,
+  "latency": {
+    "p50": 11,
+    "p90": 133,
+    "p99": 361,
+    "avg": 60.87,
+    "max": 5292
+  },
+  "errors": 0,
+  "non2xx": 0,
+  "timeouts": 0,
+  "durationSec": 300
+}

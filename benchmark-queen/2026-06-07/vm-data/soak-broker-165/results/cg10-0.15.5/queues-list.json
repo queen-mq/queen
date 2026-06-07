@@ -1,0 +1,1 @@
+{"queues":[{"createdAt":"2026-06-04T08:01:13.230Z","id":"1406d278-313e-42ef-aba0-ca59ceb55a7d","messages":{"pending":237280,"processing":0,"total":4359580},"name":"bench-cg10-0.15.5","namespace":"","partitions":1002,"task":""}]}

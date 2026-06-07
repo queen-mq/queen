@@ -1,0 +1,1 @@
+{"role":"producer","event":"start","queues":["bench-bp-100-sustained"],"queueCount":1,"numWorkers":1,"conns":50,"duration":2700,"maxPartition":100,"msgsPerPush":100,"timestamp":"2026-06-04T14:27:57.709Z"}
