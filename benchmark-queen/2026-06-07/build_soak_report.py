@@ -485,3 +485,223 @@ out = os.path.join(BASE, "soak-report.html")
 with open(out, "w") as f:
     f.write(HTML)
 print(f"\nWROTE {out} ({os.path.getsize(out)/1024:.0f} KB), {len(CH)} charts -> {CHARTS}/")
+
+# ============ SITE (dark-theme) charts for docs/assets/soak ============
+import matplotlib as mpl
+SITE_DIR = os.path.abspath(os.path.join(BASE, "..", "..", "docs", "assets", "soak"))
+os.makedirs(SITE_DIR, exist_ok=True)
+BG = "#1d1d1f"
+DARK = {
+    "figure.facecolor": BG, "axes.facecolor": BG, "savefig.facecolor": BG,
+    "text.color": "#9a9a9a", "axes.labelcolor": "#9a9a9a", "axes.titlecolor": "#e6e6e6",
+    "xtick.color": "#6a6a6a", "ytick.color": "#6a6a6a",
+    "axes.edgecolor": "#26262a", "grid.color": "#26262a", "grid.alpha": 0.5,
+    "font.size": 12,
+}
+ICE, OK, EMBER, WARN, MUT = "#22d3ee", "#4ade80", "#fb7185", "#e6b450", "#9a9a9a"
+
+def site_fig():
+    fig, ax = plt.subplots(figsize=(10, 3.3))
+    ax.set_xlim(0, dur_h); ax.set_xlabel("elapsed (hours)")
+    for s in ("top", "right"): ax.spines[s].set_visible(False)
+    return fig, ax
+
+def site_save(fig, name):
+    fig.savefig(os.path.join(SITE_DIR, name), dpi=150, bbox_inches="tight", facecolor=BG)
+    plt.close(fig)
+
+with mpl.rc_context(DARK):
+    # throughput (push vs pop + 5-min mean)
+    fig, ax = site_fig()
+    ax.plot(L["t"], L["push"], color=ICE, lw=0.4, alpha=0.25)
+    ax.plot(L["t"], L["pop"], color=OK, lw=0.4, alpha=0.25)
+    ax.plot(L["t"], roll(L["push"], 30), color=ICE, lw=2, label="push/s")
+    ax.plot(L["t"], roll(L["pop"], 30), color=OK, lw=2, label="pop/s")
+    ax.set_ylim(0, None); ax.set_ylabel("msg/s")
+    ax.legend(loc="lower center", ncol=2, framealpha=0, labelcolor="#e6e6e6")
+    site_save(fig, "chart-throughput.png")
+
+    # broker memory (flat ~400 MiB)
+    fig, ax = site_fig()
+    ax.fill_between(M["t"], M["qmem"], color=ICE, alpha=0.12)
+    ax.plot(M["t"], M["qmem"], color=ICE, lw=1.6)
+    ax.set_ylim(0, max(520, M["qmem"].max() * 1.25)); ax.set_ylabel("broker RSS (MiB)")
+    site_save(fig, "chart-broker-mem.png")
+
+    # push-pop gap
+    fig, ax = site_fig()
+    ax.plot(L["t"], (L["tp"] - L["tpo"]) / 1000.0, color=WARN, lw=1.4)
+    ax.set_ylim(0, None); ax.set_ylabel("in-flight gap (thousands)")
+    site_save(fig, "chart-gap.png")
+
+    # CPU: broker vs postgres (cores)
+    fig, ax = site_fig()
+    ax.plot(M["t"], M["pcpu"], color=EMBER, lw=1, alpha=0.9, label="Postgres")
+    ax.plot(M["t"], M["qcpu"], color=ICE, lw=1, alpha=0.9, label="Queen broker")
+    ax.set_ylim(0, 32); ax.set_ylabel("CPU cores (of 32)")
+    ax.legend(loc="center right", framealpha=0, labelcolor="#e6e6e6")
+    site_save(fig, "chart-cpu.png")
+
+    # PG insert vs delete rate (retention keeps pace)
+    fig, ax = site_fig()
+    ax.plot(M["t_rate"], roll(M["ins_s"], 10) / 1000.0, color=ICE, lw=1.5, label="inserted/s")
+    ax.plot(M["t_rate"], roll(M["del_s"], 10) / 1000.0, color=EMBER, lw=1.5, label="deleted/s (retention)")
+    ax.set_ylim(0, None); ax.set_ylabel("rows/s (thousands)")
+    ax.legend(loc="lower center", ncol=2, framealpha=0, labelcolor="#e6e6e6")
+    site_save(fig, "chart-pg-rates.png")
+
+    # disk free
+    fig, ax = site_fig()
+    ax.fill_between(M["t"], M["disk"], color=EMBER, alpha=0.10)
+    ax.plot(M["t"], M["disk"], color=EMBER, lw=1.6)
+    ax.set_ylim(0, None); ax.set_ylabel("disk free (GB)")
+    site_save(fig, "chart-disk.png")
+
+print(f"WROTE 6 dark site charts -> {SITE_DIR}/")
+
+# ============ Single composite overview (dark) for README / sharing ============
+# Fusion metrics: HTTP requests/s (messages / client batch) vs Postgres commits/s
+# (xact_commit rate). Shows how the broker coalesces many requests into few PG commits.
+PUSH_BATCH, POP_BATCH = 10, 300
+req_s = avg_push / PUSH_BATCH + avg_pop / POP_BATCH
+_win = max((M["t"][-1] - M["t"][0]) * 3600, 1.0)
+commits_s = (M["xc"][-1] - M["xc"][0]) / _win
+ops_s = ((M["ins"][-1] - M["ins"][0]) + (M["dele"][-1] - M["dele"][0])) / _win
+req_per_commit = req_s / commits_s if commits_s else 0
+ops_per_commit = ops_s / commits_s if commits_s else 0
+print(f"fusion: req/s={req_s:.0f} commits/s={commits_s:.0f} req/commit={req_per_commit:.1f} ops/commit={ops_per_commit:.0f}")
+
+from matplotlib.lines import Line2D
+with mpl.rc_context(DARK):
+    fig, axs = plt.subplots(2, 2, figsize=(14, 9.8))
+    fig.patch.set_facecolor(BG)
+    (a_thr, a_cpu), (a_mem, a_disk) = axs
+    for ax in axs.flat:
+        ax.set_facecolor(BG)
+        for s in ("top", "right"): ax.spines[s].set_visible(False)
+        for s in ("left", "bottom"): ax.spines[s].set_color("#3a3b42")
+        ax.set_xlim(0, dur_h); ax.set_xlabel("elapsed (hours)")
+        ax.grid(True, which="major", color="#3a3b42", linewidth=0.8, alpha=0.85)
+        ax.set_axisbelow(True)
+        ax.tick_params(length=0)
+
+    # (1) push / pop / deletes — solid / dashed / dotted so the coincident lines stay readable
+    a_thr.plot(L["t"], roll(L["push"], 30) / 1000, color=ICE, lw=2.4, solid_capstyle="round", label="push", zorder=2)
+    a_thr.plot(L["t"], roll(L["pop"], 30) / 1000, color=OK, lw=1.9, ls=(0, (7, 5)), label="pop", zorder=3)
+    a_thr.plot(M["t_rate"], roll(M["del_s"], 10) / 1000, color=WARN, lw=2.0, ls=(0, (1, 3)), label="retention deletes", zorder=4)
+    a_thr.set_ylim(0, 150); a_thr.set_ylabel("k msg/s")
+    a_thr.set_title("Throughput — push, pop & deletes", color="#e6e6e6", fontsize=13, fontweight="bold", loc="left")
+    a_thr.legend(loc="lower center", ncol=3, framealpha=0, labelcolor="#e6e6e6", fontsize=9.5)
+
+    # (2) CPU cores
+    a_cpu.plot(M["t"], M["pcpu"], color=EMBER, lw=1, label="Postgres")
+    a_cpu.plot(M["t"], M["qcpu"], color=ICE, lw=1, label="Queen broker")
+    a_cpu.set_ylim(0, 32); a_cpu.set_ylabel("CPU cores (of 32)")
+    a_cpu.set_title("CPU", color="#e6e6e6", fontsize=13, fontweight="bold", loc="left")
+    a_cpu.legend(loc="center right", framealpha=0, labelcolor="#e6e6e6", fontsize=9.5)
+
+    # (3) memory — broker MiB (left) + Postgres GiB (right)
+    a_mem.fill_between(M["t"], M["qmem"], color=ICE, alpha=0.12)
+    a_mem.plot(M["t"], M["qmem"], color=ICE, lw=1.8, label="broker RSS (MiB)")
+    a_mem.set_ylim(0, max(560, M["qmem"].max() * 1.3)); a_mem.set_ylabel("broker RSS (MiB)", color=ICE)
+    a_mem.tick_params(axis="y", labelcolor=ICE)
+    a_mem.set_title("Memory", color="#e6e6e6", fontsize=13, fontweight="bold", loc="left")
+    a_mem2 = a_mem.twinx(); a_mem2.spines["top"].set_visible(False)
+    a_mem2.plot(M["t"], M["pmem"], color=EMBER, lw=1.5, label="Postgres RSS (GiB)")
+    a_mem2.set_ylim(0, max(40, M["pmem"].max() * 1.3)); a_mem2.set_ylabel("Postgres RSS (GiB)", color=EMBER)
+    a_mem2.tick_params(axis="y", labelcolor=EMBER); a_mem2.grid(False)
+    l1, lb1 = a_mem.get_legend_handles_labels(); l2, lb2 = a_mem2.get_legend_handles_labels()
+    a_mem.legend(l1 + l2, lb1 + lb2, loc="center right", framealpha=0, labelcolor="#e6e6e6", fontsize=9.5)
+
+    # (4) disk free
+    a_disk.fill_between(M["t"], M["disk"], color=EMBER, alpha=0.10)
+    a_disk.plot(M["t"], M["disk"], color=EMBER, lw=1.8)
+    a_disk.set_ylim(0, None); a_disk.set_ylabel("disk free (GB)")
+    a_disk.set_title("Disk free", color="#e6e6e6", fontsize=13, fontweight="bold", loc="left")
+
+    # header — title + KPI line + fusion line, with generous top padding
+    fig.suptitle("Queen 0.16 — 24-hour soak", color="#ffffff", fontsize=22, fontweight="bold", x=0.5, y=0.980)
+    sub = (f"{tot_push/1e9:.2f} billion messages    ·    ~{avg_push/1000:.0f}k msg/s sustained push & pop    ·    "
+           f"0 push errors    ·    broker flat ~{res['qmem_mean']:.0f} MiB    ·    Postgres ~{res['pcpu_mean']:.0f}/32 cores")
+    fig.text(0.5, 0.914, sub, ha="center", color="#b6bcc8", fontsize=11.5)
+    fusion = (f"broker fusion:   ~{req_s/1000:.1f}k HTTP req/s   →   ~{commits_s/1000:.2f}k Postgres commits/s"
+              f"      (≈{req_per_commit:.0f} requests  &  ≈{ops_per_commit:.0f} row writes per commit)")
+    fig.text(0.5, 0.880, fusion, ha="center", color=ICE, fontsize=11.5)
+    fig.add_artist(Line2D([0.05, 0.95], [0.858, 0.858], color="#33343b", lw=1.0,
+                          transform=fig.transFigure, solid_capstyle="round"))
+    fig.text(0.5, 0.012, "32 vCPU / 62 GiB host · PostgreSQL · pushser architecture · benchmark-queen/2026-06-07",
+             ha="center", color="#6a6a6a", fontsize=9)
+    fig.tight_layout(rect=[0, 0.02, 1, 0.84])
+    for p in (os.path.join(BASE, "soak-24h-overview.png"), os.path.join(SITE_DIR, "soak-24h-overview.png")):
+        fig.savefig(p, dpi=150, facecolor=BG)
+    plt.close(fig)
+print(f"WROTE composite overview -> {os.path.join(BASE, 'soak-24h-overview.png')} (+ docs copy)")
+
+# ============ Expanded 6-panel overview (dark) — separate file, leaves the 2x2 untouched ============
+with mpl.rc_context(DARK):
+    fig, axs = plt.subplots(3, 2, figsize=(14, 13.6))
+    fig.patch.set_facecolor(BG)
+    (a_thr, a_cum), (a_gap, a_cpu), (a_mem, a_disk) = axs
+    for ax in axs.flat:
+        ax.set_facecolor(BG)
+        for s in ("top", "right"): ax.spines[s].set_visible(False)
+        for s in ("left", "bottom"): ax.spines[s].set_color("#3a3b42")
+        ax.set_xlim(0, dur_h); ax.set_xlabel("elapsed (hours)")
+        ax.grid(True, which="major", color="#3a3b42", linewidth=0.8, alpha=0.85)
+        ax.set_axisbelow(True); ax.tick_params(length=0)
+
+    def ptitle(ax, t): ax.set_title(t, color="#e6e6e6", fontsize=13, fontweight="bold", loc="left")
+
+    # 1. throughput — push / pop / deletes
+    a_thr.plot(L["t"], roll(L["push"], 30) / 1000, color=ICE, lw=2.4, label="push", zorder=2)
+    a_thr.plot(L["t"], roll(L["pop"], 30) / 1000, color=OK, lw=1.9, ls=(0, (7, 5)), label="pop", zorder=3)
+    a_thr.plot(M["t_rate"], roll(M["del_s"], 10) / 1000, color=WARN, lw=2.0, ls=(0, (1, 3)), label="retention deletes", zorder=4)
+    a_thr.set_ylim(0, 150); a_thr.set_ylabel("k msg/s"); ptitle(a_thr, "Throughput — push, pop & deletes")
+    a_thr.legend(loc="lower center", ncol=3, framealpha=0, labelcolor="#e6e6e6", fontsize=9.5)
+
+    # 2. cumulative messages → 10.4B
+    a_cum.plot(L["t"], L["tp"] / 1e9, color=ICE, lw=2.2, label="pushed")
+    a_cum.plot(L["t"], L["tpo"] / 1e9, color=OK, lw=1.8, ls=(0, (6, 4)), label="popped")
+    a_cum.set_ylim(0, None); a_cum.set_ylabel("messages (billions)"); ptitle(a_cum, "Cumulative messages")
+    a_cum.legend(loc="upper left", framealpha=0, labelcolor="#e6e6e6", fontsize=9.5)
+
+    # 3. push – pop gap (in-flight)
+    a_gap.plot(L["t"], (L["tp"] - L["tpo"]) / 1000.0, color=WARN, lw=1.5)
+    a_gap.set_ylim(0, None); a_gap.set_ylabel("in-flight gap (thousands)"); ptitle(a_gap, "Push – pop gap (in-flight backlog)")
+
+    # 4. CPU cores
+    a_cpu.plot(M["t"], M["pcpu"], color=EMBER, lw=1, label="Postgres")
+    a_cpu.plot(M["t"], M["qcpu"], color=ICE, lw=1, label="Queen broker")
+    a_cpu.set_ylim(0, 32); a_cpu.set_ylabel("CPU cores (of 32)"); ptitle(a_cpu, "CPU")
+    a_cpu.legend(loc="center right", framealpha=0, labelcolor="#e6e6e6", fontsize=9.5)
+
+    # 5. memory — broker MiB (left) + Postgres GiB (right)
+    a_mem.fill_between(M["t"], M["qmem"], color=ICE, alpha=0.12)
+    a_mem.plot(M["t"], M["qmem"], color=ICE, lw=1.8, label="broker RSS (MiB)")
+    a_mem.set_ylim(0, max(560, M["qmem"].max() * 1.3)); a_mem.set_ylabel("broker RSS (MiB)", color=ICE)
+    a_mem.tick_params(axis="y", labelcolor=ICE); ptitle(a_mem, "Memory")
+    a_mem2 = a_mem.twinx(); a_mem2.spines["top"].set_visible(False); a_mem2.grid(False)
+    a_mem2.plot(M["t"], M["pmem"], color=EMBER, lw=1.5, label="Postgres RSS (GiB)")
+    a_mem2.set_ylim(0, max(40, M["pmem"].max() * 1.3)); a_mem2.set_ylabel("Postgres RSS (GiB)", color=EMBER)
+    a_mem2.tick_params(axis="y", labelcolor=EMBER, length=0)
+    lh1, ll1 = a_mem.get_legend_handles_labels(); lh2, ll2 = a_mem2.get_legend_handles_labels()
+    a_mem.legend(lh1 + lh2, ll1 + ll2, loc="center right", framealpha=0, labelcolor="#e6e6e6", fontsize=9.5)
+
+    # 6. disk free
+    a_disk.fill_between(M["t"], M["disk"], color=EMBER, alpha=0.10)
+    a_disk.plot(M["t"], M["disk"], color=EMBER, lw=1.8)
+    a_disk.set_ylim(0, None); a_disk.set_ylabel("disk free (GB)"); ptitle(a_disk, "Disk free")
+
+    # header — reuse the same title / KPI / fusion lines + divider
+    fig.suptitle("Queen 0.16 — 24-hour soak", color="#ffffff", fontsize=22, fontweight="bold", x=0.5, y=0.975)
+    fig.text(0.5, 0.940, sub, ha="center", color="#b6bcc8", fontsize=11.5)
+    fig.text(0.5, 0.920, fusion, ha="center", color=ICE, fontsize=11.5)
+    fig.add_artist(Line2D([0.05, 0.95], [0.906, 0.906], color="#33343b", lw=1.0,
+                          transform=fig.transFigure, solid_capstyle="round"))
+    fig.text(0.5, 0.010, "32 vCPU / 62 GiB host · PostgreSQL · pushser architecture · benchmark-queen/2026-06-07",
+             ha="center", color="#6a6a6a", fontsize=9)
+    fig.tight_layout(rect=[0, 0.014, 1, 0.892])
+    for p in (os.path.join(BASE, "soak-24h-overview-6panel.png"), os.path.join(SITE_DIR, "soak-24h-overview-6panel.png")):
+        fig.savefig(p, dpi=150, facecolor=BG)
+    plt.close(fig)
+print(f"WROTE 6-panel overview -> {os.path.join(BASE, 'soak-24h-overview-6panel.png')} (+ docs copy)")

@@ -108,7 +108,7 @@
 
     <div class="tour-meta">
       <span><strong>10,000+</strong> partitions normal</span><span class="dot"></span>
-      <span><strong>104k msg/s</strong> peak push (batch=100)</span><span class="dot"></span>
+      <span><strong>172k msg/s</strong> peak push (batch=100)</span><span class="dot"></span>
       <span><strong>0</strong> rebalance protocol</span>
     </div>
   </div>
@@ -245,14 +245,14 @@
       When PostgreSQL becomes unreachable, pushes don't fail. The broker writes them
       to a local <code>FILE_BUFFER</code> on disk and acknowledges to the client.
       When PostgreSQL recovers, a background scanner streams the buffered events back
-      into the database in order. Verified across <strong>1.6&nbsp;billion</strong>
-      events in our benchmark suite with zero loss and zero duplicates.
+      into the database in order. Verified across a 24-hour soak of
+      <strong>10.4&nbsp;billion</strong> messages (plus 1.6 billion across the suite) with zero loss and zero duplicates.
     </p>
 
     <figure class="pipeline-figure">
       <img src="assets/queen-failover.svg" alt="Three-phase loop. Phase 1: producers push to broker, broker commits to PostgreSQL, status 'all healthy'. Phase 2: PostgreSQL becomes unreachable, the PG card border flashes red, broker spills new pushes to the FILE_BUFFER on local disk, buffered counter grows from 0 to 312, status 'postgres unreachable, spilling pushes to local FILE_BUFFER, clients still get HTTP 201'. Phase 3: PostgreSQL recovers, the broker drains the buffer back into the database in order, status 'postgres recovered, draining file buffer back to db'. The 'messages lost' counter remains 0 throughout." />
       <figcaption>
-        <strong>Push path always succeeds &middot; order preserved across recovery &middot; verified across 1.6B events.</strong>
+        <strong>Push path always succeeds &middot; order preserved across recovery &middot; verified across 10.4B+ messages.</strong>
         See <a href="concepts.html#failover">disk failover</a>.
       </figcaption>
     </figure>

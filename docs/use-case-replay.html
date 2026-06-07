@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Subscription replay — Queen MQ Use Cases</title>
+<title>Subscription replay: Queen MQ Use Cases</title>
 <meta name="description" content="Rewind a brand-new consumer group to any timestamp and reprocess. Your production consumers never notice. Zero coordination, just Queen.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
@@ -109,11 +109,11 @@
 
 <span class="label-xs">Recipe · ops</span>
 <h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
-  Subscription replay — rewind a stream to any timestamp.
+  Subscription replay, rewind a stream to any timestamp.
 </h1>
 <p class="muted">
   Your consumer had a bug last Tuesday. You shipped a fix today. You need
-  to reprocess every message since the bug went live — without disturbing
+  to reprocess every message since the bug went live, without disturbing
   the production consumer that's still running. With Queen this is one
   line of configuration: spawn a new consumer group with
   <code>subscriptionFrom</code> set to the moment the bug went live. The
@@ -183,18 +183,18 @@
   <tbody>
     <tr>
       <td>SQS</td>
-      <td>No — messages are deleted on ack</td>
-      <td>—</td>
+      <td>No, messages are deleted on ack</td>
+      <td>, </td>
     </tr>
     <tr>
       <td>Kafka</td>
       <td>Yes (new consumer group + seek)</td>
-      <td>Possibly — seek on the same group disturbs production</td>
+      <td>Possibly, seek on the same group disturbs production</td>
     </tr>
     <tr>
       <td>RabbitMQ</td>
-      <td>No — messages are gone after consumption</td>
-      <td>—</td>
+      <td>No, messages are gone after consumption</td>
+      <td>, </td>
     </tr>
     <tr>
       <td>Pulsar</td>
@@ -203,8 +203,8 @@
     </tr>
     <tr>
       <td><strong>Queen</strong></td>
-      <td><strong>Yes</strong> — new CG with <code>subscriptionFrom</code></td>
-      <td><strong>Zero</strong> — each CG has its own offset row in PG</td>
+      <td><strong>Yes</strong>, new CG with <code>subscriptionFrom</code></td>
+      <td><strong>Zero</strong>, each CG has its own offset row in PG</td>
     </tr>
   </tbody>
 </table>
@@ -217,7 +217,7 @@
   <code>(partition_id, consumer_group)</code>. To replay, you spawn a
   brand-new consumer group that's never been seen before. The first pop
   registers it in <code>queen.consumer_groups_metadata</code> with the
-  subscription anchor — either <code>'all'</code>, <code>'new'</code>, or
+  subscription anchor, either <code>'all'</code>, <code>'new'</code>, or
   a specific ISO timestamp.
 </p>
 
@@ -282,7 +282,7 @@ await q.queue(QUEUE).config({
   completedRetentionSeconds: 600
 }).create()
 
-// Production consumer — sees every message ever pushed.
+// Production consumer - sees every message ever pushed.
 const ac = new AbortController()
 ;(async () =&gt; {
   await q.queue(QUEUE)
@@ -318,7 +318,7 @@ const reprocessAc = new AbortController()
     .group('reprocess')
     .batch(50)
     .each()
-    .subscriptionFrom(deployAt)   // ★ ISO timestamp — picks up the 'timestamp' mode
+    .subscriptionFrom(deployAt)   // ISO timestamp - picks up the 'timestamp' mode
     .partitions(8)
     .consume(async (msg) =&gt; {
       // re-run your fixed pipeline for this message
@@ -333,7 +333,7 @@ const reprocessAc = new AbortController()
 
 <p class="muted">
   Note that <code>'prod'</code> and <code>'reprocess'</code> consume the
-  same queue, on the same broker, against the same database — there is no
+  same queue, on the same broker, against the same database, there is no
   contention or impact between them. The same pattern works at any
   scale: the reprocess CG can be a separate Pod, a separate cluster, a
   notebook, or a CLI invocation.
@@ -397,7 +397,7 @@ await q.admin.deleteConsumerGroupForQueue(
 
 <p class="muted">
   The mode is locked in on the consumer group's <strong>first pop</strong>.
-  Subsequent pops by the same CG honour the recorded anchor — they ignore
+  Subsequent pops by the same CG honour the recorded anchor, they ignore
   any <code>subscriptionMode</code> / <code>subscriptionFrom</code> you
   pass. To change the anchor, you either rename the CG, or delete it
   via the admin API (see §4) and let the next pop re-register it.
@@ -411,7 +411,7 @@ await q.admin.deleteConsumerGroupForQueue(
   <code>queen.partition_consumers</code> holding that CG's
   <code>last_consumed_id</code>. The pop stored procedure
   (<a href="https://github.com/queen-mq/queen/blob/master/lib/schema/procedures/002d_pop_unified_v4.sql"><code>pop_unified_batch_v4</code></a>)
-  filters by that row alone — no cross-CG read or write happens anywhere
+  filters by that row alone, no cross-CG read or write happens anywhere
   on the hot path.
 </p>
 
@@ -442,7 +442,7 @@ GROUP  BY consumer_group;</code></pre>
   <p>
     Once a consumer group has popped once, its anchor is fixed. Re-running
     your script with a different <code>subscriptionFrom</code> against the
-    same CG name does nothing — the recorded
+    same CG name does nothing, the recorded
     <code>subscription_timestamp</code> wins. Either rename the CG or
     delete it via <code>q.admin.deleteConsumerGroupForQueue(cg, queue, true)</code>.
   </p>
@@ -473,7 +473,7 @@ GROUP  BY consumer_group;</code></pre>
   <p>
     The rewound CG uses the exact same wildcard pop path
     (<code>maxPartitions</code>, lease, batch, etc.) as production. You
-    can run multiple parallel workers on a replay CG — Queen's
+    can run multiple parallel workers on a replay CG, Queen's
     per-partition lease guarantees no double-processing.
   </p>
 </div>

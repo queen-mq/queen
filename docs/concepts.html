@@ -199,7 +199,7 @@ await queen.queue('events').group('analytics').consume(analyticsHandler)</code><
     <strong>Per-group offset, replay any timestamp.</strong>
     The live <code>agent-runner</code> group keeps consuming at the head while a new
     <code>report-fall-2024</code> group materialises at <code>subscriptionFrom: 2024-09-01</code>
-    and replays the historical window. PostgreSQL is the source of truth — there is no separate
+    and replays the historical window. PostgreSQL is the source of truth, there is no separate
     log retention to manage.
   </figcaption>
 </figure>
@@ -272,7 +272,7 @@ await queen.queue('events').group('analytics').consume(analyticsHandler)</code><
   <figcaption>
     <strong>Atomic across queues.</strong>
     The ack of the input and the push of the output are written in the same WAL record.
-    Either both commit, or neither does — no orphan output, no duplicate ack, no
+    Either both commit, or neither does, no orphan output, no duplicate ack, no
     separate outbox table.
   </figcaption>
 </figure>
@@ -335,7 +335,7 @@ await queen.queue('events').group('analytics').consume(analyticsHandler)</code><
     <strong>Push path always succeeds.</strong>
     When PG is unreachable, pushes spill to <code>FILE_BUFFER</code> on local disk and
     clients still get an HTTP 201. When PG recovers, a background scanner drains the
-    buffer back in order. Verified across 1.6B events with zero loss.
+    buffer back in order. Verified across 10.4B+ messages with zero loss.
   </figcaption>
 </figure>
 

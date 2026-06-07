@@ -29,7 +29,15 @@
 
 ---
 
-Queen MQ is a partitioned message queue backed by PostgreSQL, built with uWebSockets, libuv, and libpq async API. It features unlimited FIFO partitions that process independently, consumer groups with replay, transactional delivery, tracing, and ACID-guaranteed durability all in a single stateless binary alongside the Postgres you already run. Version 0.16.0's push-serialization architecture delivers **commit-ordered** messages under high concurrent push and uses SIMD (simdjson) JSON on the hot path, sustaining **~110–120k msg/s** on push and pop concurrently (**~190k** push-only) on a 32-core host with a broker RSS well under 100 MB. (0.14.0 reference figures: 104k msg/s push, 165k msg/s fan-out across 10 consumer groups.)
+Queen MQ is a partitioned message queue backed by PostgreSQL, built with uWebSockets, libuv, and libpq async API. It features unlimited FIFO partitions that process independently, consumer groups with replay, transactional delivery, tracing, and ACID-guaranteed durability all in a single stateless binary alongside the Postgres you already run. Version 0.16.0's push-serialization architecture delivers **commit-ordered** messages under high concurrent push and uses SIMD (simdjson) JSON on the hot path, sustaining **~110–120k msg/s** on push and pop concurrently (**~190k** push-only) on a 32-core host. A 24-hour soak sustained this rate over **10.4 billion messages with zero loss** at a flat ~400 MB broker. (0.14.0 reference figures: 104k msg/s push, 165k msg/s fan-out across 10 consumer groups.)
+
+<div align="center">
+
+<a href="https://queenmq.com/benchmarks-0.16-soak.html"><img src="benchmark-queen/2026-06-07/soak-24h-overview.png" alt="Queen 0.16 — 24-hour soak: 10.4 billion messages at ~119k msg/s balanced push and pop, zero loss, flat ~400 MB broker, Postgres ~21/32 cores" width="840" /></a>
+
+<sub><b>24-hour soak</b> · 10.4 billion messages · ~119k msg/s balanced push &amp; pop · zero loss · flat ~400 MB broker · fusion ~12.3k HTTP req/s → ~1.09k PG commits/s · <a href="https://queenmq.com/benchmarks-0.16-soak.html">full report →</a></sub>
+
+</div>
 
 See [examples/base.js](examples/base.js) for a complete (push, consume, transactionally ack and push to another queue) example. An experimental PostgreSQL extension version is also available at [pg_qpubsub](pg_qpubsub/README.md).
 
@@ -42,9 +50,9 @@ Perfect for:
 - **One ordered lane per entity, no preallocation** — 10,000 partitions cost index rows, not 10,000 commit-log files. A partition is created on first push; a slow consumer on one partition never stalls another.
 - **Transactional integration with PostgreSQL** — ACK and push in a single PG transaction.
 - **Fan-out with fairness** — consumer groups each get a full copy of every message; the adaptive engine keeps delivery fair across groups at sub-linear CPU cost.
-- **52 MB broker at 104k msg/s** — no JVM, no Erlang, no cluster to operate. One Docker container plus your existing Postgres.
+- **~70 MB broker at 172k msg/s peak; flat ~400 MB across a 24h / 10.4B-message soak** — no JVM, no Erlang, no cluster to operate. One Docker container plus your existing Postgres.
 - **Replay and DLQ** — rewind any consumer group to any timestamp; failed messages surface in a per-queue dead-letter queue automatically.
-- **Zero message loss, verified** — 1.6 billion events across the benchmark suite, zero lost, zero duplicates.
+- **Zero message loss, verified** — 10.4 billion messages in a 24-hour soak (plus 1.6 billion across the April suite), zero lost, zero duplicates.
 
 ## Quick Start
 
@@ -146,7 +154,7 @@ The repository is structured as follows:
 
 | Server Version | Description                                                                                                                     | Compatible Clients                                          |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| **0.16.0**     | **Push-serialization architecture + SIMD JSON.** New function-split libqueen engine cluster (3 shared engines — push/ack, pop, rest — decoupled from `NUM_WORKERS`, sized by per-function connection slots). Per-partition push serialization (in-memory in-flight gate + `pg_advisory_xact_lock` + `clock_timestamp()`) makes `messages.created_at` **commit-ordered**, eliminating the cursor-skip where a message could commit behind an already-advanced pop cursor under high concurrent push. Data-path concurrency (push/pop/ack) is now **static** (Vegas retained for auxiliary lanes), and `partition_lookup` maintenance is coalesced Nagle-style. Hot-path JSON is parsed and assembled with **simdjson** (nlohmann/json fallback), cutting broker CPU on push result fan-out. Balanced ~110–120k msg/s push & pop concurrently, ~190k push-only, on a 32-core host. | All ≥0.14.0 clients work unchanged — HTTP contract is identical; 0.16.0 SDKs are a version-aligned release |
+| **0.16.0**     | **Push-serialization architecture + SIMD JSON.** New function-split libqueen engine cluster (3 shared engines — push/ack, pop, rest — decoupled from `NUM_WORKERS`, sized by per-function connection slots). Per-partition push serialization (in-memory in-flight gate + `pg_advisory_xact_lock` + `clock_timestamp()`) makes `messages.created_at` **commit-ordered**, eliminating the cursor-skip where a message could commit behind an already-advanced pop cursor under high concurrent push. Data-path concurrency (push/pop/ack) is now **static** (Vegas retained for auxiliary lanes), and `partition_lookup` maintenance is coalesced Nagle-style. Hot-path JSON is parsed and assembled with **simdjson** (nlohmann/json fallback), cutting broker CPU on push result fan-out. Balanced ~110–120k msg/s push & pop concurrently, ~190k push-only, on a 32-core host. Validated by a 24-hour soak: **10.4 billion messages, ~119k msg/s balanced, zero loss, flat ~400 MB broker**. [See soak →](docs/benchmarks-0.16-soak.html) | All ≥0.14.0 clients work unchanged — HTTP contract is identical; 0.16.0 SDKs are a version-aligned release |
 | **0.15.5**     | Resolves **#30** (proxy compatible with Traefik forward-auth middleware), **#31** (write-only access role), **#32** (hardened Node base image). Robustness: malformed payloads can no longer crash a worker. Invalid UTF‑8 bytes and unpaired UTF‑16 surrogates — in a request body or in DB‑returned data — are serialized leniently and rejected with a clean **400** instead of throwing out of the event loop. Previously‑unguarded admin/metrics routes wrapped in error handling. | All ≥0.14.0 clients work unchanged |
 | **0.15.0**     | Cross-language streaming SDK: fluent `Stream` builder + `.gate()` rate limiter + tumbling/sliding/session/cron windows + event-time + watermarks shipping in `queen-mq` (JS), `queen-mq` (Python), and `client-go` — all backed by the same `/streams/v1/*` endpoints and three new stored procedures (`streams_register_query_v1`, `streams_cycle_v1`, `streams_state_get_v1`). Identical SHA-256 `config_hash` across runtimes so a query registered by one client can be resumed by a worker written in another. UUIDv7 stamping in `streams_cycle_v1` push items to preserve FIFO order in batched sink emits. | All ≥0.14.0 clients work unchanged — upgrade clients to 0.15.0 to use the streaming SDK |
 | **0.14.3**     | Improved frontend. | All ≥0.14.0 clients work unchanged |

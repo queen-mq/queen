@@ -216,7 +216,7 @@
   All live inside the procedures, not the schema:
 </p>
 <ul>
-  <li><strong>PUSH per-partition serialization</strong>, <code>pg_advisory_xact_lock(int4, int4)</code> in a dedicated two-int keyspace (disjoint from the pop/ack keys below). Each push takes the lock for every partition it writes, in sorted order, and stamps <code>created_at = clock_timestamp()</code> under it — so per-partition <code>created_at</code> is monotonic in <em>commit</em> order and the pop cursor can never skip an uncommitted message. The broker also keeps an in-memory "≤1 in-flight push per partition" gate so this lock is almost never contended on a single instance.</li>
+  <li><strong>PUSH per-partition serialization</strong>, <code>pg_advisory_xact_lock(int4, int4)</code> in a dedicated two-int keyspace (disjoint from the pop/ack keys below). Each push takes the lock for every partition it writes, in sorted order, and stamps <code>created_at = clock_timestamp()</code> under it, so per-partition <code>created_at</code> is monotonic in <em>commit</em> order and the pop cursor can never skip an uncommitted message. The broker also keeps an in-memory "≤1 in-flight push per partition" gate so this lock is almost never contended on a single instance.</li>
   <li><strong>POP wildcard claim</strong>, <code>pg_try_advisory_xact_lock(hashtextextended(partition_id::text, …))</code>. Non-blocking try; the first request to claim a partition wins it for the duration of its transaction.</li>
   <li><strong>ACK serialization</strong>, <code>pg_advisory_xact_lock(...md5(partition_id || consumer_group)...)</code>. Blocking lock; prevents two concurrent acks from racing on the same cursor row.</li>
 </ul>
@@ -352,7 +352,7 @@ SELECT jsonb_build_object('items', …, 'partition_updates', …);</code></pre>
   libqueen is a C++ engine that owns a libuv event loop and a pool of non-blocking
   PostgreSQL connections. Its job: take many HTTP requests of the same kind and turn them
   into one batched stored-procedure call. The broker runs <strong>three</strong> of these
-  engines per process — push/ack, pop, and rest — created once and shared by every HTTP
+  engines per process, push/ack, pop, and rest, created once and shared by every HTTP
   worker (a <code>QueenCluster</code> routes each <code>submit()</code> to the right engine
   by <code>JobType</code>). This function split (replacing the old one-engine-per-worker
   model) gives the push path a single owner per partition for commit-ordered
@@ -416,7 +416,7 @@ SELECT jsonb_build_object('items', …, 'partition_updates', …);</code></pre>
   Two implementations, selected per lane:
 </p>
 <ul>
-  <li><strong>Static</strong> (the data-path default): a fixed cap. Atomic counter against <code>max_concurrent</code>. Predictable and boring — and the right choice for the hot path.</li>
+  <li><strong>Static</strong> (the data-path default): a fixed cap. Atomic counter against <code>max_concurrent</code>. Predictable and boring, and the right choice for the hot path.</li>
   <li>
     <strong>Vegas</strong>: TCP-Vegas-inspired adaptive limit. The controller computes
     <code>queue_load = in_flight × (1 − rtt_min ⁄ rtt_recent)</code>. If <code>queue_load &lt; α</code> (default 3) → grow the limit; if <code>queue_load &gt; β</code> (default 12) → shrink. <code>rtt_min</code> is a 30-second sliding minimum (so a single fast outlier doesn't pin it). Adjusted at most once per second to prevent thrashing.
@@ -501,7 +501,7 @@ SELECT jsonb_build_object('items', …, 'partition_updates', …);</code></pre>
 <h3>Acceptor / worker pattern</h3>
 <ul>
   <li><strong>One acceptor thread</strong> listens on <code>:6632</code>. When a TCP connection arrives, it <code>adoptSocket()</code>s the socket onto one of the worker <code>uWS::App</code> event loops. The acceptor never serves a request itself.</li>
-  <li><strong>N worker threads</strong> (default 10), each running its own <code>uWS::App</code> for HTTP I/O. Workers do <strong>not</strong> own a DB engine — they all <code>submit()</code> into the same process-global <code>QueenCluster</code> (push/ack, pop, rest). Each worker still has its own <code>ResponseRegistry</code>, so cross-worker response delivery has no shared mutex. <code>NUM_WORKERS</code> therefore sizes only HTTP I/O; DB concurrency is sized by the per-function slot counts.</li>
+  <li><strong>N worker threads</strong> (default 10), each running its own <code>uWS::App</code> for HTTP I/O. Workers do <strong>not</strong> own a DB engine, they all <code>submit()</code> into the same process-global <code>QueenCluster</code> (push/ack, pop, rest). Each worker still has its own <code>ResponseRegistry</code>, so cross-worker response delivery has no shared mutex. <code>NUM_WORKERS</code> therefore sizes only HTTP I/O; DB concurrency is sized by the per-function slot counts.</li>
   <li><strong>Worker 0</strong> bootstraps schema + starts the background services: <code>MetricsCollector</code>, <code>RetentionService</code>, <code>EvictionService</code>, <code>StatsService</code>, <code>PartitionLookupReconcileService</code>, and <code>SharedStateManager</code>. Other workers wait on a condvar until worker 0 signals ready.</li>
 </ul>
 
@@ -640,7 +640,7 @@ ctx.queen-&gt;submit(std::move(job_req),
   <div class="card">
     <div class="card-eyebrow">Concurrency control</div>
     <h3>Static hot path, Vegas for the rest</h3>
-    <p>The data-path lanes (push/pop/ack) run at fixed, measured limits — RTT-adaptive control mis-reads commit RTT and long-poll parking, so it under-shoots push and collapses pop. The auxiliary lanes still use the TCP-Vegas-inspired controller, which grows under stable RTT and shrinks when PostgreSQL queueing rises.</p>
+    <p>The data-path lanes (push/pop/ack) run at fixed, measured limits, RTT-adaptive control mis-reads commit RTT and long-poll parking, so it under-shoots push and collapses pop. The auxiliary lanes still use the TCP-Vegas-inspired controller, which grows under stable RTT and shrinks when PostgreSQL queueing rises.</p>
   </div>
   <div class="card">
     <div class="card-eyebrow">Two-event-loop hand-off</div>
@@ -669,7 +669,7 @@ ctx.queen-&gt;submit(std::move(job_req),
     <div class="card-eyebrow" style="color: var(--warn-400);">Throughput ceiling</div>
     <h3>One Postgres is the limit</h3>
     <p>
-      We measured Queen at <strong>~104k msg/s peak</strong> on a 32-vCPU host with a
+      We measured Queen at <strong>~172k msg/s peak push</strong> (and ~119k balanced push&amp;pop sustained over a 24-hour soak) on a 32-vCPU host with a
       well-tuned PostgreSQL. Past that, you start running into PG's own scaling
       limits, WAL throughput, autovacuum cycles, checkpoint pressure, not Queen's.
       <strong>There is no Queen-native multi-broker design.</strong> If your workload
@@ -720,7 +720,7 @@ ctx.queen-&gt;submit(std::move(job_req),
       consumer can take over. Default is <code>leaseTime=60</code> seconds, tunable
       per-queue. Tighter leases mean faster recovery but more overhead from lease
       renewals on long-running jobs. Compare to Kafka's consumer group rebalance
-      (typically 1–10s with modern static membership). If sub-second recovery from
+      (typically 1-10s with modern static membership). If sub-second recovery from
       consumer crashes is critical, this is a real constraint.
     </p>
   </div>

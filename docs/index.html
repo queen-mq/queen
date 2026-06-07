@@ -66,7 +66,7 @@
 <section class="hero">
   <div class="shell hero-inner">
     <div class="row" style="gap: 8px;">
-      <span class="chip chip-ice"><span class="dot"></span> v0.14 · partitions on PostgreSQL</span>
+      <span class="chip chip-ice"><span class="dot"></span> v0.16 · partitions on PostgreSQL</span>
       <span class="chip chip-mute"><span class="dot"></span> Apache 2.0</span>
     </div>
     <h1>Per-entity ordering<br><em>without preallocating partitions.</em></h1>
@@ -92,9 +92,11 @@
       <a class="btn btn-ghost" href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Developer Guide ↗</a>
     </div>
     <div class="hero-meta">
-      <span><strong>6.7k msg/s</strong> end-to-end pipeline · p99 ≈ 1 s · 0 duplicates</span>
+      <span><strong>10.4B msgs</strong> · 24 h soak · zero loss</span>
       <span class="dot"></span>
-      <span><strong>104k msg/s</strong> peak push (batch=100)</span>
+      <span><strong>172k msg/s</strong> peak push (batch=100)</span>
+      <span class="dot"></span>
+      <span><strong>6.7k msg/s</strong> end-to-end pipeline · p99 ≈ 1 s</span>
       <span class="dot"></span>
       <span><strong>100 000</strong> active partitions, no degradation</span>
       <span class="dot"></span>
@@ -102,7 +104,8 @@
     </div>
     <p class="muted" style="font-size: 12px; margin-top: 8px;">
       Numbers from <a href="benchmarks.html">our benchmark page</a>, including a
-      4-stage real-client pipeline (producer → worker → fan-out × 2). Use the
+      <a href="benchmarks-0.16-soak.html">24-hour soak of 10.4 billion messages</a> (zero loss)
+      and a 4-stage real-client pipeline (producer → worker → fan-out × 2). Use the
       <a href="sizing.html">sizing calculator</a> to convert your target msg/s
       into a Postgres vCPU budget. Above ~200k msg/s sustained, or for
       multi-region replication, you want Kafka.
@@ -379,7 +382,7 @@ await queen.queue('test-queue')
           <li>You <strong>already run PostgreSQL</strong> and want one less thing to operate.</li>
           <li>You want <strong>transactional integration</strong>: insert business data and queue a message in the same PG transaction.</li>
           <li>You need <strong>replay from a timestamp</strong> for new consumer groups.</li>
-          <li>You have <strong>high-cardinality ordering keys</strong> (10k–1M+ entities, each needing its own ordered lane).</li>
+          <li>You have <strong>high-cardinality ordering keys</strong> (10k-1M+ entities, each needing its own ordered lane).</li>
         </ul>
       </div>
 
@@ -407,7 +410,7 @@ await queen.queue('test-queue')
         <p class="muted" style="margin-top: 8px; font-size: 12.5px;">
           Note: for the <em>typical</em> RabbitMQ workload, competing consumers
           with persistent messages and acks, Queen at low partition count gets
-          you the same shape at higher throughput, lower RAM (~70 MB vs 2–5 GB),
+          you the same shape at higher throughput, lower RAM (~70 MB vs 2-5 GB),
           and a simpler protocol. The reasons left to pick RabbitMQ are mostly
           protocol / ecosystem, not raw queue mechanics.
         </p>
@@ -433,7 +436,7 @@ await queen.queue('test-queue')
         your <strong>worker fleet is the bottleneck, not the broker</strong>. At 20 ms of
         work per message, one worker handles 50 msg/s. Saturating Kafka's 1.5M msg/s
         requires <strong>30 000 worker processes</strong> (~$150k/month of consumer fleet).
-        Most companies have 100–2 000 workers and run at 5 k–100 k msg/s of actual demand ,
+        Most companies have 100-2 000 workers and run at 5 k-100 k msg/s of actual demand ,
         well within Queen's broker envelope. In that regime, the broker comparison stops
         mattering, and Queen wins on operational cost, durability semantics, and
         Postgres-transactional integration. The

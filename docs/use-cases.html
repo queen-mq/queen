@@ -132,8 +132,8 @@
 <p class="muted">
   Queen on its own is a partitioned message broker. The same
   <a href="https://www.npmjs.com/package/queen-mq"><code>queen-mq</code></a>
-  npm package also ships a fluent stream-processing SDK — windows, joins,
-  stateful reducers, and gates — that runs in your own Node process and
+  npm package also ships a fluent stream-processing SDK, windows, joins,
+  stateful reducers, and gates, that runs in your own Node process and
   commits state, sink emissions, and source acks atomically in PostgreSQL.
   The pages below are end-to-end recipes that combine the broker with the
   streaming SDK to solve real production problems.
@@ -167,7 +167,7 @@
     <h3>Subscription replay</h3>
     <p>
       Rewind a brand-new consumer group to any timestamp and reprocess just
-      that window — without disturbing the production consumer. Each CG has
+      that window, without disturbing the production consumer. Each CG has
       its own offset row in PostgreSQL, so production and replay run truly
       independently.
     </p>
@@ -180,7 +180,7 @@
     <div class="uc-card-eyebrow">Live · orchestration</div>
     <h3>Transactional multi-stage pipelines</h3>
     <p>
-      Chain multiple processing stages — translate → route → notify — with
+      Chain multiple processing stages, translate → route → notify, with
       one PG transaction per handoff. A worker crash between stages cannot
       duplicate or drop a message. Per-stage retries and DLQ are built in.
     </p>
@@ -195,7 +195,7 @@
     <p>
       Maintain rolling per-customer count / sum / max / avg over tumbling
       windows. State <strong>is</strong> a row in <code>queen_streams.state</code>
-      — your Grafana, Metabase, or BI tool queries it as plain SQL. No
+, your Grafana, Metabase, or BI tool queries it as plain SQL. No
       Materialize, no ksqlDB, no extra database.
     </p>
     <div class="uc-mini">.windowTumbling({ seconds: 60 }).aggregate({ count, sum, max })</div>
@@ -210,7 +210,7 @@
       Drop duplicate webhook deliveries from Stripe, Booking, Octorate, or
       Twilio without operating Redis. The per-window seen-set lives in
       PostgreSQL and is garbage-collected automatically when the window
-      closes — no TTL job, no eviction policy.
+      closes, no TTL job, no eviction policy.
     </p>
     <div class="uc-mini">.windowTumbling({ seconds: 600 }).reduce(seenSet)</div>
     <div class="uc-mini">verified: 1,000 unique through, 0 duplicates leaked (23.1% dropped)</div>
@@ -222,7 +222,7 @@
 <!-- ===================================================================== -->
 <h2 id="contributing">A pattern you'd like to see?</h2>
 <p class="muted">
-  These pages are written from real production code — not idealised examples.
+  These pages are written from real production code, not idealised examples.
   Each card above includes verified numbers from a live run against
   <code>localhost:6632</code>. If you have built something on Queen +
   streams that fits a generalisable pattern, please open an issue at

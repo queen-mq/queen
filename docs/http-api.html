@@ -121,7 +121,7 @@
 <p class="muted">
   Lightweight JSON snapshot intended for ad-hoc inspection and the bundled SDKs'
   <code>Admin.metrics()</code> helper. Reports the live DB pool stats plus a stub for
-  uptime / requests / messages — for a real telemetry surface use
+  uptime / requests / messages, for a real telemetry surface use
   <code>/metrics/prometheus</code> below.
 </p>
 
@@ -136,7 +136,7 @@
   Prometheus text exposition format. Each scrape:
 </p>
 <ul class="muted" style="margin: 4px 0 12px 22px;">
-  <li>reads in-process state for per-replica live gauges (process / db pool / threadpools / file buffer / sidecar / shared-state) — no DB hit;</li>
+  <li>reads in-process state for per-replica live gauges (process / db pool / threadpools / file buffer / sidecar / shared-state), no DB hit;</li>
   <li>performs <strong>one</strong> DB call to <code>queen.get_prometheus_metrics_v1()</code> for cluster-wide series (lifetime totals, latest-bucket per-queue and per-worker, DLQ depth).</li>
 </ul>
 
@@ -144,7 +144,7 @@
   <div class="callout-title">Series labelling rules</div>
   <p>
     <strong>Cluster-singleton series</strong> (lifetime totals, DLQ depth) carry
-    <code>scope="cluster"</code>. They are the same on every replica — query them with
+    <code>scope="cluster"</code>. They are the same on every replica, query them with
     <code>max(...)</code>, never <code>sum(...)</code>.
   </p>
   <p>
@@ -162,18 +162,18 @@
 <table>
   <thead><tr><th>Family</th><th>Type</th><th>Labels</th><th>Source</th></tr></thead>
   <tbody>
-    <tr><td><code>queen_uptime_seconds</code></td><td>gauge</td><td>—</td><td>live</td></tr>
-    <tr><td><code>queen_cpu_user_microseconds_total</code> · <code>queen_cpu_system_microseconds_total</code></td><td>counter</td><td>—</td><td>live (latest sample)</td></tr>
-    <tr><td><code>queen_process_resident_memory_bytes</code> · <code>queen_process_virtual_memory_bytes</code></td><td>gauge</td><td>—</td><td>live</td></tr>
-    <tr><td><code>queen_db_pool_size</code> · <code>_idle</code> · <code>_active</code></td><td>gauge</td><td>—</td><td>live</td></tr>
+    <tr><td><code>queen_uptime_seconds</code></td><td>gauge</td><td>, </td><td>live</td></tr>
+    <tr><td><code>queen_cpu_user_microseconds_total</code> · <code>queen_cpu_system_microseconds_total</code></td><td>counter</td><td>, </td><td>live (latest sample)</td></tr>
+    <tr><td><code>queen_process_resident_memory_bytes</code> · <code>queen_process_virtual_memory_bytes</code></td><td>gauge</td><td>, </td><td>live</td></tr>
+    <tr><td><code>queen_db_pool_size</code> · <code>_idle</code> · <code>_active</code></td><td>gauge</td><td>, </td><td>live</td></tr>
     <tr><td><code>queen_threadpool_size</code> · <code>queen_threadpool_queue_size</code></td><td>gauge</td><td><code>pool="db|system"</code></td><td>live</td></tr>
     <tr><td><code>queen_response_registry_size</code></td><td>gauge</td><td><code>worker_id</code></td><td>live</td></tr>
-    <tr><td><code>queen_file_buffer_pending</code> · <code>_failed</code> · <code>_db_healthy</code></td><td>gauge</td><td>—</td><td>live</td></tr>
-    <tr><td><code>queen_maintenance_mode_enabled</code></td><td>gauge</td><td>—</td><td>live (TTL-cached)</td></tr>
+    <tr><td><code>queen_file_buffer_pending</code> · <code>_failed</code> · <code>_db_healthy</code></td><td>gauge</td><td>, </td><td>live</td></tr>
+    <tr><td><code>queen_maintenance_mode_enabled</code></td><td>gauge</td><td>, </td><td>live (TTL-cached)</td></tr>
     <tr><td><code>queen_sidecar_op_count</code> · <code>_latency_microseconds</code> · <code>_items</code></td><td>gauge</td><td><code>op="push|pop|ack"</code></td><td>live (latest sample)</td></tr>
-    <tr><td><code>queen_queue_backoff_groups</code> · <code>_queues</code> · <code>_avg_interval_milliseconds</code></td><td>gauge</td><td>—</td><td>live</td></tr>
-    <tr><td><code>queen_shared_state_enabled</code></td><td>gauge</td><td>—</td><td>live</td></tr>
-    <tr><td><code>queen_qc_cache_size</code> · <code>_hits_total</code> · <code>_misses_total</code></td><td>gauge / counter</td><td>—</td><td>live (when shared-state enabled)</td></tr>
+    <tr><td><code>queen_queue_backoff_groups</code> · <code>_queues</code> · <code>_avg_interval_milliseconds</code></td><td>gauge</td><td>, </td><td>live</td></tr>
+    <tr><td><code>queen_shared_state_enabled</code></td><td>gauge</td><td>, </td><td>live</td></tr>
+    <tr><td><code>queen_qc_cache_size</code> · <code>_hits_total</code> · <code>_misses_total</code></td><td>gauge / counter</td><td>, </td><td>live (when shared-state enabled)</td></tr>
     <tr><td><code>queen_servers</code></td><td>gauge</td><td><code>state="alive|dead"</code></td><td>live (when shared-state enabled)</td></tr>
     <tr><td><code>queen_transport_messages_total</code></td><td>counter</td><td><code>dir="sent|received|dropped"</code></td><td>live (when shared-state enabled)</td></tr>
     <tr><td><code>queen_cluster_push_requests_total</code> · <code>_pop_requests_total</code> · <code>_ack_requests_total</code> · <code>_transactions_total</code></td><td>counter</td><td><code>scope="cluster"</code></td><td>DB · <code>worker_metrics_summary</code></td></tr>
@@ -203,7 +203,7 @@
     The per-queue and per-worker <code>*_per_minute</code> series carry the
     <strong>delta for the most recent minute bucket</strong>, already aggregated
     server-side. Use the value directly as messages-per-minute or divide by 60 for
-    per-second. Do <strong>not</strong> wrap them in <code>rate()</code> — that would
+    per-second. Do <strong>not</strong> wrap them in <code>rate()</code>, that would
     compute the rate of a rate.
   </p>
   <p>

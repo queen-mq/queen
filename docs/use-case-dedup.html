@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Webhook deduplication — Queen MQ Use Cases</title>
+<title>Webhook deduplication: Queen MQ Use Cases</title>
 <meta name="description" content="Drop duplicate webhook deliveries from Stripe, Booking, Octorate, Twilio without Redis. Per-window seen-set state lives in PostgreSQL and is garbage-collected automatically when the window closes.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
@@ -112,7 +112,7 @@
   Idempotent webhook deduplication, without Redis.
 </h1>
 <p class="muted">
-  Stripe, Booking, Octorate, Twilio, GitHub all redeliver webhooks —
+  Stripe, Booking, Octorate, Twilio, GitHub all redeliver webhooks, 
   sometimes within minutes, sometimes hours later. Your handler running
   twice means a double charge, a duplicate email, a duplicate row. The
   standard fix is a Redis SET with a TTL; the standard problem is that
@@ -152,7 +152,7 @@
   <a href="#pattern">2. The pattern</a>
   <a href="#quickstart">3. Quickstart</a>
   <a href="#sql">4. Inspecting state via SQL</a>
-  <a href="#window-sizing">5. Window sizing — how long to dedup for</a>
+  <a href="#window-sizing">5. Window sizing, how long to dedup for</a>
   <a href="#comparison">6. vs. Redis / outbox / hand-rolled</a>
   <a href="#pitfalls">7. Common pitfalls</a>
   <a href="#references">8. References</a>
@@ -162,8 +162,8 @@
 <h2 id="problem">1. The problem</h2>
 <p class="muted">
   External providers retry webhook deliveries on any non-2xx response,
-  on read timeouts, and sometimes — especially during platform-side
-  incidents — at random. The contract is "at-least-once". Real
+  on read timeouts, and sometimes, especially during platform-side
+  incidents, at random. The contract is "at-least-once". Real
   redelivery patterns we've seen:
 </p>
 <ul>
@@ -176,19 +176,19 @@
   <li><strong>Twilio</strong> retries 11 times over 24h on 5xx
     responses.</li>
   <li><strong>GitHub</strong> redelivers any failed webhook for 8 hours,
-    and the UI offers manual redelivery — which support engineers click
+    and the UI offers manual redelivery, which support engineers click
     multiple times in a panic.</li>
 </ul>
 <p class="muted">
   The standard fix:
 </p>
-<pre><code class="language-javascript">// The naïve handler — broken under redelivery.
+<pre><code class="language-javascript">// The naive handler - broken under redelivery.
 app.post('/webhooks/stripe', async (req, res) =&gt; {
   await charge(req.body)             // ← runs twice on retry
   res.send('ok')
 })
 
-// The standard fix — adds Redis to your stack.
+// The standard fix - adds Redis to your stack.
 app.post('/webhooks/stripe', async (req, res) =&gt; {
   if (await redis.set(`seen:${req.body.id}`, 1, 'EX', 3600, 'NX') === null) {
     return res.send('ok')            // already processed
@@ -240,11 +240,11 @@ app.post('/webhooks/stripe', async (req, res) =&gt; {
   Two key properties:
 </p>
 <ul>
-  <li><strong>State is durable</strong> — the seen-set is a JSONB
+  <li><strong>State is durable</strong>, the seen-set is a JSONB
     accumulator inside <code>queen_streams.state</code>, replicated by
-    your PG backup. Restart Node, kill the worker, redeploy the broker —
+    your PG backup. Restart Node, kill the worker, redeploy the broker, 
     state is untouched.</li>
-  <li><strong>State is garbage-collected automatically</strong> — when
+  <li><strong>State is garbage-collected automatically</strong>, when
     the window closes, the runner emits the accumulator to the sink and
     <strong>deletes</strong> the state row in the same PG transaction.
     No TTL job, no Redis eviction story, no operational surface area.</li>
@@ -291,7 +291,7 @@ await q.queue(Q_VERIFIED).config({
 <pre><code class="language-javascript">// 10-minute tumbling windows, per-provider seen-set, emit firsts to verified.
 const stream = await Stream
   .from(q.queue(Q_INCOMING))
-  // Default key = partition_id = providerId — what we want.
+  // Default key = partition_id = providerId - what we want.
   .windowTumbling({ seconds: 600, idleFlushMs: 5000 })
   .reduce(
     (acc, msg) =&gt; {
@@ -323,7 +323,7 @@ await q.queue(Q_VERIFIED)
   .batch(50)
   .each()
   .consume(async (msg) =&gt; {
-    await chargeCustomer(msg.data)   // safe to run — deduplicated upstream
+    await chargeCustomer(msg.data)   // safe to run - deduplicated upstream
   })
 
 // Verified run, 1000 unique + 300 duplicates injected over 5 providers:
@@ -363,7 +363,7 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
 </p>
 
 <!-- ====================================================================== -->
-<h2 id="window-sizing">5. Window sizing — how long to dedup for</h2>
+<h2 id="window-sizing">5. Window sizing: how long to dedup for</h2>
 <p class="muted">
   The window size determines the maximum gap between an original
   delivery and a redelivery that the system will still deduplicate.
@@ -382,7 +382,7 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
     <tr>
       <td>Stripe</td>
       <td>Up to 3 days</td>
-      <td>259,200 (3d) — but see below for large windows</td>
+      <td>259,200 (3d), but see below for large windows</td>
     </tr>
     <tr>
       <td>Twilio</td>
@@ -392,12 +392,12 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
     <tr>
       <td>GitHub manual redelivery</td>
       <td>Hours; manual</td>
-      <td>3,600–86,400 (1h–24h)</td>
+      <td>3,600-86,400 (1h-24h)</td>
     </tr>
     <tr>
       <td>OTA channel managers</td>
       <td>Seconds to minutes</td>
-      <td>60–600 (1min–10min)</td>
+      <td>60-600 (1min-10min)</td>
     </tr>
   </tbody>
 </table>
@@ -430,9 +430,9 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
   <tbody>
     <tr>
       <td>Extra infra to operate</td>
-      <td>Yes — Redis</td>
+      <td>Yes, Redis</td>
       <td>No, but TTL job to maintain</td>
-      <td><strong>No</strong> — same PG</td>
+      <td><strong>No</strong>, same PG</td>
     </tr>
     <tr>
       <td>Durability of seen-set</td>
@@ -448,7 +448,7 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
     </tr>
     <tr>
       <td>SPOF risk</td>
-      <td>Yes — Redis down kills dedup</td>
+      <td>Yes, Redis down kills dedup</td>
       <td>Same as your DB</td>
       <td>Same as your DB</td>
     </tr>
@@ -456,7 +456,7 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
       <td>Per-provider isolation</td>
       <td>Manual (key prefixes)</td>
       <td>Manual</td>
-      <td><strong>Free</strong> — partition by providerId</td>
+      <td><strong>Free</strong>, partition by providerId</td>
     </tr>
     <tr>
       <td>Audit / inspection</td>
@@ -486,7 +486,7 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
     The seen-set is sharded by <code>partition_id</code>. If you
     partition the source queue by <code>eventId</code> instead of
     <code>providerId</code>, every event lands on its own partition with
-    a seen-set of size 1 — no dedup ever happens. Always partition by
+    a seen-set of size 1, no dedup ever happens. Always partition by
     the entity whose seen-set you want to share (the provider).
   </p>
 </div>
@@ -497,7 +497,7 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
     A window only closes when (a) a later event arrives that's past the
     window end, or (b) the idle-flush timer fires. If a provider goes
     silent, the window stays open until the timer sweeps it. The default
-    in this recipe is 5 seconds — fast enough that you see closed
+    in this recipe is 5 seconds, fast enough that you see closed
     windows promptly even on quiet providers, slow enough that the flush
     sweep doesn't dominate CPU.
   </p>
@@ -510,7 +510,7 @@ ORDER BY distinct_events_in_window DESC;</code></pre>
     Stripe: <code>event.id</code>. Twilio:
     <code>MessageSid</code>. GitHub:
     <code>X-GitHub-Delivery</code>. If the upstream doesn't expose a
-    stable identifier, hash a canonical subset of the payload — but be
+    stable identifier, hash a canonical subset of the payload, but be
     aware that hash collisions effectively become false-positive
     duplicates.
   </p>

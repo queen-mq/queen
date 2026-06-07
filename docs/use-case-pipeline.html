@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Transactional multi-stage pipelines — Queen MQ Use Cases</title>
+<title>Transactional multi-stage pipelines: Queen MQ Use Cases</title>
 <meta name="description" content="Chain multiple processing stages with atomic ack-and-push between them. A worker crash never duplicates or drops a message. Per-stage retries and DLQ are built in.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
@@ -112,14 +112,14 @@
   Transactional multi-stage pipelines.
 </h1>
 <p class="muted">
-  Chain multiple processing stages together — translation → routing →
-  notification, validate → charge → ship, ingest → enrich → publish —
+  Chain multiple processing stages together, translation → routing →
+  notification, validate → charge → ship, ingest → enrich → publish, 
   with one PostgreSQL transaction per handoff. The
   <code>transaction().ack().push().commit()</code> primitive guarantees
   that a worker crash, network hiccup, or PG hiccup between stages
   cannot duplicate a message into the next stage, nor lose it from the
   current one. Per-stage retries and DLQ are built into the queue
-  config — no orchestrator process, no Temporal cluster.
+  config, no orchestrator process, no Temporal cluster.
 </p>
 
 <div class="rl-stat-grid">
@@ -150,7 +150,7 @@
   <a href="#problem">1. The problem</a>
   <a href="#pattern">2. The transactional handoff</a>
   <a href="#failure">3. What happens without the transaction</a>
-  <a href="#quickstart">4. Quickstart — 3-stage pipeline</a>
+  <a href="#quickstart">4. Quickstart, 3-stage pipeline</a>
   <a href="#retries">5. Retries and DLQ per stage</a>
   <a href="#ordering">6. Per-entity ordering via partitions</a>
   <a href="#pitfalls">7. Common pitfalls</a>
@@ -189,7 +189,7 @@
 
 <p class="muted">
   Both failure modes silently corrupt downstream state. They happen
-  rarely enough to escape testing — on a heavily loaded system, weekly.
+  rarely enough to escape testing, on a heavily loaded system, weekly.
   The fix in most systems is "implement saga / outbox / 2PC" which
   doubles the surface area. In Queen the fix is one line of code:
   <code>transaction().ack().push().commit()</code>.
@@ -235,7 +235,7 @@
 
 <div class="code-meta-wrap with-copy">
   <div class="code-meta"><span>javascript · the wrong way (ack-then-push)</span><button class="copy-btn" type="button">copy</button></div>
-<pre><code class="language-javascript">// ❌ DANGEROUS — message can be lost between stages on a worker crash.
+<pre><code class="language-javascript">// DANGEROUS: message can be lost between stages on a worker crash.
 await q.queue('stageN').consume(async (msg) =&gt; {
   const out = await stageNHandler(msg)
   await q.ack(msg, true, { group: 'stageN-worker' })
@@ -246,7 +246,7 @@ await q.queue('stageN').consume(async (msg) =&gt; {
 
 <div class="code-meta-wrap with-copy">
   <div class="code-meta"><span>javascript · the also-wrong way (push-then-ack)</span><button class="copy-btn" type="button">copy</button></div>
-<pre><code class="language-javascript">// ❌ DANGEROUS — message can be duplicated to stageN+1 on a worker crash.
+<pre><code class="language-javascript">// DANGEROUS: message can be duplicated to stageN+1 on a worker crash.
 await q.queue('stageN').consume(async (msg) =&gt; {
   const out = await stageNHandler(msg)
   await q.queue('stageN+1').push([{ data: out }])
@@ -280,7 +280,7 @@ await q.queue('stageN').autoAck(false).consume(async (msg) =&gt; {
 </p>
 
 <!-- ====================================================================== -->
-<h2 id="quickstart">4. Quickstart — a 3-stage pipeline</h2>
+<h2 id="quickstart">4. Quickstart: a 3-stage pipeline</h2>
 <p class="muted">
   Setup: three queues, one for each stage, all with
   <code>retryLimit: 2</code> and <code>dlqAfterMaxRetries: true</code>.
@@ -353,7 +353,7 @@ for (const name of [Q_TRANSLATE, Q_ROUTE, Q_NOTIFY]) {
 
 <p class="muted">
   Stage 2 (<code>route</code>) and stage 3 (<code>notify</code>) follow
-  the same shape. Stage 3 is terminal — it doesn't push anywhere, just
+  the same shape. Stage 3 is terminal, it doesn't push anywhere, just
   calls a downstream API.
 </p>
 
@@ -364,8 +364,8 @@ for (const name of [Q_TRANSLATE, Q_ROUTE, Q_NOTIFY]) {
   stage. When a handler throws, the manual nack
   (<code>q.ack(msg, false)</code>) marks the attempt as failed; the
   broker decrements the retry budget and redelivers when the lease
-  expires. On exhaustion, the message is moved to that queue's DLQ — not
-  to any global one — so debugging stays scoped to the stage that broke.
+  expires. On exhaustion, the message is moved to that queue's DLQ, not
+  to any global one, so debugging stays scoped to the stage that broke.
 </p>
 
 <div class="rl-ascii">  produce(100 messages, 14 are 'poisoned')
@@ -398,8 +398,8 @@ for (const name of [Q_TRANSLATE, Q_ROUTE, Q_NOTIFY]) {
     <tr><th>Counter</th><th>Value</th><th>Expected</th></tr>
   </thead>
   <tbody>
-    <tr><td>Messages produced</td><td>100</td><td>—</td></tr>
-    <tr><td>Poisoned (every 7th)</td><td>14</td><td>—</td></tr>
+    <tr><td>Messages produced</td><td>100</td><td>, </td></tr>
+    <tr><td>Poisoned (every 7th)</td><td>14</td><td>, </td></tr>
     <tr><td>Translate handler attempts (incl. retries)</td><td>128</td><td>≥ 86 + 14×3 = 128</td></tr>
     <tr><td>Translate handler failures</td><td>42</td><td>14 × 3 = 42</td></tr>
     <tr><td>Routed (stage 2 throughput)</td><td>86</td><td>86</td></tr>
@@ -466,7 +466,7 @@ for (const name of [Q_TRANSLATE, Q_ROUTE, Q_NOTIFY]) {
   <div class="callout-title">Set <code>leaseTime</code> longer than your handler's p99</div>
   <p>
     If the handler runs longer than <code>leaseTime</code> seconds the
-    broker assumes it crashed and redelivers — and your eventual
+    broker assumes it crashed and redelivers, and your eventual
     transaction commit will fail with "Invalid or expired lease". Either
     raise <code>leaseTime</code> or use
     <code>.renewLease(true, intervalMillis)</code> on the consumer.
@@ -480,7 +480,7 @@ for (const name of [Q_TRANSLATE, Q_ROUTE, Q_NOTIFY]) {
     <code>/api/v1/dlq?queue=&lt;name&gt;</code>. If a stage 3 handler
     poisons every message, those poison messages land in
     <code>chat.notify</code>'s DLQ, not in <code>chat.translate</code>'s.
-    This is deliberate — different stages have different operational
+    This is deliberate, different stages have different operational
     owners.
   </p>
 </div>
@@ -489,7 +489,7 @@ for (const name of [Q_TRANSLATE, Q_ROUTE, Q_NOTIFY]) {
   <div class="callout-title">Why this isn't Temporal</div>
   <p>
     Temporal replays workflow code deterministically from an event log.
-    Queen pipelines don't — they pop a message, run the handler, commit
+    Queen pipelines don't, they pop a message, run the handler, commit
     the next-stage push. There's no replay harness, no
     determinism contract on your handler code. The trade-off is
     simpler workers (use any library, any clock, any random number

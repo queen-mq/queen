@@ -69,7 +69,7 @@
 <!-- ============== DOCKER ============== -->
 <h2 id="docker">Docker</h2>
 <p class="muted">
-  Multi-arch image (linux/amd64 + linux/arm64), pushed to Docker Hub on every release. Current stable: <strong>0.15.5</strong> — pin with <code>smartnessai/queen-mq:0.15.5</code> for reproducible deployments. 0.15.5 hardens JSON handling against malformed payloads: invalid UTF-8 bytes or unpaired UTF-16 surrogates are rejected with a clean 400 instead of crashing a worker.
+  Multi-arch image (linux/amd64 + linux/arm64), pushed to Docker Hub on every release. Current stable: <strong>0.15.5</strong>, pin with <code>smartnessai/queen-mq:0.15.5</code> for reproducible deployments. 0.15.5 hardens JSON handling against malformed payloads: invalid UTF-8 bytes or unpaired UTF-16 surrogates are rejected with a clean 400 instead of crashing a worker.
 </p>
 
 <div class="code-meta-wrap with-copy">
@@ -128,7 +128,7 @@ docker run -p 6632:6632 --network queen \
   <tbody>
     <tr><td>PORT</td><td>6632</td><td>HTTP listener port.</td></tr>
     <tr><td>HOST</td><td>0.0.0.0</td><td>HTTP bind address.</td></tr>
-    <tr><td>NUM_WORKERS</td><td>10</td><td>uWebSockets HTTP I/O threads. <strong>Decoupled from the DB engine count</strong> — all workers share 3 function-split libqueen engines (push/ack, pop, rest). Size DB concurrency with the slot vars below, not this.</td></tr>
+    <tr><td>NUM_WORKERS</td><td>10</td><td>uWebSockets HTTP I/O threads. <strong>Decoupled from the DB engine count</strong>, all workers share 3 function-split libqueen engines (push/ack, pop, rest). Size DB concurrency with the slot vars below, not this.</td></tr>
     <tr><td>QUEEN_PUSH_SLOTS · QUEEN_POP_SLOTS · QUEEN_REST_SLOTS</td><td>~50% · 40% · 10% of <code>SIDECAR_POOL_SIZE</code></td><td>Per-engine libpq connection slots carved from the hot-path <code>SIDECAR_POOL_SIZE</code> budget.</td></tr>
     <tr><td>QUEEN_&lt;PUSH|POP|ACK&gt;_CONCURRENCY_MODE</td><td>static</td><td>Data-path lanes run at a fixed limit (push 24, pop/ack 16). Set to <code>vegas</code> to opt a lane into adaptive control.</td></tr>
     <tr><td>PG_HOST</td><td>localhost</td><td>PostgreSQL hostname.</td></tr>
@@ -829,7 +829,7 @@ export RESPONSE_BATCH_SIZE=200
 export RESPONSE_BATCH_MAX=1000
 
 # Data-path lanes run STATIC by default at these limits (push/pop/ack).
-# These are measured optima, not Vegas ceilings — push ceiling is a flat
+# These are measured optima, not Vegas ceilings; push ceiling is a flat
 # ~190k (then Postgres Lock:extend on queen.messages), balanced ~110-120k.
 export QUEEN_PUSH_MAX_CONCURRENT=24
 export QUEEN_ACK_MAX_CONCURRENT=16

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Rate limiter — Queen MQ Use Cases</title>
+<title>Rate limiter: Queen MQ Use Cases</title>
 <meta name="description" content="Build a production-grade rate limiter on Queen MQ + the streams SDK. FIFO order on retries, multi-tenant isolation, scales to 9k+ msg/s with multiple consumers.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
@@ -118,7 +118,7 @@
   multiple   consumers, and scales linearly. The pattern uses the
   <code>.gate()</code> primitive shipped in the
   <a href="https://www.npmjs.com/package/queen-mq"><code>queen-mq</code></a>
-  package, with the per-partition lease as natural backpressure — no
+  package, with the per-partition lease as natural backpressure, no
   deferred queue, no timers, no Redis.
 </p>
 
@@ -170,11 +170,11 @@
 </p>
 <ul>
   <li><strong>OTAs</strong> (Booking, Airbnb, VRBO/Expedia, Hotel-Nerds, Google
-    Hotel) — typically X req/min or Y operations/min per partner key, with
+    Hotel), typically X req/min or Y operations/min per partner key, with
     suspension as the penalty.</li>
-  <li><strong>WhatsApp Cloud / SendGrid / Twilio</strong> — per-phone-number
+  <li><strong>WhatsApp Cloud / SendGrid / Twilio</strong>, per-phone-number
     or per-IP tiers; exceeding triggers throttling or temporary bans.</li>
-  <li><strong>LLM providers</strong> (OpenAI, Anthropic) — TPM (tokens / min)
+  <li><strong>LLM providers</strong> (OpenAI, Anthropic), TPM (tokens / min)
     and RPM (requests / min) per API key; exceeding returns 429 and a
     Retry-After.</li>
 </ul>
@@ -227,7 +227,7 @@
   (no state mutation, no ack, no sink push) and lets the source-queue
   lease expire naturally. The broker then redelivers the un-acked tail of
   the batch in its original order. This is what makes ordering FIFO
-  on retries — the same partition lease sits with the runner across the
+  on retries, the same partition lease sits with the runner across the
   deny → expiry → redeliver cycle, so denied messages can never overtake
   later messages.
 </p>
@@ -239,7 +239,7 @@
     Kafka-shaped pattern) <em>breaks per-key FIFO order</em>: by the time
     the deferred message rejoins the main queue, newer messages may have
     already passed through. Queen's per-partition lease lets us avoid
-    this entirely — the broker itself is the backpressure mechanism.
+    this entirely, the broker itself is the backpressure mechanism.
   </p>
 </div>
 
@@ -262,7 +262,7 @@
 </div>
 
 <div class="callout callout-info">
-  <div class="callout-title">One install, one import — JavaScript / Python / Go</div>
+  <div class="callout-title">One install, one import, JavaScript / Python / Go</div>
   <p>
     The broker client and the streaming SDK ship in the same package on
     every supported runtime:
@@ -289,7 +289,7 @@ import (
     The same <code>.gate()</code> primitive, helper factories, and
     <code>config_hash</code> wire format work identically across all three
     languages. A query registered by the JS client can be resumed by a
-    worker written in Go (or vice versa) — the SHA-256 of the operator
+    worker written in Go (or vice versa), the SHA-256 of the operator
     chain matches across runtimes.
   </p>
 </div>
@@ -462,7 +462,7 @@ func main() {
 <h2 id="models">4. Four canonical models</h2>
 <p class="muted">
   Real APIs measure rate limits in different units. The same
-  <code>.gate()</code> primitive expresses all four common shapes —
+  <code>.gate()</code> primitive expresses all four common shapes, 
   what changes is only the <code>costFn</code> and the queue contents:
 </p>
 
@@ -477,25 +477,25 @@ func main() {
   </thead>
   <tbody>
     <tr>
-      <td><strong>A</strong> — req/sec<br/><code>"100 calls/sec, batch arbitrary inside"</code></td>
+      <td><strong>A</strong>, req/sec<br/><code>"100 calls/sec, batch arbitrary inside"</code></td>
       <td>Airbnb StandardCalendars; Google Hotel uploads</td>
       <td>Pre-batched HTTP requests<br/>each carrying an <code>items[]</code></td>
       <td><code>() =&gt; 1</code></td>
     </tr>
     <tr>
-      <td><strong>B</strong> — msg/sec<br/><code>"100 ops/sec, regardless of batching"</code></td>
+      <td><strong>B</strong>, msg/sec<br/><code>"100 ops/sec, regardless of batching"</code></td>
       <td>WhatsApp Cloud per-phone tier; Twilio; SendGrid</td>
       <td>Individual messages<br/>(one logical operation per item)</td>
       <td><code>() =&gt; 1</code></td>
     </tr>
     <tr>
-      <td><strong>C</strong> — 1:1<br/><code>"each call carries exactly one op"</code></td>
+      <td><strong>C</strong>, 1:1<br/><code>"each call carries exactly one op"</code></td>
       <td>Legacy VRBO/Expedia "one operation per call" endpoints</td>
       <td>Individual operations</td>
       <td><code>() =&gt; 1</code></td>
     </tr>
     <tr>
-      <td><strong>D</strong> — cost-based<br/><code>"weight per request varies"</code></td>
+      <td><strong>D</strong>, cost-based<br/><code>"weight per request varies"</code></td>
       <td>Expedia weight-per-endpoint; OpenAI TPM</td>
       <td>Requests with a <code>weight</code> field</td>
       <td><code>msg =&gt; msg.weight</code></td>
@@ -504,13 +504,13 @@ func main() {
 </table>
 
 <p class="muted">
-  Models A, B, and C share the same <code>costFn</code> — they differ
+  Models A, B, and C share the same <code>costFn</code>, they differ
   only in what you put on the queue. Model D shows the only place where
   the gate code itself changes: the cost function reads the message
   payload to compute how many tokens to charge.
 </p>
 
-<h3>Model D — cost-based example</h3>
+<h3>Model D: cost-based example</h3>
 <p class="muted">
   100 requests with weights 1..5 (avg 3, total 300). Bucket of 100,
   refill 50/sec. Drains in ~6 seconds.
@@ -620,8 +620,8 @@ const gate2 = await Stream
 <!-- ====================================================================== -->
 <h2 id="sliding">6. Sliding-window quotas (model E)</h2>
 <p class="muted">
-  Some APIs impose <em>quota-style</em> limits — "max N events in any
-  rolling window of W seconds" — typically used for daily caps
+  Some APIs impose <em>quota-style</em> limits, "max N events in any
+  rolling window of W seconds", typically used for daily caps
   ("max 1000 emails/day per IP") or hourly bursts. The
   <code>slidingWindowGate</code> helper implements an efficient 2-bucket
   approximation that is accurate within ±1× the rate at boundaries
@@ -715,9 +715,9 @@ const stream = await Stream
 <h2 id="scaling">8. Scaling with multiple consumers</h2>
 <p class="muted">
   A single Node process running <code>Stream.run()</code> sustains
-  roughly 1500–2500 msg/sec end-to-end on a modest setup, limited by
+  roughly 1500-2500 msg/sec end-to-end on a modest setup, limited by
   HTTP round-trips and PG cycle latency. To scale higher, run multiple
-  consumers in parallel — each calls <code>.run()</code> with the same
+  consumers in parallel, each calls <code>.run()</code> with the same
   <code>queryId</code>. Queen's per-partition lease guarantees that a
   given partition is processed by AT MOST ONE runner at any moment, so
   per-key state writes never collide and ordering stays intact.
@@ -823,7 +823,7 @@ const streams = await spawnRateLimiter({
 <p class="muted">
   Throughput scales nearly linearly with the number of runners. The same
   test was repeated for all four canonical models (A, B, C, D) plus the
-  cascade and sliding window — all 5 verifiable against
+  cascade and sliding window, all 5 verifiable against
   <code>streams/examples/09-rate-limiter-all-models.js</code>:
 </p>
 
@@ -861,7 +861,7 @@ const streams = await spawnRateLimiter({
 <!-- ====================================================================== -->
 <h2 id="inspecting">10. Inspecting state</h2>
 <p class="muted">
-  All gate state lives in the <code>queen_streams.state</code> table — a
+  All gate state lives in the <code>queen_streams.state</code> table, a
   plain PostgreSQL table you can query directly for ops debugging.
 </p>
 
@@ -893,7 +893,7 @@ ORDER BY s.updated_at DESC;</code></pre>
 
 <p class="muted">
   Because the state is plain SQL, you can hook it directly into Grafana,
-  Metabase, or your existing alerting pipeline — no extra metrics
+  Metabase, or your existing alerting pipeline, no extra metrics
   exporter required.
 </p>
 
@@ -927,7 +927,7 @@ ORDER BY s.updated_at DESC;</code></pre>
 <div class="callout callout-warn">
   <div class="callout-title">Set <code>retryLimit</code> to a large number</div>
   <p>
-    A denied message goes back into the queue via lease expiry — Queen
+    A denied message goes back into the queue via lease expiry, Queen
     reads that as a "retry". On a heavily throttled tenant a single
     message can be redelivered hundreds of times before its bucket
     refills enough. Set <code>retryLimit</code> to ≥ 1000 on the source
