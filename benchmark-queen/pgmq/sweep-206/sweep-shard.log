@@ -1,0 +1,21 @@
+>>> pgmq SHARD sweep: queues=[1 2 4 8 16 32] total=300 clients/role  send=10 read=100 dur=60s (direct)
+
+######## SHARD: 1 queues · 300 clients/role (~300 per queue) ########
+RESULT q=1 push=69730 pop=15176 push_p99=267.6ms pop_p99=3543.4ms dead|live|size=414936|2680724|603 MB
+
+######## SHARD: 2 queues · 300 clients/role (~150 per queue) ########
+RESULT q=2 push=104286 pop=25358 push_p99=160ms pop_p99=2373.3ms dead|live|size=380717|4623569|784 MB
+
+######## SHARD: 4 queues · 300 clients/role (~75 per queue) ########
+RESULT q=4 push=125431 pop=42306 push_p99=117ms pop_p99=1650.8ms dead|live|size=286012|5060770|830 MB
+
+######## SHARD: 8 queues · 300 clients/role (~37 per queue) ########
+RESULT q=8 push=145183 pop=66034 push_p99=86.9ms pop_p99=1160.1ms dead|live|size=384842|4810951|803 MB
+
+######## SHARD: 16 queues · 300 clients/role (~18 per queue) ########
+RESULT q=16 push=144154 pop=95633 push_p99=74.9ms pop_p99=866.1ms dead|live|size=405594|2961115|617 MB
+
+######## SHARD: 32 queues · 300 clients/role (~9 per queue) ########
+RESULT q=32 push=152712 pop=125461 push_p99=71.4ms pop_p99=519.9ms dead|live|size=58000|1757547|877 MB
+
+>>> shard sweep complete. Artifacts in results/shard-direct-q*/

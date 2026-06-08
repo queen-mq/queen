@@ -1,0 +1,183 @@
+>>> pgmq FIFO sweep: clients=[25 50 100 200 400 800] groups=1000 send=10 read=100 dur=60s (direct, per-group FIFO)
+
+######## FIFO STEP: 25 clients/role ########
+>> run: fifo-direct-c25
+>> mode=fifo conns(prod/cons)=25/25 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+   fifo index created
+>> starting metrics sampler…
+>> starting consumer (25 conns)…
+>> starting producer (25 conns)…
+>> running for 60s…
+
+==================== SUMMARY (fifo-direct-c25) ====================
+PRODUCER:  msg/s=82214  p50=2.5ms  p99=9.1ms  errors=0
+CONSUMER:  msg/s=4059  p50=1.2ms  p99=1287.3ms  errors=0
+PG BACKENDS: avg_active=44.6  peak_active=51  peak_total=60
+PG CHURN:    peak_dead_tuples=248930  autovacuum_runs=8
+pgmq version: 1.11.1
+queue table:  834MB
+artifacts:    results/fifo-direct-c25/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## FIFO STEP: 50 clients/role ########
+>> run: fifo-direct-c50
+>> mode=fifo conns(prod/cons)=50/50 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+   fifo index created
+>> starting metrics sampler…
+>> starting consumer (50 conns)…
+>> starting producer (50 conns)…
+>> running for 60s…
+
+==================== SUMMARY (fifo-direct-c50) ====================
+PRODUCER:  msg/s=51835  p50=4.5ms  p99=59.7ms  errors=0
+CONSUMER:  msg/s=4350  p50=1.8ms  p99=1481ms  errors=0
+PG BACKENDS: avg_active=91.8  peak_active=102  peak_total=110
+PG CHURN:    peak_dead_tuples=130898  autovacuum_runs=9
+pgmq version: 1.11.1
+queue table:  514MB
+artifacts:    results/fifo-direct-c50/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## FIFO STEP: 100 clients/role ########
+>> run: fifo-direct-c100
+>> mode=fifo conns(prod/cons)=100/100 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+   fifo index created
+>> starting metrics sampler…
+>> starting consumer (100 conns)…
+>> starting producer (100 conns)…
+>> running for 60s…
+
+==================== SUMMARY (fifo-direct-c100) ====================
+PRODUCER:  msg/s=37479  p50=6.4ms  p99=196.1ms  errors=0
+CONSUMER:  msg/s=2830  p50=1.8ms  p99=2223.5ms  errors=0
+PG BACKENDS: avg_active=184.4  peak_active=202  peak_total=210
+PG CHURN:    peak_dead_tuples=75190  autovacuum_runs=9
+pgmq version: 1.11.1
+queue table:  387MB
+artifacts:    results/fifo-direct-c100/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## FIFO STEP: 200 clients/role ########
+>> run: fifo-direct-c200
+>> mode=fifo conns(prod/cons)=200/200 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+   fifo index created
+>> starting metrics sampler…
+>> starting consumer (200 conns)…
+>> starting producer (200 conns)…
+>> running for 60s…
+
+==================== SUMMARY (fifo-direct-c200) ====================
+PRODUCER:  msg/s=23478  p50=10.6ms  p99=660.5ms  errors=0
+CONSUMER:  msg/s=1833  p50=2.2ms  p99=2869ms  errors=0
+PG BACKENDS: avg_active=371.4  peak_active=402  peak_total=410
+PG CHURN:    peak_dead_tuples=51350  autovacuum_runs=11
+pgmq version: 1.11.1
+queue table:  251MB
+artifacts:    results/fifo-direct-c200/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## FIFO STEP: 400 clients/role ########
+>> run: fifo-direct-c400
+>> mode=fifo conns(prod/cons)=400/400 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+   fifo index created
+>> starting metrics sampler…
+>> starting consumer (400 conns)…
+>> starting producer (400 conns)…
+>> running for 60s…
+
+==================== SUMMARY (fifo-direct-c400) ====================
+PRODUCER:  msg/s=8637  p50=14.1ms  p99=4921.2ms  errors=0
+CONSUMER:  msg/s=735  p50=7.1ms  p99=3648.7ms  errors=0
+PG BACKENDS: avg_active=734.8  peak_active=802  peak_total=810
+PG CHURN:    peak_dead_tuples=85304  autovacuum_runs=2
+pgmq version: 1.11.1
+queue table:  174MB
+artifacts:    results/fifo-direct-c400/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## FIFO STEP: 800 clients/role ########
+>> run: fifo-direct-c800
+>> mode=fifo conns(prod/cons)=800/800 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+   fifo index created
+>> starting metrics sampler…
+>> starting consumer (800 conns)…
+>> starting producer (800 conns)…
+>> running for 60s…
+
+==================== SUMMARY (fifo-direct-c800) ====================
+PRODUCER:  msg/s=7610  p50=52.4ms  p99=10215.2ms  errors=0
+CONSUMER:  msg/s=667  p50=19.6ms  p99=6017.4ms  errors=0
+PG BACKENDS: avg_active=1367.2  peak_active=1602  peak_total=1610
+PG CHURN:    peak_dead_tuples=74059  autovacuum_runs=2
+pgmq version: 1.11.1
+queue table:  204MB
+artifacts:    results/fifo-direct-c800/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+>>> FIFO sweep complete. Artifacts in results/fifo-direct-c*/

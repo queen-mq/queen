@@ -1,0 +1,207 @@
+>>> pgmq POOLED sweep (PgBouncer pool=64): clients/role=[25 50 100 200 400 800 1600] send=10 read=100 dur=60s port=6432
+
+######## STEP: 25 clients/role (PgBouncer -> ~64 PG backends) ########
+>> run: plain-pooled-c25
+>> mode=plain conns(prod/cons)=25/25 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (25 conns)…
+>> starting producer (25 conns)…
+>> running for 60s…
+
+==================== SUMMARY (plain-pooled-c25) ====================
+PRODUCER:  msg/s=132129  p50=1.7ms  p99=5ms  errors=0
+CONSUMER:  msg/s=60164  p50=27.8ms  p99=112.8ms  errors=0
+PG BACKENDS: avg_active=42.1  peak_active=51  peak_total=52
+PG CHURN:    peak_dead_tuples=706395  autovacuum_runs=12
+pgmq version: 1.11.1
+queue table:  697MB
+artifacts:    results/plain-pooled-c25/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## STEP: 50 clients/role (PgBouncer -> ~64 PG backends) ########
+>> run: plain-pooled-c50
+>> mode=plain conns(prod/cons)=50/50 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (50 conns)…
+>> starting producer (50 conns)…
+>> running for 60s…
+
+==================== SUMMARY (plain-pooled-c50) ====================
+PRODUCER:  msg/s=114403  p50=4.2ms  p99=8.7ms  errors=0
+CONSUMER:  msg/s=47831  p50=50ms  p99=296.1ms  errors=0
+PG BACKENDS: avg_active=59.6  peak_active=66  peak_total=66
+PG CHURN:    peak_dead_tuples=564771  autovacuum_runs=12
+pgmq version: 1.11.1
+queue table:  634MB
+artifacts:    results/plain-pooled-c50/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## STEP: 100 clients/role (PgBouncer -> ~64 PG backends) ########
+>> run: plain-pooled-c100
+>> mode=plain conns(prod/cons)=100/100 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (100 conns)…
+>> starting producer (100 conns)…
+>> running for 60s…
+
+==================== SUMMARY (plain-pooled-c100) ====================
+PRODUCER:  msg/s=55715  p50=19.1ms  p99=28.3ms  errors=0
+CONSUMER:  msg/s=48530  p50=43.1ms  p99=64.3ms  errors=0
+PG BACKENDS: avg_active=60.4  peak_active=66  peak_total=66
+PG CHURN:    peak_dead_tuples=1033796  autovacuum_runs=8
+pgmq version: 1.11.1
+queue table:  161MB
+artifacts:    results/plain-pooled-c100/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## STEP: 200 clients/role (PgBouncer -> ~64 PG backends) ########
+>> run: plain-pooled-c200
+>> mode=plain conns(prod/cons)=200/200 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (200 conns)…
+>> starting producer (200 conns)…
+>> running for 60s…
+
+==================== SUMMARY (plain-pooled-c200) ====================
+PRODUCER:  msg/s=50314  p50=41.8ms  p99=70.9ms  errors=0
+CONSUMER:  msg/s=43971  p50=53.9ms  p99=83.5ms  errors=0
+PG BACKENDS: avg_active=60.5  peak_active=66  peak_total=66
+PG CHURN:    peak_dead_tuples=933111  autovacuum_runs=9
+pgmq version: 1.11.1
+queue table:  129MB
+artifacts:    results/plain-pooled-c200/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## STEP: 400 clients/role (PgBouncer -> ~64 PG backends) ########
+>> run: plain-pooled-c400
+>> mode=plain conns(prod/cons)=400/400 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (400 conns)…
+>> starting producer (400 conns)…
+>> running for 60s…
+
+==================== SUMMARY (plain-pooled-c400) ====================
+PRODUCER:  msg/s=47372  p50=90.7ms  p99=123.2ms  errors=0
+CONSUMER:  msg/s=41088  p50=98.4ms  p99=142.7ms  errors=0
+PG BACKENDS: avg_active=59.5  peak_active=65  peak_total=66
+PG CHURN:    peak_dead_tuples=449269  autovacuum_runs=12
+pgmq version: 1.11.1
+queue table:  92MB
+artifacts:    results/plain-pooled-c400/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## STEP: 800 clients/role (PgBouncer -> ~64 PG backends) ########
+>> run: plain-pooled-c800
+>> mode=plain conns(prod/cons)=800/800 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (800 conns)…
+>> starting producer (800 conns)…
+>> running for 60s…
+
+==================== SUMMARY (plain-pooled-c800) ====================
+PRODUCER:  msg/s=24744  p50=71.1ms  p99=129.2ms  errors=3894
+CONSUMER:  msg/s=18466  p50=77ms  p99=126.9ms  errors=0
+PG BACKENDS: avg_active=57.4  peak_active=66  peak_total=66
+PG CHURN:    peak_dead_tuples=353402  autovacuum_runs=11
+pgmq version: 1.11.1
+queue table:  69MB
+artifacts:    results/plain-pooled-c800/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+######## STEP: 1600 clients/role (PgBouncer -> ~64 PG backends) ########
+>> run: plain-pooled-c1600
+>> mode=plain conns(prod/cons)=1600/1600 msgsPerPush=10 readQty=100 partitions=1000 duration=60s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (1600 conns)…
+>> starting producer (1600 conns)…
+>> running for 60s…
+
+==================== SUMMARY (plain-pooled-c1600) ====================
+!! producer exited rc=1 — see results/plain-pooled-c1600/producer.err.log
+PRODUCER:  msg/s=n/a  p50=n/ams  p99=n/ams  errors=n/a
+CONSUMER:  msg/s=0  p50=13.4ms  p99=32.8ms  errors=3664
+PG BACKENDS: avg_active=12.5  peak_active=33  peak_total=65
+PG CHURN:    peak_dead_tuples=0  autovacuum_runs=0
+pgmq version: 1.11.1
+queue table:  24kB
+artifacts:    results/plain-pooled-c1600/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+
+>>> pooled sweep complete. Artifacts in results/plain-pooled-c*/ + *.dockerstats.csv

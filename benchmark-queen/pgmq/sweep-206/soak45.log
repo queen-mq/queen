@@ -1,0 +1,29 @@
+>>> soak: plain-pooled-soak45  conns=200 dur=2700s port=6432 send=10 read=100
+>> run: plain-pooled-soak45
+>> mode=plain conns(prod/cons)=200/200 msgsPerPush=10 readQty=100 partitions=1000 duration=2700s
+>> bringing up stack (postgres+pgmq + pgbouncer)…
+ Container pgmq-postgres Running 
+ Container pgmq-pgbouncer Running 
+ Container pgmq-postgres Waiting 
+ Container pgmq-postgres Healthy 
+>> waiting for Postgres… ready
+>> waiting for PgBouncer… ready
+>> resetting queue 'bench'…
+>> starting metrics sampler…
+>> starting consumer (200 conns)…
+>> starting producer (200 conns)…
+>> running for 2700s…
+
+==================== SUMMARY (plain-pooled-soak45) ====================
+PRODUCER:  msg/s=45026  p50=43.3ms  p99=68.5ms  errors=0
+CONSUMER:  msg/s=44878  p50=57.2ms  p99=90.6ms  errors=0
+PG BACKENDS: avg_active=62.6  peak_active=66  peak_total=67
+PG CHURN:    peak_dead_tuples=1333925  autovacuum_runs=360
+pgmq version: 1.11.1
+queue table:  143MB
+artifacts:    results/plain-pooled-soak45/
+============================================================
+
+Compare against Queen's hi-part-1000 / bp-10 (≈25–39k msg/s, ~2.5 active PG conns).
+Tear down with:  docker compose down -v
+>>> soak complete: results/plain-pooled-soak45/

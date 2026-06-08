@@ -43,6 +43,8 @@ const DURATION        = parseInt(process.env.DURATION || '60', 10);  // seconds
 const MSGS_PER_PUSH   = parseInt(process.env.MSGS_PER_PUSH || '10', 10);
 const READ_QTY        = parseInt(process.env.READ_QTY || '100', 10); // plain: msgs/read; fifo: groups/read
 const NUM_PARTITIONS  = parseInt(process.env.NUM_PARTITIONS || '1000', 10); // fifo only
+const NUM_QUEUES      = parseInt(process.env.NUM_QUEUES || '1', 10);        // plain: shard clients across N queues (QUEUE_0..QUEUE_{N-1})
+const GROUPED_FN      = process.env.GROUPED_FN || 'read_grouped_head';      // fifo consume fn: read_grouped_head | read_grouped_rr
 const ROUTING_KEY     = process.env.ROUTING_KEY || 'evt';            // fanout: topic routing key
 const VT              = parseInt(process.env.VT || '30', 10);        // visibility timeout (s)
 const PAYLOAD_BYTES   = parseInt(process.env.PAYLOAD_BYTES || '0', 10); // pad payload to ~N bytes
@@ -118,7 +120,7 @@ const SQL_SEND_FANOUT_FIFO =
   'ARRAY(SELECT $3::jsonb FROM generate_series(1, jsonb_array_length($2::jsonb))))';
 // Consumer: read + delete in one round-trip (gives pgmq its best latency).
 const SQL_CONSUME_FIFO =
-  "WITH r AS (SELECT msg_id FROM pgmq.read_grouped_head($1::text,$2::int,$3::int)), " +
+  `WITH r AS (SELECT msg_id FROM pgmq.${GROUPED_FN}($1::text,$2::int,$3::int)), ` +
   "ids AS (SELECT COALESCE(array_agg(msg_id),'{}'::bigint[]) AS a, count(*)::int AS n FROM r), " +
   "d AS (SELECT count(*)::int AS dn FROM pgmq.delete($1::text,(SELECT a FROM ids))) " +
   "SELECT (SELECT n FROM ids) AS n, (SELECT dn FROM d) AS deleted";
@@ -128,7 +130,7 @@ const SQL_CONSUME_PLAIN =
   "d AS (SELECT count(*)::int AS dn FROM pgmq.delete($1::text,(SELECT a FROM ids))) " +
   "SELECT (SELECT n FROM ids) AS n, (SELECT dn FROM d) AS deleted";
 
-function makeOp(pool) {
+function makeOp(pool, q = QUEUE) {
   // ENGINE=queen: call Queen's stored procedures directly (pg_qpubsub style).
   if (ENGINE === 'queen') {
     if (ROLE === 'producer') {
@@ -187,14 +189,14 @@ function makeOp(pool) {
     }
     return async () => {
       const payloads = buildPayloads(MSGS_PER_PUSH, 0);
-      await pool.query(SQL_SEND_PLAIN, [QUEUE, JSON.stringify(payloads)]);
+      await pool.query(SQL_SEND_PLAIN, [q, JSON.stringify(payloads)]);
       return MSGS_PER_PUSH;
     };
   }
   // consumer
   const sql = MODE === 'fifo' ? SQL_CONSUME_FIFO : SQL_CONSUME_PLAIN;
   return async () => {
-    const res = await pool.query(sql, [QUEUE, VT, READ_QTY]);
+    const res = await pool.query(sql, [q, VT, READ_QTY]);
     return res.rows[0] ? res.rows[0].n : 0;
   };
 }
@@ -249,9 +251,11 @@ async function main() {
   if (WARMUP_MS > 0) await sleep(WARMUP_MS);
 
   const deadline = Date.now() + DURATION * 1000;
-  const op = makeOp(pool);
   const loops = [];
-  for (let i = 0; i < CONNECTIONS; i++) loops.push(clientLoop(op, deadline));
+  for (let i = 0; i < CONNECTIONS; i++) {
+    const q = NUM_QUEUES > 1 ? `${QUEUE}_${i % NUM_QUEUES}` : QUEUE;
+    loops.push(clientLoop(makeOp(pool, q), deadline));
+  }
   await Promise.all(loops);
 
   const elapsed = DURATION;
