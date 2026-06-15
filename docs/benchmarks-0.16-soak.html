@@ -7,7 +7,20 @@
 <meta name="description" content="Queen MQ 0.16 (pushser) sustained ~119k msg/s of balanced push and pop for 24 hours: 10.4 billion messages, zero push errors, flat ~400 MiB broker memory, Postgres-bound throughput. Full charts and the live dashboard at the 24h mark.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="canonical" href="https://queenmq.com/benchmarks-0.16-soak.html">
+<meta property="og:site_name" content="Queen MQ">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://queenmq.com/benchmarks-0.16-soak.html">
+<meta property="og:title" content="24-hour durability soak · Queen 0.16: 10.4B messages, zero loss">
+<meta property="og:description" content="Queen MQ 0.16 (pushser) sustained ~119k msg/s of balanced push and pop for 24 hours: 10.4 billion messages, zero push errors, flat ~400 MiB broker memory, Postgres-bound throughput. Full charts and the live dashboard at the 24h mark.">
+<meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Queen MQ, partitioned message queue on PostgreSQL">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
 <style>
 .headline-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
@@ -42,7 +55,7 @@
 <header class="topnav">
   <div class="topnav-inner">
     <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
@@ -85,7 +98,7 @@
 </p>
 
 <figure class="compare-figure" style="margin-top: 22px;">
-  <img src="assets/soak/soak-24h-overview.png" alt="Queen 0.16 24-hour soak overview: throughput (push, pop, retention deletes all ~119k msg/s), CPU, memory and disk across 24 hours">
+  <img src="assets/soak/soak-24h-overview.webp" alt="Queen 0.16 24-hour soak overview: throughput (push, pop, retention deletes all ~119k msg/s), CPU, memory and disk across 24 hours">
   <figcaption><strong>The whole run at a glance.</strong> Push, pop &amp; retention-delete throughput, CPU, memory and disk across the full 24 hours. Broker fusion coalesced ~12.3k HTTP requests/s into ~1.09k Postgres commits/s (≈11 requests &amp; ≈220 row writes per commit).</figcaption>
 </figure>
 
@@ -165,7 +178,7 @@
   bounded.
 </p>
 <figure class="compare-figure">
-  <img src="assets/soak/ui-dashboard.png" alt="Queen dashboard at the 24-hour mark showing throughput holding around 120k msg/s and pending bounded">
+  <img src="assets/soak/ui-dashboard.webp" alt="Queen dashboard at the 24-hour mark showing throughput holding around 120k msg/s and pending bounded">
   <figcaption><strong>Queen dashboard, 24h in.</strong> Throughput sits in its band with push ≈ pop ≈ ack; the pending series oscillates within a small in-flight window and never runs away.</figcaption>
 </figure>
 
@@ -256,7 +269,7 @@
   </figure>
 </div>
 <figure class="compare-figure">
-  <img src="assets/soak/ui-pg-cache.png" alt="Queen dashboard Postgres stats showing 100% database, table and index hit ratios">
+  <img src="assets/soak/ui-pg-cache.webp" alt="Queen dashboard Postgres stats showing 100% database, table and index hit ratios">
   <figcaption><strong>Postgres cache, 24h in.</strong> 100% database / table / index hit ratios on 24 GB shared_buffers, the working set stays resident; reads almost never touch disk.</figcaption>
 </figure>
 <div class="takeaway">
@@ -267,7 +280,7 @@
   data you choose to keep, not a leak.
 </div>
 <figure class="compare-figure">
-  <img src="assets/soak/ui-message-flow.png" alt="Message flow over time showing ingested and processed lines overlapping across 24 hours">
+  <img src="assets/soak/ui-message-flow.webp" alt="Message flow over time showing ingested and processed lines overlapping across 24 hours">
   <figcaption><strong>Message flow, ingested vs processed.</strong> The two lines overlap for the whole run: everything ingested is processed, continuously.</figcaption>
 </figure>
 
@@ -342,7 +355,7 @@
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">

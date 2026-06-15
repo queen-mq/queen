@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📚 Documentation
+    url: https://queenmq.com/
+    about: Guides, concepts, HTTP API reference, server configuration, benchmarks.
+  - name: 🛠️ Developer guide
+    url: https://github.com/queen-mq/queen/blob/master/DEVELOPING.md
+    about: How to build, run, and test every component of the repository.

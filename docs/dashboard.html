@@ -7,7 +7,20 @@
 <meta name="description" content="The Queen MQ web dashboard: real-time queues, message browser, trace timelines, DLQ management, and analytics.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="canonical" href="https://queenmq.com/dashboard.html">
+<meta property="og:site_name" content="Queen MQ">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://queenmq.com/dashboard.html">
+<meta property="og:title" content="Dashboard: Queen MQ">
+<meta property="og:description" content="The Queen MQ web dashboard: real-time queues, message browser, trace timelines, DLQ management, and analytics.">
+<meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Queen MQ, partitioned message queue on PostgreSQL">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,7 +28,7 @@
 <header class="topnav">
   <div class="topnav-inner">
     <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
@@ -55,7 +68,7 @@
 </p>
 
 <figure>
-  <img class="bordered" src="assets/webapp.png" alt="Queen MQ dashboard, overview screen">
+  <img class="bordered" src="assets/webapp.webp" alt="Queen MQ dashboard, overview screen" width="2160" height="1218" decoding="async">
   <figcaption>Dashboard overview, real-time throughput, queue list, consumer-group lag, system health.</figcaption>
 </figure>
 
@@ -106,12 +119,12 @@
 <h2 style="margin-top: 40px;">Tour</h2>
 
 <figure>
-  <img class="bordered" src="assets/new_messages.png" alt="Messages browser, Queen dashboard">
+  <img class="bordered" src="assets/new_messages.webp" alt="Messages browser, Queen dashboard" width="2160" height="1219" loading="lazy" decoding="async">
   <figcaption>Messages browser, filter by queue / partition / status / namespace / task; click into any message to see the payload, retries, and trace.</figcaption>
 </figure>
 
 <figure>
-  <img class="bordered" src="assets/new_traces.png" alt="Traces, Queen dashboard">
+  <img class="bordered" src="assets/new_traces.webp" alt="Traces, Queen dashboard" width="2160" height="1218" loading="lazy" decoding="async">
   <figcaption>Traces, every stage of a multi-queue workflow on a single timeline, including which consumer group owned the message at each hop.</figcaption>
 </figure>
 
@@ -140,7 +153,7 @@
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">

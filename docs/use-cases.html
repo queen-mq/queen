@@ -7,7 +7,20 @@
 <meta name="description" content="Patterns and recipes built on Queen MQ + the streams SDK: rate limiters, windowed aggregations, cross-stream joins, anomaly detection, and more.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="canonical" href="https://queenmq.com/use-cases.html">
+<meta property="og:site_name" content="Queen MQ">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://queenmq.com/use-cases.html">
+<meta property="og:title" content="Use cases: Queen MQ">
+<meta property="og:description" content="Patterns and recipes built on Queen MQ + the streams SDK: rate limiters, windowed aggregations, cross-stream joins, anomaly detection, and more.">
+<meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Queen MQ, partitioned message queue on PostgreSQL">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
 <style>
 .uc-card-grid {
@@ -23,8 +36,8 @@
   .uc-card-grid { grid-template-columns: 1fr; }
 }
 .uc-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-mid);
+  background: var(--ink-2);
+  border: 1px solid var(--bd);
   border-radius: 10px;
   padding: 18px 18px 14px;
   display: flex;
@@ -33,10 +46,10 @@
   transition: border-color 0.15s, transform 0.15s;
 }
 .uc-card.uc-live {
-  border-color: var(--accent-mid, #4a7);
+  border-color: var(--bd-hi);
 }
 .uc-card.uc-live:hover {
-  border-color: var(--accent-hi, #5b8);
+  border-color: var(--ice-400);
   transform: translateY(-1px);
 }
 .uc-card.uc-soon {
@@ -50,7 +63,7 @@
   color: var(--text-mid);
 }
 .uc-card.uc-live .uc-card-eyebrow {
-  color: var(--accent-hi, #5b8);
+  color: var(--ice-400);
 }
 .uc-card.uc-soon .uc-card-eyebrow {
   color: var(--text-low);
@@ -74,7 +87,7 @@
   font-weight: 500;
 }
 .uc-card.uc-live .uc-cta a {
-  color: var(--accent-hi, #5b8);
+  color: var(--ice-400);
   text-decoration: none;
 }
 .uc-card.uc-live .uc-cta a:hover {
@@ -97,7 +110,7 @@
 <header class="topnav">
   <div class="topnav-inner">
     <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
@@ -236,7 +249,7 @@
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">

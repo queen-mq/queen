@@ -28,3 +28,4 @@ helm_queen
 upgrade.sh
 upgrade_queen.sh
 start.sh
+.DS_Store

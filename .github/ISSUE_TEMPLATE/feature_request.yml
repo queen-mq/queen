@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an idea or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the use case — what are you building, and where does Queen fall short today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Queen to do? API sketches, CLI flags, or config examples welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you use today, or other tools that solve this and how.
+  - type: input
+    id: component
+    attributes:
+      label: Component
+      placeholder: "server, dashboard, proxy, client-js, client-py, client-go, client-laravel, client-cpp, queenctl, pg_qpubsub"

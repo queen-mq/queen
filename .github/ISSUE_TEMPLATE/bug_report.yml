@@ -1,0 +1,37 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: input
+    id: server-version
+    attributes:
+      label: Queen server version
+      placeholder: "0.16.0"
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Client / SDK and version
+      placeholder: "queen-mq (npm) 0.16.0, queen-mq (PyPI), client-go, cURL, queenctl…"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect to happen, and what happened instead? Include error output and relevant server logs if you have them.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: Minimal steps or snippet — docker run flags, queue config, push/pop/ack calls.
+      placeholder: |
+        1. Start the server with …
+        2. Push …
+        3. Pop with consumer group …
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS/arch, how Queen runs (Docker, Kubernetes/Helm, bare binary), PostgreSQL version, relevant non-default env vars.

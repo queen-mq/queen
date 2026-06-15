@@ -7,7 +7,20 @@
 <meta name="description" content="Measured Postgres throughput per vCPU under Queen, with a calculator that turns your target msg/s into a vCPU budget. Numbers from real benchmarks, not vendor folklore.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="icon" type="image/png" href="assets/queen_head.png">
+<link rel="canonical" href="https://queenmq.com/sizing.html">
+<meta property="og:site_name" content="Queen MQ">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://queenmq.com/sizing.html">
+<meta property="og:title" content="Sizing Queen MQ on PostgreSQL: how much hardware do I need?">
+<meta property="og:description" content="Measured Postgres throughput per vCPU under Queen, with a calculator that turns your target msg/s into a vCPU budget. Numbers from real benchmarks, not vendor folklore.">
+<meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Queen MQ, partitioned message queue on PostgreSQL">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
 <style>
 /* Sizing-page extras: inline calculator and band-coloured result chip. */
@@ -103,7 +116,7 @@
 <header class="topnav">
   <div class="topnav-inner">
     <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
@@ -190,7 +203,7 @@
       <option value="1">Push-only firehose (1 op/msg)</option>
       <option value="3" selected>Simple queue: push + pop + ack (3 ops/msg)</option>
       <option value="5">Fan-out × 2: push + 2 consumer groups (5 ops/msg)</option>
-      <option value="7">Multi-stage pipeline: producer , worker , fan-out × 2 (7 ops/msg)</option>
+      <option value="7">Multi-stage pipeline: producer → worker → fan-out × 2 (7 ops/msg)</option>
     </select>
   </div>
   <div>
@@ -260,7 +273,7 @@
       <td>One push, then each of the 2 groups does a pop and an ack. Each consumer group's cursor is independent.</td>
     </tr>
     <tr>
-      <td><strong>Multi-stage pipeline</strong>: producer , worker , fan-out × 2</td>
+      <td><strong>Multi-stage pipeline</strong>: producer → worker → fan-out × 2</td>
       <td><code>7</code></td>
       <td>q1 push, q1 pop, q1 ack, q2 push, q2 pop × 2, q2 ack × 2. Each stage costs PG operations on its own queue.</td>
     </tr>
@@ -444,7 +457,7 @@
 
 <footer style="border-top: 1px solid var(--bd); margin-top: 60px; padding: 32px 0; text-align: center;">
   <div class="shell-narrow" style="color: var(--text-low); font-size: 12px;">
-    Queen MQ , Apache 2.0 , <a href="https://github.com/queen-mq/queen">github.com/queen-mq/queen</a>
+    Queen MQ · Apache 2.0 · <a href="https://github.com/queen-mq/queen">github.com/queen-mq/queen</a>
   </div>
 </footer>
 
@@ -461,7 +474,7 @@
     '1': 'push-only firehose',
     '3': 'simple queue (push + pop + ack)',
     '5': 'fan-out × 2 (push + 2 consumer groups)',
-    '7': 'multi-stage pipeline (producer , worker , fan-out × 2)'
+    '7': 'multi-stage pipeline (producer → worker → fan-out × 2)'
   };
   const DEPTH_LABEL = {
     '12000': 'deep partitions, batches fill',

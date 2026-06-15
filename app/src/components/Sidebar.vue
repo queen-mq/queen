@@ -15,7 +15,7 @@
       <!-- Brand -->
       <div class="brand">
         <div class="brand-mark">
-          <img src="/queen_head.png" alt="" />
+          <img src="/queen-duck-white-linemark.png" alt="" />
           <span class="brand-health" :class="isConnected ? 'bg-ok' : 'bg-ember'" />
         </div>
         <div v-if="!props.collapsed" class="brand-text">

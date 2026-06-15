@@ -1,5 +1,9 @@
 # Developing Queen
 
+[![libuv](https://img.shields.io/badge/libuv-1.48.0-blue.svg)](https://libuv.org/)
+[![libpq](https://img.shields.io/badge/libpq-15.5-blue.svg)](https://www.postgresql.org/)
+[![uWebSockets](https://img.shields.io/badge/uWebSockets-22.0.0-blue.svg)](https://github.com/uNetworking/uWebSockets)
+
 This is the developer guide for the **Queen MQ** repository. It tells you how to build, run, test, and reason about every piece of the system: the C++broker, the libqueen core library, the SQL schema and stored procedures, the Vue dashboard, the auth proxy, and all five client SDKs (JavaScript, Python, Go, PHP/Laravel, C++).
 
 If you only want to **use** Queen, see [README.md](README.md) and [docs/](docs/index.html). This guide is for people who want to **change** Queen — internally at Smartness, or as an external contributor.

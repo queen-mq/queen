@@ -4,6 +4,29 @@
    No build step. No JS framework. Pure HTML + this file + Prism.
    ========================================================================== */
 
+/* Self-hosted variable fonts (latin subset, via Fontsource) */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('assets/fonts/inter-variable.woff2') format('woff2-variations');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('assets/fonts/inter-variable-italic.woff2') format('woff2-variations');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('assets/fonts/jetbrains-mono-variable.woff2') format('woff2-variations');
+}
+
 :root {
   /* Surfaces, Cursor greys */
   --ink-0: #141415;  /* page bg */
@@ -15,7 +38,7 @@
 
   --text-hi:    #e6e6e6;
   --text-mid:   #9a9a9a;
-  --text-low:   #6a6a6a;
+  --text-low:   #8a8a92;
   --text-faint: #464649;
 
   /* White-as-accent (Cursor "Accept button" vibe) */
@@ -97,31 +120,34 @@ a.subtle:hover { color: var(--text-hi); }
   border-bottom: 1px solid var(--bd);
 }
 .topnav-inner {
-  display: flex; align-items: center; gap: 18px;
+  display: grid;
+  grid-template-columns: 1fr minmax(0, auto) 1fr;
+  align-items: center; gap: 18px;
   height: 52px;
-  max-width: 1080px;
-  margin: 0 auto;
-  padding: 0 24px;
+  width: 100%;
+  margin: 0;
+  padding: 0 28px;
 }
+.topnav-inner > .brand { justify-self: start; white-space: nowrap; }
+.topnav-inner > .topnav-right { justify-self: end; }
 .brand {
   display: inline-flex; align-items: center; gap: 9px;
   font-weight: 600; font-size: 14px; letter-spacing: -0.015em;
   color: var(--text-hi);
 }
 .brand-mark {
-  width: 24px; height: 24px; border-radius: 6px; overflow: hidden;
+  width: 26px; height: 26px;
   display: inline-grid; place-items: center;
   flex-shrink: 0;
-  background: var(--ink-3);
 }
-.brand-mark img { width: 100%; height: 100%; object-fit: cover; }
+.brand-mark img { width: 100%; height: 100%; object-fit: contain; }
 .brand b {
   font-weight: 500; font-size: 10.5px;
   letter-spacing: 0.06em; color: var(--text-mid); margin-left: 3px;
 }
 .topnav-links {
-  display: flex; align-items: center; gap: 4px; margin-left: 12px;
-  flex: 1; min-width: 0; overflow-x: auto;
+  display: flex; align-items: center; justify-content: safe center; gap: 4px;
+  min-width: 0; overflow-x: auto;
 }
 .topnav-links::-webkit-scrollbar { height: 0; }
 .topnav-links a {
@@ -170,8 +196,31 @@ a.subtle:hover { color: var(--text-hi); }
 }
 .hero-inner {
   position: relative; z-index: 1;
-  display: grid; gap: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 56px;
   text-align: left;
+}
+.hero-copy { display: grid; gap: 24px; min-width: 0; }
+/* Logo treatment is a token choice, not baked into the asset.
+   --logo-ink: C = confident white + visible cyan glow. */
+:root {
+  --logo-ink:  #ececec;
+  --logo-glow: rgba(34, 211, 238, 0.38);
+}
+.hero-logo {
+  width: clamp(200px, 26vw, 340px);
+  aspect-ratio: 1 / 1;
+  justify-self: end;
+  background-color: var(--logo-ink);
+  -webkit-mask: url('assets/queen-duck-white-linemark.png') center / contain no-repeat;
+          mask: url('assets/queen-duck-white-linemark.png') center / contain no-repeat;
+  filter: drop-shadow(0 8px 34px var(--logo-glow));
+}
+@media (max-width: 860px) {
+  .hero-inner { grid-template-columns: 1fr; gap: 24px; }
+  .hero-logo { order: -1; justify-self: start; width: 104px; }
 }
 .hero h1 {
   font-size: clamp(34px, 5.5vw, 52px);

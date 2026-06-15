@@ -7,10 +7,20 @@
 <meta name="description" content="A Postgres-backed message queue for the workloads where one Postgres is enough. Per-key ordering at high partition cardinality, transactional delivery, replay-from-timestamp.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
+<link rel="canonical" href="https://queenmq.com/">
+<meta property="og:site_name" content="Queen MQ">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://queenmq.com/">
 <meta property="og:title" content="Queen MQ: Partitioned Message Queue on PostgreSQL">
 <meta property="og:description" content="A Postgres-backed message queue for the &lt;200k msg/s tier with per-key ordering at high partition cardinality.">
-<meta property="og:type" content="website">
-<link rel="icon" type="image/png" href="assets/queen_head.png">
+<meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Queen MQ, partitioned message queue on PostgreSQL">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="style.css">
 <style>
 /* Index-page extras: tight lists inside positioning cards. */
@@ -36,7 +46,7 @@
 <header class="topnav">
   <div class="topnav-inner">
     <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
@@ -65,22 +75,19 @@
 <!-- ============================ HERO ============================ -->
 <section class="hero">
   <div class="shell hero-inner">
+    <div class="hero-copy">
     <div class="row" style="gap: 8px;">
       <span class="chip chip-ice"><span class="dot"></span> v0.16 · partitions on PostgreSQL</span>
       <span class="chip chip-mute"><span class="dot"></span> Apache 2.0</span>
     </div>
-    <h1>Per-entity ordering<br><em>without preallocating partitions.</em></h1>
+    <h1>Kafka-style ordering,<br><em>on the Postgres you already run.</em></h1>
     <p class="lead">
-      Queen MQ is a message queue backed by PostgreSQL with the partition count as a
-      continuous knob. Slide it toward thousands and you have
-      <strong>Kafka-shaped per-entity FIFO ordering</strong> without preallocating
-      anything, one chat per partition, one user per partition, one workflow
-      per partition. Slide it toward ten and you have
-      <strong>RabbitMQ-shaped competing consumers</strong> at higher throughput,
-      with per-shard ordering as a free bonus. Same engine, same SDK, same
-      durability tier (<code>synchronous_commit=on</code>). One Docker container
-      plus the Postgres you already run. Sized for workloads where
-      <strong>one beefy Postgres is enough</strong>.
+      Queen MQ gives every entity — each chat, user, or workflow — its own
+      ordered FIFO lane, created on first push. <strong>No partitions to
+      preallocate, no rebalance, no cluster to operate.</strong> A slow consumer
+      on one lane never stalls another. One stateless binary next to your
+      Postgres, with consumer groups, replay, and transactional delivery
+      (<code>synchronous_commit=on</code>).
     </p>
     <div class="hero-actions">
       <a class="btn btn-primary" href="quickstart.html">
@@ -94,22 +101,98 @@
     <div class="hero-meta">
       <span><strong>10.4B msgs</strong> · 24 h soak · zero loss</span>
       <span class="dot"></span>
-      <span><strong>172k msg/s</strong> peak push (batch=100)</span>
+      <span><strong>~120k msg/s</strong> balanced push &amp; pop</span>
       <span class="dot"></span>
-      <span><strong>6.7k msg/s</strong> end-to-end pipeline · p99 ≈ 1 s</span>
-      <span class="dot"></span>
-      <span><strong>100 000</strong> active partitions, no degradation</span>
-      <span class="dot"></span>
-      <span><strong>52 MB</strong> broker RAM · single container</span>
+      <span><strong>100k+ partitions</strong> · no rebalance</span>
     </div>
     <p class="muted" style="font-size: 12px; margin-top: 8px;">
       Numbers from <a href="benchmarks.html">our benchmark page</a>, including a
-      <a href="benchmarks-0.16-soak.html">24-hour soak of 10.4 billion messages</a> (zero loss)
-      and a 4-stage real-client pipeline (producer → worker → fan-out × 2). Use the
-      <a href="sizing.html">sizing calculator</a> to convert your target msg/s
-      into a Postgres vCPU budget. Above ~200k msg/s sustained, or for
-      multi-region replication, you want Kafka.
+      <a href="benchmarks-0.16-soak.html">24-hour soak of 10.4 billion messages</a>
+      (zero loss). Above ~200k msg/s sustained, or for multi-region replication,
+      you want Kafka.
     </p>
+    </div>
+    <div class="hero-logo" role="img" aria-label="Queen MQ"></div>
+  </div>
+</section>
+
+<!-- ====================== HERO CODE TABS ====================== -->
+<section class="band">
+  <div class="shell-narrow">
+    <div class="tabs">
+      <input type="radio" class="t-js"      id="hero-js"      name="hero" checked>
+      <input type="radio" class="t-py"      id="hero-py"      name="hero">
+      <input type="radio" class="t-go"      id="hero-go"      name="hero">
+      <input type="radio" class="t-laravel" id="hero-laravel" name="hero">
+      <input type="radio" class="t-curl"    id="hero-curl"    name="hero">
+      <div class="tabs-bar">
+        <label for="hero-js"><span class="lang-dot"></span>JavaScript</label>
+        <label for="hero-py"><span class="lang-dot"></span>Python</label>
+        <label for="hero-go"><span class="lang-dot"></span>Go</label>
+        <label for="hero-laravel"><span class="lang-dot"></span>PHP / Laravel</label>
+        <label for="hero-curl"><span class="lang-dot"></span>HTTP</label>
+      </div>
+      <div class="tabs-panes">
+
+        <div class="tab-pane pane-js"><pre><code class="language-javascript">import { Queen } from 'queen-mq'
+
+const queen = new Queen('http://localhost:6632')
+
+// One ordered lane per chat — created on first push
+await queen.queue('chat').partition(chatId).push([
+  { data: { text: 'hello' } }
+])
+
+// Workers pull in order; ack is automatic on success
+await queen.queue('chat').consume(async (msg) => {
+  await handle(msg.data)
+})</code></pre></div>
+
+        <div class="tab-pane pane-py"><pre><code class="language-python">from queen import Queen
+
+queen = Queen(url='http://localhost:6632')
+
+# One ordered lane per chat — created on first push
+await queen.queue('chat').partition(chat_id).push([
+    {'data': {'text': 'hello'}}
+])
+
+# Workers pull in order; ack is automatic on success
+await queen.queue('chat').consume(handle)</code></pre></div>
+
+        <div class="tab-pane pane-go"><pre><code class="language-go">client, _ := queen.New("http://localhost:6632")
+
+// One ordered lane per chat — created on first push
+client.Queue("chat").Partition(chatID).Push(map[string]any{
+    "text": "hello",
+}).Execute(ctx)
+
+// Workers pull in order; ack is automatic on success
+client.Queue("chat").Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+    return handle(msg.Data)
+})</code></pre></div>
+
+        <div class="tab-pane pane-laravel"><pre><code class="language-php">// One ordered lane per chat — created on first push
+$queen->queue('chat')->partition($chatId)->push([
+    ['data' => ['text' => 'hello']],
+])->execute();
+
+// Workers pull in order, then ack
+$consumer = $queen->queue('chat')->consumer();
+while ($msg = $consumer->consume(1000)) {
+    handle($msg->data);
+    $consumer->ack($msg);
+}</code></pre></div>
+
+        <div class="tab-pane pane-curl"><pre><code class="language-bash"># One ordered lane per chat — partition is the chat id
+curl -X POST localhost:6632/api/v1/push -H 'Content-Type: application/json' \
+  -d '{"items":[{"queue":"chat","partition":"chat-42","payload":{"text":"hello"}}]}'
+
+# Pop the next message in order, auto-ack on read
+curl 'localhost:6632/api/v1/pop/queue/chat?autoAck=true'</code></pre></div>
+
+      </div>
+    </div>
   </div>
 </section>
 
@@ -436,7 +519,7 @@ await queen.queue('test-queue')
         your <strong>worker fleet is the bottleneck, not the broker</strong>. At 20 ms of
         work per message, one worker handles 50 msg/s. Saturating Kafka's 1.5M msg/s
         requires <strong>30 000 worker processes</strong> (~$150k/month of consumer fleet).
-        Most companies have 100-2 000 workers and run at 5 k-100 k msg/s of actual demand ,
+        Most companies have 100-2 000 workers and run at 5 k-100 k msg/s of actual demand,
         well within Queen's broker envelope. In that regime, the broker comparison stops
         mattering, and Queen wins on operational cost, durability semantics, and
         Postgres-transactional integration. The
@@ -482,7 +565,7 @@ curl 'http://localhost:6632/api/v1/pop/queue/demo?autoAck=true'</code></pre>
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
