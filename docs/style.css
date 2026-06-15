@@ -111,6 +111,16 @@ a.subtle:hover { color: var(--text-hi); }
   padding: 0 24px;
 }
 
+/* Skip link, visible only on keyboard focus */
+.skip-link {
+  position: absolute; left: 12px; top: -48px; z-index: 100;
+  padding: 8px 14px; border-radius: var(--border-radius-md, 8px);
+  background: var(--ink-3); color: var(--text-hi);
+  border: 1px solid var(--bd-hi); font-size: 13px;
+  transition: top .15s var(--ease);
+}
+.skip-link:focus { top: 10px; outline: 2px solid var(--ice-400); outline-offset: 2px; }
+
 /* Header */
 .topnav {
   position: sticky; top: 0; z-index: 50;
@@ -150,6 +160,13 @@ a.subtle:hover { color: var(--text-hi); }
   min-width: 0; overflow-x: auto;
 }
 .topnav-links::-webkit-scrollbar { height: 0; }
+@media (max-width: 980px) {
+  /* fade the right edge to signal the nav scrolls horizontally */
+  .topnav-links {
+    -webkit-mask-image: linear-gradient(90deg, #000 88%, transparent 100%);
+            mask-image: linear-gradient(90deg, #000 88%, transparent 100%);
+  }
+}
 .topnav-links a {
   display: inline-flex; align-items: center;
   padding: 6px 10px; border-radius: 5px;
@@ -203,20 +220,14 @@ a.subtle:hover { color: var(--text-hi); }
   text-align: left;
 }
 .hero-copy { display: grid; gap: 24px; min-width: 0; }
-/* Logo treatment is a token choice, not baked into the asset.
-   --logo-ink: C = confident white + visible cyan glow. */
-:root {
-  --logo-ink:  #ececec;
-  --logo-glow: rgba(34, 211, 238, 0.38);
-}
+/* Treatment C: the asset is already white line-art, so full opacity plus a
+   visible cyan glow ties it to the accent. Plain <img>, no mask (robust
+   across browsers). */
 .hero-logo {
   width: clamp(200px, 26vw, 340px);
-  aspect-ratio: 1 / 1;
+  height: auto;
   justify-self: end;
-  background-color: var(--logo-ink);
-  -webkit-mask: url('assets/queen-duck-white-linemark.png') center / contain no-repeat;
-          mask: url('assets/queen-duck-white-linemark.png') center / contain no-repeat;
-  filter: drop-shadow(0 8px 34px var(--logo-glow));
+  filter: drop-shadow(0 8px 34px rgba(34, 211, 238, 0.38));
 }
 @media (max-width: 860px) {
   .hero-inner { grid-template-columns: 1fr; gap: 24px; }
@@ -283,6 +294,9 @@ a.subtle:hover { color: var(--text-hi); }
    ========================================================================= */
 .section { padding: 56px 0; }
 .section-tight { padding: 28px 0; }
+/* Code-tabs band under the hero: give it the same vertical rhythm so the
+   client code isn't cramped against the diagram below. */
+.band { padding: 8px 0 56px; }
 h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.015em; margin: 0 0 14px; color: var(--text-hi); }
 h3 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; margin: 28px 0 10px; color: var(--text-hi); }
 h4 { font-size: 13.5px; font-weight: 600; margin: 22px 0 8px; color: var(--text-hi); }

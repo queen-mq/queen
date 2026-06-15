@@ -42,6 +42,8 @@
 </head>
 <body>
 
+<a class="skip-link" href="#main">Skip to content</a>
+
 <!-- ========================== TOP NAV ========================== -->
 <header class="topnav">
   <div class="topnav-inner">
@@ -72,6 +74,8 @@
   </div>
 </header>
 
+<main id="main">
+
 <!-- ============================ HERO ============================ -->
 <section class="hero">
   <div class="shell hero-inner">
@@ -82,8 +86,8 @@
     </div>
     <h1>Kafka-style ordering,<br><em>on the Postgres you already run.</em></h1>
     <p class="lead">
-      Queen MQ gives every entity — each chat, user, or workflow — its own
-      ordered FIFO lane, created on first push. <strong>No partitions to
+      Queen MQ gives every entity its own ordered FIFO lane, created on first
+      push: one per chat, one per user, one per workflow. <strong>No partitions to
       preallocate, no rebalance, no cluster to operate.</strong> A slow consumer
       on one lane never stalls another. One stateless binary next to your
       Postgres, with consumer groups, replay, and transactional delivery
@@ -112,7 +116,7 @@
       you want Kafka.
     </p>
     </div>
-    <div class="hero-logo" role="img" aria-label="Queen MQ"></div>
+    <img class="hero-logo" src="assets/queen-duck-white-linemark.png" alt="Queen MQ" width="340" height="340">
   </div>
 </section>
 
@@ -138,7 +142,7 @@
 
 const queen = new Queen('http://localhost:6632')
 
-// One ordered lane per chat — created on first push
+// One ordered lane per chat, created on first push
 await queen.queue('chat').partition(chatId).push([
   { data: { text: 'hello' } }
 ])
@@ -152,7 +156,7 @@ await queen.queue('chat').consume(async (msg) => {
 
 queen = Queen(url='http://localhost:6632')
 
-# One ordered lane per chat — created on first push
+# One ordered lane per chat, created on first push
 await queen.queue('chat').partition(chat_id).push([
     {'data': {'text': 'hello'}}
 ])
@@ -162,7 +166,7 @@ await queen.queue('chat').consume(handle)</code></pre></div>
 
         <div class="tab-pane pane-go"><pre><code class="language-go">client, _ := queen.New("http://localhost:6632")
 
-// One ordered lane per chat — created on first push
+// One ordered lane per chat, created on first push
 client.Queue("chat").Partition(chatID).Push(map[string]any{
     "text": "hello",
 }).Execute(ctx)
@@ -172,7 +176,7 @@ client.Queue("chat").Consume(ctx, func(ctx context.Context, msg *queen.Message) 
     return handle(msg.Data)
 })</code></pre></div>
 
-        <div class="tab-pane pane-laravel"><pre><code class="language-php">// One ordered lane per chat — created on first push
+        <div class="tab-pane pane-laravel"><pre><code class="language-php">// One ordered lane per chat, created on first push
 $queen->queue('chat')->partition($chatId)->push([
     ['data' => ['text' => 'hello']],
 ])->execute();
@@ -184,7 +188,7 @@ while ($msg = $consumer->consume(1000)) {
     $consumer->ack($msg);
 }</code></pre></div>
 
-        <div class="tab-pane pane-curl"><pre><code class="language-bash"># One ordered lane per chat — partition is the chat id
+        <div class="tab-pane pane-curl"><pre><code class="language-bash"># One ordered lane per chat; partition is the chat id
 curl -X POST localhost:6632/api/v1/push -H 'Content-Type: application/json' \
   -d '{"items":[{"queue":"chat","partition":"chat-42","payload":{"text":"hello"}}]}'
 
@@ -559,6 +563,8 @@ curl 'http://localhost:6632/api/v1/pop/queue/demo?autoAck=true'</code></pre>
     </div>
   </div>
 </section>
+
+</main>
 
 <!-- ============================ FOOTER ============================ -->
 <footer class="site-foot">
