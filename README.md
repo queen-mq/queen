@@ -13,11 +13,15 @@
 
 <img src="assets/queen-partitions.svg" alt="Queen MQ pipeline: producers push to one queue split into ordered partitions per agent session; two consumer groups (agent runner, tracer) each see every message; one slow tool call stalls only its own partition." width="780" />
 
-[![Server CI](https://github.com/queen-mq/queen/actions/workflows/cpp-server-build.yml/badge.svg?branch=release)](https://github.com/queen-mq/queen/actions/workflows/cpp-server-build.yml)
-[![Release](https://img.shields.io/github/v/release/queen-mq/queen)](https://github.com/queen-mq/queen/releases)
-[![npm](https://img.shields.io/npm/v/queen-mq?label=npm)](https://www.npmjs.com/package/queen-mq)
-[![PyPI](https://img.shields.io/pypi/v/queen-mq?label=PyPI)](https://pypi.org/project/queen-mq/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
+[![PHP](https://img.shields.io/badge/php-8.3%2B-777BB4.svg)](https://www.php.net/)
+[![C++](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![libuv](https://img.shields.io/badge/libuv-1.48.0-blue.svg)](https://libuv.org/)
+[![libpq](https://img.shields.io/badge/libpq-15.5-blue.svg)](https://www.postgresql.org/)
+[![uWebSockets](https://img.shields.io/badge/uWebSockets-22.0.0-blue.svg)](https://github.com/uNetworking/uWebSockets)
 
 📚 **[Complete Documentation](https://queenmq.com/)** • 🚀 **[Quick Start](https://queenmq.com/quickstart.html)** • ⚖️ **[Comparison & Benchmarks](https://queenmq.com/benchmarks.html)** • 🛠️ **[Contributing — Developer Guide](DEVELOPING.md)**
 
