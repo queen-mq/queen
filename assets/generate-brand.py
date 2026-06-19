@@ -18,7 +18,8 @@ Outputs (all regenerated, do not hand-edit):
 Run:  python3 assets/generate-brand.py
 """
 import base64, io, os
-from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def P(*p): return os.path.join(ROOT, *p)
@@ -73,6 +74,40 @@ save(contain(WHITE, 64), 'docs/assets/queen_head_64.png')
 save(WHITE, 'docs/assets/queen-duck-white-linemark.png')
 save(WHITE, 'app/public/queen-duck-white-linemark.png')
 save(WHITE, 'proxy/public/queen-duck-white-linemark.png')
+
+print('rainbow-crest variant (warm -> cyan), masked to mohawk + crown')
+# The crest (mohawk + crown) is one connected stroke with the head, so it can't be
+# isolated topologically. We mask it with a hand-traced polygon whose edges run
+# through the transparent negative space between crest and face -> no visible seam.
+# LARGE-SIZE USE ONLY (hero / og-card); the mono white mark stays for favicon/nav.
+_wa = np.asarray(WHITE).astype(np.float32)
+_alpha = _wa[..., 3] / 255.0
+_ink = _alpha > 0.05
+CREST = [(300,20),(560,20),(720,70),(905,230),(905,400),(855,445),
+         (560,405),(360,395),(315,350),(300,430),(250,520),(255,640),
+         (305,705),(150,730),(20,690),(10,380),(70,190),(170,70)]
+_pm = Image.new('L', WHITE.size, 0); ImageDraw.Draw(_pm).polygon(CREST, fill=255)
+_region = np.asarray(_pm.filter(ImageFilter.GaussianBlur(1.5))).astype(np.float32) / 255.0
+_crest = np.clip(_region * _ink, 0, 1)[..., None]
+_xs = np.where((_region > 0.5) & _ink)[1]; _x0, _x1 = _xs.min(), _xs.max()
+_t = np.clip((np.indices(_alpha.shape)[1] - _x0) / max(1, _x1 - _x0), 0, 1)
+STOPS = np.array([(255,86,92),(255,150,70),(250,205,95),(80,205,165),(34,221,238)], np.float32)
+_seg = _t * (len(STOPS) - 1); _i = np.clip(_seg.astype(int), 0, len(STOPS) - 2); _f = (_seg - _i)[..., None]
+_rain = STOPS[_i] * (1 - _f) + STOPS[_i + 1] * _f
+_rgb = np.array([235., 235, 235]) * (1 - _crest) + _rain * _crest
+_rainbow = Image.fromarray(np.dstack([_rgb, _alpha * 255]).clip(0, 255).astype('uint8'))
+save(_rainbow, 'assets/queen-duck-rainbow-linemark.png')
+save(_rainbow, 'docs/assets/queen-duck-rainbow-linemark.png')
+
+# FULL-rainbow variant: every stroke coloured, gradient across the whole duck,
+# no white/dark strokes left. No mask needed (the whole line-art is recoloured).
+_fxs = np.where(_ink)[1]; _fx0, _fx1 = _fxs.min(), _fxs.max()
+_tf = np.clip((np.indices(_alpha.shape)[1] - _fx0) / max(1, _fx1 - _fx0), 0, 1)
+_sf = _tf * (len(STOPS) - 1); _fi = np.clip(_sf.astype(int), 0, len(STOPS) - 2); _ff = (_sf - _fi)[..., None]
+_rainf = STOPS[_fi] * (1 - _ff) + STOPS[_fi + 1] * _ff
+_full = Image.fromarray(np.dstack([_rainf, _alpha * 255]).clip(0, 255).astype('uint8'))
+save(_full, 'assets/queen-duck-rainbow-full-linemark.png')
+save(_full, 'docs/assets/queen-duck-rainbow-full-linemark.png')
 
 print('og-card 1200x630')
 def font(bold, size):

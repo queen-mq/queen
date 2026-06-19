@@ -1,0 +1,1 @@
+[pacer] rate=40000 offered=1120000 dispatched=152473 completed=95626 non2xx=0 failed=56847 deficit=967527 p50=328ms p99=2118ms maxInflight=4000

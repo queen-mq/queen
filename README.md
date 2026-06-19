@@ -1,8 +1,5 @@
 <div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/queen-mq/queen/master/assets/queen-duck-white-linemark.png">
-    <img src="https://raw.githubusercontent.com/queen-mq/queen/master/assets/queen-duck-black-linemark.png" alt="Queen MQ" width="130">
-  </picture>
+  <img src="https://raw.githubusercontent.com/queen-mq/queen/master/assets/queen-badge.png" alt="Queen MQ" width="140">
 </div>
 
 # Queen MQ

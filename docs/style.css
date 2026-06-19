@@ -227,7 +227,6 @@ a.subtle:hover { color: var(--text-hi); }
   width: clamp(200px, 26vw, 340px);
   height: auto;
   justify-self: end;
-  filter: drop-shadow(0 8px 34px rgba(34, 211, 238, 0.38));
 }
 @media (max-width: 860px) {
   .hero-inner { grid-template-columns: 1fr; gap: 24px; }

@@ -7,10 +7,10 @@
 <meta name="description" content="What happens when you push faster than you can consume? A 1-hour realistic-app soak (2 consumer-group fan-out, explicit ack, 20ms handlers, failures+DLQ, transactional pipeline) driven deliberately above the sustainable rate. Queen 0.16 never blocks producers, never loses or reorders a message, keeps a bounded and self-draining backlog, and never crashes. Graceful degradation under sustained lag.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="canonical" href="https://queenmq.com/benchmarks-0.16-lag.html">
+<link rel="canonical" href="https://queenmq.com/benchmarks-0.16-lag">
 <meta property="og:site_name" content="Queen MQ">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://queenmq.com/benchmarks-0.16-lag.html">
+<meta property="og:url" content="https://queenmq.com/benchmarks-0.16-lag">
 <meta property="og:title" content="Over-provisioned push · Queen 0.16: graceful lag, zero loss">
 <meta property="og:description" content="What happens when you push faster than you can consume? A 1-hour realistic-app soak (2 consumer-group fan-out, explicit ack, 20ms handlers, failures+DLQ, transactional pipeline) driven deliberately above the sustainable rate. Queen 0.16 never blocks producers, never loses or reorders a message, keeps a bounded and self-draining backlog, and never crashes. Graceful degradation under sustained lag.">
 <meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
@@ -59,23 +59,23 @@
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+    <a class="brand" href="/">
+      <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
-      <a href="quickstart.html">Quickstart</a>
-      <a href="concepts.html">Concepts</a>
-      <a href="visual-tour.html">Visual tour</a>
-      <a href="architecture.html">Architecture</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="clients.html">Clients</a>
-      <a href="cli.html">CLI</a>
-      <a href="server.html">Server</a>
-      <a href="http-api.html">HTTP API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="benchmarks.html" class="current">Benchmarks</a>
-      <a href="sizing.html">Sizing</a>
+      <a href="quickstart">Quickstart</a>
+      <a href="concepts">Concepts</a>
+      <a href="visual-tour">Visual tour</a>
+      <a href="architecture">Architecture</a>
+      <a href="use-cases">Use cases</a>
+      <a href="clients">Clients</a>
+      <a href="cli">CLI</a>
+      <a href="server">Server</a>
+      <a href="http-api">HTTP API</a>
+      <a href="dashboard">Dashboard</a>
+      <a href="benchmarks" class="current">Benchmarks</a>
+      <a href="sizing">Sizing</a>
       <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
@@ -88,7 +88,7 @@
 
 <main class="shell-narrow" style="padding-top: 48px;">
 
-<p style="margin:0 0 6px;"><a class="subtle" href="benchmarks.html">← All benchmarks</a></p>
+<p style="margin:0 0 6px;"><a class="subtle" href="benchmarks">← All benchmarks</a></p>
 <span class="label-xs">Behavior under overload · Queen 0.16 (pushser) · June 2026</span>
 <h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
   What happens when you push faster than you can consume.
@@ -436,17 +436,17 @@
   -completed-retention 120 -pending-retention 3600 \
   -report 30 -duration 3600</code></pre>
 <div class="card-grid">
-  <a class="card" href="benchmarks-0.16-soak.html" style="border-color: rgba(34,211,238,0.4);">
+  <a class="card" href="benchmarks-0.16-soak" style="border-color: rgba(34,211,238,0.4);">
     <div class="card-eyebrow" style="color: var(--ice-400);">Companion benchmark</div>
     <h3>24-hour durability soak</h3>
     <p>The balanced-load counterpart: ~119k msg/s push <em>and</em> pop for a day, 10.4B messages, zero loss, flat memory.</p>
   </a>
-  <a class="card" href="benchmarks-0.16-matrix.html">
+  <a class="card" href="benchmarks-0.16-matrix">
     <div class="card-eyebrow">0.16 · Matrix</div>
     <h3>Throughput &amp; scaling</h3>
     <p>Batch sizing, partition scaling to 10k, and fan-out vs the 0.14 baseline.</p>
   </a>
-  <a class="card" href="sizing.html">
+  <a class="card" href="sizing">
     <div class="card-eyebrow">Sizing</div>
     <h3>How much Postgres do I need?</h3>
     <p>Turn a target msg/s and your fan-out into a PG vCPU budget.</p>
@@ -459,7 +459,7 @@
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
@@ -470,21 +470,21 @@
     <div>
       <h5>Docs</h5>
       <ul>
-        <li><a href="quickstart.html">Quickstart</a></li>
-        <li><a href="concepts.html">Concepts</a></li>
-        <li><a href="architecture.html">Architecture</a></li>
-        <li><a href="use-cases.html">Use cases</a></li>
-        <li><a href="clients.html">Clients</a></li>
-        <li><a href="cli.html">CLI</a></li>
-        <li><a href="http-api.html">HTTP API</a></li>
+        <li><a href="quickstart">Quickstart</a></li>
+        <li><a href="concepts">Concepts</a></li>
+        <li><a href="architecture">Architecture</a></li>
+        <li><a href="use-cases">Use cases</a></li>
+        <li><a href="clients">Clients</a></li>
+        <li><a href="cli">CLI</a></li>
+        <li><a href="http-api">HTTP API</a></li>
       </ul>
     </div>
     <div>
       <h5>Operate</h5>
       <ul>
-        <li><a href="server.html">Server setup</a></li>
-        <li><a href="dashboard.html">Web dashboard</a></li>
-        <li><a href="benchmarks.html">Benchmarks</a></li>
+        <li><a href="server">Server setup</a></li>
+        <li><a href="dashboard">Web dashboard</a></li>
+        <li><a href="benchmarks">Benchmarks</a></li>
       </ul>
     </div>
     <div>

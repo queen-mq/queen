@@ -7,10 +7,10 @@
 <meta name="description" content="Queen MQ 0.16 (pushser) re-run of the April benchmark matrix: 10 of 11 cells faster (1.3-3.0×), flat partition scaling to 10,000 partitions, 2.9× consumer-group fan-out, 171.6k msg/s peak push, measured on the same 32 vCPU host.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="canonical" href="https://queenmq.com/benchmarks-0.16-matrix.html">
+<link rel="canonical" href="https://queenmq.com/benchmarks-0.16-matrix">
 <meta property="og:site_name" content="Queen MQ">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://queenmq.com/benchmarks-0.16-matrix.html">
+<meta property="og:url" content="https://queenmq.com/benchmarks-0.16-matrix">
 <meta property="og:title" content="Throughput &amp; scaling matrix · Queen 0.16 vs 0.14">
 <meta property="og:description" content="Queen MQ 0.16 (pushser) re-run of the April benchmark matrix: 10 of 11 cells faster (1.3-3.0×), flat partition scaling to 10,000 partitions, 2.9× consumer-group fan-out, 171.6k msg/s peak push, measured on the same 32 vCPU host.">
 <meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
@@ -47,23 +47,23 @@ td .fac.bad { color: var(--ember-400); }
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+    <a class="brand" href="/">
+      <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
-      <a href="quickstart.html">Quickstart</a>
-      <a href="concepts.html">Concepts</a>
-      <a href="visual-tour.html">Visual tour</a>
-      <a href="architecture.html">Architecture</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="clients.html">Clients</a>
-      <a href="cli.html">CLI</a>
-      <a href="server.html">Server</a>
-      <a href="http-api.html">HTTP API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="benchmarks.html" class="current">Benchmarks</a>
-      <a href="sizing.html">Sizing</a>
+      <a href="quickstart">Quickstart</a>
+      <a href="concepts">Concepts</a>
+      <a href="visual-tour">Visual tour</a>
+      <a href="architecture">Architecture</a>
+      <a href="use-cases">Use cases</a>
+      <a href="clients">Clients</a>
+      <a href="cli">CLI</a>
+      <a href="server">Server</a>
+      <a href="http-api">HTTP API</a>
+      <a href="dashboard">Dashboard</a>
+      <a href="benchmarks" class="current">Benchmarks</a>
+      <a href="sizing">Sizing</a>
       <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
@@ -76,7 +76,7 @@ td .fac.bad { color: var(--ember-400); }
 
 <main class="shell-narrow" style="padding-top: 48px;">
 
-<p style="margin:0 0 6px;"><a class="subtle" href="benchmarks.html">← All benchmarks</a></p>
+<p style="margin:0 0 6px;"><a class="subtle" href="benchmarks">← All benchmarks</a></p>
 <span class="label-xs">Matrix · Queen 0.16 (pushser) vs 0.14 · June 2026</span>
 <h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
   Same suite, new engine: faster on 10 of 11 cells.
@@ -86,7 +86,7 @@ td .fac.bad { color: var(--ember-400); }
   architecture) on the <strong>same 32 vCPU / 62 GiB host</strong> with the same
   PostgreSQL tuning and the same autocannon harness, so the only thing that changed is
   the broker. Baseline is Queen <code>0.14.0.alpha.3</code> from the
-  <a href="benchmarks-2026-04.html">April 2026 run</a>. Full numbers and raw data:
+  <a href="benchmarks-2026-04">April 2026 run</a>. Full numbers and raw data:
   <a href="https://github.com/queen-mq/queen/tree/master/benchmark-queen/2026-06-07"><code>benchmark-queen/2026-06-07</code></a>.
 </p>
 
@@ -250,7 +250,7 @@ td .fac.bad { color: var(--ember-400); }
 <div class="takeaway takeaway-warn">
   <strong>Tune the hold to the workload.</strong> Low-concurrency / batched clients want
   <code>hold=0</code> (pipelines the push path). High-concurrency throughput, like the
-  <a href="benchmarks-0.16-soak.html">24-hour soak</a> with 650 producers, wants a larger
+  <a href="benchmarks-0.16-soak">24-hour soak</a> with 650 producers, wants a larger
   hold so fusion packs many messages per Postgres commit (it sustained ~118k msg/s that
   way). All matrix numbers above use <code>hold=0</code>, the right setting for this harness.
 </div>
@@ -258,19 +258,19 @@ td .fac.bad { color: var(--ember-400); }
 <!-- CAVEATS -->
 <h2 id="caveats">Caveats</h2>
 <ul>
-  <li>This is the <strong>low-concurrency</strong> autocannon harness (50-500 connections). It measures per-cell push efficiency, <em>not</em> the engine's sustained ceiling, for that see the <a href="benchmarks-0.16-soak.html">24-hour soak</a> (~118k msg/s sustained, balanced).</li>
+  <li>This is the <strong>low-concurrency</strong> autocannon harness (50-500 connections). It measures per-cell push efficiency, <em>not</em> the engine's sustained ceiling, for that see the <a href="benchmarks-0.16-soak">24-hour soak</a> (~118k msg/s sustained, balanced).</li>
   <li>The metric is <strong>push</strong> throughput (producer side); pop throughput is recorded per cell in the raw consumer logs.</li>
   <li><code>q-100</code> is omitted (no April baseline + the producer log didn't record cleanly). A handful of April-only cells weren't re-run.</li>
   <li>Errors were negligible across all cells (<code>non2xx</code> ≤ 2 per run, ~3×10⁻⁵%).</li>
 </ul>
 
 <div class="card-grid" style="margin-top:18px;">
-  <a class="card" href="benchmarks-0.16-soak.html" style="border-color: rgba(34,211,238,0.4);">
+  <a class="card" href="benchmarks-0.16-soak" style="border-color: rgba(34,211,238,0.4);">
     <div class="card-eyebrow" style="color: var(--ice-400);">Companion benchmark</div>
     <h3>0.16 · 24-hour durability soak</h3>
     <p>10.4 billion messages, ~119k msg/s sustained, flat broker memory, zero loss.</p>
   </a>
-  <a class="card" href="benchmarks-2026-04.html">
+  <a class="card" href="benchmarks-2026-04">
     <div class="card-eyebrow">Baseline</div>
     <h3>April 2026 archive (0.14)</h3>
     <p>The original 18-test suite, plus the head-to-head vs Kafka and RabbitMQ.</p>
@@ -288,7 +288,7 @@ td .fac.bad { color: var(--ember-400); }
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
@@ -299,21 +299,21 @@ td .fac.bad { color: var(--ember-400); }
     <div>
       <h5>Docs</h5>
       <ul>
-        <li><a href="quickstart.html">Quickstart</a></li>
-        <li><a href="concepts.html">Concepts</a></li>
-        <li><a href="architecture.html">Architecture</a></li>
-        <li><a href="use-cases.html">Use cases</a></li>
-        <li><a href="clients.html">Clients</a></li>
-        <li><a href="cli.html">CLI</a></li>
-        <li><a href="http-api.html">HTTP API</a></li>
+        <li><a href="quickstart">Quickstart</a></li>
+        <li><a href="concepts">Concepts</a></li>
+        <li><a href="architecture">Architecture</a></li>
+        <li><a href="use-cases">Use cases</a></li>
+        <li><a href="clients">Clients</a></li>
+        <li><a href="cli">CLI</a></li>
+        <li><a href="http-api">HTTP API</a></li>
       </ul>
     </div>
     <div>
       <h5>Operate</h5>
       <ul>
-        <li><a href="server.html">Server setup</a></li>
-        <li><a href="dashboard.html">Web dashboard</a></li>
-        <li><a href="benchmarks.html">Benchmarks</a></li>
+        <li><a href="server">Server setup</a></li>
+        <li><a href="dashboard">Web dashboard</a></li>
+        <li><a href="benchmarks">Benchmarks</a></li>
       </ul>
     </div>
     <div>

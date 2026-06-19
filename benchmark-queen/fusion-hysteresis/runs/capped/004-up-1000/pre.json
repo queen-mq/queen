@@ -1,0 +1,36 @@
+{
+  "label": "pre",
+  "wal": {
+    "wal_fpi": 1628,
+    "wal_sync": 8878,
+    "wal_bytes": 35124771,
+    "wal_write": 9625,
+    "wal_records": 264589,
+    "wal_sync_time": 19838.457,
+    "wal_write_time": 381.926,
+    "wal_buffers_full": 0
+  },
+  "database": {
+    "ts": 1781771782.010862,
+    "blks_hit": 853364,
+    "blks_read": 456,
+    "deadlocks": 0,
+    "numbackends": 60,
+    "tup_deleted": 60,
+    "tup_updated": 22446,
+    "xact_commit": 9675,
+    "tup_inserted": 32987,
+    "blk_read_time": 2.745,
+    "xact_rollback": 0,
+    "blk_write_time": 56.554
+  },
+  "messages": {
+    "n_tup_ins": 30884,
+    "n_dead_tup": 0,
+    "n_live_tup": 31362
+  },
+  "row_counts": {
+    "messages_total": 31875,
+    "partitions_total": 9
+  }
+}

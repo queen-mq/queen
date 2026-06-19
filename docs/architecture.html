@@ -7,10 +7,10 @@
 <meta name="description" content="How Queen works under the hood: the three-layer mental model, PostgreSQL data model, libqueen request-fusion engine, and the HTTP shell.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="canonical" href="https://queenmq.com/architecture.html">
+<link rel="canonical" href="https://queenmq.com/architecture">
 <meta property="og:site_name" content="Queen MQ">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://queenmq.com/architecture.html">
+<meta property="og:url" content="https://queenmq.com/architecture">
 <meta property="og:title" content="Architecture: Queen MQ">
 <meta property="og:description" content="How Queen works under the hood: the three-layer mental model, PostgreSQL data model, libqueen request-fusion engine, and the HTTP shell.">
 <meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
@@ -53,23 +53,23 @@
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+    <a class="brand" href="/">
+      <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
-      <a href="quickstart.html">Quickstart</a>
-      <a href="concepts.html">Concepts</a>
-      <a href="visual-tour.html">Visual tour</a>
-      <a href="architecture.html" class="current">Architecture</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="clients.html">Clients</a>
-      <a href="cli.html">CLI</a>
-      <a href="server.html">Server</a>
-      <a href="http-api.html">HTTP API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="benchmarks.html">Benchmarks</a>
-      <a href="sizing.html">Sizing</a>
+      <a href="quickstart">Quickstart</a>
+      <a href="concepts">Concepts</a>
+      <a href="visual-tour">Visual tour</a>
+      <a href="architecture" class="current">Architecture</a>
+      <a href="use-cases">Use cases</a>
+      <a href="clients">Clients</a>
+      <a href="cli">CLI</a>
+      <a href="server">Server</a>
+      <a href="http-api">HTTP API</a>
+      <a href="dashboard">Dashboard</a>
+      <a href="benchmarks">Benchmarks</a>
+      <a href="sizing">Sizing</a>
       <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
@@ -754,7 +754,7 @@ ctx.queen-&gt;submit(std::move(job_req),
   These trade-offs are real, but they're <strong>scoped</strong>: they only matter if
   your workload sits at the edges of Queen's envelope. For most business workloads
   (&lt;100k msg/s, single-region, single-Postgres), none of this is a problem. The
-  <a href="benchmarks.html">benchmarks page</a> has the full picture with measured
+  <a href="benchmarks">benchmarks page</a> has the full picture with measured
   numbers and side-by-side comparisons against Kafka and RabbitMQ.
 </p>
 
@@ -787,7 +787,7 @@ ctx.queen-&gt;submit(std::move(job_req),
     <h3>cdocs/LIBQUEEN_IMPROVEMENTS.md</h3>
     <p>The 2026 rewrite of libqueen, adaptive batching, concurrency, scheduling. Has the perf data behind the choices.</p>
   </a>
-  <a class="card" href="benchmarks.html">
+  <a class="card" href="benchmarks">
     <div class="card-eyebrow">Numbers</div>
     <h3>Benchmarks</h3>
     <p>Where this architecture lands on real hardware.</p>
@@ -800,7 +800,7 @@ ctx.queen-&gt;submit(std::move(job_req),
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
@@ -811,21 +811,21 @@ ctx.queen-&gt;submit(std::move(job_req),
     <div>
       <h5>Docs</h5>
       <ul>
-        <li><a href="quickstart.html">Quickstart</a></li>
-        <li><a href="concepts.html">Concepts</a></li>
-        <li><a href="architecture.html">Architecture</a></li>
-        <li><a href="use-cases.html">Use cases</a></li>
-        <li><a href="clients.html">Clients</a></li>
-        <li><a href="cli.html">CLI</a></li>
-        <li><a href="http-api.html">HTTP API</a></li>
+        <li><a href="quickstart">Quickstart</a></li>
+        <li><a href="concepts">Concepts</a></li>
+        <li><a href="architecture">Architecture</a></li>
+        <li><a href="use-cases">Use cases</a></li>
+        <li><a href="clients">Clients</a></li>
+        <li><a href="cli">CLI</a></li>
+        <li><a href="http-api">HTTP API</a></li>
       </ul>
     </div>
     <div>
       <h5>Operate</h5>
       <ul>
-        <li><a href="server.html">Server setup</a></li>
-        <li><a href="dashboard.html">Web dashboard</a></li>
-        <li><a href="benchmarks.html">Benchmarks</a></li>
+        <li><a href="server">Server setup</a></li>
+        <li><a href="dashboard">Web dashboard</a></li>
+        <li><a href="benchmarks">Benchmarks</a></li>
       </ul>
     </div>
     <div>

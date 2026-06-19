@@ -7,10 +7,10 @@
 <meta name="description" content="18 Queen tests, 1.6 billion message events, zero loss. Plus measured head-to-head against Kafka 3.7 and RabbitMQ 3.12 at 1000 partitions/queues. Push throughput, latency profile, partition scaling, consumer-group fan-out, memory and PG efficiency.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="canonical" href="https://queenmq.com/benchmarks-2026-04.html">
+<link rel="canonical" href="https://queenmq.com/benchmarks-2026-04">
 <meta property="og:site_name" content="Queen MQ">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://queenmq.com/benchmarks-2026-04.html">
+<meta property="og:url" content="https://queenmq.com/benchmarks-2026-04">
 <meta property="og:title" content="Benchmarks archive · April 2026 (v0.14): Queen MQ vs Kafka vs RabbitMQ">
 <meta property="og:description" content="18 Queen tests, 1.6 billion message events, zero loss. Plus measured head-to-head against Kafka 3.7 and RabbitMQ 3.12 at 1000 partitions/queues. Push throughput, latency profile, partition scaling, consumer-group fan-out, memory and PG efficiency.">
 <meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
@@ -125,23 +125,23 @@
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+    <a class="brand" href="/">
+      <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
-      <a href="quickstart.html">Quickstart</a>
-      <a href="concepts.html">Concepts</a>
-      <a href="visual-tour.html">Visual tour</a>
-      <a href="architecture.html">Architecture</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="clients.html">Clients</a>
-      <a href="cli.html">CLI</a>
-      <a href="server.html">Server</a>
-      <a href="http-api.html">HTTP API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="benchmarks.html" class="current">Benchmarks</a>
-      <a href="sizing.html">Sizing</a>
+      <a href="quickstart">Quickstart</a>
+      <a href="concepts">Concepts</a>
+      <a href="visual-tour">Visual tour</a>
+      <a href="architecture">Architecture</a>
+      <a href="use-cases">Use cases</a>
+      <a href="clients">Clients</a>
+      <a href="cli">CLI</a>
+      <a href="server">Server</a>
+      <a href="http-api">HTTP API</a>
+      <a href="dashboard">Dashboard</a>
+      <a href="benchmarks" class="current">Benchmarks</a>
+      <a href="sizing">Sizing</a>
       <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
@@ -154,7 +154,7 @@
 
 <main class="shell-narrow" style="padding-top: 48px;">
 
-<p style="margin:0 0 6px;"><a class="subtle" href="benchmarks.html">← All benchmarks</a></p>
+<p style="margin:0 0 6px;"><a class="subtle" href="benchmarks">← All benchmarks</a></p>
 <span class="label-xs">Archive · April 2026 · Queen 0.14.0.alpha.3</span>
 <h1 style="font-size: 32px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 14px;">
   18 tests. 1.6 billion message events. Zero loss.
@@ -163,9 +163,9 @@
   <strong>This is an archived run.</strong> It captures the April 2026 suite on Queen
   <code>0.14.0.alpha.3</code> (plus a 0.14-vs-0.12 comparison). For the current engine
   (<code>0.16</code>, the pushser architecture) see the
-  <a href="benchmarks.html">latest benchmarks</a>, including a
-  <a href="benchmarks-0.16-soak.html">24-hour durability soak</a> and the
-  <a href="benchmarks-0.16-matrix.html">refreshed throughput &amp; scaling matrix</a>.
+  <a href="benchmarks">latest benchmarks</a>, including a
+  <a href="benchmarks-0.16-soak">24-hour durability soak</a> and the
+  <a href="benchmarks-0.16-matrix">refreshed throughput &amp; scaling matrix</a>.
 </div>
 <p class="muted">
   All numbers on this page come from benchmark sessions run on
@@ -866,7 +866,7 @@
   in-flight work doesn't reduce RTT, the controller knows the pipe isn't congested and
   stays put. <strong>You can't manually tune your way to a better number for this
   workload</strong>, the controller already found it. See the
-  <a href="architecture.html#libqueen">architecture page</a> for the math.
+  <a href="architecture#libqueen">architecture page</a> for the math.
 </p>
 
 <!-- ============================ VERSION ============================ -->
@@ -977,7 +977,7 @@
 </p>
 
 <div class="card-grid">
-  <a class="card" href="sizing.html" style="border-color: rgba(34,211,238,0.4);">
+  <a class="card" href="sizing" style="border-color: rgba(34,211,238,0.4);">
     <div class="card-eyebrow" style="color: var(--ice-400);">Sizing</div>
     <h3>How much Postgres do I need?</h3>
     <p>Interactive calculator turning your target msg/s into a PG vCPU budget, derived directly from these benchmarks. ~10 k PG ops/s/vCPU rule of thumb.</p>
@@ -1020,7 +1020,7 @@
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
@@ -1031,21 +1031,21 @@
     <div>
       <h5>Docs</h5>
       <ul>
-        <li><a href="quickstart.html">Quickstart</a></li>
-        <li><a href="concepts.html">Concepts</a></li>
-        <li><a href="architecture.html">Architecture</a></li>
-        <li><a href="use-cases.html">Use cases</a></li>
-        <li><a href="clients.html">Clients</a></li>
-        <li><a href="cli.html">CLI</a></li>
-        <li><a href="http-api.html">HTTP API</a></li>
+        <li><a href="quickstart">Quickstart</a></li>
+        <li><a href="concepts">Concepts</a></li>
+        <li><a href="architecture">Architecture</a></li>
+        <li><a href="use-cases">Use cases</a></li>
+        <li><a href="clients">Clients</a></li>
+        <li><a href="cli">CLI</a></li>
+        <li><a href="http-api">HTTP API</a></li>
       </ul>
     </div>
     <div>
       <h5>Operate</h5>
       <ul>
-        <li><a href="server.html">Server setup</a></li>
-        <li><a href="dashboard.html">Web dashboard</a></li>
-        <li><a href="benchmarks.html">Benchmarks</a></li>
+        <li><a href="server">Server setup</a></li>
+        <li><a href="dashboard">Web dashboard</a></li>
+        <li><a href="benchmarks">Benchmarks</a></li>
       </ul>
     </div>
     <div>

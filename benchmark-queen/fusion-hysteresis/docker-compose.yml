@@ -1,0 +1,55 @@
+name: queen-fusion-hysteresis
+
+# Postgres pinned SMALL on purpose: we want the commit/fsync ceiling to be
+# reachable on a laptop, so the fusion "knee" and the saturation cliff land at a
+# few-tens-of-k msg/s instead of 100k+. Tune PG_CPUS to move the cliff.
+#
+# synchronous_commit defaults to `on` (the regime where fusion actually buys you
+# something: it amortizes the per-commit WAL fsync). Flip SYNC_COMMIT=off to run
+# the control arm — fusion's PG-load benefit should largely vanish there.
+#
+# Pinned to postgres:17 because pg_stat_wal still exposes wal_sync / wal_write
+# directly there; in PG18 those moved into pg_stat_io (see README).
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: queen-fusion-pg
+    cpus: ${PG_CPUS:-2.0}
+    mem_limit: ${PG_MEM:-4g}
+    shm_size: "1gb"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: queen
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-1GB}
+      - -c
+      - work_mem=8MB
+      # The variable under study. on = WAL fsync before commit returns.
+      - -c
+      - synchronous_commit=${SYNC_COMMIT:-on}
+      # Keep checkpoints from injecting their own CPU spikes mid-sweep.
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      # Timing instrumentation so we can read WAL fsync time, not just counts.
+      - -c
+      - track_io_timing=on
+      - -c
+      - track_wal_io_timing=on
+    ports:
+      - "${PG_HOST_PORT:-5439}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d queen"]
+      interval: 2s
+      timeout: 3s
+      retries: 40

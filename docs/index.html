@@ -47,23 +47,23 @@
 <!-- ========================== TOP NAV ========================== -->
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+    <a class="brand" href="/">
+      <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
-      <a href="quickstart.html">Quickstart</a>
-      <a href="concepts.html">Concepts</a>
-      <a href="visual-tour.html">Visual tour</a>
-      <a href="architecture.html">Architecture</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="clients.html">Clients</a>
-      <a href="cli.html">CLI</a>
-      <a href="server.html">Server</a>
-      <a href="http-api.html">HTTP API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="benchmarks.html">Benchmarks</a>
-      <a href="sizing.html">Sizing</a>
+      <a href="quickstart">Quickstart</a>
+      <a href="concepts">Concepts</a>
+      <a href="visual-tour">Visual tour</a>
+      <a href="architecture">Architecture</a>
+      <a href="use-cases">Use cases</a>
+      <a href="clients">Clients</a>
+      <a href="cli">CLI</a>
+      <a href="server">Server</a>
+      <a href="http-api">HTTP API</a>
+      <a href="dashboard">Dashboard</a>
+      <a href="benchmarks">Benchmarks</a>
+      <a href="sizing">Sizing</a>
       <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
@@ -94,7 +94,7 @@
       (<code>synchronous_commit=on</code>).
     </p>
     <div class="hero-actions">
-      <a class="btn btn-primary" href="quickstart.html">
+      <a class="btn btn-primary" href="quickstart">
         Quickstart
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
       </a>
@@ -110,13 +110,13 @@
       <span><strong>100k+ partitions</strong> · no rebalance</span>
     </div>
     <p class="muted" style="font-size: 12px; margin-top: 8px;">
-      Numbers from <a href="benchmarks.html">our benchmark page</a>, including a
-      <a href="benchmarks-0.16-soak.html">24-hour soak of 10.4 billion messages</a>
+      Numbers from <a href="benchmarks">our benchmark page</a>, including a
+      <a href="benchmarks-0.16-soak">24-hour soak of 10.4 billion messages</a>
       (zero loss). Above ~200k msg/s sustained, or for multi-region replication,
       you want Kafka.
     </p>
     </div>
-    <img class="hero-logo" src="assets/queen-duck-white-linemark.png" alt="Queen MQ" width="340" height="340">
+    <img class="hero-logo" src="assets/queen-badge-noborder.svg" alt="Queen MQ" width="336" height="336">
   </div>
 </section>
 
@@ -210,7 +210,7 @@ curl 'localhost:6632/api/v1/pop/queue/chat?autoAck=true'</code></pre></div>
         Producers push tasks; each session is its own FIFO partition; <code>agent runner</code>
         and <code>tracer</code> each consume the same stream with their own offset. A 28-second
         tool call on <code>sess:9c1d</code> stalls only that lane &mdash; the other 9,999
-        sessions keep flowing. <a href="concepts.html#partitions">Read the concepts &rarr;</a>
+        sessions keep flowing. <a href="concepts#partitions">Read the concepts &rarr;</a>
       </figcaption>
     </figure>
   </div>
@@ -351,8 +351,8 @@ await queen.queue('test-queue')
         <strong>Go</strong> (1.24+) ·
         <strong>PHP / Laravel</strong> (8.3+, <code>composer require smartpricing/queen-mq</code>) ·
         <strong>C++</strong> (header-only, C++17).
-        Or skip SDKs entirely and call the <a href="http-api.html">raw HTTP API</a>.
-        <a href="clients.html">See the full matrix &rarr;</a>
+        Or skip SDKs entirely and call the <a href="http-api">raw HTTP API</a>.
+        <a href="clients">See the full matrix &rarr;</a>
       </p>
     </div>
   </div>
@@ -364,62 +364,62 @@ await queen.queue('test-queue')
     <span class="label-xs">Feature surface</span>
     <h2>What you get out of the box.</h2>
     <div class="card-grid">
-      <a class="card" href="concepts.html#partitions">
+      <a class="card" href="concepts#partitions">
         <div class="card-eyebrow">Ordering</div>
         <h3>FIFO partitions at high cardinality</h3>
         <p>Per-user, per-tenant, per-chat, tens of thousands of ordered lanes per queue. Slow processing on one lane doesn't slow another.</p>
       </a>
-      <a class="card" href="concepts.html#consumer-groups">
+      <a class="card" href="concepts#consumer-groups">
         <div class="card-eyebrow">Fan-out</div>
         <h3>Consumer groups & subscriptions</h3>
         <p>Process from beginning, only new messages, or replay from a timestamp. Each group has its own offset.</p>
       </a>
-      <a class="card" href="concepts.html#transactions">
+      <a class="card" href="concepts#transactions">
         <div class="card-eyebrow">Atomicity</div>
         <h3>Transactional pipelines</h3>
         <p>Atomic ack + push across queues, in one PostgreSQL transaction. Exactly-once between Queen operations; downstream effects are still your responsibility.</p>
       </a>
-      <a class="card" href="concepts.html#long-polling">
+      <a class="card" href="concepts#long-polling">
         <div class="card-eyebrow">Latency</div>
         <h3>Long polling, no busy loops</h3>
         <p>Server holds the connection until a message arrives. Inter-instance UDP wakeup keeps fan-out fast.</p>
       </a>
-      <a class="card" href="concepts.html#dlq">
+      <a class="card" href="concepts#dlq">
         <div class="card-eyebrow">Reliability</div>
         <h3>Dead-letter queue</h3>
         <p>Configurable retry limit. Failed messages land in the DLQ with the error message and full payload.</p>
       </a>
-      <a class="card" href="concepts.html#failover">
+      <a class="card" href="concepts#failover">
         <div class="card-eyebrow">Durability</div>
         <h3>Disk failover</h3>
         <p>If PostgreSQL is unreachable, pushes spill to a local file buffer and replay on recovery.</p>
       </a>
-      <a class="card" href="concepts.html#tracing">
+      <a class="card" href="concepts#tracing">
         <div class="card-eyebrow">Observability</div>
         <h3>End-to-end tracing</h3>
         <p>Trace a message across queues, transformations, retries, and consumer groups. Visualize timelines in the dashboard.</p>
       </a>
-      <a class="card" href="http-api.html#metrics">
+      <a class="card" href="http-api#metrics">
         <div class="card-eyebrow">Observability</div>
         <h3>Prometheus &amp; Grafana</h3>
         <p>Native <code>/metrics/prometheus</code> exposition with per-queue, per-worker, and DLQ series. One DB call per scrape; ready for Grafana out of the box.</p>
       </a>
-      <a class="card" href="server.html#auth">
+      <a class="card" href="server#auth">
         <div class="card-eyebrow">Security</div>
         <h3>JWT auth + role gates</h3>
         <p>HS256, RS256, and EdDSA. Read-only / read-write / admin role tiers. Per-message <code>producerSub</code> stamped from the JWT.</p>
       </a>
-      <a class="card" href="dashboard.html">
+      <a class="card" href="dashboard">
         <div class="card-eyebrow">Operate</div>
         <h3>Vue 3 dashboard</h3>
         <p>Real-time queues, message browser, analytics, trace explorer, DLQ management, all served by the same C++ binary.</p>
       </a>
-      <a class="card" href="architecture.html#data-model">
+      <a class="card" href="architecture#data-model">
         <div class="card-eyebrow">Postgres health</div>
         <h3>Bloat &amp; vacuuming, addressed by design</h3>
         <p>Update-heavy tables ship with <code>FILLFACTOR=50</code> and tuned autovacuum knobs to stay HOT-update-friendly. Advisory locks replace row contention on the hot path. Retention windows on <code>messages_consumed</code> keep the message log bounded.</p>
       </a>
-      <a class="card" href="server.html#k8s">
+      <a class="card" href="server#k8s">
         <div class="card-eyebrow">High availability</div>
         <h3>Single container, or K8s StatefulSet</h3>
         <p>One Docker container is enough for most setups. For HA, run a StatefulSet behind a headless service: pods coordinate via UDP peer wake-ups and the UDPSYNC shared-state cache, with affinity routing in the clients.</p>
@@ -510,7 +510,7 @@ await queen.queue('test-queue')
         Most production message-queue workloads at most companies are below 100k msg/s and
         need ordering of some sort. Queen targets that median workload, not Kafka's
         upper tail and not RabbitMQ's specific routing strengths. Our
-        <a href="benchmarks.html">benchmarks</a> show Queen, Kafka, and RabbitMQ
+        <a href="benchmarks">benchmarks</a> show Queen, Kafka, and RabbitMQ
         head-to-head on identical hardware so you can decide for yourself, with numbers
         we measured rather than wishful thinking.
       </p>
@@ -527,7 +527,7 @@ await queen.queue('test-queue')
         well within Queen's broker envelope. In that regime, the broker comparison stops
         mattering, and Queen wins on operational cost, durability semantics, and
         Postgres-transactional integration. The
-        <a href="benchmarks.html#workers">benchmarks page has the full math</a>.
+        <a href="benchmarks#workers">benchmarks page has the full math</a>.
       </p>
     </div>
   </div>
@@ -557,9 +557,9 @@ curl 'http://localhost:6632/api/v1/pop/queue/demo?autoAck=true'</code></pre>
     </div>
 
     <div class="row" style="margin-top: 18px;">
-      <a class="btn btn-primary" href="quickstart.html">Full quickstart</a>
-      <a class="btn" href="clients.html">Pick a client library</a>
-      <a class="btn btn-ghost" href="http-api.html">Or stay raw HTTP</a>
+      <a class="btn btn-primary" href="quickstart">Full quickstart</a>
+      <a class="btn" href="clients">Pick a client library</a>
+      <a class="btn btn-ghost" href="http-api">Or stay raw HTTP</a>
     </div>
   </div>
 </section>
@@ -571,7 +571,7 @@ curl 'http://localhost:6632/api/v1/pop/queue/demo?autoAck=true'</code></pre>
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
@@ -582,21 +582,21 @@ curl 'http://localhost:6632/api/v1/pop/queue/demo?autoAck=true'</code></pre>
     <div>
       <h5>Docs</h5>
       <ul>
-        <li><a href="quickstart.html">Quickstart</a></li>
-        <li><a href="concepts.html">Concepts</a></li>
-        <li><a href="architecture.html">Architecture</a></li>
-        <li><a href="use-cases.html">Use cases</a></li>
-        <li><a href="clients.html">Clients</a></li>
-        <li><a href="cli.html">CLI</a></li>
-        <li><a href="http-api.html">HTTP API</a></li>
+        <li><a href="quickstart">Quickstart</a></li>
+        <li><a href="concepts">Concepts</a></li>
+        <li><a href="architecture">Architecture</a></li>
+        <li><a href="use-cases">Use cases</a></li>
+        <li><a href="clients">Clients</a></li>
+        <li><a href="cli">CLI</a></li>
+        <li><a href="http-api">HTTP API</a></li>
       </ul>
     </div>
     <div>
       <h5>Operate</h5>
       <ul>
-        <li><a href="server.html">Server setup</a></li>
-        <li><a href="dashboard.html">Web dashboard</a></li>
-        <li><a href="benchmarks.html">Benchmarks</a></li>
+        <li><a href="server">Server setup</a></li>
+        <li><a href="dashboard">Web dashboard</a></li>
+        <li><a href="benchmarks">Benchmarks</a></li>
       </ul>
     </div>
     <div>

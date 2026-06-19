@@ -1,0 +1,237 @@
+# HELP queen_uptime_seconds Seconds since the queen process started.
+# TYPE queen_uptime_seconds gauge
+queen_uptime_seconds 712
+# HELP queen_cpu_user_microseconds_total Cumulative user CPU time consumed by the process, in microseconds.
+# TYPE queen_cpu_user_microseconds_total counter
+queen_cpu_user_microseconds_total 30891449
+# HELP queen_cpu_system_microseconds_total Cumulative system CPU time consumed by the process, in microseconds.
+# TYPE queen_cpu_system_microseconds_total counter
+queen_cpu_system_microseconds_total 186091775
+# HELP queen_process_resident_memory_bytes Resident set size of the queen process, in bytes.
+# TYPE queen_process_resident_memory_bytes gauge
+queen_process_resident_memory_bytes 16171008
+# HELP queen_process_virtual_memory_bytes Virtual memory size of the queen process, in bytes.
+# TYPE queen_process_virtual_memory_bytes gauge
+queen_process_virtual_memory_bytes 421449973760
+# HELP queen_db_pool_size Total connections in the asynchronous Postgres pool.
+# TYPE queen_db_pool_size gauge
+queen_db_pool_size 19
+# HELP queen_db_pool_idle Idle connections currently available in the asynchronous Postgres pool.
+# TYPE queen_db_pool_idle gauge
+queen_db_pool_idle 17
+# HELP queen_db_pool_active Connections currently checked out from the asynchronous Postgres pool.
+# TYPE queen_db_pool_active gauge
+queen_db_pool_active 2
+# HELP queen_threadpool_size Worker count in each background threadpool.
+# TYPE queen_threadpool_size gauge
+queen_threadpool_size{pool="db"} 9
+queen_threadpool_size{pool="system"} 4
+# HELP queen_threadpool_queue_size Tasks pending in each background threadpool.
+# TYPE queen_threadpool_queue_size gauge
+queen_threadpool_queue_size{pool="db"} 0
+queen_threadpool_queue_size{pool="system"} 5
+# HELP queen_response_registry_size In-flight HTTP responses awaiting completion in each worker.
+# TYPE queen_response_registry_size gauge
+queen_response_registry_size{worker_id="0"} 0
+queen_response_registry_size{worker_id="1"} 0
+queen_response_registry_size{worker_id="2"} 0
+queen_response_registry_size{worker_id="3"} 0
+# HELP queen_file_buffer_pending Push events currently buffered to disk awaiting database flush.
+# TYPE queen_file_buffer_pending gauge
+queen_file_buffer_pending 0
+# HELP queen_file_buffer_failed Push events that failed to flush from the file buffer.
+# TYPE queen_file_buffer_failed gauge
+queen_file_buffer_failed 0
+# HELP queen_file_buffer_db_healthy 1 if the file buffer believes the database is healthy, 0 otherwise.
+# TYPE queen_file_buffer_db_healthy gauge
+queen_file_buffer_db_healthy 1
+# HELP queen_maintenance_mode_enabled 1 when push maintenance mode is active (push requests are buffered to disk), 0 otherwise.
+# TYPE queen_maintenance_mode_enabled gauge
+queen_maintenance_mode_enabled 0
+# HELP queen_sidecar_op_count Sidecar operations observed in the latest sample window, by op.
+# TYPE queen_sidecar_op_count gauge
+queen_sidecar_op_count{op="push"} 0
+queen_sidecar_op_count{op="pop"} 0
+queen_sidecar_op_count{op="ack"} 0
+# HELP queen_sidecar_op_latency_microseconds Average sidecar operation latency in the latest sample window, by op.
+# TYPE queen_sidecar_op_latency_microseconds gauge
+queen_sidecar_op_latency_microseconds{op="push"} 0
+queen_sidecar_op_latency_microseconds{op="pop"} 0
+queen_sidecar_op_latency_microseconds{op="ack"} 0
+# HELP queen_sidecar_op_items Items processed by sidecar operations in the latest sample window, by op.
+# TYPE queen_sidecar_op_items gauge
+queen_sidecar_op_items{op="push"} 0
+queen_sidecar_op_items{op="pop"} 0
+queen_sidecar_op_items{op="ack"} 0
+# HELP queen_queue_backoff_groups Total consumer groups currently in pop-backoff across all queues.
+# TYPE queen_queue_backoff_groups gauge
+queen_queue_backoff_groups 0
+# HELP queen_queue_backoff_queues Number of queues that have at least one consumer group in backoff.
+# TYPE queen_queue_backoff_queues gauge
+queen_queue_backoff_queues 0
+# HELP queen_queue_backoff_avg_interval_milliseconds Average backoff interval across all backed-off groups, in milliseconds.
+# TYPE queen_queue_backoff_avg_interval_milliseconds gauge
+queen_queue_backoff_avg_interval_milliseconds 0
+# HELP queen_shared_state_enabled 1 if cross-replica UDP shared-state sync is enabled, 0 otherwise.
+# TYPE queen_shared_state_enabled gauge
+queen_shared_state_enabled 0
+# HELP queen_cluster_push_requests_total Cumulative push HTTP requests handled across the cluster.
+# TYPE queen_cluster_push_requests_total counter
+queen_cluster_push_requests_total{scope="cluster"} 1510117
+# HELP queen_cluster_pop_requests_total Cumulative pop HTTP requests handled across the cluster.
+# TYPE queen_cluster_pop_requests_total counter
+queen_cluster_pop_requests_total{scope="cluster"} 0
+# HELP queen_cluster_ack_requests_total Cumulative ack HTTP requests handled across the cluster.
+# TYPE queen_cluster_ack_requests_total counter
+queen_cluster_ack_requests_total{scope="cluster"} 0
+# HELP queen_cluster_transactions_total Cumulative transaction calls handled across the cluster.
+# TYPE queen_cluster_transactions_total counter
+queen_cluster_transactions_total{scope="cluster"} 0
+# HELP queen_cluster_push_messages_total Cumulative messages pushed across the cluster.
+# TYPE queen_cluster_push_messages_total counter
+queen_cluster_push_messages_total{scope="cluster"} 1510117
+# HELP queen_cluster_pop_messages_total Cumulative messages popped across the cluster (may exceed push_messages due to consumer-group fan-out).
+# TYPE queen_cluster_pop_messages_total counter
+queen_cluster_pop_messages_total{scope="cluster"} 0
+# HELP queen_cluster_ack_messages_total Cumulative ack attempts across the cluster.
+# TYPE queen_cluster_ack_messages_total counter
+queen_cluster_ack_messages_total{scope="cluster"} 0
+# HELP queen_cluster_ack_total Cumulative acks across the cluster, by result.
+# TYPE queen_cluster_ack_total counter
+queen_cluster_ack_total{scope="cluster",result="success"} 0
+queen_cluster_ack_total{scope="cluster",result="failed"} 0
+# HELP queen_cluster_db_errors_total Cumulative database errors observed across the cluster.
+# TYPE queen_cluster_db_errors_total counter
+queen_cluster_db_errors_total{scope="cluster"} 0
+# HELP queen_cluster_dlq_total Cumulative messages routed to the dead-letter queue across the cluster.
+# TYPE queen_cluster_dlq_total counter
+queen_cluster_dlq_total{scope="cluster"} 0
+# HELP queen_queue_pop_messages_per_minute Messages popped from this queue in the most recent minute bucket (includes consumer-group fan-out).
+# TYPE queen_queue_pop_messages_per_minute gauge
+# HELP queen_queue_pop_lag_milliseconds Pop latency over the most recent minute bucket, by stat.
+# TYPE queen_queue_pop_lag_milliseconds gauge
+# HELP queen_queue_push_requests_per_minute Push HTTP requests targeting this queue in the most recent minute.
+# TYPE queen_queue_push_requests_per_minute gauge
+# HELP queen_queue_push_messages_per_minute Messages enqueued to this queue in the most recent minute.
+# TYPE queen_queue_push_messages_per_minute gauge
+# HELP queen_queue_pop_empty_per_minute Empty pop responses for this queue in the most recent minute.
+# TYPE queen_queue_pop_empty_per_minute gauge
+# HELP queen_queue_ack_per_minute Acks for this queue in the most recent minute, by result.
+# TYPE queen_queue_ack_per_minute gauge
+# HELP queen_queue_transactions_per_minute Transactions touching this queue in the most recent minute.
+# TYPE queen_queue_transactions_per_minute gauge
+# HELP queen_queue_parked_consumers Consumers currently parked on this queue (cluster-wide minute-average).
+# TYPE queen_queue_parked_consumers gauge
+# HELP queen_queue_metrics_age_seconds Seconds since the latest queue_lag_metrics bucket was flushed.
+# TYPE queen_queue_metrics_age_seconds gauge
+queen_queue_pop_messages_per_minute{queue="fusion-test"} 0
+queen_queue_pop_lag_milliseconds{queue="fusion-test",stat="avg"} 0
+queen_queue_pop_lag_milliseconds{queue="fusion-test",stat="max"} 0
+queen_queue_push_requests_per_minute{queue="fusion-test"} 6863
+queen_queue_push_messages_per_minute{queue="fusion-test"} 6863
+queen_queue_pop_empty_per_minute{queue="fusion-test"} 0
+queen_queue_ack_per_minute{queue="fusion-test",result="success"} 0
+queen_queue_ack_per_minute{queue="fusion-test",result="failed"} 0
+queen_queue_transactions_per_minute{queue="fusion-test"} 0
+queen_queue_parked_consumers{queue="fusion-test"} 0
+queen_queue_metrics_age_seconds{queue="fusion-test"} 89
+# HELP queen_worker_event_loop_lag_milliseconds Event-loop lag in the most recent minute bucket, by stat.
+# TYPE queen_worker_event_loop_lag_milliseconds gauge
+# HELP queen_worker_free_slots Free job slots in the libqueen scheduler, by stat.
+# TYPE queen_worker_free_slots gauge
+# HELP queen_worker_db_connections DB connections held by this worker.
+# TYPE queen_worker_db_connections gauge
+# HELP queen_worker_job_queue_size libqueen job queue depth in the most recent minute, by stat.
+# TYPE queen_worker_job_queue_size gauge
+# HELP queen_worker_backoff_size Number of pop requests in backoff for this worker.
+# TYPE queen_worker_backoff_size gauge
+# HELP queen_worker_jobs_done_per_minute Jobs completed by this worker in the most recent minute.
+# TYPE queen_worker_jobs_done_per_minute gauge
+# HELP queen_worker_requests_per_minute Requests handled by this worker in the most recent minute, by op.
+# TYPE queen_worker_requests_per_minute gauge
+# HELP queen_worker_messages_per_minute Messages handled by this worker in the most recent minute, by op.
+# TYPE queen_worker_messages_per_minute gauge
+# HELP queen_worker_ack_per_minute Acks handled by this worker in the most recent minute, by result.
+# TYPE queen_worker_ack_per_minute gauge
+# HELP queen_worker_lag_milliseconds Pop lag observed by this worker in the most recent minute, by stat.
+# TYPE queen_worker_lag_milliseconds gauge
+# HELP queen_worker_db_errors_per_minute DB errors observed by this worker in the most recent minute.
+# TYPE queen_worker_db_errors_per_minute gauge
+# HELP queen_worker_dlq_per_minute Messages routed to DLQ by this worker in the most recent minute.
+# TYPE queen_worker_dlq_per_minute gauge
+# HELP queen_worker_metrics_age_seconds Seconds since this worker's last metrics bucket was flushed.
+# TYPE queen_worker_metrics_age_seconds gauge
+queen_worker_event_loop_lag_milliseconds{hostname="alice.local",worker_id="0",pid="46295",stat="avg"} 0
+queen_worker_event_loop_lag_milliseconds{hostname="alice.local",worker_id="0",pid="46295",stat="max"} 1
+queen_worker_free_slots{hostname="alice.local",worker_id="0",pid="46295",stat="avg"} 19
+queen_worker_free_slots{hostname="alice.local",worker_id="0",pid="46295",stat="min"} 19
+queen_worker_db_connections{hostname="alice.local",worker_id="0",pid="46295"} 20
+queen_worker_job_queue_size{hostname="alice.local",worker_id="0",pid="46295",stat="avg"} 1
+queen_worker_job_queue_size{hostname="alice.local",worker_id="0",pid="46295",stat="max"} 4
+queen_worker_backoff_size{hostname="alice.local",worker_id="0",pid="46295"} 0
+queen_worker_jobs_done_per_minute{hostname="alice.local",worker_id="0",pid="46295"} 8612
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="0",pid="46295",op="push"} 6863
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="0",pid="46295",op="pop"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="0",pid="46295",op="ack"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="0",pid="46295",op="transaction"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="0",pid="46295",op="push"} 6863
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="0",pid="46295",op="pop"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="0",pid="46295",op="ack"} 0
+queen_worker_ack_per_minute{hostname="alice.local",worker_id="0",pid="46295",result="success"} 0
+queen_worker_ack_per_minute{hostname="alice.local",worker_id="0",pid="46295",result="failed"} 0
+queen_worker_lag_milliseconds{hostname="alice.local",worker_id="0",pid="46295",stat="avg"} 0
+queen_worker_lag_milliseconds{hostname="alice.local",worker_id="0",pid="46295",stat="max"} 0
+queen_worker_db_errors_per_minute{hostname="alice.local",worker_id="0",pid="46295"} 0
+queen_worker_dlq_per_minute{hostname="alice.local",worker_id="0",pid="46295"} 0
+queen_worker_metrics_age_seconds{hostname="alice.local",worker_id="0",pid="46295"} 89
+queen_worker_event_loop_lag_milliseconds{hostname="alice.local",worker_id="1",pid="46295",stat="avg"} 0
+queen_worker_event_loop_lag_milliseconds{hostname="alice.local",worker_id="1",pid="46295",stat="max"} 0
+queen_worker_free_slots{hostname="alice.local",worker_id="1",pid="46295",stat="avg"} 16
+queen_worker_free_slots{hostname="alice.local",worker_id="1",pid="46295",stat="min"} 16
+queen_worker_db_connections{hostname="alice.local",worker_id="1",pid="46295"} 16
+queen_worker_job_queue_size{hostname="alice.local",worker_id="1",pid="46295",stat="avg"} 0
+queen_worker_job_queue_size{hostname="alice.local",worker_id="1",pid="46295",stat="max"} 0
+queen_worker_backoff_size{hostname="alice.local",worker_id="1",pid="46295"} 0
+queen_worker_jobs_done_per_minute{hostname="alice.local",worker_id="1",pid="46295"} 1
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="1",pid="46295",op="push"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="1",pid="46295",op="pop"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="1",pid="46295",op="ack"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="1",pid="46295",op="transaction"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="1",pid="46295",op="push"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="1",pid="46295",op="pop"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="1",pid="46295",op="ack"} 0
+queen_worker_ack_per_minute{hostname="alice.local",worker_id="1",pid="46295",result="success"} 0
+queen_worker_ack_per_minute{hostname="alice.local",worker_id="1",pid="46295",result="failed"} 0
+queen_worker_lag_milliseconds{hostname="alice.local",worker_id="1",pid="46295",stat="avg"} 0
+queen_worker_lag_milliseconds{hostname="alice.local",worker_id="1",pid="46295",stat="max"} 0
+queen_worker_db_errors_per_minute{hostname="alice.local",worker_id="1",pid="46295"} 0
+queen_worker_dlq_per_minute{hostname="alice.local",worker_id="1",pid="46295"} 0
+queen_worker_metrics_age_seconds{hostname="alice.local",worker_id="1",pid="46295"} 89
+queen_worker_event_loop_lag_milliseconds{hostname="alice.local",worker_id="2",pid="46295",stat="avg"} 0
+queen_worker_event_loop_lag_milliseconds{hostname="alice.local",worker_id="2",pid="46295",stat="max"} 0
+queen_worker_free_slots{hostname="alice.local",worker_id="2",pid="46295",stat="avg"} 4
+queen_worker_free_slots{hostname="alice.local",worker_id="2",pid="46295",stat="min"} 4
+queen_worker_db_connections{hostname="alice.local",worker_id="2",pid="46295"} 4
+queen_worker_job_queue_size{hostname="alice.local",worker_id="2",pid="46295",stat="avg"} 0
+queen_worker_job_queue_size{hostname="alice.local",worker_id="2",pid="46295",stat="max"} 0
+queen_worker_backoff_size{hostname="alice.local",worker_id="2",pid="46295"} 0
+queen_worker_jobs_done_per_minute{hostname="alice.local",worker_id="2",pid="46295"} 34
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="2",pid="46295",op="push"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="2",pid="46295",op="pop"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="2",pid="46295",op="ack"} 0
+queen_worker_requests_per_minute{hostname="alice.local",worker_id="2",pid="46295",op="transaction"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="2",pid="46295",op="push"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="2",pid="46295",op="pop"} 0
+queen_worker_messages_per_minute{hostname="alice.local",worker_id="2",pid="46295",op="ack"} 0
+queen_worker_ack_per_minute{hostname="alice.local",worker_id="2",pid="46295",result="success"} 0
+queen_worker_ack_per_minute{hostname="alice.local",worker_id="2",pid="46295",result="failed"} 0
+queen_worker_lag_milliseconds{hostname="alice.local",worker_id="2",pid="46295",stat="avg"} 0
+queen_worker_lag_milliseconds{hostname="alice.local",worker_id="2",pid="46295",stat="max"} 0
+queen_worker_db_errors_per_minute{hostname="alice.local",worker_id="2",pid="46295"} 0
+queen_worker_dlq_per_minute{hostname="alice.local",worker_id="2",pid="46295"} 0
+queen_worker_metrics_age_seconds{hostname="alice.local",worker_id="2",pid="46295"} 89
+# HELP queen_dlq_depth Messages currently sitting in the dead-letter queue.
+# TYPE queen_dlq_depth gauge
+queen_dlq_depth{scope="cluster"} 0
+# HELP queen_dlq_depth_by_queue Messages in DLQ per queue.
+# TYPE queen_dlq_depth_by_queue gauge

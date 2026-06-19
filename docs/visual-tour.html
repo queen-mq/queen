@@ -7,10 +7,10 @@
 <meta name="description" content="A visual tour of Queen MQ. Seven animated diagrams covering partitions, fan-out, transactions, replay, lease/retry/DLQ, disk failover, and how Queen compares to Kafka and RabbitMQ.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="canonical" href="https://queenmq.com/visual-tour.html">
+<link rel="canonical" href="https://queenmq.com/visual-tour">
 <meta property="og:site_name" content="Queen MQ">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://queenmq.com/visual-tour.html">
+<meta property="og:url" content="https://queenmq.com/visual-tour">
 <meta property="og:title" content="Visual tour: Queen MQ">
 <meta property="og:description" content="Seven animated diagrams of how Queen MQ works, side-by-side comparisons with Kafka and RabbitMQ.">
 <meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
@@ -42,22 +42,22 @@
 <!-- ========================== TOP NAV ========================== -->
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+    <a class="brand" href="/">
+      <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
-      <a href="quickstart.html">Quickstart</a>
-      <a href="concepts.html">Concepts</a>
-      <a href="visual-tour.html" class="current">Visual tour</a>
-      <a href="architecture.html">Architecture</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="clients.html">Clients</a>
-      <a href="cli.html">CLI</a>
-      <a href="server.html">Server</a>
-      <a href="http-api.html">HTTP API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="benchmarks.html">Benchmarks</a>
+      <a href="quickstart">Quickstart</a>
+      <a href="concepts">Concepts</a>
+      <a href="visual-tour" class="current">Visual tour</a>
+      <a href="architecture">Architecture</a>
+      <a href="use-cases">Use cases</a>
+      <a href="clients">Clients</a>
+      <a href="cli">CLI</a>
+      <a href="server">Server</a>
+      <a href="http-api">HTTP API</a>
+      <a href="dashboard">Dashboard</a>
+      <a href="benchmarks">Benchmarks</a>
       <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
@@ -111,8 +111,8 @@
       <img src="assets/queen-partitions.svg" alt="Four producers (chat ui, scheduler, webhook, replay) push into one queue (agent-tasks). The queue is split into five visible ordered partitions per agent session plus 9,995 more. Two consumer groups (agent runner with lag 0, tracer with lag 12) each see every message independently. One slow session running a 28-second tool call (sess:9c1d) stalls only its own partition." />
       <figcaption>
         <strong>No head-of-line blocking &middot; FIFO per partition &middot; fan-out per group.</strong>
-        Read more in <a href="concepts.html#partitions">partitions</a>,
-        <a href="concepts.html#consumer-groups">consumer groups</a>.
+        Read more in <a href="concepts#partitions">partitions</a>,
+        <a href="concepts#consumer-groups">consumer groups</a>.
       </figcaption>
     </figure>
 
@@ -143,7 +143,7 @@
       <figcaption>
         <strong>Same input, different blast radius.</strong>
         2 of 12 unrelated entities blocked on Kafka; 0 on Queen. Read the deeper
-        argument in the <a href="https://queenmq.com/benchmarks.html#partitions">partition-scaling benchmark</a>.
+        argument in the <a href="https://queenmq.com/benchmarks#partitions">partition-scaling benchmark</a>.
       </figcaption>
     </figure>
   </div>
@@ -191,7 +191,7 @@
       <img src="assets/queen-transaction.svg" alt="A worker pops a message from queue A (raw-events), transforms it inside a glowing BEGIN/COMMIT envelope, and pushes the derived message into queue B (processed-events). The ack and the insert are in the same PostgreSQL transaction. The bottom inset shows the actual SQL: BEGIN; UPDATE messages_consumed SET status='completed'; INSERT INTO messages (...); COMMIT." />
       <figcaption>
         <strong>Transactional outbox, but as a primitive.</strong>
-        Read the API in <a href="concepts.html#transactions">transactions</a>.
+        Read the API in <a href="concepts#transactions">transactions</a>.
       </figcaption>
     </figure>
   </div>
@@ -215,7 +215,7 @@
       <img src="assets/queen-replay.svg" alt="A long horizontal tape of messages from September 2024 to NOW. The agent-runner consumer group cursor sits at the head with lag 0. A new report-fall-2024 group materialises at September 2024 with subscriptionFrom set, and sweeps fast toward the head, replaying the historical window. Below the tape, three subscription mode cards show 'all', 'new', and 'from:timestamp'." />
       <figcaption>
         <strong>Per-group offset &middot; replay any timestamp &middot; independent progress.</strong>
-        See <a href="concepts.html#consumer-groups">subscription modes</a> for the full table.
+        See <a href="concepts#consumer-groups">subscription modes</a> for the full table.
       </figcaption>
     </figure>
   </div>
@@ -239,8 +239,8 @@
       <img src="assets/queen-lease-dlq.svg" alt="State diagram: a queue feeds a worker holding a 30-second lease. Status flows through three branches. On success, the message goes to a 'completed' card (top right). On failure or lease expiry, the message returns to the head of the partition and the retry counter increments; this loops up to retryLimit times. After retryLimit (3), the message routes to the dead-letter queue (bottom right) with the original payload and last error; the DLQ message count ticks up." />
       <figcaption>
         <strong>No phantom workers &middot; order preserved on retry &middot; DLQ replay from dashboard.</strong>
-        See <a href="concepts.html#leases">leases &amp; retries</a> and
-        <a href="concepts.html#dlq">DLQ</a>.
+        See <a href="concepts#leases">leases &amp; retries</a> and
+        <a href="concepts#dlq">DLQ</a>.
       </figcaption>
     </figure>
   </div>
@@ -263,7 +263,7 @@
       <img src="assets/queen-failover.svg" alt="Three-phase loop. Phase 1: producers push to broker, broker commits to PostgreSQL, status 'all healthy'. Phase 2: PostgreSQL becomes unreachable, the PG card border flashes red, broker spills new pushes to the FILE_BUFFER on local disk, buffered counter grows from 0 to 312, status 'postgres unreachable, spilling pushes to local FILE_BUFFER, clients still get HTTP 201'. Phase 3: PostgreSQL recovers, the broker drains the buffer back into the database in order, status 'postgres recovered, draining file buffer back to db'. The 'messages lost' counter remains 0 throughout." />
       <figcaption>
         <strong>Push path always succeeds &middot; order preserved across recovery &middot; verified across 10.4B+ messages.</strong>
-        See <a href="concepts.html#failover">disk failover</a>.
+        See <a href="concepts#failover">disk failover</a>.
       </figcaption>
     </figure>
   </div>
@@ -279,9 +279,9 @@
       reference docs, or read the comparison benchmarks against Kafka and RabbitMQ.
     </p>
     <div class="row" style="justify-content: center;">
-      <a class="btn btn-primary" href="quickstart.html">Quickstart &rarr;</a>
-      <a class="btn" href="concepts.html">Concepts</a>
-      <a class="btn btn-ghost" href="benchmarks.html">Benchmarks</a>
+      <a class="btn btn-primary" href="quickstart">Quickstart &rarr;</a>
+      <a class="btn" href="concepts">Concepts</a>
+      <a class="btn btn-ghost" href="benchmarks">Benchmarks</a>
       <a class="btn btn-ghost" href="https://github.com/queen-mq/queen">GitHub ↗</a>
     </div>
   </div>
@@ -292,7 +292,7 @@
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
@@ -303,22 +303,22 @@
     <div>
       <h5>Docs</h5>
       <ul>
-        <li><a href="quickstart.html">Quickstart</a></li>
-        <li><a href="concepts.html">Concepts</a></li>
-        <li><a href="visual-tour.html">Visual tour</a></li>
-        <li><a href="architecture.html">Architecture</a></li>
-        <li><a href="use-cases.html">Use cases</a></li>
-        <li><a href="clients.html">Clients</a></li>
-        <li><a href="cli.html">CLI</a></li>
-        <li><a href="http-api.html">HTTP API</a></li>
+        <li><a href="quickstart">Quickstart</a></li>
+        <li><a href="concepts">Concepts</a></li>
+        <li><a href="visual-tour">Visual tour</a></li>
+        <li><a href="architecture">Architecture</a></li>
+        <li><a href="use-cases">Use cases</a></li>
+        <li><a href="clients">Clients</a></li>
+        <li><a href="cli">CLI</a></li>
+        <li><a href="http-api">HTTP API</a></li>
       </ul>
     </div>
     <div>
       <h5>Operate</h5>
       <ul>
-        <li><a href="server.html">Server setup</a></li>
-        <li><a href="dashboard.html">Web dashboard</a></li>
-        <li><a href="benchmarks.html">Benchmarks</a></li>
+        <li><a href="server">Server setup</a></li>
+        <li><a href="dashboard">Web dashboard</a></li>
+        <li><a href="benchmarks">Benchmarks</a></li>
       </ul>
     </div>
     <div>

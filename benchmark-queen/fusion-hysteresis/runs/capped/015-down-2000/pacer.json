@@ -1,0 +1,230 @@
+{
+  "config": {
+    "rate": 2000,
+    "duration": 28,
+    "partitions": 8,
+    "max_inflight": 512
+  },
+  "wall_seconds": 28.000797042,
+  "offered_rps": 2000,
+  "intended_total": 56000,
+  "dispatched_total": 56000,
+  "completed_total": 56000,
+  "non2xx": 0,
+  "failed": 0,
+  "deficit": 0,
+  "achieved_rps_client": 1999.9430700491273,
+  "max_inflight_seen": 257,
+  "saturated_dispatch": false,
+  "latency_ms": {
+    "p50": 19,
+    "p90": 26,
+    "p99": 46,
+    "max": 128
+  },
+  "timeline": [
+    {
+      "sec": 0,
+      "intended": 0,
+      "dispatched_in_sec": 0,
+      "completed_in_sec": 0,
+      "inflight": 0
+    },
+    {
+      "sec": 1,
+      "intended": 2001,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 1955,
+      "inflight": 46
+    },
+    {
+      "sec": 2,
+      "intended": 4000,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 1992,
+      "inflight": 53
+    },
+    {
+      "sec": 3,
+      "intended": 6001,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 2032,
+      "inflight": 22
+    },
+    {
+      "sec": 4,
+      "intended": 8000,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 1999,
+      "inflight": 22
+    },
+    {
+      "sec": 5,
+      "intended": 10000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 1973,
+      "inflight": 49
+    },
+    {
+      "sec": 6,
+      "intended": 12001,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 2027,
+      "inflight": 23
+    },
+    {
+      "sec": 7,
+      "intended": 14000,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 1994,
+      "inflight": 28
+    },
+    {
+      "sec": 8,
+      "intended": 16000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 2009,
+      "inflight": 19
+    },
+    {
+      "sec": 9,
+      "intended": 18000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 1974,
+      "inflight": 45
+    },
+    {
+      "sec": 10,
+      "intended": 20000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 1996,
+      "inflight": 49
+    },
+    {
+      "sec": 11,
+      "intended": 22000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 2012,
+      "inflight": 37
+    },
+    {
+      "sec": 12,
+      "intended": 24000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 2012,
+      "inflight": 25
+    },
+    {
+      "sec": 13,
+      "intended": 26001,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 1904,
+      "inflight": 122
+    },
+    {
+      "sec": 14,
+      "intended": 28000,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 2095,
+      "inflight": 26
+    },
+    {
+      "sec": 15,
+      "intended": 30000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 1965,
+      "inflight": 61
+    },
+    {
+      "sec": 16,
+      "intended": 32001,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 2015,
+      "inflight": 47
+    },
+    {
+      "sec": 17,
+      "intended": 34000,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 1989,
+      "inflight": 57
+    },
+    {
+      "sec": 18,
+      "intended": 36000,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 2035,
+      "inflight": 22
+    },
+    {
+      "sec": 19,
+      "intended": 38002,
+      "dispatched_in_sec": 2002,
+      "completed_in_sec": 1995,
+      "inflight": 29
+    },
+    {
+      "sec": 20,
+      "intended": 40003,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 1969,
+      "inflight": 61
+    },
+    {
+      "sec": 21,
+      "intended": 42001,
+      "dispatched_in_sec": 1998,
+      "completed_in_sec": 2005,
+      "inflight": 54
+    },
+    {
+      "sec": 22,
+      "intended": 44002,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 2019,
+      "inflight": 36
+    },
+    {
+      "sec": 23,
+      "intended": 46001,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 2007,
+      "inflight": 28
+    },
+    {
+      "sec": 24,
+      "intended": 48001,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 2009,
+      "inflight": 19
+    },
+    {
+      "sec": 25,
+      "intended": 50001,
+      "dispatched_in_sec": 2000,
+      "completed_in_sec": 1968,
+      "inflight": 51
+    },
+    {
+      "sec": 26,
+      "intended": 52000,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 2016,
+      "inflight": 34
+    },
+    {
+      "sec": 27,
+      "intended": 54001,
+      "dispatched_in_sec": 2001,
+      "completed_in_sec": 2003,
+      "inflight": 32
+    },
+    {
+      "sec": 28,
+      "intended": 56000,
+      "dispatched_in_sec": 1999,
+      "completed_in_sec": 1985,
+      "inflight": 46
+    }
+  ]
+}

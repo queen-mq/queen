@@ -1,0 +1,182 @@
+<!doctype html><meta charset="utf-8"><title>queen fusion hysteresis</title>
+<style>
+  body{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#111827;max-width:1200px;margin:24px auto;padding:0 16px}
+  h1{font-size:22px;margin:0 0 4px} h3{font-size:14px;margin:0 0 2px} .sub{font-size:11px;color:#6b7280;margin-bottom:6px;min-height:28px}
+  .legend{margin:8px 0 20px;font-size:13px} .legend b{font-weight:600}
+  .sw{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:middle;margin:0 4px 0 12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:18px}
+  .card{border:1px solid #e5e7eb;border-radius:10px;padding:12px}
+  table{border-collapse:collapse;width:100%;margin-top:24px;font-size:12px}
+  th,td{border-bottom:1px solid #eee;padding:4px 8px;text-align:right} th:first-child,td:first-child{text-align:left}
+  tr.down td{color:#9a3412} thead th{position:sticky;top:0;background:#fff}
+  .note{background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:12px 16px;margin:12px 0 20px;font-size:13px}
+</style>
+<h1>Queen fusion engine — hysteresis sweep</h1>
+<div class="legend">
+  <span class="sw" style="background:#2563eb"></span><b>up-sweep</b>
+  <span class="sw" style="background:#ea580c"></span><b>down-sweep</b>
+  — if the two trace different paths, that's real hysteresis from the self-clocked group commit.
+</div>
+<div class="note">
+  <b>How to read it.</b> PG cost ≈ <i>commits/s × fixed&nbsp;fsync&nbsp;cost + rows/s × per-row cost + maintenance</i>.
+  At low offered rate each push is its own commit (msgs/commit ≈ 1) so the fixed fsync dominates and
+  <b>PG cost per message is high</b>. As load rises the fusion engine batches (msgs/commit climbs, commits/s & fsync/s plateau)
+  and <b>cost per message falls</b>. Absolute PG cores usually keep rising; a genuine <i>dip</i> there near the knee would be the
+  non-monotonic effect worth a screenshot. The cliff shows up in the last chart, where achieved peels away from offered.
+</div>
+<div class="grid"><div class="card">
+    <h3>Fusion ratio — msgs / commit</h3><div class="sub">THE curve: Δn_tup_ins / Δxact_commit. Should climb from ~1 toward preferred/max_batch as load rises.</div>
+    <svg viewBox="0 0 560 320" width="100%">
+      <line x1="64" y1="268.0" x2="544" y2="268.0" stroke="#e5e7eb"/><text x="56" y="272.0" text-anchor="end" font-size="11" fill="#6b7280">0</text><line x1="64" y1="205.0" x2="544" y2="205.0" stroke="#e5e7eb"/><text x="56" y="209.0" text-anchor="end" font-size="11" fill="#6b7280">39.52</text><line x1="64" y1="142.0" x2="544" y2="142.0" stroke="#e5e7eb"/><text x="56" y="146.0" text-anchor="end" font-size="11" fill="#6b7280">79.03</text><line x1="64" y1="79.0" x2="544" y2="79.0" stroke="#e5e7eb"/><text x="56" y="83.0" text-anchor="end" font-size="11" fill="#6b7280">118.55</text><line x1="64" y1="16.0" x2="544" y2="16.0" stroke="#e5e7eb"/><text x="56" y="20.0" text-anchor="end" font-size="11" fill="#6b7280">158.07</text><text x="64.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">50</text><line x1="64.0" y1="16" x2="64.0" y2="268" stroke="#f3f4f6"/><text x="109.1" y="284" text-anchor="middle" font-size="10" fill="#6b7280">100</text><line x1="109.1" y1="16" x2="109.1" y2="268" stroke="#f3f4f6"/><text x="154.2" y="284" text-anchor="middle" font-size="10" fill="#6b7280">200</text><line x1="154.2" y1="16" x2="154.2" y2="268" stroke="#f3f4f6"/><text x="213.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">500</text><line x1="213.8" y1="16" x2="213.8" y2="268" stroke="#f3f4f6"/><text x="258.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">1k</text><line x1="258.9" y1="16" x2="258.9" y2="268" stroke="#f3f4f6"/><text x="304.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">2k</text><line x1="304.0" y1="16" x2="304.0" y2="268" stroke="#f3f4f6"/><text x="363.6" y="284" text-anchor="middle" font-size="10" fill="#6b7280">5k</text><line x1="363.6" y1="16" x2="363.6" y2="268" stroke="#f3f4f6"/><text x="408.7" y="284" text-anchor="middle" font-size="10" fill="#6b7280">10k</text><line x1="408.7" y1="16" x2="408.7" y2="268" stroke="#f3f4f6"/><text x="453.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">20k</text><line x1="453.8" y1="16" x2="453.8" y2="268" stroke="#f3f4f6"/><text x="498.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">40k</text><line x1="498.9" y1="16" x2="498.9" y2="268" stroke="#f3f4f6"/><text x="544.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">80k</text><line x1="544.0" y1="16" x2="544.0" y2="268" stroke="#f3f4f6"/>
+      <line x1="64" y1="16" x2="64" y2="268" stroke="#9ca3af"/>
+      <line x1="64" y1="268" x2="544" y2="268" stroke="#9ca3af"/>
+      
+      <path d="M64.0 266.7 L109.1 265.9 L154.2 264.0 L213.8 259.2 L258.9 251.4 L304.0 236.2 L363.6 228.0 L408.7 226.0 L453.8 151.7 L498.9 163.1 L544.0 96.8" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="64.0" cy="266.7" r="3" fill="#2563eb"/><circle cx="109.1" cy="265.9" r="3" fill="#2563eb"/><circle cx="154.2" cy="264.0" r="3" fill="#2563eb"/><circle cx="213.8" cy="259.2" r="3" fill="#2563eb"/><circle cx="258.9" cy="251.4" r="3" fill="#2563eb"/><circle cx="304.0" cy="236.2" r="3" fill="#2563eb"/><circle cx="363.6" cy="228.0" r="3" fill="#2563eb"/><circle cx="408.7" cy="226.0" r="3" fill="#2563eb"/><circle cx="453.8" cy="151.7" r="3" fill="#2563eb"/><circle cx="498.9" cy="163.1" r="3" fill="#2563eb"/><circle cx="544.0" cy="96.8" r="3" fill="#2563eb"/>
+      <path d="M64.0 266.7 L109.1 265.9 L154.2 264.0 L213.8 259.1 L258.9 251.2 L304.0 236.2 L363.6 228.3 L408.7 226.5 L453.8 34.7 L498.9 147.5" fill="none" stroke="#ea580c" stroke-width="2"/><circle cx="64.0" cy="266.7" r="3" fill="#ea580c"/><circle cx="109.1" cy="265.9" r="3" fill="#ea580c"/><circle cx="154.2" cy="264.0" r="3" fill="#ea580c"/><circle cx="213.8" cy="259.1" r="3" fill="#ea580c"/><circle cx="258.9" cy="251.2" r="3" fill="#ea580c"/><circle cx="304.0" cy="236.2" r="3" fill="#ea580c"/><circle cx="363.6" cy="228.3" r="3" fill="#ea580c"/><circle cx="408.7" cy="226.5" r="3" fill="#ea580c"/><circle cx="453.8" cy="34.7" r="3" fill="#ea580c"/><circle cx="498.9" cy="147.5" r="3" fill="#ea580c"/>
+      <text x="304" y="314" text-anchor="middle" font-size="11" fill="#374151">offered push/s (log)</text>
+    </svg>
+  </div><div class="card">
+    <h3>Commits / s</h3><div class="sub">Rises with load then plateaus once batching kicks in. The plateau = fusion engaged.</div>
+    <svg viewBox="0 0 560 320" width="100%">
+      <line x1="64" y1="268.0" x2="544" y2="268.0" stroke="#e5e7eb"/><text x="56" y="272.0" text-anchor="end" font-size="11" fill="#6b7280">0</text><line x1="64" y1="205.0" x2="544" y2="205.0" stroke="#e5e7eb"/><text x="56" y="209.0" text-anchor="end" font-size="11" fill="#6b7280">102.47</text><line x1="64" y1="142.0" x2="544" y2="142.0" stroke="#e5e7eb"/><text x="56" y="146.0" text-anchor="end" font-size="11" fill="#6b7280">204.93</text><line x1="64" y1="79.0" x2="544" y2="79.0" stroke="#e5e7eb"/><text x="56" y="83.0" text-anchor="end" font-size="11" fill="#6b7280">307.4</text><line x1="64" y1="16.0" x2="544" y2="16.0" stroke="#e5e7eb"/><text x="56" y="20.0" text-anchor="end" font-size="11" fill="#6b7280">409.86</text><text x="64.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">50</text><line x1="64.0" y1="16" x2="64.0" y2="268" stroke="#f3f4f6"/><text x="109.1" y="284" text-anchor="middle" font-size="10" fill="#6b7280">100</text><line x1="109.1" y1="16" x2="109.1" y2="268" stroke="#f3f4f6"/><text x="154.2" y="284" text-anchor="middle" font-size="10" fill="#6b7280">200</text><line x1="154.2" y1="16" x2="154.2" y2="268" stroke="#f3f4f6"/><text x="213.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">500</text><line x1="213.8" y1="16" x2="213.8" y2="268" stroke="#f3f4f6"/><text x="258.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">1k</text><line x1="258.9" y1="16" x2="258.9" y2="268" stroke="#f3f4f6"/><text x="304.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">2k</text><line x1="304.0" y1="16" x2="304.0" y2="268" stroke="#f3f4f6"/><text x="363.6" y="284" text-anchor="middle" font-size="10" fill="#6b7280">5k</text><line x1="363.6" y1="16" x2="363.6" y2="268" stroke="#f3f4f6"/><text x="408.7" y="284" text-anchor="middle" font-size="10" fill="#6b7280">10k</text><line x1="408.7" y1="16" x2="408.7" y2="268" stroke="#f3f4f6"/><text x="453.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">20k</text><line x1="453.8" y1="16" x2="453.8" y2="268" stroke="#f3f4f6"/><text x="498.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">40k</text><line x1="498.9" y1="16" x2="498.9" y2="268" stroke="#f3f4f6"/><text x="544.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">80k</text><line x1="544.0" y1="16" x2="544.0" y2="268" stroke="#f3f4f6"/>
+      <line x1="64" y1="16" x2="64" y2="268" stroke="#9ca3af"/>
+      <line x1="64" y1="268" x2="544" y2="268" stroke="#9ca3af"/>
+      
+      <path d="M64.0 230.7 L109.1 221.3 L154.2 217.8 L213.8 213.2 L258.9 206.9 L304.0 204.7 L363.6 146.0 L408.7 52.9 L453.8 261.2 L498.9 260.5 L544.0 260.6" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="64.0" cy="230.7" r="3" fill="#2563eb"/><circle cx="109.1" cy="221.3" r="3" fill="#2563eb"/><circle cx="154.2" cy="217.8" r="3" fill="#2563eb"/><circle cx="213.8" cy="213.2" r="3" fill="#2563eb"/><circle cx="258.9" cy="206.9" r="3" fill="#2563eb"/><circle cx="304.0" cy="204.7" r="3" fill="#2563eb"/><circle cx="363.6" cy="146.0" r="3" fill="#2563eb"/><circle cx="408.7" cy="52.9" r="3" fill="#2563eb"/><circle cx="453.8" cy="261.2" r="3" fill="#2563eb"/><circle cx="498.9" cy="260.5" r="3" fill="#2563eb"/><circle cx="544.0" cy="260.6" r="3" fill="#2563eb"/>
+      <path d="M64.0 229.3 L109.1 220.7 L154.2 223.2 L213.8 212.4 L258.9 211.3 L304.0 203.3 L363.6 150.6 L408.7 34.7 L453.8 256.0 L498.9 261.0" fill="none" stroke="#ea580c" stroke-width="2"/><circle cx="64.0" cy="229.3" r="3" fill="#ea580c"/><circle cx="109.1" cy="220.7" r="3" fill="#ea580c"/><circle cx="154.2" cy="223.2" r="3" fill="#ea580c"/><circle cx="213.8" cy="212.4" r="3" fill="#ea580c"/><circle cx="258.9" cy="211.3" r="3" fill="#ea580c"/><circle cx="304.0" cy="203.3" r="3" fill="#ea580c"/><circle cx="363.6" cy="150.6" r="3" fill="#ea580c"/><circle cx="408.7" cy="34.7" r="3" fill="#ea580c"/><circle cx="453.8" cy="256.0" r="3" fill="#ea580c"/><circle cx="498.9" cy="261.0" r="3" fill="#ea580c"/>
+      <text x="304" y="314" text-anchor="middle" font-size="11" fill="#374151">offered push/s (log)</text>
+    </svg>
+  </div><div class="card">
+    <h3>WAL fsync / s</h3><div class="sub">pg_stat_wal.wal_sync rate. Flattening while msgs/s keeps rising = the fsync cost is being amortized.</div>
+    <svg viewBox="0 0 560 320" width="100%">
+      <line x1="64" y1="268.0" x2="544" y2="268.0" stroke="#e5e7eb"/><text x="56" y="272.0" text-anchor="end" font-size="11" fill="#6b7280">0</text><line x1="64" y1="205.0" x2="544" y2="205.0" stroke="#e5e7eb"/><text x="56" y="209.0" text-anchor="end" font-size="11" fill="#6b7280">101.76</text><line x1="64" y1="142.0" x2="544" y2="142.0" stroke="#e5e7eb"/><text x="56" y="146.0" text-anchor="end" font-size="11" fill="#6b7280">203.53</text><line x1="64" y1="79.0" x2="544" y2="79.0" stroke="#e5e7eb"/><text x="56" y="83.0" text-anchor="end" font-size="11" fill="#6b7280">305.29</text><line x1="64" y1="16.0" x2="544" y2="16.0" stroke="#e5e7eb"/><text x="56" y="20.0" text-anchor="end" font-size="11" fill="#6b7280">407.05</text><text x="64.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">50</text><line x1="64.0" y1="16" x2="64.0" y2="268" stroke="#f3f4f6"/><text x="109.1" y="284" text-anchor="middle" font-size="10" fill="#6b7280">100</text><line x1="109.1" y1="16" x2="109.1" y2="268" stroke="#f3f4f6"/><text x="154.2" y="284" text-anchor="middle" font-size="10" fill="#6b7280">200</text><line x1="154.2" y1="16" x2="154.2" y2="268" stroke="#f3f4f6"/><text x="213.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">500</text><line x1="213.8" y1="16" x2="213.8" y2="268" stroke="#f3f4f6"/><text x="258.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">1k</text><line x1="258.9" y1="16" x2="258.9" y2="268" stroke="#f3f4f6"/><text x="304.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">2k</text><line x1="304.0" y1="16" x2="304.0" y2="268" stroke="#f3f4f6"/><text x="363.6" y="284" text-anchor="middle" font-size="10" fill="#6b7280">5k</text><line x1="363.6" y1="16" x2="363.6" y2="268" stroke="#f3f4f6"/><text x="408.7" y="284" text-anchor="middle" font-size="10" fill="#6b7280">10k</text><line x1="408.7" y1="16" x2="408.7" y2="268" stroke="#f3f4f6"/><text x="453.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">20k</text><line x1="453.8" y1="16" x2="453.8" y2="268" stroke="#f3f4f6"/><text x="498.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">40k</text><line x1="498.9" y1="16" x2="498.9" y2="268" stroke="#f3f4f6"/><text x="544.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">80k</text><line x1="544.0" y1="16" x2="544.0" y2="268" stroke="#f3f4f6"/>
+      <line x1="64" y1="16" x2="64" y2="268" stroke="#9ca3af"/>
+      <line x1="64" y1="268" x2="544" y2="268" stroke="#9ca3af"/>
+      
+      <path d="M64.0 232.5 L109.1 223.4 L154.2 219.6 L213.8 215.6 L258.9 208.6 L304.0 206.8 L363.6 147.3 L408.7 53.2 L453.8 263.2 L498.9 262.6 L544.0 262.7" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="64.0" cy="232.5" r="3" fill="#2563eb"/><circle cx="109.1" cy="223.4" r="3" fill="#2563eb"/><circle cx="154.2" cy="219.6" r="3" fill="#2563eb"/><circle cx="213.8" cy="215.6" r="3" fill="#2563eb"/><circle cx="258.9" cy="208.6" r="3" fill="#2563eb"/><circle cx="304.0" cy="206.8" r="3" fill="#2563eb"/><circle cx="363.6" cy="147.3" r="3" fill="#2563eb"/><circle cx="408.7" cy="53.2" r="3" fill="#2563eb"/><circle cx="453.8" cy="263.2" r="3" fill="#2563eb"/><circle cx="498.9" cy="262.6" r="3" fill="#2563eb"/><circle cx="544.0" cy="262.7" r="3" fill="#2563eb"/>
+      <path d="M64.0 231.3 L109.1 223.3 L154.2 225.0 L213.8 214.3 L258.9 213.1 L304.0 205.0 L363.6 152.2 L408.7 34.7 L453.8 258.4 L498.9 263.0" fill="none" stroke="#ea580c" stroke-width="2"/><circle cx="64.0" cy="231.3" r="3" fill="#ea580c"/><circle cx="109.1" cy="223.3" r="3" fill="#ea580c"/><circle cx="154.2" cy="225.0" r="3" fill="#ea580c"/><circle cx="213.8" cy="214.3" r="3" fill="#ea580c"/><circle cx="258.9" cy="213.1" r="3" fill="#ea580c"/><circle cx="304.0" cy="205.0" r="3" fill="#ea580c"/><circle cx="363.6" cy="152.2" r="3" fill="#ea580c"/><circle cx="408.7" cy="34.7" r="3" fill="#ea580c"/><circle cx="453.8" cy="258.4" r="3" fill="#ea580c"/><circle cx="498.9" cy="263.0" r="3" fill="#ea580c"/>
+      <text x="304" y="314" text-anchor="middle" font-size="11" fill="#374151">offered push/s (log)</text>
+    </svg>
+  </div><div class="card">
+    <h3>PG cores (absolute)</h3><div class="sub">Mean PG container CPU. Usually monotone up — but watch for a DIP near the knee (the non-monotonic effect).</div>
+    <svg viewBox="0 0 560 320" width="100%">
+      <line x1="64" y1="268.0" x2="544" y2="268.0" stroke="#e5e7eb"/><text x="56" y="272.0" text-anchor="end" font-size="11" fill="#6b7280">0</text><line x1="64" y1="205.0" x2="544" y2="205.0" stroke="#e5e7eb"/><text x="56" y="209.0" text-anchor="end" font-size="11" fill="#6b7280">0.14</text><line x1="64" y1="142.0" x2="544" y2="142.0" stroke="#e5e7eb"/><text x="56" y="146.0" text-anchor="end" font-size="11" fill="#6b7280">0.27</text><line x1="64" y1="79.0" x2="544" y2="79.0" stroke="#e5e7eb"/><text x="56" y="83.0" text-anchor="end" font-size="11" fill="#6b7280">0.41</text><line x1="64" y1="16.0" x2="544" y2="16.0" stroke="#e5e7eb"/><text x="56" y="20.0" text-anchor="end" font-size="11" fill="#6b7280">0.54</text><text x="64.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">50</text><line x1="64.0" y1="16" x2="64.0" y2="268" stroke="#f3f4f6"/><text x="109.1" y="284" text-anchor="middle" font-size="10" fill="#6b7280">100</text><line x1="109.1" y1="16" x2="109.1" y2="268" stroke="#f3f4f6"/><text x="154.2" y="284" text-anchor="middle" font-size="10" fill="#6b7280">200</text><line x1="154.2" y1="16" x2="154.2" y2="268" stroke="#f3f4f6"/><text x="213.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">500</text><line x1="213.8" y1="16" x2="213.8" y2="268" stroke="#f3f4f6"/><text x="258.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">1k</text><line x1="258.9" y1="16" x2="258.9" y2="268" stroke="#f3f4f6"/><text x="304.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">2k</text><line x1="304.0" y1="16" x2="304.0" y2="268" stroke="#f3f4f6"/><text x="363.6" y="284" text-anchor="middle" font-size="10" fill="#6b7280">5k</text><line x1="363.6" y1="16" x2="363.6" y2="268" stroke="#f3f4f6"/><text x="408.7" y="284" text-anchor="middle" font-size="10" fill="#6b7280">10k</text><line x1="408.7" y1="16" x2="408.7" y2="268" stroke="#f3f4f6"/><text x="453.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">20k</text><line x1="453.8" y1="16" x2="453.8" y2="268" stroke="#f3f4f6"/><text x="498.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">40k</text><line x1="498.9" y1="16" x2="498.9" y2="268" stroke="#f3f4f6"/><text x="544.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">80k</text><line x1="544.0" y1="16" x2="544.0" y2="268" stroke="#f3f4f6"/>
+      <line x1="64" y1="16" x2="64" y2="268" stroke="#9ca3af"/>
+      <line x1="64" y1="268" x2="544" y2="268" stroke="#9ca3af"/>
+      
+      <path d="M64.0 214.1 L109.1 201.5 L154.2 201.5 L213.8 170.4 L258.9 164.8 L304.0 166.7 L363.6 146.2 L408.7 94.6 L453.8 238.3 L498.9 227.6 L544.0 221.5" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="64.0" cy="214.1" r="3" fill="#2563eb"/><circle cx="109.1" cy="201.5" r="3" fill="#2563eb"/><circle cx="154.2" cy="201.5" r="3" fill="#2563eb"/><circle cx="213.8" cy="170.4" r="3" fill="#2563eb"/><circle cx="258.9" cy="164.8" r="3" fill="#2563eb"/><circle cx="304.0" cy="166.7" r="3" fill="#2563eb"/><circle cx="363.6" cy="146.2" r="3" fill="#2563eb"/><circle cx="408.7" cy="94.6" r="3" fill="#2563eb"/><circle cx="453.8" cy="238.3" r="3" fill="#2563eb"/><circle cx="498.9" cy="227.6" r="3" fill="#2563eb"/><circle cx="544.0" cy="221.5" r="3" fill="#2563eb"/>
+      <path d="M64.0 186.2 L109.1 156.9 L154.2 182.5 L213.8 155.5 L258.9 127.6 L304.0 156.0 L363.6 112.8 L408.7 34.7 L453.8 169.0 L498.9 206.2" fill="none" stroke="#ea580c" stroke-width="2"/><circle cx="64.0" cy="186.2" r="3" fill="#ea580c"/><circle cx="109.1" cy="156.9" r="3" fill="#ea580c"/><circle cx="154.2" cy="182.5" r="3" fill="#ea580c"/><circle cx="213.8" cy="155.5" r="3" fill="#ea580c"/><circle cx="258.9" cy="127.6" r="3" fill="#ea580c"/><circle cx="304.0" cy="156.0" r="3" fill="#ea580c"/><circle cx="363.6" cy="112.8" r="3" fill="#ea580c"/><circle cx="408.7" cy="34.7" r="3" fill="#ea580c"/><circle cx="453.8" cy="169.0" r="3" fill="#ea580c"/><circle cx="498.9" cy="206.2" r="3" fill="#ea580c"/>
+      <text x="304" y="314" text-anchor="middle" font-size="11" fill="#374151">offered push/s (log)</text>
+    </svg>
+  </div><div class="card">
+    <h3>PG cost per message — cores per Mmsg/s</h3><div class="sub">PG cores ÷ (msgs/s). The amortization curve: should fall steeply then bottom out.</div>
+    <svg viewBox="0 0 560 320" width="100%">
+      <line x1="64" y1="268.0" x2="544" y2="268.0" stroke="#e5e7eb"/><text x="56" y="272.0" text-anchor="end" font-size="11" fill="#6b7280">0</text><line x1="64" y1="205.0" x2="544" y2="205.0" stroke="#e5e7eb"/><text x="56" y="209.0" text-anchor="end" font-size="11" fill="#6b7280">947.9</text><line x1="64" y1="142.0" x2="544" y2="142.0" stroke="#e5e7eb"/><text x="56" y="146.0" text-anchor="end" font-size="11" fill="#6b7280">1895.81</text><line x1="64" y1="79.0" x2="544" y2="79.0" stroke="#e5e7eb"/><text x="56" y="83.0" text-anchor="end" font-size="11" fill="#6b7280">2843.71</text><line x1="64" y1="16.0" x2="544" y2="16.0" stroke="#e5e7eb"/><text x="56" y="20.0" text-anchor="end" font-size="11" fill="#6b7280">3791.62</text><text x="64.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">50</text><line x1="64.0" y1="16" x2="64.0" y2="268" stroke="#f3f4f6"/><text x="109.1" y="284" text-anchor="middle" font-size="10" fill="#6b7280">100</text><line x1="109.1" y1="16" x2="109.1" y2="268" stroke="#f3f4f6"/><text x="154.2" y="284" text-anchor="middle" font-size="10" fill="#6b7280">200</text><line x1="154.2" y1="16" x2="154.2" y2="268" stroke="#f3f4f6"/><text x="213.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">500</text><line x1="213.8" y1="16" x2="213.8" y2="268" stroke="#f3f4f6"/><text x="258.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">1k</text><line x1="258.9" y1="16" x2="258.9" y2="268" stroke="#f3f4f6"/><text x="304.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">2k</text><line x1="304.0" y1="16" x2="304.0" y2="268" stroke="#f3f4f6"/><text x="363.6" y="284" text-anchor="middle" font-size="10" fill="#6b7280">5k</text><line x1="363.6" y1="16" x2="363.6" y2="268" stroke="#f3f4f6"/><text x="408.7" y="284" text-anchor="middle" font-size="10" fill="#6b7280">10k</text><line x1="408.7" y1="16" x2="408.7" y2="268" stroke="#f3f4f6"/><text x="453.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">20k</text><line x1="453.8" y1="16" x2="453.8" y2="268" stroke="#f3f4f6"/><text x="498.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">40k</text><line x1="498.9" y1="16" x2="498.9" y2="268" stroke="#f3f4f6"/><text x="544.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">80k</text><line x1="544.0" y1="16" x2="544.0" y2="268" stroke="#f3f4f6"/>
+      <line x1="64" y1="16" x2="64" y2="268" stroke="#9ca3af"/>
+      <line x1="64" y1="268" x2="544" y2="268" stroke="#9ca3af"/>
+      
+      <path d="M64.0 111.4 L109.1 175.2 L154.2 221.8 L213.8 239.6 L258.9 253.8 L304.0 260.9 L363.6 264.5 L408.7 265.3 L453.8 262.7 L498.9 260.8 L544.0 262.9" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="64.0" cy="111.4" r="3" fill="#2563eb"/><circle cx="109.1" cy="175.2" r="3" fill="#2563eb"/><circle cx="154.2" cy="221.8" r="3" fill="#2563eb"/><circle cx="213.8" cy="239.6" r="3" fill="#2563eb"/><circle cx="258.9" cy="253.8" r="3" fill="#2563eb"/><circle cx="304.0" cy="260.9" r="3" fill="#2563eb"/><circle cx="363.6" cy="264.5" r="3" fill="#2563eb"/><circle cx="408.7" cy="265.3" r="3" fill="#2563eb"/><circle cx="453.8" cy="262.7" r="3" fill="#2563eb"/><circle cx="498.9" cy="260.8" r="3" fill="#2563eb"/><circle cx="544.0" cy="262.9" r="3" fill="#2563eb"/>
+      <path d="M64.0 34.7 L109.1 114.0 L154.2 201.8 L213.8 236.0 L258.9 247.3 L304.0 260.4 L363.6 263.3 L408.7 264.6 L453.8 263.0 L498.9 257.7" fill="none" stroke="#ea580c" stroke-width="2"/><circle cx="64.0" cy="34.7" r="3" fill="#ea580c"/><circle cx="109.1" cy="114.0" r="3" fill="#ea580c"/><circle cx="154.2" cy="201.8" r="3" fill="#ea580c"/><circle cx="213.8" cy="236.0" r="3" fill="#ea580c"/><circle cx="258.9" cy="247.3" r="3" fill="#ea580c"/><circle cx="304.0" cy="260.4" r="3" fill="#ea580c"/><circle cx="363.6" cy="263.3" r="3" fill="#ea580c"/><circle cx="408.7" cy="264.6" r="3" fill="#ea580c"/><circle cx="453.8" cy="263.0" r="3" fill="#ea580c"/><circle cx="498.9" cy="257.7" r="3" fill="#ea580c"/>
+      <text x="304" y="314" text-anchor="middle" font-size="11" fill="#374151">offered push/s (log)</text>
+    </svg>
+  </div><div class="card">
+    <h3>Achieved vs offered (the cliff)</h3><div class="sub">Ground-truth msgs/s vs offered. Dashed line = ideal y=x. Where the curve peels off below it, PG is saturated.</div>
+    <svg viewBox="0 0 560 320" width="100%">
+      <line x1="64" y1="268.0" x2="544" y2="268.0" stroke="#e5e7eb"/><text x="56" y="272.0" text-anchor="end" font-size="11" fill="#6b7280">0</text><line x1="64" y1="205.0" x2="544" y2="205.0" stroke="#e5e7eb"/><text x="56" y="209.0" text-anchor="end" font-size="11" fill="#6b7280">2669.06</text><line x1="64" y1="142.0" x2="544" y2="142.0" stroke="#e5e7eb"/><text x="56" y="146.0" text-anchor="end" font-size="11" fill="#6b7280">5338.12</text><line x1="64" y1="79.0" x2="544" y2="79.0" stroke="#e5e7eb"/><text x="56" y="83.0" text-anchor="end" font-size="11" fill="#6b7280">8007.17</text><line x1="64" y1="16.0" x2="544" y2="16.0" stroke="#e5e7eb"/><text x="56" y="20.0" text-anchor="end" font-size="11" fill="#6b7280">10676.23</text><text x="64.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">50</text><line x1="64.0" y1="16" x2="64.0" y2="268" stroke="#f3f4f6"/><text x="109.1" y="284" text-anchor="middle" font-size="10" fill="#6b7280">100</text><line x1="109.1" y1="16" x2="109.1" y2="268" stroke="#f3f4f6"/><text x="154.2" y="284" text-anchor="middle" font-size="10" fill="#6b7280">200</text><line x1="154.2" y1="16" x2="154.2" y2="268" stroke="#f3f4f6"/><text x="213.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">500</text><line x1="213.8" y1="16" x2="213.8" y2="268" stroke="#f3f4f6"/><text x="258.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">1k</text><line x1="258.9" y1="16" x2="258.9" y2="268" stroke="#f3f4f6"/><text x="304.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">2k</text><line x1="304.0" y1="16" x2="304.0" y2="268" stroke="#f3f4f6"/><text x="363.6" y="284" text-anchor="middle" font-size="10" fill="#6b7280">5k</text><line x1="363.6" y1="16" x2="363.6" y2="268" stroke="#f3f4f6"/><text x="408.7" y="284" text-anchor="middle" font-size="10" fill="#6b7280">10k</text><line x1="408.7" y1="16" x2="408.7" y2="268" stroke="#f3f4f6"/><text x="453.8" y="284" text-anchor="middle" font-size="10" fill="#6b7280">20k</text><line x1="453.8" y1="16" x2="453.8" y2="268" stroke="#f3f4f6"/><text x="498.9" y="284" text-anchor="middle" font-size="10" fill="#6b7280">40k</text><line x1="498.9" y1="16" x2="498.9" y2="268" stroke="#f3f4f6"/><text x="544.0" y="284" text-anchor="middle" font-size="10" fill="#6b7280">80k</text><line x1="544.0" y1="16" x2="544.0" y2="268" stroke="#f3f4f6"/>
+      <line x1="64" y1="16" x2="64" y2="268" stroke="#9ca3af"/>
+      <line x1="64" y1="268" x2="544" y2="268" stroke="#9ca3af"/>
+      <polyline points="64.0 266.8 109.1 265.6 154.2 263.3 213.8 256.2 258.9 244.4 304.0 220.8 363.6 150.0 408.7 32.0 453.8 -204.1 498.9 -676.2 544.0 -1620.3" fill="none" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4 4"/>
+      <path d="M64.0 266.8 L109.1 265.6 L154.2 263.1 L213.8 256.4 L258.9 243.6 L304.0 219.5 L363.6 150.4 L408.7 50.4 L453.8 248.9 L498.9 249.0 L544.0 237.5" fill="none" stroke="#2563eb" stroke-width="2"/><circle cx="64.0" cy="266.8" r="3" fill="#2563eb"/><circle cx="109.1" cy="265.6" r="3" fill="#2563eb"/><circle cx="154.2" cy="263.1" r="3" fill="#2563eb"/><circle cx="213.8" cy="256.4" r="3" fill="#2563eb"/><circle cx="258.9" cy="243.6" r="3" fill="#2563eb"/><circle cx="304.0" cy="219.5" r="3" fill="#2563eb"/><circle cx="363.6" cy="150.4" r="3" fill="#2563eb"/><circle cx="408.7" cy="50.4" r="3" fill="#2563eb"/><circle cx="453.8" cy="248.9" r="3" fill="#2563eb"/><circle cx="498.9" cy="249.0" r="3" fill="#2563eb"/><circle cx="544.0" cy="237.5" r="3" fill="#2563eb"/>
+      <path d="M64.0 266.8 L109.1 265.6 L154.2 263.6 L213.8 256.1 L258.9 245.1 L304.0 218.5 L363.6 155.8 L408.7 34.7 L453.8 200.6 L498.9 247.6" fill="none" stroke="#ea580c" stroke-width="2"/><circle cx="64.0" cy="266.8" r="3" fill="#ea580c"/><circle cx="109.1" cy="265.6" r="3" fill="#ea580c"/><circle cx="154.2" cy="263.6" r="3" fill="#ea580c"/><circle cx="213.8" cy="256.1" r="3" fill="#ea580c"/><circle cx="258.9" cy="245.1" r="3" fill="#ea580c"/><circle cx="304.0" cy="218.5" r="3" fill="#ea580c"/><circle cx="363.6" cy="155.8" r="3" fill="#ea580c"/><circle cx="408.7" cy="34.7" r="3" fill="#ea580c"/><circle cx="453.8" cy="200.6" r="3" fill="#ea580c"/><circle cx="498.9" cy="247.6" r="3" fill="#ea580c"/>
+      <text x="304" y="314" text-anchor="middle" font-size="11" fill="#374151">offered push/s (log)</text>
+    </svg>
+  </div></div>
+<table>
+  <thead><tr><th>phase</th><th>offered</th><th>achieved/s</th><th>msgs/commit</th><th>commits/s</th>
+  <th>fsync/s</th><th>wal B/msg</th><th>PG cores</th><th>cores/Mmsg</th><th>p50 ms</th><th>p99 ms</th><th>sat</th></tr></thead>
+  <tbody><tr class="up">
+  <td>up</td><td>50</td><td>49.4</td><td>0.81</td>
+  <td>60.7</td><td>57.3</td><td>862.6</td>
+  <td>0.116</td><td>2355.983</td><td>25</td><td>34</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>100</td><td>102.2</td><td>1.34</td>
+  <td>76</td><td>72.1</td><td>863.2</td>
+  <td>0.143</td><td>1396.033</td><td>19</td><td>34</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>200</td><td>205.8</td><td>2.52</td>
+  <td>81.6</td><td>78.2</td><td>834</td>
+  <td>0.143</td><td>695.253</td><td>17</td><td>31</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>500</td><td>490.8</td><td>5.51</td>
+  <td>89.1</td><td>84.6</td><td>778.2</td>
+  <td>0.21</td><td>427.165</td><td>17</td><td>45</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>1000</td><td>1034.2</td><td>10.4</td>
+  <td>99.4</td><td>96</td><td>682.9</td>
+  <td>0.222</td><td>214.261</td><td>17</td><td>28</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>2000</td><td>2054.8</td><td>19.94</td>
+  <td>103</td><td>98.9</td><td>657.2</td>
+  <td>0.218</td><td>106.32</td><td>18</td><td>37</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>5000</td><td>4982.6</td><td>25.11</td>
+  <td>198.4</td><td>195</td><td>641.2</td>
+  <td>0.262</td><td>52.589</td><td>10</td><td>70</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>10000</td><td>9217.4</td><td>26.34</td>
+  <td>349.9</td><td>347</td><td>646.3</td>
+  <td>0.373</td><td>40.497</td><td>6</td><td>120</td>
+  <td></td></tr><tr class="up">
+  <td>up</td><td>20000</td><td>807.5</td><td>72.94</td>
+  <td>11.1</td><td>7.7</td><td>628.8</td>
+  <td>0.064</td><td>79.484</td><td>306</td><td>1356</td>
+  <td>⚠︎</td></tr><tr class="up">
+  <td>up</td><td>40000</td><td>805.1</td><td>65.83</td>
+  <td>12.2</td><td>8.7</td><td>634</td>
+  <td>0.087</td><td>108.309</td><td>402</td><td>1849</td>
+  <td>⚠︎</td></tr><tr class="up">
+  <td>up</td><td>80000</td><td>1290.4</td><td>107.38</td>
+  <td>12</td><td>8.6</td><td>631.2</td>
+  <td>0.1</td><td>77.289</td><td>460</td><td>1850</td>
+  <td>⚠︎</td></tr><tr class="down">
+  <td>down</td><td>40000</td><td>864.5</td><td>75.61</td>
+  <td>11.4</td><td>8</td><td>637.3</td>
+  <td>0.133</td><td>154.289</td><td>328</td><td>2118</td>
+  <td>⚠︎</td></tr><tr class="down">
+  <td>down</td><td>20000</td><td>2855.7</td><td>146.36</td>
+  <td>19.5</td><td>15.5</td><td>629.5</td>
+  <td>0.213</td><td>74.548</td><td>246</td><td>2224</td>
+  <td>⚠︎</td></tr><tr class="down">
+  <td>down</td><td>10000</td><td>9885.4</td><td>26.05</td>
+  <td>379.5</td><td>376.9</td><td>640.9</td>
+  <td>0.502</td><td>50.738</td><td>6</td><td>27</td>
+  <td></td></tr><tr class="down">
+  <td>down</td><td>5000</td><td>4751.7</td><td>24.89</td>
+  <td>190.9</td><td>187.1</td><td>649.6</td>
+  <td>0.334</td><td>70.379</td><td>10</td><td>33</td>
+  <td></td></tr><tr class="down">
+  <td>down</td><td>2000</td><td>2097.2</td><td>19.94</td>
+  <td>105.2</td><td>101.8</td><td>657.6</td>
+  <td>0.241</td><td>114.894</td><td>18</td><td>30</td>
+  <td></td></tr><tr class="down">
+  <td>down</td><td>1000</td><td>970.2</td><td>10.52</td>
+  <td>92.2</td><td>88.7</td><td>700.5</td>
+  <td>0.302</td><td>311.744</td><td>18</td><td>69</td>
+  <td></td></tr><tr class="down">
+  <td>down</td><td>500</td><td>502.6</td><td>5.56</td>
+  <td>90.4</td><td>86.8</td><td>3829.3</td>
+  <td>0.242</td><td>481.284</td><td>17</td><td>45</td>
+  <td></td></tr><tr class="down">
+  <td>down</td><td>200</td><td>184.5</td><td>2.53</td>
+  <td>72.8</td><td>69.4</td><td>4335.7</td>
+  <td>0.184</td><td>996.107</td><td>18</td><td>35</td>
+  <td></td></tr><tr class="down">
+  <td>down</td><td>100</td><td>103</td><td>1.34</td>
+  <td>76.9</td><td>72.2</td><td>3751.8</td>
+  <td>0.239</td><td>2316.904</td><td>20</td><td>48</td>
+  <td></td></tr><tr class="down">
+  <td>down</td><td>50</td><td>50</td><td>0.79</td>
+  <td>63</td><td>59.3</td><td>3504.9</td>
+  <td>0.176</td><td>3510.755</td><td>25</td><td>34</td>
+  <td></td></tr></tbody>
+</table>

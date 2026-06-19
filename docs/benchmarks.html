@@ -7,10 +7,10 @@
 <meta name="description" content="Queen MQ benchmarks. Queen 0.16 (pushser): a 24-hour soak of 10.4 billion messages at ~119k msg/s with zero loss and flat broker memory, plus a throughput & scaling matrix beating 0.14 on 10 of 11 cells. Older runs (April 2026, vs Kafka & RabbitMQ) archived.">
 <meta name="theme-color" content="#141415">
 <meta name="color-scheme" content="dark">
-<link rel="canonical" href="https://queenmq.com/benchmarks.html">
+<link rel="canonical" href="https://queenmq.com/benchmarks">
 <meta property="og:site_name" content="Queen MQ">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://queenmq.com/benchmarks.html">
+<meta property="og:url" content="https://queenmq.com/benchmarks">
 <meta property="og:title" content="Benchmarks: Queen MQ: 24h soak (10.4B msgs, zero loss) + scaling matrix">
 <meta property="og:description" content="Queen MQ benchmarks. Queen 0.16 (pushser): a 24-hour soak of 10.4 billion messages at ~119k msg/s with zero loss and flat broker memory, plus a throughput & scaling matrix beating 0.14 on 10 of 11 cells. Older runs (April 2026, vs Kafka & RabbitMQ) archived.">
 <meta property="og:image" content="https://queenmq.com/assets/og-card.png?v=2">
@@ -43,23 +43,23 @@ td .fac { color: var(--ice-400); font-weight: 600; }
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html">
-      <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+    <a class="brand" href="/">
+      <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
       Queen MQ
     </a>
     <nav class="topnav-links" aria-label="Primary">
-      <a href="quickstart.html">Quickstart</a>
-      <a href="concepts.html">Concepts</a>
-      <a href="visual-tour.html">Visual tour</a>
-      <a href="architecture.html">Architecture</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="clients.html">Clients</a>
-      <a href="cli.html">CLI</a>
-      <a href="server.html">Server</a>
-      <a href="http-api.html">HTTP API</a>
-      <a href="dashboard.html">Dashboard</a>
-      <a href="benchmarks.html" class="current">Benchmarks</a>
-      <a href="sizing.html">Sizing</a>
+      <a href="quickstart">Quickstart</a>
+      <a href="concepts">Concepts</a>
+      <a href="visual-tour">Visual tour</a>
+      <a href="architecture">Architecture</a>
+      <a href="use-cases">Use cases</a>
+      <a href="clients">Clients</a>
+      <a href="cli">CLI</a>
+      <a href="server">Server</a>
+      <a href="http-api">HTTP API</a>
+      <a href="dashboard">Dashboard</a>
+      <a href="benchmarks" class="current">Benchmarks</a>
+      <a href="sizing">Sizing</a>
       <a href="https://github.com/queen-mq/queen/blob/master/DEVELOPING.md" target="_blank" rel="noopener">Develop ↗</a>
     </nav>
     <div class="topnav-right">
@@ -124,21 +124,21 @@ td .fac { color: var(--ice-400); font-weight: 600; }
 </p>
 
 <div class="bench-hero">
-  <a class="card" href="benchmarks-0.16-soak.html" style="border-color: rgba(34,211,238,0.4);">
+  <a class="card" href="benchmarks-0.16-soak" style="border-color: rgba(34,211,238,0.4);">
     <div class="card-eyebrow" style="color: var(--ice-400);">0.16 · Durability soak</div>
     <h3>24 hours · 10.4 billion messages</h3>
     <span class="big">~119k <small>msg/s sustained</small></span>
     <span class="sub">Balanced push + pop for a full day, zero loss, flat broker memory. Includes the live dashboard at the 24h mark.</span>
     <span class="meta"><span><b>0</b> errors</span><span><b>~400 MiB</b> broker</span><span><b>100%</b> PG cache</span></span>
   </a>
-  <a class="card" href="benchmarks-0.16-matrix.html" style="border-color: rgba(34,211,238,0.4);">
+  <a class="card" href="benchmarks-0.16-matrix" style="border-color: rgba(34,211,238,0.4);">
     <div class="card-eyebrow" style="color: var(--ice-400);">0.16 · Throughput &amp; scaling matrix</div>
     <h3>Same suite, new engine</h3>
     <span class="big">10 / 11 <small>cells faster</small></span>
     <span class="sub">Batch sizing, partition scaling to 10k, and consumer-group fan-out vs the 0.14 baseline on identical hardware.</span>
     <span class="meta"><span><b>171.6k</b> peak</span><span><b>flat</b> to 10k part</span><span><b>2.9×</b> fan-out</span></span>
   </a>
-  <a class="card" href="benchmarks-0.16-lag.html" style="border-color: rgba(34,211,238,0.4); grid-column: 1 / -1;">
+  <a class="card" href="benchmarks-0.16-lag" style="border-color: rgba(34,211,238,0.4); grid-column: 1 / -1;">
     <div class="card-eyebrow" style="color: var(--ice-400);">0.16 · Behavior under overload</div>
     <h3>Over-provisioned push: what happens when producers outrun consumers</h3>
     <span class="big">0 lost <small>· 0 errors · 1h, 43.2M msgs, 2× fan-out</small></span>
@@ -158,13 +158,13 @@ td .fac { color: var(--ice-400); font-weight: 600; }
       <td><strong>0.16</strong><br><span class="muted" style="font-size:12px;">pushser</span></td>
       <td>Jun 2026</td>
       <td>24h soak: <strong>10.4B msgs</strong> at ~119k/s, zero loss, flat memory · matrix <span class="fac">1.3-3.0×</span> vs 0.14, flat partition scaling · over-provisioned-push lag test: <strong>0 loss</strong>, bounded self-draining backlog</td>
-      <td><a href="benchmarks-0.16-soak.html">soak</a> · <a href="benchmarks-0.16-matrix.html">matrix</a> · <a href="benchmarks-0.16-lag.html">lag</a></td>
+      <td><a href="benchmarks-0.16-soak">soak</a> · <a href="benchmarks-0.16-matrix">matrix</a> · <a href="benchmarks-0.16-lag">lag</a></td>
     </tr>
     <tr>
       <td><strong>0.14</strong><br><span class="muted" style="font-size:12px;">0.14.0.alpha.3</span></td>
       <td>Apr 2026</td>
       <td>18 tests, 1.6B events, zero loss · 104k peak · head-to-head vs Kafka 3.7 &amp; RabbitMQ 3.12 · 0.14-vs-0.12</td>
-      <td><a href="benchmarks-2026-04.html">archive</a></td>
+      <td><a href="benchmarks-2026-04">archive</a></td>
     </tr>
   </tbody>
 </table>
@@ -172,12 +172,12 @@ td .fac { color: var(--ice-400); font-weight: 600; }
 <!-- OLDER -->
 <h2 id="older">Older benchmarks</h2>
 <div class="card-grid">
-  <a class="card" href="benchmarks-2026-04.html">
+  <a class="card" href="benchmarks-2026-04">
     <div class="card-eyebrow">April 2026 · v0.14</div>
     <h3>The original suite + Kafka / RabbitMQ</h3>
     <p>18 tests across throughput, latency, partition scaling, fan-out, multi-tenancy and a realistic pipeline, plus a direct head-to-head against Kafka 3.7 and RabbitMQ 3.12 on the same hardware, and a 0.14-vs-0.12 comparison.</p>
   </a>
-  <a class="card" href="sizing.html">
+  <a class="card" href="sizing">
     <div class="card-eyebrow">Sizing</div>
     <h3>How much Postgres do I need?</h3>
     <p>An interactive calculator turning your target msg/s into a PostgreSQL vCPU budget, derived directly from these benchmarks.</p>
@@ -199,7 +199,7 @@ td .fac { color: var(--ice-400); font-weight: 600; }
   <div class="shell site-foot-inner">
     <div>
       <div class="brand" style="margin-bottom: 10px;">
-        <span class="brand-mark"><img src="assets/queen_head_64.png" alt=""></span>
+        <span class="brand-mark"><img src="assets/queen-badge-open.svg" alt=""></span>
         Queen MQ
       </div>
       <p class="muted" style="font-size: 12.5px; max-width: 320px;">
@@ -210,21 +210,21 @@ td .fac { color: var(--ice-400); font-weight: 600; }
     <div>
       <h5>Docs</h5>
       <ul>
-        <li><a href="quickstart.html">Quickstart</a></li>
-        <li><a href="concepts.html">Concepts</a></li>
-        <li><a href="architecture.html">Architecture</a></li>
-        <li><a href="use-cases.html">Use cases</a></li>
-        <li><a href="clients.html">Clients</a></li>
-        <li><a href="cli.html">CLI</a></li>
-        <li><a href="http-api.html">HTTP API</a></li>
+        <li><a href="quickstart">Quickstart</a></li>
+        <li><a href="concepts">Concepts</a></li>
+        <li><a href="architecture">Architecture</a></li>
+        <li><a href="use-cases">Use cases</a></li>
+        <li><a href="clients">Clients</a></li>
+        <li><a href="cli">CLI</a></li>
+        <li><a href="http-api">HTTP API</a></li>
       </ul>
     </div>
     <div>
       <h5>Operate</h5>
       <ul>
-        <li><a href="server.html">Server setup</a></li>
-        <li><a href="dashboard.html">Web dashboard</a></li>
-        <li><a href="benchmarks.html">Benchmarks</a></li>
+        <li><a href="server">Server setup</a></li>
+        <li><a href="dashboard">Web dashboard</a></li>
+        <li><a href="benchmarks">Benchmarks</a></li>
       </ul>
     </div>
     <div>
