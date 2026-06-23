@@ -1,6 +1,6 @@
 {
   "name": "queen-mq",
-  "version": "0.15.0",
+  "version": "0.16.0-beta.0",
   "type": "module",
   "description": "Partitioned message queue on PostgreSQL — broker client + fluent streaming SDK (windows, joins, gates) in one package",
   "main": "client-v2/index.js",
