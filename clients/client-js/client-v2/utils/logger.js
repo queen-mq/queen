@@ -1,6 +1,6 @@
 /**
  * Logger utility for Queen Client v2
- * 
+ *
  * Supports pluggable logger backends (pino, winston, bunyan, etc.).
  * When no custom logger is configured, falls back to console-based logging
  * gated by the QUEEN_CLIENT_LOG environment variable (Node.js)
@@ -20,6 +20,9 @@ const LOG_ENABLED = (() => {
 })()
 
 let customLogger = null
+// When true, details are passed to the custom logger as structured fields
+// (pino/bunyan style: `info(fields, message)`). Opt-in for backward compatibility.
+let structuredMode = false
 
 function getTimestamp() {
   return new Date().toISOString()
@@ -36,22 +39,62 @@ function formatLog(operation, details, level = 'INFO') {
 
 /**
  * Configure a custom logger backend.
+ *
  * The logger must implement: info(msg), warn(msg), error(msg).
  * debug(msg) is optional and falls back to info(msg) if missing.
  * When a custom logger is set, it is always active (no env var gating).
+ *
+ * By default (backward compatible) the logger is called with a single formatted
+ * string: `info('[operation] {json}')`.
+ *
+ * Pass `{ structured: true }` to instead call the logger pino/bunyan style —
+ * `info(fields, message)` — so `details` become structured, queryable fields
+ * (the `operation` is also added as a field and used as the message). Use this
+ * only with loggers that accept a leading merge object (e.g. pino, bunyan).
+ *
+ * The built-in console fallback (no custom logger) is unaffected by this option.
+ *
  * @param {object} logger - Logger instance (e.g. pino(), winston.createLogger())
+ * @param {{ structured?: boolean }} [options]
  */
-export function configure(logger) {
+export function configure(logger, options = {}) {
   if (logger && typeof logger.info !== 'function') {
     throw new Error('Custom logger must implement info(), warn(), and error() methods')
   }
   customLogger = logger
+  structuredMode = options != null && options.structured === true
+}
+
+/**
+ * Emit a log through the configured custom logger.
+ * - structuredMode: `details` keys become top-level fields, `operation` is added
+ *   as a field, and the operation is the message (pino/bunyan style).
+ * - default (legacy): a single `[operation] {json}` string is passed.
+ * Missing level methods fall back to info().
+ */
+function emitToCustomLogger(method, operation, details) {
+  const fn = customLogger[method] || customLogger.info
+
+  if (structuredMode) {
+    let fields
+    if (details && typeof details === 'object' && !Array.isArray(details)) {
+      fields = { operation, ...details }
+    } else if (details !== undefined) {
+      fields = { operation, details }
+    } else {
+      fields = { operation }
+    }
+    fn.call(customLogger, fields, operation)
+    return
+  }
+
+  const detailsStr = typeof details === 'object' ? JSON.stringify(details) : details
+  fn.call(customLogger, `[${operation}] ${detailsStr}`)
 }
 
 export function log(operation, details) {
   if (customLogger) {
-    const detailsStr = typeof details === 'object' ? JSON.stringify(details) : details
-    customLogger.info(`[${operation}] ${detailsStr}`)
+    emitToCustomLogger('info', operation, details)
     return
   }
   if (!LOG_ENABLED) return
@@ -60,9 +103,7 @@ export function log(operation, details) {
 
 export function debug(operation, details) {
   if (customLogger) {
-    const detailsStr = typeof details === 'object' ? JSON.stringify(details) : details
-    const fn = customLogger.debug || customLogger.info
-    fn.call(customLogger, `[${operation}] ${detailsStr}`)
+    emitToCustomLogger('debug', operation, details)
     return
   }
   if (!LOG_ENABLED) return
@@ -71,8 +112,7 @@ export function debug(operation, details) {
 
 export function warn(operation, details) {
   if (customLogger) {
-    const detailsStr = typeof details === 'object' ? JSON.stringify(details) : details
-    customLogger.warn(`[${operation}] ${detailsStr}`)
+    emitToCustomLogger('warn', operation, details)
     return
   }
   if (!LOG_ENABLED) return
@@ -81,8 +121,7 @@ export function warn(operation, details) {
 
 export function error(operation, details) {
   if (customLogger) {
-    const detailsStr = typeof details === 'object' ? JSON.stringify(details) : details
-    customLogger.error(`[${operation}] ${detailsStr}`)
+    emitToCustomLogger('error', operation, details)
     return
   }
   if (!LOG_ENABLED) return
