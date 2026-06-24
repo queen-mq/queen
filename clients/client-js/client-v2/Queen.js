@@ -23,9 +23,12 @@ export class Queen {
   #admin = null
 
   constructor(config = {}) {
-    // Configure custom logger before anything else
+    // Configure custom logger before anything else.
+    // Opt into structured field logging with `structuredLogs: true` (the logger
+    // must accept a leading merge object, e.g. pino/bunyan); defaults to the
+    // backward-compatible single-string format.
     if (config && typeof config === 'object' && !Array.isArray(config) && config.logger) {
-      logger.configure(config.logger)
+      logger.configure(config.logger, { structured: config.structuredLogs === true })
     }
 
     logger.log('Queen.constructor', { config: typeof config === 'object' && !Array.isArray(config) ? { ...config, urls: config.urls?.length || 0 } : { type: typeof config } })
