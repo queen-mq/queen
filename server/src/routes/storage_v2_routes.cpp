@@ -6,6 +6,7 @@
 
 #include "queen/routes/route_helpers.hpp"
 #include "queen/async_queue_manager.hpp"
+#include "queen/config.hpp"  // get_env_int (fusion knobs)
 #include "queen/encryption.hpp"
 #include "queen/response_queue.hpp"
 #include "queen/shared_state_manager.hpp"
@@ -136,10 +137,290 @@ void slice_partition_segments(const nlohmann::json& segments,
 }  // namespace
 
 // --------------------------------------------------------------------- push
+namespace {
+
+// Cross-request fusion knobs (read once at first use). One HTTP push == one
+// segment per (queue,partition) degenerates to 1-frame segments for
+// single-message producers at high rate — exactly the shape the segments
+// engine is worst at. Parking frames for a few ms and flushing ONE fused
+// segment transfers the spike's measured batch wins (see
+// benchmark-queen/storage-v2-spike/README.md) to non-batchy producers, with
+// the v1 engine's self-clocked group-commit philosophy (preferred_batch_size
+// OR max_hold_ms, see benchmark-queen/fusion-hysteresis/README.md).
+// QUEEN_V2_FUSION_HOLD_MS=0 bypasses the accumulator entirely: every request
+// flushes its own segments inline — exact pre-fusion behavior, the zero-risk
+// switch.
+int fusion_hold_ms() {
+    static const int v = std::max(0, get_env_int("QUEEN_V2_FUSION_HOLD_MS", 15));
+    return v;
+}
+size_t fusion_frames() {
+    static const size_t v = static_cast<size_t>(
+        std::max(1, get_env_int("QUEEN_V2_FUSION_FRAMES", 100)));
+    return v;
+}
+
+// Aggregation state of one HTTP push request. The request parks until every
+// segment flush carrying its frames commits (up to one flush per
+// (queue,partition) it touched); `pending` counts those flushes. All
+// mutation happens on the owning worker's loop thread (route handler, flush
+// timer, defer callbacks), so no locking.
+struct PushState {
+    std::string request_id;
+    int uws_worker = 0;
+    nlohmann::json results;  // per-item, indexed like the request body
+    size_t pending = 0;      // segment flushes still in flight
+    bool failed = false;
+    std::string error;
+    std::shared_ptr<PushFailoverStorage> failover;
+    std::shared_ptr<FileBufferManager> file_buffer;
+};
+
+// Terminal response for one push request (all its flushes accounted for).
+// DB error on any flush: v1-parity failover — buffer the request's ORIGINAL
+// items (snapshotted pre-encryption in push_failover_storage) to the file
+// buffer and answer 'buffered' 201 (replay routes each event by the queue's
+// CURRENT storage flag); otherwise per-item results, 201. Each request parked
+// on a failed fused flush goes through here with its own snapshot, so every
+// one of them is answered consistently.
+void finalize_push_request(const std::shared_ptr<PushState>& st) {
+    if (st->failed) {
+        if (st->failover && st->file_buffer) {
+            auto stored = st->failover->retrieve_and_remove(st->request_id);
+            if (stored.has_value()) {
+                try {
+                    auto evs = nlohmann::json::parse(stored.value());
+                    nlohmann::json results = nlohmann::json::array();
+                    bool all_buffered = true;
+                    for (auto& ev : evs) {
+                        ev["failover"] = true;
+                        if (st->file_buffer->write_event(ev)) {
+                            results.push_back({{"status", "buffered"},
+                                               {"queue", ev.value("queue", "")},
+                                               {"partition", ev.value("partition", "")},
+                                               {"transactionId", ev.value("transactionId", "")}});
+                        } else {
+                            all_buffered = false;
+                            results.push_back({{"status", "failed"},
+                                               {"error", "File buffer write failed"}});
+                        }
+                    }
+                    spdlog::warn("segments push DB error -> buffered {} items: {}",
+                                 evs.size(), st->error);
+                    worker_response_registries[st->uws_worker]->send_response_raw(
+                        st->request_id, results.dump(), all_buffered ? 201 : 500);
+                    return;
+                } catch (const std::exception& e) {
+                    spdlog::error("segments push failover failed: {}", e.what());
+                }
+            }
+        }
+        nlohmann::json err = {{"error", "segments push failed: " + st->error}};
+        worker_response_registries[st->uws_worker]->send_response_raw(
+            st->request_id, err.dump(), 503);
+    } else {
+        if (st->failover) st->failover->remove(st->request_id);
+        worker_response_registries[st->uws_worker]->send_response_raw(
+            st->request_id, st->results.dump(), 201);
+    }
+}
+
+// One pending fused segment: frames from >= 1 requests to a single
+// (queue,partition), flushed as ONE q2 segment when it reaches
+// QUEEN_V2_FUSION_FRAMES frames or its oldest frame reaches
+// QUEEN_V2_FUSION_HOLD_MS. A request's frames for one (queue,partition)
+// always land in the SAME flush (appended whole, then the threshold is
+// checked), so `requests` holds each contributor exactly once.
+struct FusionGroup {
+    std::string queue, partition;
+    std::vector<sv2::FrameIn> frames;
+    struct Owner {                       // parallel to frames
+        std::shared_ptr<PushState> st;
+        int item_idx;                    // index in the owning request's body
+    };
+    std::vector<Owner> owners;
+    std::vector<std::shared_ptr<PushState>> requests;  // distinct contributors
+    std::map<std::string, std::string> seen_txn;  // txn -> first message_id
+    std::chrono::steady_clock::time_point deadline;  // first frame + HOLD_MS
+};
+
+// One accumulator per uWS worker thread: the route handler, the flush timer
+// and every defer callback run on this worker's loop, so the structure is
+// single-threaded by construction. Independent fusion across workers is
+// correct — worst case the same (queue,partition) yields one segment per
+// worker instead of one.
+//
+// No flush-on-shutdown: a parked frame belongs to an HTTP request that never
+// got its 201, and in-flight HTTP dies with the process anyway — the client
+// retries (idempotent by transactionId) exactly as it would for a request
+// killed between submit and commit pre-fusion. The file buffer covers
+// DB-down, not process death.
+struct FusionWorker {
+    QueenCluster* cluster = nullptr;
+    uWS::Loop* loop = nullptr;
+    us_timer_t* timer = nullptr;                // armed iff groups pending
+    std::map<std::string, FusionGroup> groups;  // "queue\x1fpartition"
+};
+
+FusionWorker& fusion_worker() {
+    static thread_local FusionWorker fw;
+    return fw;
+}
+
+// Pack, compress and submit one segment; on completion fill each parked
+// request's per-item results and finalize the requests that drained. Shared
+// by the fusion flush paths and the HOLD_MS=0 inline path (where the group
+// carries a single request).
+void flush_segment(QueenCluster* cluster, uWS::Loop* loop, FusionGroup g) {
+    if (g.frames.empty()) return;  // defensive; pending groups always carry frames
+    nlohmann::json metas = nlohmann::json::array();
+    std::vector<std::string> mids, txns;
+    mids.reserve(g.frames.size());
+    txns.reserve(g.frames.size());
+    for (size_t k = 0; k < g.frames.size(); k++) {
+        metas.push_back({{"i", static_cast<int>(k)},
+                         {"mid", g.frames[k].message_id},
+                         {"txn", g.frames[k].transaction_id}});
+        mids.push_back(g.frames[k].message_id);
+        txns.push_back(g.frames[k].transaction_id);
+    }
+    auto blob = sv2::zstd_compress(sv2::pack_frames(g.frames));
+    std::string blob_b64 = sv2::b64_encode(blob.data(), blob.size());
+
+    queen::JobRequest job;
+    job.op_type = queen::JobType::CUSTOM;
+    // Tracing only (CUSTOM jobs are never invalidated by request id); a fused
+    // segment spans requests, so the first contributor's id stands in.
+    job.request_id = g.requests.front()->request_id;
+    job.sql = "SELECT q2.push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
+    job.params = {g.queue, g.partition, metas.dump(), std::move(blob_b64),
+                  std::to_string(g.frames.size())};
+
+    auto owners = std::move(g.owners);
+    auto requests = std::move(g.requests);
+    auto queue_name = g.queue;
+    auto partition_name = g.partition;
+    auto shared_state = global_shared_state;
+
+    cluster->submit(std::move(job), [loop, owners = std::move(owners),
+                                     requests = std::move(requests),
+                                     mids = std::move(mids),
+                                     txns = std::move(txns), queue_name,
+                                     partition_name,
+                                     shared_state](std::string result) {
+        loop->defer([=]() {
+            bool flush_failed = false;
+            std::string error;
+            try {
+                auto r = nlohmann::json::parse(result);
+                if (r.contains("error") && !r["error"].is_null()) {
+                    flush_failed = true;
+                    error = r["error"].is_string() ? r["error"].get<std::string>()
+                                                   : r["error"].dump();
+                } else if (r.value("status", "") == "duplicate") {
+                    // Frame-index -> original message id map from the wrapper.
+                    // The unique_violation rolled back the WHOLE segment: dup
+                    // frames answer 'duplicate', the rest 'failed' and their
+                    // producers retry (idempotent by transactionId) — the
+                    // slice-1 mixed-batch semantics, now spanning every fused
+                    // request. Only reachable on dedup-window queues fed
+                    // client txns colliding with a COMMITTED message; same-
+                    // window collisions are absorbed by seen_txn upstream.
+                    std::map<int, std::string> orig;
+                    for (auto& d : r["dups"]) orig[d["i"].get<int>()] = d.value("mid", "");
+                    for (size_t k = 0; k < owners.size(); k++) {
+                        bool dup = orig.count(static_cast<int>(k)) > 0;
+                        owners[k].st->results[owners[k].item_idx] = {
+                            {"index", owners[k].item_idx},
+                            {"transaction_id", txns[k]},
+                            {"status", dup ? "duplicate" : "failed"},
+                            {"message_id", dup ? orig[static_cast<int>(k)] : ""},
+                            {"queueName", queue_name}};
+                    }
+                } else {
+                    for (size_t k = 0; k < owners.size(); k++) {
+                        owners[k].st->results[owners[k].item_idx] = {
+                            {"index", owners[k].item_idx},
+                            {"transaction_id", txns[k]},
+                            {"status", "queued"},
+                            {"message_id", mids[k]},
+                            {"trace_id", nullptr},
+                            {"queueName", queue_name}};
+                    }
+                    if (shared_state) {
+                        shared_state->notify_message_available(queue_name, partition_name);
+                    }
+                }
+            } catch (const std::exception& e) {
+                flush_failed = true;
+                error = e.what();
+            }
+            for (const auto& st : requests) {
+                if (flush_failed) {
+                    st->failed = true;
+                    st->error = error;
+                }
+                if (--st->pending == 0) finalize_push_request(st);
+            }
+        });
+    });
+}
+
+void fusion_timer_cb(us_timer_t* t);
+
+// (Re)arm the one-shot flush timer for the earliest pending deadline.
+// Deadlines are monotone in group creation time (now + HOLD_MS), so a newly
+// created group never needs an earlier wake-up than the armed one; a group
+// flushed early by the frame threshold at worst leaves the timer firing with
+// nothing due, and the callback re-arms for the survivors.
+void arm_fusion_timer(FusionWorker& fw) {
+    auto earliest = std::chrono::steady_clock::time_point::max();
+    for (const auto& kv : fw.groups) {
+        earliest = std::min(earliest, kv.second.deadline);
+    }
+    if (!fw.timer) {
+        // fallthrough MUST be 0 — see park_pop: us_timer_close decrements the
+        // loop's poll count unconditionally, but us_create_timer only
+        // increments it when !fallthrough. The ext is a plain FusionWorker*
+        // (thread_local, outlives the timer): nothing to destruct on close,
+        // unlike close_pop_timer's shared_ptr dance.
+        fw.timer = us_create_timer(reinterpret_cast<us_loop_t*>(fw.loop), 0,
+                                   sizeof(FusionWorker*));
+        *static_cast<FusionWorker**>(us_timer_ext(fw.timer)) = &fw;
+    }
+    auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         earliest - std::chrono::steady_clock::now()).count();
+    int delay = static_cast<int>(std::clamp<long long>(
+        remaining, 1, static_cast<long long>(std::max(fusion_hold_ms(), 1))));
+    us_timer_set(fw.timer, fusion_timer_cb, delay, 0);  // one-shot; rearmed while groups remain
+}
+
+void fusion_timer_cb(us_timer_t* t) {
+    auto& fw = **static_cast<FusionWorker**>(us_timer_ext(t));
+    auto now = std::chrono::steady_clock::now();
+    std::vector<std::string> due;
+    for (const auto& kv : fw.groups) {
+        if (kv.second.deadline <= now) due.push_back(kv.first);
+    }
+    for (const auto& key : due) {
+        auto it = fw.groups.find(key);
+        FusionGroup g = std::move(it->second);
+        fw.groups.erase(it);
+        flush_segment(fw.cluster, fw.loop, std::move(g));
+    }
+    if (fw.groups.empty()) {
+        us_timer_close(fw.timer);
+        fw.timer = nullptr;
+    } else {
+        arm_fusion_timer(fw);
+    }
+}
+
+}  // namespace
+
 void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
                     std::vector<PushItem> items) {
-    // Group per (queue, partition) preserving arrival order (one segment per
-    // group; cross-request fusion is a later optimization).
+    // Group per (queue, partition) preserving arrival order.
     struct Group {
         std::string queue, partition;
         std::vector<size_t> idx;                  // original item indices
@@ -252,148 +533,96 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
         ctx.push_failover_storage->store(request_id, failover_items.dump());
     }
 
-    // Aggregation state: all callbacks land on this worker's loop (defer), so
-    // no locking is needed.
-    struct State {
-        nlohmann::json results;
-        size_t pending;
-        bool failed = false;
-        std::string error;
-    };
-    auto st = std::make_shared<State>();
+    auto st = std::make_shared<PushState>();
+    st->request_id = request_id;
+    st->uws_worker = ctx.worker_id;
     st->results = std::move(pre_results);  // intra-batch dups pre-filled
-    st->pending = groups.size();
+    st->failover = ctx.push_failover_storage;
+    st->file_buffer = ctx.file_buffer;
 
     if (groups.empty()) {  // everything was an intra-batch duplicate
-        worker_response_registries[ctx.worker_id]->send_response_raw(
-            request_id, st->results.dump(), 201);
+        finalize_push_request(st);
         return;
     }
 
-    auto worker_loop = ctx.worker_loop;
-    auto worker_id = ctx.worker_id;
-    auto shared_state = global_shared_state;
-
-    for (auto& g : groups) {
-        nlohmann::json metas = nlohmann::json::array();
-        for (size_t k = 0; k < g.frames.size(); k++) {
-            metas.push_back({{"i", static_cast<int>(k)},
-                             {"mid", g.frames[k].message_id},
-                             {"txn", g.frames[k].transaction_id}});
+    if (fusion_hold_ms() <= 0) {
+        // Fusion bypass: one segment per (queue,partition) per request,
+        // flushed inline — exact pre-fusion behavior.
+        st->pending = groups.size();
+        for (auto& g : groups) {
+            FusionGroup fg;
+            fg.queue = std::move(g.queue);
+            fg.partition = std::move(g.partition);
+            fg.frames = std::move(g.frames);
+            fg.owners.reserve(fg.frames.size());
+            for (size_t k = 0; k < fg.frames.size(); k++) {
+                fg.owners.push_back({st, static_cast<int>(g.idx[k])});
+            }
+            fg.requests.push_back(st);
+            flush_segment(ctx.queen, ctx.worker_loop, std::move(fg));
         }
-        auto blob = sv2::zstd_compress(sv2::pack_frames(g.frames));
-        std::string blob_b64 = sv2::b64_encode(blob.data(), blob.size());
+        return;
+    }
 
-        queen::JobRequest job;
-        job.op_type = queen::JobType::CUSTOM;
-        job.request_id = request_id;
-        job.sql = "SELECT q2.push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
-        job.params = {g.queue, g.partition, metas.dump(), std::move(blob_b64),
-                      std::to_string(g.frames.size())};
-
-        // Copies needed by the callback to fill per-item results.
-        auto g_idx = g.idx;
-        std::vector<std::string> mids, txns;
-        mids.reserve(g.frames.size());
-        txns.reserve(g.frames.size());
-        for (auto& f : g.frames) { mids.push_back(f.message_id); txns.push_back(f.transaction_id); }
-        auto queue_name = g.queue;
-        auto partition_name = g.partition;
-
-        auto push_failover_storage = ctx.push_failover_storage;
-        auto file_buffer = ctx.file_buffer;
-        ctx.queen->submit(std::move(job), [worker_loop, worker_id, request_id, st,
-                                           g_idx, mids, txns, queue_name, partition_name,
-                                           shared_state, push_failover_storage,
-                                           file_buffer](std::string result) {
-            worker_loop->defer([=]() {
-                try {
-                    auto r = nlohmann::json::parse(result);
-                    if (r.contains("error") && !r["error"].is_null()) {
-                        st->failed = true;
-                        st->error = r["error"].is_string() ? r["error"].get<std::string>() : r["error"].dump();
-                    } else if (r.value("status", "") == "duplicate") {
-                        // Frame-index -> original message id map from the wrapper.
-                        std::map<int, std::string> orig;
-                        for (auto& d : r["dups"]) orig[d["i"].get<int>()] = d.value("mid", "");
-                        for (size_t k = 0; k < g_idx.size(); k++) {
-                            bool dup = orig.count(static_cast<int>(k)) > 0;
-                            st->results[g_idx[k]] = {
-                                {"index", static_cast<int>(g_idx[k])},
-                                {"transaction_id", txns[k]},
-                                {"status", dup ? "duplicate" : "failed"},
-                                {"message_id", dup ? orig[static_cast<int>(k)] : ""},
-                                {"queueName", queue_name}};
-                        }
-                        // Slice-1: a mixed batch (some dup) is NOT auto-retried
-                        // server-side; the non-dup items report failed and the
-                        // client retries them (idempotent by transactionId).
-                    } else {
-                        for (size_t k = 0; k < g_idx.size(); k++) {
-                            st->results[g_idx[k]] = {
-                                {"index", static_cast<int>(g_idx[k])},
-                                {"transaction_id", txns[k]},
-                                {"status", "queued"},
-                                {"message_id", mids[k]},
-                                {"trace_id", nullptr},
-                                {"queueName", queue_name}};
-                        }
-                        if (shared_state) {
-                            shared_state->notify_message_available(queue_name, partition_name);
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    st->failed = true;
-                    st->error = e.what();
-                }
-                if (--st->pending == 0) {
-                    if (st->failed) {
-                        // DB error: v1-parity failover — buffer the whole batch
-                        // to the file buffer and answer 'buffered' (replay
-                        // routes by the queue's CURRENT storage flag).
-                        if (push_failover_storage && file_buffer) {
-                            auto stored = push_failover_storage->retrieve_and_remove(request_id);
-                            if (stored.has_value()) {
-                                try {
-                                    auto evs = nlohmann::json::parse(stored.value());
-                                    nlohmann::json results = nlohmann::json::array();
-                                    bool all_buffered = true;
-                                    for (auto& ev : evs) {
-                                        ev["failover"] = true;
-                                        if (file_buffer->write_event(ev)) {
-                                            results.push_back({{"status", "buffered"},
-                                                               {"queue", ev.value("queue", "")},
-                                                               {"partition", ev.value("partition", "")},
-                                                               {"transactionId", ev.value("transactionId", "")}});
-                                        } else {
-                                            all_buffered = false;
-                                            results.push_back({{"status", "failed"},
-                                                               {"error", "File buffer write failed"}});
-                                        }
-                                    }
-                                    spdlog::warn("segments push DB error -> buffered {} items: {}",
-                                                 evs.size(), st->error);
-                                    worker_response_registries[worker_id]->send_response_raw(
-                                        request_id, results.dump(), all_buffered ? 201 : 500);
-                                    return;
-                                } catch (const std::exception& e) {
-                                    spdlog::error("segments push failover failed: {}", e.what());
-                                }
-                            }
-                        }
-                        nlohmann::json err = {{"error", "segments push failed: " + st->error}};
-                        worker_response_registries[worker_id]->send_response_raw(
-                            request_id, err.dump(), 503);
-                    } else {
-                        if (push_failover_storage) {
-                            push_failover_storage->remove(request_id);
-                        }
-                        worker_response_registries[worker_id]->send_response_raw(
-                            request_id, st->results.dump(), 201);
-                    }
-                }
-            });
-        });
+    // CROSS-REQUEST FUSION: park this request's frames in the worker's
+    // accumulator; the flush (frame threshold here, HOLD_MS deadline on the
+    // loop timer) commits one fused segment per (queue,partition) and answers
+    // every parked request with its own per-item results. We are ON the
+    // worker loop thread and flush callbacks defer to it, so nothing below
+    // interleaves with a completion.
+    auto& fw = fusion_worker();
+    fw.cluster = ctx.queen;
+    fw.loop = ctx.worker_loop;
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& g : groups) {
+        std::string key = g.queue + "\x1f" + g.partition;
+        auto [it, created] = fw.groups.try_emplace(key);
+        FusionGroup& fg = it->second;
+        if (created) {
+            fg.queue = g.queue;
+            fg.partition = g.partition;
+            fg.deadline = now + std::chrono::milliseconds(fusion_hold_ms());
+        }
+        bool contributed = false;
+        for (size_t k = 0; k < g.frames.size(); k++) {
+            auto& f = g.frames[k];
+            auto seen = fg.seen_txn.find(f.transaction_id);
+            if (seen != fg.seen_txn.end()) {
+                // Intra-window duplicate across parked requests: first wins,
+                // answered immediately with the first's message_id and no
+                // second frame — the intra-batch dedup above extended to the
+                // whole fusion window.
+                st->results[g.idx[k]] = {{"index", static_cast<int>(g.idx[k])},
+                                         {"transaction_id", f.transaction_id},
+                                         {"status", "duplicate"},
+                                         {"message_id", seen->second},
+                                         {"queueName", fg.queue}};
+                continue;
+            }
+            fg.seen_txn[f.transaction_id] = f.message_id;
+            fg.owners.push_back({st, static_cast<int>(g.idx[k])});
+            fg.frames.push_back(std::move(f));
+            contributed = true;
+        }
+        if (contributed) {
+            st->pending++;
+            fg.requests.push_back(st);
+        } else if (fg.frames.empty()) {
+            // Unreachable in practice (a fresh group always takes its first
+            // frame); guards a frameless group from parking forever.
+            fw.groups.erase(it);
+            continue;
+        }
+        if (fg.frames.size() >= fusion_frames()) {
+            FusionGroup out = std::move(fg);
+            fw.groups.erase(it);
+            flush_segment(fw.cluster, fw.loop, std::move(out));
+        }
+    }
+    if (!fw.groups.empty() && !fw.timer) arm_fusion_timer(fw);
+    if (st->pending == 0) {
+        // Every item was absorbed as an intra-window duplicate.
+        finalize_push_request(st);
     }
 }
 

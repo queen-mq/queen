@@ -19,9 +19,20 @@ bool is_segment_queue(const std::string& queue);
 // Handles a push whose items ALL target segment queues. Items must already be
 // validated and producer-stamped by the caller. Emits the v1 wire response
 // (items array with per-item status). Payloads of queues with
-// encryption_enabled are encrypted per frame (flag bit2). No file-buffer
-// failover: on DB error the client gets a 503 (documented slice-1 limitation
-// for segment queues).
+// encryption_enabled are encrypted per frame (flag bit2) BEFORE accumulation.
+//
+// CROSS-REQUEST FUSION: frames park in a per-worker-thread accumulator, one
+// pending segment per (queue,partition), flushed when it reaches
+// QUEEN_V2_FUSION_FRAMES frames (default 100) or its oldest frame is
+// QUEEN_V2_FUSION_HOLD_MS old (default 15) — v1's self-clocked group commit.
+// Each request parks until the flush carrying ITS frames commits, then gets
+// its own per-item results; a duplicate transactionId inside the parked
+// window answers 'duplicate' with the first occurrence's message_id. On DB
+// error every parked request fails over independently to the file buffer
+// ('buffered' 201, v1 parity). QUEEN_V2_FUSION_HOLD_MS=0 bypasses the
+// accumulator (exact pre-fusion behavior). Parked frames are NOT flushed on
+// shutdown by design: their HTTP requests die with the process (no 201 ever
+// sent) and producers retry idempotently.
 void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
                     std::vector<PushItem> items);
 
