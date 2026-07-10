@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS queen.messages (
 -- nullable column with no default is a catalog-only change in Postgres >= 11 - no table rewrite).
 ALTER TABLE queen.messages ADD COLUMN IF NOT EXISTS producer_sub TEXT;
 
+-- Storage engine selector (storage v2 "segments" is per-queue opt-in; the
+-- engine itself lives in procedures/023_storage_v2.sql under schema q2).
+-- Catalog-only change on PG >= 11: constant default, no table rewrite.
+ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS storage VARCHAR(16) NOT NULL DEFAULT 'rows';
+
 -- Unique constraint scoped to partition (not global)
 CREATE UNIQUE INDEX IF NOT EXISTS messages_partition_transaction_unique 
     ON queen.messages(partition_id, transaction_id);

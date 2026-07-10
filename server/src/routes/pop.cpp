@@ -5,6 +5,7 @@
 #include "queen/response_queue.hpp"
 #include "queen/queue_types.hpp"
 #include "queen/shared_state_manager.hpp"
+#include "queen/routes/storage_v2_routes.hpp"
 #include "queen/encryption.hpp"
 #include "queen.hpp"  // libqueen
 #include "simdjson.h"
@@ -159,7 +160,21 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
             if (!sub_from.empty()) {
                 options.subscription_from = sub_from;
             }
-            
+
+            // STORAGE V2: segment queues take the segments pop path (same
+            // wire format). Slice-1 limits: no long-poll wait, no wildcard.
+            if (queen::routes_v2::is_segment_queue(queue_name)) {
+                int lease_secs = 300;
+                if (global_shared_state) {
+                    auto cfg = global_shared_state->get_or_fetch_queue_config(queue_name);
+                    if (cfg && cfg->lease_time > 0) lease_secs = cfg->lease_time;
+                }
+                queen::routes_v2::handle_pop_v2(ctx, res, queue_name, partition_name,
+                                                consumer_group, options.batch,
+                                                lease_secs, options.auto_ack);
+                return;
+            }
+
             // Register response for async delivery
             std::string request_id = worker_response_registries[ctx.worker_id]->register_response(
                 res, ctx.worker_id, 

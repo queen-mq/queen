@@ -1,0 +1,44 @@
+name: queen-storage-v2-spike
+
+# Same pinned-PG philosophy as fusion-hysteresis: small on purpose so the
+# ceilings are reachable on a laptop. Separate container name + port so it
+# can coexist with a fusion-hysteresis run.
+services:
+  postgres:
+    image: postgres:17
+    container_name: queen-spike-pg
+    cpus: ${PG_CPUS:-2.0}
+    mem_limit: ${PG_MEM:-4g}
+    shm_size: "1gb"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-1GB}
+      - -c
+      - work_mem=8MB
+      - -c
+      - synchronous_commit=${SYNC_COMMIT:-on}
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:-4GB}
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - track_io_timing=on
+      - -c
+      - track_wal_io_timing=on
+    ports:
+      - "${PG_HOST_PORT:-5440}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 40

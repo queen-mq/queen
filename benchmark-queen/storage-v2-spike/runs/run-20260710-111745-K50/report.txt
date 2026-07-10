@@ -1,0 +1,17 @@
+metric                      v1 (rows)       v2 (segments)   gain    
+----------------------------------------------------------------------
+messages                    600000          600000                  
+ingest msgs/s               46143           28326           0.6x    
+ingest WAL/msg (B)          969             345             2.8x    
+ingest PG CPU %             156.4           177.5                   
+zstd group ratio            -               3.32                    
+heap B/msg                  512.2           120.3           4.3x    
+index B/msg                 241.7           1.4             172.6x  
+dedup B/msg (v2 window)     -               145                     
+stored B/msg TOTAL          753.9           266.6           2.8x    
+table total                 452.3 MB        160.0 MB                
+consume msgs/s              31261           154759          5.0x    
+consume WAL/msg (B)         758             4                       
+consume PG CPU %            193.5           59.7                    
+retention sweep (s)         5.654           0.216                   
+retention WAL/msg (B)       566             137             4.1x    

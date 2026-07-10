@@ -8,6 +8,7 @@
 #include "queen.hpp"  // libqueen
 #include "queen/encryption.hpp"
 #include "queen/shared_state_manager.hpp"
+#include "queen/routes/storage_v2_routes.hpp"
 #include "simdjson.h"
 #include <spdlog/spdlog.h>
 #include <chrono>
@@ -304,6 +305,27 @@ void handle_push_json(uWS::HttpResponse<false>* res,
             return;
         }
 
+        // STORAGE V2: segment queues take the segments path (frame packing +
+        // q2.push_segment_wire_v1). Mixed rows/segments batches are rejected
+        // in slice 1 — a push call must target one storage engine.
+        {
+            bool any_v2 = false, all_v2 = true;
+            for (const auto& it : items) {
+                bool s = queen::routes_v2::is_segment_queue(it.queue);
+                any_v2 = any_v2 || s;
+                all_v2 = all_v2 && s;
+            }
+            if (any_v2) {
+                if (!all_v2) {
+                    send_error_response(res,
+                        "mixed rows/segments queues in one push are not supported", 400);
+                    return;
+                }
+                queen::routes_v2::handle_push_v2(ctx, res, std::move(items));
+                return;
+            }
+        }
+
         // MAINTENANCE MODE: route to file buffer instead of the sidecar.
         if (global_shared_state && global_shared_state->get_maintenance_mode() && ctx.file_buffer) {
             spdlog::debug("[Worker {}] PUSH: Maintenance mode active, buffering {} items",
@@ -518,7 +540,12 @@ int build_push_items_simd(std::string& body,
             bool queue_encryption_enabled = false;
             if (global_shared_state) {
                 auto config = global_shared_state->get_or_fetch_queue_config(queue);
-                if (config) queue_encryption_enabled = config->encryption_enabled;
+                if (config) {
+                    // Storage v2 queues need structured items (frame packing):
+                    // bail out to the nlohmann path (sentinel -2).
+                    if (config->storage == "segments") return -2;
+                    queue_encryption_enabled = config->encryption_enabled;
+                }
             }
             if (queue_encryption_enabled && enc_service && enc_service->is_enabled()) {
                 std::string payload_str(has_payload ? payload_raw : std::string_view("{}"));
@@ -608,6 +635,17 @@ void handle_push_simd(uWS::HttpResponse<false>* res,
     std::string error;
     int count = build_push_items_simd(body, auth_sub, ctx, items_str, notify_pairs, error);
 
+    if (count == -2) {
+        // Storage v2 queue in the batch: re-parse through the nlohmann path,
+        // which routes segment queues to routes_v2::handle_push_v2.
+        try {
+            nlohmann::json parsed = nlohmann::json::parse(body);
+            handle_push_json(res, ctx, auth_claims, parsed);
+        } catch (const std::exception& e) {
+            send_error_response(res, std::string("Invalid JSON: ") + e.what(), 400);
+        }
+        return;
+    }
     if (count < 0) {
         send_error_response(res, error, 400);
         return;

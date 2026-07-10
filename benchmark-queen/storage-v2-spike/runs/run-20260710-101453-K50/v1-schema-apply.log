@@ -1,0 +1,4 @@
+psql:/Users/alice/Work/queen/lib/schema/procedures/013_stats.sql:2215: NOTICE:  function queen.is_stats_leader(text) does not exist, skipping
+psql:/Users/alice/Work/queen/lib/schema/procedures/014_worker_metrics.sql:342: NOTICE:  trigger "trg_update_worker_metrics_summary" for relation "queen.worker_metrics" does not exist, skipping
+psql:/Users/alice/Work/queen/lib/schema/procedures/014_worker_metrics.sql:1095: NOTICE:  trigger "trg_partitions_created_counter" for relation "queen.partitions" does not exist, skipping
+psql:/Users/alice/Work/queen/lib/schema/procedures/014_worker_metrics.sql:1102: NOTICE:  trigger "trg_partitions_deleted_counter" for relation "queen.partitions" does not exist, skipping

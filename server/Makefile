@@ -33,8 +33,11 @@ ifeq ($(UNAME_S),Darwin)
     UV_STATIC_LIB := ./vendor/libuv/build/libuv.a
     # jwt-cpp header-only library
     JWTCPP_INCLUDES := ./vendor/jwt-cpp/include
-    INCLUDES = -I./include -I./vendor -I./vendor/uSockets/src -I../lib $(addprefix -I,$(PG_INCLUDES)) $(addprefix -I,$(SSL_INCLUDES)) -I$(UV_INCLUDES) -I$(JWTCPP_INCLUDES)
-    LIBS = $(addprefix -L,$(PG_LIBS)) $(addprefix -L,$(SSL_LIBS)) -lpq -lssl -lcrypto -lz $(UV_STATIC_LIB) -framework CoreFoundation -framework Security
+    # zstd for storage v2 segment blobs (homebrew keg or system paths)
+    ZSTD_INCLUDES := $(BREW_PREFIX)/opt/zstd/include
+    ZSTD_LIBS := $(BREW_PREFIX)/opt/zstd/lib
+    INCLUDES = -I./include -I./vendor -I./vendor/uSockets/src -I../lib $(addprefix -I,$(PG_INCLUDES)) $(addprefix -I,$(SSL_INCLUDES)) -I$(UV_INCLUDES) -I$(JWTCPP_INCLUDES) $(addprefix -I,$(ZSTD_INCLUDES))
+    LIBS = $(addprefix -L,$(PG_LIBS)) $(addprefix -L,$(SSL_LIBS)) $(addprefix -L,$(ZSTD_LIBS)) -lpq -lssl -lcrypto -lz -lzstd $(UV_STATIC_LIB) -framework CoreFoundation -framework Security
 else
     # Linux - libuv from vendor (built from source) - use static library
     UV_INCLUDES := ./vendor/libuv/include
@@ -42,7 +45,7 @@ else
     # jwt-cpp header-only library
     JWTCPP_INCLUDES := ./vendor/jwt-cpp/include
     INCLUDES = -I./include -I./vendor -I./vendor/uSockets/src -I../lib -I/usr/include/postgresql -I/usr/local/include/postgresql -I$(UV_INCLUDES) -I$(JWTCPP_INCLUDES)
-    LIBS = -lpq -lssl -lcrypto -lz $(UV_STATIC_LIB)
+    LIBS = -lpq -lssl -lcrypto -lz -lzstd $(UV_STATIC_LIB)
 endif
 
 # Full include flags (shared between PCH and source compilation)

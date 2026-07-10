@@ -138,7 +138,7 @@ std::optional<caches::CachedQueueConfig> SharedStateManager::get_or_fetch_queue_
                 max_queue_size, ttl, dead_letter_queue, 
                 dlq_after_max_retries, delayed_processing,
                 window_buffer, retention_seconds, completed_retention_seconds,
-                encryption_enabled
+                encryption_enabled, storage
             FROM queen.queues
             WHERE name = $1
         )";
@@ -209,7 +209,10 @@ std::optional<caches::CachedQueueConfig> SharedStateManager::get_or_fetch_queue_
         
         const char* encrypted = PQgetvalue(result.get(), 0, PQfnumber(result.get(), "encryption_enabled"));
         cfg.encryption_enabled = (encrypted && (strcmp(encrypted, "t") == 0 || strcmp(encrypted, "true") == 0));
-        
+
+        const char* storage = PQgetvalue(result.get(), 0, PQfnumber(result.get(), "storage"));
+        cfg.storage = (storage && strlen(storage) > 0) ? storage : "rows";
+
         // Populate cache for future calls
         queue_configs_.set(queue, cfg);
         spdlog::debug("SharedStateManager: Fetched and cached config for queue '{}'", queue);

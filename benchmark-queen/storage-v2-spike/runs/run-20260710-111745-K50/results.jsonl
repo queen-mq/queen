@@ -1,0 +1,14 @@
+{"phase":"ingest-v1","msgs":600000,"duplicates":0,"calls":12000,"seconds":13.003,"wal_bytes":581128632,"driver_cpu_seconds":7}
+{"phase":"ingest-v1-cpu","cpu_avg_pct":156.4}
+{"phase":"sizes-v1","queen.messages":{"heap":307339264,"idx":145006592,"total":452345856,"rows":600000,"indexes":{"queen.messages_pkey":24371200,"queen.messages_partition_transaction_unique":60628992,"queen.idx_messages_partition_created":60006400}},"queen.partition_consumers":{"heap":8192,"idx":24576,"total":32768,"rows":0,"indexes":{"queen.partition_consumers_pkey":8192,"queen.partition_consumers_partition_id_consumer_group_key":8192,"queen.idx_partition_consumers_worker_id_active":8192}},"queen.messages_consumed":{"heap":0,"idx":40960,"total":40960,"rows":0,"indexes":{"queen.messages_consumed_pkey":8192,"queen.idx_messages_consumed_acked_at":8192,"queen.idx_messages_consumed_partition_acked":8192,"queen.idx_messages_consumed_consumer_acked":8192,"queen.idx_messages_consumed_partition_id":8192}}}
+{"phase":"consume-v1","msgs":600000,"seconds":19.193,"wal_bytes":454852152,"driver_cpu_seconds":5.5}
+{"phase":"consume-v1-cpu","cpu_avg_pct":193.5}
+{"phase":"retention-v1","deleted":600000,"seconds":5.654,"wal_bytes":339487968,"driver_cpu_seconds":0}
+{"phase":"retention-v1-cpu","cpu_avg_pct":90.8}
+{"phase":"ingest-v2","msgs":600000,"duplicates":0,"calls":12000,"zstd_ratio":3.32,"seconds":21.182,"wal_bytes":206962816,"driver_cpu_seconds":9.9}
+{"phase":"ingest-v2-cpu","cpu_avg_pct":177.5}
+{"phase":"sizes-v2","q2.segments":{"heap":72187904,"idx":827392,"total":73015296,"rows":12000,"indexes":{"q2.segments_pkey":827392}},"q2.dedup":{"heap":55934976,"idx":31039488,"total":86974464,"rows":600000,"indexes":{"q2.dedup_pkey":31039488}},"q2.consumers":{"heap":8192,"idx":8192,"total":16384,"rows":0,"indexes":{"q2.consumers_pkey":8192}}}
+{"phase":"consume-v2","msgs":600000,"seconds":3.877,"wal_bytes":2479040,"driver_cpu_seconds":1.5}
+{"phase":"consume-v2-cpu","cpu_avg_pct":59.7}
+{"phase":"retention-v2","deleted_segments":12000,"purged_dedup":100000,"seconds":0.216,"wal_bytes":82251512,"driver_cpu_seconds":0}
+{"phase":"retention-v2-cpu","cpu_avg_pct":0}

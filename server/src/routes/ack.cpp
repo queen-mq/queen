@@ -3,6 +3,7 @@
 #include "queen/routes/route_helpers.hpp"
 #include "queen/async_queue_manager.hpp"
 #include "queen/shared_state_manager.hpp"
+#include "queen/routes/storage_v2_routes.hpp"
 #include "queen.hpp"  // libqueen
 #include "queen/response_queue.hpp"
 #include <spdlog/spdlog.h>
@@ -57,7 +58,17 @@ void setup_ack_routes(uWS::App* app, const RouteContext& ctx) {
                         ack_item["consumerGroup"] = consumer_group;
                         ack_items.push_back(ack_item);
                     }
-                    
+
+                    // STORAGE V2: acks whose leaseId belongs to a segments
+                    // lease are resolved via the in-process lease registry.
+                    {
+                        nlohmann::json probe = nlohmann::json::array();
+                        for (const auto& a : ack_items) probe.push_back(a);
+                        if (queen::routes_v2::try_handle_ack_v2(ctx, res, probe)) {
+                            return;
+                        }
+                    }
+
                     std::string request_id = worker_response_registries[ctx.worker_id]->register_response(
                         res, ctx.worker_id, nullptr
                     );
@@ -156,11 +167,24 @@ void setup_ack_routes(uWS::App* app, const RouteContext& ctx) {
                         send_error_response(res, "partitionId is required to ensure message uniqueness", 400);
                         return;
                     }
-                    
+
+                    // STORAGE V2: single ack against a segments lease.
+                    {
+                        nlohmann::json probe = nlohmann::json::array();
+                        probe.push_back({{"transactionId", transaction_id},
+                                         {"partitionId", partition_id.value()},
+                                         {"leaseId", lease_id.value_or("")},
+                                         {"status", status},
+                                         {"consumerGroup", consumer_group}});
+                        if (queen::routes_v2::try_handle_ack_v2(ctx, res, probe)) {
+                            return;
+                        }
+                    }
+
                     std::string request_id = worker_response_registries[ctx.worker_id]->register_response(
                         res, ctx.worker_id, nullptr
                     );
-                    
+
                     // Build JSON array with single ACK
                     nlohmann::json ack_json = nlohmann::json::array();
                     ack_json.push_back({
