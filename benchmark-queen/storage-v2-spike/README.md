@@ -84,3 +84,36 @@ Il motore è passato da una review avversariale multi-agente (concorrenza,
 meccanica PG, fairness del bench); i fix applicati: fillfactor 70 su
 partitions (HOT), watermark retention, guardia NULL nell'ack, UUID
 deterministici nel driver, dedup single-statement.
+
+## Production integration
+
+Il motore dello spike è integrato nel server (branch `storage-v2-slice`),
+opt-in per coda via `queen.queues.storage = 'segments'`, wire format v1
+invariato. Documentazione completa: `developer/16-storage-v2.md`.
+
+SQL (schema `q2`, applicato al boot come ogni procedures file):
+
+- `lib/schema/procedures/023_storage_v2.sql` — schema q2 + push/pop/ack/renew
+  (evoluzione diretta di `schema_v2.sql` di questo spike)
+- `lib/schema/procedures/024_storage_v2_pop_ext.sql` — pop wildcard,
+  ack-by-txn cross-process, pending probe
+- `lib/schema/procedures/025_storage_v2_dlq.sql` — attempt tracking + DLQ
+  poison-head (snapshot, senza FK verso i segmenti)
+- `lib/schema/procedures/026_storage_v2_maintenance.sql` — retention sweep,
+  eviction, transazioni atomiche (`q2.transaction_wire_v1`)
+- `lib/schema/procedures/027_storage_v2_observability.sql` — stats + dashboard
+  + prometheus dual-engine
+
+Entry point C++:
+
+- `server/include/queen/storage_v2.hpp` — frame codec, zstd/base64,
+  `LeaseRegistry` (txn → posizione per gli ack)
+- `server/src/routes/storage_v2_routes.cpp` — `handle_push_v2` (con fusion
+  cross-request, knob `QUEEN_V2_FUSION_HOLD_MS`/`QUEEN_V2_FUSION_FRAMES`),
+  `handle_pop_v2`, `handle_pop_wildcard_v2`, `try_handle_ack_v2`
+- routing per engine in `server/src/routes/{push,pop,ack,transactions,leases}.cpp`
+  e replay del file buffer in `server/src/managers/async_queue_manager.cpp`
+- flag + flip guard in `server/src/routes/configure.cpp`; cache config in
+  `server/src/services/shared_state_manager.cpp`
+- sweep in `server/src/services/{retention,eviction}_service.cpp`
+  (`q2.retention_sweep_v1` / `q2.evict_v1`, stesso advisory lock 737001 di v1)

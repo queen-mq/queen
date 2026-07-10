@@ -124,9 +124,24 @@ bool ResponseRegistry::deliver_string(const std::string& request_id, std::string
         entry->response->writeHeader("Access-Control-Allow-Origin", "*");
         entry->response->writeHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
         entry->response->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+        // RFC 9110 §15.3.5: a 204 response MUST NOT carry a message body.
+        // Historically empty pops were sent as "204" WITH a JSON body and
+        // Content-Length, which strict HTTP clients (Go net/http, node:http's
+        // llhttp, raw curl pipelines) reject at the wire level. Suppress the
+        // payload entirely: status + headers only, and endWithoutBody() so no
+        // Content-Length is written either.
+        if (status_code == 204) {
+            entry->response->endWithoutBody();
+            entry->response = nullptr;
+            entry->valid = false;
+            spdlog::debug("Sent body-less 204 for ID: {}", request_id);
+            return true;
+        }
+
         entry->response->writeHeader("Content-Type", "application/json");
 
-        // Handle empty responses (like 204 No Content)
+        // Handle empty responses (non-204 with nothing to say)
         if (json_str.empty()) {
             entry->response->end();
             entry->response = nullptr;

@@ -19,6 +19,7 @@
 // Consumption cursor semantics live entirely in SQL; here we only pack, unpack
 // and keep the per-lease ack bookkeeping (leaseId -> delivered positions).
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -257,14 +258,22 @@ struct LeaseBatch {
     std::string queue;
     std::string partition;
     std::string consumer_group;
-    // Delivered positions, in order: (seq, offset_after_this_message) plus txn.
-    struct Pos { int64_t seq; int32_t off_after; std::string txn; };
+    // Delivered positions, in order: (seq, offset_after_this_message) plus the
+    // frame's txn and message id (the id feeds explicit-dlq q2.dlq rows).
+    struct Pos { int64_t seq; int32_t off_after; std::string txn; std::string mid; };
     std::vector<Pos> positions;
     // Sized to positions by LeaseRegistry::put; callers only fill positions.
     std::vector<bool> acked;      // acked OK — feeds the contiguous prefix
     std::vector<bool> responded;  // acked ok OR failed — feeds completion
+    std::vector<bool> dlq;        // explicit status='dlq' ack (disposed + filed)
     size_t responded_count = 0;
     bool failed = false;
+    // TTL stamped by put() from the pop's lease_seconds (plus grace): entries
+    // whose SQL lease is long gone are swept lazily on put/ack, so abandoned
+    // batches (consumer died, never acked) cannot leak the registry. An entry
+    // swept while its SQL lease is still live (e.g. renewed) is harmless: the
+    // ack falls back to q2.ack_by_txn_v1 which validates against SQL state.
+    std::chrono::steady_clock::time_point deadline{};
 };
 
 class LeaseRegistry {
@@ -274,13 +283,21 @@ public:
         return r;
     }
     // Registers (or replaces) the in-flight batch of one (lease, partition).
+    // lease_seconds mirrors the SQL lease the pop just acquired; it bounds the
+    // entry's lifetime (see LeaseBatch::deadline).
     void put(const std::string& lease_id, const std::string& partition_id,
-             LeaseBatch batch) {
+             LeaseBatch batch, int lease_seconds) {
         batch.acked.assign(batch.positions.size(), false);
         batch.responded.assign(batch.positions.size(), false);
+        batch.dlq.assign(batch.positions.size(), false);
         batch.responded_count = 0;
         batch.failed = false;
+        auto now = std::chrono::steady_clock::now();
+        batch.deadline = now + std::chrono::seconds(
+            static_cast<long long>(lease_seconds > 0 ? lease_seconds : 300) +
+            kTtlGraceSeconds);
         std::lock_guard<std::mutex> g(mu_);
+        sweep_expired_locked(now);
         map_[lease_id][partition_id] = std::move(batch);
     }
     // Applies one ack; returns the final position to persist when that
@@ -289,18 +306,35 @@ public:
     // acked-OK prefix: a nack must NOT advance the cursor past the failed
     // message — redelivery restarts there, which is exactly what drives the
     // attempt counter in q2.pop_segments_v1 (retry/DLQ model, 024).
+    // Position of an explicit status='dlq' ack inside the persisted prefix:
+    // the broker files it to q2.dlq (dead-letter on explicit request, v1
+    // parity — see q2.dlq_head_v1).
+    struct DlqPos { int64_t seq; int32_t frame_idx; std::string txn; std::string mid; };
     struct AckOutcome {
         bool known = false;        // lease+partition found and txn matched
+        bool already = false;      // txn matched an ALREADY responded position
+                                   // on a live batch: idempotent client retry,
+                                   // no state change (and no fallback — the
+                                   // SQL resolver would void the live lease)
         bool complete = false;     // time to call q2.ack_segments_v1
         bool ok = true;            // p_ok for the SQL call
         int64_t upto_seq = 0;
         int32_t upto_off = 0;
         int32_t acked_count = 0;
         std::string queue, partition, consumer_group;
+        // Explicit-dlq positions within the acked prefix, ascending; only
+        // filled when complete. The wire ack files (at most) the last one via
+        // q2.dlq_head_v1 (see try_handle_ack_v2).
+        std::vector<DlqPos> dlq_positions;
     };
+    // `dlq` marks an explicit status='dlq' ack: the position counts as
+    // disposed for cursor contiguity (like acked-OK — the message leaves the
+    // stream either way) and is reported in dlq_positions at completion.
     AckOutcome ack(const std::string& lease_id, const std::string& partition_id,
-                   const std::string& txn, bool success) {
+                   const std::string& txn, bool success, bool dlq = false) {
+        auto now = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> g(mu_);
+        sweep_expired_locked(now);
         AckOutcome r;
         auto lit = map_.find(lease_id);
         if (lit == map_.end()) return r;
@@ -311,13 +345,33 @@ public:
             if (b.positions[i].txn == txn && !b.responded[i]) {
                 b.responded[i] = true;
                 b.responded_count++;
-                if (success) b.acked[i] = true;
-                else b.failed = true;
+                if (success || dlq) b.acked[i] = true;  // dlq disposes the position
+                if (dlq) b.dlq[i] = true;
+                else if (!success) b.failed = true;
                 r.known = true;
                 break;
             }
         }
-        if (!r.known) return r;
+        if (!r.known) {
+            // Client retry of an already-responded txn while the batch is
+            // still live (e.g. duplicated ack request): idempotent no-op
+            // success. Falling through to the ack_by_txn fallback here would
+            // release the LIVE lease out from under the rest of the batch.
+            for (size_t i = 0; i < b.positions.size(); i++) {
+                if (b.positions[i].txn == txn) {
+                    r.known = true;
+                    r.already = true;
+                    r.queue = b.queue;
+                    r.partition = b.partition;
+                    r.consumer_group = b.consumer_group;
+                    return r;
+                }
+            }
+            return r;
+        }
+        r.queue = b.queue;
+        r.partition = b.partition;
+        r.consumer_group = b.consumer_group;
         if (b.responded_count == b.positions.size() || b.failed) {
             // Highest contiguous acked-OK prefix.
             size_t n = 0;
@@ -329,9 +383,14 @@ public:
                 r.upto_off = b.positions[n - 1].off_after;
             }
             r.acked_count = static_cast<int32_t>(n);
-            r.queue = b.queue;
-            r.partition = b.partition;
-            r.consumer_group = b.consumer_group;
+            for (size_t i = 0; i < n; i++) {
+                if (b.dlq[i]) {
+                    r.dlq_positions.push_back({b.positions[i].seq,
+                                               b.positions[i].off_after - 1,
+                                               b.positions[i].txn,
+                                               b.positions[i].mid});
+                }
+            }
             lit->second.erase(pit);
             if (lit->second.empty()) map_.erase(lit);
         }
@@ -427,7 +486,30 @@ public:
     }
 
 private:
+    // TTL slack over the SQL lease: keeps the cheap in-process path alive
+    // across small clock skews; anything longer-lived (renewed leases) falls
+    // back to the SQL resolver once swept, which is still correct.
+    static constexpr long long kTtlGraceSeconds = 60;
+
+    // Lazy TTL eviction (no timer): drop every batch whose deadline passed.
+    // Called under mu_ from put()/ack(), throttled to once a second so hot
+    // paths never pay a full-map scan per call.
+    void sweep_expired_locked(std::chrono::steady_clock::time_point now) {
+        if (now - last_sweep_ < std::chrono::seconds(1)) return;
+        last_sweep_ = now;
+        for (auto lit = map_.begin(); lit != map_.end();) {
+            auto& parts = lit->second;
+            for (auto pit = parts.begin(); pit != parts.end();) {
+                if (pit->second.deadline <= now) pit = parts.erase(pit);
+                else ++pit;
+            }
+            if (parts.empty()) lit = map_.erase(lit);
+            else ++lit;
+        }
+    }
+
     std::mutex mu_;
+    std::chrono::steady_clock::time_point last_sweep_{};
     // leaseId -> partitionId -> in-flight batch
     std::unordered_map<std::string,
                        std::unordered_map<std::string, LeaseBatch>> map_;

@@ -14,6 +14,7 @@
 --       - queen.has_pending_messages      (pg_qpubsub wrappers)
 --       - queen.get_queue_messages_v1     (routes/status.cpp)
 --       - queen.list_messages_v1          (routes/messages.cpp)
+--       - queen.get_dlq_messages_v1       (routes/dlq.cpp)
 -- Guarantee: for storage='rows' queues every redefined function returns
 -- results byte-identical to the original — the v2 branches are guarded on
 -- queen.queues.storage = 'segments' and only APPEND rows / take a separate
@@ -54,42 +55,48 @@ WITH parts AS (
     JOIN q2.queues q ON q.id = p.queue_id
     WHERE p_queue IS NULL OR q.name = p_queue
 ),
+-- Worst (most behind) group cursor per partition; NULL when never popped ->
+-- whole backlog pending (COALESCE(next_seq, 0) below includes every segment).
+worst AS (
+    SELECT DISTINCT ON (c.partition_id)
+           c.partition_id, c.next_seq, c.next_off
+    FROM q2.consumers c
+    JOIN parts pa ON pa.partition_id = c.partition_id
+    ORDER BY c.partition_id, c.next_seq, c.next_off
+),
+-- ONE pre-aggregated pass over q2.segments (GROUP BY partition_id) instead
+-- of per-partition LATERAL SUMs: under partition-count/size skew the planner
+-- turned the LATERALs into re-scans measured at 20-45s; a single hash join
+-- + aggregate stays flat.
+seg_agg AS (
+    SELECT s.partition_id,
+           COUNT(*)::bigint                               AS segments,
+           COALESCE(SUM(s.msg_count), 0)::bigint          AS total_frames,
+           COALESCE(SUM(octet_length(s.blob)), 0)::bigint AS total_bytes,
+           COALESCE(SUM(CASE WHEN s.seq >= COALESCE(w.next_seq, 0)
+                    THEN s.msg_count
+                         - CASE WHEN s.seq = w.next_seq THEN w.next_off ELSE 0 END
+                    ELSE 0 END), 0)::bigint               AS pending,
+           MIN(s.created_at) FILTER (WHERE s.seq >= COALESCE(w.next_seq, 0)
+                AND s.msg_count >
+                    CASE WHEN s.seq = w.next_seq THEN w.next_off ELSE 0 END)
+                                                          AS oldest_pending_at
+    FROM q2.segments s
+    JOIN parts pa ON pa.partition_id = s.partition_id
+    LEFT JOIN worst w ON w.partition_id = s.partition_id
+    GROUP BY s.partition_id
+),
 per_part AS (
     SELECT pa.queue, pa.partition, pa.partition_id, pa.last_seq, pa.retention_seq,
            w.next_seq AS cursor_seq, w.next_off AS cursor_off,
-           COALESCE(agg.segments, 0)      AS segments,
-           COALESCE(agg.total_frames, 0)  AS total_frames,
-           COALESCE(agg.total_bytes, 0)   AS total_bytes,
-           COALESCE(pend.pending, 0)      AS pending_frames,
-           pend.oldest_pending_at
+           COALESCE(sa.segments, 0)      AS segments,
+           COALESCE(sa.total_frames, 0)  AS total_frames,
+           COALESCE(sa.total_bytes, 0)   AS total_bytes,
+           COALESCE(sa.pending, 0)       AS pending_frames,
+           sa.oldest_pending_at
     FROM parts pa
-    -- worst (most behind) group cursor; NULL when never popped -> whole
-    -- backlog pending (COALESCE(next_seq, 0) below includes every segment).
-    LEFT JOIN LATERAL (
-        SELECT c.next_seq, c.next_off
-        FROM q2.consumers c
-        WHERE c.partition_id = pa.partition_id
-        ORDER BY c.next_seq, c.next_off
-        LIMIT 1
-    ) w ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT COUNT(*)::bigint                          AS segments,
-               COALESCE(SUM(s.msg_count), 0)::bigint     AS total_frames,
-               COALESCE(SUM(octet_length(s.blob)), 0)::bigint AS total_bytes
-        FROM q2.segments s
-        WHERE s.partition_id = pa.partition_id
-    ) agg ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT COALESCE(SUM(s.msg_count
-                   - CASE WHEN s.seq = w.next_seq THEN w.next_off ELSE 0 END),
-                   0)::bigint AS pending,
-               MIN(s.created_at) FILTER (WHERE s.msg_count >
-                   CASE WHEN s.seq = w.next_seq THEN w.next_off ELSE 0 END)
-                   AS oldest_pending_at
-        FROM q2.segments s
-        WHERE s.partition_id = pa.partition_id
-          AND s.seq >= COALESCE(w.next_seq, 0)
-    ) pend ON TRUE
+    LEFT JOIN worst w ON w.partition_id = pa.partition_id
+    LEFT JOIN seg_agg sa ON sa.partition_id = pa.partition_id
 )
 SELECT COALESCE(jsonb_agg(jsonb_build_object(
     'queue',          queue,
@@ -257,7 +264,25 @@ BEGIN
     FROM aggregated;
 
     -- ------------------------------------------------------- segments (v2)
-    WITH v2_data AS (
+    -- Pending frames per (partition, group) via ONE pre-aggregated
+    -- segments x consumers join (GROUP BY partition_id, consumer_group)
+    -- instead of a per-consumer-row LATERAL SUM — the LATERAL plan
+    -- degenerates under skew (see q2.stats_v1).
+    WITH pend AS (
+        SELECT c.partition_id, c.consumer_group,
+               COALESCE(SUM(CASE WHEN s.seq >= c.next_seq
+                        THEN s.msg_count
+                             - CASE WHEN s.seq = c.next_seq THEN c.next_off ELSE 0 END
+                        ELSE 0 END), 0)::bigint AS pending,
+               MIN(s.created_at) FILTER (WHERE s.seq >= c.next_seq
+                    AND s.msg_count >
+                        CASE WHEN s.seq = c.next_seq THEN c.next_off ELSE 0 END)
+                    AS oldest_unconsumed_at
+        FROM q2.consumers c
+        LEFT JOIN q2.segments s ON s.partition_id = c.partition_id
+        GROUP BY c.partition_id, c.consumer_group
+    ),
+    v2_data AS (
         SELECT c.consumer_group,
                q.name AS queue_name,
                c.total_consumed,
@@ -268,17 +293,8 @@ BEGIN
         JOIN q2.queues q ON q.id = p.queue_id
         -- Strict guard: only queues currently routed to the segments engine.
         JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
-        LEFT JOIN LATERAL (
-            -- Frames beyond the cursor (contiguous PK range per partition).
-            SELECT COALESCE(SUM(s.msg_count
-                       - CASE WHEN s.seq = c.next_seq THEN c.next_off ELSE 0 END),
-                       0)::bigint AS pending,
-                   MIN(s.created_at) FILTER (WHERE s.msg_count >
-                       CASE WHEN s.seq = c.next_seq THEN c.next_off ELSE 0 END)
-                       AS oldest_unconsumed_at
-            FROM q2.segments s
-            WHERE s.partition_id = c.partition_id AND s.seq >= c.next_seq
-        ) l ON TRUE
+        LEFT JOIN pend l ON l.partition_id = c.partition_id
+                        AND l.consumer_group = c.consumer_group
     ),
     v2_aggregated AS (
         SELECT consumer_group,
@@ -476,31 +492,35 @@ BEGIN
                 GROUP BY q.name
                 UNION ALL
                 -- segments engine: SUM(msg_count) over live segments;
-                -- pending = frames beyond the worst group cursor.
+                -- pending = frames beyond the worst group cursor. ONE
+                -- pre-aggregated pass over q2.segments (GROUP BY
+                -- partition_id) instead of per-partition LATERAL SUMs — the
+                -- LATERAL plan degenerates under skew (see q2.stats_v1).
                 SELECT q2q.name::text,
                        'segments'::text,
-                       SUM(COALESCE(agg.total_frames, 0))::bigint,
-                       SUM(COALESCE(agg.pending, 0))::bigint
+                       SUM(COALESCE(sa.total_frames, 0))::bigint,
+                       SUM(COALESCE(sa.pending, 0))::bigint
                 FROM q2.partitions p2
                 JOIN q2.queues q2q ON q2q.id = p2.queue_id
                 JOIN queen.queues quv ON quv.name = q2q.name
                                      AND quv.storage = 'segments'
-                LEFT JOIN LATERAL (
-                    SELECT c.next_seq, c.next_off
-                    FROM q2.consumers c
-                    WHERE c.partition_id = p2.id
-                    ORDER BY c.next_seq, c.next_off
-                    LIMIT 1
-                ) w ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT COALESCE(SUM(s2.msg_count), 0) AS total_frames,
-                           COALESCE(SUM(s2.msg_count
-                               - CASE WHEN s2.seq = w.next_seq THEN w.next_off ELSE 0 END)
-                               FILTER (WHERE s2.seq >= COALESCE(w.next_seq, 0)),
-                               0) AS pending
+                LEFT JOIN (
+                    SELECT s2.partition_id,
+                           SUM(s2.msg_count) AS total_frames,
+                           SUM(CASE WHEN s2.seq >= COALESCE(w.next_seq, 0)
+                                THEN s2.msg_count
+                                     - CASE WHEN s2.seq = w.next_seq
+                                            THEN w.next_off ELSE 0 END
+                                ELSE 0 END) AS pending
                     FROM q2.segments s2
-                    WHERE s2.partition_id = p2.id
-                ) agg ON TRUE
+                    LEFT JOIN (
+                        SELECT DISTINCT ON (c.partition_id)
+                               c.partition_id, c.next_seq, c.next_off
+                        FROM q2.consumers c
+                        ORDER BY c.partition_id, c.next_seq, c.next_off
+                    ) w ON w.partition_id = s2.partition_id
+                    GROUP BY s2.partition_id
+                ) sa ON sa.partition_id = p2.id
                 GROUP BY q2q.name
                 ORDER BY queue
             ) qd
@@ -955,3 +975,95 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.list_messages_v1(JSONB) TO PUBLIC;
+
+-- ============================================================================
+-- queen.get_dlq_messages_v1 — dual-mode redefinition of 010.
+-- The rows branch is the 010 body verbatim (same joins, filters, keys and
+-- outer LIMIT/OFFSET placement — byte-identical output for rows queues);
+-- q2.dlq rows are UNIONed in with the SAME keys so /api/v1/dlq serves both
+-- engines:
+--   * payload snapshots live in q2.dlq itself (data), no messages join;
+--   * retryCount: v2 tracks attempts on the consumer row, not per DLQ entry —
+--     a frame is dead-lettered exactly when attempts exceed the queue's
+--     retry_limit, so the queue's retry_limit IS the count it failed with;
+--   * partitionId: the q2 partition uuid (echoed by pop/ack wire calls);
+--   * createdAt: v2 blobs are opaque to SQL, the original enqueue time is
+--     not recoverable per frame -> failed_at (the DLQ event time);
+--   * producerSub: not tracked in v2 -> null.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.get_dlq_messages_v1(p_filters JSONB DEFAULT '{}'::jsonb)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_queue TEXT;
+    v_consumer_group TEXT;
+    v_limit INTEGER;
+    v_offset INTEGER;
+BEGIN
+    v_queue := p_filters->>'queue';
+    v_consumer_group := p_filters->>'consumerGroup';
+    v_limit := COALESCE((p_filters->>'limit')::integer, 100);
+    v_offset := COALESCE((p_filters->>'offset')::integer, 0);
+
+    RETURN (
+        SELECT jsonb_build_object(
+            'messages', COALESCE(jsonb_agg(t.msg ORDER BY t.failed_at DESC), '[]'::jsonb),
+            'pagination', jsonb_build_object(
+                'limit', v_limit,
+                'offset', v_offset
+            )
+        )
+        FROM (
+            -- rows engine (010 verbatim keys)
+            SELECT dlq.failed_at,
+                   jsonb_build_object(
+                       'id', m.id,
+                       'transactionId', m.transaction_id,
+                       'partitionId', m.partition_id,
+                       'queue', q.name,
+                       'partition', p.name,
+                       'consumerGroup', dlq.consumer_group,
+                       'errorMessage', dlq.error_message,
+                       'retryCount', dlq.retry_count,
+                       'data', m.payload,
+                       'producerSub', m.producer_sub,
+                       'createdAt', to_char(m.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                       'failedAt', to_char(dlq.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                   ) AS msg
+            FROM queen.dead_letter_queue dlq
+            JOIN queen.messages m ON m.id = dlq.message_id
+            JOIN queen.partitions p ON p.id = dlq.partition_id
+            JOIN queen.queues q ON q.id = p.queue_id
+            WHERE (v_queue IS NULL OR q.name = v_queue)
+              AND (v_consumer_group IS NULL OR dlq.consumer_group = v_consumer_group)
+            UNION ALL
+            -- segments engine (q2.dlq payload snapshots), same keys
+            SELECT d2.failed_at,
+                   jsonb_build_object(
+                       'id', d2.id,
+                       'transactionId', d2.transaction_id,
+                       'partitionId', d2.partition_id,
+                       'queue', q2q.name,
+                       'partition', p2.name,
+                       'consumerGroup', d2.consumer_group,
+                       'errorMessage', d2.error,
+                       'retryCount', COALESCE(qq.retry_limit, 3),
+                       'data', d2.payload,
+                       'producerSub', NULL,
+                       'createdAt', to_char(d2.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                       'failedAt', to_char(d2.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                   ) AS msg
+            FROM q2.dlq d2
+            JOIN q2.partitions p2 ON p2.id = d2.partition_id
+            JOIN q2.queues q2q ON q2q.id = p2.queue_id
+            LEFT JOIN queen.queues qq ON qq.name = q2q.name
+            WHERE (v_queue IS NULL OR q2q.name = v_queue)
+              AND (v_consumer_group IS NULL OR d2.consumer_group = v_consumer_group)
+        ) t
+        LIMIT v_limit OFFSET v_offset
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.get_dlq_messages_v1(JSONB) TO PUBLIC;

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <map>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -57,6 +58,17 @@ namespace sv2 = queen::storage_v2;
 // only part of a batch are recorded broker-side on success — the cursor
 // moves when the remaining wire acks complete the batch (at-least-once,
 // same as a partial /api/v1/ack).
+//
+// CROSS-BROKER: an ack group the local registry cannot resolve (the pop was
+// served by another broker instance, or the registry died with a restart)
+// is shipped to SQL in the txns form ({"partitionId","group","worker",
+// "txns":[{"txn","ok"},...]}); q2.transaction_wire_v1 resolves each txn
+// through the q2.dedup window — the same resolver as the wire-ack fallback
+// q2.ack_by_txn_v1 — atomically with the rest of the batch. The only local
+// rejection left is a partition id that cannot belong to q2 at all (not a
+// uuid, i.e. a rows-engine ack mixed into a segments transaction); a uuid
+// that is not a q2 partition is rejected by SQL and rolls the whole
+// transaction back.
 // ===========================================================================
 
 struct V2TxnPush {
@@ -70,6 +82,7 @@ struct V2TxnPush {
 struct V2TxnAck {
     size_t index;
     std::string txn, partition_id, group, status;
+    std::string lease;            // per-op leaseId hint (raw HTTP callers)
     bool ok;                      // status maps to acked-OK
 };
 
@@ -123,6 +136,7 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
             a.partition_id = op.value("partitionId", "");
             a.group = op.value("consumerGroup", "__QUEUE_MODE__");
             a.status = op.value("status", "completed");
+            a.lease = op.value("leaseId", "");
             a.ok = (a.status == "completed" || a.status == "success");
             acks.push_back(std::move(a));
         } else {
@@ -151,6 +165,7 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
     // preserving arrival order within each group.
     struct AckGroup {
         std::string partition_id, group;
+        std::string lease_hint;   // first per-op leaseId of the group, if any
         std::vector<std::pair<std::string, bool>> items;  // (txn, ok)
         sv2::LeaseRegistry::TxnAckPreview preview;
     };
@@ -161,10 +176,12 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
         auto it = ack_group_of.find(key);
         if (it == ack_group_of.end()) {
             ack_group_of[key] = ack_groups.size();
-            ack_groups.push_back({a.partition_id, a.group, {}, {}});
+            ack_groups.push_back({a.partition_id, a.group, {}, {}, {}});
             it = ack_group_of.find(key);
         }
-        ack_groups[it->second].items.emplace_back(a.txn, a.ok);
+        auto& grp = ack_groups[it->second];
+        if (grp.lease_hint.empty() && !a.lease.empty()) grp.lease_hint = a.lease;
+        grp.items.emplace_back(a.txn, a.ok);
     }
 
     auto& reg = sv2::LeaseRegistry::instance();
@@ -175,31 +192,54 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
         if (g.preview.found) any_ack_resolved = true;
     }
 
+    // Deterministic partition order in the SQL payload: the q2 ack
+    // procedures lock consumer rows in payload order, so two brokers acking
+    // an overlapping partition set in different arrival orders could
+    // deadlock. Sorting by partition uuid (group as tie-break) gives every
+    // broker the same lock order.
+    std::sort(ack_groups.begin(), ack_groups.end(),
+              [](const AckGroup& x, const AckGroup& y) {
+                  return std::tie(x.partition_id, x.group) <
+                         std::tie(y.partition_id, y.group);
+              });
+
     // Not v2-shaped: the v1 path owns the request, byte-identical behavior.
     if (!any_segments && !any_ack_resolved) return false;
 
     // ------------------------------------------------------------ validate
+    // Response id generated up front: v2 rejections carry the same body keys
+    // as a v1 transaction failure ({transactionId, success:false, error,
+    // results}) so SDK error handling sees one shape regardless of engine.
+    std::string txn_response_id = ctx.async_queue_manager->generate_uuid();
+    auto reject = [&](const std::string& msg, int status) {
+        send_json_response(res,
+                           nlohmann::json{{"transactionId", txn_response_id},
+                                          {"success", false},
+                                          {"error", msg},
+                                          {"results", nlohmann::json::array()}},
+                           status);
+    };
+
     if (any_rows) {
-        send_error_response(res,
-            "mixed rows/segments transactions are not supported: every queue "
-            "in a transaction must use the same storage engine", 400);
+        reject("mixed rows/segments transactions are not supported: every queue "
+               "in a transaction must use the same storage engine", 400);
         return true;
     }
     if (any_unknown_op) {
-        send_error_response(res,
-            "segments transaction supports only push and ack operations", 400);
+        reject("segments transaction supports only push and ack operations", 400);
         return true;
     }
     for (const auto& g : ack_groups) {
-        if (!g.preview.found) {
-            // Cross-process (or restarted-broker) lease, an already-acked
-            // batch, or a rows-engine ack mixed into a segments transaction.
-            send_error_response(res,
-                "lease not held by this broker: segment-queue transaction "
-                "acks resolve through the broker-local lease registry, so the "
-                "transaction must go to the broker instance that served the "
-                "pop, with the popped batch still unacked (mixed "
-                "rows/segments transactions are not supported)", 409);
+        if (g.preview.found) continue;
+        // Registry miss: served SQL-side (txns form, see the payload build)
+        // UNLESS the partition id cannot belong to q2 at all — q2 partition
+        // ids are uuids, so a non-uuid id is a rows-engine ack mixed into a
+        // segments transaction.
+        uint8_t scratch[16];
+        if (!sv2::uuid_to_bytes(g.partition_id, scratch)) {
+            reject("ack partitionId '" + g.partition_id + "' is not a "
+                   "segments (q2) partition: mixed rows/segments transactions "
+                   "are not supported", 409);
             return true;
         }
     }
@@ -310,18 +350,45 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
              {"count", g.frames.size()}});
     }
     for (const auto& g : ack_groups) {
-        if (!g.preview.complete) continue;  // recorded broker-side on success
+        if (g.preview.found && !g.preview.complete) {
+            continue;  // partial batch: recorded broker-side on success
+        }
+        if (g.preview.found) {
+            // Locally-resolved batch closing now: terminal cursor position.
+            payload["acks"].push_back({{"partitionId", g.partition_id},
+                                       {"group", g.preview.consumer_group},
+                                       {"worker", g.preview.lease_id},
+                                       {"uptoSeq", g.preview.upto_seq},
+                                       {"uptoOff", g.preview.upto_off},
+                                       {"ok", g.preview.ok},
+                                       {"count", g.preview.acked_count}});
+            continue;
+        }
+        // Registry miss (cross-broker / post-restart lease): txns form, the
+        // positions are resolved in SQL through the q2.dedup window. The
+        // worker (lease) comes from the group's own per-op leaseId hint,
+        // falling back to the request's requiredLeases when they all agree.
+        std::string worker = g.lease_hint;
+        if (worker.empty()) {
+            std::string only;
+            bool unambiguous = true;
+            for (const auto& h : lease_hints) {
+                if (only.empty()) only = h;
+                else if (h != only) { unambiguous = false; break; }
+            }
+            if (unambiguous) worker = only;
+        }
+        nlohmann::json txns = nlohmann::json::array();
+        for (const auto& item : g.items) {
+            txns.push_back({{"txn", item.first}, {"ok", item.second}});
+        }
         payload["acks"].push_back({{"partitionId", g.partition_id},
-                                   {"group", g.preview.consumer_group},
-                                   {"worker", g.preview.lease_id},
-                                   {"uptoSeq", g.preview.upto_seq},
-                                   {"uptoOff", g.preview.upto_off},
-                                   {"ok", g.preview.ok},
-                                   {"count", g.preview.acked_count}});
+                                   {"group", g.group},
+                                   {"worker", worker},
+                                   {"txns", std::move(txns)}});
     }
 
     // -------------------------------------------------- dispatch + respond
-    std::string txn_response_id = ctx.async_queue_manager->generate_uuid();
     std::string request_id =
         worker_response_registries[ctx.worker_id]->register_response(
             res, ctx.worker_id, nullptr);
@@ -334,9 +401,10 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
 
     auto worker_loop = ctx.worker_loop;
     auto worker_id = ctx.worker_id;
+    auto cluster = ctx.queen;
     size_t result_slots = flat_idx;
 
-    ctx.queen->submit(std::move(job), [worker_loop, worker_id, request_id,
+    ctx.queen->submit(std::move(job), [worker_loop, worker_id, cluster, request_id,
                                        txn_response_id, ack_groups, echoes,
                                        acks, result_slots](std::string result) {
         worker_loop->defer([=]() {
@@ -375,9 +443,47 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
             // complete them with the cumulative contiguous prefix.
             auto& reg2 = sv2::LeaseRegistry::instance();
             for (const auto& g : ack_groups) {
+                if (!g.preview.found) continue;  // SQL-side group: no local state
                 for (const auto& item : g.items) {
-                    reg2.ack(g.preview.lease_id, g.partition_id,
-                             item.first, item.second);
+                    auto oc = reg2.ack(g.preview.lease_id, g.partition_id,
+                                       item.first, item.second);
+                    if (!oc.complete || g.preview.complete) continue;
+                    // The batch closed DURING replay: wire acks for its other
+                    // messages landed between the preview and the SQL commit,
+                    // and this replayed response was the closing one. The
+                    // registry entry is now erased, so nobody else will ever
+                    // persist this cursor — dispatch the terminal
+                    // q2.ack_segments_v1 immediately (it used to be
+                    // discarded, leaving the lease taken until expiry).
+                    // Fire-and-forget: the transaction already committed; a
+                    // failure here (lease raced/expired) means redelivery,
+                    // the same at-least-once outcome as any lost terminal
+                    // ack, so it is logged and not surfaced to the client.
+                    queen::JobRequest ack_job;
+                    ack_job.op_type = queen::JobType::CUSTOM;
+                    ack_job.request_id = request_id;
+                    ack_job.sql = "SELECT q2.ack_segments_v1($1, $2, $3, $4, "
+                                  "$5::bigint, $6::int, $7::bool, $8::int)";
+                    ack_job.params = {oc.queue, oc.partition, oc.consumer_group,
+                                      g.preview.lease_id,
+                                      std::to_string(oc.upto_seq),
+                                      std::to_string(oc.upto_off),
+                                      oc.ok ? "true" : "false",
+                                      std::to_string(oc.acked_count)};
+                    cluster->submit(std::move(ack_job), [](std::string ack_result) {
+                        try {
+                            auto ar = nlohmann::json::parse(ack_result);
+                            if (!ar.value("ok", false)) {
+                                spdlog::warn("TRANSACTION v2: terminal ack for a batch "
+                                             "completed during replay failed: {}",
+                                             ar.dump());
+                            }
+                        } catch (...) {
+                            spdlog::warn("TRANSACTION v2: terminal ack for a batch "
+                                         "completed during replay failed: {}",
+                                         ack_result);
+                        }
+                    });
                 }
             }
 

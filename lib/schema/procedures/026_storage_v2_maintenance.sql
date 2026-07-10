@@ -95,61 +95,68 @@ DECLARE
     c_batch CONSTANT INTEGER := 50000;  -- dedup purge batch size
 BEGIN
     -- ---------------------------------------------------------- retention
-    FOR v_q IN
-        SELECT qq.retention_seconds,
-               qq.completed_retention_seconds,
-               q2q.id AS q2_queue_id
+    -- LOCK ORDER (deadlock discipline): the watermark UPDATE takes a
+    -- q2.partitions row lock that is held to commit, and
+    -- q2.transaction_wire_v1 pre-locks its push partitions in ascending id
+    -- order. Iterating partitions in that same GLOBAL ascending-id order —
+    -- one flat loop across all retention-enabled queues, not per-queue
+    -- batches whose ids could interleave — gives every multi-partition
+    -- locker one total order (live-reproduced 40P01 without it).
+    SELECT COUNT(*) INTO v_queues
+    FROM queen.queues qq
+    JOIN q2.queues q2q ON q2q.name = qq.name
+    WHERE qq.storage = 'segments'
+      AND qq.retention_enabled
+      AND (qq.retention_seconds > 0 OR qq.completed_retention_seconds > 0);
+
+    FOR v_p IN
+        SELECT p.id, p.retention_seq,
+               qq.retention_seconds, qq.completed_retention_seconds
         FROM queen.queues qq
         JOIN q2.queues q2q ON q2q.name = qq.name
+        JOIN q2.partitions p ON p.queue_id = q2q.id
         WHERE qq.storage = 'segments'
           AND qq.retention_enabled
           AND (qq.retention_seconds > 0 OR qq.completed_retention_seconds > 0)
+        ORDER BY p.id
     LOOP
-        v_queues := v_queues + 1;
+        v_boundary := v_p.retention_seq;
 
-        FOR v_p IN
-            SELECT p.id, p.retention_seq
-            FROM q2.partitions p
-            WHERE p.queue_id = v_q.q2_queue_id
-        LOOP
-            v_boundary := v_p.retention_seq;
+        -- Rule 1: time-based retention over ALL segments.
+        IF v_p.retention_seconds > 0 THEN
+            v_boundary := GREATEST(v_boundary, q2.retention_boundary_v1(
+                v_p.id, v_p.retention_seq,
+                now() - make_interval(secs => v_p.retention_seconds)));
+        END IF;
 
-            -- Rule 1: time-based retention over ALL segments.
-            IF v_q.retention_seconds > 0 THEN
-                v_boundary := GREATEST(v_boundary, q2.retention_boundary_v1(
-                    v_p.id, v_p.retention_seq,
-                    now() - make_interval(secs => v_q.retention_seconds)));
+        -- Rule 2: completed retention over CONSUMED segments only
+        -- (seq < min(next_seq) across all groups). The time boundary is
+        -- capped at the slowest cursor so we never delete anything a
+        -- group still has to read (except via rule 1, which is the
+        -- explicit "drop unconsumed data after N seconds" knob).
+        IF v_p.completed_retention_seconds > 0 THEN
+            SELECT MIN(c.next_seq) INTO v_min_next
+            FROM q2.consumers c WHERE c.partition_id = v_p.id;
+
+            IF v_min_next IS NOT NULL AND v_min_next > v_p.retention_seq THEN
+                v_boundary := GREATEST(v_boundary, LEAST(
+                    v_min_next,
+                    q2.retention_boundary_v1(
+                        v_p.id, v_p.retention_seq,
+                        now() - make_interval(secs => v_p.completed_retention_seconds))));
             END IF;
+        END IF;
 
-            -- Rule 2: completed retention over CONSUMED segments only
-            -- (seq < min(next_seq) across all groups). The time boundary is
-            -- capped at the slowest cursor so we never delete anything a
-            -- group still has to read (except via rule 1, which is the
-            -- explicit "drop unconsumed data after N seconds" knob).
-            IF v_q.completed_retention_seconds > 0 THEN
-                SELECT MIN(c.next_seq) INTO v_min_next
-                FROM q2.consumers c WHERE c.partition_id = v_p.id;
+        IF v_boundary > v_p.retention_seq THEN
+            DELETE FROM q2.segments
+            WHERE partition_id = v_p.id
+              AND seq >= v_p.retention_seq AND seq < v_boundary;
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            v_segments_deleted := v_segments_deleted + v_n;
 
-                IF v_min_next IS NOT NULL AND v_min_next > v_p.retention_seq THEN
-                    v_boundary := GREATEST(v_boundary, LEAST(
-                        v_min_next,
-                        q2.retention_boundary_v1(
-                            v_p.id, v_p.retention_seq,
-                            now() - make_interval(secs => v_q.completed_retention_seconds))));
-                END IF;
-            END IF;
-
-            IF v_boundary > v_p.retention_seq THEN
-                DELETE FROM q2.segments
-                WHERE partition_id = v_p.id
-                  AND seq >= v_p.retention_seq AND seq < v_boundary;
-                GET DIAGNOSTICS v_n = ROW_COUNT;
-                v_segments_deleted := v_segments_deleted + v_n;
-
-                UPDATE q2.partitions SET retention_seq = v_boundary
-                WHERE id = v_p.id AND retention_seq < v_boundary;
-            END IF;
-        END LOOP;
+            UPDATE q2.partitions SET retention_seq = v_boundary
+            WHERE id = v_p.id AND retention_seq < v_boundary;
+        END IF;
     END LOOP;
 
     -- --------------------------------------------------------- dedup purge
@@ -212,7 +219,6 @@ RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_q RECORD;
     v_p RECORD;
     v_s RECORD;
     v_queues BIGINT := 0;
@@ -224,61 +230,66 @@ DECLARE
     v_boundary BIGINT;
     v_n BIGINT;
 BEGIN
-    FOR v_q IN
-        SELECT qq.max_queue_size, q2q.id AS q2_queue_id
+    -- LOCK ORDER: same discipline as q2.retention_sweep_v1 — one flat
+    -- partition loop in GLOBAL ascending q2.partitions.id order, matching
+    -- q2.transaction_wire_v1's pre-lock order, so concurrent evictions,
+    -- sweeps and transactions never acquire partition row locks in
+    -- conflicting orders (40P01).
+    SELECT COUNT(*) INTO v_queues
+    FROM queen.queues qq
+    JOIN q2.queues q2q ON q2q.name = qq.name
+    WHERE qq.storage = 'segments'
+      AND qq.max_queue_size > 0;
+
+    FOR v_p IN
+        SELECT p.id, p.retention_seq, qq.max_queue_size
         FROM queen.queues qq
         JOIN q2.queues q2q ON q2q.name = qq.name
+        JOIN q2.partitions p ON p.queue_id = q2q.id
         WHERE qq.storage = 'segments'
           AND qq.max_queue_size > 0
+        ORDER BY p.id
     LOOP
-        v_queues := v_queues + 1;
+        -- Slowest cursor; no groups => everything counts as pending.
+        SELECT MIN(c.next_seq) INTO v_min_next
+        FROM q2.consumers c WHERE c.partition_id = v_p.id;
+        v_min_next := COALESCE(v_min_next, 0);
 
-        FOR v_p IN
-            SELECT p.id, p.retention_seq
-            FROM q2.partitions p
-            WHERE p.queue_id = v_q.q2_queue_id
-        LOOP
-            -- Slowest cursor; no groups => everything counts as pending.
-            SELECT MIN(c.next_seq) INTO v_min_next
-            FROM q2.consumers c WHERE c.partition_id = v_p.id;
-            v_min_next := COALESCE(v_min_next, 0);
+        SELECT COALESCE(SUM(s.msg_count), 0) INTO v_pending
+        FROM q2.segments s
+        WHERE s.partition_id = v_p.id AND s.seq >= v_min_next;
 
-            SELECT COALESCE(SUM(s.msg_count), 0) INTO v_pending
+        CONTINUE WHEN v_pending <= v_p.max_queue_size;
+        v_excess := v_pending - v_p.max_queue_size;
+
+        -- Oldest-first walk from the watermark; stop once enough pending
+        -- messages are covered. Consumed segments (seq < min cursor) are
+        -- swept along for free but reduce nothing.
+        v_boundary := v_p.retention_seq;
+        FOR v_s IN
+            SELECT s.seq, s.msg_count
             FROM q2.segments s
-            WHERE s.partition_id = v_p.id AND s.seq >= v_min_next;
-
-            CONTINUE WHEN v_pending <= v_q.max_queue_size;
-            v_excess := v_pending - v_q.max_queue_size;
-
-            -- Oldest-first walk from the watermark; stop once enough pending
-            -- messages are covered. Consumed segments (seq < min cursor) are
-            -- swept along for free but reduce nothing.
-            v_boundary := v_p.retention_seq;
-            FOR v_s IN
-                SELECT s.seq, s.msg_count
-                FROM q2.segments s
-                WHERE s.partition_id = v_p.id AND s.seq >= v_p.retention_seq
-                ORDER BY s.seq
-            LOOP
-                v_boundary := v_s.seq + 1;
-                IF v_s.seq >= v_min_next THEN
-                    v_excess := v_excess - v_s.msg_count;
-                    v_messages_evicted := v_messages_evicted + v_s.msg_count;
-                END IF;
-                EXIT WHEN v_excess <= 0;
-            END LOOP;
-
-            IF v_boundary > v_p.retention_seq THEN
-                DELETE FROM q2.segments
-                WHERE partition_id = v_p.id
-                  AND seq >= v_p.retention_seq AND seq < v_boundary;
-                GET DIAGNOSTICS v_n = ROW_COUNT;
-                v_segments_deleted := v_segments_deleted + v_n;
-
-                UPDATE q2.partitions SET retention_seq = v_boundary
-                WHERE id = v_p.id AND retention_seq < v_boundary;
+            WHERE s.partition_id = v_p.id AND s.seq >= v_p.retention_seq
+            ORDER BY s.seq
+        LOOP
+            v_boundary := v_s.seq + 1;
+            IF v_s.seq >= v_min_next THEN
+                v_excess := v_excess - v_s.msg_count;
+                v_messages_evicted := v_messages_evicted + v_s.msg_count;
             END IF;
+            EXIT WHEN v_excess <= 0;
         END LOOP;
+
+        IF v_boundary > v_p.retention_seq THEN
+            DELETE FROM q2.segments
+            WHERE partition_id = v_p.id
+              AND seq >= v_p.retention_seq AND seq < v_boundary;
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            v_segments_deleted := v_segments_deleted + v_n;
+
+            UPDATE q2.partitions SET retention_seq = v_boundary
+            WHERE id = v_p.id AND retention_seq < v_boundary;
+        END IF;
     END LOOP;
 
     RETURN jsonb_build_object(
@@ -299,6 +310,15 @@ $$;
 --                 "ok","count"}, ...]
 --   }
 --
+-- An ack element may ALSO come in the txn-resolved form
+--   {"partitionId","group","worker","txns":[{"txn","ok"},...]}
+-- (detected by the presence of "txns"): used when the broker's in-memory
+-- LeaseRegistry cannot resolve batch positions because the pop was served by
+-- ANOTHER broker process. The txns are resolved to positions SQL-side via
+-- q2.ack_by_txn_v1 (024) — cursor advances to the highest contiguous
+-- acked-ok prefix, lease released — so cross-broker transactions work
+-- without any broker registry.
+--
 -- All-or-nothing by construction: one function call = one transaction, and
 -- every failure path RAISEs, so a duplicate push or a rejected ack rolls back
 -- every other operation in the batch.
@@ -307,11 +327,16 @@ $$;
 --     partition row lock, dedup probe, segment insert). A duplicate
 --     (unique_violation, message 'QDUP ...') is re-raised with transaction
 --     context, keeping ERRCODE unique_violation so callers can classify it.
---   * acks reuse q2.ack_segments_v1; its soft failures (ok:false — invalid
---     or expired lease, position beyond leased batch, ...) are escalated to
---     an exception so the whole transaction rolls back.
+--   * acks reuse q2.ack_segments_v1 / q2.ack_by_txn_v1; their soft failures
+--     (ok:false — invalid or expired lease, position beyond leased batch,
+--     ...) are escalated to an exception so the whole transaction rolls back.
 --   * acks address the q2 partition by uuid ("partitionId", echoed by
 --     pop_segments_wire_v1); it is resolved back to (queue, partition) names.
+--   * acks execute in ascending (partition_id, group) order — NOT input
+--     order: each ack locks its (partition, group) q2.consumers row until
+--     commit, so concurrent transactions acking overlapping sets must take
+--     those locks in one total order (the same ascending-uuid discipline the
+--     push pre-pass and the maintenance sweeps use for q2.partitions).
 --
 -- Mixed-engine guard: a queue that exists in queen.queues with
 -- storage <> 'segments' may not appear in a v2 transaction (its data lives in
@@ -401,7 +426,13 @@ BEGIN
     END LOOP;
 
     -- --------------------------------------------------------------- acks
-    FOR v_op IN SELECT * FROM jsonb_array_elements(COALESCE(p->'acks', '[]'::jsonb))
+    -- Ascending (partition_id, group) execution order — see header. The
+    -- result array follows execution order; the broker treats the arrays as
+    -- opaque (it only inspects top-level "ok").
+    FOR v_op IN
+        SELECT op.value
+        FROM jsonb_array_elements(COALESCE(p->'acks', '[]'::jsonb)) op
+        ORDER BY (op.value->>'partitionId')::uuid, op.value->>'group'
     LOOP
         SELECT q2q.name, p2.name INTO v_queue, v_partition
         FROM q2.partitions p2
@@ -411,15 +442,26 @@ BEGIN
             RAISE EXCEPTION 'QTXN ack references unknown partition %', v_op->>'partitionId';
         END IF;
 
-        v_res := q2.ack_segments_v1(
-            v_queue,
-            v_partition,
-            v_op->>'group',
-            v_op->>'worker',
-            (v_op->>'uptoSeq')::bigint,
-            (v_op->>'uptoOff')::integer,
-            COALESCE((v_op->>'ok')::boolean, true),
-            COALESCE((v_op->>'count')::integer, 0));
+        IF v_op ? 'txns' THEN
+            -- Cross-broker form: positions resolved from the q2.dedup
+            -- window, cursor advanced to the highest contiguous acked-ok
+            -- prefix, lease released (exactly the plain wire fallback path).
+            v_res := q2.ack_by_txn_v1(
+                (v_op->>'partitionId')::uuid,
+                v_op->>'group',
+                v_op->>'worker',
+                COALESCE(v_op->'txns', '[]'::jsonb));
+        ELSE
+            v_res := q2.ack_segments_v1(
+                v_queue,
+                v_partition,
+                v_op->>'group',
+                v_op->>'worker',
+                (v_op->>'uptoSeq')::bigint,
+                (v_op->>'uptoOff')::integer,
+                COALESCE((v_op->>'ok')::boolean, true),
+                COALESCE((v_op->>'count')::integer, 0));
+        END IF;
 
         IF NOT COALESCE((v_res->>'ok')::boolean, false) THEN
             RAISE EXCEPTION 'QTXN ack failed for partition % group "%": %; transaction rolled back',

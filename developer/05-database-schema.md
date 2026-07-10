@@ -8,8 +8,8 @@ This page covers the Postgres-side of Queen: tables, indexes, stored procedures,
 
 ```
 lib/schema/
-├── schema.sql                   ← base tables + indexes (488 lines, idempotent)
-└── procedures/                  ← 18 stored-procedure files, ~10k lines total
+├── schema.sql                   ← base tables + indexes (~500 lines, idempotent)
+└── procedures/                  ← 30 stored-procedure files, ~14k lines total
     ├── 001_push.sql
     ├── 002_pop_unified.sql           (legacy, kept for rollback)
     ├── 002b_pop_unified_v2.sql       (legacy)
@@ -30,7 +30,16 @@ lib/schema/
     ├── 015_postgres_stats.sql
     ├── 016_partition_lookup.sql
     ├── 017_retention_analytics.sql
-    └── 018_prometheus.sql
+    ├── 018_prometheus.sql
+    ├── 019_streams_schema.sql
+    ├── 020_streams_register_query_v1.sql
+    ├── 021_streams_cycle_v1.sql
+    ├── 022_streams_state_get_v1.sql
+    ├── 023_storage_v2.sql               ← q2 schema + segments push/pop/ack
+    ├── 024_storage_v2_pop_ext.sql       ← q2 wildcard pop, ack-by-txn
+    ├── 025_storage_v2_dlq.sql           ← q2 retry tracking + DLQ
+    ├── 026_storage_v2_maintenance.sql   ← q2 retention/eviction/transactions
+    └── 027_storage_v2_observability.sql ← dual-engine stats + prometheus
 ```
 
 ---
@@ -57,7 +66,7 @@ There is a `server/migrations/` folder reference in the bootstrap code for futur
 
 ### `queen.queues`
 
-One row per logical queue. Holds the configuration: `lease_time`, `retry_limit`, `dead_letter_queue`, `retention_seconds`, `completed_retention_seconds`, `encryption_enabled`, `max_queue_size`, `max_wait_time_seconds`, etc.
+One row per logical queue. Holds the configuration: `lease_time`, `retry_limit`, `dead_letter_queue`, `retention_seconds`, `completed_retention_seconds`, `encryption_enabled`, `max_queue_size`, `max_wait_time_seconds`, etc. — plus the **storage engine selector** `storage` (`'rows'` default, `'segments'` opts the queue into storage v2; see below).
 
 ### `queen.partitions`
 
@@ -115,6 +124,16 @@ Per (consumer_group, queue, partition, namespace, task) subscription configurati
 ### `queen.system_state`
 
 Singleton key/value table for "shared between replicas" state (maintenance mode flag, encryption key version, …).
+
+---
+
+## The `q2` schema — storage v2 (segments engine)
+
+Everything above describes the v1 "rows" engine. Queues configured with `queen.queues.storage = 'segments'` are served by a second, self-contained engine in schema **`q2`** (`q2.queues`, `q2.partitions`, `q2.segments`, `q2.dedup`, `q2.consumers`, `q2.dlq`): one row = one segment of K messages, packed and zstd-compressed by the broker, consumed through a `(next_seq, next_off)` cursor with zero secondary indexes on the hot table. It lives in `procedures/023`–`027` and is applied at boot exactly like every other procedures file.
+
+Queue *configuration* stays in `queen.queues` for both engines; `q2` holds only the engine mechanics (plus `q2.queues.dedup_window_seconds`). File `027` redefines the shared observability procedures (`queen.get_prometheus_metrics_v1`, `queen.has_pending_messages`, `queen.list_messages_v1`, …) so dashboards and `/metrics` cover both engines.
+
+The full design — frames, seq allocation, dedup window, DLQ, retention watermark, opt-in flow, limits — is documented in **[16 — Storage v2](16-storage-v2.md)**. The v1 warnings below (§1–§7) apply to the v1 procedures only; the q2 engine has its own co-design constraints documented in the SQL file headers.
 
 ---
 

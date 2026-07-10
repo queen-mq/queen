@@ -165,10 +165,11 @@ BEGIN
     -- commit order (v1's PUSHSER invariant, needed by time-based retention).
     v_now := clock_timestamp();
 
-    -- Dedup is per-queue OPT-IN (window=0 disables). When the broker
-    -- generated the transactionId itself (the default), a dedup entry can
-    -- never match anything: skipping it is free correctness-preserving work
-    -- v1 cannot avoid (its UNIQUE index is unconditional).
+    -- Dedup is ON by default (dedup_window_seconds defaults to 3600) and
+    -- per-queue OPT-OUT via q2.set_queue_options_v1 (window=0 disables).
+    -- When a queue opted out, skipping the probe is free
+    -- correctness-preserving work v1 cannot avoid (its UNIQUE index is
+    -- unconditional).
     IF v_window > 0 THEN
         -- Single-statement probe+insert: ON CONFLICT counts the survivors.
         -- Any duplicate aborts the whole call (RAISE rolls back seq + dedup
@@ -423,7 +424,10 @@ BEGIN
     -- The boundary walk starts at the previous sweep's watermark
     -- (retention_seq), never at seq=1: repeated sweeps therefore never
     -- re-scan the dead head of the index.
-    FOR v_p IN SELECT id, retention_seq FROM q2.partitions LOOP
+    -- ORDER BY id: the watermark UPDATE takes partition row locks held to
+    -- commit; ascending id is the one total order every multi-partition
+    -- locker uses (see 026 q2.retention_sweep_v1 / q2.transaction_wire_v1).
+    FOR v_p IN SELECT id, retention_seq FROM q2.partitions ORDER BY id LOOP
         SELECT s.seq INTO v_boundary
         FROM q2.segments s
         WHERE s.partition_id = v_p.id
@@ -516,6 +520,11 @@ $$;
 
 -- Renews every v2 lease held by this worker (multi-partition pops share the
 -- worker id, mirroring queen.renew_lease_v2 semantics).
+-- GREATEST: renewing must never SHORTEN a lease (v1 parity —
+-- 005_renew_lease.sql:38-47 applies the same rule to partition_consumers).
+-- 'expiresAt' reports the MIN across the renewed rows: the earliest deadline
+-- is what a caller needs to schedule the next renew (v1's choice as well);
+-- NULL when nothing was renewed.
 CREATE OR REPLACE FUNCTION q2.renew_lease_v1(p_worker TEXT, p_seconds INTEGER)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -524,15 +533,50 @@ DECLARE
     v_n BIGINT;
     v_exp TIMESTAMPTZ;
 BEGIN
-    v_exp := clock_timestamp() + make_interval(secs => GREATEST(p_seconds, 1));
-    UPDATE q2.consumers
-    SET lease_expires_at = v_exp
-    WHERE worker_id = p_worker
-      AND lease_expires_at IS NOT NULL
-      AND lease_expires_at > clock_timestamp();
-    GET DIAGNOSTICS v_n = ROW_COUNT;
+    WITH updated AS (
+        UPDATE q2.consumers
+        SET lease_expires_at = GREATEST(
+                lease_expires_at,
+                clock_timestamp() + make_interval(secs => GREATEST(p_seconds, 1)))
+        WHERE worker_id = p_worker
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > clock_timestamp()
+        RETURNING lease_expires_at
+    )
+    SELECT COUNT(*), MIN(lease_expires_at) INTO v_n, v_exp FROM updated;
     RETURN jsonb_build_object('renewed', v_n,
-        'expiresAt', to_char(v_exp, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+        'expiresAt', CASE WHEN v_exp IS NOT NULL
+            THEN to_char(v_exp, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END);
+END;
+$$;
+
+-- ============================================================================
+-- Per-queue engine options. Dedup is ON by default (dedup_window_seconds
+-- defaults to 3600) and per-queue OPT-OUT: the broker calls this from the
+-- configure path (routes/configure.cpp) so a queue can shrink/disable its
+-- window (0 = disabled). p_dedup_window NULL = leave the current value (or
+-- the column default on first contact) untouched.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION q2.set_queue_options_v1(
+    p_queue TEXT,
+    p_dedup_window INTEGER DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_window INTEGER;
+BEGIN
+    INSERT INTO q2.queues (name) VALUES (p_queue)
+    ON CONFLICT (name) DO NOTHING;
+
+    IF p_dedup_window IS NOT NULL THEN
+        UPDATE q2.queues
+        SET dedup_window_seconds = GREATEST(p_dedup_window, 0)
+        WHERE name = p_queue;
+    END IF;
+
+    SELECT dedup_window_seconds INTO v_window FROM q2.queues WHERE name = p_queue;
+    RETURN jsonb_build_object('queue', p_queue, 'dedupWindowSeconds', v_window);
 END;
 $$;
 

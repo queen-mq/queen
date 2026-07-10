@@ -7,6 +7,8 @@
 #include "queen.hpp"  // libqueen
 #include <spdlog/spdlog.h>
 
+#include <optional>
+
 // External globals (declared in acceptor_server.cpp)
 namespace queen {
 extern std::vector<std::shared_ptr<ResponseRegistry>> worker_response_registries;
@@ -103,16 +105,35 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                         ? storage_requested
                         : (queue_known ? existing_storage : "rows");
 
-                    // Encryption on a segments queue is inconsistent (the v2
-                    // push path stores plaintext frames; encryption is
-                    // rows-only in slice 1): explicit reject, simple rule.
-                    const bool wants_encryption = options_json.contains("encryptionEnabled")
-                        && options_json["encryptionEnabled"].is_boolean()
-                        && options_json["encryptionEnabled"].get<bool>();
-                    if (wants_encryption && effective_storage == "segments") {
-                        send_error_response(res,
-                            "encryptionEnabled=true is not supported with storage='segments'", 400);
-                        return;
+                    // encryptionEnabled is supported on BOTH engines: the v2
+                    // push path encrypts the frame payload into an
+                    // {"encrypted","iv","authTag"} envelope (frame flag bit 2)
+                    // and the pop path decrypts it — no engine-specific
+                    // validation needed (the slice-1 reject is gone).
+
+                    // options.dedupWindowSeconds — segments-only knob bounding
+                    // the q2 dedup window (q2.queues.dedup_window_seconds,
+                    // 0 = off). configure_queue_v1 predates it, so it is
+                    // persisted by q2.set_queue_options_v1 after a successful
+                    // configure (see finalize_configured below). Rejected on
+                    // rows queues instead of being silently ignored.
+                    std::optional<long long> dedup_window;  // empty = not provided
+                    if (body.contains("options") && body["options"].is_object()
+                        && body["options"].contains("dedupWindowSeconds")) {
+                        const auto& dv = body["options"]["dedupWindowSeconds"];
+                        if (!dv.is_number_integer() || dv.get<long long>() < 0
+                            || dv.get<long long>() > 2147483647LL) {
+                            send_error_response(res,
+                                "options.dedupWindowSeconds must be a non-negative int32", 400);
+                            return;
+                        }
+                        if (effective_storage != "segments") {
+                            send_error_response(res,
+                                "options.dedupWindowSeconds requires storage='segments' "
+                                "(the rows engine dedups through its unique index, not a window)", 400);
+                            return;
+                        }
+                        dedup_window = dv.get<long long>();
                     }
 
                     // Flip probe policy (fail-closed): whenever a storage value
@@ -145,7 +166,8 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                     // Final step: optionally refresh the config cache (storage
                     // preserved/updated via effective_storage) and respond.
                     auto apply_cache_and_respond = [worker_id, request_id, captured_queue_name,
-                                                    captured_options, effective_storage](
+                                                    captured_options, effective_storage,
+                                                    dedup_window](
                                                        nlohmann::json json_response,
                                                        int status_code, bool is_error,
                                                        bool update_cache) {
@@ -186,6 +208,12 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                             // configure_queue_v1 predates the storage flag;
                             // reflect the effective engine in the reply.
                             json_response["options"]["storage"] = effective_storage;
+                            // Same for the dedup window: echoed only once the
+                            // whole chain (including set_queue_options_v1)
+                            // succeeded — update_cache is true exactly then.
+                            if (update_cache && dedup_window.has_value()) {
+                                json_response["options"]["dedupWindowSeconds"] = *dedup_window;
+                            }
                         }
                         } catch (const std::exception& e) {
                             spdlog::warn("Configure: cache update for '{}' skipped: {}",
@@ -195,12 +223,68 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                             request_id, json_response, is_error, status_code);
                     };
 
+                    // Terminal success step, entered only after configure (and
+                    // the storage-flag UPDATE when requested) succeeded: apply
+                    // the dedup window through q2.set_queue_options_v1, then
+                    // cache+respond. The cache refreshes ONLY when every
+                    // persisted step succeeded; a failed knob drops the cache
+                    // entry so the next access refetches DB truth.
+                    auto finalize_configured = [queen_ptr, worker_loop, worker_id, request_id,
+                                                captured_queue_name, dedup_window,
+                                                apply_cache_and_respond](
+                                                   nlohmann::json json_response) {
+                        if (!dedup_window.has_value()) {
+                            apply_cache_and_respond(std::move(json_response), 200, false, true);
+                            return;
+                        }
+                        queen::JobRequest opt;
+                        opt.op_type = queen::JobType::CUSTOM;
+                        opt.request_id = request_id;
+                        opt.sql = "SELECT q2.set_queue_options_v1($1, $2::int)";
+                        opt.params = {captured_queue_name, std::to_string(*dedup_window)};
+
+                        queen_ptr->submit(std::move(opt),
+                            [worker_loop, worker_id, request_id, captured_queue_name,
+                             json_response = std::move(json_response),
+                             apply_cache_and_respond](std::string opt_result) mutable {
+                            worker_loop->defer([opt_result = std::move(opt_result), worker_id,
+                                                request_id, captured_queue_name,
+                                                json_response = std::move(json_response),
+                                                apply_cache_and_respond]() mutable {
+                                bool opt_ok = false;
+                                std::string opt_err = "dedup window update failed";
+                                try {
+                                    auto r = nlohmann::json::parse(opt_result);
+                                    if (r.is_object() && r.contains("error") && !r["error"].is_null()) {
+                                        opt_err = r["error"].is_string()
+                                            ? r["error"].get<std::string>() : r["error"].dump();
+                                    } else {
+                                        opt_ok = true;
+                                    }
+                                } catch (const std::exception& e) {
+                                    opt_err = e.what();
+                                }
+                                if (!opt_ok) {
+                                    if (global_shared_state) {
+                                        global_shared_state->delete_queue_config(captured_queue_name);
+                                    }
+                                    apply_cache_and_respond(
+                                        {{"error", "queue configured but dedupWindowSeconds update failed: " + opt_err}},
+                                        500, true, false);
+                                    return;
+                                }
+                                apply_cache_and_respond(std::move(json_response), 200, false, true);
+                            });
+                        });
+                    };
+
                     // Configure via stored procedure; on success persist the
                     // storage flag (configure_queue_v1 ignores unknown keys,
                     // so 'storage' needs its own UPDATE) before caching.
                     auto submit_configure = [queen_ptr, worker_loop, worker_id, request_id,
                                              captured_queue_name, storage_requested,
-                                             captured_options, apply_cache_and_respond]() {
+                                             captured_options, apply_cache_and_respond,
+                                             finalize_configured]() {
                         queen::JobRequest job_req;
                         job_req.op_type = queen::JobType::CUSTOM;
                         job_req.request_id = request_id;
@@ -209,10 +293,12 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
 
                         queen_ptr->submit(std::move(job_req),
                             [queen_ptr, worker_loop, worker_id, request_id, captured_queue_name,
-                             storage_requested, apply_cache_and_respond](std::string result) {
+                             storage_requested, apply_cache_and_respond,
+                             finalize_configured](std::string result) {
                             worker_loop->defer([result = std::move(result), queen_ptr, worker_loop,
                                                 worker_id, request_id, captured_queue_name,
-                                                storage_requested, apply_cache_and_respond]() {
+                                                storage_requested, apply_cache_and_respond,
+                                                finalize_configured]() {
                                 nlohmann::json json_response;
                                 int status_code = 200;
                                 bool is_error = false;
@@ -233,11 +319,17 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                                     is_error = true;
                                 }
 
-                                if (!configured || storage_requested.empty()) {
-                                    // No storage flag to persist: cache on
-                                    // success and answer (original behavior).
+                                if (!configured) {
+                                    // Configure failed: answer as-is, never
+                                    // cache (nothing was persisted).
                                     apply_cache_and_respond(std::move(json_response),
-                                                            status_code, is_error, configured);
+                                                            status_code, is_error, false);
+                                    return;
+                                }
+                                if (storage_requested.empty()) {
+                                    // No storage flag to persist: straight to
+                                    // the terminal step (dedup knob + cache).
+                                    finalize_configured(std::move(json_response));
                                     return;
                                 }
 
@@ -251,11 +343,13 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                                 queen_ptr->submit(std::move(upd),
                                     [worker_loop, worker_id, request_id, captured_queue_name,
                                      json_response = std::move(json_response),
-                                     apply_cache_and_respond](std::string upd_result) mutable {
+                                     apply_cache_and_respond,
+                                     finalize_configured](std::string upd_result) mutable {
                                     worker_loop->defer([upd_result = std::move(upd_result), worker_id,
                                                         request_id, captured_queue_name,
                                                         json_response = std::move(json_response),
-                                                        apply_cache_and_respond]() mutable {
+                                                        apply_cache_and_respond,
+                                                        finalize_configured]() mutable {
                                         bool upd_ok = false;
                                         std::string upd_err = "storage update failed";
                                         try {
@@ -282,7 +376,7 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                                                 500, true, false);
                                             return;
                                         }
-                                        apply_cache_and_respond(std::move(json_response), 200, false, true);
+                                        finalize_configured(std::move(json_response));
                                     });
                                 });
                             });

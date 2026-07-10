@@ -129,7 +129,10 @@ void slice_partition_segments(const nlohmann::json& segments,
                 {"leaseId", lease_field},
                 {"consumerGroup", consumer_group}};
             messages.push_back(std::move(m));
-            if (lease) lease->positions.push_back({seq, k + 1, f.transaction_id});
+            if (lease) {
+                lease->positions.push_back({seq, k + 1, f.transaction_id,
+                                            f.message_id});
+            }
         }
     }
 }
@@ -239,6 +242,17 @@ struct FusionGroup {
         int item_idx;                    // index in the owning request's body
     };
     std::vector<Owner> owners;
+    // Duplicate items PARKED on the group: a txn already carried by one of
+    // `frames` (same request or another parked request). They are answered at
+    // flush completion with the ORIGINAL frame's outcome — a dup must share
+    // its original's fate, not assume it commits ('duplicate' of a message
+    // that then failed would fabricate a message id).
+    struct DupOwner {
+        std::shared_ptr<PushState> st;
+        int item_idx;
+        std::string txn;
+    };
+    std::vector<DupOwner> dup_owners;
     std::vector<std::shared_ptr<PushState>> requests;  // distinct contributors
     std::map<std::string, std::string> seen_txn;  // txn -> first message_id
     std::chrono::steady_clock::time_point deadline;  // first frame + HOLD_MS
@@ -267,103 +281,285 @@ FusionWorker& fusion_worker() {
     return fw;
 }
 
-// Pack, compress and submit one segment; on completion fill each parked
-// request's per-item results and finalize the requests that drained. Shared
-// by the fusion flush paths and the HOLD_MS=0 inline path (where the group
-// carries a single request).
-void flush_segment(QueenCluster* cluster, uWS::Loop* loop, FusionGroup g) {
-    if (g.frames.empty()) return;  // defensive; pending groups always carry frames
-    nlohmann::json metas = nlohmann::json::array();
-    std::vector<std::string> mids, txns;
-    mids.reserve(g.frames.size());
-    txns.reserve(g.frames.size());
-    for (size_t k = 0; k < g.frames.size(); k++) {
-        metas.push_back({{"i", static_cast<int>(k)},
-                         {"mid", g.frames[k].message_id},
-                         {"txn", g.frames[k].transaction_id}});
-        mids.push_back(g.frames[k].message_id);
-        txns.push_back(g.frames[k].transaction_id);
+// q2 partition uuid per (queue,partition), for stamping partition_id on
+// queued push rows (v1 rows carry it: 001_push.sql results). Filled from the
+// wire wrapper's partitionId when it returns one, else from a one-off probe;
+// entries never go stale (partition uuids are immutable), wiped wholesale
+// when full rather than tracking LRU order.
+class PushPidCache {
+public:
+    std::string get(const std::string& key) {
+        std::lock_guard<std::mutex> g(mu_);
+        auto it = m_.find(key);
+        return it == m_.end() ? std::string() : it->second;
     }
-    auto blob = sv2::zstd_compress(sv2::pack_frames(g.frames));
+    void put(const std::string& key, const std::string& pid) {
+        if (pid.empty()) return;
+        std::lock_guard<std::mutex> g(mu_);
+        if (m_.size() >= kMax) m_.clear();
+        m_[key] = pid;
+    }
+
+private:
+    static constexpr size_t kMax = 65536;
+    std::mutex mu_;
+    std::unordered_map<std::string, std::string> m_;
+};
+
+PushPidCache& push_pid_cache() {
+    static PushPidCache c;
+    return c;
+}
+
+// One in-flight segment write ATTEMPT for a flushed FusionGroup. The QDUP
+// repack path (see handle_flush_result) re-submits the same flush minus the
+// duplicate frames as attempt 1; the parked requests keep their `pending`
+// bookkeeping across attempts and are finalized exactly once, in
+// conclude_flush.
+struct SegmentFlush {
+    std::string queue, partition;
+    std::vector<sv2::FrameIn> frames;               // this attempt's frames
+    std::vector<FusionGroup::Owner> owners;         // parallel to frames
+    std::vector<FusionGroup::DupOwner> dup_owners;  // parked window dups
+    std::vector<std::shared_ptr<PushState>> requests;
+    int attempt = 0;
+    // txn -> terminal outcome of the frame that carried it ({"status",
+    // "message_id"[, "error"]}); parked window dups are answered from here at
+    // conclude time so a dup always shares its original's fate.
+    std::map<std::string, nlohmann::json> outcome_by_txn;
+};
+
+void submit_flush(QueenCluster* cluster, uWS::Loop* loop,
+                  std::shared_ptr<SegmentFlush> fl);
+
+// Terminal step of a flush (all frames resolved): answer the parked window
+// dups from their originals' outcomes, then release every contributing
+// request's pending slot.
+void conclude_flush(const std::shared_ptr<SegmentFlush>& fl) {
+    for (const auto& d : fl->dup_owners) {
+        nlohmann::json row = {{"index", d.item_idx},
+                              {"transaction_id", d.txn},
+                              {"queueName", fl->queue}};
+        auto it = fl->outcome_by_txn.find(d.txn);
+        if (it == fl->outcome_by_txn.end()) {
+            // Unreachable (a dup's original frame is always in this flush);
+            // answer failed so the producer retries rather than hanging.
+            row["status"] = "failed";
+            row["error"] = "duplicate original unresolved";
+        } else {
+            std::string s = it->second.value("status", "failed");
+            // Original queued -> this item is the duplicate of it; original
+            // itself a committed-duplicate -> same original message id;
+            // original failed -> the dup failed with it.
+            row["status"] = (s == "queued") ? "duplicate" : s;
+            if (it->second.contains("message_id")) row["message_id"] = it->second["message_id"];
+            if (it->second.contains("error")) row["error"] = it->second["error"];
+        }
+        d.st->results[d.item_idx] = std::move(row);
+    }
+    for (const auto& st : fl->requests) {
+        if (--st->pending == 0) finalize_push_request(st);
+    }
+}
+
+// DB error on a flush: every parked request fails over independently
+// (finalize_push_request handles the file-buffer path).
+void fail_flush(const std::shared_ptr<SegmentFlush>& fl, const std::string& error) {
+    for (const auto& st : fl->requests) {
+        st->failed = true;
+        st->error = error;
+        if (--st->pending == 0) finalize_push_request(st);
+    }
+}
+
+// Fill the per-item results for a fully committed attempt (v1 row shape:
+// 001_push.sql — status/message_id plus partition_id and the echoed
+// trace_id) and record the outcomes for parked dups.
+void fill_queued_results(const std::shared_ptr<SegmentFlush>& fl,
+                         const std::string& pid) {
+    for (size_t k = 0; k < fl->frames.size(); k++) {
+        const auto& f = fl->frames[k];
+        nlohmann::json row = {
+            {"index", fl->owners[k].item_idx},
+            {"transaction_id", f.transaction_id},
+            {"status", "queued"},
+            {"message_id", f.message_id},
+            {"partition_id", pid.empty() ? nlohmann::json(nullptr)
+                                         : nlohmann::json(pid)},
+            {"trace_id", f.trace_id ? nlohmann::json(*f.trace_id)
+                                    : nlohmann::json(nullptr)},
+            {"queueName", fl->queue}};
+        fl->outcome_by_txn[f.transaction_id] = {{"status", "queued"},
+                                                {"message_id", f.message_id}};
+        fl->owners[k].st->results[fl->owners[k].item_idx] = std::move(row);
+    }
+}
+
+// Committed attempt: stamp results (resolving the q2 partition uuid through
+// the wrapper result, the cache, or a one-off probe), notify waiters,
+// conclude.
+void finish_flush_queued(QueenCluster* cluster, uWS::Loop* loop,
+                         const std::shared_ptr<SegmentFlush>& fl,
+                         const nlohmann::json& r) {
+    auto shared_state = global_shared_state;
+    auto notify_and_conclude = [fl, shared_state](const std::string& pid) {
+        fill_queued_results(fl, pid);
+        if (shared_state) {
+            shared_state->notify_message_available(fl->queue, fl->partition);
+        }
+        conclude_flush(fl);
+    };
+
+    std::string cache_key = fl->queue + "\x1f" + fl->partition;
+    std::string pid = r.value("partitionId", "");
+    if (!pid.empty()) {
+        push_pid_cache().put(cache_key, pid);
+        notify_and_conclude(pid);
+        return;
+    }
+    pid = push_pid_cache().get(cache_key);
+    if (!pid.empty()) {
+        notify_and_conclude(pid);
+        return;
+    }
+    // Wrapper predates the partitionId key and the cache is cold: one probe
+    // per (queue,partition), cached forever afterwards.
+    queen::JobRequest probe;
+    probe.op_type = queen::JobType::CUSTOM;
+    probe.request_id = fl->requests.front()->request_id;
+    probe.sql = "SELECT to_jsonb(COALESCE((SELECT p.id::text FROM q2.partitions p "
+                "JOIN q2.queues q ON q.id = p.queue_id "
+                "WHERE q.name = $1 AND p.name = $2), ''))";
+    probe.params = {fl->queue, fl->partition};
+    cluster->submit(std::move(probe), [loop, fl, cache_key,
+                                       notify_and_conclude](std::string result) {
+        loop->defer([=]() {
+            std::string probed;
+            try {
+                auto pr = nlohmann::json::parse(result);
+                if (pr.is_string()) probed = pr.get<std::string>();
+            } catch (...) {}
+            push_pid_cache().put(cache_key, probed);
+            // Probe failure degrades to partition_id:null on this response
+            // only — never fails a push that already committed.
+            notify_and_conclude(probed);
+        });
+    });
+}
+
+void handle_flush_result(QueenCluster* cluster, uWS::Loop* loop,
+                         const std::shared_ptr<SegmentFlush>& fl,
+                         const std::string& result) {
+    try {
+        auto r = nlohmann::json::parse(result);
+        if (r.contains("error") && !r["error"].is_null()) {
+            fail_flush(fl, r["error"].is_string() ? r["error"].get<std::string>()
+                                                  : r["error"].dump());
+            return;
+        }
+        if (r.value("status", "") == "duplicate") {
+            // Frame-index -> original message id map from the wrapper. The
+            // unique_violation rolled back the WHOLE segment: dup frames
+            // answer 'duplicate' with the ORIGINAL message id, and the fresh
+            // frames are REPACKED into a new blob and retried once — a push
+            // mixing committed-dups with fresh items must not fail the fresh
+            // ones. Only reachable on dedup-window queues fed client txns
+            // colliding with a COMMITTED message; same-window collisions are
+            // absorbed by seen_txn upstream.
+            std::map<int, std::string> orig;
+            if (r.contains("dups") && r["dups"].is_array()) {
+                for (auto& d : r["dups"]) orig[d["i"].get<int>()] = d.value("mid", "");
+            }
+            std::vector<sv2::FrameIn> next_frames;
+            std::vector<FusionGroup::Owner> next_owners;
+            for (size_t k = 0; k < fl->frames.size(); k++) {
+                auto dit = orig.find(static_cast<int>(k));
+                if (dit != orig.end()) {
+                    const std::string& txn = fl->frames[k].transaction_id;
+                    fl->outcome_by_txn[txn] = {{"status", "duplicate"},
+                                               {"message_id", dit->second}};
+                    fl->owners[k].st->results[fl->owners[k].item_idx] = {
+                        {"index", fl->owners[k].item_idx},
+                        {"transaction_id", txn},
+                        {"status", "duplicate"},
+                        {"message_id", dit->second},
+                        {"queueName", fl->queue}};
+                } else if (fl->attempt == 0) {
+                    next_frames.push_back(std::move(fl->frames[k]));
+                    next_owners.push_back(fl->owners[k]);
+                } else {
+                    // Second QDUP in a row for a frame the wrapper did NOT
+                    // list as duplicate: give up on it with an explicit error
+                    // (producers retry idempotently by transactionId).
+                    const std::string& txn = fl->frames[k].transaction_id;
+                    nlohmann::json row = {
+                        {"index", fl->owners[k].item_idx},
+                        {"transaction_id", txn},
+                        {"status", "failed"},
+                        {"error", "duplicate check failed twice for this segment"},
+                        {"queueName", fl->queue}};
+                    fl->outcome_by_txn[txn] = {{"status", "failed"},
+                                               {"error", row["error"]}};
+                    fl->owners[k].st->results[fl->owners[k].item_idx] = std::move(row);
+                }
+            }
+            if (next_frames.empty()) {
+                conclude_flush(fl);  // everything was a committed-dup
+                return;
+            }
+            // Repack and retry ONCE (rare path): same flush, attempt 1.
+            fl->frames = std::move(next_frames);
+            fl->owners = std::move(next_owners);
+            fl->attempt = 1;
+            submit_flush(cluster, loop, fl);
+            return;
+        }
+        finish_flush_queued(cluster, loop, fl, r);
+    } catch (const std::exception& e) {
+        fail_flush(fl, e.what());
+    }
+}
+
+// Pack, compress and submit one attempt; completion lands back on the worker
+// loop in handle_flush_result.
+void submit_flush(QueenCluster* cluster, uWS::Loop* loop,
+                  std::shared_ptr<SegmentFlush> fl) {
+    nlohmann::json metas = nlohmann::json::array();
+    for (size_t k = 0; k < fl->frames.size(); k++) {
+        metas.push_back({{"i", static_cast<int>(k)},
+                         {"mid", fl->frames[k].message_id},
+                         {"txn", fl->frames[k].transaction_id}});
+    }
+    auto blob = sv2::zstd_compress(sv2::pack_frames(fl->frames));
     std::string blob_b64 = sv2::b64_encode(blob.data(), blob.size());
 
     queen::JobRequest job;
     job.op_type = queen::JobType::CUSTOM;
     // Tracing only (CUSTOM jobs are never invalidated by request id); a fused
     // segment spans requests, so the first contributor's id stands in.
-    job.request_id = g.requests.front()->request_id;
+    job.request_id = fl->requests.front()->request_id;
     job.sql = "SELECT q2.push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
-    job.params = {g.queue, g.partition, metas.dump(), std::move(blob_b64),
-                  std::to_string(g.frames.size())};
+    job.params = {fl->queue, fl->partition, metas.dump(), std::move(blob_b64),
+                  std::to_string(fl->frames.size())};
 
-    auto owners = std::move(g.owners);
-    auto requests = std::move(g.requests);
-    auto queue_name = g.queue;
-    auto partition_name = g.partition;
-    auto shared_state = global_shared_state;
-
-    cluster->submit(std::move(job), [loop, owners = std::move(owners),
-                                     requests = std::move(requests),
-                                     mids = std::move(mids),
-                                     txns = std::move(txns), queue_name,
-                                     partition_name,
-                                     shared_state](std::string result) {
-        loop->defer([=]() {
-            bool flush_failed = false;
-            std::string error;
-            try {
-                auto r = nlohmann::json::parse(result);
-                if (r.contains("error") && !r["error"].is_null()) {
-                    flush_failed = true;
-                    error = r["error"].is_string() ? r["error"].get<std::string>()
-                                                   : r["error"].dump();
-                } else if (r.value("status", "") == "duplicate") {
-                    // Frame-index -> original message id map from the wrapper.
-                    // The unique_violation rolled back the WHOLE segment: dup
-                    // frames answer 'duplicate', the rest 'failed' and their
-                    // producers retry (idempotent by transactionId) — the
-                    // slice-1 mixed-batch semantics, now spanning every fused
-                    // request. Only reachable on dedup-window queues fed
-                    // client txns colliding with a COMMITTED message; same-
-                    // window collisions are absorbed by seen_txn upstream.
-                    std::map<int, std::string> orig;
-                    for (auto& d : r["dups"]) orig[d["i"].get<int>()] = d.value("mid", "");
-                    for (size_t k = 0; k < owners.size(); k++) {
-                        bool dup = orig.count(static_cast<int>(k)) > 0;
-                        owners[k].st->results[owners[k].item_idx] = {
-                            {"index", owners[k].item_idx},
-                            {"transaction_id", txns[k]},
-                            {"status", dup ? "duplicate" : "failed"},
-                            {"message_id", dup ? orig[static_cast<int>(k)] : ""},
-                            {"queueName", queue_name}};
-                    }
-                } else {
-                    for (size_t k = 0; k < owners.size(); k++) {
-                        owners[k].st->results[owners[k].item_idx] = {
-                            {"index", owners[k].item_idx},
-                            {"transaction_id", txns[k]},
-                            {"status", "queued"},
-                            {"message_id", mids[k]},
-                            {"trace_id", nullptr},
-                            {"queueName", queue_name}};
-                    }
-                    if (shared_state) {
-                        shared_state->notify_message_available(queue_name, partition_name);
-                    }
-                }
-            } catch (const std::exception& e) {
-                flush_failed = true;
-                error = e.what();
-            }
-            for (const auto& st : requests) {
-                if (flush_failed) {
-                    st->failed = true;
-                    st->error = error;
-                }
-                if (--st->pending == 0) finalize_push_request(st);
-            }
+    cluster->submit(std::move(job), [cluster, loop, fl](std::string result) {
+        loop->defer([cluster, loop, fl, result = std::move(result)]() {
+            handle_flush_result(cluster, loop, fl, result);
         });
     });
+}
+
+// Adapter kept for the fusion flush paths and the HOLD_MS=0 inline path.
+void flush_segment(QueenCluster* cluster, uWS::Loop* loop, FusionGroup g) {
+    if (g.frames.empty()) return;  // defensive; pending groups always carry frames
+    auto fl = std::make_shared<SegmentFlush>();
+    fl->queue = std::move(g.queue);
+    fl->partition = std::move(g.partition);
+    fl->frames = std::move(g.frames);
+    fl->owners = std::move(g.owners);
+    fl->dup_owners = std::move(g.dup_owners);
+    fl->requests = std::move(g.requests);
+    submit_flush(cluster, loop, std::move(fl));
 }
 
 void fusion_timer_cb(us_timer_t* t);
@@ -425,12 +621,15 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
         std::string queue, partition;
         std::vector<size_t> idx;                  // original item indices
         std::vector<sv2::FrameIn> frames;
+        // Intra-batch duplicates (v1's dup_rank semantics: first occurrence
+        // wins) never enter the blob; they PARK here and are answered with
+        // the original's outcome at flush completion (like window dups).
+        struct Dup { size_t item_idx; std::string txn; };
+        std::vector<Dup> dups;
         std::map<std::string, std::string> seen_txn;  // txn -> first message_id
     };
     std::vector<Group> groups;
     std::map<std::string, size_t> group_of;
-    // Intra-batch duplicates (v1's dup_rank semantics: first occurrence wins)
-    // are resolved BEFORE packing — the blob must not contain them.
     nlohmann::json pre_results = nlohmann::json::array();
     for (size_t i = 0; i < items.size(); i++) pre_results.push_back(nullptr);
     nlohmann::json failover_items = nlohmann::json::array();
@@ -458,7 +657,7 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
         auto g = group_of.find(key);
         if (g == group_of.end()) {
             group_of[key] = groups.size();
-            groups.push_back({it.queue, it.partition, {}, {}, {}});
+            groups.push_back({it.queue, it.partition, {}, {}, {}, {}});
             g = group_of.find(key);
         }
         auto& grp = groups[g->second];
@@ -471,11 +670,7 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
 
         auto seen = grp.seen_txn.find(f.transaction_id);
         if (seen != grp.seen_txn.end()) {
-            pre_results[i] = {{"index", static_cast<int>(i)},
-                              {"transaction_id", f.transaction_id},
-                              {"status", "duplicate"},
-                              {"message_id", seen->second},
-                              {"queueName", it.queue}};
+            grp.dups.push_back({i, f.transaction_id});
             continue;
         }
         grp.seen_txn[f.transaction_id] = f.message_id;
@@ -536,11 +731,11 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
     auto st = std::make_shared<PushState>();
     st->request_id = request_id;
     st->uws_worker = ctx.worker_id;
-    st->results = std::move(pre_results);  // intra-batch dups pre-filled
+    st->results = std::move(pre_results);  // all-null template, filled per flush
     st->failover = ctx.push_failover_storage;
     st->file_buffer = ctx.file_buffer;
 
-    if (groups.empty()) {  // everything was an intra-batch duplicate
+    if (groups.empty()) {  // no items (dups always ride a framed group)
         finalize_push_request(st);
         return;
     }
@@ -557,6 +752,9 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
             fg.owners.reserve(fg.frames.size());
             for (size_t k = 0; k < fg.frames.size(); k++) {
                 fg.owners.push_back({st, static_cast<int>(g.idx[k])});
+            }
+            for (auto& d : g.dups) {
+                fg.dup_owners.push_back({st, static_cast<int>(d.item_idx), d.txn});
             }
             fg.requests.push_back(st);
             flush_segment(ctx.queen, ctx.worker_loop, std::move(fg));
@@ -589,14 +787,13 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
             auto seen = fg.seen_txn.find(f.transaction_id);
             if (seen != fg.seen_txn.end()) {
                 // Intra-window duplicate across parked requests: first wins,
-                // answered immediately with the first's message_id and no
-                // second frame — the intra-batch dedup above extended to the
-                // whole fusion window.
-                st->results[g.idx[k]] = {{"index", static_cast<int>(g.idx[k])},
-                                         {"transaction_id", f.transaction_id},
-                                         {"status", "duplicate"},
-                                         {"message_id", seen->second},
-                                         {"queueName", fg.queue}};
+                // no second frame enters the blob. The dup item PARKS on the
+                // group and is answered with the original's outcome when the
+                // flush commits — answering 'duplicate' up front would vouch
+                // for a message that might still fail.
+                fg.dup_owners.push_back({st, static_cast<int>(g.idx[k]),
+                                         f.transaction_id});
+                contributed = true;
                 continue;
             }
             fg.seen_txn[f.transaction_id] = f.message_id;
@@ -604,10 +801,14 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
             fg.frames.push_back(std::move(f));
             contributed = true;
         }
+        for (auto& d : g.dups) {  // request-local dups park the same way
+            fg.dup_owners.push_back({st, static_cast<int>(d.item_idx), d.txn});
+            contributed = true;
+        }
         if (contributed) {
             st->pending++;
             fg.requests.push_back(st);
-        } else if (fg.frames.empty()) {
+        } else if (fg.frames.empty() && fg.dup_owners.empty()) {
             // Unreachable in practice (a fresh group always takes its first
             // frame); guards a frameless group from parking forever.
             fw.groups.erase(it);
@@ -621,7 +822,8 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
     }
     if (!fw.groups.empty() && !fw.timer) arm_fusion_timer(fw);
     if (st->pending == 0) {
-        // Every item was absorbed as an intra-window duplicate.
+        // Defensive: dup items contribute pending slots too, so a request
+        // with items always parks; only an empty item list lands here.
         finalize_push_request(st);
     }
 }
@@ -647,6 +849,10 @@ struct PopWaitJob {
     int lease_seconds = 300;
     int max_partitions = 1;
     bool auto_ack = false;
+    // Effective subscription window (v1 semantics: "" = all). Forwarded to
+    // q2.pop_segments_wire_v1's p_sub_mode/p_sub_from args.
+    std::string sub_mode;
+    std::string sub_from;
     // long-poll
     bool wait = false;
     std::chrono::steady_clock::time_point deadline{};
@@ -727,7 +933,7 @@ void serve_pop_specific(const std::shared_ptr<PopWaitJob>& pj, const nlohmann::j
 
     if (!pj->auto_ack && !lease.positions.empty()) {
         sv2::LeaseRegistry::instance().put(pj->lease_worker, partition_id,
-                                           std::move(lease));
+                                           std::move(lease), pj->lease_seconds);
     }
     bool empty = messages.empty();
     nlohmann::json out = {{"success", true},
@@ -737,6 +943,7 @@ void serve_pop_specific(const std::shared_ptr<PopWaitJob>& pj, const nlohmann::j
                           {"leaseId", (pj->auto_ack || empty) ? "" : pj->lease_worker},
                           {"consumerGroup", pj->group},
                           {"messages", std::move(messages)}};
+    if (!empty) out["partitionsClaimed"] = 1;  // v4 wire parity on delivering pops
     finish_pop(pj, out.dump(), empty ? 204 : 200);
 }
 
@@ -770,7 +977,7 @@ void serve_pop_wildcard(const std::shared_ptr<PopWaitJob>& pj, const nlohmann::j
     }
     for (auto& b : batches) {
         sv2::LeaseRegistry::instance().put(pj->lease_worker, b.first,
-                                           std::move(b.second));
+                                           std::move(b.second), pj->lease_seconds);
     }
     bool empty = messages.empty();
     nlohmann::json out = {{"success", true},
@@ -819,7 +1026,8 @@ void dlq_poison_head(const std::shared_ptr<PopWaitJob>& pj,
                   std::to_string(first.seq), std::to_string(first.frame_idx),
                   first.message_id, first.txn, first.payload,
                   "Retries exhausted (attempt " + std::to_string(attempt) +
-                      " > retryLimit " + std::to_string(pj->retry_limit) + ")"};
+                      " > retryLimit " + std::to_string(pj->retry_limit) +
+                      " + first delivery)"};
 
     auto loop = pj->loop;
     pj->cluster->submit(std::move(job), [pj, r, loop](std::string result) {
@@ -885,8 +1093,12 @@ void handle_pop_wire_result(const std::shared_ptr<PopWaitJob>& pj,
             serve_pop_wildcard(pj, r);
         } else {
             int attempt = r.value("attempt", 0);  // 0 on auto-ack by contract
+            // v1 grants retryLimit retries AFTER the first delivery, so a
+            // message is served retry_limit + 1 times before it is poison
+            // (verified against the rows engine: 3 deliveries at limit=2);
+            // attempt exceeds that budget -> dead-letter the head.
             if (!pj->auto_ack && pj->dlq_enabled && !pj->dlq_retried &&
-                attempt > pj->retry_limit) {
+                attempt > pj->retry_limit + 1) {
                 dlq_poison_head(pj, std::make_shared<nlohmann::json>(std::move(r)),
                                 attempt);
                 return;
@@ -904,16 +1116,20 @@ void submit_pop(const std::shared_ptr<PopWaitJob>& pj) {
     job.op_type = queen::JobType::CUSTOM;
     job.request_id = pj->request_id;
     if (pj->wildcard) {
-        job.sql = "SELECT q2.pop_wildcard_wire_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int)";
+        job.sql = "SELECT q2.pop_wildcard_wire_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9)";
         job.params = {pj->queue, pj->group, std::to_string(pj->batch),
                       std::to_string(pj->lease_seconds), pj->lease_worker,
                       pj->auto_ack ? "true" : "false",
-                      std::to_string(pj->max_partitions)};
+                      std::to_string(pj->max_partitions),
+                      pj->sub_mode, pj->sub_from};
     } else {
-        job.sql = "SELECT q2.pop_segments_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool)";
+        // p_sub_mode/p_sub_from carry the v1 subscription window ("" = all;
+        // they have SQL defaults, so older 7-arg callers stay valid).
+        job.sql = "SELECT q2.pop_segments_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9)";
         job.params = {pj->queue, pj->partition, pj->group, std::to_string(pj->batch),
                       std::to_string(pj->lease_seconds), pj->lease_worker,
-                      pj->auto_ack ? "true" : "false"};
+                      pj->auto_ack ? "true" : "false",
+                      pj->sub_mode, pj->sub_from};
     }
     auto loop = pj->loop;
     pj->cluster->submit(std::move(job), [pj, loop](std::string result) {
@@ -967,10 +1183,13 @@ std::shared_ptr<PopWaitJob> make_pop_job(const RouteContext& ctx,
 void handle_pop_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
                    const std::string& queue, const std::string& partition,
                    const std::string& consumer_group, int batch,
-                   int lease_seconds, bool auto_ack, bool wait, int timeout_ms) {
+                   int lease_seconds, bool auto_ack, bool wait, int timeout_ms,
+                   const std::string& sub_mode, const std::string& sub_from) {
     auto pj = make_pop_job(ctx, res, queue, consumer_group, batch, lease_seconds,
                            auto_ack, wait, timeout_ms);
     pj->partition = partition;
+    pj->sub_mode = sub_mode;
+    pj->sub_from = sub_from;
     submit_pop(pj);
 }
 
@@ -978,11 +1197,14 @@ void handle_pop_wildcard_v2(const RouteContext& ctx, uWS::HttpResponse<false>* r
                             const std::string& queue,
                             const std::string& consumer_group, int batch,
                             int lease_seconds, bool auto_ack, int max_partitions,
-                            bool wait, int timeout_ms) {
+                            bool wait, int timeout_ms,
+                            const std::string& sub_mode, const std::string& sub_from) {
     auto pj = make_pop_job(ctx, res, queue, consumer_group, batch, lease_seconds,
                            auto_ack, wait, timeout_ms);
     pj->wildcard = true;
     pj->max_partitions = max_partitions;
+    pj->sub_mode = sub_mode;
+    pj->sub_from = sub_from;
     submit_pop(pj);
 }
 
@@ -1046,40 +1268,85 @@ void dispatch_ack_v1(QueenCluster* cluster, uWS::Loop* loop, int uws_worker,
     });
 }
 
+// Appends queueName/partitionName (resolved from the q2 partition uuid in
+// $1) to a jsonb result object — the v1 ack rows carry both names.
+constexpr const char* kAckNamesSuffix =
+    "COALESCE((SELECT jsonb_build_object('queueName', q.name, "
+    "'partitionName', p.name) FROM q2.partitions p "
+    "JOIN q2.queues q ON q.id = p.queue_id WHERE p.id = $1::uuid), '{}'::jsonb)";
+
 // Cross-process / post-restart v2 ack: no registry entry, so positions are
-// resolved in SQL via the q2.dedup txn index. One q2.ack_by_txn_v1 call per
-// partition (a wildcard lease spans partitions under one leaseId).
+// resolved in SQL via the q2.dedup txn index. One SQL call per partition (a
+// wildcard lease spans partitions under one leaseId). Emits v1-shaped rows
+// (003_ack.sql:207-216): validation failures answer per-item success:false
+// on HTTP 200, never a batch-level error status.
 void dispatch_ack_by_txn(QueenCluster* cluster, uWS::Loop* loop, int uws_worker,
                          const std::string& request_id, const nlohmann::json& acks,
                          const std::string& lease_id) {
+    struct Item { int idx; std::string txn; std::string status; std::string error; };
     struct Part {
         std::string group;
         nlohmann::json txns = nlohmann::json::array();  // [{"txn","ok"}]
-        std::vector<std::pair<std::string, std::string>> items;  // txn -> status
+        std::vector<Item> items;
     };
     std::map<std::string, Part> parts;
+    int idx = 0;
     for (const auto& a : acks) {
         auto& p = parts[a.value("partitionId", "")];
         p.group = a.value("consumerGroup", "__QUEUE_MODE__");
         std::string txn = a.value("transactionId", "");
         std::string status = a.value("status", "completed");
-        p.txns.push_back({{"txn", txn}, {"ok", status == "completed"}});
-        p.items.emplace_back(txn, status);
+        // Explicit 'dlq' disposes the position like a completed ack (the
+        // message leaves the stream either way; v1 dead-letters it).
+        bool ok = status == "completed" || status == "success" || status == "dlq";
+        p.txns.push_back({{"txn", txn}, {"ok", ok}});
+        p.items.push_back({idx, txn, status,
+                           a.contains("error") && a["error"].is_string()
+                               ? a["error"].get<std::string>() : ""});
+        idx++;
     }
 
     struct State {
-        nlohmann::json results = nlohmann::json::array();
+        nlohmann::json results;
         size_t pending = 0;
     };
     auto st = std::make_shared<State>();
+    st->results = nlohmann::json::array();
+    for (int i = 0; i < idx; i++) st->results.push_back(nullptr);
     st->pending = parts.size();
 
     for (auto& kv : parts) {
         queen::JobRequest job;
         job.op_type = queen::JobType::CUSTOM;
         job.request_id = request_id;
-        job.sql = "SELECT q2.ack_by_txn_v1($1::uuid, $2, $3, $4::jsonb)";
-        job.params = {kv.first, kv.second.group, lease_id, kv.second.txns.dump()};
+        bool single_dlq =
+            kv.second.items.size() == 1 && kv.second.items[0].status == "dlq";
+        if (single_dlq) {
+            // Explicit dead-letter with no in-process batch: the position
+            // comes from the dedup window and q2.dlq_head_v1 files it,
+            // advances the cursor past the frame and releases the lease (v1
+            // dead-letters immediately on explicit dlq status). Queues with
+            // dedup disabled cannot resolve the position: zero rows, answered
+            // as a failed ack below. Mixed batches keep the ack_by_txn path:
+            // their dlq positions dispose via the cursor (no q2.dlq snapshot
+            // — the lease cannot survive two terminal calls).
+            const auto& it0 = kv.second.items[0];
+            job.sql = std::string(
+                          "SELECT q2.dlq_head_v1($1::uuid, $2, $3, d.seq, "
+                          "d.frame_idx, d.message_id, $4, NULL::jsonb, $5) || ") +
+                      kAckNamesSuffix +
+                      " FROM q2.dedup d WHERE d.partition_id = $1::uuid "
+                      "AND d.txn_hash = hashtextextended($4, 0)";
+            job.params = {kv.first, kv.second.group, lease_id, it0.txn,
+                          it0.error.empty() ? "Dead-lettered by consumer ack"
+                                            : it0.error};
+        } else {
+            job.sql = std::string(
+                          "SELECT q2.ack_by_txn_v1($1::uuid, $2, $3, $4::jsonb) || ") +
+                      kAckNamesSuffix;
+            job.params = {kv.first, kv.second.group, lease_id,
+                          kv.second.txns.dump()};
+        }
 
         auto items = kv.second.items;
         cluster->submit(std::move(job), [loop, uws_worker, request_id, st,
@@ -1087,25 +1354,35 @@ void dispatch_ack_by_txn(QueenCluster* cluster, uWS::Loop* loop, int uws_worker,
             loop->defer([=]() {
                 bool ok = false;
                 std::string err;
+                nlohmann::json queue_name = nullptr, partition_name = nullptr;
                 try {
                     auto r = nlohmann::json::parse(result);
-                    ok = r.value("ok", false);
-                    if (!ok) {
-                        err = r.contains("error") && r["error"].is_string()
-                                  ? r["error"].get<std::string>() : "ack failed";
+                    if (r.is_object()) {
+                        ok = r.value("ok", false);
+                        if (r.contains("queueName")) queue_name = r["queueName"];
+                        if (r.contains("partitionName")) partition_name = r["partitionName"];
+                        if (!ok) {
+                            err = r.contains("error") && r["error"].is_string()
+                                      ? r["error"].get<std::string>() : "ack failed";
+                        }
+                    } else {
+                        err = "position not resolvable (dedup window)";
                     }
                 } catch (const std::exception& e) {
                     err = e.what();
                 }
                 for (const auto& it : items) {
-                    if (ok) {
-                        st->results.push_back({{"transactionId", it.first},
-                                               {"status", it.second}});
-                    } else {
-                        st->results.push_back({{"transactionId", it.first},
-                                               {"status", "failed"},
-                                               {"error", err}});
-                    }
+                    st->results[it.idx] = {
+                        {"index", it.idx},
+                        {"transactionId", it.txn},
+                        {"success", ok},
+                        {"error", ok ? nlohmann::json(nullptr)
+                                     : nlohmann::json(err)},
+                        {"queueName", queue_name},
+                        {"partitionName", partition_name},
+                        // Both resolvers release the lease on success.
+                        {"leaseReleased", ok},
+                        {"dlq", ok && it.status == "dlq"}};
                 }
                 if (--st->pending == 0) {
                     worker_response_registries[uws_worker]->send_response_raw(
@@ -1192,24 +1469,68 @@ bool try_handle_ack_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
     if (lease_id.empty()) return false;
 
     auto& reg = sv2::LeaseRegistry::instance();
+    // v1 wire rows (003_ack.sql:207-216): {index, transactionId, success,
+    // error, queueName, partitionName, leaseReleased, dlq}. v1 answers
+    // success:true for every PROCESSED ack — completed, failed (nack) and
+    // dlq alike; success:false is reserved for validation failures (unknown
+    // message, invalid/expired lease) and always travels on HTTP 200.
     nlohmann::json results = nlohmann::json::array();
-    std::vector<sv2::LeaseRegistry::AckOutcome> outcomes;
+    std::map<std::string, std::vector<size_t>> rows_by_pid;   // result rows
+    std::map<std::string, std::string> dlq_error_by_pid;
+    struct PartitionJob {
+        sv2::LeaseRegistry::AckOutcome oc;
+        std::string pid;
+        std::vector<size_t> rows;      // rewritten if the terminal SQL fails
+        std::string dlq_error;
+    };
+    std::vector<PartitionJob> jobs;
     bool any_known = false;
 
+    int idx = -1;
     for (const auto& a : acks) {
+        idx++;
         std::string txn = a.value("transactionId", "");
         std::string pid = a.value("partitionId", "");
         std::string status = a.value("status", "completed");
-        auto oc = reg.ack(lease_id, pid, txn, status == "completed");
+        bool s_ok = status == "completed" || status == "success";
+        bool s_dlq = status == "dlq";
+        auto oc = reg.ack(lease_id, pid, txn, s_ok, s_dlq);
         if (!oc.known) {
-            results.push_back({{"transactionId", txn},
-                               {"status", "failed"},
-                               {"error", "unknown lease or transaction"}});
+            results.push_back({{"index", idx},
+                               {"transactionId", txn},
+                               {"success", false},
+                               {"error", "Message not found"},
+                               {"queueName", nullptr},
+                               {"partitionName", nullptr},
+                               {"leaseReleased", false},
+                               {"dlq", false}});
             continue;
         }
-        any_known = true;
-        results.push_back({{"transactionId", txn}, {"status", status}});
-        if (oc.complete) outcomes.push_back(std::move(oc));
+        any_known = true;  // includes idempotent retries (oc.already): they
+                           // must NOT fall through to ack_by_txn, which would
+                           // release the still-live lease under the batch
+        results.push_back({{"index", idx},
+                           {"transactionId", txn},
+                           {"success", true},
+                           {"error", nullptr},
+                           {"queueName", oc.queue},
+                           {"partitionName", oc.partition},
+                           {"leaseReleased", oc.complete},
+                           {"dlq", s_dlq}});
+        if (oc.already) continue;  // no-op retry: no SQL, no rewrite exposure
+        rows_by_pid[pid].push_back(results.size() - 1);
+        if (s_dlq) {
+            std::string e = a.contains("error") && a["error"].is_string()
+                                ? a["error"].get<std::string>() : "";
+            dlq_error_by_pid[pid] =
+                e.empty() ? "Dead-lettered by consumer ack" : e;
+        }
+        if (oc.complete) {
+            std::string derr;
+            auto dit = dlq_error_by_pid.find(pid);
+            if (dit != dlq_error_by_pid.end()) derr = dit->second;
+            jobs.push_back({std::move(oc), pid, rows_by_pid[pid], derr});
+        }
     }
     if (!any_known) {
         // Not in this process's registry: either a v1 ack or a v2 lease from
@@ -1223,58 +1544,88 @@ bool try_handle_ack_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
     auto worker_loop = ctx.worker_loop;
     auto uws_worker = ctx.worker_id;
 
-    if (outcomes.empty()) {
+    if (jobs.empty()) {
         // No partition batch completed yet: cursors move when the rest arrives.
         worker_response_registries[uws_worker]->send_response_raw(
             request_id, results.dump(), 200);
         return true;
     }
 
-    // One q2.ack_segments_v1 per completed partition (a wildcard lease can
+    // One terminal SQL call per completed partition (a wildcard lease can
     // complete several at once). Callbacks all land on this worker's loop.
+    // A failing call (lease raced/expired) rewrites ITS partition's rows to
+    // success:false — still HTTP 200, v1 parity.
     struct State {
         nlohmann::json results;
         size_t pending = 0;
-        bool failed = false;
-        int status_code = 200;
-        std::string error;
+        bool exception = false;
+        std::string exc_error;
     };
     auto st = std::make_shared<State>();
     st->results = std::move(results);
-    st->pending = outcomes.size();
+    st->pending = jobs.size();
 
-    for (const auto& oc : outcomes) {
+    for (auto& pj : jobs) {
         queen::JobRequest job;
         job.op_type = queen::JobType::CUSTOM;
         job.request_id = request_id;
-        job.sql = "SELECT q2.ack_segments_v1($1, $2, $3, $4, $5::bigint, $6::int, $7::bool, $8::int)";
-        job.params = {oc.queue, oc.partition, oc.consumer_group, lease_id,
-                      std::to_string(oc.upto_seq), std::to_string(oc.upto_off),
-                      oc.ok ? "true" : "false", std::to_string(oc.acked_count)};
+        if (!pj.oc.dlq_positions.empty()) {
+            // Explicit status='dlq' inside the acked prefix: file the LAST
+            // such position via q2.dlq_head_v1 — it inserts the q2.dlq row
+            // (id/txn snapshot; payloads are not retained at ack time),
+            // advances the cursor past that frame and releases the lease.
+            // When it is the prefix end (single-message dlq, or dlq as the
+            // final disposed message — the practical patterns) the cursor
+            // move is exactly ack_segments_v1's; a dlq mid-prefix redelivers
+            // the acked tail (at-least-once, never loss), and earlier dlq
+            // positions of the same batch dispose without their own row (the
+            // lease cannot survive two terminal calls).
+            const auto& dp = pj.oc.dlq_positions.back();
+            job.sql = "SELECT q2.dlq_head_v1($1::uuid, $2, $3, $4::bigint, $5::int, $6::uuid, $7, NULL::jsonb, $8)";
+            job.params = {pj.pid, pj.oc.consumer_group, lease_id,
+                          std::to_string(dp.seq), std::to_string(dp.frame_idx),
+                          dp.mid, dp.txn,
+                          pj.dlq_error.empty() ? "Dead-lettered by consumer ack"
+                                               : pj.dlq_error};
+        } else {
+            job.sql = "SELECT q2.ack_segments_v1($1, $2, $3, $4, $5::bigint, $6::int, $7::bool, $8::int)";
+            job.params = {pj.oc.queue, pj.oc.partition, pj.oc.consumer_group,
+                          lease_id, std::to_string(pj.oc.upto_seq),
+                          std::to_string(pj.oc.upto_off),
+                          pj.oc.ok ? "true" : "false",
+                          std::to_string(pj.oc.acked_count)};
+        }
 
+        auto rows = pj.rows;
         ctx.queen->submit(std::move(job), [worker_loop, uws_worker, request_id,
-                                           st](std::string result) {
+                                           st, rows](std::string result) {
             worker_loop->defer([=]() {
+                bool ok = false;
+                std::string err;
                 try {
                     auto r = nlohmann::json::parse(result);
-                    if (!r.value("ok", false) && !st->failed) {
-                        st->failed = true;
-                        st->status_code = 409;
-                        st->error = r.contains("error") && r["error"].is_string()
-                                        ? r["error"].get<std::string>() : "ack failed";
+                    ok = r.is_object() && r.value("ok", false);
+                    if (!ok) {
+                        err = r.is_object() && r.contains("error") && r["error"].is_string()
+                                  ? r["error"].get<std::string>() : "ack failed";
                     }
                 } catch (const std::exception& e) {
-                    if (!st->failed) {
-                        st->failed = true;
-                        st->status_code = 500;
-                        st->error = e.what();
+                    st->exception = true;
+                    st->exc_error = e.what();
+                }
+                if (!ok && !st->exception) {
+                    for (size_t ri : rows) {
+                        st->results[ri]["success"] = false;
+                        st->results[ri]["error"] = err;
+                        st->results[ri]["leaseReleased"] = false;
+                        st->results[ri]["dlq"] = false;
                     }
                 }
                 if (--st->pending == 0) {
-                    if (st->failed) {
+                    if (st->exception) {
                         worker_response_registries[uws_worker]->send_response_raw(
-                            request_id, nlohmann::json{{"error", st->error}}.dump(),
-                            st->status_code);
+                            request_id,
+                            nlohmann::json{{"error", st->exc_error}}.dump(), 500);
                     } else {
                         worker_response_registries[uws_worker]->send_response_raw(
                             request_id, st->results.dump(), 200);

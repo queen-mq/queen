@@ -171,8 +171,32 @@ bool AsyncQueueManager::initialize_schema() {
             spdlog::error("Failed to acquire connection for schema initialization");
             return false;
         }
-        
+
         spdlog::info("Initializing schema: {}", schema_name_);
+
+        // Concurrent broker boots apply schema.sql + every procedures file at
+        // the same time; parallel CREATE OR REPLACE FUNCTION on the same
+        // function trips PostgreSQL's low-level catalog race ("tuple
+        // concurrently updated") and fails the boot. Serialize the whole
+        // apply behind a session advisory lock (blocks until the peer's apply
+        // finishes — the apply is idempotent, so last writer wins is fine).
+        // Declared AFTER conn so the guard releases the lock before the
+        // connection returns to the pool, on every exit path including
+        // exceptions.
+        if (!exec_sql(conn.get(),
+                      "SELECT pg_advisory_lock(hashtext('queen_schema_apply'))",
+                      "schema apply advisory lock")) {
+            spdlog::error("Failed to acquire schema apply advisory lock");
+            return false;
+        }
+        struct SchemaLockGuard {
+            PGconn* conn;
+            ~SchemaLockGuard() {
+                exec_sql(conn,
+                         "SELECT pg_advisory_unlock(hashtext('queen_schema_apply'))",
+                         "schema apply advisory unlock");
+            }
+        } schema_lock_guard{conn.get()};
         
         // Get base paths (relative to executable or absolute)
         std::string schema_dir = "schema";

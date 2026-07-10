@@ -44,17 +44,38 @@ CREATE INDEX IF NOT EXISTS idx_q2_dlq_partition_failed_at
 
 -- ============================================================================
 -- pop (redefinition of 023's q2.pop_segments_v1; supersedes it at boot).
--- Identical to the 023 body except for attempt tracking:
+-- Identical to the 023 body except for attempt tracking and v1-parity queue
+-- semantics:
 --   * new OUT column r_attempt: the attempt count of THIS delivery (same
 --     value on every returned row). auto_ack pops return 0 and leave the
 --     attempt state untouched.
 --   * the lease UPDATE also persists (attempt_seq, attempt_off,
 --     attempt_count) for the delivered batch's first frame.
+--   * delayed_processing / window_buffer (read from queen.queues by name,
+--     the config source of truth — q2.queues carries only engine-side
+--     options): segments younger than delayed_processing seconds are not
+--     delivered yet, and a partition whose NEWEST segment is younger than
+--     window_buffer seconds delivers nothing (002d_pop_unified_v4.sql:486-504
+--     semantics). Both checks are cheap because created_at is monotone in
+--     seq per partition: the window probe is one backward PK step, and the
+--     delayed filter cuts a suffix the budget loop would not read anyway.
+--   * subscription seeding (v1 'new'/'from' semantics): on FIRST contact of
+--     a (partition, group) — i.e. when the consumer row insert actually
+--     inserts — p_sub_mode='new' or p_sub_from='now' seeds the cursor past
+--     the existing backlog (next_seq = last_seq + 1); a timestamp p_sub_from
+--     seeds it at the first segment with created_at >= that ts (forward walk
+--     from retention_seq; everything older is skipped). Default
+--     ('all' / '') keeps the full-backlog cursor (next_seq = 1). Invalid
+--     timestamps are ignored like v1 (full backlog). Existing consumer rows
+--     are never re-seeded.
 -- DROP+CREATE instead of CREATE OR REPLACE: adding an OUT column changes the
--- return type, which OR REPLACE refuses. Input signature is unchanged, so
--- every caller (wire wrapper below, 024's wildcard) resolves to this one.
+-- return type, which OR REPLACE refuses. Both the 023 signature and this
+-- file's previous (pre-seeding) one are dropped so re-applies never leave an
+-- ambiguous overload behind. Callers using the old 7-arg form keep working
+-- through the two trailing defaults.
 -- ============================================================================
 DROP FUNCTION IF EXISTS q2.pop_segments_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN);
+DROP FUNCTION IF EXISTS q2.pop_segments_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
 
 CREATE FUNCTION q2.pop_segments_v1(
     p_queue TEXT,
@@ -63,7 +84,9 @@ CREATE FUNCTION q2.pop_segments_v1(
     p_budget INTEGER,
     p_lease_seconds INTEGER,
     p_worker TEXT,
-    p_auto_ack BOOLEAN DEFAULT FALSE
+    p_auto_ack BOOLEAN DEFAULT FALSE,
+    p_sub_mode TEXT DEFAULT 'all',
+    p_sub_from TEXT DEFAULT ''
 ) RETURNS TABLE (
     r_seq BIGINT,
     r_start_off INTEGER,
@@ -77,6 +100,14 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_pid UUID;
+    v_last_seq BIGINT;
+    v_retention_seq BIGINT;
+    v_delayed INTEGER := 0;
+    v_window INTEGER := 0;
+    v_deadline TIMESTAMPTZ;
+    v_newest TIMESTAMPTZ;
+    v_seed_seq BIGINT;
+    v_from_ts TIMESTAMPTZ;
     v_next_seq BIGINT;
     v_next_off INTEGER;
     v_att_seq BIGINT;
@@ -96,13 +127,67 @@ DECLARE
     v_end_count INTEGER;
     v_now TIMESTAMPTZ := clock_timestamp();
 BEGIN
-    SELECT p.id INTO v_pid
+    SELECT p.id, p.last_seq, p.retention_seq INTO v_pid, v_last_seq, v_retention_seq
     FROM q2.partitions p JOIN q2.queues q ON q.id = p.queue_id
     WHERE q.name = p_queue AND p.name = p_partition;
     IF v_pid IS NULL THEN RETURN; END IF;
 
-    INSERT INTO q2.consumers (partition_id, consumer_group)
-    VALUES (v_pid, p_group)
+    -- Visibility knobs live on the v1 config row (created by the configure
+    -- path for both engines). Absent row = both disabled.
+    SELECT COALESCE(qq.delayed_processing, 0), COALESCE(qq.window_buffer, 0)
+    INTO v_delayed, v_window
+    FROM queen.queues qq WHERE qq.name = p_queue;
+    IF NOT FOUND THEN
+        v_delayed := 0; v_window := 0;
+    END IF;
+
+    -- window_buffer: if the partition received a segment within the last
+    -- window_buffer seconds, deliver NOTHING (v1 checks the partition's
+    -- newest message the same way, before touching the consumer row).
+    -- created_at is monotone in seq, so the newest segment is the max seq.
+    IF v_window > 0 THEN
+        SELECT s.created_at INTO v_newest
+        FROM q2.segments s
+        WHERE s.partition_id = v_pid
+        ORDER BY s.seq DESC LIMIT 1;
+        IF v_newest IS NOT NULL
+           AND v_newest > v_now - make_interval(secs => v_window) THEN
+            RETURN;
+        END IF;
+    END IF;
+
+    -- Subscription seeding: only worth computing when the row might not
+    -- exist yet AND a non-default subscription was requested.
+    IF (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '')
+       AND NOT EXISTS (SELECT 1 FROM q2.consumers c
+                       WHERE c.partition_id = v_pid AND c.consumer_group = p_group) THEN
+        IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
+            BEGIN
+                v_from_ts := p_sub_from::timestamptz;
+            EXCEPTION WHEN OTHERS THEN
+                v_from_ts := NULL;  -- unparsable: ignore, v1 does the same
+            END;
+            IF v_from_ts IS NOT NULL THEN
+                -- First segment at/after the requested timestamp (created_at
+                -- is monotone in seq: single forward walk from the retention
+                -- watermark). Nothing that recent yet -> future-only cursor.
+                SELECT s.seq INTO v_seed_seq
+                FROM q2.segments s
+                WHERE s.partition_id = v_pid
+                  AND s.seq >= v_retention_seq
+                  AND s.created_at >= v_from_ts
+                ORDER BY s.seq LIMIT 1;
+                IF v_seed_seq IS NULL THEN
+                    v_seed_seq := v_last_seq + 1;
+                END IF;
+            END IF;
+        ELSIF p_sub_from = 'now' OR p_sub_mode = 'new' THEN
+            v_seed_seq := v_last_seq + 1;
+        END IF;
+    END IF;
+
+    INSERT INTO q2.consumers (partition_id, consumer_group, next_seq)
+    VALUES (v_pid, p_group, COALESCE(v_seed_seq, 1))
     ON CONFLICT DO NOTHING;
 
     -- Claim: skip if another worker holds a live lease (or the row is being
@@ -115,10 +200,19 @@ BEGIN
     FOR UPDATE SKIP LOCKED;
     IF NOT FOUND THEN RETURN; END IF;
 
+    -- delayed_processing: only segments at least v_delayed seconds old are
+    -- visible. Monotone created_at => the filter cuts a contiguous suffix;
+    -- the loop stops at the budget before ever scanning past it, and the
+    -- filtered tail is bounded by rate x delayed_processing.
+    IF v_delayed > 0 THEN
+        v_deadline := v_now - make_interval(secs => v_delayed);
+    END IF;
+
     FOR v_row IN
         SELECT s.seq, s.msg_count, s.created_at, s.blob
         FROM q2.segments s
         WHERE s.partition_id = v_pid AND s.seq >= v_next_seq
+          AND (v_deadline IS NULL OR s.created_at <= v_deadline)
         ORDER BY s.seq
     LOOP
         -- Offset applies ONLY to the exact cursor segment. If retention
@@ -190,10 +284,16 @@ $$;
 -- Wire wrapper (redefinition of 023's v2 wire shape; supersedes it at boot).
 -- Same "segments"/"partitionId" contract, plus top-level "attempt": the
 -- attempt count of this delivery (0 for auto_ack or empty pops).
+-- The two trailing subscription args default to the no-seeding values, so
+-- callers of the historical 7-arg form keep working; the 7-arg overload is
+-- dropped (an overload pair would make 7-arg calls ambiguous).
 -- ============================================================================
-CREATE OR REPLACE FUNCTION q2.pop_segments_wire_v1(
+DROP FUNCTION IF EXISTS q2.pop_segments_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN);
+DROP FUNCTION IF EXISTS q2.pop_segments_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
+CREATE FUNCTION q2.pop_segments_wire_v1(
     p_queue TEXT, p_partition TEXT, p_group TEXT,
-    p_budget INTEGER, p_lease_seconds INTEGER, p_worker TEXT, p_auto_ack BOOLEAN
+    p_budget INTEGER, p_lease_seconds INTEGER, p_worker TEXT, p_auto_ack BOOLEAN,
+    p_sub_mode TEXT DEFAULT 'all', p_sub_from TEXT DEFAULT ''
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -216,7 +316,8 @@ BEGIN
     )), '[]'::jsonb), COALESCE(max(r_attempt), 0)
     INTO v_segments, v_attempt
     FROM q2.pop_segments_v1(p_queue, p_partition, p_group,
-                            p_budget, p_lease_seconds, p_worker, p_auto_ack);
+                            p_budget, p_lease_seconds, p_worker, p_auto_ack,
+                            p_sub_mode, p_sub_from);
     RETURN jsonb_build_object('segments', v_segments,
                               'partitionId', COALESCE(v_pid::text, ''),
                               'attempt', v_attempt);

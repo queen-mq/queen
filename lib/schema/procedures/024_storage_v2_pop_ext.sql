@@ -17,15 +17,24 @@
 -- Returns {"partitions":[{"partition":name,"partitionId":uuid,
 --                         "segments":[{seq,startOff,take,msgCount,createdAt,
 --                                      blob(b64)}, ...]}, ...]}.
+-- p_sub_mode / p_sub_from are forwarded to q2.pop_segments_v1 (subscription
+-- seeding on first contact per partition — see 025); they default to the
+-- no-seeding values so callers of the historical 7-arg form keep working.
+-- The 7-arg overload is dropped (an overload pair would make 7-arg calls
+-- ambiguous).
 -- ============================================================================
-CREATE OR REPLACE FUNCTION q2.pop_wildcard_wire_v1(
+DROP FUNCTION IF EXISTS q2.pop_wildcard_wire_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER);
+DROP FUNCTION IF EXISTS q2.pop_wildcard_wire_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT);
+CREATE FUNCTION q2.pop_wildcard_wire_v1(
     p_queue TEXT,
     p_group TEXT,
     p_budget INTEGER,
     p_lease_seconds INTEGER,
     p_worker TEXT,
     p_auto_ack BOOLEAN,
-    p_max_partitions INTEGER
+    p_max_partitions INTEGER,
+    p_sub_mode TEXT DEFAULT 'all',
+    p_sub_from TEXT DEFAULT ''
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -67,7 +76,8 @@ BEGIN
                COALESCE(SUM(r_take), 0)
         INTO v_segments, v_taken
         FROM q2.pop_segments_v1(p_queue, v_p.name, p_group,
-                                v_remaining, p_lease_seconds, p_worker, p_auto_ack);
+                                v_remaining, p_lease_seconds, p_worker, p_auto_ack,
+                                p_sub_mode, p_sub_from);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(

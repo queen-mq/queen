@@ -211,6 +211,23 @@ Variable pattern: `QUEEN_<TYPE>_<KNOB>`.
 |----------|------|---------|-------------|
 | `DEFAULT_SUBSCRIPTION_MODE` | string | "" | Default subscription mode for new consumer groups. Options: `""` (all messages), `"new"` (skip history), `"new-only"` (same as "new") |
 
+## Storage v2 (segments engine)
+
+Cross-request push fusion for queues configured with `storage='segments'`
+(see `developer/16-storage-v2.md`). Frames from concurrent HTTP pushes to the
+same (queue, partition) park in a per-worker accumulator and are flushed as
+ONE fused segment when either threshold is hit. Both are read once at first
+use — restart the broker to change them.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `QUEEN_V2_FUSION_HOLD_MS` | int | 15 | Max age (ms) of the oldest parked frame before the pending segment flushes. `0` bypasses the accumulator entirely: every request flushes its own segments inline (exact pre-fusion behavior, the zero-risk switch). Negative values clamp to 0. |
+| `QUEEN_V2_FUSION_FRAMES` | int | 100 | Frame count at which a pending segment flushes immediately, i.e. the max messages packed into one fused segment. Clamped to ≥ 1. |
+
+The v2 background sweeps (`q2.retention_sweep_v1`, `q2.evict_v1`) run inside
+the existing Retention/Eviction service cycles and are paced by
+`RETENTION_INTERVAL` / `EVICTION_INTERVAL` below — no separate knobs.
+
 ## Background Jobs Configuration
 
 ### Metrics Collector
