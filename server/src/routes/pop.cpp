@@ -162,7 +162,8 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
             }
 
             // STORAGE V2: segment queues take the segments pop path (same
-            // wire format). Slice-1 limits: no long-poll wait, no wildcard.
+            // wire format). Long-poll wait is deadline-polled inside the v2
+            // handler (no libqueen parking for CUSTOM jobs).
             if (queen::routes_v2::is_segment_queue(queue_name)) {
                 int lease_secs = 300;
                 if (global_shared_state) {
@@ -171,7 +172,8 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
                 }
                 queen::routes_v2::handle_pop_v2(ctx, res, queue_name, partition_name,
                                                 consumer_group, options.batch,
-                                                lease_secs, options.auto_ack);
+                                                lease_secs, options.auto_ack,
+                                                wait, timeout_ms);
                 return;
             }
 
@@ -280,6 +282,22 @@ void setup_pop_routes(uWS::App* app, const RouteContext& ctx) {
             std::string sub_from = get_query_param(req, "subscriptionFrom", "");
             if (!sub_from.empty()) {
                 options.subscription_from = sub_from;
+            }
+
+            // STORAGE V2: wildcard pop over a segment queue drains up to
+            // ?partitions=N partitions per call, mirroring the v4 shape.
+            if (queen::routes_v2::is_segment_queue(queue_name)) {
+                int lease_secs = 300;
+                if (global_shared_state) {
+                    auto cfg = global_shared_state->get_or_fetch_queue_config(queue_name);
+                    if (cfg && cfg->lease_time > 0) lease_secs = cfg->lease_time;
+                }
+                queen::routes_v2::handle_pop_wildcard_v2(ctx, res, queue_name,
+                                                         consumer_group, options.batch,
+                                                         lease_secs, options.auto_ack,
+                                                         options.max_partitions,
+                                                         wait, timeout_ms);
+                return;
             }
 
             // Register response for async delivery

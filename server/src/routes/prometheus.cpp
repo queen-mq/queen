@@ -632,6 +632,32 @@ void format_dlq(Body& b, const nlohmann::json& dlq) {
 }
 
 // ---------------------------------------------------------------------------
+// Queue depth — per-queue message counts, both storage engines
+// ([{queue, storage, total_messages, pending_messages}], see
+// 027_storage_v2_observability.sql). rows: reconciler-maintained queen.stats;
+// segments: live frame counts, pending = frames beyond the worst group cursor.
+// ---------------------------------------------------------------------------
+void format_queue_depth(Body& b, const nlohmann::json& queue_depth) {
+    if (!queue_depth.is_array() || queue_depth.empty()) return;
+
+    b.help("queen_queue_depth_total_messages",
+           "Messages currently stored for this queue.");
+    b.type("queen_queue_depth_total_messages", "gauge");
+    b.help("queen_queue_depth_pending_messages",
+           "Messages not yet consumed by this queue's most-behind consumer group.");
+    b.type("queen_queue_depth_pending_messages", "gauge");
+    for (const auto& row : queue_depth) {
+        if (!row.is_object()) continue;
+        std::string queue = row.value("queue", std::string{});
+        if (queue.empty()) continue;
+        const std::string l = labels({{"queue", queue},
+                                      {"storage", row.value("storage", std::string{})}});
+        b.sample("queen_queue_depth_total_messages",   l, json_u64(row, "total_messages"));
+        b.sample("queen_queue_depth_pending_messages", l, json_u64(row, "pending_messages"));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level: parse SP result and append all DB-sourced metric families.
 // Returns the empty string if the SP result is unusable so the route falls
 // back to live-only metrics gracefully.
@@ -653,6 +679,7 @@ std::string format_db_metrics(const std::string& sp_result) {
     if (root.contains("per_queue_lag")) format_per_queue(b, root["per_queue_lag"]);
     if (root.contains("per_worker"))    format_per_worker(b, root["per_worker"]);
     if (root.contains("dlq"))           format_dlq(b, root["dlq"]);
+    if (root.contains("queue_depth"))   format_queue_depth(b, root["queue_depth"]);
     return b.str();
 }
 

@@ -7,7 +7,9 @@
 //
 // Frame layout (little-endian):
 //   u32  frame_len            length of everything after this field
-//   u8   flags                bit0: trace_id present, bit1: producer_sub present
+//   u8   flags                bit0: trace_id present, bit1: producer_sub present,
+//                             bit2: payload encrypted (envelope JSON
+//                             {"encrypted","iv","authTag"}, see EncryptionService)
 //   u8[16] message_id         UUID bytes
 //   [u8[16] trace_id]         iff flags & 1
 //   u16  txn_len, txn bytes
@@ -23,11 +25,17 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <zstd.h>
 
 namespace queen::storage_v2 {
+
+// Frame flag bits (u8 `flags` field above).
+inline constexpr uint8_t FRAME_FLAG_TRACE_ID     = 1;
+inline constexpr uint8_t FRAME_FLAG_PRODUCER_SUB = 2;
+inline constexpr uint8_t FRAME_FLAG_ENCRYPTED    = 4;
 
 struct FrameIn {
     std::string message_id;                // canonical uuid string (with dashes)
@@ -35,6 +43,7 @@ struct FrameIn {
     std::optional<std::string> trace_id;   // uuid string
     std::optional<std::string> producer_sub;
     std::string payload;                   // raw JSON bytes, passthrough
+    bool encrypted = false;                // payload is an encryption envelope
 };
 
 struct FrameOut {
@@ -43,6 +52,7 @@ struct FrameOut {
     std::optional<std::string> trace_id;
     std::optional<std::string> producer_sub;
     std::string payload;
+    bool encrypted = false;
 };
 
 // ------------------------------------------------------------------ uuid/hex
@@ -169,8 +179,9 @@ inline std::string pack_frames(const std::vector<FrameIn>& frames) {
         if (!uuid_to_bytes(f.message_id, mid)) std::memset(mid, 0, 16);
         uint8_t flags = 0;
         bool has_trace = f.trace_id && uuid_to_bytes(*f.trace_id, tid);
-        if (has_trace) flags |= 1;
-        if (f.producer_sub) flags |= 2;
+        if (has_trace) flags |= FRAME_FLAG_TRACE_ID;
+        if (f.producer_sub) flags |= FRAME_FLAG_PRODUCER_SUB;
+        if (f.encrypted) flags |= FRAME_FLAG_ENCRYPTED;
 
         std::string body;
         body.reserve(f.payload.size() + f.transaction_id.size() + 40);
@@ -206,9 +217,10 @@ inline bool unpack_frames(const std::string& raw, std::vector<FrameOut>& out) {
         size_t p = o + 4;
         uint8_t flags = static_cast<uint8_t>(raw[p]); p += 1;
         FrameOut f;
+        f.encrypted = (flags & FRAME_FLAG_ENCRYPTED) != 0;
         f.message_id = bytes_to_uuid(reinterpret_cast<const uint8_t*>(raw.data() + p));
         p += 16;
-        if (flags & 1) {
+        if (flags & FRAME_FLAG_TRACE_ID) {
             if (p + 16 > end) return false;
             f.trace_id = bytes_to_uuid(reinterpret_cast<const uint8_t*>(raw.data() + p));
             p += 16;
@@ -217,7 +229,7 @@ inline bool unpack_frames(const std::string& raw, std::vector<FrameOut>& out) {
         uint16_t txn_len = rd_u16(p); p += 2;
         if (p + txn_len > end) return false;
         f.transaction_id.assign(raw, p, txn_len); p += txn_len;
-        if (flags & 2) {
+        if (flags & FRAME_FLAG_PRODUCER_SUB) {
             if (p + 2 > end) return false;
             uint16_t ps_len = rd_u16(p); p += 2;
             if (p + ps_len > end) return false;
@@ -233,9 +245,14 @@ inline bool unpack_frames(const std::string& raw, std::vector<FrameOut>& out) {
 // ------------------------------------------------------- lease bookkeeping
 // The v1 wire ack carries (transactionId, partitionId, leaseId): for segment
 // queues the broker resolves txn -> position through this registry, populated
-// at pop time. Single-process scope; a pop answered by one worker thread and
-// acked through another still hits it (shared map + mutex). Cross-process
-// deployments fall back to the q2.dedup resolver (phase 2; documented).
+// at pop time. A wildcard pop claims several partitions under ONE leaseId, so
+// entries are keyed leaseId -> partitionId(uuid) -> in-flight batch, and acks
+// carry the partition they target. Completion and contiguity are tracked per
+// partition (each partition has its own cursor row in q2.consumers); the
+// outer lease entry disappears when its last partition completes.
+// Single-process scope; a pop answered by one worker thread and acked through
+// another still hits it (shared map + mutex). Cross-process acks fall back to
+// the q2.ack_by_txn_v1 resolver (see try_handle_ack_v2).
 struct LeaseBatch {
     std::string queue;
     std::string partition;
@@ -243,8 +260,10 @@ struct LeaseBatch {
     // Delivered positions, in order: (seq, offset_after_this_message) plus txn.
     struct Pos { int64_t seq; int32_t off_after; std::string txn; };
     std::vector<Pos> positions;
-    std::vector<bool> acked;
-    size_t acked_count = 0;
+    // Sized to positions by LeaseRegistry::put; callers only fill positions.
+    std::vector<bool> acked;      // acked OK — feeds the contiguous prefix
+    std::vector<bool> responded;  // acked ok OR failed — feeds completion
+    size_t responded_count = 0;
     bool failed = false;
 };
 
@@ -254,14 +273,24 @@ public:
         static LeaseRegistry r;
         return r;
     }
-    void put(const std::string& lease_id, LeaseBatch batch) {
+    // Registers (or replaces) the in-flight batch of one (lease, partition).
+    void put(const std::string& lease_id, const std::string& partition_id,
+             LeaseBatch batch) {
+        batch.acked.assign(batch.positions.size(), false);
+        batch.responded.assign(batch.positions.size(), false);
+        batch.responded_count = 0;
+        batch.failed = false;
         std::lock_guard<std::mutex> g(mu_);
-        map_[lease_id] = std::move(batch);
+        map_[lease_id][partition_id] = std::move(batch);
     }
-    // Applies one ack; returns the final position to persist when the batch
-    // is complete (all acked, or failed => highest contiguous prefix).
+    // Applies one ack; returns the final position to persist when that
+    // partition's batch is complete (all responded, or any failed => the
+    // batch closes early). The persisted position is the highest contiguous
+    // acked-OK prefix: a nack must NOT advance the cursor past the failed
+    // message — redelivery restarts there, which is exactly what drives the
+    // attempt counter in q2.pop_segments_v1 (retry/DLQ model, 024).
     struct AckOutcome {
-        bool known = false;        // lease found and txn matched
+        bool known = false;        // lease+partition found and txn matched
         bool complete = false;     // time to call q2.ack_segments_v1
         bool ok = true;            // p_ok for the SQL call
         int64_t upto_seq = 0;
@@ -269,24 +298,28 @@ public:
         int32_t acked_count = 0;
         std::string queue, partition, consumer_group;
     };
-    AckOutcome ack(const std::string& lease_id, const std::string& txn, bool success) {
+    AckOutcome ack(const std::string& lease_id, const std::string& partition_id,
+                   const std::string& txn, bool success) {
         std::lock_guard<std::mutex> g(mu_);
         AckOutcome r;
-        auto it = map_.find(lease_id);
-        if (it == map_.end()) return r;
-        auto& b = it->second;
+        auto lit = map_.find(lease_id);
+        if (lit == map_.end()) return r;
+        auto pit = lit->second.find(partition_id);
+        if (pit == lit->second.end()) return r;
+        auto& b = pit->second;
         for (size_t i = 0; i < b.positions.size(); i++) {
-            if (b.positions[i].txn == txn && !b.acked[i]) {
-                b.acked[i] = true;
-                b.acked_count++;
-                if (!success) b.failed = true;
+            if (b.positions[i].txn == txn && !b.responded[i]) {
+                b.responded[i] = true;
+                b.responded_count++;
+                if (success) b.acked[i] = true;
+                else b.failed = true;
                 r.known = true;
                 break;
             }
         }
         if (!r.known) return r;
-        if (b.acked_count == b.positions.size() || b.failed) {
-            // Highest contiguous acked prefix.
+        if (b.responded_count == b.positions.size() || b.failed) {
+            // Highest contiguous acked-OK prefix.
             size_t n = 0;
             while (n < b.acked.size() && b.acked[n]) n++;
             r.complete = true;
@@ -299,7 +332,8 @@ public:
             r.queue = b.queue;
             r.partition = b.partition;
             r.consumer_group = b.consumer_group;
-            map_.erase(it);
+            lit->second.erase(pit);
+            if (lit->second.empty()) map_.erase(lit);
         }
         return r;
     }
@@ -308,9 +342,95 @@ public:
         map_.erase(lease_id);
     }
 
+    // ------------------------------------------------ transaction preview
+    // The /transaction route must know the ack position BEFORE its SQL
+    // commits, and must not consume registry state until it has: a rolled-
+    // back transaction leaves every lease ackable through the plain wire
+    // path. This is the read-only counterpart of ack(): locate the in-flight
+    // batch for (partition, group) — client-supplied lease hints first, then
+    // any registered lease — simulate applying `items` (txn, success) in
+    // order, and report what ack() WOULD persist. found=false when no batch
+    // matches EVERY txn against an un-responded position (all-or-nothing:
+    // partial matches never bind a transaction to the wrong lease). After
+    // the SQL succeeds the caller replays the items through ack() to consume
+    // the entries; on failure it simply does nothing.
+    struct TxnAckPreview {
+        bool found = false;        // batch located and every txn matched
+        bool complete = false;     // batch would close -> emit a terminal ack
+        bool ok = true;            // p_ok for the SQL ack
+        int64_t upto_seq = 0;
+        int32_t upto_off = 0;
+        int32_t acked_count = 0;
+        std::string lease_id;      // owning lease == q2.consumers.worker_id
+        std::string queue, partition, consumer_group;
+    };
+    TxnAckPreview preview_txn_ack(
+        const std::string& partition_id, const std::string& consumer_group,
+        const std::vector<std::pair<std::string, bool>>& items,
+        const std::vector<std::string>& lease_hints) {
+        std::lock_guard<std::mutex> g(mu_);
+        TxnAckPreview r;
+        // Same matching rule as ack(): first un-responded position with this
+        // txn, applied sequentially over a scratch copy of the flags.
+        auto try_batch = [&](const std::string& lease_id, const LeaseBatch& b) {
+            if (b.consumer_group != consumer_group) return false;
+            std::vector<bool> acked = b.acked;
+            std::vector<bool> responded = b.responded;
+            size_t responded_count = b.responded_count;
+            bool failed = b.failed;
+            for (const auto& [txn, success] : items) {
+                bool matched = false;
+                for (size_t i = 0; i < b.positions.size(); i++) {
+                    if (b.positions[i].txn == txn && !responded[i]) {
+                        responded[i] = true;
+                        responded_count++;
+                        if (success) acked[i] = true;
+                        else failed = true;
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) return false;
+            }
+            r.found = true;
+            r.lease_id = lease_id;
+            r.queue = b.queue;
+            r.partition = b.partition;
+            r.consumer_group = b.consumer_group;
+            if (responded_count == b.positions.size() || failed) {
+                // Highest contiguous acked-OK prefix (see ack()).
+                size_t n = 0;
+                while (n < acked.size() && acked[n]) n++;
+                r.complete = true;
+                r.ok = n > 0;
+                if (n > 0) {
+                    r.upto_seq = b.positions[n - 1].seq;
+                    r.upto_off = b.positions[n - 1].off_after;
+                }
+                r.acked_count = static_cast<int32_t>(n);
+            }
+            return true;
+        };
+        for (const auto& hint : lease_hints) {
+            auto lit = map_.find(hint);
+            if (lit == map_.end()) continue;
+            auto pit = lit->second.find(partition_id);
+            if (pit == lit->second.end()) continue;
+            if (try_batch(hint, pit->second)) return r;
+        }
+        for (const auto& [lease_id, parts] : map_) {
+            auto pit = parts.find(partition_id);
+            if (pit == parts.end()) continue;
+            if (try_batch(lease_id, pit->second)) return r;
+        }
+        return r;
+    }
+
 private:
     std::mutex mu_;
-    std::unordered_map<std::string, LeaseBatch> map_;
+    // leaseId -> partitionId -> in-flight batch
+    std::unordered_map<std::string,
+                       std::unordered_map<std::string, LeaseBatch>> map_;
 };
 
 }  // namespace queen::storage_v2

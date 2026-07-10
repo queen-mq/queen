@@ -1,6 +1,8 @@
 #include "queen/retention_service.hpp"
 #include "queen/shared_state_manager.hpp"
 
+#include <json.hpp>
+
 #include <algorithm>
 #include <array>
 #include <thread>
@@ -108,12 +110,38 @@ void RetentionService::cleanup_cycle() {
             int completed = cleanup_completed_messages();
             int partitions = cleanup_inactive_partitions();
             int metrics = cleanup_old_metrics();
-            
+
             // Only log if something was cleaned up
             if (expired > 0 || completed > 0 || partitions > 0 || metrics > 0) {
                 spdlog::info("RetentionService: Cleaned up expired_messages={}, completed_messages={}, "
                             "inactive_partitions={}, old_metrics={}",
                             expired, completed, partitions, metrics);
+            }
+
+            // Storage v2 (segments): one single-transaction sweep over all v2
+            // queues — time retention + completed retention + dedup-window
+            // purge (q2.retention_sweep_v1, 026_storage_v2_maintenance.sql).
+            // Still under the advisory lock held on lock_conn, so concurrent
+            // broker instances never double-sweep.
+            try {
+                auto conn = db_pool_->acquire();
+                sendQueryParamsAsync(conn.get(), "SELECT q2.retention_sweep_v1()", {});
+                auto sweep = getTuplesResult(conn.get());
+                if (PQntuples(sweep.get()) > 0 && !PQgetisnull(sweep.get(), 0, 0)) {
+                    // {"queues":N,"segments_deleted":N,"dedup_purged":N}
+                    const std::string counts = PQgetvalue(sweep.get(), 0, 0);
+                    auto j = nlohmann::json::parse(counts, nullptr, false);
+                    bool swept = j.is_object() &&
+                                 (j.value("segments_deleted", 0) > 0 ||
+                                  j.value("dedup_purged", 0) > 0);
+                    if (swept) {
+                        spdlog::info("RetentionService: v2 segments sweep {}", counts);
+                    } else {
+                        spdlog::debug("RetentionService: v2 segments sweep {}", counts);
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::error("RetentionService v2 sweep error: {}", e.what());
             }
         }
         

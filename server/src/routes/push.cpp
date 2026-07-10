@@ -56,6 +56,65 @@ void append_json_escaped(std::string& out, std::string_view s) {
 }
 
 // ----------------------------------------------------------------------------
+// Buffer a validated batch to the file buffer and answer per-item 'buffered'.
+// Shared by the maintenance-mode branch and the storage-v2 DB-down pre-flight.
+// Buffered events are storage-agnostic JSON: replay (push_messages_internal)
+// routes each event by the queue's CURRENT storage flag, so the same event
+// shape serves both engines.
+// ----------------------------------------------------------------------------
+void buffer_items_and_respond(uWS::HttpResponse<false>* res,
+                              const RouteContext& ctx,
+                              const std::vector<PushItem>& items,
+                              const char* reason) {
+    nlohmann::json results = nlohmann::json::array();
+    bool all_buffered = true;
+
+    for (const auto& item : items) {
+        nlohmann::json event = {
+            {"queue", item.queue},
+            {"partition", item.partition},
+            {"payload", item.payload},
+            {"failover", true}
+        };
+        if (item.transaction_id.has_value() && !item.transaction_id->empty()) {
+            event["transactionId"] = *item.transaction_id;
+        } else {
+            event["transactionId"] = ctx.async_queue_manager->generate_uuid();
+        }
+        if (item.trace_id.has_value() && !item.trace_id->empty()) {
+            event["traceId"] = *item.trace_id;
+        }
+        if (item.producer_sub.has_value() && !item.producer_sub->empty()) {
+            event["producerSub"] = *item.producer_sub;
+        }
+
+        if (ctx.file_buffer->write_event(event)) {
+            nlohmann::json result = {
+                {"status", "buffered"},
+                {"queue", item.queue},
+                {"partition", item.partition}
+            };
+            if (item.transaction_id.has_value()) {
+                result["transactionId"] = *item.transaction_id;
+            }
+            results.push_back(result);
+        } else {
+            all_buffered = false;
+            results.push_back({
+                {"status", "failed"},
+                {"queue", item.queue},
+                {"partition", item.partition},
+                {"error", "File buffer write failed"}
+            });
+        }
+    }
+
+    spdlog::info("[Worker {}] PUSH: Buffered {} items ({})",
+                 ctx.worker_id, items.size(), reason);
+    send_json_response(res, results, all_buffered ? 201 : 500);
+}
+
+// ----------------------------------------------------------------------------
 // Shared submit path (used by both the nlohmann and simdjson builders).
 //
 // Registers the async response, stores the (already-serialized) items array for
@@ -305,6 +364,18 @@ void handle_push_json(uWS::HttpResponse<false>* res,
             return;
         }
 
+        // MAINTENANCE MODE: route to file buffer instead of the sidecar.
+        // Checked BEFORE the storage-v2 branch: buffered events are
+        // storage-agnostic JSON and replay routes each event by the queue's
+        // CURRENT storage flag, so maintenance buffering must win over
+        // engine routing.
+        if (global_shared_state && global_shared_state->get_maintenance_mode() && ctx.file_buffer) {
+            spdlog::debug("[Worker {}] PUSH: Maintenance mode active, buffering {} items",
+                          ctx.worker_id, items.size());
+            buffer_items_and_respond(res, ctx, items, "maintenance mode");
+            return;
+        }
+
         // STORAGE V2: segment queues take the segments path (frame packing +
         // q2.push_segment_wire_v1). Mixed rows/segments batches are rejected
         // in slice 1 — a push call must target one storage engine.
@@ -321,63 +392,23 @@ void handle_push_json(uWS::HttpResponse<false>* res,
                         "mixed rows/segments queues in one push are not supported", 400);
                     return;
                 }
+                // FILE-BUFFER FAILOVER (v2 pre-flight): handle_push_v2 has no
+                // DB-error failover inside its completion path yet (slice 1) —
+                // once the file-buffer drain has marked the DB unhealthy,
+                // buffer up front with the same events v1's failover writes
+                // instead of submitting a doomed job. First-error parity
+                // (buffering on the very first failed submit, like
+                // finish_push_submit) needs a hook inside storage_v2_routes'
+                // error branch; until then the first failing request answers
+                // 503 and the client retries (idempotent by transactionId).
+                if (ctx.file_buffer && !ctx.file_buffer->is_db_healthy()) {
+                    buffer_items_and_respond(res, ctx, items,
+                                             "storage v2 failover: DB unhealthy");
+                    return;
+                }
                 queen::routes_v2::handle_push_v2(ctx, res, std::move(items));
                 return;
             }
-        }
-
-        // MAINTENANCE MODE: route to file buffer instead of the sidecar.
-        if (global_shared_state && global_shared_state->get_maintenance_mode() && ctx.file_buffer) {
-            spdlog::debug("[Worker {}] PUSH: Maintenance mode active, buffering {} items",
-                          ctx.worker_id, items.size());
-
-            nlohmann::json results = nlohmann::json::array();
-            bool all_buffered = true;
-
-            for (const auto& item : items) {
-                nlohmann::json event = {
-                    {"queue", item.queue},
-                    {"partition", item.partition},
-                    {"payload", item.payload},
-                    {"failover", true}
-                };
-                if (item.transaction_id.has_value() && !item.transaction_id->empty()) {
-                    event["transactionId"] = *item.transaction_id;
-                } else {
-                    event["transactionId"] = ctx.async_queue_manager->generate_uuid();
-                }
-                if (item.trace_id.has_value() && !item.trace_id->empty()) {
-                    event["traceId"] = *item.trace_id;
-                }
-                if (item.producer_sub.has_value() && !item.producer_sub->empty()) {
-                    event["producerSub"] = *item.producer_sub;
-                }
-
-                if (ctx.file_buffer->write_event(event)) {
-                    nlohmann::json result = {
-                        {"status", "buffered"},
-                        {"queue", item.queue},
-                        {"partition", item.partition}
-                    };
-                    if (item.transaction_id.has_value()) {
-                        result["transactionId"] = *item.transaction_id;
-                    }
-                    results.push_back(result);
-                } else {
-                    all_buffered = false;
-                    results.push_back({
-                        {"status", "failed"},
-                        {"queue", item.queue},
-                        {"partition", item.partition},
-                        {"error", "File buffer write failed"}
-                    });
-                }
-            }
-
-            spdlog::info("[Worker {}] PUSH: Buffered {} items during maintenance mode",
-                         ctx.worker_id, items.size());
-            send_json_response(res, results, all_buffered ? 201 : 500);
-            return;
         }
 
         // Build the items array for the stored procedure (single dump in

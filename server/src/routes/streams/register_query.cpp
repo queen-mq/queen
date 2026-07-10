@@ -39,6 +39,7 @@
 #include "queen/routes/route_registry.hpp"
 #include "queen/routes/route_context.hpp"
 #include "queen/routes/route_helpers.hpp"
+#include "queen/routes/storage_v2_routes.hpp"  // is_segment_queue guard
 #include "queen.hpp"  // libqueen
 #include "queen/response_queue.hpp"
 #include <spdlog/spdlog.h>
@@ -72,6 +73,24 @@ void setup_streams_register_query_routes(uWS::App* app, const RouteContext& ctx)
                     if (!body.contains("config_hash") || !body["config_hash"].is_string() || body["config_hash"].get<std::string>().empty()) {
                         send_error_response(res, "config_hash is required", 400);
                         return;
+                    }
+
+                    // STORAGE V2 GUARD: streams read the source and write the
+                    // sink through v1 SQL only — a segments source/sink would
+                    // strand messages. Reject at registration (cycle guards
+                    // its sink pushes too).
+                    {
+                        std::string source_q = body["source_queue"].get<std::string>();
+                        std::string sink_q = (body.contains("sink_queue") && body["sink_queue"].is_string())
+                            ? body["sink_queue"].get<std::string>() : "";
+                        if (queen::routes_v2::is_segment_queue(source_q)
+                            || (!sink_q.empty() && queen::routes_v2::is_segment_queue(sink_q))) {
+                            send_error_response(res,
+                                "segments storage: not supported on this endpoint yet — track: "
+                                "transaction=q2.transaction_wire_v1 pending C++ wiring; "
+                                "streams=v1-only by design", 501);
+                            return;
+                        }
                     }
 
                     std::string request_id = worker_response_registries[ctx.worker_id]->register_response(

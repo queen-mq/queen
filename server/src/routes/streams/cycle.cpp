@@ -49,6 +49,7 @@
 #include "queen/routes/route_registry.hpp"
 #include "queen/routes/route_context.hpp"
 #include "queen/routes/route_helpers.hpp"
+#include "queen/routes/storage_v2_routes.hpp"  // is_segment_queue guard
 #include "queen/async_queue_manager.hpp"   // for ctx.async_queue_manager->generate_uuid()
 #include "queen.hpp"  // libqueen
 #include "queen/response_queue.hpp"
@@ -79,6 +80,24 @@ void setup_streams_cycle_routes(uWS::App* app, const RouteContext& ctx) {
                     if (!body.contains("partition_id") || !body["partition_id"].is_string()) {
                         send_error_response(res, "partition_id is required", 400);
                         return;
+                    }
+
+                    // STORAGE V2 GUARD: the cycle's sink pushes go through v1
+                    // push_messages_v3 inside streams_cycle_v1 — writing them
+                    // to a segments queue would strand messages (the segments
+                    // pop path never reads queen.messages). Segments sources
+                    // are already rejected at registration.
+                    if (body.contains("push_items") && body["push_items"].is_array()) {
+                        for (const auto& pi : body["push_items"]) {
+                            if (pi.is_object() && pi.contains("queue") && pi["queue"].is_string()
+                                && queen::routes_v2::is_segment_queue(pi["queue"].get<std::string>())) {
+                                send_error_response(res,
+                                    "segments storage: not supported on this endpoint yet — track: "
+                                    "transaction=q2.transaction_wire_v1 pending C++ wiring; "
+                                    "streams=v1-only by design", 501);
+                                return;
+                            }
+                        }
                     }
 
                     std::string request_id = worker_response_registries[ctx.worker_id]->register_response(

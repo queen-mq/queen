@@ -175,6 +175,7 @@ void setup_ack_routes(uWS::App* app, const RouteContext& ctx) {
                                          {"partitionId", partition_id.value()},
                                          {"leaseId", lease_id.value_or("")},
                                          {"status", status},
+                                         {"error", error.value_or("")},
                                          {"consumerGroup", consumer_group}});
                         if (queen::routes_v2::try_handle_ack_v2(ctx, res, probe)) {
                             return;

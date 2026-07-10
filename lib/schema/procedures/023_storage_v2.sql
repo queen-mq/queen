@@ -222,7 +222,11 @@ $$;
 -- r_start_off + r_take) of each row. Acquires the (partition, group) lease
 -- unless p_auto_ack.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION q2.pop_segments_v1(
+-- DROP first: later files (025) legitimately change the OUT signature, and
+-- CREATE OR REPLACE cannot alter a return type. Boot applies 023 then 025 in
+-- one sequence before serving traffic, so the gap is invisible.
+DROP FUNCTION IF EXISTS q2.pop_segments_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN);
+CREATE FUNCTION q2.pop_segments_v1(
     p_queue TEXT,
     p_partition TEXT,
     p_group TEXT,

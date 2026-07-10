@@ -249,7 +249,8 @@ void SharedStateManager::set_queue_config(const std::string& queue, const caches
                 {"retention_seconds", config.retention_seconds},
                 {"completed_retention_seconds", config.completed_retention_seconds},
                 {"retention_enabled", config.retention_enabled},
-                {"max_wait_time_seconds", config.max_wait_time_seconds}
+                {"max_wait_time_seconds", config.max_wait_time_seconds},
+                {"storage", config.storage}
             }},
             {"version", config.version}
         };
@@ -393,6 +394,7 @@ void SharedStateManager::handle_queue_config_set(const std::string& sender, cons
     config.completed_retention_seconds = config_json.value("completed_retention_seconds", 0);
     config.retention_enabled = config_json.value("retention_enabled", false);
     config.max_wait_time_seconds = config_json.value("max_wait_time_seconds", 0);
+    config.storage = config_json.value("storage", "rows");
     
     queue_configs_.set(queue, config);
     
@@ -536,7 +538,7 @@ void SharedStateManager::refresh_queue_configs_from_db() {
                 max_queue_size, ttl, dead_letter_queue, 
                 dlq_after_max_retries, delayed_processing,
                 window_buffer, retention_seconds, completed_retention_seconds,
-                encryption_enabled
+                encryption_enabled, storage
             FROM queen.queues
         )";
         
@@ -597,6 +599,13 @@ void SharedStateManager::refresh_queue_configs_from_db() {
             
             const char* encrypted = PQgetvalue(result.get(), i, PQfnumber(result.get(), "encryption_enabled"));
             cfg.encryption_enabled = (encrypted && (strcmp(encrypted, "t") == 0 || strcmp(encrypted, "true") == 0));
+            
+            // Storage engine flag: without it the bulk refresh would reset
+            // every cached entry to "rows" and silently flip segment queues
+            // back to the v1 routing (the single-queue fetch above already
+            // carries it).
+            const char* storage = PQgetvalue(result.get(), i, PQfnumber(result.get(), "storage"));
+            cfg.storage = (storage && strlen(storage) > 0) ? storage : "rows";
             
             configs.push_back(std::move(cfg));
         }

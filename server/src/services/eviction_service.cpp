@@ -1,5 +1,7 @@
 #include "queen/eviction_service.hpp"
 
+#include <json.hpp>
+
 namespace queen {
 
 EvictionService::EvictionService(
@@ -88,10 +90,36 @@ void EvictionService::eviction_cycle() {
         } else {
             // We have the lock - run eviction
             int evicted = evict_expired_waiting_messages();
-            
+
             // Only log if something was evicted
             if (evicted > 0) {
                 spdlog::info("EvictionService: Evicted {} messages exceeding max_wait_time", evicted);
+            }
+
+            // Storage v2 (segments): enforce max_queue_size on v2 queues in
+            // one single-transaction sweep (q2.evict_v1,
+            // 026_storage_v2_maintenance.sql). Still under the advisory lock
+            // held on lock_conn, so concurrent broker instances never
+            // double-sweep.
+            try {
+                auto conn = db_pool_->acquire();
+                sendQueryParamsAsync(conn.get(), "SELECT q2.evict_v1()", {});
+                auto sweep = getTuplesResult(conn.get());
+                if (PQntuples(sweep.get()) > 0 && !PQgetisnull(sweep.get(), 0, 0)) {
+                    // {"queues":N,"segments_deleted":N,"messages_evicted":N}
+                    const std::string counts = PQgetvalue(sweep.get(), 0, 0);
+                    auto j = nlohmann::json::parse(counts, nullptr, false);
+                    bool swept = j.is_object() &&
+                                 (j.value("segments_deleted", 0) > 0 ||
+                                  j.value("messages_evicted", 0) > 0);
+                    if (swept) {
+                        spdlog::info("EvictionService: v2 segments sweep {}", counts);
+                    } else {
+                        spdlog::debug("EvictionService: v2 segments sweep {}", counts);
+                    }
+                }
+            } catch (const std::exception& e) {
+                spdlog::error("EvictionService v2 sweep error: {}", e.what());
             }
         }
         

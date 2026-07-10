@@ -127,7 +127,7 @@ setup:
 # Download and setup dependencies
 deps: $(VENDOR_DIR)/.deps_ready
 
-$(VENDOR_DIR)/.deps_ready: setup
+$(VENDOR_DIR)/.deps_ready: | setup
 	@echo "Setting up dependencies..."
 	
 	# Download nlohmann/json (single header)

@@ -115,12 +115,16 @@ bool ResponseRegistry::deliver_string(const std::string& request_id, std::string
     }
 
     try {
-        // Set headers and status code
+        // Set status code FIRST: uWS writes an implicit "200 OK" on the first
+        // writeHeader() call and silently drops any later writeStatus(), so
+        // the old header-then-status order sent every registry-delivered
+        // response as 200 regardless of status_code (breaking e.g. the 400
+        // storage-flip reject and the 503 segments-push failure).
+        entry->response->writeStatus(std::to_string(status_code));
         entry->response->writeHeader("Access-Control-Allow-Origin", "*");
         entry->response->writeHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
         entry->response->writeHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
         entry->response->writeHeader("Content-Type", "application/json");
-        entry->response->writeStatus(std::to_string(status_code));
 
         // Handle empty responses (like 204 No Content)
         if (json_str.empty()) {

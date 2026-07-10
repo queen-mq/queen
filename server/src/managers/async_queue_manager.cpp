@@ -2,6 +2,7 @@
 #include "queen/file_buffer.hpp"
 #include "queen/encryption.hpp"
 #include "queen/shared_state_manager.hpp"
+#include "queen/storage_v2.hpp"
 #include <spdlog/spdlog.h>
 
 // External global for shared state
@@ -765,8 +766,136 @@ std::vector<PushResult> AsyncQueueManager::push_messages_internal(const std::vec
     // Process each partition group using stored procedure
     for (const auto& [partition_key, item_indices] : partition_groups_ordered) {
     try {
+            // STORAGE V2: route each (queue, partition) group by the queue's
+            // CURRENT storage flag (fetched like push.cpp does). Buffered
+            // events are storage-agnostic; the engine decision belongs here,
+            // at replay time. v1 'rows' groups fall through untouched.
+            size_t sep_pos = partition_key.find(':');
+            std::string group_queue = partition_key.substr(0, sep_pos);
+            std::string group_partition = partition_key.substr(sep_pos + 1);
+            std::string group_storage = "rows";
+            if (global_shared_state) {
+                auto storage_cfg = global_shared_state->get_or_fetch_queue_config(group_queue);
+                if (storage_cfg) group_storage = storage_cfg->storage;
+            }
+
         auto conn = async_db_pool_->acquire();
-        
+
+            if (group_storage == "segments") {
+                // ---- segments replay path -----------------------------------
+                // Mirrors routes_v2::handle_push_v2 semantics: intra-batch
+                // duplicate txns resolve first-wins BEFORE packing (the blob
+                // must not contain them; v1's dup_rank rule); dedup-window
+                // duplicates come back as {status:'duplicate', dups:[{i,mid}]}
+                // with nothing written, so the group is repacked without the
+                // dup frames and retried (rare path by design). Payloads pass
+                // through opaque — no encryption on segment queues (slice 1;
+                // configure rejects the combination).
+                struct LiveFrame { size_t item_idx; storage_v2::FrameIn frame; };
+                std::vector<LiveFrame> live;
+                live.reserve(item_indices.size());
+                std::map<std::string, std::string> seen_txn;  // txn -> first message id
+
+                for (size_t idx : item_indices) {
+                    const auto& item = items[idx];
+                    storage_v2::FrameIn f;
+                    f.message_id = generate_uuid();
+                    f.transaction_id = item.transaction_id.value_or(generate_transaction_id());
+
+                    PushResult result;
+                    result.transaction_id = f.transaction_id;
+
+                    auto seen = seen_txn.find(f.transaction_id);
+                    if (seen != seen_txn.end()) {
+                        result.status = "duplicate";       // first occurrence wins
+                        result.message_id = seen->second;
+                        all_results[idx] = result;
+                        continue;
+                    }
+                    seen_txn[f.transaction_id] = f.message_id;
+
+                    if (item.trace_id.has_value() && !item.trace_id->empty()) {
+                        f.trace_id = *item.trace_id;
+                    }
+                    if (item.producer_sub.has_value() && !item.producer_sub->empty()) {
+                        f.producer_sub = *item.producer_sub;
+                    }
+                    f.payload = item.payload.dump();
+
+                    result.status = "queued";              // provisional; dedup below
+                    result.message_id = f.message_id;
+                    all_results[idx] = result;
+                    live.push_back({idx, std::move(f)});
+                }
+
+                static const std::string seg_sql =
+                    "SELECT q2.push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
+
+                while (!live.empty()) {
+                    nlohmann::json metas = nlohmann::json::array();
+                    std::vector<storage_v2::FrameIn> frames;
+                    frames.reserve(live.size());
+                    for (size_t k = 0; k < live.size(); ++k) {
+                        metas.push_back({{"i", static_cast<int>(k)},
+                                         {"mid", live[k].frame.message_id},
+                                         {"txn", live[k].frame.transaction_id}});
+                        frames.push_back(live[k].frame);   // copy: a dup retry repacks
+                    }
+                    auto blob = storage_v2::zstd_compress(storage_v2::pack_frames(frames));
+                    if (blob.empty()) {
+                        throw std::runtime_error("segment compression failed");
+                    }
+                    std::string blob_b64 = storage_v2::b64_encode(blob.data(), blob.size());
+
+                    sendQueryParamsAsync(conn.get(), seg_sql,
+                                         {group_queue, group_partition, metas.dump(),
+                                          blob_b64, std::to_string(frames.size())});
+                    auto seg_result = getTuplesResult(conn.get());
+                    if (PQntuples(seg_result.get()) == 0) {
+                        throw std::runtime_error("push_segment_wire_v1 returned no rows");
+                    }
+
+                    auto sp_result = nlohmann::json::parse(PQgetvalue(seg_result.get(), 0, 0));
+                    if (sp_result.contains("error") && !sp_result["error"].is_null()) {
+                        throw std::runtime_error(sp_result["error"].is_string()
+                            ? sp_result["error"].get<std::string>()
+                            : sp_result["error"].dump());
+                    }
+
+                    if (sp_result.value("status", "") == "duplicate") {
+                        // Frame index -> original message id (from the dedup
+                        // window); mark dups, drop them, repack, retry.
+                        std::vector<char> is_dup(live.size(), 0);
+                        size_t dup_count = 0;
+                        for (const auto& d : sp_result["dups"]) {
+                            int i = d.value("i", -1);
+                            if (i < 0 || i >= static_cast<int>(live.size()) || is_dup[i]) continue;
+                            is_dup[i] = 1;
+                            dup_count++;
+                            all_results[live[i].item_idx].status = "duplicate";
+                            all_results[live[i].item_idx].message_id = d.value("mid", "");
+                        }
+                        if (dup_count == 0) {
+                            // Defensive: duplicate status without a dup list
+                            // would retry the same blob forever.
+                            throw std::runtime_error(
+                                "push_segment_wire_v1 reported duplicates without a dup list");
+                        }
+                        std::vector<LiveFrame> next;
+                        next.reserve(live.size() - dup_count);
+                        for (size_t k = 0; k < live.size(); ++k) {
+                            if (!is_dup[k]) next.push_back(std::move(live[k]));
+                        }
+                        live = std::move(next);
+                        continue;
+                    }
+
+                    break;  // queued: provisional per-item results already correct
+                }
+
+                continue;   // next partition group (v1 path below untouched)
+            }
+
             // Build JSON array for stored procedure
             nlohmann::json messages_array = nlohmann::json::array();
             
