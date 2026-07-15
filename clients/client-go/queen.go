@@ -123,20 +123,19 @@ func (q *Queen) Ack(ctx context.Context, messages interface{}, success bool, opt
 			return nil, fmt.Errorf("ack request failed: %w", err)
 		}
 
-		// Parse response
-		response := AckResponse{Success: true}
-		if errMsg, ok := result["error"].(string); ok && errMsg != "" {
-			response.Success = false
-			response.Error = errMsg
+		responses, err := parseAckResponses(result, 1)
+		if err != nil {
+			return nil, fmt.Errorf("ack response: %w", err)
 		}
 
 		logDebug("Queen.Ack", map[string]interface{}{
 			"transactionId": msg.TransactionID,
 			"status":        status,
-			"success":       response.Success,
+			"success":       responses[0].Success,
+			"error":         responses[0].Error,
 		})
 
-		return []AckResponse{response}, nil
+		return responses, nil
 	}
 
 	// Batch ack
@@ -161,29 +160,9 @@ func (q *Queen) Ack(ctx context.Context, messages interface{}, success bool, opt
 		return nil, fmt.Errorf("batch ack request failed: %w", err)
 	}
 
-	// Parse response
-	var responses []AckResponse
-	if data, ok := result["data"].([]interface{}); ok {
-		for _, item := range data {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				resp := AckResponse{Success: true}
-				if errMsg, ok := itemMap["error"].(string); ok && errMsg != "" {
-					resp.Success = false
-					resp.Error = errMsg
-				}
-				responses = append(responses, resp)
-			}
-		}
-	} else {
-		// Single response for batch
-		resp := AckResponse{Success: true}
-		if errMsg, ok := result["error"].(string); ok && errMsg != "" {
-			resp.Success = false
-			resp.Error = errMsg
-		}
-		for range msgs {
-			responses = append(responses, resp)
-		}
+	responses, err := parseAckResponses(result, len(msgs))
+	if err != nil {
+		return nil, fmt.Errorf("batch ack response: %w", err)
 	}
 
 	logDebug("Queen.Ack", map[string]interface{}{
@@ -192,6 +171,52 @@ func (q *Queen) Ack(ctx context.Context, messages interface{}, success bool, opt
 		"success": len(responses),
 	})
 
+	return responses, nil
+}
+
+// parseAckResponses parses the ack response body. Both /api/v1/ack and
+// /api/v1/ack/batch return a JSON array with one item per acknowledgment in
+// request order ({transactionId, success, error, ...}); HttpClient wraps
+// top-level arrays as {"data": [...]}. expected is the number of messages
+// sent, so a truncated or misaligned response fails loudly instead of being
+// misattributed to the wrong message.
+func parseAckResponses(result map[string]interface{}, expected int) ([]AckResponse, error) {
+	data, ok := result["data"].([]interface{})
+	if !ok {
+		// Top-level error envelope: the whole request was rejected.
+		if errMsg, ok := result["error"].(string); ok && errMsg != "" {
+			responses := make([]AckResponse, expected)
+			for i := range responses {
+				responses[i] = AckResponse{Success: false, Error: errMsg}
+			}
+			return responses, nil
+		}
+		return nil, fmt.Errorf("unexpected format: missing per-item result array")
+	}
+
+	if len(data) != expected {
+		return nil, fmt.Errorf("expected %d results, got %d", expected, len(data))
+	}
+
+	responses := make([]AckResponse, 0, expected)
+	for i, item := range data {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("unexpected item type %T at index %d", item, i)
+		}
+		resp := AckResponse{Success: true}
+		if success, ok := itemMap["success"].(bool); ok {
+			resp.Success = success
+		}
+		if errMsg, ok := itemMap["error"].(string); ok && errMsg != "" {
+			resp.Success = false
+			resp.Error = errMsg
+		}
+		if !resp.Success && resp.Error == "" {
+			resp.Error = "acknowledgment rejected by server"
+		}
+		responses = append(responses, resp)
+	}
 	return responses, nil
 }
 
