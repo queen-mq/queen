@@ -27,6 +27,7 @@ var QueueDefaults = QueueConfig{
 	MaxSize:                   0,     // No limit on messages per queue
 	RetentionSeconds:          0,     // No retention (keep forever)
 	CompletedRetentionSeconds: 0,     // No retention for completed messages
+	RetentionEnabled:          false, // Retention/cleanup disabled by default
 	EncryptionEnabled:         false, // No encryption by default
 }
 

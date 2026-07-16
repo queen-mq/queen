@@ -111,6 +111,10 @@ type QueueConfig struct {
 	RetentionSeconds int `json:"retentionSeconds,omitempty"`
 	// CompletedRetentionSeconds is the retention period for completed messages
 	CompletedRetentionSeconds int `json:"completedRetentionSeconds,omitempty"`
+	// RetentionEnabled turns on retention/cleanup for the queue. The server only
+	// runs the retention service on queues with this flag set, so RetentionSeconds
+	// and CompletedRetentionSeconds have no effect unless RetentionEnabled is true.
+	RetentionEnabled bool `json:"retentionEnabled,omitempty"`
 	// EncryptionEnabled enables payload encryption
 	EncryptionEnabled bool `json:"encryptionEnabled,omitempty"`
 }

@@ -106,6 +106,9 @@ func (ob *OperationBuilder) buildOptions() map[string]interface{} {
 	if config.CompletedRetentionSeconds > 0 {
 		opts["completedRetentionSeconds"] = config.CompletedRetentionSeconds
 	}
+	if config.RetentionEnabled {
+		opts["retentionEnabled"] = config.RetentionEnabled
+	}
 	if config.EncryptionEnabled {
 		opts["encryptionEnabled"] = config.EncryptionEnabled
 	}
