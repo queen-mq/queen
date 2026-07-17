@@ -15,6 +15,42 @@ import { CLIENT_DEFAULTS } from './utils/defaults.js'
 import { validateUrl, validateUrls } from './utils/validation.js'
 import * as logger from './utils/logger.js'
 
+// Both /api/v1/ack and /api/v1/ack/batch respond with a top-level JSON array,
+// one item per acknowledgment in request order:
+//   [{index, transactionId, success, error, queueName, partitionName, leaseReleased, dlq}]
+// (see queen.ack_messages_v2 / routes/ack.cpp). A rejected ack/nack (e.g.
+// "Invalid or expired lease") still arrives as HTTP 200 with success=false on
+// the item, so the per-item flag is the only signal that the broker accepted it.
+
+function normalizeAckItem(item, index) {
+  if (item === null || typeof item !== 'object') {
+    throw new Error(`Unexpected ack result item at index ${index}`)
+  }
+  let success = typeof item.success === 'boolean' ? item.success : true
+  let error = typeof item.error === 'string' && item.error.length > 0 ? item.error : null
+  if (error) success = false
+  if (!success && !error) error = 'Acknowledgment rejected by server'
+  return { ...item, success, error }
+}
+
+// expected is the number of acknowledgments sent, so a truncated or misaligned
+// response fails loudly instead of being misattributed to the wrong message.
+function parseAckResults(result, expected) {
+  if (Array.isArray(result)) {
+    if (result.length !== expected) {
+      throw new Error(`Ack response has ${result.length} results, expected ${expected}`)
+    }
+    return result.map(normalizeAckItem)
+  }
+
+  // Top-level error envelope: the whole request was rejected.
+  if (result && typeof result === 'object' && typeof result.error === 'string' && result.error.length > 0) {
+    return Array.from({ length: expected }, () => ({ success: false, error: result.error }))
+  }
+
+  throw new Error('Unexpected ack response format: missing per-item result array')
+}
+
 export class Queen {
   #httpClient
   #bufferManager
@@ -195,7 +231,7 @@ export class Queen {
     // Handle batch acknowledgment
     if (Array.isArray(message)) {
       if (message.length === 0) {
-        return { processed: 0, results: [] }
+        return { success: true, processed: 0, results: [] }
       }
 
       // Check if messages have individual status
@@ -277,13 +313,19 @@ export class Queen {
           consumerGroup: context.group || null
         })
 
-        if (result && result.error) {
-          logger.error('Queen.ack', { type: 'batch', error: result.error })
-          return { success: false, error: result.error }
+        const results = parseAckResults(result, acknowledgments.length)
+        const failed = results.filter(r => !r.success)
+
+        if (failed.length > 0) {
+          const error = failed.length === 1
+            ? failed[0].error
+            : `${failed.length} of ${results.length} acknowledgments rejected: ${failed[0].error}`
+          logger.error('Queen.ack', { type: 'batch', error, failed: failed.length, count: results.length })
+          return { success: false, error, results }
         }
 
-        logger.log('Queen.ack', { type: 'batch', success: true, count: acknowledgments.length })
-        return { success: true, ...result }
+        logger.log('Queen.ack', { type: 'batch', success: true, count: results.length })
+        return { success: true, processed: results.length, results }
       } catch (error) {
         logger.error('Queen.ack', { type: 'batch', error: error.message })
         return { success: false, error: error.message }
@@ -321,13 +363,14 @@ export class Queen {
     try {
       const result = await this.#httpClient.post('/api/v1/ack', body)
 
-      if (result && result.error) {
-        logger.error('Queen.ack', { type: 'single', transactionId, error: result.error })
-        return { success: false, error: result.error }
-      }
+      const [ackResult] = parseAckResults(result, 1)
 
-      logger.log('Queen.ack', { type: 'single', transactionId, success: true })
-      return { success: true, ...result }
+      if (!ackResult.success) {
+        logger.error('Queen.ack', { type: 'single', transactionId, error: ackResult.error })
+      } else {
+        logger.log('Queen.ack', { type: 'single', transactionId, success: true })
+      }
+      return ackResult
     } catch (error) {
       logger.error('Queen.ack', { type: 'single', transactionId, error: error.message })
       return { success: false, error: error.message }

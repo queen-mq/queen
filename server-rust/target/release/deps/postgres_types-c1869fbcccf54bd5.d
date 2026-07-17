@@ -1,0 +1,11 @@
+/Users/alice/Work/queen/server-rust/target/release/deps/postgres_types-c1869fbcccf54bd5.d: /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/lib.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/pg_lsn.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/private.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/special.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/type_gen.rs
+
+/Users/alice/Work/queen/server-rust/target/release/deps/libpostgres_types-c1869fbcccf54bd5.rlib: /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/lib.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/pg_lsn.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/private.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/special.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/type_gen.rs
+
+/Users/alice/Work/queen/server-rust/target/release/deps/libpostgres_types-c1869fbcccf54bd5.rmeta: /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/lib.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/pg_lsn.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/private.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/special.rs /Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/type_gen.rs
+
+/Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/lib.rs:
+/Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/pg_lsn.rs:
+/Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/private.rs:
+/Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/special.rs:
+/Users/alice/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/postgres-types-0.2.14/src/type_gen.rs:

@@ -1,0 +1,7 @@
+// Local, isolated workspace for the go-hotpath spike so it builds with a plain
+// `go build` from this directory WITHOUT being pulled into the repo-root go.work
+// (which only tracks clients/client-go and clients/client-cli). Keeps the spike
+// self-contained and master/other modules untouched.
+go 1.25.0
+
+use .

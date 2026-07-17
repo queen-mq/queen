@@ -135,6 +135,7 @@ func runMaxMode(args []string) {
 			"completedRetentionSeconds": *completedRet,
 			"retentionSeconds":          *pendingRet,
 			"leaseTime":                 30,
+			"encryptionEnabled":         os.Getenv("GOLOAD_ENCRYPT") == "1", // enables per-queue encryption (C++)
 		},
 	}); cerr != nil {
 		fmt.Printf("[configure] WARNING: %v\n", cerr)
