@@ -29,3 +29,8 @@ upgrade.sh
 upgrade_queen.sh
 start.sh
 .DS_Store
+
+# Rust build artifacts (release/debug)
+server-rust/target
+server-rust-seg/target
+**/target/

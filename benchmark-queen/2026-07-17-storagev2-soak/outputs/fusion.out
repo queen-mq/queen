@@ -1,0 +1,8 @@
+###### fusion sweep (Rust FULL_FEATURES, only fusion knobs change) DURATION=40 ######
+Rust A pushPref50/h20 popPref20/h5 | push= 49524 pop= 49369 /s | commits/s= 1330 fusion= 37.2 | brokerCPU= 142.8% CPUus/msg=14.43 pgCPU= 2145.4%
+Rust B pushPref100/h25 popPref40/h10 | push= 57371 pop= 56106 /s | commits/s= 1216 fusion= 47.2 | brokerCPU= 161.9% CPUus/msg=14.26 pgCPU= 1878.4%
+Rust C pushPref200/h40 popPref80/h15 | push= 56807 pop= 56154 /s | commits/s=  324 fusion=175.3 | brokerCPU= 132.2% CPUus/msg=11.70 pgCPU= 1499.9%
+Rust D pushPref300/h50 popPref150/h20 | push= 46548 pop= 46103 /s | commits/s=  240 fusion=193.9 | brokerCPU= 103.4% CPUus/msg=11.16 pgCPU=  709.1%
+--- anchor ---
+C++ 0.16.0 vegas (anchor)          | push= 62923 pop= 62482 /s | commits/s=  791 fusion= 79.5 | brokerCPU= 242.7% CPUus/msg=19.35 pgCPU= 1349.9%
+###### done ######

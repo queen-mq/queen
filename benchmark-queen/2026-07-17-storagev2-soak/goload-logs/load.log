@@ -1,0 +1,3 @@
+goload -> http://localhost:6634 queue=x8470 partitions=100 producers=300 consumers=200 pushBatch=10 popBatch=200 payload=256B idleConns=512 retries=2
+[configure] queue=x8470 completedRetentionSeconds=300
+[final] pushed=2851590 popped=2832740 pushErr=0 popErr=0 emptyPops=21

@@ -1,0 +1,29 @@
+[2026-07-17T18:23:33Z] recreate Postgres with soak/April tuning (max_wal_size=96GB)
+[2026-07-17T18:23:41Z] === Rust tuned (FULL_FEATURES) :6661  bp-100 for 300s (queue=soak3165) ===
+  min | push/s  pop/s | brokerCPU  pgCPU | msgsTbl commits/s
+  1m0s  |      0      0 |   156.96% 1606.54% | 4346 MB 948
+  1m30s |      0      0 |   149.38% 1499.21% | 6448 MB 914
+  2m0s  |      0      0 |   148.38% 1600.40% | 8531 MB 875
+  2m30s |      0      0 |   135.91% 1660.07% |   10 GB 881
+  3m0s  |      0      0 |   148.87% 1483.63% |   12 GB 856
+  3m30s |      0      0 |   152.99% 1562.17% |   14 GB 830
+  4m0s  |      0      0 |   141.59% 1475.69% |   16 GB 837
+  4m30s |      0      0 |   139.35% 1263.21% |   18 GB 849
+  5m0s  |      0      0 |     0.12%  100.33% |   18 GB 86
+[2026-07-17T18:29:15Z] final load: [final] pushed=27128800 popped=27113600 pushErr=0 popErr=0 emptyPops=184
+[2026-07-17T18:29:15Z] messages table: 18 GB  live=27083070
+[2026-07-17T18:29:21Z] recreate Postgres with soak/April tuning (max_wal_size=96GB)
+[2026-07-17T18:29:30Z] === C++ 0.16.0 (retParallel=8) :6634  bp-100 for 300s (queue=soak15856) ===
+  min | push/s  pop/s | brokerCPU  pgCPU | msgsTbl commits/s
+  1m0s  |      0      0 |   132.58% 1417.96% | 4635 MB 339
+  1m30s |      0      0 |   125.73% 1362.80% | 7035 MB 346
+  2m0s  |      0      0 |   121.54% 1316.34% | 9372 MB 338
+  2m30s |      0      0 |   104.41% 1515.19% |   11 GB 349
+  3m0s  |      0      0 |   120.82% 1462.53% |   14 GB 331
+  3m30s |      0      0 |   119.85% 1388.11% |   16 GB 335
+  4m0s  |      0      0 |    87.99% 1228.16% |   18 GB 338
+  4m30s |      0      0 |   118.01% 1225.83% |   20 GB 331
+  5m0s  |      0      0 |     1.08%  206.09% |   20 GB 50
+[2026-07-17T18:35:04Z] final load: [final] pushed=30520100 popped=30353700 pushErr=0 popErr=100 emptyPops=106
+[2026-07-17T18:35:04Z] messages table: 20 GB  live=28150479
+[2026-07-17T18:35:05Z] ###### soak5 done ######

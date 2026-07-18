@@ -1,0 +1,21 @@
+[2026-07-17T21:41:49Z] recreate Postgres (soak/April tuning, max_wal_size=96GB)
+[2026-07-17T21:41:52Z] start C++ broker queen-mq:segments (auto-inits schema incl. q2)
+[2026-07-17T21:41:57Z] configure soakv2_990 storage=segments + retention(comp=60)
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":60,"deadLetterQueue":false,"dedupWindowSeconds":0,"delayedProcessing":0,"dlqAfterMaxRetries":false,"encryptionEnabled":false,"leaseTime":60,"maxSize":0,"maxWaitTimeSeconds":0,"priority":0,"retentionEnabled":true,"retentionSeconds":7200,"retryDelay":1000,"retryLimit":3,"storage":"segments","ttl":3600,"windowBuffer":0},"partitionId":"b70da818-6cb0-4307-81bc-d87d3370016d","queue":"soakv2_990","queueId":"81df53dc-5d0f-4f84-b58d-aa0ef8f0b4ab","task":""}
+[2026-07-17T21:41:57Z] queue row: soakv2_990 storage=segments retEnabled=true comp=60
+[2026-07-17T21:41:57Z] === storage-v2 soak (segments) :6681 bp-100 for 480s ===
+  time  | push/s  pop/s | bCPU    pgCPU | segTbl   dedupTbl  msgs(sum)   segs commits/s
+[2026-07-17T21:42:25Z] retention re-applied: segments comp=60 dedup=0
+  1m0s  |      0      0 | 831.82% 452.92% |   272 MB 8192 bytes    9502200  95064 2680
+  1m30s |      0      0 | 826.10% 509.28% |   314 MB 8192 bytes    9348200  93607 3197
+  2m0s  |      0      0 | 825.98% 537.56% |   316 MB 8192 bytes    9391300  94049 3115
+  2m30s |      0      0 | 851.94% 521.17% |   307 MB 8192 bytes    9198700  92115 3150
+  3m0s  |      0      0 | 849.02% 519.42% |   309 MB 8192 bytes    8738500  87383 2666
+  3m30s |      0      0 | 839.29% 534.29% |   317 MB 8192 bytes    8786400  87833 3194
+  4m0s  |      0      0 | 838.64% 487.09% |   318 MB 8192 bytes    9554600  86901 3169
+  4m30s |      0      0 | 795.47% 467.38% |   319 MB 8192 bytes    9523400  95412 3190
+  5m0s  |      0      0 | 807.77% 509.36% |   317 MB 8192 bytes    9314000  93202 3151
+  5m30s |      0      0 | 865.13% 448.12% |   317 MB 8192 bytes    9242900  92425 3198
+  6m0s  |      0      0 | 833.22% 534.12% |   317 MB 8192 bytes    9215300  92136 2712
+  6m30s |      0      0 |  1.74%   0.57% |   317 MB 8192 bytes    6553000  65354 1700
+  7m0s  |      0      0 |  1.57%   0.63% |   317 MB 8192 bytes    2054300  20468 9

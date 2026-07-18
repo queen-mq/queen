@@ -1,0 +1,53 @@
+SUSTAINED START 2026-07-17T13:15:27Z
+===== qbench-cpp (smartnessai/queen-mq:0.16.0) =====
+  t=60s broker=286.15%/148.1MiB / 62.79GiB pg=1652.45%/25.95GiB / 62.79GiB msgs_rows=3405510
+  t=120s broker=267.71%/157.4MiB / 62.79GiB pg=1759.21%/26.48GiB / 62.79GiB msgs_rows=7488660
+  t=180s broker=247.27%/169MiB / 62.79GiB pg=1844.87%/27GiB / 62.79GiB msgs_rows=11534380
+  t=240s broker=232.82%/178MiB / 62.79GiB pg=1936.49%/27.55GiB / 62.79GiB msgs_rows=15629800
+  FINAL qbench-cpp: push=61539/s pop=61472/s totpush=18461700 totpop=18441610 commits/s=1584
+  throughput trend (per 30s report):
+    push=   54178/s pop=   53191/s
+    push=   52650/s pop=   52405/s
+    push=   64888/s pop=   65744/s
+    push=   63739/s pop=   63767/s
+    push=   62906/s pop=   62817/s
+    push=   63937/s pop=   63910/s
+    push=   60592/s pop=   60539/s
+    push=   66602/s pop=   66567/s
+    push=   59165/s pop=   59200/s
+    push=   66728/s pop=   66581/s
+===== qbench-go (go-hotpath-spike:latest) =====
+  t=60s broker=426.42%/94.39MiB / 62.79GiB pg=1402.50%/26.79GiB / 62.79GiB msgs_rows=3672650
+  t=120s broker=419.16%/94.55MiB / 62.79GiB pg=1306.00%/27.42GiB / 62.79GiB msgs_rows=7849190
+  t=180s broker=423.74%/97.8MiB / 62.79GiB pg=1366.56%/27.77GiB / 62.79GiB msgs_rows=12069520
+  t=240s broker=421.71%/97.9MiB / 62.79GiB pg=1317.54%/28.12GiB / 62.79GiB msgs_rows=16305960
+  FINAL qbench-go: push=63344/s pop=63328/s totpush=19003320 totpop=18998480 commits/s=1820
+  throughput trend (per 30s report):
+    push=   50134/s pop=   49950/s
+    push=   65260/s pop=   65235/s
+    push=   64894/s pop=   64859/s
+    push=   65419/s pop=   65461/s
+    push=   65065/s pop=   64990/s
+    push=   65852/s pop=   65959/s
+    push=   65056/s pop=   64936/s
+    push=   64841/s pop=   64921/s
+    push=   64106/s pop=   64078/s
+    push=   62816/s pop=   62861/s
+===== qbench-rs (queen-hotpath-rust:latest) =====
+  t=60s broker=148.32%/303MiB / 62.79GiB pg=1568.43%/26.47GiB / 62.79GiB msgs_rows=4251570
+  t=120s broker=151.66%/329.4MiB / 62.79GiB pg=1300.01%/27.29GiB / 62.79GiB msgs_rows=8412070
+  t=180s broker=157.27%/332.2MiB / 62.79GiB pg=1390.55%/27.69GiB / 62.79GiB msgs_rows=12514350
+  t=240s broker=133.33%/336.3MiB / 62.79GiB pg=1409.23%/28.1GiB / 62.79GiB msgs_rows=16815740
+  FINAL qbench-rs: push=66011/s pop=65994/s totpush=19803390 totpop=19798380 commits/s=1742
+  throughput trend (per 30s report):
+    push=   67546/s pop=   67341/s
+    push=   67290/s pop=   67208/s
+    push=   66121/s pop=   66189/s
+    push=   64403/s pop=   64373/s
+    push=   63051/s pop=   63134/s
+    push=   64754/s pop=   64759/s
+    push=   66176/s pop=   66181/s
+    push=   65836/s pop=   65854/s
+    push=   67015/s pop=   66988/s
+    push=   67920/s pop=   67918/s
+SUSTAINED DONE 2026-07-17T13:31:50Z

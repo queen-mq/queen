@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+#
+# PRODUCTION broker image of the current branch (simdjson conversion), built
+# with the SAME flags as the release (default Makefile CXXFLAGS: -O3, NO -g, NO
+# frame pointers, NO profiler) so performance is directly comparable to
+# smartnessai/queen-mq:0.15.5. Broker-only (no dashboard/CLI) — the broker
+# binary is byte-for-byte how the release builds it, and the omitted frontend/
+# CLI do not affect broker performance.
+#
+# Build context = repo root:
+#   docker build -f benchmark-queen/simd-vs-0155/Dockerfile.broker-prod -t queen-mq:simd .
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+      build-essential libpq-dev libssl-dev zlib1g-dev libzstd-dev \
+      curl unzip ca-certificates cmake ccache \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/usr/lib/ccache:${PATH}"
+
+WORKDIR /usr/build/server
+COPY server/Makefile ./Makefile
+RUN make deps
+
+COPY server/src/ ./src/
+COPY server/include/ ./include/
+COPY lib/ /usr/build/lib/
+
+# Production build — default Makefile CXXFLAGS (-O3, no debug/profiling).
+RUN --mount=type=cache,target=/root/.ccache \
+    make -j"$(nproc)" build-only \
+ && test -f bin/queen-server \
+ && echo "prod build OK"
+
+# Run from /usr/build so schema discovery finds lib/schema/schema.sql.
+WORKDIR /usr/build
+EXPOSE 6632
+CMD ["server/bin/queen-server"]

@@ -1,0 +1,34 @@
+###### DURATION=60  profile window: +25s for 20s ######
+===== perf stat: C++ (0.16.0, all machinery on) (pid=169953, 20s steady) =====
+
+ Performance counter stats for process id '169953':
+
+          52317.72 msec task-clock                       #    2.615 CPUs utilized             
+            204134      context-switches                 #    3.902 K/sec                     
+              4569      cpu-migrations                   #   87.332 /sec                      
+      147203035306      cycles                           #    2.814 GHz                       
+      110829388012      instructions                     #    0.75  insn per cycle            
+
+      20.003590182 seconds time elapsed
+
+----- C++ (0.16.0, all machinery on) result -----
+  throughput: push=55434/s pop=54533/s | commits/s=694
+  broker[243.23% / 142.5MiB / 62.79GiB]  pgCPU=1956.96%
+
+===== perf stat: Rust FULL_FEATURES=1 (attribution+lag+cache+retention+flush) (pid=171986, 20s steady) =====
+
+ Performance counter stats for process id '171986':
+
+          32740.36 msec task-clock                       #    1.637 CPUs utilized             
+            165391      context-switches                 #    5.052 K/sec                     
+              5060      cpu-migrations                   #  154.549 /sec                      
+       88339081023      cycles                           #    2.698 GHz                       
+       81657246799      instructions                     #    0.92  insn per cycle            
+
+      20.005185971 seconds time elapsed
+
+----- Rust FULL_FEATURES=1 (attribution+lag+cache+retention+flush) result -----
+  throughput: push=51109/s pop=51019/s | commits/s=1346
+  broker[149.88% / 373.2MiB / 62.79GiB]  pgCPU=2126.46%
+
+###### done ######

@@ -1,0 +1,8 @@
+DEFINITIVE START 2026-07-17T15:43:09Z (fresh PG per run)
+C++  baseline     -> push=60483/s pop=59708/s | broker[254.15%/98.94MiB / 62.79GiB] pgCPU=1570.70% commits/s=1154
+C++  full(enc+au) -> push=49633/s pop=49356/s | broker[459.15%/113.5MiB / 62.79GiB] pgCPU=1512.25% commits/s=1029
+Go   baseline     -> push=34906/s pop=34801/s | broker[251.01%/78.64MiB / 62.79GiB] pgCPU=1661.88% commits/s=2346
+Go   full(enc+au) -> push=31842/s pop=31757/s | broker[456.85%/96.3MiB / 62.79GiB] pgCPU=1509.71% commits/s=2202
+Rust baseline     -> push=65533/s pop=63790/s | broker[140.11%/296.1MiB / 62.79GiB] pgCPU=1650.78% commits/s=1552
+Rust full(enc+au) -> push=59323/s pop=58876/s | broker[226.12%/344.5MiB / 62.79GiB] pgCPU=1537.91% commits/s=1484
+DEFINITIVE DONE 2026-07-17T15:47:56Z

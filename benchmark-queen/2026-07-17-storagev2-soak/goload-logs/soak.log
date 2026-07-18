@@ -1,0 +1,6 @@
+goload -> http://localhost:6661 queue=soak10952 partitions=100 producers=100 consumers=100 pushBatch=100 popBatch=500 payload=256B idleConns=512 retries=2
+[configure] queue=soak10952 completedRetentionSeconds=300
+[19:10:43] push=  103000/s pop=  102600/s | tot push=10300000 pop=10260000 | errs p=0 c=0 empty=4
+[19:12:23] push=   98055/s pop=   98158/s | tot push=20105500 pop=20075800 | errs p=0 c=0 empty=11
+[19:14:03] push=   96472/s pop=   96542/s | tot push=29752700 pop=29730000 | errs p=0 c=0 empty=22
+[final] pushed=29752700 popped=29731400 pushErr=0 popErr=0 emptyPops=22

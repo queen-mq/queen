@@ -1,0 +1,17 @@
+[2026-07-18T05:08:09Z] recreate Postgres (soak/April tuning, max_wal_size=96GB)
+[2026-07-18T05:08:12Z] start broker queen-mq:segments (dedicated segment engines; auto-inits queen.seg_* schema)
+[2026-07-18T05:08:17Z] configure seg_15636 storage=segments dedup=0 comp=60
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":60,"deadLetterQueue":false,"dedupWindowSeconds":0,"delayedProcessing":0,"dlqAfterMaxRetries":false,"encryptionEnabled":false,"leaseTime":60,"maxSize":0,"maxWaitTimeSeconds":0,"priority":0,"retentionEnabled":true,"retentionSeconds":7200,"retryDelay":1000,"retryLimit":3,"storage":"segments","ttl":3600,"windowBuffer":0},"partitionId":"99d679eb-95b4-406b-8758-1c4691784480","queue":"seg_15636","queueId":"5b540415-61e5-4df1-a4b7-02bf0b984cf7","task":""}
+[2026-07-18T05:08:17Z] queue row: seg_15636 storage=segments  seg_queue: dedup=0
+[2026-07-18T05:08:17Z] === storage-v2 segments soak (dedicated engines) :6681 bp-100 480s load=200x200 ===
+  time  | segTbl   dedupTbl  msgs(sum)    segs  bCPU     pgCPU  commits/s
+  1m0s  |   459 MB 8192 bytes   15178700  149731  1439.65% 271.78%  3251
+  1m30s |   539 MB 8192 bytes   14816000  146715  1449.47% 239.40%  3195
+  2m0s  |   539 MB 8192 bytes   14598400  144076  1404.44% 245.62%  3173
+  2m30s |   510 MB 8192 bytes   15359300  151493  1419.30% 226.53%  3237
+  3m0s  |   518 MB 8192 bytes   15204900  149958  1356.01% 232.13%  3187
+  3m30s |   533 MB 8192 bytes   14742600  146030  1379.40% 242.57%  3176
+  4m0s  |   533 MB 8192 bytes   14478500  142948  1463.31% 224.70%  3205
+  4m30s |   514 MB 8192 bytes   15451900  153009  1365.66% 279.76%  3218
+  5m0s  |   514 MB 8192 bytes   15541700  153351  1320.15% 266.72%  3225
+  5m30s |   518 MB 8192 bytes   15104900  149093  1422.34% 239.97%  3157

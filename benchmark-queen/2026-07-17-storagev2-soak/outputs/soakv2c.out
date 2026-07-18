@@ -1,0 +1,20 @@
+[2026-07-17T21:33:47Z] recreate Postgres (soak/April tuning, max_wal_size=96GB)
+[2026-07-17T21:33:50Z] start C++ broker queen-mq:segments (auto-inits schema incl. q2)
+[2026-07-17T21:33:55Z] configure soakv2_24940 storage=segments + retention(comp=60)
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":60,"deadLetterQueue":false,"dedupWindowSeconds":120,"delayedProcessing":0,"dlqAfterMaxRetries":false,"encryptionEnabled":false,"leaseTime":60,"maxSize":0,"maxWaitTimeSeconds":0,"priority":0,"retentionEnabled":true,"retentionSeconds":7200,"retryDelay":1000,"retryLimit":3,"storage":"segments","ttl":3600,"windowBuffer":0},"partitionId":"e7c0bb33-85ab-4e0f-97dc-c3540c8a8e83","queue":"soakv2_24940","queueId":"f6c35fdb-81ac-4f0c-8c36-5b6d9f4abb63","task":""}
+[2026-07-17T21:33:55Z] queue row: soakv2_24940 storage=segments retEnabled=true comp=60
+[2026-07-17T21:33:55Z] === storage-v2 soak (segments) :6681 bp-100 for 480s ===
+  time  | push/s  pop/s | bCPU    pgCPU | segTbl   dedupTbl  msgs(sum)   segs commits/s
+[2026-07-17T21:34:23Z] retention re-applied: segments comp=60 dedup=120
+  1m0s  |      0      0 | 781.45% 633.73% |   236 MB  1163 MB    7893700  79115 2284
+  1m30s |      0      0 | 251.07% 654.67% |   259 MB  1693 MB    7327400  73440 2094
+  2m0s  |      0      0 | 714.60% 154.15% |   259 MB  2131 MB    6905400  69024 1845
+  2m30s |      0      0 | 729.46% 102.86% |   210 MB  2132 MB    4868200  48656 1041
+  3m0s  |      0      0 | 717.22% 101.44% |   210 MB  2132 MB    2615300  26131 559
+  3m30s |      0      0 | 374.71% 189.49% |    81 MB  2132 MB    1663900  16620 505
+  4m0s  |      0      0 | 767.23% 482.79% |    95 MB  1219 MB    3023800  30198 1189
+  4m30s |      0      0 | 753.12% 598.21% |   174 MB  1428 MB    5921100  59317 1875
+  5m0s  |      0      0 | 736.63% 618.96% |   218 MB  1653 MB    6559700  65735 1860
+  5m30s |      0      0 | 777.43% 662.89% |   220 MB  1904 MB    6403200  63995 1916
+  6m0s  |      0      0 | 444.70% 100.75% |   220 MB  1930 MB    4570600  45669 1132
+  6m30s |      0      0 | 344.92% 101.72% |   175 MB  1930 MB    2482300  24778 506

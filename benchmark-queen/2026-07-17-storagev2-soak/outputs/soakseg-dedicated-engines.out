@@ -1,0 +1,26 @@
+[2026-07-18T04:23:40Z] recreate Postgres (soak/April tuning, max_wal_size=96GB)
+[2026-07-18T04:23:43Z] start broker queen-mq:segments (dedicated segment engines; auto-inits queen.seg_* schema)
+[2026-07-18T04:23:48Z] configure seg_17644 storage=segments dedup=0 comp=60
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":60,"deadLetterQueue":false,"dedupWindowSeconds":0,"delayedProcessing":0,"dlqAfterMaxRetries":false,"encryptionEnabled":false,"leaseTime":60,"maxSize":0,"maxWaitTimeSeconds":0,"priority":0,"retentionEnabled":true,"retentionSeconds":7200,"retryDelay":1000,"retryLimit":3,"storage":"segments","ttl":3600,"windowBuffer":0},"partitionId":"4b9cc657-34c8-4f55-b250-886d451ab863","queue":"seg_17644","queueId":"80ec9faa-9a2f-4d13-95d2-7b0c83e57f08","task":""}
+[2026-07-18T04:23:48Z] queue row: seg_17644 storage=segments  seg_queue: dedup=0
+[2026-07-18T04:23:48Z] === storage-v2 segments soak (dedicated engines) :6681 bp-100 480s load=200x200 ===
+  time  | segTbl   dedupTbl  msgs(sum)    segs  bCPU     pgCPU  commits/s
+  1m0s  |   452 MB 8192 bytes   15089800  149526  1334.87% 375.73%  3162
+  1m30s |   506 MB 8192 bytes   15762600  156274  1280.24% 359.10%  3090
+  2m0s  |   547 MB 8192 bytes   16561200  164073  1301.88% 394.08%  3076
+  2m30s |   580 MB 8192 bytes   17163000  169899  1357.60% 360.27%  3118
+  3m0s  |   605 MB 8192 bytes   18429400  182428  1367.12% 359.26%  3108
+  3m30s |   625 MB 8192 bytes   18762600  185839  1344.39% 357.90%  3119
+  4m0s  |   650 MB 8192 bytes   18982500  187932  1350.00% 339.65%  3072
+  4m30s |   669 MB 8192 bytes   20004600  198089  1340.45% 385.90%  3092
+  5m0s  |   700 MB 8192 bytes   20091200  198958  1371.66% 381.48%  3069
+  5m30s |   712 MB 8192 bytes   21137200  209313  1329.74% 372.97%  3027
+  6m0s  |   715 MB 8192 bytes   20924600  207095  1279.78% 360.61%  3035
+  6m30s |   724 MB 8192 bytes   21354100  211380  1368.57% 377.47%  3070
+  7m0s  |   750 MB 8192 bytes   22808400  225875  1381.01% 410.59%  3065
+  7m30s |   751 MB 8192 bytes   16390200  161854    1.23%   0.07%  841
+  8m0s  |   751 MB 8192 bytes    9165400   90444    1.11%   0.05%  8
+[2026-07-18T04:32:51Z] final load: [final] pushed=111438300 popped=102311400 pushErr=0 popErr=0 emptyPops=0
+[2026-07-18T04:32:51Z] final seg_segments: 751 MB msgs=9165400
+[2026-07-18T04:32:51Z] final seg_dedup: 8192 bytes rows=0
+[2026-07-18T04:32:51Z] ###### soakseg done ######

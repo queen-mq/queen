@@ -1,0 +1,27 @@
+[2026-07-17T21:18:51Z] recreate Postgres (soak/April tuning, max_wal_size=96GB)
+[2026-07-17T21:18:53Z] start C++ broker queen-mq:segments (auto-inits schema incl. q2)
+[2026-07-17T21:18:58Z] configure soakv2_21204 storage=segments + retention(comp=60)
+{"configured":true,"namespace":"","options":{"completedRetentionSeconds":60,"deadLetterQueue":false,"dedupWindowSeconds":0,"delayedProcessing":0,"dlqAfterMaxRetries":false,"encryptionEnabled":false,"leaseTime":60,"maxSize":0,"maxWaitTimeSeconds":0,"priority":0,"retentionEnabled":true,"retentionSeconds":7200,"retryDelay":1000,"retryLimit":3,"storage":"segments","ttl":3600,"windowBuffer":0},"partitionId":"84ec8959-b84a-4a95-96ab-30cef36822e3","queue":"soakv2_21204","queueId":"07df65ba-07e3-4177-bd1e-19524326514b","task":""}
+[2026-07-17T21:18:58Z] queue row: soakv2_21204 storage=segments retEnabled=true comp=60
+[2026-07-17T21:18:58Z] === storage-v2 soak (segments) :6681 bp-100 for 480s ===
+  time  | push/s  pop/s | bCPU    pgCPU | segTbl   dedupTbl  msgs(sum)   segs commits/s
+[2026-07-17T21:19:27Z] retention re-applied: segments comp=60 dedup=0
+  1m0s  |      0      0 | 892.42% 472.79% |   322 MB 8192 bytes    9678700  97040 3071
+  1m30s |      0      0 | 939.67% 460.57% |   332 MB 8192 bytes    9856200  98770 3069
+  2m0s  |      0      0 | 836.02% 453.05% |   332 MB 8192 bytes    9577400  96019 3102
+  2m30s |      0      0 | 842.73% 451.05% |   338 MB 8192 bytes   10116900 101427 3118
+  3m0s  |      0      0 | 844.43% 441.13% |   331 MB 8192 bytes    9559300  95842 3064
+  3m30s |      0      0 | 836.08% 472.67% |   353 MB 8192 bytes    9703100  97266 3146
+  4m0s  |      0      0 | 861.15% 447.84% |   353 MB 8192 bytes    9760600  97781 3102
+  4m30s |      0      0 | 878.79% 439.72% |   333 MB 8192 bytes    9544500  95616 3100
+  5m0s  |      0      0 | 808.87% 458.97% |   339 MB 8192 bytes    9854800  98795 3092
+  5m30s |      0      0 | 780.87% 450.02% |   356 MB 8192 bytes    9453800  94791 3123
+  6m0s  |      0      0 |  1.81%   3.78% |   328 MB 8192 bytes    8860300  88575 2940
+  6m30s |      0      0 |  1.63%   0.79% |   307 MB 8192 bytes    3742500  37411 45
+  7m0s  |      0      0 |  1.64%   0.08% |   302 MB 8192 bytes       2100     21 10
+  7m30s |      0      0 |  1.75%   0.59% |   302 MB 8192 bytes       2100     21 7
+  8m0s  |      0      0 |  1.61%   0.09% |   302 MB 8192 bytes       2100     21 8
+[2026-07-17T21:29:17Z] final load: [final] pushed=75025100 popped=75021000 pushErr=0 popErr=0 emptyPops=20
+[2026-07-17T21:29:18Z] final q2.segments: 302 MB msgs=2100 segs=21
+[2026-07-17T21:29:18Z] final q2.dedup: 8192 bytes rows=0
+[2026-07-17T21:29:18Z] ###### soakv2 done ######

@@ -1,0 +1,12 @@
+[2026-07-17T20:10:02Z] recreate Postgres (soak/April tuning, max_wal_size=96GB)
+[2026-07-17T20:10:12Z] queue soaklong28039 retention: true comp=60
+[2026-07-17T20:10:12Z] === Rust soak (fusion500, retParallel=8, completedRet=60s) :6671 bp-100 for 480s ===
+  time  | push/s  pop/s | bCPU   pgCPU | msgsTbl  liveTup   deadTup commits/s
+[2026-07-17T20:10:39Z] retention re-applied: true comp=60
+  1m0s  | 112970 113947 | 97.90% 1173.88% |    4645         0   6681349 457
+  1m30s | 112930 112647 | 94.15% 1396.23% |    6972         0  10053141 408
+  2m0s  | 111207 111017 | 117.43% 1319.11% |    9275         0  13500089 438
+  2m30s | 112953 113240 | 131.04% 1434.54% |      11         0  16827770 449
+  3m0s  | 113953 113730 | 119.09% 1137.75% |      14         0  20231737 485
+  3m30s | 109367 109880 | 124.80% 1289.73% |      16         0  23522704 403
+  4m0s  | 113180 113337 | 121.12% 1136.16% |      18         0  26890223 487

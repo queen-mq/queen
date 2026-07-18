@@ -1,0 +1,7 @@
+###### vegas-match (Rust @ C++ concurrency) DURATION=45 ######
+Rust V1 conc25/25 fusionC                | push= 55660 pop= 54871 /s | commits/s=  329 | brokerCPU= 126.8% CPUus/msg=11.48 pgCPU= 1499.3%
+Rust V2 conc25/25 pushFusionOff          | push= 69030 pop= 68274 /s | commits/s= 2051 | brokerCPU= 206.4% CPUus/msg=15.03 pgCPU= 1404.4%
+Rust V3 conc40push/25pop fusionC         | push= 55618 pop= 54980 /s | commits/s=  342 | brokerCPU= 140.4% CPUus/msg=12.70 pgCPU=  812.9%
+--- anchor ---
+C++ 0.16.0 vegas (anchor)                | push= 63368 pop= 62949 /s | commits/s=  806 | brokerCPU= 299.3% CPUus/msg=23.70 pgCPU= 1338.4%
+###### done ######

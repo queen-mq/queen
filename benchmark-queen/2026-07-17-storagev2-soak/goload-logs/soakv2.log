@@ -1,0 +1,7 @@
+goload -> http://localhost:6681 queue=soakv2_990 partitions=100 producers=200 consumers=200 pushBatch=100 popBatch=500 payload=256B idleConns=512 retries=2
+[configure] queue=soakv2_990 completedRetentionSeconds=300
+[21:43:37] push=  148615/s pop=  148528/s | tot push=14861500 pop=14852800 | errs p=0 c=0 empty=249
+[21:45:17] push=  143557/s pop=  143517/s | tot push=29217200 pop=29204500 | errs p=0 c=0 empty=542
+[21:46:57] push=  145978/s pop=  146088/s | tot push=43815000 pop=43813300 | errs p=0 c=0 empty=850
+[21:48:37] push=  145600/s pop=  145529/s | tot push=58375000 pop=58366200 | errs p=0 c=0 empty=1177
+[final] pushed=70171600 popped=70161900 pushErr=0 popErr=0 emptyPops=1376

@@ -1,0 +1,15 @@
+[2026-07-17T19:08:52Z] recreate Postgres with soak/April tuning (max_wal_size=96GB)
+[2026-07-17T19:09:03Z] === Rust tuned (zero-copy attr, C++-matched fusion) :6661  bp-100 for 300s (queue=soak10952) ===
+  min | push/s  pop/s | brokerCPU  pgCPU | msgsTbl commits/s
+  1m0s  | 114817 115287 |   127.73% 1565.67% | 4756 MB 569
+  1m30s | 113577 113350 |   124.40% 1401.38% | 7085 MB 605
+  2m0s  | 111393 110827 |    71.84% 1495.70% | 9313 MB 584
+  2m30s | 106840 107717 |   101.29% 1734.54% |   11 GB 573
+  3m0s  | 109393 109217 |   123.86% 1642.12% |   14 GB 618
+  3m30s | 109183 108660 |   123.23% 1624.89% |   16 GB 576
+  4m0s  | 104917 104863 |   121.73% 1498.16% |   18 GB 530
+  4m30s | 107790 108120 |   123.83% 1302.00% |   20 GB 584
+  5m0s  |   9700   9827 |     0.14%  100.87% |   20 GB 65
+[2026-07-17T19:14:37Z] final load: [final] pushed=29752700 popped=29731400 pushErr=0 popErr=0 emptyPops=22
+[2026-07-17T19:14:37Z] messages table: 20 GB  live=29258913
+[2026-07-17T19:14:38Z] ###### soak5 done ######
