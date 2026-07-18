@@ -93,7 +93,7 @@ void setup_streams_cycle_routes(uWS::App* app, const RouteContext& ctx) {
                                 && queen::routes_v2::is_segment_queue(pi["queue"].get<std::string>())) {
                                 send_error_response(res,
                                     "segments storage: not supported on this endpoint yet — track: "
-                                    "transaction=q2.transaction_wire_v1 pending C++ wiring; "
+                                    "transaction=queen.seg_transaction_wire_v1 pending C++ wiring; "
                                     "streams=v1-only by design", 501);
                                 return;
                             }

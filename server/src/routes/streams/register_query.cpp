@@ -87,7 +87,7 @@ void setup_streams_register_query_routes(uWS::App* app, const RouteContext& ctx)
                             || (!sink_q.empty() && queen::routes_v2::is_segment_queue(sink_q))) {
                             send_error_response(res,
                                 "segments storage: not supported on this endpoint yet — track: "
-                                "transaction=q2.transaction_wire_v1 pending C++ wiring; "
+                                "transaction=queen.seg_transaction_wire_v1 pending C++ wiring; "
                                 "streams=v1-only by design", 501);
                             return;
                         }

@@ -853,7 +853,7 @@ std::vector<PushResult> AsyncQueueManager::push_messages_internal(const std::vec
                 }
 
                 static const std::string seg_sql =
-                    "SELECT q2.push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
+                    "SELECT queen.seg_push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
 
                 while (!live.empty()) {
                     nlohmann::json metas = nlohmann::json::array();

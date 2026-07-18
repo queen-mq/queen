@@ -249,17 +249,17 @@ inline bool unpack_frames(const std::string& raw, std::vector<FrameOut>& out) {
 // at pop time. A wildcard pop claims several partitions under ONE leaseId, so
 // entries are keyed leaseId -> partitionId(uuid) -> in-flight batch, and acks
 // carry the partition they target. Completion and contiguity are tracked per
-// partition (each partition has its own cursor row in q2.consumers); the
+// partition (each partition has its own cursor row in queen.seg_consumers); the
 // outer lease entry disappears when its last partition completes.
 // Single-process scope; a pop answered by one worker thread and acked through
 // another still hits it (shared map + mutex). Cross-process acks fall back to
-// the q2.ack_by_txn_v1 resolver (see try_handle_ack_v2).
+// the queen.seg_ack_by_txn_v1 resolver (see try_handle_ack_v2).
 struct LeaseBatch {
     std::string queue;
     std::string partition;
     std::string consumer_group;
     // Delivered positions, in order: (seq, offset_after_this_message) plus the
-    // frame's txn and message id (the id feeds explicit-dlq q2.dlq rows).
+    // frame's txn and message id (the id feeds explicit-dlq queen.seg_dlq rows).
     struct Pos { int64_t seq; int32_t off_after; std::string txn; std::string mid; };
     std::vector<Pos> positions;
     // Sized to positions by LeaseRegistry::put; callers only fill positions.
@@ -272,7 +272,7 @@ struct LeaseBatch {
     // whose SQL lease is long gone are swept lazily on put/ack, so abandoned
     // batches (consumer died, never acked) cannot leak the registry. An entry
     // swept while its SQL lease is still live (e.g. renewed) is harmless: the
-    // ack falls back to q2.ack_by_txn_v1 which validates against SQL state.
+    // ack falls back to queen.seg_ack_by_txn_v1 which validates against SQL state.
     std::chrono::steady_clock::time_point deadline{};
 };
 
@@ -305,10 +305,10 @@ public:
     // batch closes early). The persisted position is the highest contiguous
     // acked-OK prefix: a nack must NOT advance the cursor past the failed
     // message — redelivery restarts there, which is exactly what drives the
-    // attempt counter in q2.pop_segments_v1 (retry/DLQ model, 024).
+    // attempt counter in queen.seg_pop_segments_v1 (retry/DLQ model, 024).
     // Position of an explicit status='dlq' ack inside the persisted prefix:
-    // the broker files it to q2.dlq (dead-letter on explicit request, v1
-    // parity — see q2.dlq_head_v1).
+    // the broker files it to queen.seg_dlq (dead-letter on explicit request, v1
+    // parity — see queen.seg_dlq_head_v1).
     struct DlqPos { int64_t seq; int32_t frame_idx; std::string txn; std::string mid; };
     struct AckOutcome {
         bool known = false;        // lease+partition found and txn matched
@@ -316,7 +316,7 @@ public:
                                    // on a live batch: idempotent client retry,
                                    // no state change (and no fallback — the
                                    // SQL resolver would void the live lease)
-        bool complete = false;     // time to call q2.ack_segments_v1
+        bool complete = false;     // time to call queen.seg_ack_segments_v1
         bool ok = true;            // p_ok for the SQL call
         int64_t upto_seq = 0;
         int32_t upto_off = 0;
@@ -324,7 +324,7 @@ public:
         std::string queue, partition, consumer_group;
         // Explicit-dlq positions within the acked prefix, ascending; only
         // filled when complete. The wire ack files (at most) the last one via
-        // q2.dlq_head_v1 (see try_handle_ack_v2).
+        // queen.seg_dlq_head_v1 (see try_handle_ack_v2).
         std::vector<DlqPos> dlq_positions;
     };
     // `dlq` marks an explicit status='dlq' ack: the position counts as
@@ -420,7 +420,7 @@ public:
         int64_t upto_seq = 0;
         int32_t upto_off = 0;
         int32_t acked_count = 0;
-        std::string lease_id;      // owning lease == q2.consumers.worker_id
+        std::string lease_id;      // owning lease == queen.seg_consumers.worker_id
         std::string queue, partition, consumer_group;
     };
     TxnAckPreview preview_txn_ack(

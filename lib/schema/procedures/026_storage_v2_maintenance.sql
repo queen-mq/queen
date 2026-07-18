@@ -2,15 +2,15 @@
 -- Storage v2 (segments engine) — maintenance procedures.
 -- Companion to 023_storage_v2.sql (schema q2). Applied idempotently at boot.
 --
---   q2.retention_boundary_v1  boundary walk helper (same walk as q2.retention_v1)
---   q2.retention_sweep_v1     per-queue retention + completed-retention + dedup purge
---   q2.evict_v1               max_queue_size enforcement for v2 queues
---   q2.transaction_wire_v1    atomic push+ack for segment queues (wire, base64)
+--   queen.seg_retention_boundary_v1  boundary walk helper (same walk as queen.seg_retention_v1)
+--   queen.seg_retention_sweep_v1     per-queue retention + completed-retention + dedup purge
+--   queen.seg_evict_v1               max_queue_size enforcement for v2 queues
+--   queen.seg_transaction_wire_v1    atomic push+ack for segment queues (wire, base64)
 --
 -- Configuration lives in queen.queues (retention_enabled, retention_seconds,
 -- completed_retention_seconds, max_queue_size, storage) — the v2 engine only
--- applies to rows with storage = 'segments'; queen.queues and q2.queues are
--- correlated by name. Dedup window lives in q2.queues.dedup_window_seconds.
+-- applies to rows with storage = 'segments'; queen.queues and queen.seg_queues are
+-- correlated by name. Dedup window lives in queen.seg_queues.dedup_window_seconds.
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -18,10 +18,10 @@
 -- the smallest seq >= p_from whose created_at >= p_cutoff. created_at is
 -- monotone in seq per partition (stamped under the seq-allocator row lock),
 -- so this is a single forward index walk starting at the previous watermark —
--- identical to the walk inside q2.retention_v1 in 023. Returns p_from when
+-- identical to the walk inside queen.seg_retention_v1 in 023. Returns p_from when
 -- there is nothing to delete (boundary == watermark => empty delete range).
 -- ----------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION q2.retention_boundary_v1(
+CREATE OR REPLACE FUNCTION queen.seg_retention_boundary_v1(
     p_partition_id UUID,
     p_from BIGINT,
     p_cutoff TIMESTAMPTZ
@@ -32,7 +32,7 @@ DECLARE
     v_boundary BIGINT;
 BEGIN
     SELECT s.seq INTO v_boundary
-    FROM q2.segments s
+    FROM queen.seg_segments s
     WHERE s.partition_id = p_partition_id
       AND s.seq >= p_from
       AND s.created_at >= p_cutoff
@@ -40,7 +40,7 @@ BEGIN
 
     IF v_boundary IS NULL THEN
         -- everything (if anything) above the watermark is older than the cutoff
-        SELECT max(seq) + 1 INTO v_boundary FROM q2.segments
+        SELECT max(seq) + 1 INTO v_boundary FROM queen.seg_segments
         WHERE partition_id = p_partition_id AND seq >= p_from;
     END IF;
 
@@ -71,7 +71,7 @@ $$;
 -- repeated sweeps never re-scan the dead head of the PK index.
 --
 -- Afterwards the dedup window is purged per q2 queue (entries older than
--- q2.queues.dedup_window_seconds), in LIMIT-batched deletes so a huge backlog
+-- queen.seg_queues.dedup_window_seconds), in LIMIT-batched deletes so a huge backlog
 -- can't hold one giant delete open. The dedup purge intentionally covers ALL
 -- q2 queues with a window (not just retention-enabled ones): the window is a
 -- dedup property, unrelated to retention.
@@ -79,7 +79,7 @@ $$;
 -- Returns {"queues":N,"segments_deleted":N,"dedup_purged":N} where "queues"
 -- counts the v2 queues examined for retention.
 -- ----------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION q2.retention_sweep_v1()
+CREATE OR REPLACE FUNCTION queen.seg_retention_sweep_v1()
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -96,15 +96,15 @@ DECLARE
 BEGIN
     -- ---------------------------------------------------------- retention
     -- LOCK ORDER (deadlock discipline): the watermark UPDATE takes a
-    -- q2.partitions row lock that is held to commit, and
-    -- q2.transaction_wire_v1 pre-locks its push partitions in ascending id
+    -- queen.seg_partitions row lock that is held to commit, and
+    -- queen.seg_transaction_wire_v1 pre-locks its push partitions in ascending id
     -- order. Iterating partitions in that same GLOBAL ascending-id order —
     -- one flat loop across all retention-enabled queues, not per-queue
     -- batches whose ids could interleave — gives every multi-partition
     -- locker one total order (live-reproduced 40P01 without it).
     SELECT COUNT(*) INTO v_queues
     FROM queen.queues qq
-    JOIN q2.queues q2q ON q2q.name = qq.name
+    JOIN queen.seg_queues q2q ON q2q.name = qq.name
     WHERE qq.storage = 'segments'
       AND qq.retention_enabled
       AND (qq.retention_seconds > 0 OR qq.completed_retention_seconds > 0);
@@ -113,8 +113,8 @@ BEGIN
         SELECT p.id, p.retention_seq,
                qq.retention_seconds, qq.completed_retention_seconds
         FROM queen.queues qq
-        JOIN q2.queues q2q ON q2q.name = qq.name
-        JOIN q2.partitions p ON p.queue_id = q2q.id
+        JOIN queen.seg_queues q2q ON q2q.name = qq.name
+        JOIN queen.seg_partitions p ON p.queue_id = q2q.id
         WHERE qq.storage = 'segments'
           AND qq.retention_enabled
           AND (qq.retention_seconds > 0 OR qq.completed_retention_seconds > 0)
@@ -124,7 +124,7 @@ BEGIN
 
         -- Rule 1: time-based retention over ALL segments.
         IF v_p.retention_seconds > 0 THEN
-            v_boundary := GREATEST(v_boundary, q2.retention_boundary_v1(
+            v_boundary := GREATEST(v_boundary, queen.seg_retention_boundary_v1(
                 v_p.id, v_p.retention_seq,
                 now() - make_interval(secs => v_p.retention_seconds)));
         END IF;
@@ -136,25 +136,25 @@ BEGIN
         -- explicit "drop unconsumed data after N seconds" knob).
         IF v_p.completed_retention_seconds > 0 THEN
             SELECT MIN(c.next_seq) INTO v_min_next
-            FROM q2.consumers c WHERE c.partition_id = v_p.id;
+            FROM queen.seg_consumers c WHERE c.partition_id = v_p.id;
 
             IF v_min_next IS NOT NULL AND v_min_next > v_p.retention_seq THEN
                 v_boundary := GREATEST(v_boundary, LEAST(
                     v_min_next,
-                    q2.retention_boundary_v1(
+                    queen.seg_retention_boundary_v1(
                         v_p.id, v_p.retention_seq,
                         now() - make_interval(secs => v_p.completed_retention_seconds))));
             END IF;
         END IF;
 
         IF v_boundary > v_p.retention_seq THEN
-            DELETE FROM q2.segments
+            DELETE FROM queen.seg_segments
             WHERE partition_id = v_p.id
               AND seq >= v_p.retention_seq AND seq < v_boundary;
             GET DIAGNOSTICS v_n = ROW_COUNT;
             v_segments_deleted := v_segments_deleted + v_n;
 
-            UPDATE q2.partitions SET retention_seq = v_boundary
+            UPDATE queen.seg_partitions SET retention_seq = v_boundary
             WHERE id = v_p.id AND retention_seq < v_boundary;
         END IF;
     END LOOP;
@@ -162,15 +162,15 @@ BEGIN
     -- --------------------------------------------------------- dedup purge
     FOR v_q IN
         SELECT q2q.id AS q2_queue_id, q2q.dedup_window_seconds
-        FROM q2.queues q2q
+        FROM queen.seg_queues q2q
         WHERE q2q.dedup_window_seconds > 0
     LOOP
         LOOP
-            DELETE FROM q2.dedup d
+            DELETE FROM queen.seg_dedup d
             WHERE d.ctid IN (
                 SELECT d2.ctid
-                FROM q2.dedup d2
-                JOIN q2.partitions p ON p.id = d2.partition_id
+                FROM queen.seg_dedup d2
+                JOIN queen.seg_partitions p ON p.id = d2.partition_id
                 WHERE p.queue_id = v_q.q2_queue_id
                   AND d2.created_at < now() - make_interval(secs => v_q.dedup_window_seconds)
                 LIMIT c_batch
@@ -214,7 +214,7 @@ $$;
 -- Returns {"queues":N,"segments_deleted":N,"messages_evicted":N} where
 -- messages_evicted counts PENDING (unconsumed) messages dropped.
 -- ----------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION q2.evict_v1()
+CREATE OR REPLACE FUNCTION queen.seg_evict_v1()
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -230,33 +230,33 @@ DECLARE
     v_boundary BIGINT;
     v_n BIGINT;
 BEGIN
-    -- LOCK ORDER: same discipline as q2.retention_sweep_v1 — one flat
-    -- partition loop in GLOBAL ascending q2.partitions.id order, matching
-    -- q2.transaction_wire_v1's pre-lock order, so concurrent evictions,
+    -- LOCK ORDER: same discipline as queen.seg_retention_sweep_v1 — one flat
+    -- partition loop in GLOBAL ascending queen.seg_partitions.id order, matching
+    -- queen.seg_transaction_wire_v1's pre-lock order, so concurrent evictions,
     -- sweeps and transactions never acquire partition row locks in
     -- conflicting orders (40P01).
     SELECT COUNT(*) INTO v_queues
     FROM queen.queues qq
-    JOIN q2.queues q2q ON q2q.name = qq.name
+    JOIN queen.seg_queues q2q ON q2q.name = qq.name
     WHERE qq.storage = 'segments'
       AND qq.max_queue_size > 0;
 
     FOR v_p IN
         SELECT p.id, p.retention_seq, qq.max_queue_size
         FROM queen.queues qq
-        JOIN q2.queues q2q ON q2q.name = qq.name
-        JOIN q2.partitions p ON p.queue_id = q2q.id
+        JOIN queen.seg_queues q2q ON q2q.name = qq.name
+        JOIN queen.seg_partitions p ON p.queue_id = q2q.id
         WHERE qq.storage = 'segments'
           AND qq.max_queue_size > 0
         ORDER BY p.id
     LOOP
         -- Slowest cursor; no groups => everything counts as pending.
         SELECT MIN(c.next_seq) INTO v_min_next
-        FROM q2.consumers c WHERE c.partition_id = v_p.id;
+        FROM queen.seg_consumers c WHERE c.partition_id = v_p.id;
         v_min_next := COALESCE(v_min_next, 0);
 
         SELECT COALESCE(SUM(s.msg_count), 0) INTO v_pending
-        FROM q2.segments s
+        FROM queen.seg_segments s
         WHERE s.partition_id = v_p.id AND s.seq >= v_min_next;
 
         CONTINUE WHEN v_pending <= v_p.max_queue_size;
@@ -268,7 +268,7 @@ BEGIN
         v_boundary := v_p.retention_seq;
         FOR v_s IN
             SELECT s.seq, s.msg_count
-            FROM q2.segments s
+            FROM queen.seg_segments s
             WHERE s.partition_id = v_p.id AND s.seq >= v_p.retention_seq
             ORDER BY s.seq
         LOOP
@@ -281,13 +281,13 @@ BEGIN
         END LOOP;
 
         IF v_boundary > v_p.retention_seq THEN
-            DELETE FROM q2.segments
+            DELETE FROM queen.seg_segments
             WHERE partition_id = v_p.id
               AND seq >= v_p.retention_seq AND seq < v_boundary;
             GET DIAGNOSTICS v_n = ROW_COUNT;
             v_segments_deleted := v_segments_deleted + v_n;
 
-            UPDATE q2.partitions SET retention_seq = v_boundary
+            UPDATE queen.seg_partitions SET retention_seq = v_boundary
             WHERE id = v_p.id AND retention_seq < v_boundary;
         END IF;
     END LOOP;
@@ -315,7 +315,7 @@ $$;
 -- (detected by the presence of "txns"): used when the broker's in-memory
 -- LeaseRegistry cannot resolve batch positions because the pop was served by
 -- ANOTHER broker process. The txns are resolved to positions SQL-side via
--- q2.ack_by_txn_v1 (024) — cursor advances to the highest contiguous
+-- queen.seg_ack_by_txn_v1 (024) — cursor advances to the highest contiguous
 -- acked-ok prefix, lease released — so cross-broker transactions work
 -- without any broker registry.
 --
@@ -323,28 +323,28 @@ $$;
 -- every failure path RAISEs, so a duplicate push or a rejected ack rolls back
 -- every other operation in the batch.
 --
---   * pushes reuse q2.push_segment_v1 verbatim (seq allocation under the
+--   * pushes reuse queen.seg_push_segment_v1 verbatim (seq allocation under the
 --     partition row lock, dedup probe, segment insert). A duplicate
 --     (unique_violation, message 'QDUP ...') is re-raised with transaction
 --     context, keeping ERRCODE unique_violation so callers can classify it.
---   * acks reuse q2.ack_segments_v1 / q2.ack_by_txn_v1; their soft failures
+--   * acks reuse queen.seg_ack_segments_v1 / queen.seg_ack_by_txn_v1; their soft failures
 --     (ok:false — invalid or expired lease, position beyond leased batch,
 --     ...) are escalated to an exception so the whole transaction rolls back.
 --   * acks address the q2 partition by uuid ("partitionId", echoed by
 --     pop_segments_wire_v1); it is resolved back to (queue, partition) names.
 --   * acks execute in ascending (partition_id, group) order — NOT input
---     order: each ack locks its (partition, group) q2.consumers row until
+--     order: each ack locks its (partition, group) queen.seg_consumers row until
 --     commit, so concurrent transactions acking overlapping sets must take
 --     those locks in one total order (the same ascending-uuid discipline the
---     push pre-pass and the maintenance sweeps use for q2.partitions).
+--     push pre-pass and the maintenance sweeps use for queen.seg_partitions).
 --
 -- Mixed-engine guard: a queue that exists in queen.queues with
 -- storage <> 'segments' may not appear in a v2 transaction (its data lives in
 -- queen.messages; combining engines in one atomic batch is a broker bug).
--- Queues absent from queen.queues are allowed — like q2.push_segment_v1, the
+-- Queues absent from queen.queues are allowed — like queen.seg_push_segment_v1, the
 -- q2 side is created lazily and the broker already routed them to v2.
 -- ----------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION q2.transaction_wire_v1(p JSONB)
+CREATE OR REPLACE FUNCTION queen.seg_transaction_wire_v1(p JSONB)
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -371,8 +371,8 @@ BEGIN
     -- Guard: no ack may target a partition whose queue is rows-engine.
     SELECT qq.name INTO v_bad
     FROM jsonb_array_elements(COALESCE(p->'acks', '[]'::jsonb)) op
-    JOIN q2.partitions p2 ON p2.id = (op->>'partitionId')::uuid
-    JOIN q2.queues q2q ON q2q.id = p2.queue_id
+    JOIN queen.seg_partitions p2 ON p2.id = (op->>'partitionId')::uuid
+    JOIN queen.seg_queues q2q ON q2q.id = p2.queue_id
     JOIN queen.queues qq ON qq.name = q2q.name
     WHERE qq.storage <> 'segments'
     LIMIT 1;
@@ -382,36 +382,36 @@ BEGIN
 
     -- Deadlock-safety pre-pass (mirrors PUSHSER in queen.execute_transaction_v2):
     -- a transaction may push to several partitions, and each push takes the
-    -- q2.partitions row lock. Ensure the rows exist, then lock them in
+    -- queen.seg_partitions row lock. Ensure the rows exist, then lock them in
     -- ascending id order BEFORE the first push, so two concurrent
     -- transactions can never lock the same pair in opposite order.
-    INSERT INTO q2.queues (name)
+    INSERT INTO queen.seg_queues (name)
     SELECT DISTINCT op->>'queue'
     FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
     WHERE COALESCE(op->>'queue', '') <> ''
     ON CONFLICT (name) DO NOTHING;
 
-    INSERT INTO q2.partitions (queue_id, name)
+    INSERT INTO queen.seg_partitions (queue_id, name)
     SELECT DISTINCT q2q.id, op->>'partition'
     FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
-    JOIN q2.queues q2q ON q2q.name = op->>'queue'
+    JOIN queen.seg_queues q2q ON q2q.name = op->>'queue'
     ON CONFLICT (queue_id, name) DO NOTHING;
 
     FOR v_pid IN
         SELECT DISTINCT p2.id
         FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
-        JOIN q2.queues q2q ON q2q.name = op->>'queue'
-        JOIN q2.partitions p2 ON p2.queue_id = q2q.id AND p2.name = op->>'partition'
+        JOIN queen.seg_queues q2q ON q2q.name = op->>'queue'
+        JOIN queen.seg_partitions p2 ON p2.queue_id = q2q.id AND p2.name = op->>'partition'
         ORDER BY p2.id
     LOOP
-        PERFORM 1 FROM q2.partitions WHERE id = v_pid FOR UPDATE;
+        PERFORM 1 FROM queen.seg_partitions WHERE id = v_pid FOR UPDATE;
     END LOOP;
 
     -- ------------------------------------------------------------- pushes
     FOR v_op IN SELECT * FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb))
     LOOP
         BEGIN
-            v_res := q2.push_segment_v1(
+            v_res := queen.seg_push_segment_v1(
                 v_op->>'queue',
                 v_op->>'partition',
                 v_op->'metas',
@@ -435,24 +435,24 @@ BEGIN
         ORDER BY (op.value->>'partitionId')::uuid, op.value->>'group'
     LOOP
         SELECT q2q.name, p2.name INTO v_queue, v_partition
-        FROM q2.partitions p2
-        JOIN q2.queues q2q ON q2q.id = p2.queue_id
+        FROM queen.seg_partitions p2
+        JOIN queen.seg_queues q2q ON q2q.id = p2.queue_id
         WHERE p2.id = (v_op->>'partitionId')::uuid;
         IF v_queue IS NULL THEN
             RAISE EXCEPTION 'QTXN ack references unknown partition %', v_op->>'partitionId';
         END IF;
 
         IF v_op ? 'txns' THEN
-            -- Cross-broker form: positions resolved from the q2.dedup
+            -- Cross-broker form: positions resolved from the queen.seg_dedup
             -- window, cursor advanced to the highest contiguous acked-ok
             -- prefix, lease released (exactly the plain wire fallback path).
-            v_res := q2.ack_by_txn_v1(
+            v_res := queen.seg_ack_by_txn_v1(
                 (v_op->>'partitionId')::uuid,
                 v_op->>'group',
                 v_op->>'worker',
                 COALESCE(v_op->'txns', '[]'::jsonb));
         ELSE
-            v_res := q2.ack_segments_v1(
+            v_res := queen.seg_ack_segments_v1(
                 v_queue,
                 v_partition,
                 v_op->>'group',

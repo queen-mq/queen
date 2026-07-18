@@ -61,7 +61,12 @@ concurrency_mode_from_env() noexcept {
 // QUEEN_CONCURRENCY_MODE (Vegas by default).
 inline ConcurrencyMode
 concurrency_mode_for(JobType t, ConcurrencyMode global_default) noexcept {
-    if (t == JobType::PUSH || t == JobType::POP || t == JobType::ACK) {
+    if (t == JobType::PUSH || t == JobType::POP || t == JobType::ACK
+        || t == JobType::SEGMENT_PUSH || t == JobType::SEGMENT_POP
+        || t == JobType::SEGMENT_ACK) {
+        // Segment lanes are data-path writes/reads like PUSH/POP/ACK: default to
+        // STATIC at their policy max (Vegas misreads segment RTT the same way),
+        // overridable per lane via QUEEN_SEGMENT_<PUSH|POP|ACK>_CONCURRENCY_MODE.
         std::string env = std::string("QUEEN_") + detail::job_type_env_segment(t) + "_CONCURRENCY_MODE";
         const char* v = std::getenv(env.c_str());
         if (v && std::string(v) == "vegas")  return ConcurrencyMode::Vegas;

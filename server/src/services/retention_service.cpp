@@ -120,12 +120,12 @@ void RetentionService::cleanup_cycle() {
 
             // Storage v2 (segments): one single-transaction sweep over all v2
             // queues — time retention + completed retention + dedup-window
-            // purge (q2.retention_sweep_v1, 026_storage_v2_maintenance.sql).
+            // purge (queen.seg_retention_sweep_v1, 026_storage_v2_maintenance.sql).
             // Still under the advisory lock held on lock_conn, so concurrent
             // broker instances never double-sweep.
             try {
                 auto conn = db_pool_->acquire();
-                sendQueryParamsAsync(conn.get(), "SELECT q2.retention_sweep_v1()", {});
+                sendQueryParamsAsync(conn.get(), "SELECT queen.seg_retention_sweep_v1()", {});
                 auto sweep = getTuplesResult(conn.get());
                 if (PQntuples(sweep.get()) > 0 && !PQgetisnull(sweep.get(), 0, 0)) {
                     // {"queues":N,"segments_deleted":N,"dedup_purged":N}

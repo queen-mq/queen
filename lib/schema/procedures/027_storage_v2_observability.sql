@@ -5,7 +5,7 @@
 -- 009/010 message listing, 013 stats reconciler, 018 prometheus) reads
 -- queen.messages / queen.partition_consumers directly, so storage='segments'
 -- queues would show ZEROS everywhere. This file:
---   * adds q2.stats_v1 — the v2-native per-queue stats entry point;
+--   * adds queen.seg_stats_v1 — the v2-native per-queue stats entry point;
 --   * redefines (versioning pattern: this file applies AFTER the originals
 --     in lexical order and supersedes them at boot) the v1 procedures that
 --     routes/webapp dispatch, making them dual-mode:
@@ -21,12 +21,12 @@
 -- early-return path.
 --
 -- v2 semantics used throughout:
---   * pending frames for (partition, group) = SUM over q2.segments s with
+--   * pending frames for (partition, group) = SUM over queen.seg_segments s with
 --     s.seq >= cursor.next_seq of (s.msg_count - next_off if s.seq=next_seq).
 --   * "worst group" per partition = the minimum (next_seq, next_off) cursor;
 --     a partition with no consumer rows has its whole backlog pending.
 --   * time lag = age of the oldest segment that still has unconsumed frames.
---   * blobs are OPAQUE to SQL: payloads (and transaction-id text — q2.dedup
+--   * blobs are OPAQUE to SQL: payloads (and transaction-id text — queen.seg_dedup
 --     stores only hashtextextended(txn)) can only be recovered by the broker
 --     decompressing frames. Message-level listings therefore carry
 --     "payloadAvailable": false and "transactionId": null; the route layer
@@ -34,7 +34,7 @@
 -- ============================================================================
 
 -- ============================================================================
--- q2.stats_v1: per-queue stats for the segments engine.
+-- queen.seg_stats_v1: per-queue stats for the segments engine.
 -- Returns a JSONB array, one element per q2 queue (optionally filtered):
 --   { queue, segments, totalFrames, pendingFrames, totalBytes,
 --     oldestPendingAt, partitions: [ { partition, segments, totalFrames,
@@ -44,15 +44,15 @@
 -- Reports whatever lives in q2 regardless of the queen.queues.storage flag
 -- (it is the engine-native view; the flag only routes traffic).
 -- ============================================================================
-CREATE OR REPLACE FUNCTION q2.stats_v1(p_queue TEXT DEFAULT NULL)
+CREATE OR REPLACE FUNCTION queen.seg_stats_v1(p_queue TEXT DEFAULT NULL)
 RETURNS JSONB
 LANGUAGE sql STABLE
 AS $$
 WITH parts AS (
     SELECT q.name AS queue, p.id AS partition_id, p.name AS partition,
            p.last_seq, p.retention_seq
-    FROM q2.partitions p
-    JOIN q2.queues q ON q.id = p.queue_id
+    FROM queen.seg_partitions p
+    JOIN queen.seg_queues q ON q.id = p.queue_id
     WHERE p_queue IS NULL OR q.name = p_queue
 ),
 -- Worst (most behind) group cursor per partition; NULL when never popped ->
@@ -60,11 +60,11 @@ WITH parts AS (
 worst AS (
     SELECT DISTINCT ON (c.partition_id)
            c.partition_id, c.next_seq, c.next_off
-    FROM q2.consumers c
+    FROM queen.seg_consumers c
     JOIN parts pa ON pa.partition_id = c.partition_id
     ORDER BY c.partition_id, c.next_seq, c.next_off
 ),
--- ONE pre-aggregated pass over q2.segments (GROUP BY partition_id) instead
+-- ONE pre-aggregated pass over queen.seg_segments (GROUP BY partition_id) instead
 -- of per-partition LATERAL SUMs: under partition-count/size skew the planner
 -- turned the LATERALs into re-scans measured at 20-45s; a single hash join
 -- + aggregate stays flat.
@@ -81,7 +81,7 @@ seg_agg AS (
                 AND s.msg_count >
                     CASE WHEN s.seq = w.next_seq THEN w.next_off ELSE 0 END)
                                                           AS oldest_pending_at
-    FROM q2.segments s
+    FROM queen.seg_segments s
     JOIN parts pa ON pa.partition_id = s.partition_id
     LEFT JOIN worst w ON w.partition_id = s.partition_id
     GROUP BY s.partition_id
@@ -133,14 +133,14 @@ FROM (
 ) x;
 $$;
 
-GRANT EXECUTE ON FUNCTION q2.stats_v1(TEXT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.seg_stats_v1(TEXT) TO PUBLIC;
 
 -- ============================================================================
 -- queen.get_consumer_groups_v4 — dual-mode redefinition.
 -- The rows-engine block is copied verbatim from 008 (with an added
 -- storage <> 'segments' guard that is a no-op for rows queues, since v2
 -- queues never get queen.partition_consumers rows); segments-engine groups
--- are computed from q2.consumers/q2.segments and APPENDED to the array.
+-- are computed from queen.seg_consumers/queen.seg_segments and APPENDED to the array.
 -- v2 entries carry the same keys plus "storage":"segments"; unlike the rows
 -- branch, totalLag IS populated (pending frames beyond the cursor are a
 -- cheap PK-range SUM in v2). maxTimeLag = age of the oldest unconsumed
@@ -267,7 +267,7 @@ BEGIN
     -- Pending frames per (partition, group) via ONE pre-aggregated
     -- segments x consumers join (GROUP BY partition_id, consumer_group)
     -- instead of a per-consumer-row LATERAL SUM — the LATERAL plan
-    -- degenerates under skew (see q2.stats_v1).
+    -- degenerates under skew (see queen.seg_stats_v1).
     WITH pend AS (
         SELECT c.partition_id, c.consumer_group,
                COALESCE(SUM(CASE WHEN s.seq >= c.next_seq
@@ -278,8 +278,8 @@ BEGIN
                     AND s.msg_count >
                         CASE WHEN s.seq = c.next_seq THEN c.next_off ELSE 0 END)
                     AS oldest_unconsumed_at
-        FROM q2.consumers c
-        LEFT JOIN q2.segments s ON s.partition_id = c.partition_id
+        FROM queen.seg_consumers c
+        LEFT JOIN queen.seg_segments s ON s.partition_id = c.partition_id
         GROUP BY c.partition_id, c.consumer_group
     ),
     v2_data AS (
@@ -288,9 +288,9 @@ BEGIN
                c.total_consumed,
                COALESCE(l.pending, 0) AS pending,
                l.oldest_unconsumed_at
-        FROM q2.consumers c
-        JOIN q2.partitions p ON p.id = c.partition_id
-        JOIN q2.queues q ON q.id = p.queue_id
+        FROM queen.seg_consumers c
+        JOIN queen.seg_partitions p ON p.id = c.partition_id
+        JOIN queen.seg_queues q ON q.id = p.queue_id
         -- Strict guard: only queues currently routed to the segments engine.
         JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
         LEFT JOIN pend l ON l.partition_id = c.partition_id
@@ -339,7 +339,7 @@ GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v4() TO PUBLIC;
 -- queen.get_prometheus_metrics_v1 — dual-mode redefinition of 018.
 -- Changes vs the original (rows-only deployments render byte-identical
 -- Prometheus text):
---   * 'dlq' totals now include q2.dlq, and 'per_queue' unions the v2 DLQ
+--   * 'dlq' totals now include queen.seg_dlq, and 'per_queue' unions the v2 DLQ
 --     counts into the SAME metric names (queen_dlq_depth[_by_queue]) — for
 --     a rows queue the numbers are unchanged, v2 queues simply appear.
 --   * new 'queue_depth' section with per-queue message counts for BOTH
@@ -452,7 +452,7 @@ BEGIN
         -- DLQ depth: cluster total + per-queue breakdown, BOTH engines.
         'dlq', jsonb_build_object(
             'total', (SELECT COUNT(*) FROM queen.dead_letter_queue)
-                   + (SELECT COUNT(*) FROM q2.dlq),
+                   + (SELECT COUNT(*) FROM queen.seg_dlq),
             'per_queue', COALESCE((
                 SELECT jsonb_agg(row_to_json(d))
                 FROM (
@@ -465,9 +465,9 @@ BEGIN
                         GROUP BY q.name
                         UNION ALL
                         SELECT q2q.name, COUNT(*)::bigint
-                        FROM q2.dlq d2
-                        JOIN q2.partitions p2 ON p2.id = d2.partition_id
-                        JOIN q2.queues q2q ON q2q.id = p2.queue_id
+                        FROM queen.seg_dlq d2
+                        JOIN queen.seg_partitions p2 ON p2.id = d2.partition_id
+                        JOIN queen.seg_queues q2q ON q2q.id = p2.queue_id
                         GROUP BY q2q.name
                     ) u
                     GROUP BY queue
@@ -493,15 +493,15 @@ BEGIN
                 UNION ALL
                 -- segments engine: SUM(msg_count) over live segments;
                 -- pending = frames beyond the worst group cursor. ONE
-                -- pre-aggregated pass over q2.segments (GROUP BY
+                -- pre-aggregated pass over queen.seg_segments (GROUP BY
                 -- partition_id) instead of per-partition LATERAL SUMs — the
-                -- LATERAL plan degenerates under skew (see q2.stats_v1).
+                -- LATERAL plan degenerates under skew (see queen.seg_stats_v1).
                 SELECT q2q.name::text,
                        'segments'::text,
                        SUM(COALESCE(sa.total_frames, 0))::bigint,
                        SUM(COALESCE(sa.pending, 0))::bigint
-                FROM q2.partitions p2
-                JOIN q2.queues q2q ON q2q.id = p2.queue_id
+                FROM queen.seg_partitions p2
+                JOIN queen.seg_queues q2q ON q2q.id = p2.queue_id
                 JOIN queen.queues quv ON quv.name = q2q.name
                                      AND quv.storage = 'segments'
                 LEFT JOIN (
@@ -512,11 +512,11 @@ BEGIN
                                      - CASE WHEN s2.seq = w.next_seq
                                             THEN w.next_off ELSE 0 END
                                 ELSE 0 END) AS pending
-                    FROM q2.segments s2
+                    FROM queen.seg_segments s2
                     LEFT JOIN (
                         SELECT DISTINCT ON (c.partition_id)
                                c.partition_id, c.next_seq, c.next_off
-                        FROM q2.consumers c
+                        FROM queen.seg_consumers c
                         ORDER BY c.partition_id, c.next_seq, c.next_off
                     ) w ON w.partition_id = s2.partition_id
                     GROUP BY s2.partition_id
@@ -562,9 +562,9 @@ BEGIN
     IF v_storage = 'segments' THEN
         RETURN EXISTS (
             SELECT 1
-            FROM q2.partitions p
-            JOIN q2.queues q ON q.id = p.queue_id AND q.name = p_queue_name
-            LEFT JOIN q2.consumers c
+            FROM queen.seg_partitions p
+            JOIN queen.seg_queues q ON q.id = p.queue_id AND q.name = p_queue_name
+            LEFT JOIN queen.seg_consumers c
                 ON c.partition_id = p.id
                AND c.consumer_group = p_consumer_group
             WHERE (p_partition_name IS NULL OR p.name = p_partition_name)
@@ -616,11 +616,11 @@ GRANT EXECUTE ON FUNCTION queen.has_pending_messages(text, text, text) TO PUBLIC
 --     messages:[{id, frameIdx, transactionId:null, txnHash,
 --                payloadAvailable:false}] }
 -- ROUTE-LAYER CONTRACT: frames are opaque to SQL (zstd lives in the C++
--- broker). The per-message list comes from q2.dedup, so it exists only
+-- broker). The per-message list comes from queen.seg_dedup, so it exists only
 -- within the dedup window and only for queues with dedup enabled; the
 -- transaction-id TEXT is not recoverable (dedup stores its hash). To show
 -- payloads or transaction ids the route must fetch the segment blob
--- (q2.segments PK lookup) and decode frames broker-side.
+-- (queen.seg_segments PK lookup) and decode frames broker-side.
 -- Status vs the __QUEUE_MODE__ cursor: seq < next_seq -> completed;
 -- otherwise processing when the lease is live, else pending (a partially
 -- consumed head segment reports 'pending' for its remainder).
@@ -667,14 +667,14 @@ BEGIN
                             ) ORDER BY d.frame_idx)
                             -- PK (partition_id, txn_hash) bounds this to one
                             -- partition; fine for dashboard-sized listings.
-                            FROM q2.dedup d
+                            FROM queen.seg_dedup d
                             WHERE d.partition_id = s.partition_id AND d.seq = s.seq
                         ), '[]'::jsonb)
                     ) AS obj
-                FROM q2.segments s
-                JOIN q2.partitions p ON p.id = s.partition_id
-                JOIN q2.queues q ON q.id = p.queue_id
-                LEFT JOIN q2.consumers c
+                FROM queen.seg_segments s
+                JOIN queen.seg_partitions p ON p.id = s.partition_id
+                JOIN queen.seg_queues q ON q.id = p.queue_id
+                LEFT JOIN queen.seg_consumers c
                     ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
                 WHERE q.name = p_queue_name
                 ORDER BY s.created_at DESC, s.seq DESC
@@ -720,7 +720,7 @@ GRANT EXECUTE ON FUNCTION queen.get_queue_messages_v1(TEXT, INTEGER, INTEGER) TO
 -- ============================================================================
 -- queen.list_messages_v1 — dual-mode redefinition of 010.
 -- The rows pipeline is the 010 body verbatim; message-shaped entries for
--- segments queues (from q2.dedup, the only per-message metadata SQL has)
+-- segments queues (from queen.seg_dedup, the only per-message metadata SQL has)
 -- are then APPENDED to result.messages:
 --   { id, transactionId:null, txnHash, partitionId, queuePath, queue,
 --     partition, namespace, task, status, queueStatus, busStatus,
@@ -888,7 +888,7 @@ BEGIN
     ) sub;
 
     -- --------------------------------------------- segments (v2) entries
-    -- No index on q2.dedup.created_at: the scan is bounded by the dedup
+    -- No index on queen.seg_dedup.created_at: the scan is bounded by the dedup
     -- window's steady-state size (O(rate x window)) — acceptable for a
     -- dashboard listing.
     SELECT COALESCE(jsonb_agg(v2.obj ORDER BY v2.created_at DESC, v2.message_id DESC), '[]'::jsonb)
@@ -928,7 +928,7 @@ BEGIN
                    c.lease_expires_at,
                    -- Frame consumed iff (seq, frame_idx) < cursor (next_seq, next_off).
                    CASE
-                       WHEN EXISTS (SELECT 1 FROM q2.dlq dl
+                       WHEN EXISTS (SELECT 1 FROM queen.seg_dlq dl
                                     WHERE dl.partition_id = d.partition_id
                                       AND dl.seq = d.seq AND dl.frame_idx = d.frame_idx)
                            THEN 'dead_letter'
@@ -939,19 +939,19 @@ BEGIN
                            THEN 'processing'
                        ELSE 'pending'
                    END AS final_status,
-                   (SELECT COUNT(*)::integer FROM q2.consumers c2
+                   (SELECT COUNT(*)::integer FROM queen.seg_consumers c2
                     WHERE c2.partition_id = d.partition_id
                       AND c2.consumer_group <> '__QUEUE_MODE__'
                       AND (d.seq, d.frame_idx) < (c2.next_seq, c2.next_off)) AS consumed_by_groups,
-                   (SELECT COUNT(*)::integer FROM q2.consumers c2
+                   (SELECT COUNT(*)::integer FROM queen.seg_consumers c2
                     WHERE c2.partition_id = d.partition_id
                       AND c2.consumer_group <> '__QUEUE_MODE__') AS total_bus_groups
-            FROM q2.dedup d
-            JOIN q2.partitions p ON p.id = d.partition_id
-            JOIN q2.queues q ON q.id = p.queue_id
+            FROM queen.seg_dedup d
+            JOIN queen.seg_partitions p ON p.id = d.partition_id
+            JOIN queen.seg_queues q ON q.id = p.queue_id
             -- Strict guard: only queues currently routed to the segments engine.
             JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
-            LEFT JOIN q2.consumers c
+            LEFT JOIN queen.seg_consumers c
                 ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
             WHERE d.created_at >= v_from_ts AND d.created_at < v_to_ts
               AND (v_queue IS NULL OR q.name = v_queue)
@@ -980,9 +980,9 @@ GRANT EXECUTE ON FUNCTION queen.list_messages_v1(JSONB) TO PUBLIC;
 -- queen.get_dlq_messages_v1 — dual-mode redefinition of 010.
 -- The rows branch is the 010 body verbatim (same joins, filters, keys and
 -- outer LIMIT/OFFSET placement — byte-identical output for rows queues);
--- q2.dlq rows are UNIONed in with the SAME keys so /api/v1/dlq serves both
+-- queen.seg_dlq rows are UNIONed in with the SAME keys so /api/v1/dlq serves both
 -- engines:
---   * payload snapshots live in q2.dlq itself (data), no messages join;
+--   * payload snapshots live in queen.seg_dlq itself (data), no messages join;
 --   * retryCount: v2 tracks attempts on the consumer row, not per DLQ entry —
 --     a frame is dead-lettered exactly when attempts exceed the queue's
 --     retry_limit, so the queue's retry_limit IS the count it failed with;
@@ -1038,7 +1038,7 @@ BEGIN
             WHERE (v_queue IS NULL OR q.name = v_queue)
               AND (v_consumer_group IS NULL OR dlq.consumer_group = v_consumer_group)
             UNION ALL
-            -- segments engine (q2.dlq payload snapshots), same keys
+            -- segments engine (queen.seg_dlq payload snapshots), same keys
             SELECT d2.failed_at,
                    jsonb_build_object(
                        'id', d2.id,
@@ -1054,9 +1054,9 @@ BEGIN
                        'createdAt', to_char(d2.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                        'failedAt', to_char(d2.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                    ) AS msg
-            FROM q2.dlq d2
-            JOIN q2.partitions p2 ON p2.id = d2.partition_id
-            JOIN q2.queues q2q ON q2q.id = p2.queue_id
+            FROM queen.seg_dlq d2
+            JOIN queen.seg_partitions p2 ON p2.id = d2.partition_id
+            JOIN queen.seg_queues q2q ON q2q.id = p2.queue_id
             LEFT JOIN queen.queues qq ON qq.name = q2q.name
             WHERE (v_queue IS NULL OR q2q.name = v_queue)
               AND (v_consumer_group IS NULL OR d2.consumer_group = v_consumer_group)

@@ -112,9 +112,9 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                     // validation needed (the slice-1 reject is gone).
 
                     // options.dedupWindowSeconds — segments-only knob bounding
-                    // the q2 dedup window (q2.queues.dedup_window_seconds,
+                    // the q2 dedup window (queen.seg_queues.dedup_window_seconds,
                     // 0 = off). configure_queue_v1 predates it, so it is
-                    // persisted by q2.set_queue_options_v1 after a successful
+                    // persisted by queen.seg_set_queue_options_v1 after a successful
                     // configure (see finalize_configured below). Rejected on
                     // rows queues instead of being silently ignored.
                     std::optional<long long> dedup_window;  // empty = not provided
@@ -225,7 +225,7 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
 
                     // Terminal success step, entered only after configure (and
                     // the storage-flag UPDATE when requested) succeeded: apply
-                    // the dedup window through q2.set_queue_options_v1, then
+                    // the dedup window through queen.seg_set_queue_options_v1, then
                     // cache+respond. The cache refreshes ONLY when every
                     // persisted step succeeded; a failed knob drops the cache
                     // entry so the next access refetches DB truth.
@@ -240,7 +240,7 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                         queen::JobRequest opt;
                         opt.op_type = queen::JobType::CUSTOM;
                         opt.request_id = request_id;
-                        opt.sql = "SELECT q2.set_queue_options_v1($1, $2::int)";
+                        opt.sql = "SELECT queen.seg_set_queue_options_v1($1, $2::int)";
                         opt.params = {captured_queue_name, std::to_string(*dedup_window)};
 
                         queen_ptr->submit(std::move(opt),
@@ -398,9 +398,9 @@ void setup_configure_routes(uWS::App* app, const RouteContext& ctx) {
                               "JOIN queen.partitions p ON p.id = m.partition_id "
                               "JOIN queen.queues q ON q.id = p.queue_id WHERE q.name = $1))"
                             : "SELECT jsonb_build_object('hasData', EXISTS ("
-                              "SELECT 1 FROM q2.segments s "
-                              "JOIN q2.partitions p ON p.id = s.partition_id "
-                              "JOIN q2.queues q ON q.id = p.queue_id WHERE q.name = $1))";
+                              "SELECT 1 FROM queen.seg_segments s "
+                              "JOIN queen.seg_partitions p ON p.id = s.partition_id "
+                              "JOIN queen.seg_queues q ON q.id = p.queue_id WHERE q.name = $1))";
                         probe.params = {queue_name};
 
                         std::string flip_msg = "cannot change storage of queue '" + queue_name

@@ -1,8 +1,8 @@
 -- ============================================================================
 -- Storage v2 — retry tracking + poison-message DLQ for segment queues.
 -- Applied after 023_storage_v2.sql (lexical boot order): redefines
--- q2.pop_segments_v1 / q2.pop_segments_wire_v1 to carry the delivery attempt
--- count, and adds q2.dlq + the broker-facing dead-letter procedures.
+-- queen.seg_pop_segments_v1 / queen.seg_pop_segments_wire_v1 to carry the delivery attempt
+-- count, and adds queen.seg_dlq + the broker-facing dead-letter procedures.
 --
 -- Retry model: attempt state lives on the (partition, group) consumer row.
 -- A non-auto-ack pop delivering a batch that STARTS at the same position as
@@ -13,21 +13,21 @@
 --
 -- When attempt_count exceeds the queue's retry_limit the broker (which alone
 -- can decompress frames) extracts the poisoned head frame and calls
--- q2.dlq_head_v1 with a payload SNAPSHOT. Storing the snapshot instead of a
--- reference keeps q2.dlq decoupled from segment retention (v1's FK-cascade
+-- queen.seg_dlq_head_v1 with a payload SNAPSHOT. Storing the snapshot instead of a
+-- reference keeps queen.seg_dlq decoupled from segment retention (v1's FK-cascade
 -- coupling silently drops DLQ rows when the source row is deleted).
 -- ============================================================================
 
 -- Per-(partition, group) attempt tracking: position of the last non-auto-ack
 -- delivery's first frame + how many times a batch starting there was handed out.
-ALTER TABLE q2.consumers ADD COLUMN IF NOT EXISTS attempt_seq BIGINT;
-ALTER TABLE q2.consumers ADD COLUMN IF NOT EXISTS attempt_off INTEGER;
-ALTER TABLE q2.consumers ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE queen.seg_consumers ADD COLUMN IF NOT EXISTS attempt_seq BIGINT;
+ALTER TABLE queen.seg_consumers ADD COLUMN IF NOT EXISTS attempt_off INTEGER;
+ALTER TABLE queen.seg_consumers ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
 
 -- Dead-lettered frames. payload is a snapshot extracted by the broker
 -- (blobs are opaque to SQL); (partition_id, seq, frame_idx) records where the
--- poison frame lived for tracing, without any FK into q2.segments.
-CREATE TABLE IF NOT EXISTS q2.dlq (
+-- poison frame lived for tracing, without any FK into queen.seg_segments.
+CREATE TABLE IF NOT EXISTS queen.seg_dlq (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     partition_id UUID NOT NULL,
     consumer_group TEXT NOT NULL,
@@ -40,10 +40,10 @@ CREATE TABLE IF NOT EXISTS q2.dlq (
     failed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_q2_dlq_partition_failed_at
-    ON q2.dlq (partition_id, failed_at DESC);
+    ON queen.seg_dlq (partition_id, failed_at DESC);
 
 -- ============================================================================
--- pop (redefinition of 023's q2.pop_segments_v1; supersedes it at boot).
+-- pop (redefinition of 023's queen.seg_pop_segments_v1; supersedes it at boot).
 -- Identical to the 023 body except for attempt tracking and v1-parity queue
 -- semantics:
 --   * new OUT column r_attempt: the attempt count of THIS delivery (same
@@ -52,7 +52,7 @@ CREATE INDEX IF NOT EXISTS idx_q2_dlq_partition_failed_at
 --   * the lease UPDATE also persists (attempt_seq, attempt_off,
 --     attempt_count) for the delivered batch's first frame.
 --   * delayed_processing / window_buffer (read from queen.queues by name,
---     the config source of truth — q2.queues carries only engine-side
+--     the config source of truth — queen.seg_queues carries only engine-side
 --     options): segments younger than delayed_processing seconds are not
 --     delivered yet, and a partition whose NEWEST segment is younger than
 --     window_buffer seconds delivers nothing (002d_pop_unified_v4.sql:486-504
@@ -74,10 +74,10 @@ CREATE INDEX IF NOT EXISTS idx_q2_dlq_partition_failed_at
 -- ambiguous overload behind. Callers using the old 7-arg form keep working
 -- through the two trailing defaults.
 -- ============================================================================
-DROP FUNCTION IF EXISTS q2.pop_segments_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN);
-DROP FUNCTION IF EXISTS q2.pop_segments_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
+DROP FUNCTION IF EXISTS queen.seg_pop_segments_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN);
+DROP FUNCTION IF EXISTS queen.seg_pop_segments_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
 
-CREATE FUNCTION q2.pop_segments_v1(
+CREATE FUNCTION queen.seg_pop_segments_v1(
     p_queue TEXT,
     p_partition TEXT,
     p_group TEXT,
@@ -128,7 +128,7 @@ DECLARE
     v_now TIMESTAMPTZ := clock_timestamp();
 BEGIN
     SELECT p.id, p.last_seq, p.retention_seq INTO v_pid, v_last_seq, v_retention_seq
-    FROM q2.partitions p JOIN q2.queues q ON q.id = p.queue_id
+    FROM queen.seg_partitions p JOIN queen.seg_queues q ON q.id = p.queue_id
     WHERE q.name = p_queue AND p.name = p_partition;
     IF v_pid IS NULL THEN RETURN; END IF;
 
@@ -147,7 +147,7 @@ BEGIN
     -- created_at is monotone in seq, so the newest segment is the max seq.
     IF v_window > 0 THEN
         SELECT s.created_at INTO v_newest
-        FROM q2.segments s
+        FROM queen.seg_segments s
         WHERE s.partition_id = v_pid
         ORDER BY s.seq DESC LIMIT 1;
         IF v_newest IS NOT NULL
@@ -159,7 +159,7 @@ BEGIN
     -- Subscription seeding: only worth computing when the row might not
     -- exist yet AND a non-default subscription was requested.
     IF (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '')
-       AND NOT EXISTS (SELECT 1 FROM q2.consumers c
+       AND NOT EXISTS (SELECT 1 FROM queen.seg_consumers c
                        WHERE c.partition_id = v_pid AND c.consumer_group = p_group) THEN
         IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
             BEGIN
@@ -172,7 +172,7 @@ BEGIN
                 -- is monotone in seq: single forward walk from the retention
                 -- watermark). Nothing that recent yet -> future-only cursor.
                 SELECT s.seq INTO v_seed_seq
-                FROM q2.segments s
+                FROM queen.seg_segments s
                 WHERE s.partition_id = v_pid
                   AND s.seq >= v_retention_seq
                   AND s.created_at >= v_from_ts
@@ -186,7 +186,7 @@ BEGIN
         END IF;
     END IF;
 
-    INSERT INTO q2.consumers (partition_id, consumer_group, next_seq)
+    INSERT INTO queen.seg_consumers (partition_id, consumer_group, next_seq)
     VALUES (v_pid, p_group, COALESCE(v_seed_seq, 1))
     ON CONFLICT DO NOTHING;
 
@@ -194,7 +194,7 @@ BEGIN
     -- popped concurrently — SKIP LOCKED keeps concurrent pops non-blocking).
     SELECT c.next_seq, c.next_off, c.attempt_seq, c.attempt_off, c.attempt_count
     INTO v_next_seq, v_next_off, v_att_seq, v_att_off, v_att_count
-    FROM q2.consumers c
+    FROM queen.seg_consumers c
     WHERE c.partition_id = v_pid AND c.consumer_group = p_group
       AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
     FOR UPDATE SKIP LOCKED;
@@ -210,7 +210,7 @@ BEGIN
 
     FOR v_row IN
         SELECT s.seq, s.msg_count, s.created_at, s.blob
-        FROM q2.segments s
+        FROM queen.seg_segments s
         WHERE s.partition_id = v_pid AND s.seq >= v_next_seq
           AND (v_deadline IS NULL OR s.created_at <= v_deadline)
         ORDER BY s.seq
@@ -259,7 +259,7 @@ BEGIN
 
     IF p_auto_ack THEN
         -- auto_ack never redelivers: attempt state untouched, r_attempt = 0.
-        UPDATE q2.consumers SET
+        UPDATE queen.seg_consumers SET
             next_seq = CASE WHEN v_end_off >= v_end_count THEN v_end_seq + 1 ELSE v_end_seq END,
             next_off = CASE WHEN v_end_off >= v_end_count THEN 0 ELSE v_end_off END,
             worker_id = NULL, lease_expires_at = NULL,
@@ -267,7 +267,7 @@ BEGIN
             total_consumed = total_consumed + v_taken
         WHERE partition_id = v_pid AND consumer_group = p_group;
     ELSE
-        UPDATE q2.consumers SET
+        UPDATE queen.seg_consumers SET
             worker_id = p_worker,
             lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
             batch_end_seq = v_end_seq,
@@ -288,9 +288,9 @@ $$;
 -- callers of the historical 7-arg form keep working; the 7-arg overload is
 -- dropped (an overload pair would make 7-arg calls ambiguous).
 -- ============================================================================
-DROP FUNCTION IF EXISTS q2.pop_segments_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN);
-DROP FUNCTION IF EXISTS q2.pop_segments_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
-CREATE FUNCTION q2.pop_segments_wire_v1(
+DROP FUNCTION IF EXISTS queen.seg_pop_segments_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN);
+DROP FUNCTION IF EXISTS queen.seg_pop_segments_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
+CREATE FUNCTION queen.seg_pop_segments_wire_v1(
     p_queue TEXT, p_partition TEXT, p_group TEXT,
     p_budget INTEGER, p_lease_seconds INTEGER, p_worker TEXT, p_auto_ack BOOLEAN,
     p_sub_mode TEXT DEFAULT 'all', p_sub_from TEXT DEFAULT ''
@@ -303,7 +303,7 @@ DECLARE
     v_pid UUID;
 BEGIN
     SELECT p.id INTO v_pid
-    FROM q2.partitions p JOIN q2.queues q ON q.id = p.queue_id
+    FROM queen.seg_partitions p JOIN queen.seg_queues q ON q.id = p.queue_id
     WHERE q.name = p_queue AND p.name = p_partition;
 
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
@@ -315,7 +315,7 @@ BEGIN
         'blob', encode(r_blob, 'base64')
     )), '[]'::jsonb), COALESCE(max(r_attempt), 0)
     INTO v_segments, v_attempt
-    FROM q2.pop_segments_v1(p_queue, p_partition, p_group,
+    FROM queen.seg_pop_segments_v1(p_queue, p_partition, p_group,
                             p_budget, p_lease_seconds, p_worker, p_auto_ack,
                             p_sub_mode, p_sub_from);
     RETURN jsonb_build_object('segments', v_segments,
@@ -329,13 +329,13 @@ $$;
 -- Called by the broker when a delivery's attempt count exceeded the queue's
 -- retry_limit; the broker passes the frame it extracted (position, ids,
 -- payload snapshot) plus the failure reason. Under the validated lease it
--- inserts the q2.dlq row, advances the cursor past that one frame (segment
+-- inserts the queen.seg_dlq row, advances the cursor past that one frame (segment
 -- boundary handled via msg_count), resets the attempt state, and releases
 -- the lease. Calling it twice is safe: the first call released the lease, so
 -- the second fails the worker match and returns {ok:false} without side
 -- effects.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION q2.dlq_head_v1(
+CREATE OR REPLACE FUNCTION queen.seg_dlq_head_v1(
     p_partition_id UUID,
     p_group TEXT,
     p_worker TEXT,
@@ -353,7 +353,7 @@ DECLARE
     v_count INTEGER;
     v_id UUID;
 BEGIN
-    SELECT * INTO v_c FROM q2.consumers c
+    SELECT * INTO v_c FROM queen.seg_consumers c
     WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
     FOR UPDATE;
     IF NOT FOUND OR v_c.worker_id IS DISTINCT FROM p_worker
@@ -361,7 +361,7 @@ BEGIN
         RETURN jsonb_build_object('ok', false, 'error', 'invalid or expired lease');
     END IF;
 
-    INSERT INTO q2.dlq (partition_id, consumer_group, seq, frame_idx,
+    INSERT INTO queen.seg_dlq (partition_id, consumer_group, seq, frame_idx,
                         message_id, transaction_id, payload, error)
     VALUES (p_partition_id, p_group, p_seq, p_frame_idx,
             p_message_id, p_txn, p_payload, p_error)
@@ -372,10 +372,10 @@ BEGIN
     -- (retention) the unnormalized offset is still safe — pop skips segments
     -- whose frames are exhausted and applies the offset only to the exact
     -- cursor segment.
-    SELECT msg_count INTO v_count FROM q2.segments
+    SELECT msg_count INTO v_count FROM queen.seg_segments
     WHERE partition_id = p_partition_id AND seq = p_seq;
 
-    UPDATE q2.consumers SET
+    UPDATE queen.seg_consumers SET
         next_seq = CASE WHEN v_count IS NOT NULL AND p_frame_idx + 1 >= v_count
                         THEN p_seq + 1 ELSE p_seq END,
         next_off = CASE WHEN v_count IS NOT NULL AND p_frame_idx + 1 >= v_count
@@ -394,7 +394,7 @@ $$;
 -- ============================================================================
 -- dlq_list: browse dead-lettered frames of a queue (v1-compatible keys).
 -- ============================================================================
-CREATE OR REPLACE FUNCTION q2.dlq_list_v1(
+CREATE OR REPLACE FUNCTION queen.seg_dlq_list_v1(
     p_queue TEXT,
     p_partition TEXT DEFAULT NULL,
     p_group TEXT DEFAULT NULL,
@@ -415,9 +415,9 @@ AS $$
     FROM (
         SELECT d.id, d.transaction_id, d.consumer_group, d.error, d.failed_at,
                d.payload, q.name AS queue, p.name AS partition
-        FROM q2.dlq d
-        JOIN q2.partitions p ON p.id = d.partition_id
-        JOIN q2.queues q ON q.id = p.queue_id
+        FROM queen.seg_dlq d
+        JOIN queen.seg_partitions p ON p.id = d.partition_id
+        JOIN queen.seg_queues q ON q.id = p.queue_id
         WHERE q.name = p_queue
           AND (p_partition IS NULL OR p.name = p_partition)
           AND (p_group IS NULL OR d.consumer_group = p_group)

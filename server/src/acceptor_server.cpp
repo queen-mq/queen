@@ -403,8 +403,14 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
             int pop_slots  = slot_env("QUEEN_POP_SLOTS",  std::max(2, (total_slots * 2) / 5));
             int rest_slots = slot_env("QUEEN_REST_SLOTS", std::max(2, total_slots - push_slots - pop_slots));
             if (rest_slots < 1) rest_slots = 1;
-            spdlog::info("Engine cluster (function-split): push={} slots, pop={} slots, rest={} slots (total budget {})",
-                         push_slots, pop_slots, rest_slots, total_slots);
+            // Storage-v2 segment engines have their OWN connection budget (not
+            // carved out of total_slots), so enabling segments never starves the
+            // rows path. Default 0 keeps them idle-but-present for rows-only boxes;
+            // set QUEEN_SEG_PUSH_SLOTS / QUEEN_SEG_POP_SLOTS for segment workloads.
+            int seg_push_slots = slot_env("QUEEN_SEG_PUSH_SLOTS", 32);
+            int seg_pop_slots  = slot_env("QUEEN_SEG_POP_SLOTS",  32);
+            spdlog::info("Engine cluster (function-split): push={} slots, pop={} slots, rest={} slots (total budget {}); segments: seg_push={} slots, seg_pop={} slots",
+                         push_slots, pop_slots, rest_slots, total_slots, seg_push_slots, seg_pop_slots);
 
             auto make_engine = [&](int slots, uint16_t engine_id) {
                 return std::make_unique<queen::Queen>(
@@ -419,11 +425,14 @@ static void worker_thread(const Config& config, int worker_id, int num_workers,
                     engine_id,
                     global_system_info.hostname);
             };
-            // engine ids 0/1/2 -> push/pop/rest (distinct worker_metrics identities)
+            // engine ids 0/1/2/3/4 -> push/pop/rest/seg_push/seg_pop
+            // (distinct worker_metrics identities)
             g_queen_cluster = std::make_unique<queen::QueenCluster>(
                 make_engine(push_slots, 0),
                 make_engine(pop_slots,  1),
-                make_engine(rest_slots, 2));
+                make_engine(rest_slots, 2),
+                make_engine(seg_push_slots, 3),
+                make_engine(seg_pop_slots,  4));
 
             // Only the pop engine has parked POPs, so it is the sole target of
             // message-available wake notifications (UDP / local push).

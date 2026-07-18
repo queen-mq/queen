@@ -41,7 +41,7 @@ struct CachedQueueConfig {
     // Eviction settings
     int max_wait_time_seconds = 0;
 
-    // Storage engine: "rows" (v1, queen.messages) or "segments" (v2, q2.segments)
+    // Storage engine: "rows" (v1, queen.messages) or "segments" (v2, queen.seg_segments)
     std::string storage = "rows";
 };
 

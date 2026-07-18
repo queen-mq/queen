@@ -1,5 +1,5 @@
 // Storage v2 (segments) route handlers. Wire format v1 stays byte-compatible:
-// clients cannot tell which engine served them. SQL side: q2.* wire wrappers
+// clients cannot tell which engine served them. SQL side: queen.seg_* wire wrappers
 // in lib/schema/procedures/023_storage_v2.sql + 024 (wildcard/attempt) + 025
 // (DLQ) — blobs travel base64 through the text-mode libpq layer.
 #include "queen/routes/storage_v2_routes.hpp"
@@ -68,7 +68,7 @@ std::string decrypt_frame_payload(const std::string& envelope_json) {
     return envelope_json;
 }
 
-// First delivered frame of a batch — the poison-head snapshot q2.dlq_head_v1
+// First delivered frame of a batch — the poison-head snapshot queen.seg_dlq_head_v1
 // needs (position + identity + decrypted payload).
 struct FirstFrame {
     bool valid = false;
@@ -427,8 +427,8 @@ void finish_flush_queued(QueenCluster* cluster, uWS::Loop* loop,
     queen::JobRequest probe;
     probe.op_type = queen::JobType::CUSTOM;
     probe.request_id = fl->requests.front()->request_id;
-    probe.sql = "SELECT to_jsonb(COALESCE((SELECT p.id::text FROM q2.partitions p "
-                "JOIN q2.queues q ON q.id = p.queue_id "
+    probe.sql = "SELECT to_jsonb(COALESCE((SELECT p.id::text FROM queen.seg_partitions p "
+                "JOIN queen.seg_queues q ON q.id = p.queue_id "
                 "WHERE q.name = $1 AND p.name = $2), ''))";
     probe.params = {fl->queue, fl->partition};
     cluster->submit(std::move(probe), [loop, fl, cache_key,
@@ -534,11 +534,11 @@ void submit_flush(QueenCluster* cluster, uWS::Loop* loop,
     std::string blob_b64 = sv2::b64_encode(blob.data(), blob.size());
 
     queen::JobRequest job;
-    job.op_type = queen::JobType::CUSTOM;
+    job.op_type = queen::JobType::SEGMENT_PUSH;
     // Tracing only (CUSTOM jobs are never invalidated by request id); a fused
     // segment spans requests, so the first contributor's id stands in.
     job.request_id = fl->requests.front()->request_id;
-    job.sql = "SELECT q2.push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
+    job.sql = "SELECT queen.seg_push_segment_wire_v1($1, $2, $3::jsonb, $4, $5::int)";
     job.params = {fl->queue, fl->partition, metas.dump(), std::move(blob_b64),
                   std::to_string(fl->frames.size())};
 
@@ -850,7 +850,7 @@ struct PopWaitJob {
     int max_partitions = 1;
     bool auto_ack = false;
     // Effective subscription window (v1 semantics: "" = all). Forwarded to
-    // q2.pop_segments_wire_v1's p_sub_mode/p_sub_from args.
+    // queen.seg_pop_segments_wire_v1's p_sub_mode/p_sub_from args.
     std::string sub_mode;
     std::string sub_from;
     // long-poll
@@ -993,7 +993,7 @@ void serve_pop_wildcard(const std::shared_ptr<PopWaitJob>& pj, const nlohmann::j
 
 // Poison head: the delivered batch's attempt count exceeded the queue's retry
 // limit and the queue dead-letters. Snapshot the FIRST delivered frame
-// (decrypted), hand it to q2.dlq_head_v1 (which files it, advances the cursor
+// (decrypted), hand it to queen.seg_dlq_head_v1 (which files it, advances the cursor
 // past the frame and releases the lease), then re-run the pop once — the
 // fresh batch starts after the poison message. dlq_retried guards the single
 // re-pop per request: if the next head is poisoned too it is served as-is and
@@ -1019,9 +1019,9 @@ void dlq_poison_head(const std::shared_ptr<PopWaitJob>& pj,
     }
 
     queen::JobRequest job;
-    job.op_type = queen::JobType::CUSTOM;
+    job.op_type = queen::JobType::SEGMENT_POP;
     job.request_id = pj->request_id;
-    job.sql = "SELECT q2.dlq_head_v1($1::uuid, $2, $3, $4::bigint, $5::int, $6::uuid, $7, $8::jsonb, $9)";
+    job.sql = "SELECT queen.seg_dlq_head_v1($1::uuid, $2, $3, $4::bigint, $5::int, $6::uuid, $7, $8::jsonb, $9)";
     job.params = {r->value("partitionId", ""), pj->group, pj->lease_worker,
                   std::to_string(first.seq), std::to_string(first.frame_idx),
                   first.message_id, first.txn, first.payload,
@@ -1113,10 +1113,10 @@ void handle_pop_wire_result(const std::shared_ptr<PopWaitJob>& pj,
 
 void submit_pop(const std::shared_ptr<PopWaitJob>& pj) {
     queen::JobRequest job;
-    job.op_type = queen::JobType::CUSTOM;
+    job.op_type = queen::JobType::SEGMENT_POP;
     job.request_id = pj->request_id;
     if (pj->wildcard) {
-        job.sql = "SELECT q2.pop_wildcard_wire_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9)";
+        job.sql = "SELECT queen.seg_pop_wildcard_wire_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9)";
         job.params = {pj->queue, pj->group, std::to_string(pj->batch),
                       std::to_string(pj->lease_seconds), pj->lease_worker,
                       pj->auto_ack ? "true" : "false",
@@ -1125,7 +1125,7 @@ void submit_pop(const std::shared_ptr<PopWaitJob>& pj) {
     } else {
         // p_sub_mode/p_sub_from carry the v1 subscription window ("" = all;
         // they have SQL defaults, so older 7-arg callers stay valid).
-        job.sql = "SELECT q2.pop_segments_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9)";
+        job.sql = "SELECT queen.seg_pop_segments_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9)";
         job.params = {pj->queue, pj->partition, pj->group, std::to_string(pj->batch),
                       std::to_string(pj->lease_seconds), pj->lease_worker,
                       pj->auto_ack ? "true" : "false",
@@ -1272,11 +1272,11 @@ void dispatch_ack_v1(QueenCluster* cluster, uWS::Loop* loop, int uws_worker,
 // $1) to a jsonb result object — the v1 ack rows carry both names.
 constexpr const char* kAckNamesSuffix =
     "COALESCE((SELECT jsonb_build_object('queueName', q.name, "
-    "'partitionName', p.name) FROM q2.partitions p "
-    "JOIN q2.queues q ON q.id = p.queue_id WHERE p.id = $1::uuid), '{}'::jsonb)";
+    "'partitionName', p.name) FROM queen.seg_partitions p "
+    "JOIN queen.seg_queues q ON q.id = p.queue_id WHERE p.id = $1::uuid), '{}'::jsonb)";
 
 // Cross-process / post-restart v2 ack: no registry entry, so positions are
-// resolved in SQL via the q2.dedup txn index. One SQL call per partition (a
+// resolved in SQL via the queen.seg_dedup txn index. One SQL call per partition (a
 // wildcard lease spans partitions under one leaseId). Emits v1-shaped rows
 // (003_ack.sql:207-216): validation failures answer per-item success:false
 // on HTTP 200, never a batch-level error status.
@@ -1317,32 +1317,32 @@ void dispatch_ack_by_txn(QueenCluster* cluster, uWS::Loop* loop, int uws_worker,
 
     for (auto& kv : parts) {
         queen::JobRequest job;
-        job.op_type = queen::JobType::CUSTOM;
+        job.op_type = queen::JobType::SEGMENT_ACK;
         job.request_id = request_id;
         bool single_dlq =
             kv.second.items.size() == 1 && kv.second.items[0].status == "dlq";
         if (single_dlq) {
             // Explicit dead-letter with no in-process batch: the position
-            // comes from the dedup window and q2.dlq_head_v1 files it,
+            // comes from the dedup window and queen.seg_dlq_head_v1 files it,
             // advances the cursor past the frame and releases the lease (v1
             // dead-letters immediately on explicit dlq status). Queues with
             // dedup disabled cannot resolve the position: zero rows, answered
             // as a failed ack below. Mixed batches keep the ack_by_txn path:
-            // their dlq positions dispose via the cursor (no q2.dlq snapshot
+            // their dlq positions dispose via the cursor (no queen.seg_dlq snapshot
             // — the lease cannot survive two terminal calls).
             const auto& it0 = kv.second.items[0];
             job.sql = std::string(
-                          "SELECT q2.dlq_head_v1($1::uuid, $2, $3, d.seq, "
+                          "SELECT queen.seg_dlq_head_v1($1::uuid, $2, $3, d.seq, "
                           "d.frame_idx, d.message_id, $4, NULL::jsonb, $5) || ") +
                       kAckNamesSuffix +
-                      " FROM q2.dedup d WHERE d.partition_id = $1::uuid "
+                      " FROM queen.seg_dedup d WHERE d.partition_id = $1::uuid "
                       "AND d.txn_hash = hashtextextended($4, 0)";
             job.params = {kv.first, kv.second.group, lease_id, it0.txn,
                           it0.error.empty() ? "Dead-lettered by consumer ack"
                                             : it0.error};
         } else {
             job.sql = std::string(
-                          "SELECT q2.ack_by_txn_v1($1::uuid, $2, $3, $4::jsonb) || ") +
+                          "SELECT queen.seg_ack_by_txn_v1($1::uuid, $2, $3, $4::jsonb) || ") +
                       kAckNamesSuffix;
             job.params = {kv.first, kv.second.group, lease_id,
                           kv.second.txns.dump()};
@@ -1422,7 +1422,7 @@ bool try_handle_ack_v2_fallback(const queen::routes::RouteContext& ctx,
     queen::JobRequest probe;
     probe.op_type = queen::JobType::CUSTOM;
     probe.request_id = request_id;
-    probe.sql = "SELECT to_jsonb(EXISTS(SELECT 1 FROM q2.partitions WHERE id = $1::uuid))";
+    probe.sql = "SELECT to_jsonb(EXISTS(SELECT 1 FROM queen.seg_partitions WHERE id = $1::uuid))";
     probe.params = {pid};
 
     nlohmann::json acks_copy = acks;
@@ -1567,11 +1567,11 @@ bool try_handle_ack_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
 
     for (auto& pj : jobs) {
         queen::JobRequest job;
-        job.op_type = queen::JobType::CUSTOM;
+        job.op_type = queen::JobType::SEGMENT_ACK;
         job.request_id = request_id;
         if (!pj.oc.dlq_positions.empty()) {
             // Explicit status='dlq' inside the acked prefix: file the LAST
-            // such position via q2.dlq_head_v1 — it inserts the q2.dlq row
+            // such position via queen.seg_dlq_head_v1 — it inserts the queen.seg_dlq row
             // (id/txn snapshot; payloads are not retained at ack time),
             // advances the cursor past that frame and releases the lease.
             // When it is the prefix end (single-message dlq, or dlq as the
@@ -1581,14 +1581,14 @@ bool try_handle_ack_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
             // positions of the same batch dispose without their own row (the
             // lease cannot survive two terminal calls).
             const auto& dp = pj.oc.dlq_positions.back();
-            job.sql = "SELECT q2.dlq_head_v1($1::uuid, $2, $3, $4::bigint, $5::int, $6::uuid, $7, NULL::jsonb, $8)";
+            job.sql = "SELECT queen.seg_dlq_head_v1($1::uuid, $2, $3, $4::bigint, $5::int, $6::uuid, $7, NULL::jsonb, $8)";
             job.params = {pj.pid, pj.oc.consumer_group, lease_id,
                           std::to_string(dp.seq), std::to_string(dp.frame_idx),
                           dp.mid, dp.txn,
                           pj.dlq_error.empty() ? "Dead-lettered by consumer ack"
                                                : pj.dlq_error};
         } else {
-            job.sql = "SELECT q2.ack_segments_v1($1, $2, $3, $4, $5::bigint, $6::int, $7::bool, $8::int)";
+            job.sql = "SELECT queen.seg_ack_segments_v1($1, $2, $3, $4, $5::bigint, $6::int, $7::bool, $8::int)";
             job.params = {pj.oc.queue, pj.oc.partition, pj.oc.consumer_group,
                           lease_id, std::to_string(pj.oc.upto_seq),
                           std::to_string(pj.oc.upto_off),

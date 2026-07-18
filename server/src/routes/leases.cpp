@@ -16,7 +16,7 @@ namespace routes {
 
 namespace {
 // Merge state for the dual-engine lease renewal (v1 queen.renew_lease_v2 +
-// v2 q2.renew_lease_v1). Namespace scope: local structs inside the generic
+// v2 queen.seg_renew_lease_v1). Namespace scope: local structs inside the generic
 // route lambda would make every touching expression template-dependent.
 struct RenewMergeState {
     int pending = 2;
@@ -69,10 +69,10 @@ void setup_lease_routes(uWS::App* app, const RouteContext& ctx) {
 
                     // STORAGE V2: a leaseId is either a v1 lease
                     // (queen.partition_consumers.worker_id) or a v2 one
-                    // (q2.consumers.worker_id) — the route can't tell which, so
+                    // (queen.seg_consumers.worker_id) — the route can't tell which, so
                     // it renews BOTH engines and merges: success if either
                     // renewed. The non-owning engine's UPDATE matches 0 rows
-                    // (q2.consumers stays O(partitions x groups), so the
+                    // (queen.seg_consumers stays O(partitions x groups), so the
                     // unindexed worker_id probe is cheap). Response shape is
                     // unchanged: v1's array of {index, leaseId, success, error,
                     // expiresAt}; expiresAt is the later of the two if both
@@ -88,7 +88,7 @@ void setup_lease_routes(uWS::App* app, const RouteContext& ctx) {
                         // a deferred callback would unwind the worker thread.
                         try {
 
-                        // v2 leg: q2.renew_lease_v1 -> {renewed, expiresAt}.
+                        // v2 leg: queen.seg_renew_lease_v1 -> {renewed, expiresAt}.
                         bool v2_ok = false;
                         std::string v2_expires;
                         try {
@@ -166,7 +166,7 @@ void setup_lease_routes(uWS::App* app, const RouteContext& ctx) {
                     queen::JobRequest v2_job;
                     v2_job.op_type = queen::JobType::CUSTOM;
                     v2_job.request_id = request_id;
-                    v2_job.sql = "SELECT q2.renew_lease_v1($1, $2::int)";
+                    v2_job.sql = "SELECT queen.seg_renew_lease_v1($1, $2::int)";
                     v2_job.params = {lease_id, std::to_string(seconds)};
 
                     ctx.queen->submit(std::move(v2_job),

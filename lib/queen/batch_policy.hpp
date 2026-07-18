@@ -79,6 +79,9 @@ job_type_env_segment(JobType t) noexcept {
         case JobType::STREAMS_CYCLE:          return "STREAMS_CYCLE";
         case JobType::STREAMS_STATE_GET:      return "STREAMS_STATE_GET";
         case JobType::PARTITION_LOOKUP:       return "PARTITION_LOOKUP";
+        case JobType::SEGMENT_PUSH:           return "SEGMENT_PUSH";
+        case JobType::SEGMENT_POP:            return "SEGMENT_POP";
+        case JobType::SEGMENT_ACK:            return "SEGMENT_ACK";
         default:                              return "UNKNOWN";
     }
 }
@@ -137,6 +140,12 @@ default_batch_policy_for(JobType t) noexcept {
         // (update_partition_lookup_v1 is monotonic + consistently lock-ordered,
         // so overlapping calls are safe).
         case JobType::PARTITION_LOOKUP:       return { 1,   0,    1,  2};
+        // Storage-v2 segment lanes: CUSTOM-shaped (one per-job SQL, no merge) but
+        // with real concurrency so the dedicated segment engine keeps many segment
+        // SQL ops in flight. Tune via QUEEN_SEGMENT_{PUSH,POP,ACK}_MAX_CONCURRENT.
+        case JobType::SEGMENT_PUSH:           return { 1,   0,    1, 32};
+        case JobType::SEGMENT_POP:            return { 1,   0,    1, 32};
+        case JobType::SEGMENT_ACK:            return { 1,   0,    1, 24};
         default:                              return { 1,   5,    1,  1};
     }
 }

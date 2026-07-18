@@ -32,7 +32,7 @@ namespace sv2 = queen::storage_v2;
 
 // ===========================================================================
 // Storage v2 (segments) transaction: atomic push+ack through ONE call to
-// q2.transaction_wire_v1 (026_storage_v2_maintenance.sql). Wire-compatible
+// queen.seg_transaction_wire_v1 (026_storage_v2_maintenance.sql). Wire-compatible
 // with the v1 endpoint: same request shape, same response shape
 // ({transactionId, success, results:[...]}, per-flattened-op result rows).
 //
@@ -54,7 +54,7 @@ namespace sv2 = queen::storage_v2;
 // transaction's acks close a leased batch (every delivered message
 // responded, or any failure closes it early), the SQL payload carries the
 // terminal cursor position (highest contiguous acked-OK prefix) and
-// q2.ack_segments_v1 persists it atomically with the pushes. Acks covering
+// queen.seg_ack_segments_v1 persists it atomically with the pushes. Acks covering
 // only part of a batch are recorded broker-side on success — the cursor
 // moves when the remaining wire acks complete the batch (at-least-once,
 // same as a partial /api/v1/ack).
@@ -62,9 +62,9 @@ namespace sv2 = queen::storage_v2;
 // CROSS-BROKER: an ack group the local registry cannot resolve (the pop was
 // served by another broker instance, or the registry died with a restart)
 // is shipped to SQL in the txns form ({"partitionId","group","worker",
-// "txns":[{"txn","ok"},...]}); q2.transaction_wire_v1 resolves each txn
-// through the q2.dedup window — the same resolver as the wire-ack fallback
-// q2.ack_by_txn_v1 — atomically with the rest of the batch. The only local
+// "txns":[{"txn","ok"},...]}); queen.seg_transaction_wire_v1 resolves each txn
+// through the queen.seg_dedup window — the same resolver as the wire-ack fallback
+// queen.seg_ack_by_txn_v1 — atomically with the rest of the batch. The only local
 // rejection left is a partition id that cannot belong to q2 at all (not a
 // uuid, i.e. a rows-engine ack mixed into a segments transaction); a uuid
 // that is not a q2 partition is rejected by SQL and rolls the whole
@@ -365,7 +365,7 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
             continue;
         }
         // Registry miss (cross-broker / post-restart lease): txns form, the
-        // positions are resolved in SQL through the q2.dedup window. The
+        // positions are resolved in SQL through the queen.seg_dedup window. The
         // worker (lease) comes from the group's own per-op leaseId hint,
         // falling back to the request's requiredLeases when they all agree.
         std::string worker = g.lease_hint;
@@ -396,7 +396,7 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
     queen::JobRequest job;
     job.op_type = queen::JobType::CUSTOM;
     job.request_id = request_id;
-    job.sql = "SELECT q2.transaction_wire_v1($1::jsonb)";
+    job.sql = "SELECT queen.seg_transaction_wire_v1($1::jsonb)";
     job.params = {payload.dump()};
 
     auto worker_loop = ctx.worker_loop;
@@ -453,7 +453,7 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
                     // and this replayed response was the closing one. The
                     // registry entry is now erased, so nobody else will ever
                     // persist this cursor — dispatch the terminal
-                    // q2.ack_segments_v1 immediately (it used to be
+                    // queen.seg_ack_segments_v1 immediately (it used to be
                     // discarded, leaving the lease taken until expiry).
                     // Fire-and-forget: the transaction already committed; a
                     // failure here (lease raced/expired) means redelivery,
@@ -462,7 +462,7 @@ bool try_handle_transaction_v2(const RouteContext& ctx,
                     queen::JobRequest ack_job;
                     ack_job.op_type = queen::JobType::CUSTOM;
                     ack_job.request_id = request_id;
-                    ack_job.sql = "SELECT q2.ack_segments_v1($1, $2, $3, $4, "
+                    ack_job.sql = "SELECT queen.seg_ack_segments_v1($1, $2, $3, $4, "
                                   "$5::bigint, $6::int, $7::bool, $8::int)";
                     ack_job.params = {oc.queue, oc.partition, oc.consumer_group,
                                       g.preview.lease_id,
@@ -541,7 +541,7 @@ void setup_transaction_routes(uWS::App* app, const RouteContext& ctx) {
 
                     // STORAGE V2: transactions whose queues are ALL
                     // storage='segments' are served atomically by
-                    // q2.transaction_wire_v1 (returns true = response owned,
+                    // queen.seg_transaction_wire_v1 (returns true = response owned,
                     // success or rejection). Mixed rows/segments requests are
                     // rejected inside; pure-rows requests fall through to the
                     // v1 path untouched.

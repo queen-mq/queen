@@ -1162,9 +1162,12 @@ class Queen {
             }
         }
 
-        if (type == JobType::CUSTOM || type == JobType::PARTITION_LOOKUP) {
-            // PARTITION_LOOKUP carries its own fixed sql + one jsonb param,
-            // exactly like CUSTOM — reuse the per-job fire path (no idx demux).
+        if (type == JobType::CUSTOM || type == JobType::PARTITION_LOOKUP
+            || type == JobType::SEGMENT_PUSH || type == JobType::SEGMENT_POP
+            || type == JobType::SEGMENT_ACK) {
+            // PARTITION_LOOKUP and the SEGMENT_* lanes carry their own per-job sql
+            // (set by the storage-v2 routes), exactly like CUSTOM — reuse the
+            // per-job fire path (no idx demux).
             return _fire_custom(slot, std::move(batch));
         }
         return _fire_batched(slot, type, std::move(batch));
@@ -1727,7 +1730,10 @@ class Queen {
             if (status == PGRES_TUPLES_OK || status == PGRES_COMMAND_OK) {
                 if (!slot.jobs.empty()
                     && (slot.jobs[0]->job.op_type == JobType::CUSTOM
-                        || slot.jobs[0]->job.op_type == JobType::PARTITION_LOOKUP)) {
+                        || slot.jobs[0]->job.op_type == JobType::PARTITION_LOOKUP
+                        || slot.jobs[0]->job.op_type == JobType::SEGMENT_PUSH
+                        || slot.jobs[0]->job.op_type == JobType::SEGMENT_POP
+                        || slot.jobs[0]->job.op_type == JobType::SEGMENT_ACK)) {
                     _process_custom_result(slot, res);
                     PQclear(res);
                     continue;

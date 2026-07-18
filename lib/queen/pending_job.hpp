@@ -42,6 +42,16 @@ enum class JobType : uint8_t {
     // (one flush job per ~100ms, latest-wins per partition), healed by
     // PartitionLookupReconcileService if ever dropped.
     PARTITION_LOOKUP,
+    // Storage-v2 (segments engine) dedicated lanes. Mechanically CUSTOM-shaped
+    // (each job carries its own SQL, fired via _fire_custom, no idx demux) but on
+    // their own JobTypes so they route to dedicated engine threads instead of
+    // sharing the single rest engine with all other CUSTOM work. Appended before
+    // _COUNT per the ordering rule above.
+    //   SEGMENT_PUSH / SEGMENT_ACK -> segment push engine (writes)
+    //   SEGMENT_POP                -> segment pop engine
+    SEGMENT_PUSH,
+    SEGMENT_POP,
+    SEGMENT_ACK,
     _COUNT,          // sentinel - array size, not a real type
     _SENTINEL = 0xFF // "no type" sentinel (idle slot)
 };
@@ -74,6 +84,9 @@ job_type_name(JobType t) noexcept {
         case JobType::STREAMS_CYCLE:          return "streams_cycle";
         case JobType::STREAMS_STATE_GET:      return "streams_state_get";
         case JobType::PARTITION_LOOKUP:       return "partition_lookup";
+        case JobType::SEGMENT_PUSH:           return "segment_push";
+        case JobType::SEGMENT_POP:            return "segment_pop";
+        case JobType::SEGMENT_ACK:            return "segment_ack";
         default:                              return "?";
     }
 }
@@ -103,6 +116,11 @@ JobTypeToSqlTable() {
         // Dispatched via the CUSTOM fire path (the flush job sets its own sql),
         // so this entry is informational/uniform with the other types.
         {JobType::PARTITION_LOOKUP,       "SELECT queen.update_partition_lookup_v1($1::jsonb)"},
+        // Segment lanes carry their own per-job SQL (fired via the CUSTOM path);
+        // these entries are informational sentinels for map completeness.
+        {JobType::SEGMENT_PUSH,           "CUSTOM"},
+        {JobType::SEGMENT_POP,            "CUSTOM"},
+        {JobType::SEGMENT_ACK,            "CUSTOM"},
     };
     return table;
 }

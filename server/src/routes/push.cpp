@@ -377,7 +377,7 @@ void handle_push_json(uWS::HttpResponse<false>* res,
         }
 
         // STORAGE V2: segment queues take the segments path (frame packing +
-        // q2.push_segment_wire_v1). Mixed rows/segments batches are rejected
+        // queen.seg_push_segment_wire_v1). Mixed rows/segments batches are rejected
         // in slice 1 — a push call must target one storage engine.
         {
             bool any_v2 = false, all_v2 = true;

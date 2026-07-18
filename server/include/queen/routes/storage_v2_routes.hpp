@@ -45,7 +45,7 @@ void handle_push_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
 // (deadline polling on the worker loop; see storage_v2_routes.cpp).
 // sub_mode/sub_from carry the effective subscription window exactly as the
 // v1 pop computes it ("" = all) and are forwarded to
-// q2.pop_segments_wire_v1's p_sub_mode/p_sub_from args.
+// queen.seg_pop_segments_wire_v1's p_sub_mode/p_sub_from args.
 void handle_pop_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
                    const std::string& queue, const std::string& partition,
                    const std::string& consumer_group, int batch,
@@ -57,7 +57,7 @@ void handle_pop_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
 // max_partitions partitions in one call and emits the v1 wire response
 // (flat messages[] with per-message partition fields; top-level fields from
 // the first claimed partition, mirroring pop_unified_batch_v4). sub_mode /
-// sub_from as in handle_pop_v2, forwarded to q2.pop_wildcard_wire_v1.
+// sub_from as in handle_pop_v2, forwarded to queen.seg_pop_wildcard_wire_v1.
 void handle_pop_wildcard_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
                             const std::string& queue,
                             const std::string& consumer_group, int batch,
@@ -77,7 +77,7 @@ void handle_pop_wildcard_v2(const RouteContext& ctx, uWS::HttpResponse<false>* r
 // partitionName, leaseReleased, dlq} — 003_ack.sql:207-216) on HTTP 200;
 // invalid/expired leases answer per-item success:false, never 4xx. Retrying
 // an already-acked txn of a live batch is an idempotent no-op success.
-// status='dlq' files the message via q2.dlq_head_v1 (v1 dead-letters
+// status='dlq' files the message via queen.seg_dlq_head_v1 (v1 dead-letters
 // immediately on explicit dlq).
 bool try_handle_ack_v2(const RouteContext& ctx, uWS::HttpResponse<false>* res,
                        const nlohmann::json& acks);
