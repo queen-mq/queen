@@ -65,7 +65,14 @@ BEGIN
             (r->>'idx')::INT          AS idx,
             (r->>'query_id')::UUID    AS query_id,
             (r->>'partition_id')::UUID AS partition_id,
-            COALESCE(r->'keys', '[]'::jsonb) AS keys,
+            -- Coerce `keys` to an array defensively. COALESCE alone only catches
+            -- an ABSENT key (SQL NULL); a client that sends `"keys": null`
+            -- (e.g. the Go SDK's GetState with a nil slice) yields a jsonb
+            -- 'null' SCALAR, which survives COALESCE and makes the
+            -- jsonb_array_length(keys) filter below throw "cannot get array
+            -- length of a scalar". Treat anything that isn't a JSON array as [].
+            CASE WHEN jsonb_typeof(r->'keys') = 'array'
+                 THEN r->'keys' ELSE '[]'::jsonb END AS keys,
             NULLIF(r->>'key_prefix', '') AS key_prefix,
             CASE
                 WHEN r ? 'ripe_at_or_before' AND jsonb_typeof(r->'ripe_at_or_before') = 'number'

@@ -585,6 +585,55 @@ pub async fn delete_consumer_group_seg(
     Ok(row.get(0))
 }
 
+// Segment-side per-queue delete: drop this group's segment cursors for EVERY
+// partition of the named queue (queen.seg_consumers) + the seg empty-scan
+// watermark row for (queue, group). Returns the number of seg_consumers rows
+// removed (the segment analogue of deletedPartitions). No seg SQL proc exists
+// for the queue-scoped delete, so the two DELETEs are issued directly.
+pub async fn delete_consumer_group_for_queue_seg(
+    client: &deadpool_postgres::Client,
+    group: &str,
+    queue: &str,
+) -> Result<u64, tokio_postgres::Error> {
+    let n = client
+        .execute(
+            "DELETE FROM queen.seg_consumers c \
+             USING queen.seg_partitions p \
+             JOIN queen.seg_queues q ON q.id = p.queue_id \
+             WHERE c.partition_id = p.id \
+               AND c.consumer_group = $1 \
+               AND q.name = $2",
+            &[&group, &queue],
+        )
+        .await?;
+    client
+        .execute(
+            "DELETE FROM queen.seg_consumer_watermarks \
+             WHERE queue_name = $1 AND consumer_group = $2",
+            &[&queue, &group],
+        )
+        .await?;
+    Ok(n)
+}
+
+// Rows-side per-queue delete: queen.delete_consumer_group_for_queue_v1 clears
+// queen.partition_consumers for the queue, consumer_watermarks for (queue,group),
+// and (when delete_metadata) consumer_groups_metadata. Returns the SP JSON.
+pub async fn delete_consumer_group_for_queue_rows(
+    client: &deadpool_postgres::Client,
+    group: &str,
+    queue: &str,
+    delete_metadata: bool,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one(
+            "SELECT (queen.delete_consumer_group_for_queue_v1($1, $2, $3::boolean))::text",
+            &[&group, &queue, &delete_metadata],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
 // POST /api/v1/consumer-groups/:group/subscription ->
 // queen.update_consumer_group_subscription_v1 (writes consumer_groups_metadata;
 // engine-agnostic). p_new_timestamp is TEXT SQL-side.

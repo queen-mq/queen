@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -91,7 +91,58 @@ struct PushBody<'a> {
     items: Vec<PushItem<'a>>,
 }
 
-pub async fn handle_push(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+// Frames staged per (queue, partition) group. `item` indexes into `results`.
+struct PreFrame {
+    mid: [u8; 16],
+    txn: String,
+    payload: Vec<u8>,
+    item: usize,
+}
+
+// Resolve layer-1 duplicate followers: a follower adopts the leader's FINAL
+// message_id (a leader that turned out to be a cross-flush duplicate now carries
+// the pre-existing id) and inherits an "error" status if the leader errored.
+fn resolve_push_followers(results: &mut [ItemResult]) {
+    for i in 0..results.len() {
+        if let Some(l) = results[i].dup_of {
+            let leader_mid = results[l].message_id.clone();
+            let leader_status = results[l].status;
+            results[i].message_id = leader_mid;
+            if leader_status == "error" {
+                results[i].status = "error";
+            }
+        }
+    }
+}
+
+fn render_push_results(results: &[ItemResult]) -> String {
+    let mut out = String::with_capacity(results.len() * 96);
+    out.push('[');
+    for (i, item) in results.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"index\":");
+        out.push_str(&i.to_string());
+        out.push_str(",\"message_id\":\"");
+        out.push_str(&item.message_id);
+        out.push_str("\",\"transaction_id\":\"");
+        json_escape_into(&mut out, &item.txn);
+        out.push_str("\",\"queueName\":\"");
+        json_escape_into(&mut out, &item.queue);
+        out.push_str("\",\"status\":\"");
+        out.push_str(item.status);
+        out.push_str("\"}");
+    }
+    out.push(']');
+    out
+}
+
+pub async fn handle_push(
+    State(st): State<Arc<AppState>>,
+    Extension(authed): Extension<crate::auth::AuthedSub>,
+    body: Bytes,
+) -> Response {
     let parsed: PushBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
@@ -99,14 +150,6 @@ pub async fn handle_push(State(st): State<Arc<AppState>>, body: Bytes) -> Respon
     let n = parsed.items.len();
     if n == 0 {
         return json(StatusCode::CREATED, "[]".to_string());
-    }
-    // Frames staged per (queue, partition) group, minus their owning request
-    // (attached once the shared PushState exists). item = index into `results`.
-    struct PreFrame {
-        mid: [u8; 16],
-        txn: String,
-        payload: Vec<u8>,
-        item: usize,
     }
     let mut results: Vec<ItemResult> = Vec::with_capacity(n);
     let mut groups: HashMap<(String, String), Vec<PreFrame>> = HashMap::new();
@@ -153,6 +196,16 @@ pub async fn handle_push(State(st): State<Arc<AppState>>, body: Bytes) -> Respon
             item: i,
         });
     }
+
+    // producer_sub is stamped ONLY from the validated JWT `sub`. The request body
+    // is never a source (PushItem doesn't parse `producerSub`, so a spoofed value
+    // is silently dropped). With a sub present we take the stamping path, which
+    // packs the sub into each frame; otherwise (auth disabled, or a token with no
+    // sub) the default cross-request fusion path below runs untouched.
+    if let Some(sub) = authed.0.filter(|s| !s.is_empty()) {
+        return push_stamped(&st, results, groups, n, sub).await;
+    }
+
     let pending = groups.len();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let state = Arc::new(PushState {
@@ -176,40 +229,89 @@ pub async fn handle_push(State(st): State<Arc<AppState>>, body: Bytes) -> Respon
     let _ = rx.await;
     st.metrics.push.record_request(n);
 
-    let mut r = state.results.lock().unwrap();
-    // Resolve layer-1 followers: adopt the leader's FINAL message_id (a leader
-    // that turned out to be a cross-flush duplicate now carries the pre-existing
-    // id). A follower stays "duplicate" unless the leader failed outright.
-    for i in 0..r.len() {
-        if let Some(l) = r[i].dup_of {
-            let leader_mid = r[l].message_id.clone();
-            let leader_status = r[l].status;
-            r[i].message_id = leader_mid;
-            if leader_status == "error" {
-                r[i].status = "error";
+    let mut guard = state.results.lock().unwrap();
+    resolve_push_followers(guard.as_mut_slice());
+    let body = render_push_results(guard.as_slice());
+    json(StatusCode::CREATED, body)
+}
+
+// Auth-enabled push: the authenticated producer `sub` must be packed into each
+// frame, so we bypass cross-request fusion and write every (queue, partition)
+// group as its own segment via seg_push_segment_wire_v1 (producer_sub set on
+// each FrameIn). Only reached when JWT auth is enabled AND the token carried a
+// sub, so the default (fusion) hot path is entirely unaffected. Duplicate
+// handling mirrors the seg engine's whole-segment dedup.
+async fn push_stamped(
+    st: &Arc<AppState>,
+    mut results: Vec<ItemResult>,
+    groups: HashMap<(String, String), Vec<PreFrame>>,
+    n: usize,
+    sub: String,
+) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => {
+            return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string())
+        }
+    };
+    for ((queue, partition), pfs) in groups {
+        if pfs.is_empty() {
+            continue;
+        }
+        let fins: Vec<FrameIn> = pfs
+            .iter()
+            .map(|p| FrameIn {
+                message_id: p.mid,
+                txn: &p.txn,
+                trace_id: None,
+                producer_sub: Some(sub.as_str()),
+                payload: &p.payload,
+                encrypted: false,
+            })
+            .collect();
+        let metas: Vec<serde_json::Value> = pfs
+            .iter()
+            .enumerate()
+            .map(|(k, p)| serde_json::json!({"i": k, "mid": uuid_bytes_to_string(&p.mid), "txn": p.txn}))
+            .collect();
+        let metas_json = serde_json::Value::Array(metas).to_string();
+        let blob = zstd_compress(&pack_frames(&fins), st.zstd_level);
+        match db::push_segment(&client, &queue, &partition, &metas_json, &blob, pfs.len() as i32)
+            .await
+        {
+            Ok(txt) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+                if v.get("status").and_then(|s| s.as_str()) == Some("duplicate") {
+                    // Whole-segment dedup: map each returned dup {i, mid} back to
+                    // its item (adopting the pre-existing id); the rest stay queued.
+                    if let Some(dups) = v.get("dups").and_then(|d| d.as_array()) {
+                        for d in dups {
+                            let idx = d.get("i").and_then(|x| x.as_i64()).unwrap_or(-1);
+                            if idx < 0 || idx as usize >= pfs.len() {
+                                continue;
+                            }
+                            let item = pfs[idx as usize].item;
+                            results[item].status = "duplicate";
+                            if let Some(mid) = d.get("mid").and_then(|x| x.as_str()) {
+                                if !mid.is_empty() {
+                                    results[item].message_id = mid.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                for p in &pfs {
+                    results[p.item].status = "error";
+                }
             }
         }
     }
-    let mut out = String::with_capacity(n * 96);
-    out.push('[');
-    for (i, item) in r.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str("{\"index\":");
-        out.push_str(&i.to_string());
-        out.push_str(",\"message_id\":\"");
-        out.push_str(&item.message_id);
-        out.push_str("\",\"transaction_id\":\"");
-        json_escape_into(&mut out, &item.txn);
-        out.push_str("\",\"queueName\":\"");
-        json_escape_into(&mut out, &item.queue);
-        out.push_str("\",\"status\":\"");
-        out.push_str(item.status);
-        out.push_str("\"}");
-    }
-    out.push(']');
-    json(StatusCode::CREATED, out)
+    st.metrics.push.record_request(n);
+    resolve_push_followers(&mut results);
+    json(StatusCode::CREATED, render_push_results(&results))
 }
 
 // ------------------------------------------------------------------- pop
@@ -1049,12 +1151,19 @@ fn txn_fail_body(txn_id: &str, err: &str, status: StatusCode) -> Response {
     json(status, out.to_string())
 }
 
-pub async fn handle_transaction(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+pub async fn handle_transaction(
+    State(st): State<Arc<AppState>>,
+    Extension(authed): Extension<crate::auth::AuthedSub>,
+    body: Bytes,
+) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
     };
     let txn_id = uuid_bytes_to_string(&uuidv7_bytes());
+    // Authenticated producer identity (JWT sub), stamped onto every pushed frame
+    // when auth is enabled. None when auth is disabled or the token had no sub.
+    let producer_sub = authed.0.filter(|s| !s.is_empty());
 
     let operations = match root.get("operations").and_then(|o| o.as_array()) {
         Some(o) => o,
@@ -1272,7 +1381,7 @@ pub async fn handle_transaction(State(st): State<Arc<AppState>>, body: Bytes) ->
                 message_id: f.mid,
                 txn: &f.txn,
                 trace_id: f.trace,
-                producer_sub: None,
+                producer_sub: producer_sub.as_deref(),
                 payload: &f.payload,
                 encrypted: false,
             })
@@ -2237,6 +2346,53 @@ pub async fn handle_delete_consumer_group(
     let out = serde_json::json!({
         "success": true,
         "consumerGroup": group,
+        "deletedPartitions": seg_n + rows_n,
+        "metadataDeleted": delete_metadata,
+    });
+    json(StatusCode::OK, out.to_string())
+}
+
+// DELETE /api/v1/consumer-groups/:group/queues/:queue?deleteMetadata= — drop the
+// group FOR ONE QUEUE only. Removes the group's segment cursors for every
+// partition of THAT queue (seg_consumers) + its seg_consumer_watermarks row for
+// (queue, group), AND the rows-side per-queue coordination state via
+// queen.delete_consumer_group_for_queue_v1 (partition_consumers, consumer_watermarks,
+// and consumer_groups_metadata when deleteMetadata). Clearing the empty-scan
+// watermark is what lets the group re-consume the queue from the start (an
+// advanced watermark would otherwise fence off every partition). deletedPartitions
+// sums both engines; HTTP 200 with the merged JSON (a 204 would make the JS client
+// return null).
+pub async fn handle_delete_consumer_group_for_queue(
+    State(st): State<Arc<AppState>>,
+    Path((group, queue)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let delete_metadata = qbool(&params, "deleteMetadata", true);
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+
+    let seg_n = match db::delete_consumer_group_for_queue_seg(&client, &group, &queue).await {
+        Ok(n) => n as i64,
+        Err(e) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{{\"error\":\"delete(seg) failed: {}\"}}", e).replace('"', "'"),
+            )
+        }
+    };
+    // Best-effort rows-side cleanup (empty for a pure-segments deployment).
+    let rows = db::delete_consumer_group_for_queue_rows(&client, &group, &queue, delete_metadata)
+        .await
+        .unwrap_or_else(|_| "{}".to_string());
+    let rows_v: serde_json::Value = serde_json::from_str(&rows).unwrap_or(serde_json::Value::Null);
+    let rows_n = rows_v.get("deletedPartitions").and_then(|x| x.as_i64()).unwrap_or(0);
+
+    let out = serde_json::json!({
+        "success": true,
+        "consumerGroup": group,
+        "queueName": queue,
         "deletedPartitions": seg_n + rows_n,
         "metadataDeleted": delete_metadata,
     });

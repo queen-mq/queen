@@ -518,48 +518,37 @@ export async function testPushMalformedTraceId(client) {
 
 export async function testPushProducerSubEmptyStringBecomesNull(client) {
     // We can't set producerSub from the client (server-stamped field). The
-    // invariant we need to preserve is that when the server writes an empty
-    // producer_sub into the JSON, the SP stores SQL NULL. We verify it by
-    // pushing without auth (server will stamp producerSub as empty / NULL)
-    // and then checking via a short-lived pg client. NOTE: we intentionally
-    // do NOT dynamically import ./run.js here — that module executes
-    // top-level `await main()` and re-importing it while it's running
-    // deadlocks the ESM module graph.
+    // invariant we need to preserve is that a message pushed without auth has a
+    // producerSub of null (never a literal empty string). Black-box port: the
+    // segments engine stores messages in queen.seg_segments and never populates
+    // queen.messages, so we observe the field via the pop API — the seg-native
+    // ground truth — instead of a direct SQL read of queen.messages.
     const queueName = 'test-v3-producer-sub-null'
     const queue = await client.queue(queueName).create()
     if (!queue.configured) {
         return { success: false, message: 'Queue not created' }
     }
-    const res = await client.queue(queueName).push([{ data: { x: 1 } }])
+    const tx = 'tx-psn-' + crypto.randomBytes(4).toString('hex')
+    const res = await client.queue(queueName).push([{ transactionId: tx, data: { x: 1 } }])
     if (res[0].status !== 'queued') {
         return { success: false, message: 'Push failed' }
     }
-    const messageId = res[0].message_id
 
-    const { default: pg } = await import('pg')
-    const pool = new pg.Pool({
-        host: process.env.PG_HOST || 'localhost',
-        port: process.env.PG_PORT || 5432,
-        database: process.env.PG_DB || 'postgres',
-        user: process.env.PG_USER || 'postgres',
-        password: process.env.PG_PASSWORD || 'postgres',
-        max: 1
-    })
-    try {
-        const r = await pool.query(
-            'SELECT producer_sub FROM queen.messages WHERE id = $1',
-            [messageId]
-        )
-        if (r.rows.length !== 1) {
-            return { success: false, message: `Message ${messageId} not found` }
-        }
-        if (r.rows[0].producer_sub !== null) {
-            return { success: false, message: `Expected producer_sub NULL, got ${JSON.stringify(r.rows[0].producer_sub)}` }
-        }
-        return { success: true }
-    } finally {
-        await pool.end()
+    // wait(true): ride out any push→visibility race (see pushLargePayload).
+    const deadline = Date.now() + 6000
+    let hit = null
+    while (Date.now() < deadline && !hit) {
+        const msgs = await client.queue(queueName).batch(20).wait(true).pop()
+        hit = (msgs || []).find(m => m && m.transactionId === tx)
+        if (!hit) await new Promise(r => setTimeout(r, 150))
     }
+    if (!hit) {
+        return { success: false, message: `Pushed message ${tx} not observed via pop` }
+    }
+    if (hit.producerSub != null) {
+        return { success: false, message: `Expected producerSub null, got ${JSON.stringify(hit.producerSub)}` }
+    }
+    return { success: true }
 }
 
 export async function pushEncryptedPayload(client) {

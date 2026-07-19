@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod db;
 mod frames;
@@ -55,6 +56,17 @@ async fn main() {
     );
 
     let metrics = Arc::new(metrics::Metrics::new());
+
+    // JWT auth. Disabled by default (JWT_ENABLED=false) → the middleware is a
+    // transparent pass-through and every request is served with no token, exactly
+    // as the rest of the test-suite expects.
+    let authenticator = auth::Authenticator::new(cfg.auth.clone());
+    if cfg.auth.enabled {
+        println!(
+            "queen-seg-rust: JWT auth ENABLED (algorithm={}, skip_paths={:?})",
+            cfg.auth.algorithm, cfg.auth.skip_paths
+        );
+    }
 
     // Background retention + eviction sweep (segments-targeted). Spawned before
     // the HTTP server so the RETENTION_INTERVAL cadence is live as soon as the
@@ -155,6 +167,10 @@ async fn main() {
             post(handlers::handle_update_subscription),
         )
         .route(
+            "/api/v1/consumer-groups/:group/queues/:queue",
+            axum::routing::delete(handlers::handle_delete_consumer_group_for_queue),
+        )
+        .route(
             "/api/v1/consumer-groups/:group/queues/:queue/seek",
             post(handlers::handle_seek_consumer_group),
         )
@@ -197,6 +213,12 @@ async fn main() {
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(64 * 1024 * 1024),
+        ))
+        // Auth runs outermost: it validates the token + route level before any
+        // handler, and stamps AuthedSub into request extensions for producer_sub.
+        .layer(axum::middleware::from_fn_with_state(
+            authenticator.clone(),
+            auth::auth_middleware,
         ))
         .with_state(state);
 

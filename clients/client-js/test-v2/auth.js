@@ -110,6 +110,40 @@ async function httpConfigure(queue, bearerToken) {
     }
 }
 
+// Black-box observation for the HTTP push tests: pop the message back through
+// the API and read its `producerSub`. The segments engine stores messages in
+// queen.seg_segments (never queen.messages), so a seg-broker push is only
+// observable via pop — the seg-native ground truth. Optional bearer so the
+// JWT-enabled pops are authorized.
+async function httpPop({ queue, bearerToken, batch = 20, waitMs = 5000 }) {
+    const headers = {}
+    if (bearerToken) headers['Authorization'] = `Bearer ${bearerToken}`
+    const url = `${SERVER_URL}/api/v1/pop/queue/${encodeURIComponent(queue)}`
+        + `?batch=${batch}&wait=true&timeout=${waitMs}&autoAck=true`
+    const res = await fetch(url, { method: 'GET', headers })
+    if (res.status === 204) return []
+    const text = await res.text()
+    if (!res.ok) {
+        throw new Error(`pop failed ${res.status}: ${text}`)
+    }
+    const body = text ? JSON.parse(text) : {}
+    return (body.messages || []).filter(m => m != null)
+}
+
+// Pop until we observe the message with the given transactionId; returns its
+// producerSub (a seg push is immediately visible via fire-on-idle, but retry a
+// few times to be robust to any push→visibility race).
+async function poppedProducerSub(queue, transactionId, bearerToken) {
+    const deadline = Date.now() + 6000
+    while (Date.now() < deadline) {
+        const msgs = await httpPop({ queue, bearerToken })
+        const hit = msgs.find(m => m.transactionId === transactionId)
+        if (hit) return { found: true, producerSub: hit.producerSub }
+        await new Promise(r => setTimeout(r, 150))
+    }
+    return { found: false, producerSub: undefined }
+}
+
 // Direct SP call via dbPool — bypasses HTTP and JWT entirely. Used by the
 // SP-level tests below so they work regardless of whether the server has
 // auth enabled or not.
@@ -265,12 +299,17 @@ export async function producerSubIgnoredFromBodyWithoutAuth(client) {
         extraItemFields: { producerSub: 'attacker-no-jwt' }
     })
 
-    const stored = await getStoredProducerSub(q, tx)
-    if (stored !== null) {
-        return { success: false, message: `Expected NULL producer_sub (auth disabled), got ${JSON.stringify(stored)} - client was able to set it!` }
+    // Black-box: observe the pushed message via pop. producerSub must be null
+    // (the field is not client-settable, and there is no JWT sub to stamp).
+    const { found, producerSub } = await poppedProducerSub(q, tx)
+    if (!found) {
+        return { success: false, message: `Pushed message ${tx} not observed via pop` }
+    }
+    if (producerSub !== null) {
+        return { success: false, message: `Expected producerSub null (auth disabled), got ${JSON.stringify(producerSub)} - client was able to set it!` }
     }
 
-    return { success: true, message: 'Body-supplied producerSub ignored when auth disabled; stored as NULL' }
+    return { success: true, message: 'Body-supplied producerSub ignored when auth disabled; pop shows null' }
 }
 
 // ===========================================================================
@@ -297,12 +336,17 @@ export async function producerSubStampedFromJwt(client) {
         bearerToken: token
     })
 
-    const stored = await getStoredProducerSub(q, tx)
-    if (stored !== 'alice-producer') {
-        return { success: false, message: `Expected producer_sub='alice-producer', got ${JSON.stringify(stored)}` }
+    // Black-box: pop the message back and read producerSub (the seg-native
+    // ground truth). It must equal the authenticated JWT sub.
+    const { found, producerSub } = await poppedProducerSub(q, tx, token)
+    if (!found) {
+        return { success: false, message: `Pushed message ${tx} not observed via pop` }
+    }
+    if (producerSub !== 'alice-producer') {
+        return { success: false, message: `Expected producerSub='alice-producer', got ${JSON.stringify(producerSub)}` }
     }
 
-    return { success: true, message: 'producer_sub stamped from authenticated JWT sub claim' }
+    return { success: true, message: 'producer_sub stamped from authenticated JWT sub claim (observed via pop)' }
 }
 
 // ===========================================================================
@@ -328,13 +372,18 @@ export async function producerSubSpoofingIgnoredWithJwt(client) {
         extraItemFields: { producerSub: 'attacker' }
     })
 
-    const stored = await getStoredProducerSub(q, tx)
-    if (stored !== 'legit-producer') {
+    // Black-box: pop the message back; the body-supplied producerSub must be
+    // ignored and the observed value must be the validated JWT sub.
+    const { found, producerSub } = await poppedProducerSub(q, tx, token)
+    if (!found) {
+        return { success: false, message: `Pushed message ${tx} not observed via pop` }
+    }
+    if (producerSub !== 'legit-producer') {
         return {
             success: false,
-            message: `Impersonation not prevented: stored producer_sub=${JSON.stringify(stored)}, expected 'legit-producer'`
+            message: `Impersonation not prevented: observed producerSub=${JSON.stringify(producerSub)}, expected 'legit-producer'`
         }
     }
 
-    return { success: true, message: 'Body-supplied producerSub ignored; stored sub is from validated JWT' }
+    return { success: true, message: 'Body-supplied producerSub ignored; observed sub is from validated JWT' }
 }

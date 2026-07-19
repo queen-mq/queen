@@ -18,6 +18,8 @@ bytes = "1"
 rand = "0.8"
 zstd = "0.13"
 base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3

@@ -10,8 +10,11 @@
 //     a push request body contains producerSub, the server replaces it with
 //     the authenticated JWT sub.
 //
-// The JWT-gated tests require the server to be running with JWT enabled and
-// the matching JWT_SECRET env var to be set when running the tests.
+// These are black-box: the segments engine stores messages in seg_segments and
+// never populates queen.messages, so producerSub is observed via the pop API
+// (the seg-native ground truth) rather than a direct SQL read. The JWT-gated
+// tests require the server running with JWT enabled and the matching JWT_SECRET
+// env var set when running the tests.
 
 package tests
 
@@ -27,6 +30,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
 )
 
 // ---------------------------------------------------------------------------
@@ -72,30 +77,8 @@ func makeJWT(t *testing.T, sub, secret string) string {
 }
 
 // ---------------------------------------------------------------------------
-// DB helpers (ground-truth checks bypass the server so we can tell whether
-// the server actually persisted the stamped value vs. just echoing it).
+// HTTP helpers.
 // ---------------------------------------------------------------------------
-func getStoredProducerSub(ctx context.Context, t *testing.T, queueName, txID string) (*string, bool) {
-	t.Helper()
-	if dbPool == nil {
-		t.Skip("dbPool not available; set PG_* env vars to run this test")
-		return nil, false
-	}
-
-	var sub *string
-	err := dbPool.QueryRow(ctx, `
-		SELECT m.producer_sub
-		FROM queen.messages m
-		JOIN queen.partitions p ON p.id = m.partition_id
-		JOIN queen.queues q ON q.id = p.queue_id
-		WHERE q.name = $1 AND m.transaction_id = $2
-	`, queueName, txID).Scan(&sub)
-	if err != nil {
-		t.Fatalf("query producer_sub: %v", err)
-	}
-	return sub, true
-}
-
 func httpPush(t *testing.T, queue, txID string, data map[string]interface{}, bearer string, extraFields map[string]interface{}) {
 	t.Helper()
 	item := map[string]interface{}{
@@ -127,54 +110,83 @@ func httpPush(t *testing.T, queue, txID string, data map[string]interface{}, bea
 	}
 }
 
+// configureQueue creates a queue over HTTP with an optional bearer (configure
+// requires auth when JWT is enabled).
+func configureQueue(t *testing.T, queue, bearer string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, serverURL+"/api/v1/configure",
+		strings.NewReader(fmt.Sprintf(`{"queue":%q,"options":{}}`, queue)))
+	if err != nil {
+		t.Fatalf("configure request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	res.Body.Close()
+}
+
+// popProducerSub pops the queue (optionally authenticated) until it observes the
+// message with the given transactionId, then returns its ProducerSub as
+// deserialised into the typed Message struct. This is the seg-native ground
+// truth for producerSub (queen.messages is never populated by the seg engine).
+func popProducerSub(ctx context.Context, t *testing.T, bearer, queue, txID string) (string, bool) {
+	t.Helper()
+	c, err := queen.New(queen.ClientConfig{URL: serverURL, BearerToken: bearer})
+	if err != nil {
+		t.Fatalf("build client: %v", err)
+	}
+	defer c.Close(ctx)
+
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		msgs, err := c.Queue(queue).Batch(20).Wait(true).Pop(ctx)
+		if err != nil {
+			t.Fatalf("pop: %v", err)
+		}
+		for _, m := range msgs {
+			if m.TransactionID == txID {
+				return m.ProducerSub, true
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return "", false
+}
+
 // ===========================================================================
 // TEST: Message.ProducerSub is properly deserialised by the typed struct
 // ---------------------------------------------------------------------------
-// Pushes via HTTP with a fake producerSub in the body (which will be ignored),
-// then pushes directly via the stored procedure (which accepts producerSub
-// because it's the server's own interface to the SP), then verifies the Go
-// client deserialises ProducerSub correctly on pop.
+// An authenticated push stamps producer_sub from the JWT sub; this test proves
+// the Go client deserialises that stamped, non-empty value into the typed
+// Message.ProducerSub field on pop. (An authenticated push is the only way a
+// non-null producerSub reaches a seg-broker message, so it is JWT-gated.)
 // ===========================================================================
 func TestProducerSubFieldDeserialisation(t *testing.T) {
-	client := requireClient(t)
-	if dbPool == nil {
-		t.Skip("dbPool not available")
+	requireClient(t)
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		t.Skip("set JWT_SECRET (matching server) to run")
 	}
 	ctx := context.Background()
 
 	q := fmt.Sprintf("test-auth-go-field-%d", time.Now().UnixNano())
 	txID := fmt.Sprintf("tx-go-field-%d", time.Now().UnixNano())
+	token := makeJWT(t, "go-test-sub", secret)
 
-	// Use the SP directly to inject a known producer_sub (simulates a message
-	// that was stamped at an earlier time by an authenticated JWT push).
-	items, _ := json.Marshal([]map[string]interface{}{{
-		"queue":         q,
-		"partition":     "Default",
-		"transactionId": txID,
-		"payload":       map[string]interface{}{"hello": "world"},
-		"producerSub":   "go-test-sub",
-	}})
-	if _, err := dbPool.Exec(ctx, "SELECT queen.push_messages_v2($1::jsonb)", string(items)); err != nil {
-		t.Fatalf("push_messages_v2: %v", err)
-	}
+	configureQueue(t, q, token)
+	httpPush(t, q, txID, map[string]interface{}{"hello": "world"}, token, nil)
 
-	msgs, err := client.Queue(q).Batch(10).Wait(false).Pop(ctx)
-	if err != nil {
-		t.Fatalf("pop: %v", err)
-	}
-
-	var found bool
-	for _, m := range msgs {
-		if m.TransactionID == txID {
-			if m.ProducerSub != "go-test-sub" {
-				t.Fatalf("ProducerSub = %q, want %q", m.ProducerSub, "go-test-sub")
-			}
-			found = true
-			break
-		}
-	}
+	sub, found := popProducerSub(ctx, t, token, q, txID)
 	if !found {
-		t.Fatalf("did not find tx %s in %d popped messages", txID, len(msgs))
+		t.Fatalf("did not observe pushed tx %s via pop", txID)
+	}
+	if sub != "go-test-sub" {
+		t.Fatalf("ProducerSub = %q, want %q", sub, "go-test-sub")
 	}
 }
 
@@ -183,9 +195,6 @@ func TestProducerSubFieldDeserialisation(t *testing.T) {
 // ===========================================================================
 func TestProducerSubBodyIgnoredWithoutAuth(t *testing.T) {
 	requireClient(t)
-	if dbPool == nil {
-		t.Skip("dbPool not available")
-	}
 	if os.Getenv("JWT_SECRET") != "" {
 		t.Skip("JWT_SECRET is set - run TestProducerSubStampedFromJwt instead")
 	}
@@ -198,12 +207,14 @@ func TestProducerSubBodyIgnoredWithoutAuth(t *testing.T) {
 		"producerSub": "attacker-no-jwt",
 	})
 
-	stored, ok := getStoredProducerSub(ctx, t, q, txID)
-	if !ok {
-		return
+	// Black-box: observe via pop. With auth disabled the field must be empty
+	// (the Go zero value for a null producerSub); the body value must be ignored.
+	sub, found := popProducerSub(ctx, t, "", q, txID)
+	if !found {
+		t.Fatalf("did not observe pushed tx %s via pop", txID)
 	}
-	if stored != nil {
-		t.Fatalf("expected NULL producer_sub (auth disabled) but got %q - client was able to set it!", *stored)
+	if sub != "" {
+		t.Fatalf("expected empty producerSub (auth disabled) but got %q - client was able to set it!", sub)
 	}
 }
 
@@ -211,12 +222,10 @@ func TestProducerSubBodyIgnoredWithoutAuth(t *testing.T) {
 // TEST: Authenticated push stamps producer_sub from JWT sub claim
 // ===========================================================================
 func TestProducerSubStampedFromJwt(t *testing.T) {
+	requireClient(t)
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		t.Skip("set JWT_SECRET (matching server) to run")
-	}
-	if dbPool == nil {
-		t.Skip("dbPool not available")
 	}
 	ctx := context.Background()
 
@@ -224,25 +233,15 @@ func TestProducerSubStampedFromJwt(t *testing.T) {
 	txID := fmt.Sprintf("tx-go-jwt-%d", time.Now().UnixNano())
 	token := makeJWT(t, "alice-go-producer", secret)
 
-	// Queue configure (auth required under JWT).
-	req, _ := http.NewRequest(http.MethodPost, serverURL+"/api/v1/configure",
-		strings.NewReader(fmt.Sprintf(`{"queue":%q,"options":{}}`, q)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	_, _ = http.DefaultClient.Do(req)
-
+	configureQueue(t, q, token)
 	httpPush(t, q, txID, map[string]interface{}{"hello": "world"}, token, nil)
 
-	stored, ok := getStoredProducerSub(ctx, t, q, txID)
-	if !ok {
-		return
+	sub, found := popProducerSub(ctx, t, token, q, txID)
+	if !found {
+		t.Fatalf("did not observe pushed tx %s via pop", txID)
 	}
-	if stored == nil || *stored != "alice-go-producer" {
-		got := "(nil)"
-		if stored != nil {
-			got = *stored
-		}
-		t.Fatalf("producer_sub = %q, want %q", got, "alice-go-producer")
+	if sub != "alice-go-producer" {
+		t.Fatalf("producerSub = %q, want %q", sub, "alice-go-producer")
 	}
 }
 
@@ -250,12 +249,10 @@ func TestProducerSubStampedFromJwt(t *testing.T) {
 // TEST: Spoofing is blocked even with a valid JWT
 // ===========================================================================
 func TestProducerSubSpoofingIgnoredWithJwt(t *testing.T) {
+	requireClient(t)
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		t.Skip("set JWT_SECRET (matching server) to run")
-	}
-	if dbPool == nil {
-		t.Skip("dbPool not available")
 	}
 	ctx := context.Background()
 
@@ -263,25 +260,16 @@ func TestProducerSubSpoofingIgnoredWithJwt(t *testing.T) {
 	txID := fmt.Sprintf("tx-go-spoof-%d", time.Now().UnixNano())
 	token := makeJWT(t, "legit-go-producer", secret)
 
-	req, _ := http.NewRequest(http.MethodPost, serverURL+"/api/v1/configure",
-		strings.NewReader(fmt.Sprintf(`{"queue":%q,"options":{}}`, q)))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	_, _ = http.DefaultClient.Do(req)
-
+	configureQueue(t, q, token)
 	httpPush(t, q, txID, map[string]interface{}{"hello": "world"}, token, map[string]interface{}{
 		"producerSub": "attacker",
 	})
 
-	stored, ok := getStoredProducerSub(ctx, t, q, txID)
-	if !ok {
-		return
+	sub, found := popProducerSub(ctx, t, token, q, txID)
+	if !found {
+		t.Fatalf("did not observe pushed tx %s via pop", txID)
 	}
-	if stored == nil || *stored != "legit-go-producer" {
-		got := "(nil)"
-		if stored != nil {
-			got = *stored
-		}
-		t.Fatalf("impersonation not prevented: stored %q, want %q", got, "legit-go-producer")
+	if sub != "legit-go-producer" {
+		t.Fatalf("impersonation not prevented: producerSub %q, want %q", sub, "legit-go-producer")
 	}
 }
