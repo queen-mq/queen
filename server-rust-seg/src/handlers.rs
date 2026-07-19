@@ -503,6 +503,110 @@ pub async fn handle_pop_partition(
     }
 }
 
+// Discovery pop params — same knobs as PopParams plus the namespace/task scope.
+// This is the bare `GET /api/v1/pop` the clients issue for
+// `client.queue().namespace_name(ns).consume(...)` (no queue in the path).
+#[derive(Deserialize)]
+pub struct PopDiscoverParams {
+    batch: Option<i32>,
+    partitions: Option<i32>,
+    #[serde(rename = "autoAck")]
+    auto_ack: Option<bool>,
+    wait: Option<bool>,
+    timeout: Option<u64>,
+    #[serde(rename = "consumerGroup")]
+    consumer_group: Option<String>,
+    namespace: Option<String>,
+    task: Option<String>,
+    #[serde(rename = "subscriptionMode")]
+    subscription_mode: Option<String>,
+    #[serde(rename = "subscriptionFrom")]
+    subscription_from: Option<String>,
+}
+
+// GET /api/v1/pop?namespace=&task=&consumerGroup=... — namespace/task discovery
+// pop. Resolves every segment queue whose queen.queues row matches the requested
+// namespace/task and wildcard-pops across their partitions in one call
+// (queen.seg_pop_discover_wire_v1), returning the SAME response shape as
+// handle_pop. Same long-poll + lease/leaseId semantics; ack/attempt work
+// identically because the SP reuses the per-partition seg_pop_segments_v1 path.
+// At least one of namespace/task must be provided (the clients never send a bare
+// pop without one — QueueBuilder.pop throws first — so a neither-provided call is
+// a 400 rather than an unbounded scan of every queue).
+pub async fn handle_pop_discover(
+    State(st): State<Arc<AppState>>,
+    Query(p): Query<PopDiscoverParams>,
+) -> Response {
+    if st.pop_maintenance.load(Ordering::Relaxed) {
+        return json(StatusCode::NO_CONTENT, "{\"messages\":[],\"paused\":true}".to_string());
+    }
+    let namespace = p.namespace.unwrap_or_default();
+    let task = p.task.unwrap_or_default();
+    if namespace.is_empty() && task.is_empty() {
+        return json(
+            StatusCode::BAD_REQUEST,
+            "{\"success\":false,\"error\":\"namespace or task is required\",\"messages\":[]}".to_string(),
+        );
+    }
+    let batch = p.batch.unwrap_or(200);
+    let max_parts = p.partitions.unwrap_or(1);
+    let auto_ack = p.auto_ack.unwrap_or(false);
+    let wait = p.wait.unwrap_or(false);
+    let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
+    let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    let sub_mode = p.subscription_mode.unwrap_or_else(|| "all".to_string());
+    let sub_from = p.subscription_from.unwrap_or_default();
+    let worker = uuid_bytes_to_string(&uuidv7_bytes());
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    // No single queue to read a lease from: the SP leases each partition with its
+    // own queue's configured lease_time; this is only the fallback for a matching
+    // queue that has no seg_queues.lease_time.
+    let lease_seconds = DEFAULT_LEASE_SECONDS;
+
+    loop {
+        let permit = st.pop_vegas.acquire().await;
+        let client = match st.pool.get().await {
+            Ok(c) => c,
+            Err(_) => {
+                drop(permit);
+                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+            }
+        };
+        let t0 = Instant::now();
+        let res = tokio::time::timeout(
+            st.stmt_timeout,
+            db::pop_discover(
+                &client, &namespace, &task, &group, batch, lease_seconds, &worker,
+                auto_ack, max_parts, &sub_mode, &sub_from,
+            ),
+        )
+        .await;
+        let rtt = t0.elapsed();
+        st.pop_vegas.record(rtt);
+        drop(permit);
+
+        let txt = match res {
+            Ok(Ok(t)) => t,
+            _ => {
+                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
+            }
+        };
+
+        let lease_id: &str = if auto_ack { "" } else { &worker };
+        // Discovery spans queues, so there is no single top-level queue name; the
+        // per-message JSON carries partitionId/leaseId/consumerGroup (all the ack
+        // needs), and the top-level "queue" field is left empty.
+        let (body, count) = build_pop_response(&txt, "", &group, lease_id);
+        if count == 0 && wait && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(st.pop_wait_poll_ms)).await;
+            continue;
+        }
+        st.metrics.pop.record_request(count);
+        st.metrics.pop.record_batch(count, true, rtt);
+        return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
+    }
+}
+
 fn pop_error_body(e: &str) -> (String, usize) {
     let mut out = String::from("{\"success\":false,\"error\":\"");
     json_escape_into(&mut out, e);
@@ -1669,6 +1773,113 @@ pub async fn handle_get_queue(
     json(StatusCode::OK, v.to_string())
 }
 
+// ------------------------------------------------------- resources LIST API
+// GET /api/v1/resources/queues — queue list via get_queues_v2, enriched with
+// segment counts. get_queues_v2 reads its partitions/messages from queen.stats,
+// which the segments engine leaves empty, so those come back 0; we overlay the
+// live seg_partitions/seg_segments counts (mirrors handle_get_queue's segments
+// enrichment). Namespace/task query filters are accepted but not applied — the
+// full list is a valid superset for the CLI list view.
+pub async fn handle_list_queues(State(st): State<Arc<AppState>>) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+
+    let txt = match db::get_queues(&client).await {
+        Ok(t) => t,
+        Err(e) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("{{\"error\":\"list failed: {}\"}}", e).replace('"', "'"),
+            )
+        }
+    };
+    let mut v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+
+    // Enrich each queue with segment-derived counts (best-effort; leave the base
+    // list intact on error).
+    if let Ok(stats) = db::seg_queue_stats_all(&client).await {
+        let map: HashMap<String, (i64, i64, i64)> = stats
+            .into_iter()
+            .map(|(name, parts, segs, msgs)| (name, (parts, segs, msgs)))
+            .collect();
+        if let Some(arr) = v.get_mut("queues").and_then(|q| q.as_array_mut()) {
+            for item in arr.iter_mut() {
+                let name = match item.get("name").and_then(|x| x.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                if let (Some(&(parts, segs, msgs)), Some(obj)) =
+                    (map.get(&name), item.as_object_mut())
+                {
+                    obj.insert(
+                        "segments".to_string(),
+                        serde_json::json!({"segments": segs, "messages": msgs}),
+                    );
+                    obj.insert("partitions".to_string(), serde_json::json!(parts));
+                    // The SP's messages{} block is all-zero for seg queues; overlay
+                    // total/pending with the segment message count.
+                    let m = obj.entry("messages".to_string()).or_insert_with(
+                        || serde_json::json!({"total": 0, "pending": 0, "processing": 0}),
+                    );
+                    if let Some(mo) = m.as_object_mut() {
+                        mo.insert("total".to_string(), serde_json::json!(msgs));
+                        mo.insert("pending".to_string(), serde_json::json!(msgs));
+                    }
+                }
+            }
+        }
+    }
+
+    json(StatusCode::OK, v.to_string())
+}
+
+// GET /api/v1/resources/overview — system overview via get_system_overview_v3.
+pub async fn handle_system_overview(State(st): State<Arc<AppState>>) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+    match db::get_system_overview(&client).await {
+        Ok(t) => json(StatusCode::OK, t),
+        Err(e) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"overview failed: {}\"}}", e).replace('"', "'"),
+        ),
+    }
+}
+
+// GET /api/v1/resources/namespaces — namespace list via get_namespaces_v2.
+pub async fn handle_list_namespaces(State(st): State<Arc<AppState>>) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+    match db::get_namespaces(&client).await {
+        Ok(t) => json(StatusCode::OK, t),
+        Err(e) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"namespaces failed: {}\"}}", e).replace('"', "'"),
+        ),
+    }
+}
+
+// GET /api/v1/resources/tasks — task list via get_tasks_v2.
+pub async fn handle_list_tasks(State(st): State<Arc<AppState>>) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+    match db::get_tasks(&client).await {
+        Ok(t) => json(StatusCode::OK, t),
+        Err(e) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"tasks failed: {}\"}}", e).replace('"', "'"),
+        ),
+    }
+}
+
 pub async fn handle_status() -> Response {
     json(StatusCode::OK, "{\"status\":\"ok\",\"engine\":\"segments-rust\"}".to_string())
 }
@@ -1797,6 +2008,36 @@ pub async fn handle_get_message(
         "isEncrypted": f.encrypted,
     });
     json(StatusCode::OK, out.to_string())
+}
+
+// -------------------------------------------- DELETE /api/v1/messages/:pid/:txn
+// Delete a message by address. In the segments engine live payloads live in
+// immutable segments; the deletable rows are the DLQ snapshots in queen.seg_dlq.
+// This backs the DLQ manual-requeue workflow (dlq list -> re-push -> delete the
+// DLQ row). Always 200 with {success,...}; success:false when nothing matched.
+pub async fn handle_delete_message(
+    State(st): State<Arc<AppState>>,
+    Path((partition_id, transaction_id)): Path<(String, String)>,
+) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+    match db::delete_message(&client, &partition_id, &transaction_id).await {
+        Ok(deleted) => {
+            let out = serde_json::json!({
+                "success": deleted,
+                "partitionId": partition_id,
+                "transactionId": transaction_id,
+                "message": if deleted { "Message deleted successfully" } else { "Message not found" },
+            });
+            json(StatusCode::OK, out.to_string())
+        }
+        Err(e) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{{\"error\":\"delete failed: {}\"}}", e).replace('"', "'"),
+        ),
+    }
 }
 
 // Enrich a list_messages_v1 result: segment-queue entries come back with

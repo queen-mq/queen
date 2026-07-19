@@ -28,6 +28,8 @@ var QueueDefaults = QueueConfig{
 	RetentionSeconds:          0,     // No retention (keep forever)
 	CompletedRetentionSeconds: 0,     // No retention for completed messages
 	RetentionEnabled:          false, // Retention/cleanup disabled by default
+	DeadLetterQueue:           false, // Poison messages dropped (not dead-lettered) by default
+	DlqAfterMaxRetries:        false, // DLQ-after-max-retries trigger off by default
 	EncryptionEnabled:         false, // No encryption by default
 }
 

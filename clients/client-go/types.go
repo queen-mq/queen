@@ -115,6 +115,13 @@ type QueueConfig struct {
 	// runs the retention service on queues with this flag set, so RetentionSeconds
 	// and CompletedRetentionSeconds have no effect unless RetentionEnabled is true.
 	RetentionEnabled bool `json:"retentionEnabled,omitempty"`
+	// DeadLetterQueue routes messages that exhaust RetryLimit to the dead-letter
+	// queue instead of dropping them. The server only dead-letters poison messages
+	// when this (or DlqAfterMaxRetries) is set.
+	DeadLetterQueue bool `json:"deadLetterQueue,omitempty"`
+	// DlqAfterMaxRetries is the retry-exhaustion trigger for dead-lettering; the
+	// server treats it as equivalent to DeadLetterQueue for the DLQ hand-off.
+	DlqAfterMaxRetries bool `json:"dlqAfterMaxRetries,omitempty"`
 	// EncryptionEnabled enables payload encryption
 	EncryptionEnabled bool `json:"encryptionEnabled,omitempty"`
 }

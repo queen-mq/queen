@@ -253,6 +253,70 @@ pub async fn seg_queue_message_stats(
     Ok((row.get(0), row.get(1)))
 }
 
+// ------------------------------------------------------- resources LIST API
+// The get_*_v2 / get_system_overview_v3 SPs power the /api/v1/resources/* list
+// endpoints. They read from queen.queues / queen.stats; the segments engine
+// populates queen.queues but NOT queen.stats, so the queue list comes back with
+// zeroed partitions/messages and is enriched separately (see seg_queue_stats_all).
+// Each returns the SP result JSON as text.
+pub async fn get_queues(
+    client: &deadpool_postgres::Client,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client.query_one("SELECT (queen.get_queues_v2())::text", &[]).await?;
+    Ok(row.get(0))
+}
+
+pub async fn get_system_overview(
+    client: &deadpool_postgres::Client,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_system_overview_v3())::text", &[])
+        .await?;
+    Ok(row.get(0))
+}
+
+pub async fn get_namespaces(
+    client: &deadpool_postgres::Client,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client.query_one("SELECT (queen.get_namespaces_v2())::text", &[]).await?;
+    Ok(row.get(0))
+}
+
+pub async fn get_tasks(
+    client: &deadpool_postgres::Client,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client.query_one("SELECT (queen.get_tasks_v2())::text", &[]).await?;
+    Ok(row.get(0))
+}
+
+// Per-queue segment stats for the whole broker: name -> (partitions, segments,
+// messages). Grouped analogue of seg_queue_message_stats, used to enrich the
+// queue LIST endpoint since queen.stats is empty for the segments engine.
+pub async fn seg_queue_stats_all(
+    client: &deadpool_postgres::Client,
+) -> Result<Vec<(String, i64, i64, i64)>, tokio_postgres::Error> {
+    let stmt = "SELECT q.name, \
+                       count(DISTINCT p.id)::bigint AS partitions, \
+                       count(s.seq)::bigint AS segments, \
+                       COALESCE(sum(s.msg_count), 0)::bigint AS messages \
+                FROM queen.seg_queues q \
+                LEFT JOIN queen.seg_partitions p ON p.queue_id = q.id \
+                LEFT JOIN queen.seg_segments s ON s.partition_id = p.id \
+                GROUP BY q.name";
+    let rows = client.query(stmt, &[]).await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<_, String>(0),
+                r.get::<_, i64>(1),
+                r.get::<_, i64>(2),
+                r.get::<_, i64>(3),
+            )
+        })
+        .collect())
+}
+
 // Configured lease time (seconds) for a queue, from queen.seg_queues by name.
 // None when the queue has no seg_queues row yet (caller defaults to 300).
 pub async fn queue_lease_time(
@@ -329,6 +393,36 @@ pub async fn get_dlq_messages(
     let stmt = "SELECT (queen.get_dlq_messages_v1($1::text::jsonb))::text";
     let row = client.query_one(stmt, &[&filters_json]).await?;
     Ok(row.get(0))
+}
+
+// Delete a message addressed by (partition_id, transaction_id). The segments
+// engine stores live payloads in immutable segments, so the deletable rows here
+// are the DLQ snapshots in queen.seg_dlq (the DLQ manual-requeue workflow drops
+// one). Also runs the rows-engine delete_message_v1 for dual-engine parity (a
+// no-op on a pure-segments queue). Returns true when either path removed a row.
+pub async fn delete_message(
+    client: &deadpool_postgres::Client,
+    partition_id: &str,
+    txn: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let seg = client
+        .execute(
+            "DELETE FROM queen.seg_dlq WHERE partition_id = $1::text::uuid AND transaction_id = $2",
+            &[&partition_id, &txn],
+        )
+        .await?;
+    let rows_txt: String = client
+        .query_one(
+            "SELECT (queen.delete_message_v1($1::text::uuid, $2))::text",
+            &[&partition_id, &txn],
+        )
+        .await?
+        .get(0);
+    let rows_deleted = serde_json::from_str::<serde_json::Value>(&rows_txt)
+        .ok()
+        .and_then(|v| v.get("success").and_then(|x| x.as_bool()))
+        .unwrap_or(false);
+    Ok(seg > 0 || rows_deleted)
 }
 
 // ------------------------------------------------------------------- traces
@@ -507,6 +601,38 @@ pub async fn pop_wildcard(
             stmt,
             &[&queue, &group, &budget, &lease_seconds, &worker, &auto_ack,
               &max_partitions, &sub_mode, &sub_from],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+// Namespace/task discovery pop — GET /api/v1/pop (no queue in path). Wildcard-pops
+// across every segment queue whose queen.queues row matches the namespace/task
+// filter, returning the SAME {"partitions":[...]} shape as pop_wildcard. Empty
+// `namespace`/`task` disable that side of the filter (the handler guards against
+// both being empty). `lease_seconds` is only the fallback lease when a matching
+// queue has no seg_queues.lease_time; each partition is otherwise leased with its
+// own queue's configured leaseTime inside the SP.
+#[allow(clippy::too_many_arguments)]
+pub async fn pop_discover(
+    client: &deadpool_postgres::Client,
+    namespace: &str,
+    task: &str,
+    group: &str,
+    budget: i32,
+    lease_seconds: i32,
+    worker: &str,
+    auto_ack: bool,
+    max_partitions: i32,
+    sub_mode: &str,
+    sub_from: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = "SELECT (queen.seg_pop_discover_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8::int, $9, $10))::text";
+    let row = client
+        .query_one(
+            stmt,
+            &[&namespace, &task, &group, &budget, &lease_seconds, &worker,
+              &auto_ack, &max_partitions, &sub_mode, &sub_from],
         )
         .await?;
     Ok(row.get(0))

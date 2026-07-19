@@ -27,6 +27,7 @@ var (
 	queueCfgRetentionSeconds          int
 	queueCfgCompletedRetentionSeconds int
 	queueCfgEncryption                bool
+	queueCfgDLQ                       bool
 
 	queueDeleteYes bool
 )
@@ -150,7 +151,12 @@ in tests).`,
 			MaxSize:                   queueCfgMaxSize,
 			RetentionSeconds:          queueCfgRetentionSeconds,
 			CompletedRetentionSeconds: queueCfgCompletedRetentionSeconds,
-			EncryptionEnabled:         queueCfgEncryption,
+			// The retention service only sweeps queues with retentionEnabled set,
+			// so a retention/completed-retention window implies enabling retention.
+			RetentionEnabled:   queueCfgRetentionSeconds > 0 || queueCfgCompletedRetentionSeconds > 0,
+			DeadLetterQueue:    queueCfgDLQ,
+			DlqAfterMaxRetries: queueCfgDLQ,
+			EncryptionEnabled:  queueCfgEncryption,
 		}
 		qb = qb.Config(cfg)
 		resp, err := qb.Create().Execute(context.Background())
@@ -242,6 +248,7 @@ func init() {
 	queueConfigureCmd.Flags().IntVar(&queueCfgRetentionSeconds, "retention", 0, "pending retention seconds")
 	queueConfigureCmd.Flags().IntVar(&queueCfgCompletedRetentionSeconds, "completed-retention", 0, "completed retention seconds")
 	queueConfigureCmd.Flags().BoolVar(&queueCfgEncryption, "encrypt", false, "enable payload encryption")
+	queueConfigureCmd.Flags().BoolVar(&queueCfgDLQ, "dlq", true, "dead-letter messages that exhaust --retry-limit (use --dlq=false to drop them instead)")
 
 	queueDeleteCmd.Flags().BoolVar(&queueDeleteYes, "yes", false, "confirm destructive operation")
 

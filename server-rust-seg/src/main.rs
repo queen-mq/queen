@@ -111,6 +111,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/v1/push", post(handlers::handle_push))
+        // Namespace/task discovery pop (no queue in the path). Registered before
+        // the `/pop/queue/:queue` routes; matchit keeps the static `/api/v1/pop`
+        // distinct from the deeper queue-scoped paths.
+        .route("/api/v1/pop", get(handlers::handle_pop_discover))
         .route("/api/v1/pop/queue/:queue", get(handlers::handle_pop))
         .route(
             "/api/v1/pop/queue/:queue/partition/:partition",
@@ -124,6 +128,19 @@ async fn main() {
             post(handlers::handle_lease_extend),
         )
         .route("/api/v1/configure", post(handlers::handle_configure))
+        // Resources LIST API. Static siblings (queues/overview/namespaces/tasks)
+        // registered alongside the `:queue` param route; matchit keeps the static
+        // `/resources/queues` distinct from the deeper `/resources/queues/:queue`.
+        .route("/api/v1/resources/queues", get(handlers::handle_list_queues))
+        .route(
+            "/api/v1/resources/overview",
+            get(handlers::handle_system_overview),
+        )
+        .route(
+            "/api/v1/resources/namespaces",
+            get(handlers::handle_list_namespaces),
+        )
+        .route("/api/v1/resources/tasks", get(handlers::handle_list_tasks))
         .route(
             "/api/v1/resources/queues/:queue",
             get(handlers::handle_get_queue).delete(handlers::handle_delete_queue),
@@ -132,7 +149,7 @@ async fn main() {
         .route("/api/v1/messages", get(handlers::handle_list_messages))
         .route(
             "/api/v1/messages/:partitionId/:transactionId",
-            get(handlers::handle_get_message),
+            get(handlers::handle_get_message).delete(handlers::handle_delete_message),
         )
         .route("/api/v1/dlq", get(handlers::handle_dlq))
         .route("/api/v1/traces", post(handlers::handle_record_trace))

@@ -109,6 +109,12 @@ func (ob *OperationBuilder) buildOptions() map[string]interface{} {
 	if config.RetentionEnabled {
 		opts["retentionEnabled"] = config.RetentionEnabled
 	}
+	if config.DeadLetterQueue {
+		opts["deadLetterQueue"] = config.DeadLetterQueue
+	}
+	if config.DlqAfterMaxRetries {
+		opts["dlqAfterMaxRetries"] = config.DlqAfterMaxRetries
+	}
 	if config.EncryptionEnabled {
 		opts["encryptionEnabled"] = config.EncryptionEnabled
 	}
