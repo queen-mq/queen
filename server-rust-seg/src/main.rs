@@ -4,13 +4,17 @@ mod db;
 mod frames;
 mod fusion;
 mod handlers;
+mod internal;
 mod metrics;
 mod migrate;
+mod notify;
 mod retention;
 mod schema;
+mod udp;
 mod util;
 mod vegas;
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::routing::{get, post};
@@ -94,6 +98,11 @@ async fn main() {
         Err(_) => (false, false),
     };
 
+    // Long-poll waker + inter-instance notifier. Always constructed (the local
+    // waker needs no cluster); the UDP transport is attached below only when peers
+    // are configured.
+    let notifier = notify::Notifier::new();
+
     let state = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
@@ -107,7 +116,55 @@ async fn main() {
         lease_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         maintenance: std::sync::atomic::AtomicBool::new(init_maint),
         pop_maintenance: std::sync::atomic::AtomicBool::new(init_pop_maint),
+        notifier: notifier.clone(),
     });
+
+    // Inter-instance UDP notifications. Gated on QUEEN_SYNC_ENABLED (default true)
+    // AND at least one QUEEN_UDP_PEERS entry — a single stock broker binds nothing
+    // and sends nothing, behaving exactly as before (only the in-process waker,
+    // wired above, is live). Inbound packets apply peer effects to local state:
+    // MESSAGE_AVAILABLE wakes local pops (no re-broadcast), maintenance flips flip
+    // the atomics, queue-config changes drop the stale lease-cache entry.
+    if cfg.sync.udp_active() {
+        let handlers = udp::SyncHandlers {
+            on_message_available: {
+                let n = notifier.clone();
+                Box::new(move |q: &str, _p: &str| n.wake_local(q))
+            },
+            on_maintenance: {
+                let s = state.clone();
+                Box::new(move |e: bool| s.maintenance.store(e, Ordering::Relaxed))
+            },
+            on_pop_maintenance: {
+                let s = state.clone();
+                Box::new(move |e: bool| s.pop_maintenance.store(e, Ordering::Relaxed))
+            },
+            on_queue_config_set: {
+                let s = state.clone();
+                Box::new(move |q: &str| {
+                    s.lease_cache.lock().unwrap().remove(q);
+                })
+            },
+            on_queue_config_delete: {
+                let s = state.clone();
+                Box::new(move |q: &str| {
+                    s.lease_cache.lock().unwrap().remove(q);
+                })
+            },
+        };
+        match udp::UdpTransport::bind(&cfg.sync, handlers).await {
+            Ok(t) => {
+                notifier.attach_transport(t.clone());
+                t.start(&cfg.sync);
+            }
+            Err(e) => eprintln!(
+                "WARN: UDP sync bind failed on :{} ({e}) — continuing with local waker only",
+                cfg.sync.udp_port
+            ),
+        }
+    } else if cfg.sync.enabled {
+        println!("queen-seg-rust: UDP sync enabled but no peers configured — local waker only");
+    }
 
     let app = Router::new()
         .route("/api/v1/push", post(handlers::handle_push))
@@ -208,6 +265,16 @@ async fn main() {
         .route(
             "/api/v1/system/shared-state",
             get(handlers::handle_shared_state),
+        )
+        // ------------------------------------- internal inter-instance surface
+        .route("/internal/api/notify", post(internal::handle_notify))
+        .route(
+            "/internal/api/shared-state/stats",
+            get(internal::handle_shared_state_stats),
+        )
+        .route(
+            "/internal/api/inter-instance/stats",
+            get(internal::handle_inter_instance_stats),
         )
         // ------------------------------------------------------------ streams
         .route(

@@ -69,6 +69,89 @@ impl AuthConfig {
     }
 }
 
+/// Inter-instance UDP sync configuration, mirroring the C++ `InterInstanceConfig`
+/// + `SharedStateConfig` (server/include/queen/config.hpp). Drives `udp.rs` /
+/// `notify.rs`. When `enabled` is true but `peers` is empty (a single stock
+/// broker) the UDP transport is never bound — the broker behaves exactly as
+/// before, except the in-process long-poll waker (which needs no cluster) is live.
+#[derive(Clone)]
+pub struct SyncConfig {
+    pub enabled: bool,
+    pub udp_port: u16,
+    /// Parsed `QUEEN_UDP_PEERS` — (host, port) pairs. Empty ⇒ no peers ⇒ no UDP.
+    pub peers: Vec<(String, u16)>,
+    /// HMAC-SHA256 secret for packet auth. Empty ⇒ insecure mode (no signing).
+    pub secret: String,
+    pub heartbeat_ms: u64,
+    pub dead_threshold_ms: u64,
+    /// Accepted for parity with the C++ `QUEEN_CACHE_REFRESH_INTERVAL_MS`, but not
+    /// consumed: this broker's only per-queue cache (lease time) is lazily fetched
+    /// on miss and invalidated over UDP, so it self-heals without a periodic DB
+    /// refresh loop. Kept so setting the env var is never an error.
+    #[allow(dead_code)]
+    pub cache_refresh_ms: u64,
+    /// This node's identity in heartbeats/stats (env `QUEEN_SERVER_ID`, else a
+    /// short random id). Cosmetic — used only for peer identity/logging/stats.
+    pub server_id: String,
+}
+
+impl SyncConfig {
+    fn from_env() -> SyncConfig {
+        let udp_port = env_int("QUEEN_UDP_NOTIFY_PORT", 6633) as u16;
+        let peers = parse_udp_peers(&env_str("QUEEN_UDP_PEERS", ""), udp_port);
+        let server_id = std::env::var("QUEEN_SERVER_ID")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| std::env::var("HOSTNAME").ok().filter(|v| !v.is_empty()))
+            .unwrap_or_else(|| format!("queen-{:08x}", rand::random::<u32>()));
+        SyncConfig {
+            enabled: env_bool("QUEEN_SYNC_ENABLED", true),
+            udp_port,
+            peers,
+            secret: env_str("QUEEN_SYNC_SECRET", ""),
+            heartbeat_ms: env_int("QUEEN_SYNC_HEARTBEAT_MS", 1000).max(1) as u64,
+            dead_threshold_ms: env_int("QUEEN_SYNC_DEAD_THRESHOLD_MS", 5000).max(1) as u64,
+            cache_refresh_ms: env_int("QUEEN_CACHE_REFRESH_INTERVAL_MS", 60000).max(1) as u64,
+            server_id,
+        }
+    }
+
+    /// The UDP transport only starts when sync is enabled AND at least one peer is
+    /// configured (matches the C++ `enabled_ = shared_state.enabled && has_udp_peers()`).
+    pub fn udp_active(&self) -> bool {
+        self.enabled && !self.peers.is_empty()
+    }
+}
+
+/// Parse `QUEEN_UDP_PEERS`: comma-separated `host` or `host:port` entries (a bare
+/// host uses `default_port`). Tolerates an `http://` prefix and surrounding
+/// whitespace, matching the C++ `parse_udp_peers`.
+fn parse_udp_peers(raw: &str, default_port: u16) -> Vec<(String, u16)> {
+    raw.split(',')
+        .filter_map(|entry| {
+            let mut s = entry.trim();
+            if let Some(rest) = s.strip_prefix("http://") {
+                s = rest;
+            }
+            if let Some(rest) = s.strip_prefix("https://") {
+                s = rest;
+            }
+            if s.is_empty() {
+                return None;
+            }
+            // Split host:port on the LAST ':' so IPv6 literals (unlikely here) or
+            // stray colons degrade gracefully; a non-numeric tail keeps default port.
+            match s.rsplit_once(':') {
+                Some((host, port)) if !host.is_empty() => match port.trim().parse::<u16>() {
+                    Ok(p) => Some((host.trim().to_string(), p)),
+                    Err(_) => Some((s.to_string(), default_port)),
+                },
+                _ => Some((s.to_string(), default_port)),
+            }
+        })
+        .collect()
+}
+
 pub struct Config {
     pub port: String,
     pub pg: deadpool_postgres::Config,
@@ -95,6 +178,8 @@ pub struct Config {
     pub retention_interval_ms: u64,
     // JWT authentication (disabled by default).
     pub auth: AuthConfig,
+    // Inter-instance UDP notifications (enabled by default, but inert with no peers).
+    pub sync: SyncConfig,
 }
 
 fn env_str(k: &str, def: &str) -> String {
@@ -144,5 +229,6 @@ pub fn load() -> Config {
         // with RETENTION_INTERVAL=2000; default matches the C++ 5-minute sweep.
         retention_interval_ms: env_int("RETENTION_INTERVAL", 300000).max(1) as u64,
         auth: AuthConfig::from_env(),
+        sync: SyncConfig::from_env(),
     }
 }

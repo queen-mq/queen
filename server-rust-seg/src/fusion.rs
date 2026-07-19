@@ -68,6 +68,11 @@ pub struct OwnedFrame {
     pub message_id: [u8; 16],
     pub txn: String,
     pub payload: Vec<u8>,
+    // Authenticated producer `sub` (from the validated JWT), carried THROUGH
+    // fusion so auth-enabled pushes can still coalesce across requests. When set,
+    // pack_frames stamps it into the frame (FLAG_PSUB) and pop echoes it back as
+    // `producerSub`. None when auth is disabled or the token carried no sub.
+    pub producer_sub: Option<String>,
     pub state: Arc<PushState>,
     pub item: usize,
 }
@@ -389,7 +394,9 @@ fn build_metas_and_blob(group: &FusionGroup, pending: &[usize], zstd_level: i32)
                 message_id: f.message_id,
                 txn: &f.txn,
                 trace_id: None,
-                producer_sub: None,
+                // Stamp the authenticated producer sub into the packed frame
+                // (FLAG_PSUB) so it survives fusion and is readable at pop.
+                producer_sub: f.producer_sub.as_deref(),
                 payload: &f.payload,
                 encrypted: false,
             }

@@ -45,6 +45,11 @@ pub struct AppState {
     // pops (handle_pop / handle_pop_partition early-return {messages:[],paused:true}).
     pub maintenance: AtomicBool,
     pub pop_maintenance: AtomicBool,
+    // Long-poll waker + inter-instance notifier. A local push wakes locally-parked
+    // pops through this, and (when a UDP transport is attached) fans MESSAGE_AVAILABLE
+    // / maintenance / queue-config changes out to peer replicas. With no peers it is
+    // a pure in-process waker — no packets, behaviour otherwise unchanged.
+    pub notifier: Arc<crate::notify::Notifier>,
 }
 
 const DEFAULT_LEASE_SECONDS: i32 = 300;
@@ -72,6 +77,20 @@ impl AppState {
 
 fn json(status: StatusCode, body: String) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
+// Build a VALID JSON error body: {"error":"<prefix><escaped message>"}. The
+// message is JSON-escaped (via json_escape_into) while the STRUCTURAL quotes are
+// left intact, so clients receive parseable JSON carrying the real error text.
+// Replaces the old format-then-blanket-quote-replace pattern, whose replacement
+// of every quote mangled the structural quotes into invalid `{'error':'..'}`
+// (which is what hid the real DB error on the streams path).
+fn json_err(prefix: &str, e: impl std::fmt::Display) -> String {
+    let mut out = String::from("{\"error\":\"");
+    out.push_str(prefix);
+    json_escape_into(&mut out, &e.to_string());
+    out.push_str("\"}");
+    out
 }
 
 // ------------------------------------------------------------------ push
@@ -199,14 +218,16 @@ pub async fn handle_push(
 
     // producer_sub is stamped ONLY from the validated JWT `sub`. The request body
     // is never a source (PushItem doesn't parse `producerSub`, so a spoofed value
-    // is silently dropped). With a sub present we take the stamping path, which
-    // packs the sub into each frame; otherwise (auth disabled, or a token with no
-    // sub) the default cross-request fusion path below runs untouched.
-    if let Some(sub) = authed.0.filter(|s| !s.is_empty()) {
-        return push_stamped(&st, results, groups, n, sub).await;
-    }
+    // is silently dropped). The sub (when present) is carried THROUGH fusion on
+    // each OwnedFrame — the flush's pack_frames stamps it into the frame
+    // (FLAG_PSUB) — so auth-enabled pushes coalesce across requests exactly like
+    // the anonymous path. Auth disabled, or a token with no sub, leaves it None.
+    let producer_sub = authed.0.filter(|s| !s.is_empty());
 
     let pending = groups.len();
+    // Capture the pushed (queue, partition) set before the submit loop consumes
+    // `groups`, so we can wake parked pops / notify peers once the write lands.
+    let notify_keys: Vec<(String, String)> = groups.keys().cloned().collect();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let state = Arc::new(PushState {
         results: Mutex::new(results),
@@ -220,6 +241,7 @@ pub async fn handle_push(
                 message_id: p.mid,
                 txn: p.txn,
                 payload: p.payload,
+                producer_sub: producer_sub.clone(),
                 state: state.clone(),
                 item: p.item,
             })
@@ -228,90 +250,16 @@ pub async fn handle_push(
     }
     let _ = rx.await;
     st.metrics.push.record_request(n);
+    // The segment is committed — wake any parked long-poll pops on these queues
+    // (local) and notify peer replicas (UDP) so cross-replica consume is immediate.
+    for (queue, partition) in &notify_keys {
+        st.notifier.notify_pushed(queue, partition);
+    }
 
     let mut guard = state.results.lock().unwrap();
     resolve_push_followers(guard.as_mut_slice());
     let body = render_push_results(guard.as_slice());
     json(StatusCode::CREATED, body)
-}
-
-// Auth-enabled push: the authenticated producer `sub` must be packed into each
-// frame, so we bypass cross-request fusion and write every (queue, partition)
-// group as its own segment via seg_push_segment_wire_v1 (producer_sub set on
-// each FrameIn). Only reached when JWT auth is enabled AND the token carried a
-// sub, so the default (fusion) hot path is entirely unaffected. Duplicate
-// handling mirrors the seg engine's whole-segment dedup.
-async fn push_stamped(
-    st: &Arc<AppState>,
-    mut results: Vec<ItemResult>,
-    groups: HashMap<(String, String), Vec<PreFrame>>,
-    n: usize,
-    sub: String,
-) -> Response {
-    let client = match st.pool.get().await {
-        Ok(c) => c,
-        Err(_) => {
-            return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string())
-        }
-    };
-    for ((queue, partition), pfs) in groups {
-        if pfs.is_empty() {
-            continue;
-        }
-        let fins: Vec<FrameIn> = pfs
-            .iter()
-            .map(|p| FrameIn {
-                message_id: p.mid,
-                txn: &p.txn,
-                trace_id: None,
-                producer_sub: Some(sub.as_str()),
-                payload: &p.payload,
-                encrypted: false,
-            })
-            .collect();
-        let metas: Vec<serde_json::Value> = pfs
-            .iter()
-            .enumerate()
-            .map(|(k, p)| serde_json::json!({"i": k, "mid": uuid_bytes_to_string(&p.mid), "txn": p.txn}))
-            .collect();
-        let metas_json = serde_json::Value::Array(metas).to_string();
-        let blob = zstd_compress(&pack_frames(&fins), st.zstd_level);
-        match db::push_segment(&client, &queue, &partition, &metas_json, &blob, pfs.len() as i32)
-            .await
-        {
-            Ok(txt) => {
-                let v: serde_json::Value =
-                    serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
-                if v.get("status").and_then(|s| s.as_str()) == Some("duplicate") {
-                    // Whole-segment dedup: map each returned dup {i, mid} back to
-                    // its item (adopting the pre-existing id); the rest stay queued.
-                    if let Some(dups) = v.get("dups").and_then(|d| d.as_array()) {
-                        for d in dups {
-                            let idx = d.get("i").and_then(|x| x.as_i64()).unwrap_or(-1);
-                            if idx < 0 || idx as usize >= pfs.len() {
-                                continue;
-                            }
-                            let item = pfs[idx as usize].item;
-                            results[item].status = "duplicate";
-                            if let Some(mid) = d.get("mid").and_then(|x| x.as_str()) {
-                                if !mid.is_empty() {
-                                    results[item].message_id = mid.to_string();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                for p in &pfs {
-                    results[p.item].status = "error";
-                }
-            }
-        }
-    }
-    st.metrics.push.record_request(n);
-    resolve_push_followers(&mut results);
-    json(StatusCode::CREATED, render_push_results(&results))
 }
 
 // ------------------------------------------------------------------- pop
@@ -430,7 +378,13 @@ pub async fn handle_pop(
         let lease_id: &str = if auto_ack { "" } else { &worker };
         let (body, count) = build_pop_response(&txt, &queue, &group, lease_id);
         if count == 0 && wait && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(st.pop_wait_poll_ms)).await;
+            // Park on the queue's wake gate instead of a blind sleep: a push (local
+            // or peer MESSAGE_AVAILABLE) returns us at once; else we re-poll after
+            // the poll interval, exactly as before.
+            let waitd = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(st.pop_wait_poll_ms));
+            st.notifier.wait_queue(&queue, waitd).await;
             continue;
         }
         st.metrics.pop.record_request(count);
@@ -494,7 +448,12 @@ pub async fn handle_pop_partition(
         let lease_id: &str = if auto_ack { "" } else { &worker };
         let (body, count) = build_pop_specific_response(&txt, &queue, &partition, &group, lease_id);
         if count == 0 && wait && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(st.pop_wait_poll_ms)).await;
+            // A push to any partition of this queue wakes us; we re-poll our
+            // partition. Falls back to the poll interval on a missed wake.
+            let waitd = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(st.pop_wait_poll_ms));
+            st.notifier.wait_queue(&queue, waitd).await;
             continue;
         }
         st.metrics.pop.record_request(count);
@@ -598,7 +557,11 @@ pub async fn handle_pop_discover(
         // needs), and the top-level "queue" field is left empty.
         let (body, count) = build_pop_response(&txt, "", &group, lease_id);
         if count == 0 && wait && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(st.pop_wait_poll_ms)).await;
+            // Discovery pops span queues → park on the shared gate, woken by any push.
+            let waitd = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(st.pop_wait_poll_ms));
+            st.notifier.wait_any(waitd).await;
             continue;
         }
         st.metrics.pop.record_request(count);
@@ -1123,7 +1086,7 @@ pub async fn handle_lease_extend(
         }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"renew failed: {}\"}}", e).replace('"', "'"),
+            json_err("renew failed: ", &e),
         ),
     }
 }
@@ -1657,7 +1620,7 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"configure failed: {}\"}}", e).replace('"', "'"),
+                json_err("configure failed: ", &e),
             )
         }
     };
@@ -1679,7 +1642,7 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
     if let Err(e) = db::mark_queue_segments(&client, &queue).await {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"configure(storage) failed: {}\"}}", e).replace('"', "'"),
+            json_err("configure(storage) failed: ", &e),
         );
     }
     if let Err(e) =
@@ -1687,12 +1650,14 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
     {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"configure(seg_queue) failed: {}\"}}", e).replace('"', "'"),
+            json_err("configure(seg_queue) failed: ", &e),
         );
     }
 
     // Invalidate the cached lease so a leaseTime change is reflected on next pop.
     st.lease_cache.lock().unwrap().remove(&queue);
+    // Invalidate the same queue's config cache on peer replicas.
+    st.notifier.broadcast_queue_config_set(&queue);
 
     json(StatusCode::OK, cfg_txt)
 }
@@ -1716,7 +1681,7 @@ pub async fn handle_delete_queue(
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"delete failed: {}\"}}", e).replace('"', "'"),
+                json_err("delete failed: ", &e),
             )
         }
     };
@@ -1724,11 +1689,13 @@ pub async fn handle_delete_queue(
     if let Err(e) = db::delete_seg_queue(&client, &queue).await {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"delete(seg) failed: {}\"}}", e).replace('"', "'"),
+            json_err("delete(seg) failed: ", &e),
         );
     }
 
     st.lease_cache.lock().unwrap().remove(&queue);
+    // Invalidate the deleted queue's config cache on peer replicas.
+    st.notifier.broadcast_queue_config_delete(&queue);
     json(StatusCode::OK, del_txt)
 }
 
@@ -1751,7 +1718,7 @@ pub async fn handle_get_queue(
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"get failed: {}\"}}", e).replace('"', "'"),
+                json_err("get failed: ", &e),
             )
         }
     };
@@ -1791,7 +1758,7 @@ pub async fn handle_list_queues(State(st): State<Arc<AppState>>) -> Response {
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"list failed: {}\"}}", e).replace('"', "'"),
+                json_err("list failed: ", &e),
             )
         }
     };
@@ -1845,7 +1812,7 @@ pub async fn handle_system_overview(State(st): State<Arc<AppState>>) -> Response
         Ok(t) => json(StatusCode::OK, t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"overview failed: {}\"}}", e).replace('"', "'"),
+            json_err("overview failed: ", &e),
         ),
     }
 }
@@ -1860,7 +1827,7 @@ pub async fn handle_list_namespaces(State(st): State<Arc<AppState>>) -> Response
         Ok(t) => json(StatusCode::OK, t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"namespaces failed: {}\"}}", e).replace('"', "'"),
+            json_err("namespaces failed: ", &e),
         ),
     }
 }
@@ -1875,7 +1842,7 @@ pub async fn handle_list_tasks(State(st): State<Arc<AppState>>) -> Response {
         Ok(t) => json(StatusCode::OK, t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"tasks failed: {}\"}}", e).replace('"', "'"),
+            json_err("tasks failed: ", &e),
         ),
     }
 }
@@ -1953,7 +1920,7 @@ pub async fn handle_get_message(
             Err(e) => {
                 return json(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("{{\"error\":\"resolve failed: {}\"}}", e).replace('"', "'"),
+                    json_err("resolve failed: ", &e),
                 )
             }
         };
@@ -1966,7 +1933,7 @@ pub async fn handle_get_message(
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"segment fetch failed: {}\"}}", e).replace('"', "'"),
+                json_err("segment fetch failed: ", &e),
             )
         }
     };
@@ -2035,7 +2002,7 @@ pub async fn handle_delete_message(
         }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"delete failed: {}\"}}", e).replace('"', "'"),
+            json_err("delete failed: ", &e),
         ),
     }
 }
@@ -2133,7 +2100,7 @@ pub async fn handle_list_messages(
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"list failed: {}\"}}", e).replace('"', "'"),
+                json_err("list failed: ", &e),
             )
         }
     };
@@ -2168,7 +2135,7 @@ pub async fn handle_dlq(
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"dlq failed: {}\"}}", e).replace('"', "'"),
+                json_err("dlq failed: ", &e),
             )
         }
     };
@@ -2246,7 +2213,7 @@ pub async fn handle_record_trace(State(st): State<Arc<AppState>>, body: Bytes) -
         }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"trace failed: {}\"}}", e).replace('"', "'"),
+            json_err("trace failed: ", &e),
         ),
     }
 }
@@ -2264,7 +2231,7 @@ pub async fn handle_message_traces(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"traces failed: {}\"}}", e).replace('"', "'"),
+            json_err("traces failed: ", &e),
         ),
     }
 }
@@ -2285,7 +2252,7 @@ pub async fn handle_traces_by_name(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"traces failed: {}\"}}", e).replace('"', "'"),
+            json_err("traces failed: ", &e),
         ),
     }
 }
@@ -2305,7 +2272,7 @@ pub async fn handle_trace_names(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"trace names failed: {}\"}}", e).replace('"', "'"),
+            json_err("trace names failed: ", &e),
         ),
     }
 }
@@ -2325,7 +2292,7 @@ pub async fn handle_api_status(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"status failed: {}\"}}", e).replace('"', "'"),
+            json_err("status failed: ", &e),
         ),
     }
 }
@@ -2347,7 +2314,7 @@ pub async fn handle_status_queues(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"status queues failed: {}\"}}", e).replace('"', "'"),
+            json_err("status queues failed: ", &e),
         ),
     }
 }
@@ -2496,7 +2463,7 @@ pub async fn handle_consumer_groups(State(st): State<Arc<AppState>>) -> Response
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"consumer groups failed: {}\"}}", e).replace('"', "'"),
+            json_err("consumer groups failed: ", &e),
         ),
     }
 }
@@ -2517,7 +2484,7 @@ pub async fn handle_lagging_consumers(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"lagging failed: {}\"}}", e).replace('"', "'"),
+            json_err("lagging failed: ", &e),
         ),
     }
 }
@@ -2535,7 +2502,7 @@ pub async fn handle_consumer_group_details(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"details failed: {}\"}}", e).replace('"', "'"),
+            json_err("details failed: ", &e),
         ),
     }
 }
@@ -2570,7 +2537,7 @@ pub async fn handle_delete_consumer_group(
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"delete(seg) failed: {}\"}}", e).replace('"', "'"),
+                json_err("delete(seg) failed: ", &e),
             )
         }
     };
@@ -2619,7 +2586,7 @@ pub async fn handle_delete_consumer_group_for_queue(
         Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("{{\"error\":\"delete(seg) failed: {}\"}}", e).replace('"', "'"),
+                json_err("delete(seg) failed: ", &e),
             )
         }
     };
@@ -2675,7 +2642,7 @@ pub async fn handle_update_subscription(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"subscription failed: {}\"}}", e).replace('"', "'"),
+            json_err("subscription failed: ", &e),
         ),
     }
 }
@@ -2718,7 +2685,7 @@ pub async fn handle_seek_consumer_group(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"seek failed: {}\"}}", e).replace('"', "'"),
+            json_err("seek failed: ", &e),
         ),
     }
 }
@@ -2742,7 +2709,7 @@ pub async fn handle_seek_partition(
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"seek failed: {}\"}}", e).replace('"', "'"),
+            json_err("seek failed: ", &e),
         ),
     }
 }
@@ -2758,7 +2725,7 @@ pub async fn handle_stats_refresh(State(st): State<Arc<AppState>>) -> Response {
         Ok(txt) => json(StatusCode::OK, txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"refresh failed: {}\"}}", e).replace('"', "'"),
+            json_err("refresh failed: ", &e),
         ),
     }
 }
@@ -2812,6 +2779,8 @@ pub async fn handle_set_maintenance(State(st): State<Arc<AppState>>, body: Bytes
     if let Ok(c) = st.pool.get().await {
         let _ = db::set_system_flag(&c, "maintenance_mode", enabled).await;
     }
+    // Propagate the flip to peer replicas (no-op with no UDP transport).
+    st.notifier.broadcast_maintenance(enabled);
     let out = serde_json::json!({
         "maintenanceMode": enabled,
         "bufferedMessages": 0,
@@ -2858,6 +2827,8 @@ pub async fn handle_set_pop_maintenance(State(st): State<Arc<AppState>>, body: B
     if let Ok(c) = st.pool.get().await {
         let _ = db::set_system_flag(&c, "pop_maintenance_mode", enabled).await;
     }
+    // Propagate the flip to peer replicas (no-op with no UDP transport).
+    st.notifier.broadcast_pop_maintenance(enabled);
     let out = serde_json::json!({
         "popMaintenanceMode": enabled,
         "message": if enabled {
@@ -2944,7 +2915,7 @@ pub async fn handle_streams_register(State(st): State<Arc<AppState>>, body: Byte
         }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"register failed: {}\"}}", e).replace('"', "'"),
+            json_err("register failed: ", &e),
         ),
     }
 }
@@ -2975,7 +2946,7 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
         Ok(txt) => json(StatusCode::OK, unwrap_stream_result(&txt).to_string()),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"state get failed: {}\"}}", e).replace('"', "'"),
+            json_err("state get failed: ", &e),
         ),
     }
 }
@@ -3148,7 +3119,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
         // whole SP call is one transaction, so a retry is safe).
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{{\"error\":\"cycle failed: {}\"}}", e).replace('"', "'"),
+            json_err("cycle failed: ", &e),
         ),
     }
 }
