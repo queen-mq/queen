@@ -23,7 +23,7 @@ import { randomUUID } from 'crypto';
 const { Pool } = pg;
 
 // ENGINE=queen calls Queen's stored procedures DIRECTLY over libpq (no broker,
-// no HTTP hop) — the pg_qpubsub deployment. This isolates Queen's SQL engine so
+// no HTTP hop) — the direct-to-Postgres deployment. This isolates Queen's SQL engine so
 // we can compare it apples-to-apples with pgmq's functions, separating the
 // engine from the broker/HTTP cost measured in the latency test.
 const ENGINE          = process.env.ENGINE || 'pgmq';
@@ -131,7 +131,7 @@ const SQL_CONSUME_PLAIN =
   "SELECT (SELECT n FROM ids) AS n, (SELECT dn FROM d) AS deleted";
 
 function makeOp(pool, q = QUEUE) {
-  // ENGINE=queen: call Queen's stored procedures directly (pg_qpubsub style).
+  // ENGINE=queen: call Queen's stored procedures directly.
   if (ENGINE === 'queen') {
     if (ROLE === 'producer') {
       return async () => {

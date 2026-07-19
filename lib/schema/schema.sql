@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS queen.messages (
 -- nullable column with no default is a catalog-only change in Postgres >= 11 - no table rewrite).
 ALTER TABLE queen.messages ADD COLUMN IF NOT EXISTS producer_sub TEXT;
 
+-- Storage engine selector. Storage v2 "segments" is the engine this (Rust) broker
+-- serves; the engine itself lives in procedures/023..028_storage_v2*.sql. This is a
+-- segments-only broker, so new queues default to 'segments' (the rows engine and its
+-- hot-path procedures are retired). The column is kept (rather than dropped) so the
+-- dual-engine observability guards in 026/027 and the rows→segments migration can key
+-- off it. Catalog-only change on PG >= 11: constant default, no table rewrite.
+ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS storage VARCHAR(16) NOT NULL DEFAULT 'segments';
+
 -- Unique constraint scoped to partition (not global)
 CREATE UNIQUE INDEX IF NOT EXISTS messages_partition_transaction_unique 
     ON queen.messages(partition_id, transaction_id);

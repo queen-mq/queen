@@ -22,6 +22,8 @@ pub struct Config {
     pub fusion_shards: usize,
     pub fusion_frames: usize,
     pub fusion_hold_ms: u64,
+    // background retention/eviction sweep cadence (ms)
+    pub retention_interval_ms: u64,
 }
 
 fn env_str(k: &str, def: &str) -> String {
@@ -61,5 +63,8 @@ pub fn load() -> Config {
         fusion_shards: env_int("QUEEN_V2_FUSION_SHARDS", 8).max(1) as usize,
         fusion_frames: env_int("QUEEN_V2_FUSION_FRAMES", 500).max(1) as usize,
         fusion_hold_ms: env_int("QUEEN_V2_FUSION_HOLD_MS", 15).max(1) as u64,
+        // RetentionService cadence (C++ parity). retention.js starts the server
+        // with RETENTION_INTERVAL=2000; default matches the C++ 5-minute sweep.
+        retention_interval_ms: env_int("RETENTION_INTERVAL", 300000).max(1) as u64,
     }
 }

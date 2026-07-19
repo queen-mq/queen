@@ -24,7 +24,7 @@
 
 </div>
 
-Queen MQ is a partitioned message queue backed by PostgreSQL, built with uWebSockets, libuv, and the libpq async API. It gives you unlimited FIFO partitions that process independently, consumer groups with replay, transactional delivery, dead-letter queues, tracing, and ACID-guaranteed durability — in a single stateless binary alongside the Postgres you already operate. Five client SDKs (JavaScript, Python, Go, PHP/Laravel, C++) share the same fluent grammar, and there is a plain HTTP API plus a built-in dashboard. An experimental PostgreSQL-extension variant is available as [pg_qpubsub](pg_qpubsub/README.md).
+Queen MQ is a partitioned message queue backed by PostgreSQL, built with uWebSockets, libuv, and the libpq async API. It gives you unlimited FIFO partitions that process independently, consumer groups with replay, transactional delivery, dead-letter queues, tracing, and ACID-guaranteed durability — in a single stateless binary alongside the Postgres you already operate. Five client SDKs (JavaScript, Python, Go, PHP/Laravel, C++) share the same fluent grammar, and there is a plain HTTP API plus a built-in dashboard.
 
 <div align="center">
 
@@ -137,7 +137,7 @@ Then go to the dashboard ([http://localhost:6632](http://localhost:6632)) to see
 <img src="assets/queen-vs-rabbitmq.svg" alt="RabbitMQ: queue-per-entity, 10,000 Erlang processes at ~245 KB each. Queen: one queue, logical partitions per entity." width="780" />
 </div>
 
-**vs pgmq** — also Postgres-backed, and at the SQL-engine level they are equally fast (~1.4 ms/op). The differences are architectural: Queen does ordered fan-out through consumer groups at **1× writes** (pgmq fans out via one queue per group ≈ N× writes), with **no UPDATE+DELETE churn** and **~8× fewer active Postgres backends** under high concurrency. pgmq wins single-op latency at low load — the broker hop Queen can skip entirely with [pg_qpubsub](pg_qpubsub/README.md). Full like-for-like methodology in [benchmark-queen/pgmq/QUEEN-vs-PGMQ.md](benchmark-queen/pgmq/QUEEN-vs-PGMQ.md).
+**vs pgmq** — also Postgres-backed, and at the SQL-engine level they are equally fast (~1.4 ms/op). The differences are architectural: Queen does ordered fan-out through consumer groups at **1× writes** (pgmq fans out via one queue per group ≈ N× writes), with **no UPDATE+DELETE churn** and **~8× fewer active Postgres backends** under high concurrency. pgmq wins single-op latency at low load — that gap is purely Queen's broker hop, not its SQL engine. Full like-for-like methodology in [benchmark-queen/pgmq/QUEEN-vs-PGMQ.md](benchmark-queen/pgmq/QUEEN-vs-PGMQ.md).
 
 ⚖️ Numbers, methodology, and the full comparison: **[queenmq.com/benchmarks.html](https://queenmq.com/benchmarks.html)**
 
@@ -171,7 +171,6 @@ The repository is structured as follows:
 
 - `lib`: C++ core queen library (libqueen), implementing libuv loops, sql schema and procedures
 - `server`: Queen MQ server, implementing the HTTP API that talks to the libqueen library
-- `pg_qpubsub`: PostgreSQL extension for using queen-mq semantics as a PostgreSQL extension
 - `clients/client-js`: JavaScript client library (browser and node.js)
 - `clients/client-py`: Python client library (python 3.8+)
 - `clients/client-go`: Go client library (go 1.24+)

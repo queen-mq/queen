@@ -39,7 +39,6 @@ queen/
 │   ├── client-go/         github.com/smartpricing/queen/clients/client-go
 │   ├── client-laravel/    smartpricing/queen-mq on Packagist (PHP 8.3+)
 │   └── client-cpp/        header-only, ships with the repo
-├── pg_qpubsub/            experimental Postgres extension (separate project)
 ├── benchmark-queen/       end-to-end benchmark harness
 ├── examples/              ~30 runnable Node examples
 ├── helm/, helm_queen/     Helm charts for k8s deployment

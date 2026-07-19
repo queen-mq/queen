@@ -46,6 +46,22 @@ impl Vegas {
         p
     }
 
+    // Take a slot WITHOUT waiting. Returns None when no permit is immediately
+    // available (the lane is contended). Fusion's fire-on-idle path uses this:
+    // an available permit means the push lane is idle enough to flush a low-rate
+    // push right now instead of arming the hold timer. Accounting matches
+    // `acquire` (in_flight++ on success; `record` decrements), so a permit taken
+    // here has the identical lifecycle to one awaited.
+    pub fn try_acquire(self: &Arc<Self>) -> Option<OwnedSemaphorePermit> {
+        match self.sem.clone().try_acquire_owned() {
+            Ok(p) => {
+                self.inner.lock().unwrap().in_flight += 1;
+                Some(p)
+            }
+            Err(_) => None,
+        }
+    }
+
     pub fn record(&self, rtt: Duration) {
         let rtt_ns = rtt.as_nanos() as f64;
         let mut c = self.inner.lock().unwrap();

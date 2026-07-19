@@ -1,8 +1,0 @@
-# pg_qpubsub extension
-comment = 'High-performance message queue with partitions, consumer groups, and analytics'
-default_version = '1.0'
-relocatable = false
-schema = queen
-requires = 'pgcrypto'
-superuser = false
-

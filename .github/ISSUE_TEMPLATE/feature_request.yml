@@ -25,4 +25,4 @@ body:
     id: component
     attributes:
       label: Component
-      placeholder: "server, dashboard, proxy, client-js, client-py, client-go, client-laravel, client-cpp, queenctl, pg_qpubsub"
+      placeholder: "server, dashboard, proxy, client-js, client-py, client-go, client-laravel, client-cpp, queenctl"

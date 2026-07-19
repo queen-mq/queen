@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Engine-vs-engine latency: Queen's stored procedures (pg_qpubsub style) vs pgmq's
+# Engine-vs-engine latency: Queen's stored procedures vs pgmq's
 # functions, BOTH called directly over libpq (no broker, no HTTP, no pooler),
 # concurrency=1, single message. Isolates the SQL engine from the broker hop.
 #
@@ -34,7 +34,7 @@ echo "   running ${DURATION}s…"; wait "$PP"; wait "$PC"
 docker compose down -v >/dev/null 2>&1 || true
 
 ############ Queen stored procedures (direct to queen-pg :55433) ############
-echo; echo "### Queen stored procedures, direct (pg_qpubsub style)…"
+echo; echo "### Queen stored procedures, direct…"
 QUEEN_IMAGE="$QUEEN_IMAGE" docker compose -f queen-compose.yml up -d
 echo -n "   waiting broker (schema init)…"; for i in $(seq 1 90); do curl -sf http://localhost:6633/api/v1/status >/dev/null 2>&1 && break; sleep 1; done; echo " ok"
 ( load_node; ENGINE=queen ROLE=consumer QUEUE=bench QUEEN_PARTITION=p0 CONNECTIONS=1 READ_QTY=1 RECORD_EMPTY=false \
