@@ -58,6 +58,7 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("029_seg_streams.sql", include_str!("../../lib/schema/procedures/029_seg_streams.sql")),
     ("030_seg_traces.sql", include_str!("../../lib/schema/procedures/030_seg_traces.sql")),
     ("031_seg_consumer_groups.sql", include_str!("../../lib/schema/procedures/031_seg_consumer_groups.sql")),
+    ("032_seg_push_multi.sql", include_str!("../../lib/schema/procedures/032_seg_push_multi.sql")),
 ];
 
 /// Apply the schema at boot. Set `QUEEN_APPLY_SCHEMA=0` to skip (e.g. when the DB

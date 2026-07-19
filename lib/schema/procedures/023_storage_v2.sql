@@ -126,6 +126,19 @@ ALTER TABLE queen.seg_consumers SET (
     autovacuum_vacuum_cost_delay = 0,
     fillfactor = 50
 );
+-- Durable per-position ack map for the currently leased batch (Trap 2): the
+-- ordered list of delivered positions the pop handed out, one JSON element each
+--   {"seq":<bigint>, "off":<frame_idx>, "acked":<bool>, "dlq":<bool>}
+-- recorded by the pop in the SAME UPDATE that sets worker_id/lease_expires_at/
+-- batch_end_*. Each ack MARKS its position here instead of releasing the lease,
+-- and the cursor (next_seq,next_off) advances over the highest CONTIGUOUS
+-- acked-OR-dlq prefix. This is what makes out-of-order per-message ack within a
+-- single leased batch (.batch(N).each().concurrency(N)) work: the first ack no
+-- longer finalizes+releases the lease under the other in-flight acks. The map is
+-- durable on the row, so an ack landing on ANY replica resolves by reading it
+-- (no in-process LeaseRegistry as the source of truth). NULL when no batch is
+-- leased (or after a full resolve / release).
+ALTER TABLE queen.seg_consumers ADD COLUMN IF NOT EXISTS batch_positions JSONB;
 
 -- Per-(queue, consumer_group) empty-scan watermark — the segments analogue of
 -- queen.consumer_watermarks in the rows engine. `last_empty_scan_at` records when
@@ -440,6 +453,7 @@ BEGIN
                             THEN 0 ELSE p_upto_off END,
             worker_id = NULL, lease_expires_at = NULL,
             batch_end_seq = NULL, batch_end_off = NULL,
+            batch_positions = NULL,
             total_consumed = total_consumed + GREATEST(p_acked_count, 0)
         WHERE partition_id = v_pid AND consumer_group = p_group;
         v_acked := GREATEST(p_acked_count, 0);
@@ -447,7 +461,8 @@ BEGIN
         -- nack / failed batch: release the lease, cursor untouched.
         UPDATE queen.seg_consumers SET
             worker_id = NULL, lease_expires_at = NULL,
-            batch_end_seq = NULL, batch_end_off = NULL
+            batch_end_seq = NULL, batch_end_off = NULL,
+            batch_positions = NULL
         WHERE partition_id = v_pid AND consumer_group = p_group;
     END IF;
 

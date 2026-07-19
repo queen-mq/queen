@@ -118,6 +118,10 @@ DECLARE
     v_start_off INTEGER;
     v_budget INTEGER := GREATEST(p_budget, 1);
     v_taken INTEGER := 0;
+    -- Durable per-position ack map (Trap 2): the ordered list of delivered
+    -- positions [{seq,off,acked,dlq}] for a non-auto-ack (leased) batch, written
+    -- into queen.seg_consumers.batch_positions in the lease UPDATE below.
+    v_positions JSONB := '[]'::jsonb;
     v_row RECORD;
     v_off INTEGER;
     v_avail INTEGER;
@@ -239,6 +243,17 @@ BEGIN
 
         v_take := LEAST(v_avail, v_budget - v_taken);
 
+        -- Record the exact positions handed out (frame_idx v_off .. v_off+v_take-1
+        -- of this segment) into the durable per-position map. Only for leased
+        -- (non-auto-ack) batches: auto-ack advances the cursor here and holds no
+        -- lease, so it needs no per-position tracking.
+        IF NOT p_auto_ack THEN
+            v_positions := v_positions || (
+                SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                           'seq', v_row.seq, 'off', g, 'acked', false, 'dlq', false)), '[]'::jsonb)
+                FROM generate_series(v_off, v_off + v_take - 1) AS g);
+        END IF;
+
         r_seq        := v_row.seq;
         r_start_off  := v_off;
         r_take       := v_take;
@@ -264,6 +279,7 @@ BEGIN
             next_off = CASE WHEN v_end_off >= v_end_count THEN 0 ELSE v_end_off END,
             worker_id = NULL, lease_expires_at = NULL,
             batch_end_seq = NULL, batch_end_off = NULL,
+            batch_positions = NULL,
             total_consumed = total_consumed + v_taken
         WHERE partition_id = v_pid AND consumer_group = p_group;
     ELSE
@@ -272,6 +288,7 @@ BEGIN
             lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
             batch_end_seq = v_end_seq,
             batch_end_off = v_end_off,
+            batch_positions = v_positions,
             attempt_seq = v_start_seq,
             attempt_off = v_start_off,
             attempt_count = v_attempt
@@ -352,6 +369,18 @@ DECLARE
     v_c RECORD;
     v_count INTEGER;
     v_id UUID;
+    -- Durable per-position path (Trap 2): mark the poison position dlq in the
+    -- leased batch map, re-extend the contiguous prefix past it, and release the
+    -- lease only if the whole batch is then resolved (else keep it for the rest).
+    v_bp JSONB;
+    v_el JSONB;
+    v_prefix_last_seq BIGINT;
+    v_prefix_last_off INTEGER;
+    v_head_seq BIGINT;
+    v_new_seq BIGINT;
+    v_new_off INTEGER;
+    v_pc INTEGER;
+    v_delta BIGINT;
 BEGIN
     SELECT * INTO v_c FROM queen.seg_consumers c
     WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
@@ -367,11 +396,72 @@ BEGIN
             p_message_id, p_txn, p_payload, p_error)
     RETURNING id INTO v_id;
 
-    -- Advance past the poison frame. If it was the segment's last frame the
-    -- cursor rolls over to (seq+1, 0); if the segment is already gone
-    -- (retention) the unnormalized offset is still safe — pop skips segments
-    -- whose frames are exhausted and applies the offset only to the exact
-    -- cursor segment.
+    -- Durable per-position path: dispose the poison position within the map so
+    -- the contiguous prefix can advance PAST it (DLQ-unblock), then release the
+    -- lease iff every position is now resolved. Otherwise keep the lease + map
+    -- so the still-in-flight positions of the same batch can still be acked.
+    IF v_c.batch_positions IS NOT NULL THEN
+        SELECT COALESCE(jsonb_agg(
+                 CASE WHEN (e->>'seq')::bigint = p_seq
+                       AND (e->>'off')::int = p_frame_idx
+                      THEN jsonb_set(e, '{dlq}', 'true'::jsonb)
+                      ELSE e END), '[]'::jsonb)
+        INTO v_bp
+        FROM jsonb_array_elements(v_c.batch_positions) e;
+
+        v_prefix_last_seq := NULL; v_prefix_last_off := NULL; v_head_seq := NULL;
+        FOR v_el IN SELECT value FROM jsonb_array_elements(v_bp) LOOP
+            IF COALESCE((v_el->>'acked')::boolean, false)
+               OR COALESCE((v_el->>'dlq')::boolean, false) THEN
+                v_prefix_last_seq := (v_el->>'seq')::bigint;
+                v_prefix_last_off := (v_el->>'off')::int;
+            ELSE
+                v_head_seq := (v_el->>'seq')::bigint;
+                EXIT;
+            END IF;
+        END LOOP;
+
+        IF v_prefix_last_seq IS NULL THEN
+            v_new_seq := v_c.next_seq; v_new_off := v_c.next_off;
+        ELSE
+            SELECT msg_count INTO v_pc FROM queen.seg_segments
+            WHERE partition_id = p_partition_id AND seq = v_prefix_last_seq;
+            IF v_pc IS NOT NULL AND v_prefix_last_off + 1 >= v_pc THEN
+                v_new_seq := v_prefix_last_seq + 1; v_new_off := 0;
+            ELSE
+                v_new_seq := v_prefix_last_seq; v_new_off := v_prefix_last_off + 1;
+            END IF;
+        END IF;
+        SELECT count(*) INTO v_delta
+        FROM jsonb_array_elements(v_bp) e
+        WHERE ((e->>'seq')::bigint, (e->>'off')::int) >= (v_c.next_seq, v_c.next_off)
+          AND ((e->>'seq')::bigint, (e->>'off')::int) <  (v_new_seq, v_new_off);
+
+        IF v_head_seq IS NULL THEN
+            UPDATE queen.seg_consumers SET
+                next_seq = v_new_seq, next_off = v_new_off,
+                worker_id = NULL, lease_expires_at = NULL,
+                batch_end_seq = NULL, batch_end_off = NULL,
+                batch_positions = NULL,
+                attempt_seq = NULL, attempt_off = NULL, attempt_count = 0,
+                total_consumed = total_consumed + v_delta
+            WHERE partition_id = p_partition_id AND consumer_group = p_group;
+        ELSE
+            UPDATE queen.seg_consumers SET
+                next_seq = v_new_seq, next_off = v_new_off,
+                batch_positions = v_bp,
+                total_consumed = total_consumed + v_delta
+            WHERE partition_id = p_partition_id AND consumer_group = p_group;
+        END IF;
+
+        RETURN jsonb_build_object('ok', true, 'id', v_id);
+    END IF;
+
+    -- Legacy path (lease with no recorded map): advance past the poison frame.
+    -- If it was the segment's last frame the cursor rolls over to (seq+1, 0); if
+    -- the segment is already gone (retention) the unnormalized offset is still
+    -- safe — pop skips segments whose frames are exhausted and applies the offset
+    -- only to the exact cursor segment.
     SELECT msg_count INTO v_count FROM queen.seg_segments
     WHERE partition_id = p_partition_id AND seq = p_seq;
 

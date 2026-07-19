@@ -234,6 +234,19 @@ DECLARE
     v_dlq_enabled BOOLEAN;
     v_attempt INTEGER;
     v_poison_count INTEGER;
+    -- Durable per-position path (Trap 2): the leased batch's ordered position map
+    -- (queen.seg_consumers.batch_positions) + the contiguous-prefix computation.
+    v_bp JSONB;
+    v_el JSONB;
+    v_prefix_last_seq BIGINT;
+    v_prefix_last_off INTEGER;
+    v_head_seq BIGINT;
+    v_head_off INTEGER;
+    v_head_nacked BOOLEAN;
+    v_new_seq BIGINT;
+    v_new_off INTEGER;
+    v_pc INTEGER;
+    v_delta BIGINT;
 BEGIN
     SELECT * INTO v_c FROM queen.seg_consumers c
     WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
@@ -244,6 +257,212 @@ BEGIN
     END IF;
     IF v_c.batch_end_seq IS NULL OR v_c.batch_end_off IS NULL THEN
         RETURN jsonb_build_object('ok', false, 'error', 'no leased batch');
+    END IF;
+
+    -- ================================================================
+    -- Durable per-position ack (Trap 2). When the pop recorded a position
+    -- map, each ack MARKS its position(s) here and the lease is NOT released
+    -- on the first ack: the cursor advances over the highest CONTIGUOUS
+    -- acked-OR-dlq prefix and the lease is held until every position is
+    -- resolved (or it expires). This is what lets .batch(N).each() acks land
+    -- in any order (and on any replica — the map is on the row) without the
+    -- first ack finalizing the batch out from under the other in-flight acks.
+    -- ================================================================
+    IF v_c.batch_positions IS NOT NULL THEN
+        -- Resolve THIS request's acked-ok / nacked txns to (seq:frame_idx) keys
+        -- through the dedup window (same resolver as the legacy walk below).
+        SELECT COALESCE(jsonb_object_agg(d.seq::text || ':' || d.frame_idx::text, true),
+                        '{}'::jsonb)
+        INTO v_acked
+        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, ok BOOLEAN)
+        JOIN queen.seg_dedup d
+          ON d.partition_id = p_partition_id
+         AND d.txn_hash = hashtextextended(a.txn, 0)
+        WHERE a.ok;
+
+        SELECT COALESCE(jsonb_object_agg(d.seq::text || ':' || d.frame_idx::text, true),
+                        '{}'::jsonb)
+        INTO v_nacked
+        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, ok BOOLEAN)
+        JOIN queen.seg_dedup d
+          ON d.partition_id = p_partition_id
+         AND d.txn_hash = hashtextextended(a.txn, 0)
+        WHERE NOT a.ok;
+
+        -- Apply the acked-ok marks to the durable map (idempotent; positions
+        -- already acked/dlq are left as-is).
+        SELECT COALESCE(jsonb_agg(
+                 CASE WHEN NOT COALESCE((e->>'acked')::boolean, false)
+                       AND NOT COALESCE((e->>'dlq')::boolean, false)
+                       AND (v_acked ? ((e->>'seq') || ':' || (e->>'off')))
+                      THEN jsonb_set(e, '{acked}', 'true'::jsonb)
+                      ELSE e END), '[]'::jsonb)
+        INTO v_bp
+        FROM jsonb_array_elements(v_c.batch_positions) e;
+
+        -- Highest contiguous acked/dlq prefix + first unresolved (head) position.
+        v_prefix_last_seq := NULL; v_prefix_last_off := NULL;
+        v_head_seq := NULL; v_head_off := NULL; v_head_nacked := FALSE;
+        FOR v_el IN SELECT value FROM jsonb_array_elements(v_bp) LOOP
+            IF COALESCE((v_el->>'acked')::boolean, false)
+               OR COALESCE((v_el->>'dlq')::boolean, false) THEN
+                v_prefix_last_seq := (v_el->>'seq')::bigint;
+                v_prefix_last_off := (v_el->>'off')::int;
+            ELSE
+                v_head_seq := (v_el->>'seq')::bigint;
+                v_head_off := (v_el->>'off')::int;
+                v_head_nacked := (v_nacked ? ((v_el->>'seq') || ':' || (v_el->>'off')));
+                EXIT;
+            END IF;
+        END LOOP;
+
+        -- New cursor = position just past the contiguous prefix (normalized on
+        -- the segment boundary via msg_count). Empty prefix keeps the cursor.
+        IF v_prefix_last_seq IS NULL THEN
+            v_new_seq := v_c.next_seq; v_new_off := v_c.next_off;
+        ELSE
+            SELECT msg_count INTO v_pc FROM queen.seg_segments
+            WHERE partition_id = p_partition_id AND seq = v_prefix_last_seq;
+            IF v_pc IS NOT NULL AND v_prefix_last_off + 1 >= v_pc THEN
+                v_new_seq := v_prefix_last_seq + 1; v_new_off := 0;
+            ELSE
+                v_new_seq := v_prefix_last_seq; v_new_off := v_prefix_last_off + 1;
+            END IF;
+        END IF;
+        -- Positions newly crossed by the cursor this call (for total_consumed).
+        SELECT count(*) INTO v_delta
+        FROM jsonb_array_elements(v_bp) e
+        WHERE ((e->>'seq')::bigint, (e->>'off')::int) >= (v_c.next_seq, v_c.next_off)
+          AND ((e->>'seq')::bigint, (e->>'off')::int) <  (v_new_seq, v_new_off);
+
+        -- Fully resolved: every position acked or dlq'd -> release the lease.
+        IF v_head_seq IS NULL THEN
+            UPDATE queen.seg_consumers SET
+                next_seq = v_new_seq, next_off = v_new_off,
+                worker_id = NULL, lease_expires_at = NULL,
+                batch_end_seq = NULL, batch_end_off = NULL,
+                batch_positions = NULL,
+                total_consumed = total_consumed + v_delta
+            WHERE partition_id = p_partition_id AND consumer_group = p_group;
+            RETURN jsonb_build_object('ok', true, 'acked', v_delta,
+                                      'seq', v_new_seq, 'off', v_new_off);
+        END IF;
+
+        -- Head unresolved AND explicitly nacked -> retry / DLQ / drop, keyed off
+        -- the queue's retry_limit + the delivery attempt of the poison head.
+        IF v_head_nacked THEN
+            SELECT COALESCE(qq.retry_limit, 3),
+                   COALESCE(qq.dead_letter_queue, false)
+                   OR COALESCE(qq.dlq_after_max_retries, false)
+            INTO v_retry_limit, v_dlq_enabled
+            FROM queen.seg_partitions sp
+            JOIN queen.seg_queues sq ON sq.id = sp.queue_id
+            LEFT JOIN queen.queues qq ON qq.name = sq.name
+            WHERE sp.id = p_partition_id;
+            v_retry_limit := COALESCE(v_retry_limit, 3);
+            v_dlq_enabled := COALESCE(v_dlq_enabled, false);
+            v_attempt := CASE
+                WHEN (v_c.attempt_seq, v_c.attempt_off)
+                     IS NOT DISTINCT FROM (v_head_seq, v_head_off)
+                THEN COALESCE(v_c.attempt_count, 1) ELSE 1 END;
+
+            IF v_attempt > v_retry_limit THEN
+                IF v_dlq_enabled THEN
+                    -- Persist this call's acks + advance to the prefix end, but
+                    -- KEEP the lease so the broker can decode+snapshot the poison
+                    -- head frame and call queen.seg_dlq_head_v1 (which marks the
+                    -- position dlq, re-extends the prefix past it, and releases
+                    -- the lease iff the whole batch is then resolved).
+                    UPDATE queen.seg_consumers SET
+                        next_seq = v_new_seq, next_off = v_new_off,
+                        batch_positions = v_bp,
+                        total_consumed = total_consumed + v_delta
+                    WHERE partition_id = p_partition_id AND consumer_group = p_group;
+                    RETURN jsonb_build_object(
+                        'ok', true, 'dlq', true,
+                        'partitionId', p_partition_id, 'group', p_group,
+                        'worker', p_worker, 'seq', v_head_seq, 'frameIdx', v_head_off,
+                        'acked', v_delta);
+                ELSE
+                    -- No DLQ: DROP the poison head (mark it dlq/disposed), then
+                    -- re-extend the contiguous prefix past it and re-resolve.
+                    SELECT COALESCE(jsonb_agg(
+                             CASE WHEN (e->>'seq')::bigint = v_head_seq
+                                   AND (e->>'off')::int = v_head_off
+                                  THEN jsonb_set(e, '{dlq}', 'true'::jsonb)
+                                  ELSE e END), '[]'::jsonb)
+                    INTO v_bp
+                    FROM jsonb_array_elements(v_bp) e;
+
+                    v_prefix_last_seq := NULL; v_prefix_last_off := NULL;
+                    v_head_seq := NULL; v_head_off := NULL;
+                    FOR v_el IN SELECT value FROM jsonb_array_elements(v_bp) LOOP
+                        IF COALESCE((v_el->>'acked')::boolean, false)
+                           OR COALESCE((v_el->>'dlq')::boolean, false) THEN
+                            v_prefix_last_seq := (v_el->>'seq')::bigint;
+                            v_prefix_last_off := (v_el->>'off')::int;
+                        ELSE
+                            v_head_seq := (v_el->>'seq')::bigint;
+                            EXIT;
+                        END IF;
+                    END LOOP;
+                    SELECT msg_count INTO v_pc FROM queen.seg_segments
+                    WHERE partition_id = p_partition_id AND seq = v_prefix_last_seq;
+                    IF v_pc IS NOT NULL AND v_prefix_last_off + 1 >= v_pc THEN
+                        v_new_seq := v_prefix_last_seq + 1; v_new_off := 0;
+                    ELSE
+                        v_new_seq := v_prefix_last_seq; v_new_off := v_prefix_last_off + 1;
+                    END IF;
+                    SELECT count(*) INTO v_delta
+                    FROM jsonb_array_elements(v_bp) e
+                    WHERE ((e->>'seq')::bigint, (e->>'off')::int) >= (v_c.next_seq, v_c.next_off)
+                      AND ((e->>'seq')::bigint, (e->>'off')::int) <  (v_new_seq, v_new_off);
+
+                    IF v_head_seq IS NULL THEN
+                        UPDATE queen.seg_consumers SET
+                            next_seq = v_new_seq, next_off = v_new_off,
+                            worker_id = NULL, lease_expires_at = NULL,
+                            batch_end_seq = NULL, batch_end_off = NULL,
+                            batch_positions = NULL,
+                            attempt_seq = NULL, attempt_off = NULL, attempt_count = 0,
+                            total_consumed = total_consumed + v_delta
+                        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+                    ELSE
+                        UPDATE queen.seg_consumers SET
+                            next_seq = v_new_seq, next_off = v_new_off,
+                            batch_positions = v_bp,
+                            total_consumed = total_consumed + v_delta
+                        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+                    END IF;
+                    RETURN jsonb_build_object('ok', true, 'dropped', true,
+                        'acked', v_delta, 'seq', v_new_seq, 'off', v_new_off);
+                END IF;
+            ELSE
+                -- Retry budget remains: release the lease so the poison head (and
+                -- everything after the acked prefix) is redelivered; the attempt
+                -- columns are preserved so the next delivery increments the count.
+                UPDATE queen.seg_consumers SET
+                    next_seq = v_new_seq, next_off = v_new_off,
+                    worker_id = NULL, lease_expires_at = NULL,
+                    batch_end_seq = NULL, batch_end_off = NULL,
+                    batch_positions = NULL,
+                    total_consumed = total_consumed + v_delta
+                WHERE partition_id = p_partition_id AND consumer_group = p_group;
+                RETURN jsonb_build_object('ok', true, 'acked', v_delta,
+                                          'seq', v_new_seq, 'off', v_new_off);
+            END IF;
+        END IF;
+
+        -- Head is merely un-acked (waiting for its own ok-ack, arriving in a
+        -- separate call): advance over the contiguous prefix but RETAIN the lease
+        -- and the (updated) map. This is the out-of-order accumulation fix.
+        UPDATE queen.seg_consumers SET
+            next_seq = v_new_seq, next_off = v_new_off,
+            batch_positions = v_bp,
+            total_consumed = total_consumed + v_delta
+        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+        RETURN jsonb_build_object('ok', true, 'acked', v_delta,
+                                  'seq', v_new_seq, 'off', v_new_off);
     END IF;
 
     -- Resolve acked-ok txns to positions. Txns with ok=false, or without a
