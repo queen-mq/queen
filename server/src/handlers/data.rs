@@ -227,6 +227,17 @@ pub async fn handle_push(
     }
     let _ = rx.await;
     st.metrics.push.record_request(n);
+    // RUSTFIX item 24: per-queue push throughput for queue_lag_metrics (one
+    // push_request per queue touched + push_messages = its item count).
+    {
+        let mut per_q: HashMap<&str, u64> = HashMap::new();
+        for it in &parsed.items {
+            *per_q.entry(it.queue).or_insert(0) += 1;
+        }
+        for (q, msgs) in per_q {
+            st.metrics.per_queue.add_push(q, msgs);
+        }
+    }
     // The segment is committed — wake any parked long-poll pops on these queues
     // (local) and notify peer replicas (UDP) so cross-replica consume is immediate.
     for (queue, partition) in &notify_keys {
@@ -257,12 +268,13 @@ pub async fn handle_push(
     for i in error_leaders {
         let it = &parsed.items[i];
         let txn = state.results.lock().unwrap()[i].txn.clone();
-        let payload = spool_payload(&st, it.queue, it.payload, &mut enc_flags).await;
+        let (payload, encrypted) = spool_payload(&st, it.queue, it.payload, &mut enc_flags).await;
         let ok = st.file_buffer.write_event(
             it.queue,
             it.partition.unwrap_or("Default"),
             &txn,
             producer_sub.as_deref(),
+            encrypted,
             &payload,
         );
         if ok {
@@ -304,7 +316,7 @@ async fn spool_payload(
     queue: &str,
     raw: &RawValue,
     enc_flags: &mut HashMap<String, bool>,
-) -> Box<RawValue> {
+) -> (Box<RawValue>, bool) {
     if st.encryption.is_enabled() {
         let on = match enc_flags.get(queue) {
             Some(&b) => b,
@@ -319,12 +331,14 @@ async fn spool_payload(
                 if let Ok(rv) =
                     RawValue::from_string(String::from_utf8_lossy(&env).into_owned())
                 {
-                    return rv;
+                    // RUSTFIX item 8: report that the spooled payload IS an envelope,
+                    // so the drain re-stamps FLAG_ENCRYPTED on the replayed frame.
+                    return (rv, true);
                 }
             }
         }
     }
-    raw.to_owned()
+    (raw.to_owned(), false)
 }
 
 // RUSTFIX item 17: buffer every item of a push to the file buffer (maintenance
@@ -343,10 +357,10 @@ async fn buffer_all(st: &Arc<AppState>, parsed: &PushBody<'_>, producer_sub: Opt
             .unwrap_or_else(|| mid_str.clone());
         let partition = it.partition.unwrap_or("Default");
         // RUSTFIX item 8: spool the encrypted envelope for an encrypted queue.
-        let payload = spool_payload(st, it.queue, it.payload, &mut enc_flags).await;
+        let (payload, encrypted) = spool_payload(st, it.queue, it.payload, &mut enc_flags).await;
         let ok = st
             .file_buffer
-            .write_event(it.queue, partition, &txn, producer_sub, &payload);
+            .write_event(it.queue, partition, &txn, producer_sub, encrypted, &payload);
         if !ok {
             all_ok = false;
         }
@@ -506,6 +520,12 @@ pub async fn handle_pop(
         }
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
+        // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
+        if count > 0 {
+            st.metrics.per_queue.add_pop(&queue, count as u64);
+        } else {
+            st.metrics.per_queue.add_pop_empty(&queue);
+        }
         // autoAck advances the cursor server-side (no client ack round-trip), but it
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
@@ -593,6 +613,12 @@ pub async fn handle_pop_partition(
         }
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
+        // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
+        if count > 0 {
+            st.metrics.per_queue.add_pop(&queue, count as u64);
+        } else {
+            st.metrics.per_queue.add_pop_empty(&queue);
+        }
         // autoAck advances the cursor server-side (no client ack round-trip), but it
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
@@ -1324,11 +1350,20 @@ struct TxnPushGroup {
     // trip seg_push_segment_v1's per-segment dedup and raise QDUP).
     seen: HashMap<String, String>,
 }
+// RUSTFIX item 10: one ack op inside a transaction. Carries the normalized status
+// (completed|failed|retry|dlq) — NOT a bool — so retry/dlq survive to the SP, plus
+// the nack error (for the DLQ reason) and the flat op index (to stamp the result).
+struct TxnAckItem {
+    txn: String,
+    status: &'static str,
+    error: Option<String>,
+    index: usize,
+}
 struct TxnAckGroup {
     partition_id: String,
     group: String,
     worker: String,
-    items: Vec<(String, bool)>,
+    items: Vec<TxnAckItem>,
 }
 
 fn txn_add_push(
@@ -1483,8 +1518,14 @@ pub async fn handle_transaction(
                     .filter(|s| !s.is_empty())
                     .unwrap_or("__QUEUE_MODE__")
                     .to_string();
-                let status = op.get("status").and_then(|x| x.as_str());
-                let ok = status_is_ok(status);
+                // RUSTFIX item 10: keep the normalized status (completed|failed|retry|
+                // dlq) instead of collapsing to a bool, so retry/dlq reach the SP.
+                let status = normalize_ack_status(op.get("status").and_then(|x| x.as_str()));
+                let error = op
+                    .get("error")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
                 let lease = op
                     .get("leaseId")
                     .and_then(|x| x.as_str())
@@ -1511,7 +1552,7 @@ pub async fn handle_transaction(
                         ag.worker = l;
                     }
                 }
-                ag.items.push((txn, ok));
+                ag.items.push(TxnAckItem { txn, status, error, index: flat });
                 flat += 1;
             }
             _ => {
@@ -1527,6 +1568,17 @@ pub async fn handle_transaction(
             "segments transaction supports only push and ack operations",
             StatusCode::BAD_REQUEST,
         );
+    }
+
+    // RUSTFIX item 24: per-queue transaction throughput (each distinct queue the
+    // transaction pushes to; an ack-only transaction maps to no queue here).
+    {
+        let mut seen_q: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for g in &groups {
+            if seen_q.insert(g.queue.as_str()) {
+                st.metrics.per_queue.add_transaction(&g.queue);
+            }
+        }
     }
 
     // Fallback worker resolution: ack groups with no per-op leaseId inherit the
@@ -1571,8 +1623,18 @@ pub async fn handle_transaction(
     //   1. a per-op leaseId (raw HTTP callers), already set during parse;
     //   2. the current partition_consumers.worker_id for (partition, group);
     //   3. the single unambiguous requiredLeases hint (last resort).
+    // RUSTFIX item 11: only resolve a worker from partition_consumers / requiredLeases
+    // when the client actually supplied lease info somewhere in the transaction. If
+    // NO leaseId was sent at all, every ack is a lease-less ack: leave the worker
+    // empty so seg_ack_by_txn_v1 skips the worker/expiry check and still advances the
+    // cursor — matching the direct /ack path, where a post-expiry lease-less ack must
+    // succeed, not fail. The JS/Go builders always put the popped leaseId in
+    // requiredLeases, so normal pop-then-ack transactions still resolve as before
+    // (live leases → back-fill runs → validation passes; a supplied-but-expired
+    // leaseId still fails, per item 11's second clause).
+    let client_supplied_lease = !lease_hints.is_empty();
     for ag in &mut ack_groups {
-        if !ag.worker.is_empty() || ag.partition_id.is_empty() {
+        if !client_supplied_lease || !ag.worker.is_empty() || ag.partition_id.is_empty() {
             continue;
         }
         if let Ok(Some(r)) = client
@@ -1608,7 +1670,7 @@ pub async fn handle_transaction(
         if ag.partition_id.is_empty() || ag.items.is_empty() {
             continue;
         }
-        let txns: Vec<&str> = ag.items.iter().map(|(t, _)| t.as_str()).collect();
+        let txns: Vec<&str> = ag.items.iter().map(|it| it.txn.as_str()).collect();
         match client
             .query_opt(
                 "SELECT 1 FROM unnest($2::text[]) AS a(txn) \
@@ -1696,10 +1758,12 @@ pub async fn handle_transaction(
     let acks_json: Vec<serde_json::Value> = ack_groups
         .iter()
         .map(|ag| {
+            // RUSTFIX item 10: send {"txn","status"} so seg_ack_by_txn_v1 honors
+            // retry/dlq (it prefers status over the legacy ok bool via COALESCE).
             let txns: Vec<serde_json::Value> = ag
                 .items
                 .iter()
-                .map(|(t, ok)| serde_json::json!({"txn": t, "ok": ok}))
+                .map(|it| serde_json::json!({"txn": it.txn, "status": it.status}))
                 .collect();
             serde_json::json!({
                 "partitionId": ag.partition_id,
@@ -1716,6 +1780,62 @@ pub async fn handle_transaction(
         Ok(txt) => {
             let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
             if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
+                // RUSTFIX item 10: DLQ hand-off. seg_ack_by_txn_v1 (via the wire SP)
+                // returns dlq:true for a forced-dlq or budget-exhausted nack and KEEPS
+                // the lease, so the broker must snapshot the poison frame and file the
+                // seg_dlq row — exactly what process_acks does on the direct path.
+                // Without this the DLQ entry is delayed until lease expiry + a later
+                // direct nack. Runs post-commit on the same pooled client.
+                let mut dlq_indices: std::collections::HashSet<usize> =
+                    std::collections::HashSet::new();
+                if let Some(arr) = v.get("acks").and_then(|x| x.as_array()) {
+                    for r in arr {
+                        if !r.get("dlq").and_then(|x| x.as_bool()).unwrap_or(false) {
+                            continue;
+                        }
+                        let pid = r.get("partitionId").and_then(|x| x.as_str()).unwrap_or("");
+                        let grp = r.get("group").and_then(|x| x.as_str()).unwrap_or("");
+                        let seq = r.get("seq").and_then(|x| x.as_i64()).unwrap_or(0);
+                        let frame_idx =
+                            r.get("frameIdx").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+                        // Recover the originating ack group for the worker + nack error
+                        // reason, and to know which result rows to stamp dlq:true.
+                        let ag = match ack_groups
+                            .iter()
+                            .find(|g| g.partition_id == pid && g.group == grp)
+                        {
+                            Some(a) => a,
+                            None => continue,
+                        };
+                        let acks: Vec<Ack> = ag
+                            .items
+                            .iter()
+                            .map(|it| Ack {
+                                txn: it.txn.clone(),
+                                partition_id: ag.partition_id.clone(),
+                                worker: ag.worker.clone(),
+                                status: it.status,
+                                error: it.error.clone(),
+                            })
+                            .collect();
+                        let idxs: Vec<usize> = (0..acks.len()).collect();
+                        let _ = dlq_file_head(
+                            &client, pid, grp, &ag.worker, seq, frame_idx, &acks, &idxs,
+                        )
+                        .await;
+                        for it in &ag.items {
+                            dlq_indices.insert(it.index);
+                        }
+                    }
+                }
+                // DLQ metric parity with the direct ack path (process_acks bumps
+                // dlq_moved per dead-lettered item) so worker_metrics.dlq_count and
+                // the Prometheus lifetime DLQ total include transaction DLQs too.
+                if !dlq_indices.is_empty() {
+                    st.metrics
+                        .dlq_moved
+                        .fetch_add(dlq_indices.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
                 let mut results: Vec<serde_json::Value> = vec![serde_json::Value::Null; flat];
                 for e in &echoes {
                     let mut obj = serde_json::json!({
@@ -1741,7 +1861,7 @@ pub async fn handle_transaction(
                             "success": true,
                             "transactionId": a.txn,
                             "error": serde_json::Value::Null,
-                            "dlq": false,
+                            "dlq": dlq_indices.contains(&a.index),
                         });
                     }
                 }

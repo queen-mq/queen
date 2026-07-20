@@ -247,6 +247,13 @@ pub async fn handle_list_queues(State(st): State<Arc<AppState>>) -> Response {
     };
     let mut v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
 
+    // RUSTFIX item 25: surface an embedded {"error":..} SP body as 404/500 instead
+    // of serving it at 200 (mirrors handle_configure's guard and the resources
+    // siblings). Happy-path bodies ({"queues":[...]}) have no top-level error key.
+    if v.get("error").filter(|e| !e.is_null()).is_some() {
+        return sp_result_to_response(txt);
+    }
+
     // Enrich each queue with segment-derived counts (best-effort; leave the base
     // list intact on error).
     if let Ok(stats) = db::seg_queue_stats_all(&client).await {

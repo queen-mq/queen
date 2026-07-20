@@ -118,7 +118,7 @@ pub async fn handle_health(State(st): State<Arc<AppState>>) -> Response {
         json(
             StatusCode::OK,
             format!(
-                "{{\"status\":\"ok\",\"database\":\"connected\",\"engine\":\"segments-rust\",\"version\":\"{}\"}}",
+                "{{\"status\":\"healthy\",\"database\":\"connected\",\"engine\":\"segments-rust\",\"version\":\"{}\"}}",
                 crate::VERSION
             ),
         )

@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 pub struct OpMetrics {
@@ -84,6 +85,8 @@ pub struct Metrics {
     /// DLQ transitions and DB errors observed on the ack path (worker_metrics parity).
     pub dlq_moved: AtomicU64,
     pub db_errors: AtomicU64,
+    /// RUSTFIX item 24: per-queue throughput, flushed into queen.queue_lag_metrics.
+    pub per_queue: PerQueue,
     start: Instant,
 }
 
@@ -104,6 +107,86 @@ pub struct Counters {
     pub db_errors: u64,
 }
 
+/// RUSTFIX item 24: per-queue throughput counters, flushed each minute into
+/// queen.queue_lag_metrics so the per-queue Prometheus families
+/// (queen_queue_*_per_minute) and the /analytics/queue-lag|queue-ops views show
+/// real data instead of zeros.
+///
+/// Only fields the broker can attribute to a queue CHEAPLY on the hot path are
+/// tracked here — the queue name is in scope at push and at keyed pop. Deliberately
+/// NOT tracked (left 0 in the bucket): ack_* (the ack wire is keyed by partitionId,
+/// with no queue), pop lag (needs per-message age), wildcard-discover pops (span
+/// queues), and parked_count (a gauge). See syscollect.rs for the flush.
+#[derive(Default)]
+pub struct QueueCounters {
+    pub push_requests: AtomicU64,
+    pub push_messages: AtomicU64,
+    pub pop_count: AtomicU64,
+    pub pop_empty: AtomicU64,
+    pub transactions: AtomicU64,
+}
+
+/// A per-queue snapshot the collector diffs into per-minute deltas.
+#[derive(Clone, Copy, Default)]
+pub struct QueueSnap {
+    pub push_requests: u64,
+    pub push_messages: u64,
+    pub pop_count: u64,
+    pub pop_empty: u64,
+    pub transactions: u64,
+}
+
+#[derive(Default)]
+pub struct PerQueue {
+    map: RwLock<HashMap<String, Arc<QueueCounters>>>,
+}
+
+impl PerQueue {
+    /// Fast path: a read lock + Arc clone for an already-seen queue; the write lock
+    /// is taken only the first time a queue is observed (bounded by #queues).
+    fn counters(&self, queue: &str) -> Arc<QueueCounters> {
+        if let Some(c) = self.map.read().unwrap().get(queue) {
+            return c.clone();
+        }
+        self.map.write().unwrap().entry(queue.to_string()).or_default().clone()
+    }
+    pub fn add_push(&self, queue: &str, msgs: u64) {
+        let c = self.counters(queue);
+        c.push_requests.fetch_add(1, Ordering::Relaxed);
+        c.push_messages.fetch_add(msgs, Ordering::Relaxed);
+    }
+    pub fn add_pop(&self, queue: &str, msgs: u64) {
+        self.counters(queue).pop_count.fetch_add(msgs, Ordering::Relaxed);
+    }
+    pub fn add_pop_empty(&self, queue: &str) {
+        self.counters(queue).pop_empty.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn add_transaction(&self, queue: &str) {
+        self.counters(queue).transactions.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Snapshot every queue's cumulative counters (Relaxed loads — the collector
+    /// diffs successive snapshots, so it only needs eventual monotone values).
+    pub fn snapshot(&self) -> HashMap<String, QueueSnap> {
+        self.map
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, c)| {
+                (
+                    k.clone(),
+                    QueueSnap {
+                        push_requests: c.push_requests.load(Ordering::Relaxed),
+                        push_messages: c.push_messages.load(Ordering::Relaxed),
+                        pop_count: c.pop_count.load(Ordering::Relaxed),
+                        pop_empty: c.pop_empty.load(Ordering::Relaxed),
+                        transactions: c.transactions.load(Ordering::Relaxed),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
 impl Metrics {
     pub fn new() -> Metrics {
         Metrics {
@@ -115,6 +198,7 @@ impl Metrics {
             ack_failed: AtomicU64::new(0),
             dlq_moved: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
+            per_queue: PerQueue::default(),
             start: Instant::now(),
         }
     }

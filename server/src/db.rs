@@ -409,6 +409,7 @@ pub async fn seg_message_detail(
                WHERE partition_id = $1::text::uuid AND seq = $2::bigint AND frame_idx = $3::int LIMIT 1 ), \
         g AS ( \
             SELECT COALESCE(jsonb_agg(jsonb_build_object( \
+                       'name', pc.consumer_group, \
                        'group', pc.consumer_group, \
                        'consumed', (pc.next_seq, pc.next_off) > ($2::bigint, $3::int), \
                        'leaseExpiresAt', pc.lease_expires_at) \
@@ -818,6 +819,48 @@ pub async fn insert_system_metrics(
             metrics = EXCLUDED.metrics, sample_count = EXCLUDED.sample_count";
     client
         .execute(stmt, &[&hostname, &port, &worker_id, &sample_count, &metrics_json])
+        .await?;
+    Ok(())
+}
+
+// RUSTFIX item 24: accumulate one replica's per-minute per-queue throughput into
+// queen.queue_lag_metrics (UNIQUE(bucket_time, queue_name)). ON CONFLICT SUMs, so
+// several replicas writing the same minute bucket aggregate cluster-wide (matching
+// the "aggregated across all workers" semantics the readers expect). The lag / ack
+// / parked columns keep their table defaults — the segments broker does not track
+// them per queue (the ack wire is partitionId-keyed and lag needs per-message age).
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_queue_lag_metrics(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    pop_count: i64,
+    push_request_count: i64,
+    push_message_count: i64,
+    pop_empty_count: i64,
+    transaction_count: i64,
+) -> Result<(), tokio_postgres::Error> {
+    let stmt = "INSERT INTO queen.queue_lag_metrics \
+        (bucket_time, queue_name, pop_count, push_request_count, push_message_count, \
+         pop_empty_count, transaction_count) \
+        VALUES (date_trunc('minute', NOW()), $1, $2, $3, $4, $5, $6) \
+        ON CONFLICT (bucket_time, queue_name) DO UPDATE SET \
+            pop_count = queen.queue_lag_metrics.pop_count + EXCLUDED.pop_count, \
+            push_request_count = queen.queue_lag_metrics.push_request_count + EXCLUDED.push_request_count, \
+            push_message_count = queen.queue_lag_metrics.push_message_count + EXCLUDED.push_message_count, \
+            pop_empty_count = queen.queue_lag_metrics.pop_empty_count + EXCLUDED.pop_empty_count, \
+            transaction_count = queen.queue_lag_metrics.transaction_count + EXCLUDED.transaction_count";
+    client
+        .execute(
+            stmt,
+            &[
+                &queue,
+                &pop_count,
+                &push_request_count,
+                &push_message_count,
+                &pop_empty_count,
+                &transaction_count,
+            ],
+        )
         .await?;
     Ok(())
 }

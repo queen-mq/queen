@@ -12,6 +12,11 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Hard cap on a fetched response body. A real JWKS document is a few KB; 1 MiB is
+/// generous headroom while bounding memory against a malicious/MITM'd endpoint that
+/// streams an unbounded body (the per-request timeout only bounds *slow* responses).
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
 /// GET `url` and parse the response body as JSON, bounded by `timeout`.
 pub async fn get_json(url: &str, timeout: Duration) -> Result<serde_json::Value, String> {
     let bytes = tokio::time::timeout(timeout, fetch(url))
@@ -80,12 +85,20 @@ where
         .await
         .map_err(|e| format!("write: {e}"))?;
     stream.flush().await.ok();
-    // Connection: close — read to EOF gets the whole response.
+    // Connection: close — read to EOF, but cap the total so a malicious/MITM'd
+    // endpoint cannot stream an unbounded body and OOM the broker.
     let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("read: {e}"))?;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut chunk).await.map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break; // EOF (Connection: close)
+        }
+        if buf.len() + n > MAX_RESPONSE_BYTES {
+            return Err(format!("response exceeds {MAX_RESPONSE_BYTES}-byte cap"));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
     Ok(buf)
 }
 

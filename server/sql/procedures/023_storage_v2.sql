@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS queen.seg_queues (
     dedup_window_seconds INTEGER NOT NULL DEFAULT 3600,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- RUSTFIX item 18: re-assert the lease_time default on every boot. CREATE TABLE
+-- IF NOT EXISTS is a no-op on a DB created by an earlier build of this branch, so
+-- a seg_queues made before the DEFAULT 60 was added keeps its old (or absent)
+-- default — and the name-only auto-provision INSERTs below (seg_push_segment_v1
+-- etc.) would then fail the NOT NULL constraint. Idempotent metadata-only ALTER.
+ALTER TABLE queen.seg_queues ALTER COLUMN lease_time SET DEFAULT 60;
 
 CREATE TABLE IF NOT EXISTS queen.seg_partitions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

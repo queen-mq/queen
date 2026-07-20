@@ -164,7 +164,11 @@ pub async fn handle_get_message(
         "task": get("task"),
         "status": status,
         "errorMessage": get("errorMessage"),
-        "retryCount": 0,  // seg_dlq stores no per-message retry count
+        // The segments engine has no per-message retry counter: seg_dlq stores no
+        // retry_count, and retries are tracked per-(partition,group) on
+        // partition_consumers.batch_retry_count. Surfacing a true per-message count
+        // would need a seg_dlq schema addition populated at dead-letter time.
+        "retryCount": 0,
         "leaseExpiresAt": get("leaseExpiresAt"),
         "queueConfig": get("queueConfig"),
         "mode": serde_json::json!({

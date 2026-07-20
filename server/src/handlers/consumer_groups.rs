@@ -263,9 +263,16 @@ pub async fn handle_seek_partition(
     Path((group, queue, partition)): Path<(String, String, String)>,
     body: Bytes,
 ) -> Response {
-    let (to_end, ts) = match parse_seek(&body) {
-        Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"{e}\"}}")),
+    // The webapp's per-partition "Skip to end" button (and the C++ per-partition
+    // seek) send NO body; default an empty body to toEnd=true instead of 400ing. A
+    // present body still goes through parse_seek (explicit toEnd / timestamp).
+    let (to_end, ts) = if body.is_empty() {
+        (true, None)
+    } else {
+        match parse_seek(&body) {
+            Ok(v) => v,
+            Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"{e}\"}}")),
+        }
     };
     let client = match st.pool.get().await {
         Ok(c) => c,

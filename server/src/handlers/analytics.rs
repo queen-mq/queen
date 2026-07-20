@@ -42,18 +42,11 @@ pub async fn handle_queue_detail(
     Path(queue): Path<String>,
 ) -> Response {
     let client = client_or_500!(st);
-    match db::get_queue_detail(&client, &queue).await {
-        Ok(txt) => {
-            // Queue-not-found: the SP returns {"error":"Queue not found"}; map it to
-            // 404 the way the C++ status route did (message contains "not found").
-            if txt.contains("\"error\"") && txt.to_lowercase().contains("not found") {
-                json(StatusCode::NOT_FOUND, txt)
-            } else {
-                json(StatusCode::OK, txt)
-            }
-        }
-        Err(e) => json(StatusCode::INTERNAL_SERVER_ERROR, json_err("queue detail failed: ", &e)),
-    }
+    // RUSTFIX item 25: route the SP result through sp_result_to_response (the same
+    // helper every sibling handler in this file uses) so an embedded {"error":..}
+    // body maps to 404 ("not found") / 500 instead of being served at HTTP 200. A
+    // valid queue detail has no top-level "error" key, so success is still 200.
+    serve("queue detail failed: ", db::get_queue_detail(&client, &queue).await)
 }
 
 // ---------------------------------------------- GET /api/v1/status/analytics

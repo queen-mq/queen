@@ -90,6 +90,16 @@ async fn main() {
         // RUSTFIX item 7: for RS256/EdDSA/auto with a JWKS URL, pre-fetch on boot
         // and refresh on the configured interval (jwt_validator.cpp:64-73,540-545).
         if authenticator.uses_jwks() {
+            // Security: a plaintext JWKS URL lets a network MITM substitute the JWT
+            // *verification* keys and forge accepted tokens. We fetch it anyway
+            // (localhost/in-cluster JWKS-over-http is a legitimate setup) but warn
+            // loudly — matching the warn-on-security-downgrade posture elsewhere.
+            if cfg.auth.jwks_url.to_ascii_lowercase().starts_with("http://") {
+                eprintln!(
+                    "WARNING: JWT_JWKS_URL is plaintext http:// ({}) — signing keys are fetched over cleartext and are MITM-forgeable; use https://",
+                    cfg.auth.jwks_url
+                );
+            }
             match authenticator.fetch_jwks().await {
                 Ok(n) => println!("queen-seg-rust: JWKS pre-fetch OK ({n} keys)"),
                 Err(e) => eprintln!("queen-seg-rust: JWKS pre-fetch failed: {e} (will retry on demand)"),

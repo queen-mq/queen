@@ -24,7 +24,7 @@ use deadpool_postgres::Pool;
 
 use crate::config::Config;
 use crate::db;
-use crate::metrics::{Counters, Metrics};
+use crate::metrics::{Counters, Metrics, QueueSnap};
 
 pub fn spawn(pool: Pool, metrics: Arc<Metrics>, cfg: &Config) {
     let interval = Duration::from_millis(cfg.metrics_flush_ms);
@@ -41,6 +41,8 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
     let started = Instant::now();
     // Baseline snapshot: the first flush reflects only traffic since boot.
     let mut last: Counters = metrics.snapshot();
+    // RUSTFIX item 24: per-queue baseline (diffed into queue_lag_metrics buckets).
+    let mut last_pq = metrics.per_queue.snapshot();
     // Baseline cumulative CPU: the CPU gauge is the DELTA over each interval,
     // expressed as (percent × 100) — the units System.vue divides by 100 to plot %.
     let (mut last_user_us, mut last_sys_us, _) = rusage();
@@ -110,6 +112,45 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         {
             eprintln!("syscollect: system_metrics insert error: {e}");
         }
+
+        // --- per-queue throughput -> queue_lag_metrics --------------------
+        // RUSTFIX item 24: diff each queue's cumulative counters into a per-minute
+        // bucket (UPSERT-accumulate across replicas). Only queues with activity this
+        // interval are written. Lag/ack/parked columns keep their table defaults —
+        // the segments broker does not track them per queue.
+        let now_pq = metrics.per_queue.snapshot();
+        for (queue, cur) in &now_pq {
+            let prev = last_pq.get(queue).copied().unwrap_or_default();
+            let d = QueueSnap {
+                push_requests: cur.push_requests.saturating_sub(prev.push_requests),
+                push_messages: cur.push_messages.saturating_sub(prev.push_messages),
+                pop_count: cur.pop_count.saturating_sub(prev.pop_count),
+                pop_empty: cur.pop_empty.saturating_sub(prev.pop_empty),
+                transactions: cur.transactions.saturating_sub(prev.transactions),
+            };
+            if d.push_requests == 0
+                && d.push_messages == 0
+                && d.pop_count == 0
+                && d.pop_empty == 0
+                && d.transactions == 0
+            {
+                continue;
+            }
+            if let Err(e) = db::upsert_queue_lag_metrics(
+                &client,
+                queue,
+                d.pop_count as i64,
+                d.push_requests as i64,
+                d.push_messages as i64,
+                d.pop_empty as i64,
+                d.transactions as i64,
+            )
+            .await
+            {
+                eprintln!("syscollect: queue_lag_metrics upsert error ({queue}): {e}");
+            }
+        }
+        last_pq = now_pq;
     }
 }
 

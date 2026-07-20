@@ -154,7 +154,36 @@ async fn cycle_body(
 
 /// Trim worker/lag/parked metrics (SP) and queen.system_metrics (batched DELETE)
 /// older than `metrics_retention_days`. Returns a short summary for the log line.
+///
+/// RUSTFIX item 20: the purge runs inside the cycle's locked transaction, but is
+/// bracketed in a SAVEPOINT. In Postgres a failed statement aborts the whole
+/// transaction, turning the subsequent COMMIT into a silent ROLLBACK — which would
+/// discard the sweep + max_wait eviction that already succeeded in the same
+/// transaction. Rolling a failed purge back to the savepoint leaves the
+/// transaction clean, so the outer COMMIT still persists the sweep. The advisory
+/// lock is taken before the savepoint, so ROLLBACK TO SAVEPOINT does not release it
+/// (leader-gating is preserved).
 async fn purge_metrics(
+    client: &deadpool_postgres::Client,
+    knobs: Knobs,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    client.batch_execute("SAVEPOINT metrics_purge").await?;
+    match purge_metrics_inner(client, knobs).await {
+        Ok(summary) => {
+            // Best-effort (mirrors run_cycle's COMMIT/ROLLBACK): a RELEASE failure
+            // can't lose the purge's already-applied changes.
+            let _ = client.batch_execute("RELEASE SAVEPOINT metrics_purge").await;
+            Ok(summary)
+        }
+        Err(e) => {
+            // Un-abort the transaction so the outer COMMIT still persists the sweep.
+            let _ = client.batch_execute("ROLLBACK TO SAVEPOINT metrics_purge").await;
+            Err(e)
+        }
+    }
+}
+
+async fn purge_metrics_inner(
     client: &deadpool_postgres::Client,
     knobs: Knobs,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

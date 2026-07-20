@@ -15,6 +15,7 @@ import * as bootstrapTests from './bootstrap.js'
 import * as loggerTests from './logger.js'
 import * as watermarkTests from './watermark.js'
 import * as authTests from './auth.js'
+import * as semanticsTests from './semantics.js'
 import * as streamTests from './stream/index.js'
 import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
 
@@ -129,7 +130,8 @@ async function main() {
         bootstrapTests,
         loggerTests,
         watermarkTests,
-        authTests
+        authTests,
+        semanticsTests
     ]
     
     const aiTests = [
@@ -224,6 +226,12 @@ async function main() {
     
     //await cleanupTestData()
     await closeDb()
+
+    // Exit explicitly: the client's keep-alive sockets hold the event loop
+    // open indefinitely (Queen.close() doesn't destroy agents), and an
+    // explicit exit code makes the suite usable from CI.
+    const failedCount = testResults.filter(x => !x.success).length
+    process.exit(failedCount > 0 ? 1 : 0)
 }
 
 try {

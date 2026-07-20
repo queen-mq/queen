@@ -43,6 +43,12 @@ const MAX_STARTUP_RECOVERY: Duration = Duration::from_secs(3600);
 /// drains up to 10 when healthy, 1 otherwise).
 const DRAIN_FILES_HEALTHY: usize = 10;
 const DRAIN_FILES_UNHEALTHY: usize = 1;
+/// RUSTFIX item 1: a spool file that fails with a PERMANENT (bad-data / server-side
+/// SQL) error this many times in a row is moved to the `failed/` quarantine dir so
+/// one poison file stops blocking replay of every newer buffered message. A DB
+/// outage produces TRANSIENT errors, which never count toward this — good spool is
+/// never quarantined during an outage.
+const MAX_FILE_ATTEMPTS: u32 = 5;
 
 /// One spooled push event. Serialized as the on-disk JSON body; `payload` is the
 /// raw JSON of the original message, embedded verbatim.
@@ -54,6 +60,10 @@ struct WriteEvent<'a> {
     transaction_id: &'a str,
     #[serde(rename = "producerSub", skip_serializing_if = "Option::is_none")]
     producer_sub: Option<&'a str>,
+    // RUSTFIX item 8: true when `payload` is an {encrypted,iv,authTag} envelope, so
+    // the drain re-stamps FLAG_ENCRYPTED on the replayed frame (else isEncrypted is
+    // wrongly reported false for buffered->drained messages on encrypted queues).
+    encrypted: bool,
     payload: &'a RawValue,
 }
 
@@ -65,7 +75,52 @@ struct StoredEvent {
     transaction_id: String,
     #[serde(rename = "producerSub")]
     producer_sub: Option<String>,
+    // #[serde(default)] so spool files written before this field existed (which
+    // stored the envelope with no flag) deserialize to false — still decrypt via
+    // the read-path envelope sniff, identical to their pre-fix behavior.
+    #[serde(default)]
+    encrypted: bool,
     payload: Box<RawValue>,
+}
+
+/// A drain failure, classified so the drain loop can tell a recoverable outage
+/// (leave the file, back off, retry) from a poison file that will never succeed (a
+/// server-side data/SQL rejection or an unreadable spool file) and must be
+/// quarantined so the FIFO advances.
+enum DrainErr {
+    Transient(String),
+    Permanent(String),
+}
+
+impl std::fmt::Display for DrainErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DrainErr::Transient(e) => write!(f, "{e} (transient)"),
+            DrainErr::Permanent(e) => write!(f, "{e} (permanent)"),
+        }
+    }
+}
+
+/// Classify a DB push error. A connection-level failure (no SQLSTATE) and the
+/// retryable serialization/deadlock/connection/resource SQLSTATE classes are
+/// transient; any other server-side SQL error (bad data, constraint, custom RAISE)
+/// is permanent — the same data will fail every retry, so quarantine it.
+fn classify_push_error(e: &tokio_postgres::Error) -> DrainErr {
+    match e.as_db_error() {
+        None => DrainErr::Transient(e.to_string()),
+        Some(db) => {
+            let code = db.code().code();
+            let class = &code[..2.min(code.len())];
+            let transient = code == "40001" // serialization_failure
+                || code == "40P01" // deadlock_detected
+                || matches!(class, "08" | "53" | "57" | "58");
+            if transient {
+                DrainErr::Transient(db.message().to_string())
+            } else {
+                DrainErr::Permanent(db.message().to_string())
+            }
+        }
+    }
 }
 
 struct Active {
@@ -92,6 +147,10 @@ pub struct FileBufferManager {
     /// Drain suppressed while maintenance mode is on (item 17). Writes still spool.
     drain_paused: AtomicBool,
     cooldown_until: Mutex<Option<Instant>>,
+    /// RUSTFIX item 1: quarantine dir (`<dir>/failed`) for poison spool files.
+    failed_dir: PathBuf,
+    /// Head-of-FIFO poison tracker: (file, consecutive permanent-failure count).
+    poison: Mutex<Option<(PathBuf, u32)>>,
 }
 
 impl FileBufferManager {
@@ -101,6 +160,17 @@ impl FileBufferManager {
             eprintln!(
                 "file_buffer: could not create spool dir {}: {} (buffering will fail)",
                 dir.display(),
+                e
+            );
+        }
+        // RUSTFIX item 1: quarantine dir for poison files. It sits inside the spool
+        // dir but is invisible to the drain (list_buf_files / finalized_file_stats /
+        // the startup .tmp scan all filter by .buf/.tmp extension, non-recursively).
+        let failed_dir = dir.join("failed");
+        if let Err(e) = std::fs::create_dir_all(&failed_dir) {
+            eprintln!(
+                "file_buffer: could not create quarantine dir {}: {} (poison files can't be quarantined)",
+                failed_dir.display(),
                 e
             );
         }
@@ -116,6 +186,53 @@ impl FileBufferManager {
             consecutive_failures: AtomicUsize::new(0),
             drain_paused: AtomicBool::new(false),
             cooldown_until: Mutex::new(None),
+            failed_dir,
+            poison: Mutex::new(None),
+        }
+    }
+
+    /// Record a permanent failure for the current FIFO-head file; returns its
+    /// running consecutive count. Switching to a different head resets the count.
+    fn note_poison(&self, path: &Path) -> u32 {
+        let mut g = self.poison.lock().unwrap();
+        match g.as_mut() {
+            Some((p, n)) if p == path => {
+                *n += 1;
+                *n
+            }
+            _ => {
+                *g = Some((path.to_path_buf(), 1));
+                1
+            }
+        }
+    }
+
+    fn clear_poison(&self) {
+        *self.poison.lock().unwrap() = None;
+    }
+
+    /// Move a poison spool file into `failed/` so the FIFO advances. Last resort on
+    /// a rename failure: delete it — its data is a permanent SQL failure that can
+    /// never be persisted, and leaving it would re-freeze the FIFO.
+    fn quarantine(&self, path: &Path) {
+        let dest = match path.file_name() {
+            Some(n) => self.failed_dir.join(n),
+            None => return,
+        };
+        match std::fs::rename(path, &dest) {
+            Ok(_) => eprintln!(
+                "file_buffer: quarantined poison spool file {} -> {}",
+                path.display(),
+                dest.display()
+            ),
+            Err(e) => {
+                eprintln!(
+                    "file_buffer: could not quarantine {} ({}); deleting it to unblock the FIFO",
+                    path.display(),
+                    e
+                );
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
 
@@ -156,6 +273,7 @@ impl FileBufferManager {
         partition: &str,
         transaction_id: &str,
         producer_sub: Option<&str>,
+        encrypted: bool,
         payload: &RawValue,
     ) -> bool {
         let ev = WriteEvent {
@@ -163,6 +281,7 @@ impl FileBufferManager {
             partition,
             transaction_id,
             producer_sub,
+            encrypted,
             payload,
         };
         let body = match serde_json::to_vec(&ev) {
@@ -348,9 +467,12 @@ impl FileBufferManager {
                     self.pending.fetch_sub(n.min(self.pending.load(Ordering::Relaxed)), Ordering::Relaxed);
                     self.db_healthy.store(true, Ordering::Relaxed);
                     self.consecutive_failures.store(0, Ordering::Relaxed);
+                    self.clear_poison(); // made progress on the FIFO head
                 }
-                Err(e) => {
-                    eprintln!("file_buffer: drain {} failed: {}", f.display(), e);
+                Err(DrainErr::Transient(e)) => {
+                    // DB (probably) down: leave the file, trip the circuit breaker,
+                    // retry next cycle. Never quarantines — good spool survives an outage.
+                    eprintln!("file_buffer: drain {} failed (transient): {}", f.display(), e);
                     self.db_healthy.store(false, Ordering::Relaxed);
                     let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
                     if fails >= MAX_CONSECUTIVE_FAILURES {
@@ -358,6 +480,27 @@ impl FileBufferManager {
                         self.consecutive_failures.store(0, Ordering::Relaxed);
                     }
                     break; // stop this cycle; retry next tick
+                }
+                Err(DrainErr::Permanent(e)) => {
+                    // The DB is reachable but this file's data can't be stored. Count
+                    // consecutive failures of THIS head file (DB stays "healthy", the
+                    // transient breaker is untouched); quarantine after
+                    // MAX_FILE_ATTEMPTS so a poison file stops blocking newer ones.
+                    let attempts = self.note_poison(&f);
+                    eprintln!(
+                        "file_buffer: drain {} failed (permanent, attempt {}/{}): {}",
+                        f.display(),
+                        attempts,
+                        MAX_FILE_ATTEMPTS,
+                        e
+                    );
+                    if attempts >= MAX_FILE_ATTEMPTS {
+                        self.quarantine(&f);
+                        self.clear_poison();
+                        continue; // advance the FIFO; drain the rest of this cycle
+                    }
+                    break; // retry the head next cycle (a mis-classified retryable
+                           // error gets MAX_FILE_ATTEMPTS chances before quarantine)
                 }
             }
         }
@@ -368,8 +511,9 @@ impl FileBufferManager {
     /// them in one multi-segment transaction. Returns the number of events on
     /// success. An Err means the DB is (probably) still down — the file is left in
     /// place for a later retry.
-    async fn drain_file(&self, pool: &Pool, path: &Path) -> Result<usize, String> {
-        let events = read_events(path).map_err(|e| format!("read: {e}"))?;
+    async fn drain_file(&self, pool: &Pool, path: &Path) -> Result<usize, DrainErr> {
+        // A spool file we cannot read is corrupt — permanent (retrying can't fix it).
+        let events = read_events(path).map_err(|e| DrainErr::Permanent(format!("read: {e}")))?;
         if events.is_empty() {
             return Ok(0);
         }
@@ -397,7 +541,7 @@ impl FileBufferManager {
     /// Replay one batch of events as a single multi-segment transaction: group by
     /// (queue, partition), rebuild one segment per group, push. An Err means the DB
     /// is (probably) down — leave the file for retry.
-    async fn replay_batch(&self, pool: &Pool, events: &[StoredEvent]) -> Result<(), String> {
+    async fn replay_batch(&self, pool: &Pool, events: &[StoredEvent]) -> Result<(), DrainErr> {
         let mut order: Vec<(String, String)> = Vec::new();
         let mut groups: std::collections::HashMap<(String, String), Vec<&StoredEvent>> =
             std::collections::HashMap::new();
@@ -431,10 +575,14 @@ impl FileBufferManager {
         }
         segs.push(']');
 
-        let client = pool.get().await.map_err(|e| format!("pool: {e}"))?;
+        // Pool acquisition failure = DB unreachable = transient.
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| DrainErr::Transient(format!("pool: {e}")))?;
         db::push_segments_multi(&client, &segs, blobs)
             .await
-            .map_err(|e| format!("push: {e}"))?;
+            .map_err(|e| classify_push_error(&e))?;
         Ok(())
     }
 }
@@ -471,7 +619,9 @@ fn build_segment(evs: &[&StoredEvent], zstd_level: i32) -> (String, Vec<u8>) {
             trace_id: None,
             producer_sub: ev.producer_sub.as_deref(),
             payload: ev.payload.get().as_bytes(),
-            encrypted: false,
+            // RUSTFIX item 8: restore the persisted flag so a buffered->drained
+            // encrypted payload keeps FLAG_ENCRYPTED (was hardcoded false).
+            encrypted: ev.encrypted,
         })
         .collect();
     let blob = zstd_compress(&pack_frames(&fins), zstd_level);
