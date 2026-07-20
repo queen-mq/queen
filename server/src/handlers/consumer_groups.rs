@@ -33,7 +33,7 @@ pub async fn handle_consumer_groups(State(st): State<Arc<AppState>>) -> Response
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_consumer_groups(&client).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("consumer groups failed: ", &e),
@@ -48,13 +48,14 @@ pub async fn handle_lagging_consumers(
     State(st): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let min_lag = qint(&params, "minLagSeconds", 60);
+    // RUSTFIX item 22: default 3600s, matching C++ consumer_groups.cpp:99.
+    let min_lag = qint(&params, "minLagSeconds", 3600);
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_lagging_partitions(&client, min_lag).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("lagging failed: ", &e),
@@ -72,7 +73,7 @@ pub async fn handle_consumer_group_details(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_consumer_group_details(&client, &group).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("details failed: ", &e),
@@ -204,7 +205,7 @@ pub async fn handle_update_subscription(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::update_consumer_group_subscription(&client, &group, &ts).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("subscription failed: ", &e),
@@ -247,7 +248,7 @@ pub async fn handle_seek_consumer_group(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::seg_seek_consumer_group(&client, &group, &queue, to_end, ts.as_deref()).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("seek failed: ", &e),
@@ -271,7 +272,7 @@ pub async fn handle_seek_partition(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::seg_seek_partition(&client, &group, &queue, &partition, to_end, ts.as_deref()).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("seek failed: ", &e),

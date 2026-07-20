@@ -20,6 +20,24 @@ zstd = "0.13"
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
+# At-rest payload encryption (RUSTFIX item 8): AES-256-GCM with a 16-byte IV,
+# wire-compatible with the C++ EncryptionService envelope.
+aes-gcm = "0.10"
+# Postgres TLS (RUSTFIX item 5). rustls (pure-Rust, statically linked) with the
+# `ring` crypto provider so the Debian build image needs only a C compiler — no
+# cmake (aws-lc-rs) and no system OpenSSL (native-tls) in the slim runtime image.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+# tokio-rustls drives the self-contained JWKS HTTPS client (src/httpget.rs).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
+# hex-decode QUEEN_ENCRYPTION_KEY (item 8) + parse assorted hex config.
+hex = "0.4"
+# Full JWT verification (RUSTFIX item 7): HS256/384/512, RS256/384/512, EdDSA.
+# jsonwebtoken 9 uses `ring` (no aws-lc-rs), consistent with the rustls choice
+# above, so the Docker build stays cmake-free. JWKS is fetched over the bundled
+# tokio-rustls client (src/httpget.rs) — no reqwest / second TLS backend.
+jsonwebtoken = "9"
 # getrusage(2) for cross-platform process CPU + RSS in the metrics collector
 # (syscollect.rs). Tiny, ubiquitous, no_std-friendly FFI shim only.
 libc = "0.2"

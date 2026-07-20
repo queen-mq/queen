@@ -1,13 +1,18 @@
 mod auth;
 mod config;
 mod db;
+mod encryption;
+mod file_buffer;
 mod frames;
 mod fusion;
 mod handlers;
+mod httpget;
 mod internal;
 mod metrics;
 mod migrate;
 mod notify;
+mod pgtls;
+mod reconcile;
 mod retention;
 mod schema;
 mod stats;
@@ -70,12 +75,36 @@ async fn main() {
     // JWT auth. Disabled by default (JWT_ENABLED=false) → the middleware is a
     // transparent pass-through and every request is served with no token, exactly
     // as the rest of the test-suite expects.
+    // RUSTFIX item 7: validate the auth config at startup and FAIL FAST (like the
+    // C++ acceptor_server.cpp:719-726) when enabled with no usable key material.
+    if let Err(e) = cfg.auth.validate() {
+        eprintln!("FATAL: invalid JWT auth configuration: {e}");
+        std::process::exit(1);
+    }
     let authenticator = auth::Authenticator::new(cfg.auth.clone());
     if cfg.auth.enabled {
         println!(
             "queen-seg-rust: JWT auth ENABLED (algorithm={}, skip_paths={:?})",
             cfg.auth.algorithm, cfg.auth.skip_paths
         );
+        // RUSTFIX item 7: for RS256/EdDSA/auto with a JWKS URL, pre-fetch on boot
+        // and refresh on the configured interval (jwt_validator.cpp:64-73,540-545).
+        if authenticator.uses_jwks() {
+            match authenticator.fetch_jwks().await {
+                Ok(n) => println!("queen-seg-rust: JWKS pre-fetch OK ({n} keys)"),
+                Err(e) => eprintln!("queen-seg-rust: JWKS pre-fetch failed: {e} (will retry on demand)"),
+            }
+            let a = authenticator.clone();
+            let interval = authenticator.jwks_refresh_interval();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(interval).await;
+                    if let Err(e) = a.fetch_jwks().await {
+                        eprintln!("queen-seg-rust: JWKS refresh failed: {e}");
+                    }
+                }
+            });
+        }
     }
 
     // Background retention + eviction sweep (segments-targeted). Spawned before
@@ -120,6 +149,24 @@ async fn main() {
     // are configured.
     let notifier = notify::Notifier::new();
 
+    // File buffer (RUSTFIX items 1 & 17): DB-outage / maintenance push spool. Drain
+    // any leftover on-disk spool BEFORE serving (startup recovery, capped 3600s) so
+    // a restart during an outage never loses buffered messages. If maintenance mode
+    // is already on at boot, pause draining so the disable path drives it.
+    // At-rest payload encryption (RUSTFIX item 8). Disabled unless
+    // QUEEN_ENCRYPTION_KEY is a valid 64-hex key.
+    let encryption = encryption::Encryption::from_env();
+
+    let file_buffer = Arc::new(file_buffer::FileBufferManager::new(
+        cfg.file_buffer.clone(),
+        cfg.zstd_level,
+    ));
+    file_buffer.startup_recovery(&pool).await;
+    if init_maint {
+        file_buffer.pause_background_drain();
+    }
+    file_buffer::spawn_drain(file_buffer.clone(), pool.clone());
+
     let state = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
@@ -128,13 +175,25 @@ async fn main() {
         metrics: metrics.clone(),
         stmt_timeout: cfg.stmt_timeout,
         pop_default_timeout_ms: cfg.pop_default_timeout_ms,
-        pop_wait_poll_ms: cfg.pop_wait_poll_ms,
+        pop_wait_initial_interval_ms: cfg.pop_wait_initial_interval_ms,
+        pop_wait_backoff_threshold: cfg.pop_wait_backoff_threshold,
+        pop_wait_backoff_multiplier: cfg.pop_wait_backoff_multiplier,
+        pop_wait_max_interval_ms: cfg.pop_wait_max_interval_ms,
         zstd_level: cfg.zstd_level,
         lease_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        encryption: encryption.clone(),
+        enc_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         maintenance: std::sync::atomic::AtomicBool::new(init_maint),
         pop_maintenance: std::sync::atomic::AtomicBool::new(init_pop_maint),
         notifier: notifier.clone(),
+        file_buffer: file_buffer.clone(),
     });
+
+    // RUSTFIX item 16: periodic reconcile — re-read the maintenance flags from
+    // queen.system_state and drop the per-queue caches, so a replica heals within
+    // one interval after a lost UDP packet. Spawned unconditionally (single-node
+    // also benefits from DB reconvergence).
+    reconcile::spawn(state.clone(), pool.clone(), cfg.sync.cache_refresh_ms);
 
     // Inter-instance UDP notifications. Gated on QUEEN_SYNC_ENABLED (default true)
     // AND at least one QUEEN_UDP_PEERS entry — a single stock broker binds nothing
@@ -150,7 +209,18 @@ async fn main() {
             },
             on_maintenance: {
                 let s = state.clone();
-                Box::new(move |e: bool| s.maintenance.store(e, Ordering::Relaxed))
+                Box::new(move |e: bool| {
+                    let prev = s.maintenance.swap(e, Ordering::Relaxed);
+                    if prev != e {
+                        // Keep the file-buffer drain in sync with a peer's flip (item 17).
+                        if e {
+                            s.file_buffer.pause_background_drain();
+                        } else {
+                            s.file_buffer.force_finalize_all();
+                            s.file_buffer.resume_background_drain();
+                        }
+                    }
+                })
             },
             on_pop_maintenance: {
                 let s = state.clone();
@@ -160,12 +230,15 @@ async fn main() {
                 let s = state.clone();
                 Box::new(move |q: &str| {
                     s.lease_cache.lock().unwrap().remove(q);
+                    // RUSTFIX item 8: a peer's config change may flip encryption_enabled.
+                    s.enc_cache.lock().unwrap().remove(q);
                 })
             },
             on_queue_config_delete: {
                 let s = state.clone();
                 Box::new(move |q: &str| {
                     s.lease_cache.lock().unwrap().remove(q);
+                    s.enc_cache.lock().unwrap().remove(q);
                 })
             },
         };

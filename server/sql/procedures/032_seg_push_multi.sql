@@ -62,6 +62,17 @@ BEGIN
     WHERE COALESCE(seg->>'queue', '') <> ''
     ON CONFLICT (name) DO NOTHING;
 
+    -- RUSTFIX item 26: create the queen.queues config rows too (the loop's
+    -- seg_push_segment_v1 skips creation because the partition already exists).
+    INSERT INTO queen.queues (name, namespace, task, storage)
+    SELECT DISTINCT seg->>'queue',
+           split_part(seg->>'queue', '.', 1),
+           CASE WHEN position('.' in seg->>'queue') > 0 THEN split_part(seg->>'queue', '.', 2) ELSE '' END,
+           'segments'
+    FROM jsonb_array_elements(p_segments) seg
+    WHERE COALESCE(seg->>'queue', '') <> ''
+    ON CONFLICT (name) DO NOTHING;
+
     INSERT INTO queen.seg_partitions (queue_id, name)
     SELECT DISTINCT q.id, seg->>'partition'
     FROM jsonb_array_elements(p_segments) seg

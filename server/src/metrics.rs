@@ -137,8 +137,29 @@ impl Metrics {
         }
     }
 
+    /// RUSTFIX item 21: accessors so the JSON /metrics handler can read the private
+    /// process state (uptime + RSS).
+    pub fn uptime_seconds(&self) -> u64 {
+        self.start.elapsed().as_secs()
+    }
+    pub fn resident_bytes(&self) -> u64 {
+        resident_bytes()
+    }
+
     pub fn prometheus(&self) -> String {
         let mut s = String::with_capacity(2048);
+        // RUSTFIX item 24: emit `# HELP`/`# TYPE` before every family.
+        let ht = |s: &mut String, name: &str, help: &str, typ: &str| {
+            s.push_str("# HELP ");
+            s.push_str(name);
+            s.push(' ');
+            s.push_str(help);
+            s.push_str("\n# TYPE ");
+            s.push_str(name);
+            s.push(' ');
+            s.push_str(typ);
+            s.push('\n');
+        };
         let g = |s: &mut String, name: &str, labels: &str, v: String| {
             s.push_str(name);
             s.push_str(labels);
@@ -146,14 +167,29 @@ impl Metrics {
             s.push_str(&v);
             s.push('\n');
         };
+        ht(&mut s, "queen_uptime_seconds", "Process uptime in seconds", "gauge");
         g(&mut s, "queen_uptime_seconds", "", (self.start.elapsed().as_secs()).to_string());
+        ht(&mut s, "queen_process_resident_memory_bytes", "Resident memory of this process", "gauge");
         g(&mut s, "queen_process_resident_memory_bytes", "", resident_bytes().to_string());
-        g(&mut s, "queen_cluster_push_requests_total", "{scope=\"cluster\"}", self.push.requests.load(Ordering::Relaxed).to_string());
-        g(&mut s, "queen_cluster_pop_requests_total", "{scope=\"cluster\"}", self.pop.requests.load(Ordering::Relaxed).to_string());
-        g(&mut s, "queen_cluster_ack_requests_total", "{scope=\"cluster\"}", self.ack.requests.load(Ordering::Relaxed).to_string());
-        g(&mut s, "queen_cluster_push_messages_total", "{scope=\"cluster\"}", self.push.messages.load(Ordering::Relaxed).to_string());
-        g(&mut s, "queen_cluster_pop_messages_total", "{scope=\"cluster\"}", self.pop.messages.load(Ordering::Relaxed).to_string());
-        g(&mut s, "queen_cluster_ack_messages_total", "{scope=\"cluster\"}", self.ack.messages.load(Ordering::Relaxed).to_string());
+        // RUSTFIX item 24: these are PER-PROCESS counters (reset on restart), so they
+        // are named queen_process_* — the queen_cluster_* namespace is reclaimed by
+        // the DB-backed lifetime totals in status.rs (which survive restart).
+        let process = [
+            ("queen_process_push_requests_total", "Push API requests handled by this process", &self.push.requests),
+            ("queen_process_pop_requests_total", "Pop API requests handled by this process", &self.pop.requests),
+            ("queen_process_ack_requests_total", "Ack API requests handled by this process", &self.ack.requests),
+            ("queen_process_push_messages_total", "Messages pushed by this process", &self.push.messages),
+            ("queen_process_pop_messages_total", "Messages popped by this process", &self.pop.messages),
+            ("queen_process_ack_messages_total", "Messages acked by this process", &self.ack.messages),
+        ];
+        for (name, help, ctr) in process {
+            ht(&mut s, name, help, "counter");
+            g(&mut s, name, "", ctr.load(Ordering::Relaxed).to_string());
+        }
+        ht(&mut s, "queen_batches_fired_total", "Fusion batches flushed", "counter");
+        ht(&mut s, "queen_batch_items_fired_total", "Items flushed across fusion batches", "counter");
+        ht(&mut s, "queen_fusion_items_per_batch", "Mean items per fusion batch", "gauge");
+        ht(&mut s, "queen_batch_rtt_milliseconds", "Fusion batch round-trip latency", "gauge");
         for op in [&self.push, &self.pop, &self.ack] {
             let lbl = format!("{{op=\"{}\"}}", op.name);
             g(&mut s, "queen_batches_fired_total", &lbl, op.batches_fired.load(Ordering::Relaxed).to_string());

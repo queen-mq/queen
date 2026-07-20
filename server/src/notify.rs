@@ -72,21 +72,25 @@ impl Notifier {
     /// waiter is armed (`enable`) before the wait, so a wake that arrives during the
     /// window is delivered; a wake missed in the tiny arm gap simply times out and
     /// the caller re-polls — identical to the pre-existing poll-interval ceiling.
-    pub async fn wait_queue(&self, queue: &str, dur: Duration) {
+    /// Returns true if a push woke the gate, false if `dur` elapsed first — the
+    /// caller uses this to reset (on wake) vs advance (on timeout) its long-poll
+    /// backoff (RUSTFIX item 19).
+    pub async fn wait_queue(&self, queue: &str, dur: Duration) -> bool {
         let gate = self.gate(queue);
         let notified = gate.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let _ = tokio::time::timeout(dur, notified).await;
+        tokio::time::timeout(dur, notified).await.is_ok()
     }
 
     /// Park a discovery (namespace/task) long-poll on the shared gate — woken by any
-    /// push, since these pops span queues and have no single gate.
-    pub async fn wait_any(&self, dur: Duration) {
+    /// push, since these pops span queues and have no single gate. Returns true on a
+    /// push-wake, false on timeout (RUSTFIX item 19).
+    pub async fn wait_any(&self, dur: Duration) -> bool {
         let notified = self.any.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let _ = tokio::time::timeout(dur, notified).await;
+        tokio::time::timeout(dur, notified).await.is_ok()
     }
 
     /// Wake locally-parked pops for `queue` (and all discovery pops). Purely local —

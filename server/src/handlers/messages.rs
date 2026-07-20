@@ -40,11 +40,28 @@ pub async fn handle_get_message(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    let (seq, frame_idx, _mid) =
+    // Resolve (seq, frame_idx) via the dedup window; RUSTFIX item 23: if the dedup
+    // entry has been purged, fall back to a bounded newest-first scan of the
+    // partition's segments so a message older than the dedup window still resolves
+    // instead of 404-ing.
+    let resolved: Option<(i64, i32)> =
         match db::seg_resolve_position(&client, &partition_id, &transaction_id).await {
-            Ok(Some(p)) => p,
+            Ok(Some((seq, fidx, _))) => Some((seq, fidx)),
             Ok(None) => {
-                return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string())
+                let mut found = None;
+                if let Ok(cands) = db::seg_scan_segments(&client, &partition_id, 5000).await {
+                    'scan: for (s, blob) in cands {
+                        if let Some(frames) = unpack_frames(&zstd_decompress(&blob)) {
+                            for (fi, fr) in frames.iter().enumerate() {
+                                if fr.txn == transaction_id {
+                                    found = Some((s, fi as i32));
+                                    break 'scan;
+                                }
+                            }
+                        }
+                    }
+                }
+                found
             }
             Err(e) => {
                 return json(
@@ -53,6 +70,12 @@ pub async fn handle_get_message(
                 )
             }
         };
+    let (seq, frame_idx) = match resolved {
+        Some(p) => p,
+        None => {
+            return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string())
+        }
+    };
 
     let (created_at, partition_name, blob) = match db::seg_fetch_segment(&client, &partition_id, seq).await {
         Ok(Some(s)) => s,
@@ -82,13 +105,45 @@ pub async fn handle_get_message(
         None => return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string()),
     };
 
-    // Payload is stored as raw JSON bytes (or the {encrypted,iv,authTag}
-    // envelope object when the frame's encrypted flag is set — crypto decode is a
-    // later slice, so we surface the envelope + isEncrypted here).
+    // RUSTFIX item 8: decrypt the {encrypted,iv,authTag} envelope when the
+    // encryption key is configured (envelope-sniff, per messages.cpp — regardless of
+    // the stored flag, so migrated v0.16.0 messages decrypt too). `isEncrypted`
+    // still reports the stored flag.
     let payload: serde_json::Value = if f.payload.is_empty() {
         serde_json::Value::Null
+    } else if let Some(pt) = st.encryption.decrypt_payload_bytes(&f.payload) {
+        serde_json::from_slice(&pt).unwrap_or(serde_json::Value::Null)
     } else {
         serde_json::from_slice(&f.payload).unwrap_or(serde_json::Value::Null)
+    };
+
+    // RUSTFIX item 23: the full ~20-field detail shape (010_messages.sql parity):
+    // queue/namespace/task, queueConfig, mode, consumerGroups, status, errorMessage,
+    // retryCount, leaseExpiresAt. Missing detail (partition gone) degrades to nulls.
+    let detail: serde_json::Value =
+        match db::seg_message_detail(&client, &partition_id, seq, frame_idx).await {
+            Ok(Some(txt)) => serde_json::from_str(&txt).unwrap_or_else(|_| serde_json::json!({})),
+            _ => serde_json::json!({}),
+        };
+    let boolf = |k: &str| detail.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
+    let bus_groups = detail.get("busGroups").and_then(|x| x.as_i64()).unwrap_or(0);
+    let is_dlq = boolf("isDlq");
+    // status: dead_letter | completed | processing | pending (010:203-224 semantics).
+    let status = if is_dlq {
+        "dead_letter"
+    } else if (bus_groups > 0 && boolf("busAllPassed")) || (bus_groups == 0 && boolf("qmodePassed")) {
+        "completed"
+    } else if boolf("anyLeaseLive") {
+        "processing"
+    } else {
+        "pending"
+    };
+    let get = |k: &str| detail.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let queue = get("queue");
+    let partition_field = get("partition");
+    let queue_path = match (queue.as_str(), partition_field.as_str()) {
+        (Some(q), Some(p)) => serde_json::Value::String(format!("{q}/{p}")),
+        _ => serde_json::Value::Null,
     };
 
     let out = serde_json::json!({
@@ -102,6 +157,22 @@ pub async fn handle_get_message(
         "partitionId": partition_id,
         "partition": partition_name,
         "isEncrypted": f.encrypted,
+        // --- RUSTFIX item 23 additions ---
+        "queue": queue,
+        "queuePath": queue_path,
+        "namespace": get("namespace"),
+        "task": get("task"),
+        "status": status,
+        "errorMessage": get("errorMessage"),
+        "retryCount": 0,  // seg_dlq stores no per-message retry count
+        "leaseExpiresAt": get("leaseExpiresAt"),
+        "queueConfig": get("queueConfig"),
+        "mode": serde_json::json!({
+            "hasQueueMode": boolf("hasQueueMode"),
+            "busGroupsCount": bus_groups,
+            "type": if bus_groups > 0 { "bus" } else { "queue" },
+        }),
+        "consumerGroups": get("consumerGroups"),
     });
     json(StatusCode::OK, out.to_string())
 }
@@ -141,7 +212,11 @@ pub async fn handle_delete_message(
 // once, decode, and fill data/payload/transactionId/traceId/producerSub for the
 // addressed frame. Segments are cached per (partitionId, seq) so a page that
 // spans one segment decodes it exactly once.
-async fn enrich_segment_payloads(client: &deadpool_postgres::Client, v: &mut serde_json::Value) {
+async fn enrich_segment_payloads(
+    client: &deadpool_postgres::Client,
+    enc: &crate::encryption::Encryption,
+    v: &mut serde_json::Value,
+) {
     let msgs = match v.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(m) => m,
         None => return,
@@ -181,8 +256,12 @@ async fn enrich_segment_payloads(client: &deadpool_postgres::Client, v: &mut ser
         }
         if let Some(Some(frames)) = cache.get(&key) {
             if let Some(f) = frames.get(fidx) {
+                // RUSTFIX item 8: decrypt the envelope when a key is configured
+                // (sniff by shape, regardless of the stored flag).
                 let payload: serde_json::Value = if f.payload.is_empty() {
                     serde_json::Value::Null
+                } else if let Some(pt) = enc.decrypt_payload_bytes(&f.payload) {
+                    serde_json::from_slice(&pt).unwrap_or(serde_json::Value::Null)
                 } else {
                     serde_json::from_slice(&f.payload).unwrap_or(serde_json::Value::Null)
                 };
@@ -234,7 +313,11 @@ pub async fn handle_list_messages(
         }
     };
     let mut v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
-    enrich_segment_payloads(&client, &mut v).await;
+    enrich_segment_payloads(&client, &st.encryption, &mut v).await;
+    // RUSTFIX item 25: surface an embedded SP {"error":...} as 500/404.
+    if v.get("error").filter(|e| !e.is_null()).is_some() {
+        return sp_result_to_response(v.to_string());
+    }
     if let Some(obj) = v.as_object_mut() {
         let total = obj.get("messages").and_then(|m| m.as_array()).map(|a| a.len()).unwrap_or(0);
         obj.insert("total".to_string(), serde_json::json!(total));
@@ -269,6 +352,10 @@ pub async fn handle_dlq(
         }
     };
     let mut v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
+    // RUSTFIX item 25: surface an embedded SP {"error":...} as 500/404.
+    if v.get("error").filter(|e| !e.is_null()).is_some() {
+        return sp_result_to_response(v.to_string());
+    }
     if let Some(obj) = v.as_object_mut() {
         let total = obj.get("messages").and_then(|m| m.as_array()).map(|a| a.len()).unwrap_or(0);
         obj.insert("total".to_string(), serde_json::json!(total));

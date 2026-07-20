@@ -41,8 +41,11 @@ BEGIN
     v_retry_delay := COALESCE((p_options->>'retryDelay')::integer, 1000);
     v_max_size := COALESCE((p_options->>'maxSize')::integer, 0);
     v_ttl := COALESCE((p_options->>'ttl')::integer, 3600);
-    v_dead_letter_queue := COALESCE((p_options->>'deadLetterQueue')::boolean, false);
-    v_dlq_after_max_retries := COALESCE((p_options->>'dlqAfterMaxRetries')::boolean, false);
+    -- RUSTFIX item 2: default TRUE when the option is OMITTED (JSON key absent →
+    -- ->>'deadLetterQueue' is NULL). An explicit deadLetterQueue:false yields
+    -- ('false')::boolean = false and is preserved — so a client can still disable it.
+    v_dead_letter_queue := COALESCE((p_options->>'deadLetterQueue')::boolean, true);
+    v_dlq_after_max_retries := COALESCE((p_options->>'dlqAfterMaxRetries')::boolean, true);
     v_delayed_processing := COALESCE((p_options->>'delayedProcessing')::integer, 0);
     v_window_buffer := COALESCE((p_options->>'windowBuffer')::integer, 0);
     v_retention_seconds := COALESCE((p_options->>'retentionSeconds')::integer, 0);

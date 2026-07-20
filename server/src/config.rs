@@ -8,11 +8,13 @@ pub struct AuthConfig {
     pub enabled: bool,
     pub algorithm: String,
     pub secret: String,
-    /// PEM public key for RS256/EdDSA. Reserved for parity with the C++ config;
-    /// this broker only verifies HS256 today (the auth tests are HS256-only), so
-    /// it is loaded but not yet consulted.
-    #[allow(dead_code)]
+    /// PEM public key for RS256/EdDSA (static-key deployments). Consulted before
+    /// the JWKS cache (RUSTFIX item 7).
     pub public_key: String,
+    /// JWKS endpoint for RS256/EdDSA key discovery + rotation (RUSTFIX item 7).
+    pub jwks_url: String,
+    pub jwks_refresh_interval_seconds: i64,
+    pub jwks_request_timeout_ms: i64,
     pub issuer: String,
     pub audience: String,
     pub clock_skew_seconds: i64,
@@ -41,6 +43,9 @@ impl AuthConfig {
             algorithm: env_str("JWT_ALGORITHM", "HS256"),
             secret: env_str("JWT_SECRET", ""),
             public_key: env_str("JWT_PUBLIC_KEY", ""),
+            jwks_url: env_str("JWT_JWKS_URL", ""),
+            jwks_refresh_interval_seconds: env_int("JWT_JWKS_REFRESH_INTERVAL", 3600),
+            jwks_request_timeout_ms: env_int("JWT_JWKS_TIMEOUT_MS", 5000),
             issuer: env_str("JWT_ISSUER", ""),
             audience: env_str("JWT_AUDIENCE", ""),
             clock_skew_seconds: env_int("JWT_CLOCK_SKEW", 30),
@@ -67,6 +72,40 @@ impl AuthConfig {
         }
         false
     }
+
+    /// Startup config validation (RUSTFIX item 7), mirroring the C++
+    /// `AuthConfig::validate` (config.hpp:539-561): when auth is enabled, the
+    /// configured algorithm must have usable key material. Returns Err with a
+    /// message naming the missing credentials so boot can fail loudly.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        match self.algorithm.as_str() {
+            "HS256" | "auto" => {
+                if self.secret.is_empty() && self.jwks_url.is_empty() && self.public_key.is_empty() {
+                    return Err(format!(
+                        "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
+                        self.algorithm
+                    ));
+                }
+            }
+            "RS256" | "RS384" | "RS512" | "EdDSA" => {
+                if self.jwks_url.is_empty() && self.public_key.is_empty() {
+                    return Err(format!(
+                        "JWT_ENABLED=true with JWT_ALGORITHM={} but neither JWT_PUBLIC_KEY nor JWT_JWKS_URL is set",
+                        self.algorithm
+                    ));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "JWT_ALGORITHM={other} is not supported (use HS256, RS256, RS384, RS512, EdDSA, or auto)"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Inter-instance UDP sync configuration, mirroring the C++ `InterInstanceConfig`
@@ -84,11 +123,10 @@ pub struct SyncConfig {
     pub secret: String,
     pub heartbeat_ms: u64,
     pub dead_threshold_ms: u64,
-    /// Accepted for parity with the C++ `QUEEN_CACHE_REFRESH_INTERVAL_MS`, but not
-    /// consumed: this broker's only per-queue cache (lease time) is lazily fetched
-    /// on miss and invalidated over UDP, so it self-heals without a periodic DB
-    /// refresh loop. Kept so setting the env var is never an error.
-    #[allow(dead_code)]
+    /// `QUEEN_CACHE_REFRESH_INTERVAL_MS` (default 60000). RUSTFIX item 16: drives
+    /// the periodic reconcile loop (reconcile.rs) that re-reads the maintenance
+    /// flags from queen.system_state and drops the lease cache, so a replica heals
+    /// within one interval after a lost UDP packet.
     pub cache_refresh_ms: u64,
     /// This node's identity in heartbeats/stats (env `QUEEN_SERVER_ID`, else a
     /// short random id). Cosmetic — used only for peer identity/logging/stats.
@@ -156,6 +194,13 @@ pub struct Config {
     pub port: String,
     pub pg: deadpool_postgres::Config,
     pub pool_size: usize,
+    // Postgres TLS (RUSTFIX item 5). C++ `PG_USE_SSL` (default false) /
+    // `PG_SSL_REJECT_UNAUTHORIZED` (default true), config.hpp:90-91. When
+    // `pg_use_ssl` is false the pool is created with `NoTls` (byte-for-byte
+    // unchanged); when true a rustls connector is wired in `db.rs`, with cert
+    // verification disabled iff `pg_ssl_reject_unauthorized` is false.
+    pub pg_use_ssl: bool,
+    pub pg_ssl_reject_unauthorized: bool,
     pub stmt_timeout: Duration,
     pub zstd_level: i32,
     // Vegas per-lane: initial / min / max / alpha / beta.
@@ -167,15 +212,32 @@ pub struct Config {
     pub pop_max: u64,
     pub vegas_alpha: f64,
     pub vegas_beta: f64,
-    // pop long-poll
+    // pop long-poll (RUSTFIX item 19). Default idle wait 30s (DEFAULT_TIMEOUT); the
+    // re-query interval backs off exponentially instead of a fixed poll.
     pub pop_default_timeout_ms: u64,
-    pub pop_wait_poll_ms: u64,
+    pub pop_wait_initial_interval_ms: u64,
+    pub pop_wait_backoff_threshold: u32,
+    pub pop_wait_backoff_multiplier: f64,
+    pub pop_wait_max_interval_ms: u64,
     // cross-request fusion
     pub fusion_shards: usize,
     pub fusion_frames: usize,
     pub fusion_hold_ms: u64,
     // background retention/eviction sweep cadence (ms)
     pub retention_interval_ms: u64,
+    // Retention/metrics background-job knobs (RUSTFIX item 20 — C++ JobsConfig,
+    // config.hpp:286-329). `retention_batch_size` bounds each metrics-purge DELETE;
+    // `metrics_retention_days` is the worker/system-metrics purge window (default
+    // 90, matching the C++ RetentionService, not the old hardcoded 7). Under the
+    // segments engine `retention_parallelism` and `partition_cleanup_days` have no
+    // work to do (the sweep is a single advisory-locked txn, no partitioned message
+    // table to drop) — read for config-compat and documented inert.
+    pub retention_batch_size: usize,
+    #[allow(dead_code)]
+    pub retention_parallelism: usize,
+    pub metrics_retention_days: i32,
+    #[allow(dead_code)]
+    pub partition_cleanup_days: i32,
     // stats reconciler cadence (ms) — segments-native queen.stats refresh
     // (server/src/stats.rs). Mirrors the C++ StatsService STATS_INTERVAL_MS.
     pub stats_interval_ms: u64,
@@ -186,21 +248,64 @@ pub struct Config {
     pub auth: AuthConfig,
     // Inter-instance UDP notifications (enabled by default, but inert with no peers).
     pub sync: SyncConfig,
+    // Disk spool for DB-outage / maintenance push durability (RUSTFIX items 1, 17).
+    pub file_buffer: FileBufferConfig,
 }
 
+/// File-buffer configuration, mirroring the C++ `FileBufferConfig`
+/// (config.hpp:356-392). Drives `file_buffer.rs`. Defaults match C++ exactly.
+#[derive(Clone)]
+pub struct FileBufferConfig {
+    pub dir: String,
+    pub flush_interval_ms: u64,
+    pub max_batch_size: usize,
+    pub max_events_per_file: usize,
+}
+
+impl FileBufferConfig {
+    fn from_env() -> FileBufferConfig {
+        FileBufferConfig {
+            // Plan pins the Linux default; the C++ Apple `/tmp/queen` default is
+            // dev-only. Must be a writable, persistent path for durability.
+            dir: env_str("FILE_BUFFER_DIR", "/var/lib/queen/buffers"),
+            flush_interval_ms: env_int("FILE_BUFFER_FLUSH_MS", 100).max(1) as u64,
+            max_batch_size: env_int("FILE_BUFFER_MAX_BATCH", 100).max(1) as usize,
+            max_events_per_file: env_int("FILE_BUFFER_EVENTS_PER_FILE", 10000).max(1) as usize,
+        }
+    }
+}
+
+// C++ `get_env_string` parity (config.hpp:29-33): a present-but-empty env var
+// returns "" verbatim; only a genuinely-unset var falls back to the default.
+// (RUSTFIX item 6 — the old `.filter(|v| !v.is_empty())` treated ""` as unset,
+// which silently restored default lists e.g. for JWT_SKIP_PATHS="".)
 fn env_str(k: &str, def: &str) -> String {
-    std::env::var(k).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| def.to_string())
+    std::env::var(k).unwrap_or_else(|_| def.to_string())
 }
 fn env_int(k: &str, def: i64) -> i64 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
 }
+// RUSTFIX item 4: PG_DATABASE (Rust name) → PG_DB (C++ name, config.hpp:86) →
+// "postgres". Uses a non-empty filter independent of `env_str`'s item-6 semantics
+// so an explicitly-empty PG_DATABASE still falls through instead of yielding "".
+// Must match the migration source resolution in handlers/migration.rs.
+pub fn resolve_db_name() -> String {
+    std::env::var("PG_DATABASE")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("PG_DB").ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "postgres".to_string())
+}
 fn env_f64(k: &str, def: f64) -> f64 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
 }
+// C++ `get_env_bool` parity (config.hpp:11-15): only the exact literal "true" is
+// truthy (case-sensitive). "1"/"yes"/"on"/"TRUE" are all false. (RUSTFIX item 6 —
+// the old permissive parser turned JWT_ENABLED=1 into an accidental auth-enable.)
 fn env_bool(k: &str, def: bool) -> bool {
-    match std::env::var(k).ok().map(|v| v.to_ascii_lowercase()) {
-        Some(v) => matches!(v.as_str(), "1" | "true" | "yes" | "on"),
-        None => def,
+    match std::env::var(k) {
+        Ok(v) => v == "true",
+        Err(_) => def,
     }
 }
 
@@ -210,12 +315,17 @@ pub fn load() -> Config {
     pg.port = Some(env_int("PG_PORT", 5432) as u16);
     pg.user = Some(env_str("PG_USER", "postgres"));
     pg.password = Some(env_str("PG_PASSWORD", "postgres"));
-    pg.dbname = Some(env_str("PG_DATABASE", "postgres"));
+    // RUSTFIX item 4: prefer PG_DATABASE, fall back to the C++ name PG_DB, then
+    // "postgres". Explicit non-empty chain (not env_str) so an empty PG_DATABASE
+    // still falls through to PG_DB rather than resolving to "" under item 6.
+    pg.dbname = Some(resolve_db_name());
 
     Config {
         port: env_str("PORT", "6632"),
         pg,
         pool_size: env_int("DB_POOL_SIZE", 160) as usize,
+        pg_use_ssl: env_bool("PG_USE_SSL", false),
+        pg_ssl_reject_unauthorized: env_bool("PG_SSL_REJECT_UNAUTHORIZED", true),
         stmt_timeout: Duration::from_millis(env_int("QUEEN_STMT_TIMEOUT_MS", 30000) as u64),
         zstd_level: env_int("QUEEN_V2_ZSTD_LEVEL", 3) as i32,
         push_init: env_int("QUEEN_SEG_PUSH_INIT", 16) as u64,
@@ -226,17 +336,28 @@ pub fn load() -> Config {
         pop_max: env_int("QUEEN_SEG_POP_MAX", 64) as u64,
         vegas_alpha: env_f64("QUEEN_VEGAS_ALPHA", 3.0),
         vegas_beta: env_f64("QUEEN_VEGAS_BETA", 6.0),
-        pop_default_timeout_ms: env_int("POP_DEFAULT_TIMEOUT_MS", 2000) as u64,
-        pop_wait_poll_ms: env_int("POP_WAIT_POLL_MS", 25) as u64,
+        // RUSTFIX item 19: honor DEFAULT_TIMEOUT (C++ name) first, then
+        // POP_DEFAULT_TIMEOUT_MS, then 30000 — not the old 2000.
+        pop_default_timeout_ms: env_int("DEFAULT_TIMEOUT", env_int("POP_DEFAULT_TIMEOUT_MS", 30000))
+            .max(1) as u64,
+        pop_wait_initial_interval_ms: env_int("POP_WAIT_INITIAL_INTERVAL_MS", 100).max(1) as u64,
+        pop_wait_backoff_threshold: env_int("POP_WAIT_BACKOFF_THRESHOLD", 3).max(0) as u32,
+        pop_wait_backoff_multiplier: env_f64("POP_WAIT_BACKOFF_MULTIPLIER", 2.0),
+        pop_wait_max_interval_ms: env_int("POP_WAIT_MAX_INTERVAL_MS", 1000).max(1) as u64,
         fusion_shards: env_int("QUEEN_V2_FUSION_SHARDS", 8).max(1) as usize,
         fusion_frames: env_int("QUEEN_V2_FUSION_FRAMES", 500).max(1) as usize,
         fusion_hold_ms: env_int("QUEEN_V2_FUSION_HOLD_MS", 15).max(1) as u64,
         // RetentionService cadence (C++ parity). retention.js starts the server
         // with RETENTION_INTERVAL=2000; default matches the C++ 5-minute sweep.
         retention_interval_ms: env_int("RETENTION_INTERVAL", 300000).max(1) as u64,
+        retention_batch_size: env_int("RETENTION_BATCH_SIZE", 1000).max(1) as usize,
+        retention_parallelism: env_int("RETENTION_PARALLELISM", 1).max(1) as usize,
+        metrics_retention_days: env_int("METRICS_RETENTION_DAYS", 90).max(1) as i32,
+        partition_cleanup_days: env_int("PARTITION_CLEANUP_DAYS", 30).max(1) as i32,
         stats_interval_ms: env_int("STATS_INTERVAL_MS", 10000).max(1000) as u64,
         metrics_flush_ms: env_int("METRICS_FLUSH_MS", 60000).max(1000) as u64,
         auth: AuthConfig::from_env(),
         sync: SyncConfig::from_env(),
+        file_buffer: FileBufferConfig::from_env(),
     }
 }

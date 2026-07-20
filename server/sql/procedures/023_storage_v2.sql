@@ -29,7 +29,7 @@
 CREATE TABLE IF NOT EXISTS queen.seg_queues (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT UNIQUE NOT NULL,
-    lease_time INTEGER NOT NULL DEFAULT 300,
+    lease_time INTEGER NOT NULL DEFAULT 60,  -- RUSTFIX item 18: default lease 60s
     retention_seconds INTEGER NOT NULL DEFAULT 3600,
     dedup_window_seconds INTEGER NOT NULL DEFAULT 3600,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -203,6 +203,18 @@ BEGIN
 
     IF v_pid IS NULL THEN
         INSERT INTO queen.seg_queues (name) VALUES (p_queue)
+        ON CONFLICT (name) DO NOTHING;
+        -- RUSTFIX item 26: create the queen.queues config row on queue creation,
+        -- deriving namespace/task from the dotted name exactly like 001_push.sql, so
+        -- push-only queues are visible to namespace/task discovery pops and pick up
+        -- retry/DLQ/retention config (ON CONFLICT preserves a /configure-created row).
+        -- Kept inside the v_pid IS NULL branch only (an unconditional per-push
+        -- ON CONFLICT would reintroduce the ShareLock convoy the header avoids).
+        INSERT INTO queen.queues (name, namespace, task, storage)
+        VALUES (p_queue,
+                split_part(p_queue, '.', 1),
+                CASE WHEN position('.' in p_queue) > 0 THEN split_part(p_queue, '.', 2) ELSE '' END,
+                'segments')
         ON CONFLICT (name) DO NOTHING;
         INSERT INTO queen.seg_partitions (queue_id, name)
         SELECT q.id, p_partition FROM queen.seg_queues q WHERE q.name = p_queue
@@ -441,8 +453,16 @@ BEGIN
     SELECT * INTO v_c FROM queen.partition_consumers c
     WHERE c.partition_id = v_pid AND c.consumer_group = p_group
     FOR UPDATE;
-    IF NOT FOUND OR v_c.worker_id IS DISTINCT FROM p_worker
-       OR v_c.lease_expires_at IS NULL OR v_c.lease_expires_at < clock_timestamp() THEN
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'consumer not found');
+    END IF;
+    -- RUSTFIX item 11: validate the lease only when a non-empty worker/leaseId is
+    -- supplied (parity with 004_transaction.sql:172-182). A lease-less ack still
+    -- advances the cursor.
+    IF p_worker IS NOT NULL AND p_worker <> ''
+       AND (v_c.worker_id IS DISTINCT FROM p_worker
+            OR v_c.lease_expires_at IS NULL
+            OR v_c.lease_expires_at < clock_timestamp()) THEN
         RETURN jsonb_build_object('ok', false, 'error', 'invalid or expired lease');
     END IF;
 

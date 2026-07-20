@@ -98,6 +98,16 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
         }
     };
 
+    // RUSTFIX item 25: if the SP echo carries an {"error":...}, surface it as
+    // 500/404 and short-circuit BEFORE the side-effecting seg_queues writes.
+    if cfg_txt.contains("\"error\"") {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cfg_txt) {
+            if v.get("error").filter(|e| !e.is_null()).is_some() {
+                return sp_result_to_response(cfg_txt);
+            }
+        }
+    }
+
     // Pull the resolved (defaulted) leaseTime/retentionSeconds from the SP echo so
     // the seg_queues row matches queen.queues exactly.
     let cfg_val: serde_json::Value =
@@ -282,7 +292,7 @@ pub async fn handle_system_overview(State(st): State<Arc<AppState>>) -> Response
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_system_overview(&client).await {
-        Ok(t) => json(StatusCode::OK, t),
+        Ok(t) => sp_result_to_response(t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("overview failed: ", &e),
@@ -297,7 +307,7 @@ pub async fn handle_list_namespaces(State(st): State<Arc<AppState>>) -> Response
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_namespaces(&client).await {
-        Ok(t) => json(StatusCode::OK, t),
+        Ok(t) => sp_result_to_response(t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("namespaces failed: ", &e),
@@ -312,7 +322,7 @@ pub async fn handle_list_tasks(State(st): State<Arc<AppState>>) -> Response {
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_tasks(&client).await {
-        Ok(t) => json(StatusCode::OK, t),
+        Ok(t) => sp_result_to_response(t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("tasks failed: ", &e),

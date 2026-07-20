@@ -6,8 +6,22 @@ use crate::config::Config;
 pub fn create_pool(cfg: &Config) -> Pool {
     let mut pg = cfg.pg.clone();
     pg.pool = Some(PoolConfig::new(cfg.pool_size));
-    pg.create_pool(Some(Runtime::Tokio1), NoTls)
-        .expect("failed to create pool")
+    // RUSTFIX item 5: wire a rustls connector when PG_USE_SSL=true, else the
+    // byte-for-byte-unchanged NoTls path. The two arms have divergent TlsConnect
+    // types, so the pool-config mutation above is shared and only the terminal
+    // create_pool differs.
+    if cfg.pg_use_ssl {
+        // Force TLS negotiation (C++ appended sslmode=require). Chain verification
+        // is delegated to the rustls connector's ClientConfig, gated by
+        // PG_SSL_REJECT_UNAUTHORIZED.
+        pg.ssl_mode = Some(deadpool_postgres::SslMode::Require);
+        let connector = crate::pgtls::make_connector(cfg.pg_ssl_reject_unauthorized);
+        pg.create_pool(Some(Runtime::Tokio1), connector)
+            .expect("failed to create TLS pool")
+    } else {
+        pg.create_pool(Some(Runtime::Tokio1), NoTls)
+            .expect("failed to create pool")
+    }
 }
 
 // Ack a set of (transactionId -> ok) for ONE (partition, consumer_group, worker)
@@ -316,6 +330,18 @@ pub async fn queue_lease_time(
     Ok(rows.first().map(|r| r.get::<_, i32>(0)))
 }
 
+// RUSTFIX item 8: per-queue at-rest encryption flag. Lives on queen.queues
+// (written by 012_configure from options.encryptionEnabled), NOT seg_queues.
+// None when the queue has no queen.queues row yet (caller treats as false).
+pub async fn queue_encryption_enabled(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+) -> Result<Option<bool>, tokio_postgres::Error> {
+    let stmt = "SELECT encryption_enabled FROM queen.queues WHERE name = $1";
+    let rows = client.query(stmt, &[&queue]).await?;
+    Ok(rows.first().map(|r| r.get::<_, bool>(0)))
+}
+
 // ------------------------------------------------------- per-message access
 // Resolve (partition_id, transactionId) -> (seq, frame_idx, message_id) through
 // queen.seg_dedup, whose PK is (partition_id, hashtextextended(txn, 0)) — the
@@ -335,6 +361,85 @@ pub async fn seg_resolve_position(
                   AND txn_hash = hashtextextended($2, 0)";
     let rows = client.query(stmt, &[&partition_id, &txn]).await?;
     Ok(rows.first().map(|r| (r.get::<_, i64>(0), r.get::<_, i32>(1), r.get::<_, String>(2))))
+}
+
+// RUSTFIX item 23: fallback resolver for a txn whose seg_dedup entry has been
+// purged (older than dedupWindowSeconds). Scans the partition's segment blobs
+// newest-first (bounded) and returns (seq, blob) candidates so the handler can
+// decode + match f.txn. O(segments in the partition) — acceptable for a
+// management endpoint; bounded by LIMIT to avoid a pathological scan.
+pub async fn seg_scan_segments(
+    client: &deadpool_postgres::Client,
+    partition_id: &str,
+    limit: i64,
+) -> Result<Vec<(i64, Vec<u8>)>, tokio_postgres::Error> {
+    let stmt = "SELECT s.seq, s.blob FROM queen.seg_segments s \
+                WHERE s.partition_id = $1::text::uuid ORDER BY s.seq DESC LIMIT $2";
+    let rows = client.query(stmt, &[&partition_id, &limit]).await?;
+    Ok(rows.iter().map(|r| (r.get::<_, i64>(0), r.get::<_, Vec<u8>>(1))).collect())
+}
+
+// RUSTFIX item 23: the extra management fields for GET /messages/:pid/:txn
+// (010_messages.sql:194-271 parity) — queue/namespace/task, queueConfig, the
+// per-group consumerGroups + leaseExpiresAt, DLQ error, and the flags to derive
+// `status`. Returns the assembled JSON as text (or None if the partition is gone).
+// Tolerates a missing queen.queues row (item 26) via COALESCE + split_part.
+pub async fn seg_message_detail(
+    client: &deadpool_postgres::Client,
+    partition_id: &str,
+    seq: i64,
+    frame_idx: i32,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let stmt = "\
+        WITH q AS ( \
+            SELECT sq.name AS queue, sp.name AS partition, \
+                   COALESCE(NULLIF(qq.namespace, ''), split_part(sq.name, '.', 1)) AS namespace, \
+                   COALESCE(NULLIF(qq.task, ''), CASE WHEN position('.' in sq.name) > 0 \
+                        THEN split_part(sq.name, '.', 2) ELSE '' END) AS task, \
+                   COALESCE(qq.lease_time, 60) AS lease_time, \
+                   COALESCE(qq.retry_limit, 3) AS retry_limit, \
+                   COALESCE(qq.retry_delay, 1000) AS retry_delay, \
+                   COALESCE(qq.ttl, 3600) AS ttl, \
+                   COALESCE(qq.priority, 0) AS priority \
+            FROM queen.seg_partitions sp \
+            JOIN queen.seg_queues sq ON sq.id = sp.queue_id \
+            LEFT JOIN queen.queues qq ON qq.name = sq.name \
+            WHERE sp.id = $1::text::uuid ), \
+        d AS ( SELECT error FROM queen.seg_dlq \
+               WHERE partition_id = $1::text::uuid AND seq = $2::bigint AND frame_idx = $3::int LIMIT 1 ), \
+        g AS ( \
+            SELECT COALESCE(jsonb_agg(jsonb_build_object( \
+                       'group', pc.consumer_group, \
+                       'consumed', (pc.next_seq, pc.next_off) > ($2::bigint, $3::int), \
+                       'leaseExpiresAt', pc.lease_expires_at) \
+                   ORDER BY pc.consumer_group), '[]'::jsonb) AS arr, \
+                   MAX(CASE WHEN pc.consumer_group = '__QUEUE_MODE__' THEN pc.lease_expires_at END) AS qmode_lease, \
+                   bool_and((pc.next_seq, pc.next_off) > ($2::bigint, $3::int)) \
+                       FILTER (WHERE pc.consumer_group <> '__QUEUE_MODE__') AS bus_all_passed, \
+                   bool_or((pc.next_seq, pc.next_off) > ($2::bigint, $3::int)) \
+                       FILTER (WHERE pc.consumer_group = '__QUEUE_MODE__') AS qmode_passed, \
+                   COUNT(*) FILTER (WHERE pc.consumer_group <> '__QUEUE_MODE__') AS bus_groups, \
+                   COUNT(*) FILTER (WHERE pc.consumer_group = '__QUEUE_MODE__') AS has_qmode, \
+                   bool_or(pc.lease_expires_at IS NOT NULL AND pc.lease_expires_at > now()) AS any_lease \
+            FROM queen.partition_consumers pc WHERE pc.partition_id = $1::text::uuid ) \
+        SELECT jsonb_build_object( \
+            'queue', q.queue, 'partition', q.partition, 'namespace', q.namespace, 'task', q.task, \
+            'queueConfig', jsonb_build_object('leaseTime', q.lease_time, 'retryLimit', q.retry_limit, \
+                'retryDelay', q.retry_delay, 'ttl', q.ttl, 'priority', q.priority), \
+            'errorMessage', (SELECT error FROM d), \
+            'isDlq', EXISTS(SELECT 1 FROM d), \
+            'consumerGroups', (SELECT arr FROM g), \
+            'leaseExpiresAt', (SELECT qmode_lease FROM g), \
+            'busAllPassed', COALESCE((SELECT bus_all_passed FROM g), false), \
+            'qmodePassed', COALESCE((SELECT qmode_passed FROM g), false), \
+            'busGroups', COALESCE((SELECT bus_groups FROM g), 0), \
+            'hasQueueMode', COALESCE((SELECT has_qmode FROM g), 0) > 0, \
+            'anyLeaseLive', COALESCE((SELECT any_lease FROM g), false) \
+        )::text FROM q";
+    let rows = client
+        .query(stmt, &[&partition_id, &seq, &frame_idx])
+        .await?;
+    Ok(rows.first().map(|r| r.get::<_, String>(0)))
 }
 
 // Fetch one segment's decode inputs: (createdAt ISO text, partition name, raw
@@ -682,6 +787,20 @@ pub async fn insert_worker_metrics(
     Ok(())
 }
 
+// RUSTFIX item 1: multi-segment push for the file-buffer drain. Identical SP call
+// to the fusion path (queen.seg_push_segments_multi_v1), exposed so file_buffer.rs
+// can replay spooled events preserving each original transactionId (dedup makes
+// the replay idempotent). `segments_json` is index-aligned with `blobs`.
+pub async fn push_segments_multi(
+    client: &deadpool_postgres::Client,
+    segments_json: &str,
+    blobs: Vec<Vec<u8>>,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = "SELECT (queen.seg_push_segments_multi_v1($1::text::jsonb, $2))::text";
+    let row = client.query_one(stmt, &[&segments_json, &blobs]).await?;
+    Ok(row.get(0))
+}
+
 // Insert one per-window system_metrics row (host/process gauges as a JSONB blob
 // shaped exactly like the C++ AggregatedMetrics.to_json(), which
 // queen.get_system_metrics_v1 re-aggregates). ON CONFLICT keeps the latest.
@@ -713,6 +832,34 @@ pub async fn cleanup_worker_metrics(
         .query_one("SELECT (queen.cleanup_worker_metrics_v1($1::int))::text", &[&days])
         .await?;
     Ok(row.get(0))
+}
+
+// RUSTFIX item 20: purge queen.system_metrics rows older than `days`. This table
+// is written every metrics window by syscollect.rs (insert_system_metrics above)
+// and had NO purge anywhere, so it grew unbounded — the C++ RetentionService
+// (retention_service.cpp:432-476) deleted it on a 90-day window. Batched so a
+// large backlog doesn't lock the table in one statement; `batch` bounds each
+// DELETE (RETENTION_BATCH_SIZE). Returns the total rows deleted.
+pub async fn cleanup_system_metrics(
+    client: &deadpool_postgres::Client,
+    days: i32,
+    batch: usize,
+) -> Result<u64, tokio_postgres::Error> {
+    let batch = batch.max(1) as i64;
+    let stmt = "DELETE FROM queen.system_metrics \
+                WHERE ctid IN ( \
+                    SELECT ctid FROM queen.system_metrics \
+                    WHERE timestamp < NOW() - make_interval(days => $1) \
+                    LIMIT $2 )";
+    let mut total: u64 = 0;
+    loop {
+        let n = client.execute(stmt, &[&days, &batch]).await?;
+        total += n;
+        if (n as i64) < batch {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 // ---------------------------------------------------------------- retention

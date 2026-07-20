@@ -15,7 +15,7 @@ use axum::response::Response;
 // Serve a stored-procedure result: raw JSON on success, {"error":..} on failure.
 fn serve(prefix: &str, r: Result<String, tokio_postgres::Error>) -> Response {
     match r {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(StatusCode::INTERNAL_SERVER_ERROR, json_err(prefix, &e)),
     }
 }
@@ -136,17 +136,18 @@ pub async fn handle_postgres_stats(State(st): State<Arc<AppState>>) -> Response 
 }
 
 // --------------------------------------------- GET /api/v1/status/buffers
-// The segments broker has no file-buffer (push maintenance never diverts to disk),
-// so this reports an always-empty, healthy buffer — the shape the dashboard's
-// backpressure panel expects.
+// Live file-buffer status (RUSTFIX item 1) — the shape the dashboard's
+// backpressure panel expects. `dbHealthy` reflects the buffer's own DB-reachability
+// hint (flipped by push/drain), falling back to a fresh ping when nothing has been
+// buffered yet.
 pub async fn handle_status_buffers(State(st): State<Arc<AppState>>) -> Response {
-    let db_healthy = matches!(st.pool.get().await, Ok(c) if db::ping(&c).await.is_ok());
+    let db_healthy = st.file_buffer.db_healthy()
+        && matches!(st.pool.get().await, Ok(c) if db::ping(&c).await.is_ok());
     let body = serde_json::json!({
-        "pending": 0,
-        "failed": 0,
+        "pending": st.file_buffer.pending_count(),
+        "failed": st.file_buffer.failed_count(),
         "dbHealthy": db_healthy,
         "worker": 0,
-        "note": "segments broker has no file buffer"
     });
     json(StatusCode::OK, body.to_string())
 }

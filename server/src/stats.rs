@@ -26,8 +26,11 @@ use crate::db;
 /// retention lock (737_001) so stats and retention never block each other.
 const STATS_LOCK_ID: i64 = 737_002;
 
-/// Metrics-retention window: worker/lag/parked rows older than this are trimmed.
-const METRICS_RETENTION_DAYS: i32 = 7;
+// NOTE (RUSTFIX item 20): the metrics purge used to live here on a hardcoded
+// 7-day window. It moved to retention.rs (C++ parity — the RetentionService owned
+// it, at 90 days) so it also purges queen.system_metrics and honors
+// METRICS_RETENTION_DAYS / RETENTION_BATCH_SIZE. This loop now only reconciles
+// queen.stats.
 
 /// Launch the stats reconciler loop. Non-blocking: spawns a detached tokio task.
 /// Call once at boot, before `axum::serve`.
@@ -41,12 +44,9 @@ pub fn spawn(pool: Pool, cfg: &Config) {
 }
 
 async fn run_loop(pool: Pool, interval: Duration) {
-    // Cleanup runs at most once per ~this many cycles (≈ every 10 min at 10s cadence).
-    let cleanup_every = (Duration::from_secs(600).as_millis() / interval.as_millis().max(1)).max(1);
-    let mut cycle: u128 = 0;
     loop {
         let start = Instant::now();
-        match run_cycle(&pool, cycle % cleanup_every == 0).await {
+        match run_cycle(&pool).await {
             Ok(Outcome::Skipped) => {}
             Ok(Outcome::Ran { summary }) => {
                 // Compact: the SP already reports queuesUpdated/segPartitions.
@@ -54,7 +54,6 @@ async fn run_loop(pool: Pool, interval: Duration) {
             }
             Err(e) => eprintln!("stats: cycle error: {e}"),
         }
-        cycle = cycle.wrapping_add(1);
         let sleep = interval.checked_sub(start.elapsed()).unwrap_or(Duration::ZERO);
         tokio::time::sleep(sleep).await;
     }
@@ -67,11 +66,10 @@ enum Outcome {
 
 async fn run_cycle(
     pool: &Pool,
-    do_cleanup: bool,
 ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
     let client = pool.get().await?;
     client.batch_execute("BEGIN").await?;
-    let res = cycle_body(&client, do_cleanup).await;
+    let res = cycle_body(&client).await;
     match &res {
         Ok(_) => {
             let _ = client.batch_execute("COMMIT").await;
@@ -85,7 +83,6 @@ async fn run_cycle(
 
 async fn cycle_body(
     client: &deadpool_postgres::Client,
-    do_cleanup: bool,
 ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
     let got: bool = client
         .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&STATS_LOCK_ID])
@@ -96,10 +93,5 @@ async fn cycle_body(
     }
 
     let summary = db::seg_refresh_all_stats(client).await?;
-    if do_cleanup {
-        if let Err(e) = db::cleanup_worker_metrics(client, METRICS_RETENTION_DAYS).await {
-            eprintln!("stats: metrics cleanup error: {e}");
-        }
-    }
     Ok(Outcome::Ran { summary })
 }

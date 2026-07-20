@@ -214,88 +214,23 @@ $$;
 -- Returns {"queues":N,"segments_deleted":N,"messages_evicted":N} where
 -- messages_evicted counts PENDING (unconsumed) messages dropped.
 -- ----------------------------------------------------------------------------
+-- RUSTFIX item 3: max_queue_size enforcement REMOVED for v0.16.0 parity. The old
+-- server never enforced the cap (no SQL rule, and the C++ EvictionService only did
+-- max_wait_time_seconds). Segment-granular eviction here was a Rust-only regression
+-- with documented data loss (including in-flight leased batches). Reduced to a
+-- no-op returning zeros — kept (not dropped) so CREATE OR REPLACE keeps applying and
+-- 032's lock-order comment plus the retention loop's references still resolve. The
+-- broker no longer calls it (see retention.rs). `maxSize` is still accepted, stored
+-- and echoed by /configure for API compatibility; it is simply never enforced.
 CREATE OR REPLACE FUNCTION queen.seg_evict_v1()
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
-DECLARE
-    v_p RECORD;
-    v_s RECORD;
-    v_queues BIGINT := 0;
-    v_segments_deleted BIGINT := 0;
-    v_messages_evicted BIGINT := 0;
-    v_min_next BIGINT;
-    v_pending BIGINT;
-    v_excess BIGINT;
-    v_boundary BIGINT;
-    v_n BIGINT;
 BEGIN
-    -- LOCK ORDER: same discipline as queen.seg_retention_sweep_v1 — one flat
-    -- partition loop in GLOBAL ascending queen.seg_partitions.id order, matching
-    -- queen.seg_transaction_wire_v1's pre-lock order, so concurrent evictions,
-    -- sweeps and transactions never acquire partition row locks in
-    -- conflicting orders (40P01).
-    SELECT COUNT(*) INTO v_queues
-    FROM queen.queues qq
-    JOIN queen.seg_queues q2q ON q2q.name = qq.name
-    WHERE qq.storage = 'segments'
-      AND qq.max_queue_size > 0;
-
-    FOR v_p IN
-        SELECT p.id, p.retention_seq, qq.max_queue_size
-        FROM queen.queues qq
-        JOIN queen.seg_queues q2q ON q2q.name = qq.name
-        JOIN queen.seg_partitions p ON p.queue_id = q2q.id
-        WHERE qq.storage = 'segments'
-          AND qq.max_queue_size > 0
-        ORDER BY p.id
-    LOOP
-        -- Slowest cursor; no groups => everything counts as pending.
-        SELECT MIN(c.next_seq) INTO v_min_next
-        FROM queen.partition_consumers c WHERE c.partition_id = v_p.id;
-        v_min_next := COALESCE(v_min_next, 0);
-
-        SELECT COALESCE(SUM(s.msg_count), 0) INTO v_pending
-        FROM queen.seg_segments s
-        WHERE s.partition_id = v_p.id AND s.seq >= v_min_next;
-
-        CONTINUE WHEN v_pending <= v_p.max_queue_size;
-        v_excess := v_pending - v_p.max_queue_size;
-
-        -- Oldest-first walk from the watermark; stop once enough pending
-        -- messages are covered. Consumed segments (seq < min cursor) are
-        -- swept along for free but reduce nothing.
-        v_boundary := v_p.retention_seq;
-        FOR v_s IN
-            SELECT s.seq, s.msg_count
-            FROM queen.seg_segments s
-            WHERE s.partition_id = v_p.id AND s.seq >= v_p.retention_seq
-            ORDER BY s.seq
-        LOOP
-            v_boundary := v_s.seq + 1;
-            IF v_s.seq >= v_min_next THEN
-                v_excess := v_excess - v_s.msg_count;
-                v_messages_evicted := v_messages_evicted + v_s.msg_count;
-            END IF;
-            EXIT WHEN v_excess <= 0;
-        END LOOP;
-
-        IF v_boundary > v_p.retention_seq THEN
-            DELETE FROM queen.seg_segments
-            WHERE partition_id = v_p.id
-              AND seq >= v_p.retention_seq AND seq < v_boundary;
-            GET DIAGNOSTICS v_n = ROW_COUNT;
-            v_segments_deleted := v_segments_deleted + v_n;
-
-            UPDATE queen.seg_partitions SET retention_seq = v_boundary
-            WHERE id = v_p.id AND retention_seq < v_boundary;
-        END IF;
-    END LOOP;
-
     RETURN jsonb_build_object(
-        'queues', v_queues,
-        'segments_deleted', v_segments_deleted,
-        'messages_evicted', v_messages_evicted
+        'queues', 0,
+        'segments_deleted', 0,
+        'messages_evicted', 0
     );
 END;
 $$;
@@ -387,6 +322,17 @@ BEGIN
     -- transactions can never lock the same pair in opposite order.
     INSERT INTO queen.seg_queues (name)
     SELECT DISTINCT op->>'queue'
+    FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
+    WHERE COALESCE(op->>'queue', '') <> ''
+    ON CONFLICT (name) DO NOTHING;
+
+    -- RUSTFIX item 26: create the queen.queues config rows for transaction-pushed
+    -- queues too (the loop's seg_push_segment_v1 skips creation — partition exists).
+    INSERT INTO queen.queues (name, namespace, task, storage)
+    SELECT DISTINCT op->>'queue',
+           split_part(op->>'queue', '.', 1),
+           CASE WHEN position('.' in op->>'queue') > 0 THEN split_part(op->>'queue', '.', 2) ELSE '' END,
+           'segments'
     FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
     WHERE COALESCE(op->>'queue', '') <> ''
     ON CONFLICT (name) DO NOTHING;

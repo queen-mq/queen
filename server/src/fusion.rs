@@ -73,6 +73,10 @@ pub struct OwnedFrame {
     // pack_frames stamps it into the frame (FLAG_PSUB) and pop echoes it back as
     // `producerSub`. None when auth is disabled or the token carried no sub.
     pub producer_sub: Option<String>,
+    // RUSTFIX item 8: this frame's payload is already an {encrypted,iv,authTag}
+    // envelope (the push handler encrypted it). Carried through so pack_frames sets
+    // FLAG_ENCRYPTED on the stored frame.
+    pub encrypted: bool,
     pub state: Arc<PushState>,
     pub item: usize,
 }
@@ -398,7 +402,9 @@ fn build_metas_and_blob(group: &FusionGroup, pending: &[usize], zstd_level: i32)
                 // (FLAG_PSUB) so it survives fusion and is readable at pop.
                 producer_sub: f.producer_sub.as_deref(),
                 payload: &f.payload,
-                encrypted: false,
+                // RUSTFIX item 8: propagate the frame's encrypted flag (crypto was
+                // done at the push handler; fusion only carries the bit).
+                encrypted: f.encrypted,
             }
         })
         .collect();

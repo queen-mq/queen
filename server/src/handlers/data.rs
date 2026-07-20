@@ -47,6 +47,9 @@ struct PreFrame {
     mid: [u8; 16],
     txn: String,
     payload: Vec<u8>,
+    // RUSTFIX item 8: true when `payload` is an encryption envelope (encrypted at
+    // push for a queue with encryption_enabled).
+    encrypted: bool,
     item: usize,
 }
 
@@ -102,6 +105,19 @@ pub async fn handle_push(
     if n == 0 {
         return json(StatusCode::CREATED, "[]".to_string());
     }
+
+    // producer_sub is stamped ONLY from the validated JWT `sub` (never the body).
+    // Computed up front so the maintenance-buffer path can carry it too.
+    let producer_sub = authed.0.filter(|s| !s.is_empty());
+
+    // RUSTFIX item 17: maintenance mode diverts EVERY push to the file buffer
+    // (parity with push.cpp:307-359) — nothing reaches queen.seg_segments; the
+    // background drain replays on disable. Return 201 with per-item
+    // status:"buffered" (or "failed" on a spool write error).
+    if st.maintenance.load(Ordering::Relaxed) {
+        return buffer_all(&st, &parsed, producer_sub.as_deref()).await;
+    }
+
     let mut results: Vec<ItemResult> = Vec::with_capacity(n);
     let mut groups: HashMap<(String, String), Vec<PreFrame>> = HashMap::new();
     // Layer 1 — intra-request first-wins dedup: (queue, partition, txn) -> the
@@ -109,6 +125,9 @@ pub async fn handle_push(
     // follower of the leader and produces no frame; at render it copies the
     // leader's final message_id.
     let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
+    // RUSTFIX item 8: memoize each distinct queue's encryption_enabled flag so the
+    // hot loop does at most one async lookup per queue (not per item).
+    let mut enc_flags: HashMap<String, bool> = HashMap::new();
     for (i, it) in parsed.items.iter().enumerate() {
         let mid = uuidv7_bytes();
         let mid_str = uuid_bytes_to_string(&mid);
@@ -140,22 +159,47 @@ pub async fn handle_push(
             status: "queued",
             dup_of: None,
         });
+
+        // RUSTFIX item 8: encrypt the payload for a queue with encryption_enabled
+        // (parity with push.cpp:370-405). On failure, warn + store plaintext — never
+        // fail the push.
+        let raw = it.payload.get().as_bytes();
+        let enc_on = if st.encryption.is_enabled() {
+            match enc_flags.get(&queue) {
+                Some(&b) => b,
+                None => {
+                    let b = st.encryption_enabled_for(&queue).await;
+                    enc_flags.insert(queue.clone(), b);
+                    b
+                }
+            }
+        } else {
+            false
+        };
+        let (payload, encrypted) = if enc_on {
+            match st.encryption.encrypt(raw) {
+                Some(env) => (env, true),
+                None => {
+                    eprintln!("PUSH: encryption failed for queue '{queue}', storing plaintext");
+                    (raw.to_vec(), false)
+                }
+            }
+        } else {
+            (raw.to_vec(), false)
+        };
+
         groups.entry((queue, partition)).or_default().push(PreFrame {
             mid,
             txn,
-            payload: it.payload.get().as_bytes().to_vec(),
+            payload,
+            encrypted,
             item: i,
         });
     }
 
-    // producer_sub is stamped ONLY from the validated JWT `sub`. The request body
-    // is never a source (PushItem doesn't parse `producerSub`, so a spoofed value
-    // is silently dropped). The sub (when present) is carried THROUGH fusion on
-    // each OwnedFrame — the flush's pack_frames stamps it into the frame
-    // (FLAG_PSUB) — so auth-enabled pushes coalesce across requests exactly like
-    // the anonymous path. Auth disabled, or a token with no sub, leaves it None.
-    let producer_sub = authed.0.filter(|s| !s.is_empty());
-
+    // producer_sub (computed above) is carried THROUGH fusion on each OwnedFrame —
+    // the flush's pack_frames stamps it into the frame (FLAG_PSUB) — so auth-enabled
+    // pushes coalesce across requests exactly like the anonymous path.
     let pending = groups.len();
     // Capture the pushed (queue, partition) set before the submit loop consumes
     // `groups`, so we can wake parked pops / notify peers once the write lands.
@@ -174,6 +218,7 @@ pub async fn handle_push(
                 txn: p.txn,
                 payload: p.payload,
                 producer_sub: producer_sub.clone(),
+                encrypted: p.encrypted,
                 state: state.clone(),
                 item: p.item,
             })
@@ -188,10 +233,138 @@ pub async fn handle_push(
         st.notifier.notify_pushed(queue, partition);
     }
 
+    // RUSTFIX item 1: an "error" status means the whole DB transaction failed
+    // (connection/timeout) — fusion committed nothing. Spool those items to the
+    // file buffer and report status:"buffered" so a client that only checks the
+    // HTTP code does not silently lose them; the background drain replays them
+    // (dedup on the preserved transactionId makes replay idempotent). Followers of
+    // a buffered leader inherit its status.
+    //
+    // Snapshot the error leaders (index + resolved txn) UNDER the guard, drop it,
+    // then encrypt+spool asynchronously (item 8) — a std Mutex guard cannot be held
+    // across .await — and re-apply the statuses.
+    let error_leaders: Vec<usize> = {
+        let mut guard = state.results.lock().unwrap();
+        resolve_push_followers(guard.as_mut_slice());
+        (0..guard.len())
+            .filter(|&i| guard[i].dup_of.is_none() && guard[i].status == "error")
+            .collect()
+    };
+
+    let mut enc_flags: HashMap<String, bool> = HashMap::new();
+    let mut new_status: Vec<(usize, &'static str)> = Vec::with_capacity(error_leaders.len());
+    let mut buffered_any = false;
+    for i in error_leaders {
+        let it = &parsed.items[i];
+        let txn = state.results.lock().unwrap()[i].txn.clone();
+        let payload = spool_payload(&st, it.queue, it.payload, &mut enc_flags).await;
+        let ok = st.file_buffer.write_event(
+            it.queue,
+            it.partition.unwrap_or("Default"),
+            &txn,
+            producer_sub.as_deref(),
+            &payload,
+        );
+        if ok {
+            buffered_any = true;
+            new_status.push((i, "buffered"));
+        } else {
+            new_status.push((i, "failed"));
+        }
+    }
+
     let mut guard = state.results.lock().unwrap();
-    resolve_push_followers(guard.as_mut_slice());
+    for (i, s) in new_status {
+        guard[i].status = s;
+    }
+    // Followers of a buffered/failed leader inherit its status.
+    for i in 0..guard.len() {
+        if let Some(l) = guard[i].dup_of {
+            if guard[i].status == "error" {
+                let s = guard[l].status;
+                guard[i].status = s;
+            }
+        }
+    }
+    if buffered_any {
+        // The DB just failed — hint the drain loop / fast-failover path.
+        st.file_buffer.mark_db_unhealthy();
+    }
+
     let body = render_push_results(guard.as_slice());
     json(StatusCode::CREATED, body)
+}
+
+// RUSTFIX item 8: the payload to spool for `queue` — an encryption envelope when
+// the queue is encrypted (so the disk spool never holds at-rest plaintext for an
+// encrypted queue), else the raw payload. Never fails (plaintext fallback). The
+// per-queue flag is memoized in `enc_flags`.
+async fn spool_payload(
+    st: &Arc<AppState>,
+    queue: &str,
+    raw: &RawValue,
+    enc_flags: &mut HashMap<String, bool>,
+) -> Box<RawValue> {
+    if st.encryption.is_enabled() {
+        let on = match enc_flags.get(queue) {
+            Some(&b) => b,
+            None => {
+                let b = st.encryption_enabled_for(queue).await;
+                enc_flags.insert(queue.to_string(), b);
+                b
+            }
+        };
+        if on {
+            if let Some(env) = st.encryption.encrypt(raw.get().as_bytes()) {
+                if let Ok(rv) =
+                    RawValue::from_string(String::from_utf8_lossy(&env).into_owned())
+                {
+                    return rv;
+                }
+            }
+        }
+    }
+    raw.to_owned()
+}
+
+// RUSTFIX item 17: buffer every item of a push to the file buffer (maintenance
+// mode), returning per-item status:"buffered". A fresh transactionId is minted
+// when the client omitted one (push.cpp:322-326) so the buffered result and the
+// replay dedup key are well-defined. 201 if all spooled, 500 if any write failed.
+async fn buffer_all(st: &Arc<AppState>, parsed: &PushBody<'_>, producer_sub: Option<&str>) -> Response {
+    let mut results: Vec<ItemResult> = Vec::with_capacity(parsed.items.len());
+    let mut all_ok = true;
+    let mut enc_flags: HashMap<String, bool> = HashMap::new();
+    for it in parsed.items.iter() {
+        let mid_str = uuid_bytes_to_string(&uuidv7_bytes());
+        let txn = it
+            .transaction_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| mid_str.clone());
+        let partition = it.partition.unwrap_or("Default");
+        // RUSTFIX item 8: spool the encrypted envelope for an encrypted queue.
+        let payload = spool_payload(st, it.queue, it.payload, &mut enc_flags).await;
+        let ok = st
+            .file_buffer
+            .write_event(it.queue, partition, &txn, producer_sub, &payload);
+        if !ok {
+            all_ok = false;
+        }
+        results.push(ItemResult {
+            message_id: mid_str,
+            txn,
+            queue: it.queue.to_string(),
+            status: if ok { "buffered" } else { "failed" },
+            dup_of: None,
+        });
+    }
+    let body = render_push_results(&results);
+    let code = if all_ok {
+        StatusCode::CREATED
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    json(code, body)
 }
 
 // ------------------------------------------------------------------- pop
@@ -203,6 +376,10 @@ pub struct PopParams {
     auto_ack: Option<bool>,
     wait: Option<bool>,
     timeout: Option<u64>,
+    // RUSTFIX item 18: per-request lease override (?leaseSeconds=N). Wins over the
+    // queue's configured leaseTime; 0/absent = use the queue value (else 60).
+    #[serde(rename = "leaseSeconds")]
+    lease_seconds: Option<i32>,
     #[serde(rename = "consumerGroup")]
     consumer_group: Option<String>,
     // Subscription seeding for a NEW (partition, group) cursor on first contact:
@@ -273,8 +450,13 @@ pub async fn handle_pop(
     let sub_from = p.subscription_from.unwrap_or_default();
     let worker = uuid_bytes_to_string(&uuidv7_bytes());
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let lease_seconds = st.lease_time_for(&queue).await;
+    // RUSTFIX item 18: COALESCE(request.leaseSeconds, queue.lease_time, 60).
+    let lease_seconds = match p.lease_seconds {
+        Some(v) if v > 0 => v,
+        _ => st.lease_time_for(&queue).await,
+    };
 
+    let mut backoff_count: u32 = 0;
     loop {
         let permit = st.pop_vegas.acquire().await;
         let client = match st.pool.get().await {
@@ -308,15 +490,18 @@ pub async fn handle_pop(
         // echoes back in ack/renew. autoAck pops advance the cursor server-side and
         // carry no lease, so they report an empty leaseId.
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count) = build_pop_response(&txt, &queue, &group, lease_id);
+        let (body, count) = build_pop_response(&txt, &queue, &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
-            // Park on the queue's wake gate instead of a blind sleep: a push (local
-            // or peer MESSAGE_AVAILABLE) returns us at once; else we re-poll after
-            // the poll interval, exactly as before.
+            // Park on the queue's wake gate; a push wakes us at once.
+            // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
+            backoff_count += 1;
+            let interval = st.pop_backoff_interval(backoff_count);
             let waitd = deadline
                 .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(st.pop_wait_poll_ms));
-            st.notifier.wait_queue(&queue, waitd).await;
+                .min(interval);
+            if st.notifier.wait_queue(&queue, waitd).await {
+                backoff_count = 0;
+            }
             continue;
         }
         st.metrics.pop.record_request(count);
@@ -355,8 +540,13 @@ pub async fn handle_pop_partition(
     let sub_from = p.subscription_from.unwrap_or_default();
     let worker = uuid_bytes_to_string(&uuidv7_bytes());
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let lease_seconds = st.lease_time_for(&queue).await;
+    // RUSTFIX item 18: COALESCE(request.leaseSeconds, queue.lease_time, 60).
+    let lease_seconds = match p.lease_seconds {
+        Some(v) if v > 0 => v,
+        _ => st.lease_time_for(&queue).await,
+    };
 
+    let mut backoff_count: u32 = 0;
     loop {
         let permit = st.pop_vegas.acquire().await;
         let client = match st.pool.get().await {
@@ -387,14 +577,18 @@ pub async fn handle_pop_partition(
         };
 
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count) = build_pop_specific_response(&txt, &queue, &partition, &group, lease_id);
+        let (body, count) = build_pop_specific_response(&txt, &queue, &partition, &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
-            // A push to any partition of this queue wakes us; we re-poll our
-            // partition. Falls back to the poll interval on a missed wake.
+            // A push to any partition of this queue wakes us.
+            // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
+            backoff_count += 1;
+            let interval = st.pop_backoff_interval(backoff_count);
             let waitd = deadline
                 .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(st.pop_wait_poll_ms));
-            st.notifier.wait_queue(&queue, waitd).await;
+                .min(interval);
+            if st.notifier.wait_queue(&queue, waitd).await {
+                backoff_count = 0;
+            }
             continue;
         }
         st.metrics.pop.record_request(count);
@@ -423,6 +617,10 @@ pub struct PopDiscoverParams {
     auto_ack: Option<bool>,
     wait: Option<bool>,
     timeout: Option<u64>,
+    // RUSTFIX item 18: per-request lease override; 0/absent lets each discovered
+    // partition use its own queue's seg_queues.lease_time (else 60).
+    #[serde(rename = "leaseSeconds")]
+    lease_seconds: Option<i32>,
     #[serde(rename = "consumerGroup")]
     consumer_group: Option<String>,
     namespace: Option<String>,
@@ -470,8 +668,11 @@ pub async fn handle_pop_discover(
     // No single queue to read a lease from: the SP leases each partition with its
     // own queue's configured lease_time; this is only the fallback for a matching
     // queue that has no seg_queues.lease_time.
-    let lease_seconds = DEFAULT_LEASE_SECONDS;
+    // RUSTFIX item 18: pass the RAW request override (0 = none) so the discover SP
+    // resolves COALESCE(NULLIF(request,0), sq.lease_time, 60) PER partition.
+    let lease_seconds = p.lease_seconds.filter(|v| *v > 0).unwrap_or(0);
 
+    let mut backoff_count: u32 = 0;
     loop {
         let permit = st.pop_vegas.acquire().await;
         let client = match st.pool.get().await {
@@ -505,13 +706,18 @@ pub async fn handle_pop_discover(
         // Discovery spans queues, so there is no single top-level queue name; the
         // per-message JSON carries partitionId/leaseId/consumerGroup (all the ack
         // needs), and the top-level "queue" field is left empty.
-        let (body, count) = build_pop_response(&txt, "", &group, lease_id);
+        let (body, count) = build_pop_response(&txt, "", &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
-            // Discovery pops span queues → park on the shared gate, woken by any push.
+            // Discovery pops span queues -> shared gate, woken by any push.
+            // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
+            backoff_count += 1;
+            let interval = st.pop_backoff_interval(backoff_count);
             let waitd = deadline
                 .saturating_duration_since(Instant::now())
-                .min(Duration::from_millis(st.pop_wait_poll_ms));
-            st.notifier.wait_any(waitd).await;
+                .min(interval);
+            if st.notifier.wait_any(waitd).await {
+                backoff_count = 0;
+            }
             continue;
         }
         st.metrics.pop.record_request(count);
@@ -537,7 +743,13 @@ fn pop_error_body(e: &str) -> (String, usize) {
 }
 
 // Wildcard pop response: SP result is {"partitions":[{partition,partitionId,segments}]}.
-fn build_pop_response(txt: &str, queue: &str, group: &str, lease_id: &str) -> (String, usize) {
+fn build_pop_response(
+    txt: &str,
+    queue: &str,
+    group: &str,
+    lease_id: &str,
+    enc: &crate::encryption::Encryption,
+) -> (String, usize) {
     let parsed: PopResult = match serde_json::from_str(txt) {
         Ok(p) => p,
         Err(_) => return pop_error_body("parse"),
@@ -545,7 +757,7 @@ fn build_pop_response(txt: &str, queue: &str, group: &str, lease_id: &str) -> (S
     if let Some(e) = parsed.error {
         return pop_error_body(&e);
     }
-    render_pop_parts(&parsed.partitions, queue, group, lease_id)
+    render_pop_parts(&parsed.partitions, queue, group, lease_id, enc)
 }
 
 // Specific-partition pop response: SP result is single-partition shaped
@@ -559,6 +771,7 @@ fn build_pop_specific_response(
     partition: &str,
     group: &str,
     lease_id: &str,
+    enc: &crate::encryption::Encryption,
 ) -> (String, usize) {
     let parsed: PopSpecificResult = match serde_json::from_str(txt) {
         Ok(p) => p,
@@ -572,12 +785,18 @@ fn build_pop_specific_response(
         partition_id: parsed.partition_id,
         segments: parsed.segments,
     };
-    render_pop_parts(std::slice::from_ref(&part), queue, group, lease_id)
+    render_pop_parts(std::slice::from_ref(&part), queue, group, lease_id, enc)
 }
 
 // Shared renderer: decode + slice each partition's segment frames into the
 // wire per-message JSON, then wrap with the common top-level fields.
-fn render_pop_parts(parts: &[PopPart], queue: &str, group: &str, lease_id: &str) -> (String, usize) {
+fn render_pop_parts(
+    parts: &[PopPart],
+    queue: &str,
+    group: &str,
+    lease_id: &str,
+    enc: &crate::encryption::Encryption,
+) -> (String, usize) {
     let mut msgs = String::new();
     let mut count = 0usize;
     let mut first_name = String::new();
@@ -629,8 +848,14 @@ fn render_pop_parts(parts: &[PopPart], queue: &str, group: &str, lease_id: &str)
                 msgs.push_str(",\"data\":");
                 if f.payload.is_empty() {
                     msgs.push_str("null");
+                } else if let Some(pt) = enc.decrypt_payload_bytes(&f.payload) {
+                    // RUSTFIX item 8: decrypted envelope -> plaintext JSON. The sniff
+                    // is by envelope shape (not FLAG_ENCRYPTED), so migrated v0.16.0
+                    // messages decrypt too. Disabled encryption early-returns None.
+                    msgs.push_str(&String::from_utf8_lossy(&pt));
                 } else {
-                    // raw splice: payload is already valid JSON
+                    // raw splice: plaintext JSON, or an envelope we could not decrypt
+                    // (served as-is — C++ swallows decrypt failures).
                     msgs.push_str(&String::from_utf8_lossy(&f.payload));
                 }
                 msgs.push_str(",\"producerSub\":");
@@ -723,7 +948,9 @@ struct Ack {
     txn: String,
     partition_id: String,
     worker: String,
-    ok: bool,
+    // RUSTFIX item 10: the normalized outcome (completed|failed|retry|dlq) threaded
+    // through to seg_ack_by_txn_v1 so retry/dlq survive to SQL.
+    status: &'static str,
     // Nack failure reason, threaded into the DLQ snapshot when retries exhaust.
     error: Option<String>,
 }
@@ -738,7 +965,7 @@ pub async fn handle_ack(State(st): State<Arc<AppState>>, body: Bytes) -> Respons
         txn: a.transaction_id.unwrap_or_default(),
         partition_id: a.partition_id.unwrap_or_default(),
         worker: a.lease_id.unwrap_or_default(),
-        ok: status_is_ok(a.status.as_deref()),
+        status: normalize_ack_status(a.status.as_deref()),
         error: a.error.filter(|s| !s.is_empty()),
     }];
     let body = process_acks(&st, &group, acks).await;
@@ -758,7 +985,7 @@ pub async fn handle_ack_batch(State(st): State<Arc<AppState>>, body: Bytes) -> R
             txn: it.transaction_id.unwrap_or_default(),
             partition_id: it.partition_id.unwrap_or_default(),
             worker: it.lease_id.unwrap_or_default(),
-            ok: status_is_ok(it.status.as_deref()),
+            status: normalize_ack_status(it.status.as_deref()),
             error: it.error.filter(|s| !s.is_empty()),
         })
         .collect();
@@ -795,7 +1022,9 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
     };
 
     for ((pid, worker), idxs) in groups {
-        // Build the [{txn, ok}] array for this partition's acks.
+        // RUSTFIX item 10: send [{txn, status}] so seg_ack_by_txn_v1 distinguishes
+        // completed / failed / retry / dlq (the SP also still accepts a legacy
+        // "ok" boolean for the transaction path).
         let mut aj = String::from("[");
         for (k, &i) in idxs.iter().enumerate() {
             if k > 0 {
@@ -803,9 +1032,9 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
             }
             aj.push_str("{\"txn\":\"");
             json_escape_into(&mut aj, &acks[i].txn);
-            aj.push_str("\",\"ok\":");
-            aj.push_str(if acks[i].ok { "true" } else { "false" });
-            aj.push('}');
+            aj.push_str("\",\"status\":\"");
+            aj.push_str(acks[i].status);
+            aj.push_str("\"}");
         }
         aj.push(']');
 
@@ -930,13 +1159,13 @@ async fn dlq_file_head(
     let error = idxs
         .iter()
         .map(|&i| &acks[i])
-        .filter(|a| !a.ok)
+        .filter(|a| a.status != "completed")
         .find(|a| a.txn == txn)
         .and_then(|a| a.error.clone())
         .or_else(|| {
             idxs.iter()
                 .map(|&i| &acks[i])
-                .filter(|a| !a.ok)
+                .filter(|a| a.status != "completed")
                 .find_map(|a| a.error.clone())
         })
         .unwrap_or_else(|| "Retries exhausted".to_string());
@@ -1083,6 +1312,8 @@ struct TxnFrame {
     txn: String,
     trace: Option<[u8; 16]>,
     payload: Vec<u8>,
+    // RUSTFIX item 8: set when payload was replaced with an encryption envelope.
+    encrypted: bool,
 }
 struct TxnPushGroup {
     queue: String,
@@ -1168,6 +1399,7 @@ fn txn_add_push(
         txn,
         trace,
         payload: serde_json::to_vec(&payload).unwrap_or_default(),
+        encrypted: false,
     });
 }
 
@@ -1401,6 +1633,29 @@ pub async fn handle_transaction(
         }
     }
 
+    // RUSTFIX item 8: encrypt each group's frame payloads for a queue with
+    // encryption_enabled (parity with the normal push path). Warn + keep plaintext
+    // on failure — never fail the transaction.
+    if st.encryption.is_enabled() {
+        for g in &mut groups {
+            if g.frames.is_empty() || !st.encryption_enabled_for(&g.queue).await {
+                continue;
+            }
+            for f in &mut g.frames {
+                match st.encryption.encrypt(&f.payload) {
+                    Some(env) => {
+                        f.payload = env;
+                        f.encrypted = true;
+                    }
+                    None => eprintln!(
+                        "TXN: encryption failed for queue '{}', storing plaintext",
+                        g.queue
+                    ),
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------ build the SP payload
     let mut pushes_json: Vec<serde_json::Value> = Vec::new();
     for g in &groups {
@@ -1416,7 +1671,7 @@ pub async fn handle_transaction(
                 trace_id: f.trace,
                 producer_sub: producer_sub.as_deref(),
                 payload: &f.payload,
-                encrypted: false,
+                encrypted: f.encrypted,
             })
             .collect();
         let metas: Vec<serde_json::Value> = g

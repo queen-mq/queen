@@ -105,7 +105,19 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::streams_state_get(&client, &requests).await {
-        Ok(txt) => json(StatusCode::OK, unwrap_stream_result(&txt).to_string()),
+        Ok(txt) => {
+            // RUSTFIX item 25: mirror state_get.cpp:96-101 — 400 when the inner
+            // result has success:false, 500 on an embedded error, else 200.
+            let result = unwrap_stream_result(&txt);
+            let code = if result.get("error").filter(|e| !e.is_null()).is_some() {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else if result.get("success").and_then(|s| s.as_bool()) == Some(false) {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::OK
+            };
+            json(code, result.to_string())
+        }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("state get failed: ", &e),
@@ -164,6 +176,8 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
         mid: [u8; 16],
         txn: String,
         payload: Vec<u8>,
+        // RUSTFIX item 8: set when payload was replaced with an encryption envelope.
+        encrypted: bool,
     }
     let mut groups: Vec<(String, String, Vec<SinkFrame>)> = Vec::new();
     let mut group_of: HashMap<(String, String), usize> = HashMap::new();
@@ -209,7 +223,29 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                 mid,
                 txn,
                 payload: serde_json::to_vec(&payload).unwrap_or_default(),
+                encrypted: false,
             });
+        }
+    }
+
+    // RUSTFIX item 8: encrypt sink-push payloads for encryption-enabled queues
+    // (warn + plaintext on failure — never fail the cycle).
+    if st.encryption.is_enabled() {
+        for (queue, _partition, frames) in groups.iter_mut() {
+            if frames.is_empty() || !st.encryption_enabled_for(queue).await {
+                continue;
+            }
+            for f in frames.iter_mut() {
+                match st.encryption.encrypt(&f.payload) {
+                    Some(env) => {
+                        f.payload = env;
+                        f.encrypted = true;
+                    }
+                    None => eprintln!(
+                        "STREAMS: encryption failed for queue '{queue}', storing plaintext"
+                    ),
+                }
+            }
         }
     }
 
@@ -226,7 +262,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                 trace_id: None,
                 producer_sub: None,
                 payload: &f.payload,
-                encrypted: false,
+                encrypted: f.encrypted,
             })
             .collect();
         let metas: Vec<serde_json::Value> = frames

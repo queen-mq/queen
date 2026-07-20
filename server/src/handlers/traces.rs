@@ -106,7 +106,7 @@ pub async fn handle_message_traces(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_message_traces(&client, &partition_id, &transaction_id).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("traces failed: ", &e),
@@ -127,7 +127,7 @@ pub async fn handle_traces_by_name(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_traces_by_name(&client, &trace_name, limit, offset).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("traces failed: ", &e),
@@ -147,7 +147,7 @@ pub async fn handle_trace_names(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_trace_names(&client, limit, offset).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("trace names failed: ", &e),

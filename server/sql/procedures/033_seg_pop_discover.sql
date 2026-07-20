@@ -67,6 +67,11 @@ DECLARE
     v_cand_cap INTEGER;
     v_first_seen INTEGER;
     v_from_ts TIMESTAMPTZ;
+    -- RUSTFIX item 12: throttle floor + lease-ignoring re-check for the watermark.
+    v_verified_at TIMESTAMPTZ;
+    v_has_pending BOOLEAN;
+    -- RUSTFIX item 13: durable subscription mode written to consumer_groups_metadata.
+    v_sub_mode_stored TEXT;
 BEGIN
     -- Bulk subscription bootstrap (mirrors seg_pop_wildcard_wire_v1). When a
     -- consumer group first registers with subscriptionMode='new' or a
@@ -75,14 +80,23 @@ BEGIN
     -- meant to skip. The per-queue consumer_watermarks row is the once-per-
     -- (queue,group) marker (first insert => never scanned). Queue mode never
     -- seeds a backlog, so it is excluded.
+    -- RUSTFIX item 13: register the subscription DURABLY per matching queue in
+    -- consumer_groups_metadata (the marker, replacing consumer_watermarks-existence
+    -- which item 12's empty-scan path now also writes). A late-created partition of
+    -- any matching queue seeds from the stored timestamp on first contact.
     IF p_group <> '__QUEUE_MODE__'
        AND (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '') THEN
         IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
             BEGIN
                 v_from_ts := p_sub_from::timestamptz;
             EXCEPTION WHEN OTHERS THEN
-                v_from_ts := NULL;  -- unparsable: fall back to full backlog seed
+                v_from_ts := NULL;  -- unparsable: fall back to registration-time 'new'
             END;
+        END IF;
+        IF v_from_ts IS NULL THEN
+            v_from_ts := v_now; v_sub_mode_stored := 'new';
+        ELSE
+            v_sub_mode_stored := 'timestamp';
         END IF;
 
         FOR v_q IN
@@ -92,13 +106,14 @@ BEGIN
             WHERE (v_ns = '' OR qq.namespace = v_ns)
               AND (v_task = '' OR qq.task = v_task)
         LOOP
-            INSERT INTO queen.consumer_watermarks (queue_name, consumer_group)
-            VALUES (v_q.qname, p_group)
-            ON CONFLICT (queue_name, consumer_group) DO NOTHING;
+            INSERT INTO queen.consumer_groups_metadata
+                (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+            VALUES (p_group, v_q.qname, '', v_sub_mode_stored, v_from_ts)
+            ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
             GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
             IF v_first_seen > 0 THEN
-                IF v_from_ts IS NOT NULL THEN
+                IF v_sub_mode_stored = 'timestamp' THEN
                     -- timestamp seed: first segment at/after v_from_ts per
                     -- partition, else last_seq+1 (identical to the lazy seed in
                     -- queen.seg_pop_segments_v1).
@@ -129,8 +144,11 @@ BEGIN
     -- Empty-scan floor: the OLDEST last_empty_scan_at across matching queues
     -- (missing rows count as the epoch => full scan). Only consider partitions
     -- written since some matching queue last found itself empty.
-    SELECT MIN(COALESCE(cw.last_empty_scan_at, '1970-01-01 00:00:00+00'::timestamptz))
-    INTO v_watermark
+    -- RUSTFIX item 12: also compute the throttle floor = MIN(updated_at) across
+    -- matching queues (missing rows => epoch => re-check every poll, acceptable).
+    SELECT MIN(COALESCE(cw.last_empty_scan_at, '1970-01-01 00:00:00+00'::timestamptz)),
+           MIN(COALESCE(cw.updated_at, '1970-01-01 00:00:00+00'::timestamptz))
+    INTO v_watermark, v_verified_at
     FROM queen.seg_queues sq
     JOIN queen.queues qq ON qq.name = sq.name
     LEFT JOIN queen.consumer_watermarks cw
@@ -139,6 +157,7 @@ BEGIN
       AND (v_task = '' OR qq.task = v_task);
     IF v_watermark IS NULL THEN
         v_watermark := '1970-01-01 00:00:00+00'::timestamptz;
+        v_verified_at := NULL;
     END IF;
 
     -- Fetch more candidates than requested: some will be claimed by concurrent
@@ -152,7 +171,9 @@ BEGIN
     -- honored even when a single discovery pop spans several queues.
     FOR v_p IN
         SELECT p.id, p.name AS pname, sq.name AS qname,
-               COALESCE(sq.lease_time, p_lease_seconds) AS lease_time
+               -- RUSTFIX item 18: request override (p_lease_seconds>0) wins per
+               -- partition, else the queue's own lease_time, else the 60s floor.
+               COALESCE(NULLIF(p_lease_seconds, 0), sq.lease_time, 60) AS lease_time
         FROM queen.seg_partitions p
         JOIN queen.seg_queues sq ON sq.id = p.queue_id
         JOIN queen.queues qq ON qq.name = sq.name
@@ -193,20 +214,45 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Nothing claimable this cycle: advance the empty-scan watermark for every
-    -- matching queue so the next long-poll only re-checks partitions written
-    -- after now (skips the quiet ones).
+    -- Nothing claimable this cycle. RUSTFIX item 12: throttle (30s) + re-check for
+    -- pending data IGNORING the lease filter across matching queues before advancing
+    -- the empty-scan floor, so a lease-held backlog is never stranded once the lease
+    -- expires with no new push (parity with 002d_pop_unified_v4:395-426).
     IF v_claimed = 0 THEN
-        INSERT INTO queen.consumer_watermarks
-            (queue_name, consumer_group, last_empty_scan_at, updated_at)
-        SELECT sq.name, p_group, v_now, v_now
-        FROM queen.seg_queues sq
-        JOIN queen.queues qq ON qq.name = sq.name
-        WHERE (v_ns = '' OR qq.namespace = v_ns)
-          AND (v_task = '' OR qq.task = v_task)
-        ON CONFLICT (queue_name, consumer_group)
-        DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
-                      updated_at = EXCLUDED.updated_at;
+        IF v_verified_at IS NULL OR v_verified_at <= v_now - interval '30 seconds' THEN
+            SELECT EXISTS (
+                SELECT 1 FROM queen.seg_partitions p
+                JOIN queen.seg_queues sq ON sq.id = p.queue_id
+                JOIN queen.queues qq ON qq.name = sq.name
+                LEFT JOIN queen.partition_consumers c
+                  ON c.partition_id = p.id AND c.consumer_group = p_group
+                WHERE (v_ns = '' OR qq.namespace = v_ns)
+                  AND (v_task = '' OR qq.task = v_task)
+                  AND p.last_write_at >= v_watermark - interval '2 minutes'
+                  AND (c.partition_id IS NULL OR p.last_seq >= c.next_seq)
+            ) INTO v_has_pending;
+            IF NOT v_has_pending THEN
+                INSERT INTO queen.consumer_watermarks
+                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
+                SELECT sq.name, p_group, v_now, v_now
+                FROM queen.seg_queues sq
+                JOIN queen.queues qq ON qq.name = sq.name
+                WHERE (v_ns = '' OR qq.namespace = v_ns)
+                  AND (v_task = '' OR qq.task = v_task)
+                ON CONFLICT (queue_name, consumer_group)
+                DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
+                              updated_at = EXCLUDED.updated_at;
+            ELSE
+                -- Pending backlog exists (possibly lease-held): record the check
+                -- time only, keep the floor so the partitions stay candidates.
+                UPDATE queen.consumer_watermarks cw SET updated_at = v_now
+                FROM queen.seg_queues sq
+                JOIN queen.queues qq ON qq.name = sq.name
+                WHERE cw.queue_name = sq.name AND cw.consumer_group = p_group
+                  AND (v_ns = '' OR qq.namespace = v_ns)
+                  AND (v_task = '' OR qq.task = v_task);
+            END IF;
+        END IF;
     END IF;
 
     RETURN jsonb_build_object('partitions', v_out);

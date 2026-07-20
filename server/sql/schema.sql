@@ -29,8 +29,10 @@ CREATE TABLE IF NOT EXISTS queen.queues (
     retry_limit INTEGER DEFAULT 3,
     retry_delay INTEGER DEFAULT 1000,
     ttl INTEGER DEFAULT 3600,
-    dead_letter_queue BOOLEAN DEFAULT FALSE,
-    dlq_after_max_retries BOOLEAN DEFAULT FALSE,
+    -- RUSTFIX item 2: default TRUE so unconfigured queues keep the v0.16.0
+    -- "always dead-letter" behaviour (the old ack ignored these flags entirely).
+    dead_letter_queue BOOLEAN DEFAULT TRUE,
+    dlq_after_max_retries BOOLEAN DEFAULT TRUE,
     delayed_processing INTEGER DEFAULT 0,
     window_buffer INTEGER DEFAULT 0,
     retention_seconds INTEGER DEFAULT 0,
@@ -77,6 +79,14 @@ ALTER TABLE queen.messages ADD COLUMN IF NOT EXISTS producer_sub TEXT;
 -- dual-engine observability guards in 026/027 and the rows→segments migration can key
 -- off it. Catalog-only change on PG >= 11: constant default, no table rewrite.
 ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS storage VARCHAR(16) NOT NULL DEFAULT 'segments';
+
+-- RUSTFIX item 2: flip the DLQ column defaults to TRUE on existing tables too
+-- (CREATE TABLE IF NOT EXISTS above does not alter an existing table's defaults).
+-- This only changes the default for FUTURE inserts — existing rows keep whatever
+-- explicit value they were configured with, and the load-bearing parity fix is the
+-- COALESCE(...,true) in 024 which covers NULL columns and absent queen.queues rows.
+ALTER TABLE queen.queues ALTER COLUMN dead_letter_queue SET DEFAULT TRUE;
+ALTER TABLE queen.queues ALTER COLUMN dlq_after_max_retries SET DEFAULT TRUE;
 
 -- Unique constraint scoped to partition (not global)
 CREATE UNIQUE INDEX IF NOT EXISTS messages_partition_transaction_unique 

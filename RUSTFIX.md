@@ -44,17 +44,18 @@ fusion resolves every frame to `"error"` and **still returns 201**
 client that only checks the status code.
 
 **Required.** Port the file buffer:
+
 - Disk spool of failed push items (length-prefixed or JSONL event files, rotating),
-  written when the fusion bundle fails with a connection/timeout error (hook the
-  error path at `fusion.rs:504-536`).
+written when the fusion bundle fails with a connection/timeout error (hook the
+error path at `fusion.rs:504-536`).
 - Background drain task: replay oldest-first to the DB in batches, preserving the
-  original `transactionId`s (dedup makes replay idempotent), circuit breaker on
-  consecutive failures (C++: 10 failures / 5 s cooldown, `file_buffer.hpp:150-151`).
+original `transactionId`s (dedup makes replay idempotent), circuit breaker on
+consecutive failures (C++: 10 failures / 5 s cooldown, `file_buffer.hpp:150-151`).
 - Startup recovery: drain leftover buffer files before serving (C++ blocked worker 0,
-  capped 3600 s, `file_buffer.cpp:77-85, 206-245`).
+capped 3600 s, `file_buffer.cpp:77-85, 206-245`).
 - Response contract: buffered items must be reported `status:"buffered"` in the
-  201 body, exactly like C++.
-- Read the four `FILE_BUFFER_*` env vars with the C++ names and defaults.
+201 body, exactly like C++.
+- Read the four `FILE_BUFFER_`* env vars with the C++ names and defaults.
 
 **Acceptance.** Kill Postgres mid-push-load: no message lost, clients see
 `buffered`, everything lands in the DB after Postgres returns, restart during the
@@ -71,13 +72,14 @@ the poison message (`024:386-439, 567-588`).
 
 **Required.** Make `deadLetterQueue` and `dlqAfterMaxRetries` default to **true**
 so unconfigured queues keep the old behavior:
+
 - Change the `COALESCE(..., false)` defaults to `true` in `024_storage_v2_pop_ext.sql`
-  (both the durable path ~354-363 and the legacy path ~532-541) and anywhere else
-  the flags are read (grep `dead_letter_queue` and `dlq_after_max_retries` across
-  `server/sql/procedures/02*.sql`, `025_storage_v2_dlq.sql`).
+(both the durable path ~354-363 and the legacy path ~532-541) and anywhere else
+the flags are read (grep `dead_letter_queue` and `dlq_after_max_retries` across
+`server/sql/procedures/02*.sql`, `025_storage_v2_dlq.sql`).
 - Change the column defaults in `server/sql/schema.sql` for `queen.queues` to true,
-  and make `012_configure.sql` default them to true when the caller omits them
-  (careful: don't override an explicit `false` from the client).
+and make `012_configure.sql` default them to true when the caller omits them
+(careful: don't override an explicit `false` from the client).
 
 **Acceptance.** On a queue configured with no DLQ options, a message that exhausts
 retries lands in the DLQ (visible via `GET /api/v1/dlq`), never silently dropped.
@@ -90,15 +92,16 @@ An explicit `deadLetterQueue:false` still disables it.
 oldest whole segments — documented data loss including in-flight leased batches.
 
 **Required.**
+
 - Delete `seg_evict_v1` from `026_storage_v2_maintenance.sql` (or reduce it to a
-  no-op returning 0) and remove its invocation from the Rust retention loop
-  (`retention.rs`, and the eviction helpers in `db.rs` — grep `evict`).
+no-op returning 0) and remove its invocation from the Rust retention loop
+(`retention.rs`, and the eviction helpers in `db.rs` — grep `evict`).
 - Keep `maxSize` accepted and persisted by `/api/v1/configure` (API compat: the
-  option is echoed back), just never enforced — this matches v0.16.0.
+option is echoed back), just never enforced — this matches v0.16.0.
 - Also remove the broker-side `max_wait_time_seconds` eviction if it deletes data
-  (`db.rs` ~719-783) — v0.16.0's SQL never implemented it either; check what the
-  C++ eviction service actually did before deciding (if C++ enforced it
-  server-side, keep parity; the audit found the old SQL had no implementation).
+(`db.rs` ~719-783) — v0.16.0's SQL never implemented it either; check what the
+C++eviction service actually did before deciding (if C++ enforced it
+server-side, keep parity; the audit found the old SQL had no implementation).
 
 **Acceptance.** A queue past its configured `maxSize` keeps accepting pushes and
 never loses segments to eviction. `configure` still echoes `maxSize`.
@@ -123,11 +126,12 @@ unread; the pool is hard-wired `NoTls` (`db.rs`), migration handlers too
 (C++ honored it via `sslmode=require`, `migration.cpp:47-55, 182`).
 
 **Required.**
+
 - Read `PG_USE_SSL` (default false) and `PG_SSL_REJECT_UNAUTHORIZED`
-  (default true).
+(default true).
 - Wire a TLS connector (e.g. `tokio-postgres-rustls` or `postgres-native-tls`)
-  into the deadpool pool when enabled; `PG_SSL_REJECT_UNAUTHORIZED=false` must
-  disable cert verification (many managed PGs use self-signed chains).
+into the deadpool pool when enabled; `PG_SSL_REJECT_UNAUTHORIZED=false` must
+disable cert verification (many managed PGs use self-signed chains).
 - Honor `ssl:true` in the migration test-connection/start/validate handlers.
 
 **Acceptance.** Connects to an SSL-required Postgres with `PG_USE_SSL=true`;
@@ -135,7 +139,7 @@ plain deployments unaffected.
 
 ### 6. Boolean env parsing — match C++ exactly
 
-**Problem.** C++ treats only the literal string `true` as truthy
+**Problem.** C++treats only the literal string `true` as truthy
 (`config.hpp:14`). Rust accepts `1/true/yes/on` case-insensitively
 (`config.rs:200-205`). `JWT_ENABLED=1` was a no-op on C++ but enables auth on
 Rust. Additionally Rust treats empty-string env values as unset
@@ -143,9 +147,10 @@ Rust. Additionally Rust treats empty-string env values as unset
 list instead of clearing it; C++ used the empty value verbatim.
 
 **Required.**
+
 - Boolean parser: only `"true"` is true, everything else false (exact C++ parity).
 - String vars: an env var that is set-but-empty is an **empty string value**, not
-  unset (audit every `filter(|v| !v.is_empty())` in `config.rs`).
+unset (audit every `filter(|v| !v.is_empty())` in `config.rs`).
 
 **Acceptance.** `JWT_ENABLED=1` leaves auth off; `JWT_SKIP_PATHS=""` results in an
 empty skip list; unset vars still get defaults.
@@ -153,7 +158,7 @@ empty skip list; unset vars still get defaults.
 ### 7. Restore the full auth system (RS256 / EdDSA / JWKS)
 
 **Problem.** Rust verifies HS256 only, by hand (`auth.rs:113-134`); any other
-`alg` is 401. C++ supported HS256, RS256/RS384/RS512, EdDSA (Ed25519) and
+`alg` is 401. C++supported HS256, RS256/RS384/RS512, EdDSA (Ed25519) and
 `auto`-dispatch on the token header (`auth/jwt_validator.cpp:88-116`), plus a full
 JWKS client: startup pre-fetch, kid-keyed cache, refresh-on-unknown-kid,
 `JWT_JWKS_URL` / `JWT_JWKS_REFRESH_INTERVAL`(3600 s) / `JWT_JWKS_TIMEOUT_MS`(5000)
@@ -162,19 +167,20 @@ validated the auth config at startup (`config.hpp:539-561`); Rust boots with a
 missing secret and 500s per request.
 
 **Required.**
+
 - Replace the hand-rolled verifier with a real JWT library (`jsonwebtoken` crate)
-  supporting HS256, RS256/384/512, EdDSA, and `JWT_ALGORITHM=auto`.
+supporting HS256, RS256/384/512, EdDSA, and `JWT_ALGORITHM=auto`.
 - Static key support: `JWT_PUBLIC_KEY` (PEM) — currently loaded but dead
-  (`config.rs:11-15`).
+(`config.rs:11-15`).
 - JWKS: fetch on startup, cache keys by `kid`, refresh on unknown kid and on the
-  refresh interval, honor the timeout env. RSA `n`/`e` and OKP `x` JWK forms.
+refresh interval, honor the timeout env. RSA `n`/`e` and OKP `x` JWK forms.
 - Startup validation: fail fast (or at minimum log loudly) when `JWT_ENABLED=true`
-  but the configured algorithm has no usable key material.
+but the configured algorithm has no usable key material.
 - Keep the existing claim handling (issuer, audience, clock skew 30 s, roles
-  claims, producer_sub stamping) — that part is already at parity.
+claims, producer_sub stamping) — that part is already at parity.
 - Route-level map (`auth.rs:220-285`): remove the Rust-only PUBLIC `/status`
-  exposure (make it READ_ONLY or keep public deliberately — C++ had no `/status`;
-  do not leak broker info unauthenticated by default).
+exposure (make it READ_ONLY or keep public deliberately — C++ had no `/status`;
+do not leak broker info unauthenticated by default).
 
 **Acceptance.** Tokens signed RS256 via a JWKS endpoint validate; rotating the
 JWKS key is picked up without restart; HS256 deployments unchanged; boot fails
@@ -193,21 +199,22 @@ loudly on `JWT_ENABLED=true` with no key.
 decrypts; migrated old encrypted messages are served as raw ciphertext envelopes.
 
 **Required.**
+
 - Encryption module (`aes-gcm` crate): same envelope format, same env var, same
-  16-byte IV / 16-byte tag, so old messages decrypt and old servers could decrypt
-  new ones.
+16-byte IV / 16-byte tag, so old messages decrypt and old servers could decrypt
+new ones.
 - Encrypt at push when the queue's `encryption_enabled` is true and the key is
-  set. The flag must be read from queue config — add it to the broker's queue
-  config cache (see also item 16's cache work). Set `FLAG_ENCRYPTED` on the frame
-  (`frames.rs:10, 84-85`).
+set. The flag must be read from queue config — add it to the broker's queue
+config cache (see also item 16's cache work). Set `FLAG_ENCRYPTED` on the frame
+(`frames.rs:10, 84-85`).
 - Decrypt on pop (`handlers/data.rs` pop response assembly ~629-644), on
-  `GET /api/v1/messages` list enrichment and `GET /api/v1/messages/:pid/:txn`
-  (`handlers/messages.rs:85-105`), envelope-sniffing like C++ (decrypt anything
-  that looks like the envelope, regardless of current flag state).
+`GET /api/v1/messages` list enrichment and `GET /api/v1/messages/:pid/:txn`
+(`handlers/messages.rs:85-105`), envelope-sniffing like C++ (decrypt anything
+that looks like the envelope, regardless of current flag state).
 - Transaction pushes and streams sink pushes must encrypt too
-  (`data.rs:1419`, `streams.rs:229`).
+(`data.rs:1419`, `streams.rs:229`).
 - Match C++'s failure mode: if the key is missing/encryption fails, store
-  plaintext **with a warning log** (do not fail the push).
+plaintext **with a warning log** (do not fail the push).
 
 **Acceptance.** Round-trip on an encrypted queue returns plaintext to consumers;
 DB rows contain only envelopes; messages encrypted by v0.16.0 (after migration)
@@ -229,16 +236,17 @@ body param is also ignored (covered by item 5).
 
 **Problem.** The segment engine changed ack semantics in several
 client-observable ways. Old behavior (`003_ack.sql`):
+
 - A `completed` ack of message N set the cursor to N — **implicitly completing
-  every unacked message before it** (`003:88-92`). "Ack the last message of the
-  batch" completed the batch.
+every unacked message before it** (`003:88-92`). "Ack the last message of the
+batch" completed the batch.
 - Retry state was a single `batch_retry_count` per (partition, group), incremented
-  once per `failed` ack, reset on full batch completion (`003:109-147`); lease
-  expiry did **not** consume retry budget.
+once per `failed` ack, reset on full batch completion (`003:109-147`); lease
+expiry did **not** consume retry budget.
 - `status:'retry'` released the lease without touching cursor or retry count —
-  budget-free explicit retry (`003:193-203`).
+budget-free explicit retry (`003:193-203`).
 - `status:'dlq'` force-dead-lettered immediately, bypassing remaining retries
-  (`003:123-133`).
+(`003:123-133`).
 
 New behavior (`023_storage_v2.sql:416-485`, `024_storage_v2_pop_ext.sql:207-618`):
 contiguous-prefix cursor advancement (gaps redeliver, including already-acked
@@ -247,22 +255,23 @@ redelivery (lease expiry now consumes budget), no `retry` status, no forced-DLQ
 status.
 
 **Required.** Make the segment ack path behave like the old one:
+
 - `seg_ack_by_txn_v1` / `seg_ack_segments_v1`: an ack of position P advances the
-  cursor past P unconditionally (clamped to the leased batch range), regardless of
-  gaps — restore implicit-ack. Release the lease when the cursor reaches the batch
-  end. The `batch_positions` contiguous-prefix machinery
-  (`025_storage_v2_dlq.sql:250-255`, `024:271-349`) can be removed or bypassed.
+cursor past P unconditionally (clamped to the leased batch range), regardless of
+gaps — restore implicit-ack. Release the lease when the cursor reaches the batch
+end. The `batch_positions` contiguous-prefix machinery
+(`025_storage_v2_dlq.sql:250-255`, `024:271-349`) can be removed or bypassed.
 - Restore per-(partition, group) retry counting semantics: increment only on an
-  explicit failed/nack ack, reset when a batch fully completes, never charge on
-  lease expiry or plain lease release. The `attempt_seq/attempt_off/attempt_count`
-  columns (`025:21-25, 231-241`) should be reworked to count failed acks, not
-  deliveries.
+explicit failed/nack ack, reset when a batch fully completes, never charge on
+lease expiry or plain lease release. The `attempt_seq/attempt_off/attempt_count`
+columns (`025:21-25, 231-241`) should be reworked to count failed acks, not
+deliveries.
 - Re-add the `retry` ack outcome (release lease, no cursor move, no retry charge)
-  and the client-forced `dlq` outcome, and thread both through the broker ack
-  handler (`handlers/data.rs` ack path) and `seg_transaction_wire_v1`
-  (`026:432-464`).
+and the client-forced `dlq` outcome, and thread both through the broker ack
+handler (`handlers/data.rs` ack path) and `seg_transaction_wire_v1`
+(`026:432-464`).
 - Keep the DLQ handoff mechanics (payload snapshot into `queen.seg_dlq`) — only
-  the *decision* logic changes, per item 2's defaults.
+the *decision* logic changes, per item 2's defaults.
 
 This is the largest SQL rework in the plan. Write pgTAP-style or scripted tests
 against the old engine's documented cases before changing anything: (a) ack last
@@ -328,19 +337,20 @@ does not exclude `__QUEUE_MODE__`, so a queue-mode pop carrying `sub_mode='new'`
 skips backlog.
 
 **Required.**
+
 - Persist the subscription (mode + timestamp) durably per (group, queue) — either
-  reuse `queen.consumer_groups_metadata` or add columns to the group's watermark
-  row. Registration time = first pop carrying `sub_mode`/`sub_from`, and the
-  `POST /consumer-groups/:group/subscription` endpoint must update it.
+reuse `queen.consumer_groups_metadata` or add columns to the group's watermark
+row. Registration time = first pop carrying `sub_mode`/`sub_from`, and the
+`POST /consumer-groups/:group/subscription` endpoint must update it.
 - Lazy per-partition seeding must consult the stored subscription: seed from the
-  subscription timestamp (map to first segment with `created_at >= ts`), not from
-  `last_seq + 1`.
+subscription timestamp (map to first segment with `created_at >= ts`), not from
+`last_seq + 1`.
 - Use a dedicated "subscription registered" marker instead of the
-  `consumer_watermarks` row existence, fixing collision (a).
+`consumer_watermarks` row existence, fixing collision (a).
 - Exclude `__QUEUE_MODE__` from subscription seeding in `025` (parity with
-  `002d:211` and `024:76`).
+`002d:211` and `024:76`).
 - This same durable record should feed the consumer-group observability endpoints
-  (item 22: `subscriptionMode`/`subscriptionTimestamp` fields).
+(item 22: `subscriptionMode`/`subscriptionTimestamp` fields).
 
 **Acceptance.** Group subscribes with `subscriptionMode:'new'`; a new partition is
 created afterwards and receives pushes; the group's first pop of that partition
@@ -356,19 +366,20 @@ partition's live dedup window cause the second message to be silently dropped as
 a "duplicate".
 
 **Required.** This is an investigation task, not necessarily a code change:
+
 - Quantify: collision probability among N live dedup entries per partition is
-  ≈ N²/2⁶⁵ (birthday bound). At 1 M live entries per partition-window it is
-  ~5×10⁻⁸ per window; at 10 k entries ~5×10⁻¹². Estimate against realistic
-  production rates (entries = messages per partition per `dedup_window_seconds`,
-  default 3600 s).
+≈ N²/2⁶⁵ (birthday bound). At 1 M live entries per partition-window it is
+~5×10⁻⁸ per window; at 10 k entries ~5×10⁻¹². Estimate against realistic
+production rates (entries = messages per partition per `dedup_window_seconds`,
+default 3600 s).
 - If accepted: document the risk and the window semantics in `DEVELOPING.md` /
-  release notes, and move on.
+release notes, and move on.
 - If not accepted: store the raw `transaction_id` alongside the hash in
-  `queen.seg_dedup` and compare it on hash match before declaring a duplicate
-  (turns false positives into correct inserts at the cost of one text column).
+`queen.seg_dedup` and compare it on hash match before declaring a duplicate
+(turns false positives into correct inserts at the cost of one text column).
 - Note the second-order issue either way: txn-based acks resolve through
-  `seg_dedup` (`024:470-489`), so expired dedup entries already degrade acks —
-  keep that in mind when tuning window defaults.
+`seg_dedup` (`024:470-489`), so expired dedup entries already degrade acks —
+keep that in mind when tuning window defaults.
 
 **Acceptance.** A written decision (in the PR description or `DEVELOPING.md`)
 with the math; if the fallback is chosen, a test that two colliding-hash distinct
@@ -376,7 +387,7 @@ txns both insert.
 
 ### 15. Mixed C++/Rust cluster wire format — accepted, no code change
 
-The UDP payload codec differs (C++ msgpack vs Rust JSON; framing and HMAC are
+The UDP payload codec differs (C++msgpack vs Rust JSON; framing and HMAC are
 identical). Decision: **mixed clusters are out of scope** (already documented at
 `udp.rs:26-31`). Only action: make sure the deployment/upgrade docs say a rolling
 C++→Rust migration runs without cross-replica sync (wakeups, maintenance flags,
@@ -393,13 +404,14 @@ packet leaves a replica divergent indefinitely. Same root cause leaves the
 (`handlers/mod.rs:37-40`).
 
 **Required.**
+
 - Add a periodic reconcile task (default 60 s, honor
-  `QUEEN_CACHE_REFRESH_INTERVAL_MS`, which is parsed but deliberately unused —
-  `config.rs:87-92`): re-read `queen.system_state` maintenance + pop-maintenance
-  flags and overwrite the in-process atomics.
+`QUEEN_CACHE_REFRESH_INTERVAL_MS`, which is parsed but deliberately unused —
+`config.rs:87-92`): re-read `queen.system_state` maintenance + pop-maintenance
+flags and overwrite the in-process atomics.
 - Give the queue-config `lease_cache` a TTL (or refresh it in the same loop).
 - Make `GET /api/v1/system/maintenance` read fresh from the DB like C++ did
-  (`maintenance.cpp:22`), or accept the ≤60 s staleness and document it.
+(`maintenance.cpp:22`), or accept the ≤60 s staleness and document it.
 
 **Acceptance.** Flip pop-maintenance on replica A with replica B's UDP blocked;
 within the refresh interval B pauses pops too. Same for un-flip.
@@ -494,15 +506,16 @@ unchanged.
 ### 22. Consumer-group observability endpoints
 
 **Problems** (all in `099_retire_rows.sql` redefinitions):
+
 - `GET /consumer-groups/:group` returns `{}` for every group: `099:265-267` joins
-  `partition_consumers` to `queen.partitions`, but segment cursors reference
-  `queen.seg_partitions` (independent UUID space, FK dropped at `023:157-160`).
+`partition_consumers` to `queen.partitions`, but segment cursors reference
+`queen.seg_partitions` (independent UUID space, FK dropped at `023:157-160`).
 - `GET /consumer-groups/lagging` is a stub: `099:186-240` hardcodes
-  `lag_seconds = NULL` then filters `lag_seconds IS NOT NULL` — always `[]`.
-  Also the handler default changed: C++ `minLagSeconds` 3600
-  (`consumer_groups.cpp:99`) vs Rust 60 (`consumer_groups.rs:51`).
+`lag_seconds = NULL` then filters `lag_seconds IS NOT NULL` — always `[]`.
+Also the handler default changed: C++ `minLagSeconds` 3600
+(`consumer_groups.cpp:99`) vs Rust 60 (`consumer_groups.rs:51`).
 - Group list: `subscriptionMode`/`subscriptionTimestamp`/`subscriptionCreatedAt`
-  hardcoded `null` (`099:378-380`).
+hardcoded `null` (`099:378-380`).
 
 **Required.** Fix the details join to `seg_partitions`; implement real lag in the
 lagging SP (pending frames via `last_seq`/`next_seq` and segment `msg_count`,
@@ -537,27 +550,29 @@ message, including one older than the dedup window.
 ### 24. Prometheus endpoint fixes
 
 **Problems** (`status.rs:135-224`, `metrics.rs:140-168` vs `prometheus.cpp`):
+
 - No `# HELP`/`# TYPE` lines at all.
 - `queen_cluster_{push,pop,ack}_{requests,messages}_total{scope="cluster"}` keep
-  their C++ names but are now per-process counters that reset on restart; the
-  C++ versions were DB-backed cluster-lifetime totals.
+their C++names but are now per-process counters that reset on restart; the
+C++ versions were DB-backed cluster-lifetime totals.
 - The new `queen_db_*_total` family reads from `queen.worker_metrics_summary`,
-  which the Rust broker never populates — always 0 (`status.rs:140-143`).
+which the Rust broker never populates — always 0 (`status.rs:140-143`).
 - ~30 C++ families dropped (per-queue `queen_queue_*_per_minute`, per-worker
-  `queen_worker_*`, pool/threadpool/file-buffer/maintenance gauges).
+`queen_worker_`*, pool/threadpool/file-buffer/maintenance gauges).
 
 **Required.**
+
 - Emit HELP/TYPE for every family.
-- Resolve the `queen_cluster_*` semantic lie: either populate
-  `worker_metrics_summary` from the Rust stats path and emit DB-backed values
-  under the old names, or rename the in-process counters to
-  `queen_process_*` and keep `queen_cluster_*` DB-backed. Old dashboards use
-  `max(queen_cluster_*)` — pick the option that keeps them correct.
+- Resolve the `queen_cluster_`* semantic lie: either populate
+`worker_metrics_summary` from the Rust stats path and emit DB-backed values
+under the old names, or rename the in-process counters to
+`queen_process_*` and keep `queen_cluster_*` DB-backed. Old dashboards use
+`max(queen_cluster_*)` — pick the option that keeps them correct.
 - Restore the families that still make sense: `queen_db_pool_{size,idle,active}`
-  (deadpool status), `queen_maintenance_mode_enabled`, `queen_file_buffer_*`
-  (after item 1), and the per-queue minute-rate family if the stats tables can
-  supply it (034 path). Per-worker/threadpool/sidecar families may be declared
-  obsolete — document which are intentionally gone.
+(deadpool status), `queen_maintenance_mode_enabled`, `queen_file_buffer_*`
+(after item 1), and the per-queue minute-rate family if the stats tables can
+supply it (034 path). Per-worker/threadpool/sidecar families may be declared
+obsolete — document which are intentionally gone.
 - Add `Cache-Control: no-cache` like C++ (`prometheus.cpp:664`).
 
 **Acceptance.** A v0.16.0 Grafana dashboard's core panels (cluster totals, DLQ
@@ -611,7 +626,7 @@ it, and retention/DLQ config later applied via `/configure` takes effect.
 4. **10 (ack semantics)** + **11 (lease leniency)** together — same SQL functions.
 5. **12 (watermark)** and **13 (sub mode)** — same pop SQL area; 13 also feeds 22.
 6. **7 (auth)** and **8 (encryption)** — self-contained Rust modules; 8 touches
-   push/pop/messages handlers.
+  push/pop/messages handlers.
 7. **16 (reconcile loop)**, **19 (long poll)** — broker-side, independent.
 8. Observability batch: **21, 22, 23, 24, 25, 26**.
 9. **14 (dedup investigation)** any time; **15** is docs-only.
@@ -619,9 +634,10 @@ it, and retention/DLQ config later applied via `/configure` takes effect.
 ## Testing notes
 
 - The JS test suite (`clients/`?) was previously used for parity ("js suite seems
-  ok" in commit history) — run it before and after each band.
+ok" in commit history) — run it before and after each band.
 - For SQL semantic changes (items 2, 3, 10, 11, 12, 13, 26) write direct SQL
-  scenario tests first, and where possible run the same scenario against a
-  v0.16.0 database (worktree + old schema) to pin expected behavior.
+scenario tests first, and where possible run the same scenario against a
+v0.16.0 database (worktree + old schema) to pin expected behavior.
 - Multi-replica items (16) need a 2-process test with UDP dropped (e.g. block the
-  port with a firewall rule or run peers pointing at a black-hole address).
+port with a firewall rule or run peers pointing at a black-hole address).
+

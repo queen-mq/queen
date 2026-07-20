@@ -33,24 +33,45 @@ use crate::vegas::Vegas;
 // in-process flag is the source of truth for hot-path checks; the DB write is a
 // best-effort mirror for restart/cluster propagation.
 //
-// The segments broker has no file buffer, so `maintenanceMode` is REPORTED
-// (bufferedMessages always 0) but does not divert pushes — messages keep flowing
-// to the DB, which is what maintenance.js needs (all produced messages eventually
-// received). `popMaintenanceMode` pauses pops (see handle_pop).
+// When `maintenanceMode` is on, pushes are diverted to the file buffer (RUSTFIX
+// item 17) and reported status:"buffered" — nothing reaches queen.seg_segments
+// until maintenance is disabled and the background drain replays the spool.
+// `popMaintenanceMode` pauses pops (see handle_pop).
 #[derive(Deserialize)]
 struct MaintenanceBody {
     enabled: Option<bool>,
 }
 
-// GET /api/v1/system/maintenance — current flags + buffer status (buffer is a
-// no-op for the segments engine, so it always reports empty + healthy).
+// GET /api/v1/system/maintenance — current flags + live file-buffer status
+// (RUSTFIX items 1 & 17).
 pub async fn handle_get_maintenance(State(st): State<Arc<AppState>>) -> Response {
+    // RUSTFIX item 16: read the flags FRESH from queen.system_state (C++
+    // get_maintenance_mode_fresh), so a change made by another node is reflected
+    // immediately, and update the in-process atomics. Fall back to the atomics if
+    // the pool/DB is unavailable so the endpoint never 500s.
+    let (maint, pop_maint) = match st.pool.get().await {
+        Ok(c) => {
+            let m = db::get_system_flag(&c, "maintenance_mode")
+                .await
+                .unwrap_or_else(|_| st.maintenance.load(Ordering::Relaxed));
+            let pm = db::get_system_flag(&c, "pop_maintenance_mode")
+                .await
+                .unwrap_or_else(|_| st.pop_maintenance.load(Ordering::Relaxed));
+            st.maintenance.store(m, Ordering::Relaxed);
+            st.pop_maintenance.store(pm, Ordering::Relaxed);
+            (m, pm)
+        }
+        Err(_) => (
+            st.maintenance.load(Ordering::Relaxed),
+            st.pop_maintenance.load(Ordering::Relaxed),
+        ),
+    };
     let out = serde_json::json!({
-        "maintenanceMode": st.maintenance.load(Ordering::Relaxed),
-        "popMaintenanceMode": st.pop_maintenance.load(Ordering::Relaxed),
-        "bufferedMessages": 0,
-        "bufferHealthy": true,
-        "bufferStats": {},
+        "maintenanceMode": maint,
+        "popMaintenanceMode": pop_maint,
+        "bufferedMessages": st.file_buffer.pending_count(),
+        "bufferHealthy": st.file_buffer.db_healthy(),
+        "bufferStats": st.file_buffer.buffer_stats(),
     });
     json(StatusCode::OK, out.to_string())
 }
@@ -74,16 +95,27 @@ pub async fn handle_set_maintenance(State(st): State<Arc<AppState>>, body: Bytes
     if let Ok(c) = st.pool.get().await {
         let _ = db::set_system_flag(&c, "maintenance_mode", enabled).await;
     }
+    // Drive the buffer drain lifecycle (parity with async_queue_manager.cpp
+    // set_maintenance_mode:1108-1125): on ENABLE pause the drain so spooled pushes
+    // accumulate; on DISABLE force-finalize the active spool file and resume so it
+    // drains to the DB.
+    if enabled {
+        st.file_buffer.pause_background_drain();
+    } else {
+        st.file_buffer.force_finalize_all();
+        st.file_buffer.resume_background_drain();
+    }
     // Propagate the flip to peer replicas (no-op with no UDP transport).
     st.notifier.broadcast_maintenance(enabled);
     let out = serde_json::json!({
         "maintenanceMode": enabled,
-        "bufferedMessages": 0,
-        "bufferHealthy": true,
+        "bufferedMessages": st.file_buffer.pending_count(),
+        "bufferHealthy": st.file_buffer.db_healthy(),
+        // Exact C++ text (routes/maintenance.cpp) — some tooling greps for it.
         "message": if enabled {
-            "Maintenance mode ENABLED."
+            "Maintenance mode ENABLED. All PUSHes routing to file buffer."
         } else {
-            "Maintenance mode DISABLED."
+            "Maintenance mode DISABLED. Background processor will drain buffer to DB."
         },
     });
     json(StatusCode::OK, out.to_string())

@@ -106,13 +106,18 @@ impl TargetConfig {
         }
     }
     fn connstr(&self) -> String {
+        // RUSTFIX item 5: honor the request `ssl` flag. sslmode=require triggers
+        // TLS; the actual chain check for the tokio-postgres validate/probe path
+        // is done by the rustls connector (target is encrypt-only, mirroring the
+        // C++ `sslmode=require`).
         format!(
-            "host={} port={} user={} password={} dbname={} connect_timeout=10",
+            "host={} port={} user={} password={} dbname={} sslmode={} connect_timeout=10",
             self.host,
             self.port_str(),
             self.user,
             self.password,
-            self.database
+            self.database,
+            if self.ssl { "require" } else { "disable" }
         )
     }
 }
@@ -124,6 +129,11 @@ struct Source {
     user: String,
     password: String,
     database: String,
+    // RUSTFIX item 5: PG_USE_SSL / PG_SSL_REJECT_UNAUTHORIZED for the source side,
+    // same as the broker pool (config.rs). The source is usually the broker's own
+    // DB, so it follows the broker's TLS policy, not the request body.
+    use_ssl: bool,
+    reject_unauthorized: bool,
 }
 fn source() -> Source {
     fn ev(k: &str, d: &str) -> String {
@@ -134,15 +144,54 @@ fn source() -> Source {
         port: ev("PG_PORT", "5432"),
         user: ev("PG_USER", "postgres"),
         password: ev("PG_PASSWORD", "postgres"),
-        database: ev("PG_DATABASE", "postgres"),
+        // RUSTFIX item 4: PG_DATABASE → PG_DB → postgres, identical to the pool.
+        database: crate::config::resolve_db_name(),
+        use_ssl: std::env::var("PG_USE_SSL").map(|v| v == "true").unwrap_or(false),
+        reject_unauthorized: std::env::var("PG_SSL_REJECT_UNAUTHORIZED")
+            .map(|v| v == "true")
+            .unwrap_or(true),
     }
 }
 impl Source {
     fn connstr(&self) -> String {
         format!(
-            "host={} port={} user={} password={} dbname={} connect_timeout=10",
-            self.host, self.port, self.user, self.password, self.database
+            "host={} port={} user={} password={} dbname={} sslmode={} connect_timeout=10",
+            self.host,
+            self.port,
+            self.user,
+            self.password,
+            self.database,
+            if self.use_ssl { "require" } else { "disable" }
         )
+    }
+}
+
+// One-shot connect honoring TLS (RUSTFIX item 5). When `use_ssl` is false this is
+// the original NoTls path (byte-for-byte); when true a rustls connector is used,
+// with chain verification gated by `reject`. Returns the client + the spawned
+// connection driver handle (abort it when done).
+async fn connect_pg(
+    connstr: &str,
+    use_ssl: bool,
+    reject: bool,
+) -> Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), String> {
+    if use_ssl {
+        let connector = crate::pgtls::make_connector(reject);
+        let (client, connection) = tokio_postgres::connect(connstr, connector)
+            .await
+            .map_err(|e| e.to_string())?;
+        let handle = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Ok((client, handle))
+    } else {
+        let (client, connection) = tokio_postgres::connect(connstr, NoTls)
+            .await
+            .map_err(|e| e.to_string())?;
+        let handle = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        Ok((client, handle))
     }
 }
 
@@ -159,7 +208,9 @@ pub async fn handle_migration_test(body: Bytes) -> Response {
     if cfg.host.is_empty() || cfg.database.is_empty() || cfg.user.is_empty() {
         return bad_request("host, database and user are required");
     }
-    match probe_version(&cfg.connstr()).await {
+    // Target TLS follows the request `ssl` flag; encrypt-only (no chain verify),
+    // mirroring the C++ target `sslmode=require`.
+    match probe_version(&cfg.connstr(), cfg.ssl, false).await {
         Ok(version) => json(
             StatusCode::OK,
             serde_json::json!({ "success": true, "message": "Connection successful", "version": version })
@@ -173,15 +224,10 @@ pub async fn handle_migration_test(body: Bytes) -> Response {
     }
 }
 
-// SELECT version() over a one-shot NoTls connection; the connection future is
-// driven to completion, then dropped.
-async fn probe_version(connstr: &str) -> Result<String, String> {
-    let (client, connection) = tokio_postgres::connect(connstr, NoTls)
-        .await
-        .map_err(|e| e.to_string())?;
-    let handle = tokio::spawn(async move {
-        let _ = connection.await;
-    });
+// SELECT version() over a one-shot connection (TLS-aware, RUSTFIX item 5); the
+// connection future is driven to completion, then dropped.
+async fn probe_version(connstr: &str, use_ssl: bool, reject: bool) -> Result<String, String> {
+    let (client, handle) = connect_pg(connstr, use_ssl, reject).await?;
     let row = client
         .query_one("SELECT version()", &[])
         .await
@@ -224,7 +270,8 @@ pub async fn handle_migration_validate(body: Bytes) -> Response {
     if cfg.host.is_empty() || cfg.database.is_empty() || cfg.user.is_empty() {
         return bad_request("host, database and user are required");
     }
-    match validate(&source().connstr(), &cfg.connstr()).await {
+    let src = source();
+    match validate(&src, &cfg).await {
         Ok(v) => json(StatusCode::OK, v.to_string()),
         Err(e) => json(
             StatusCode::OK,
@@ -233,11 +280,15 @@ pub async fn handle_migration_validate(body: Bytes) -> Response {
     }
 }
 
-async fn validate(src: &str, tgt: &str) -> Result<serde_json::Value, String> {
-    let (sc, sconn) = tokio_postgres::connect(src, NoTls).await.map_err(|e| format!("source: {e}"))?;
-    let sh = tokio::spawn(async move { let _ = sconn.await; });
-    let (tc, tconn) = tokio_postgres::connect(tgt, NoTls).await.map_err(|e| format!("target: {e}"))?;
-    let th = tokio::spawn(async move { let _ = tconn.await; });
+async fn validate(src: &Source, tgt: &TargetConfig) -> Result<serde_json::Value, String> {
+    // TLS-aware connects (RUSTFIX item 5): source follows PG_USE_SSL/reject,
+    // target follows the request `ssl` flag (encrypt-only).
+    let (sc, sh) = connect_pg(&src.connstr(), src.use_ssl, src.reject_unauthorized)
+        .await
+        .map_err(|e| format!("source: {e}"))?;
+    let (tc, th) = connect_pg(&tgt.connstr(), tgt.ssl, false)
+        .await
+        .map_err(|e| format!("target: {e}"))?;
 
     let tables_res = async {
         let rows = sc
@@ -317,9 +368,10 @@ pub async fn handle_migration_start(body: Bytes) -> Response {
     let tgt_user = cfg.user.clone();
     let tgt_db = cfg.database.clone();
     let tgt_pw = cfg.password.clone();
+    let tgt_ssl = cfg.ssl;
 
     std::thread::spawn(move || {
-        run_migration(src, tgt_host, tgt_port, tgt_user, tgt_db, tgt_pw, excludes);
+        run_migration(src, tgt_host, tgt_port, tgt_user, tgt_db, tgt_pw, tgt_ssl, excludes);
     });
 
     json(
@@ -346,15 +398,23 @@ fn run_migration(
     tgt_user: String,
     tgt_db: String,
     tgt_pw: String,
+    tgt_ssl: bool,
     excludes: Vec<String>,
 ) {
     use std::process::Command;
+
+    // RUSTFIX item 5: sslmode for each libpq process. Matches C++ build_connstr
+    // (require when ssl, else disable). Source follows PG_USE_SSL, target the body
+    // `ssl` flag.
+    let src_sslmode = if src.use_ssl { "require" } else { "disable" };
+    let tgt_sslmode = if tgt_ssl { "require" } else { "disable" };
 
     // Ensure the target schema exists (pg_dump of a schema does not emit CREATE
     // SCHEMA), then stream dump|restore. --clean --if-exists makes re-runs idempotent.
     set_state(|s| s.current_step = "preparing target schema".into());
     let precreate = Command::new("psql")
         .env("PGPASSWORD", &tgt_pw)
+        .env("PGSSLMODE", tgt_sslmode)
         .args([
             "-h", &tgt_host, "-p", &tgt_port, "-U", &tgt_user, "-d", &tgt_db,
             "-v", "ON_ERROR_STOP=1", "-c", "CREATE SCHEMA IF NOT EXISTS queen",
@@ -370,13 +430,15 @@ fn run_migration(
 
     set_state(|s| s.current_step = "dump | restore".into());
     let exclude_flags = excludes.join(" ");
+    // Per-side inline PGSSLMODE (each applies only to its own command in the pipe).
     let pipeline = format!(
         "set -o pipefail; \
-         PGPASSWORD=\"$SRC_PW\" pg_dump --format=custom -Z 0 --schema=queen --no-owner --no-privileges {excludes} \
+         PGPASSWORD=\"$SRC_PW\" PGSSLMODE={src_ssl} pg_dump --format=custom -Z 0 --schema=queen --no-owner --no-privileges {excludes} \
              -h {sh} -p {sp} -U {su} -d {sd} \
-         | PGPASSWORD=\"$TGT_PW\" pg_restore --no-owner --no-privileges --clean --if-exists --exit-on-error \
+         | PGPASSWORD=\"$TGT_PW\" PGSSLMODE={tgt_ssl} pg_restore --no-owner --no-privileges --clean --if-exists --exit-on-error \
              -h {th} -p {tp} -U {tu} -d {td}",
         excludes = exclude_flags,
+        src_ssl = src_sslmode, tgt_ssl = tgt_sslmode,
         sh = src.host, sp = src.port, su = src.user, sd = src.database,
         th = tgt_host, tp = tgt_port, tu = tgt_user, td = tgt_db,
     );

@@ -113,6 +113,10 @@ DECLARE
     v_att_seq BIGINT;
     v_att_off INTEGER;
     v_att_count INTEGER;
+    -- RUSTFIX item 10: retry budget lives in batch_retry_count (charged only by the
+    -- ack path). r_attempt is a DISPLAY delivery-count = failed acks so far + 1; it
+    -- is NOT incremented on lease-expiry redelivery, so expiry never consumes budget.
+    v_retry_ct INTEGER := 0;
     v_attempt INTEGER := 0;
     v_start_seq BIGINT;
     v_start_off INTEGER;
@@ -160,33 +164,57 @@ BEGIN
         END IF;
     END IF;
 
-    -- Subscription seeding: only worth computing when the row might not
-    -- exist yet AND a non-default subscription was requested.
-    IF (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '')
+    -- Subscription seeding on first contact of a (partition, group). RUSTFIX
+    -- item 13: (b) exclude __QUEUE_MODE__ (a queue-mode pop carrying sub_mode='new'
+    -- must never skip backlog); and consult the DURABLE subscription record first,
+    -- so a partition created AFTER the group subscribed seeds from the stored
+    -- subscription timestamp (delivering everything pushed after subscription)
+    -- rather than last_seq+1 which would skip that partition's whole backlog.
+    IF p_group <> '__QUEUE_MODE__'
        AND NOT EXISTS (SELECT 1 FROM queen.partition_consumers c
                        WHERE c.partition_id = v_pid AND c.consumer_group = p_group) THEN
-        IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
-            BEGIN
-                v_from_ts := p_sub_from::timestamptz;
-            EXCEPTION WHEN OTHERS THEN
-                v_from_ts := NULL;  -- unparsable: ignore, v1 does the same
-            END;
-            IF v_from_ts IS NOT NULL THEN
-                -- First segment at/after the requested timestamp (created_at
-                -- is monotone in seq: single forward walk from the retention
-                -- watermark). Nothing that recent yet -> future-only cursor.
-                SELECT s.seq INTO v_seed_seq
-                FROM queen.seg_segments s
-                WHERE s.partition_id = v_pid
-                  AND s.seq >= v_retention_seq
-                  AND s.created_at >= v_from_ts
-                ORDER BY s.seq LIMIT 1;
-                IF v_seed_seq IS NULL THEN
-                    v_seed_seq := v_last_seq + 1;
-                END IF;
+        SELECT cgm.subscription_timestamp INTO v_from_ts
+        FROM queen.consumer_groups_metadata cgm
+        WHERE cgm.consumer_group = p_group AND cgm.queue_name = p_queue
+          AND cgm.partition_name = ''
+        LIMIT 1;
+
+        IF v_from_ts IS NOT NULL THEN
+            -- Durable subscription: seed from the first segment at/after the stored
+            -- registration timestamp (created_at monotone in seq).
+            SELECT s.seq INTO v_seed_seq
+            FROM queen.seg_segments s
+            WHERE s.partition_id = v_pid
+              AND s.seq >= v_retention_seq
+              AND s.created_at >= v_from_ts
+            ORDER BY s.seq LIMIT 1;
+            IF v_seed_seq IS NULL THEN
+                v_seed_seq := v_last_seq + 1;
             END IF;
-        ELSIF p_sub_from = 'now' OR p_sub_mode = 'new' THEN
-            v_seed_seq := v_last_seq + 1;
+        ELSIF COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '' THEN
+            -- No durable record (a direct single-partition pop that never went
+            -- through the wildcard/discover registration): fall back to the
+            -- pop-carried subscription intent.
+            IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
+                BEGIN
+                    v_from_ts := p_sub_from::timestamptz;
+                EXCEPTION WHEN OTHERS THEN
+                    v_from_ts := NULL;  -- unparsable: ignore, v1 does the same
+                END;
+                IF v_from_ts IS NOT NULL THEN
+                    SELECT s.seq INTO v_seed_seq
+                    FROM queen.seg_segments s
+                    WHERE s.partition_id = v_pid
+                      AND s.seq >= v_retention_seq
+                      AND s.created_at >= v_from_ts
+                    ORDER BY s.seq LIMIT 1;
+                    IF v_seed_seq IS NULL THEN
+                        v_seed_seq := v_last_seq + 1;
+                    END IF;
+                END IF;
+            ELSIF p_sub_from = 'now' OR p_sub_mode = 'new' THEN
+                v_seed_seq := v_last_seq + 1;
+            END IF;
         END IF;
     END IF;
 
@@ -196,8 +224,9 @@ BEGIN
 
     -- Claim: skip if another worker holds a live lease (or the row is being
     -- popped concurrently — SKIP LOCKED keeps concurrent pops non-blocking).
-    SELECT c.next_seq, c.next_off, c.attempt_seq, c.attempt_off, c.attempt_count
-    INTO v_next_seq, v_next_off, v_att_seq, v_att_off, v_att_count
+    SELECT c.next_seq, c.next_off, c.attempt_seq, c.attempt_off, c.attempt_count,
+           COALESCE(c.batch_retry_count, 0)
+    INTO v_next_seq, v_next_off, v_att_seq, v_att_off, v_att_count, v_retry_ct
     FROM queen.partition_consumers c
     WHERE c.partition_id = v_pid AND c.consumer_group = p_group
       AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
@@ -230,29 +259,18 @@ BEGIN
 
         IF v_taken = 0 THEN
             -- First delivered frame: the batch's identity for retry tracking.
-            -- Tracked from the ACTUAL first frame (not the raw cursor) so a
-            -- retention-shifted redelivery still matches its previous attempt.
             v_start_seq := v_row.seq;
             v_start_off := v_off;
+            -- RUSTFIX item 10: r_attempt is the DISPLAY delivery count derived from
+            -- batch_retry_count (failed acks so far), NOT an incrementing delivery
+            -- counter — a lease-expiry redelivery re-pops at the same cursor without
+            -- charging retry budget (case e). auto-ack never redelivers -> 0.
             IF NOT p_auto_ack THEN
-                v_attempt := CASE WHEN (v_att_seq, v_att_off)
-                                       IS NOT DISTINCT FROM (v_start_seq, v_start_off)
-                                  THEN v_att_count + 1 ELSE 1 END;
+                v_attempt := v_retry_ct + 1;
             END IF;
         END IF;
 
         v_take := LEAST(v_avail, v_budget - v_taken);
-
-        -- Record the exact positions handed out (frame_idx v_off .. v_off+v_take-1
-        -- of this segment) into the durable per-position map. Only for leased
-        -- (non-auto-ack) batches: auto-ack advances the cursor here and holds no
-        -- lease, so it needs no per-position tracking.
-        IF NOT p_auto_ack THEN
-            v_positions := v_positions || (
-                SELECT COALESCE(jsonb_agg(jsonb_build_object(
-                           'seq', v_row.seq, 'off', g, 'acked', false, 'dlq', false)), '[]'::jsonb)
-                FROM generate_series(v_off, v_off + v_take - 1) AS g);
-        END IF;
 
         r_seq        := v_row.seq;
         r_start_off  := v_off;
@@ -283,15 +301,19 @@ BEGIN
             total_consumed = total_consumed + v_taken
         WHERE partition_id = v_pid AND consumer_group = p_group;
     ELSE
+        -- RUSTFIX item 10: no durable per-position map (batch_positions = NULL) —
+        -- the ack path restores v0.16.0 implicit-ack (max acked position wins), so
+        -- the contiguous-prefix machinery is retired. attempt_seq/off record the
+        -- batch start for reference only; the retry budget is batch_retry_count.
         UPDATE queen.partition_consumers SET
             worker_id = p_worker,
             lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
             batch_end_seq = v_end_seq,
             batch_end_off = v_end_off,
-            batch_positions = v_positions,
+            batch_positions = NULL,
             attempt_seq = v_start_seq,
             attempt_off = v_start_off,
-            attempt_count = v_attempt
+            attempt_count = 0
         WHERE partition_id = v_pid AND consumer_group = p_group;
     END IF;
 END;
@@ -385,8 +407,14 @@ BEGIN
     SELECT * INTO v_c FROM queen.partition_consumers c
     WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
     FOR UPDATE;
-    IF NOT FOUND OR v_c.worker_id IS DISTINCT FROM p_worker
-       OR v_c.lease_expires_at IS NULL OR v_c.lease_expires_at < clock_timestamp() THEN
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'consumer not found');
+    END IF;
+    -- RUSTFIX item 11: validate the lease only when a non-empty worker is supplied.
+    IF p_worker IS NOT NULL AND p_worker <> ''
+       AND (v_c.worker_id IS DISTINCT FROM p_worker
+            OR v_c.lease_expires_at IS NULL
+            OR v_c.lease_expires_at < clock_timestamp()) THEN
         RETURN jsonb_build_object('ok', false, 'error', 'invalid or expired lease');
     END IF;
 
@@ -473,6 +501,9 @@ BEGIN
         worker_id = NULL, lease_expires_at = NULL,
         batch_end_seq = NULL, batch_end_off = NULL,
         attempt_seq = NULL, attempt_off = NULL, attempt_count = 0,
+        -- RUSTFIX item 10: the batch completes via DLQ of the poison — reset the
+        -- retry counter so the NEXT batch starts with a fresh retry budget.
+        batch_retry_count = 0,
         -- the frame is disposed of (moved to the DLQ), count it as consumed
         total_consumed = total_consumed + 1
     WHERE partition_id = p_partition_id AND consumer_group = p_group;

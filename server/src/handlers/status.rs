@@ -29,19 +29,35 @@ pub async fn handle_status() -> Response {
     json(StatusCode::OK, "{\"status\":\"ok\",\"engine\":\"segments-rust\"}".to_string())
 }
 
+// RUSTFIX item 21: GET /metrics returns the C++ JSON shape (metrics.cpp:11-46),
+// NOT Prometheus text — Prometheus lives at /metrics/prometheus only. The C++
+// original populated only the `database` block from the pool; the rest were
+// literal 0. We populate uptime/requests/messages/memory as a safe superset.
 pub async fn handle_metrics(State(st): State<Arc<AppState>>) -> Response {
-    let mut body = st.metrics.prometheus();
-    body.push_str(&format!(
-        "queen_seg_push_vegas_limit {}\nqueen_seg_pop_vegas_limit {}\n",
-        st.push_vegas.limit(),
-        st.pop_vegas.limit()
-    ));
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        body,
-    )
-        .into_response()
+    let snap = st.metrics.snapshot();
+    let ps = st.pool.status();
+    let out = serde_json::json!({
+        "uptime": st.metrics.uptime_seconds(),
+        "requests": {
+            "total": snap.push_requests + snap.pop_requests + snap.ack_requests,
+            "rate": 0,
+        },
+        "messages": {
+            "total": snap.push_messages + snap.pop_messages + snap.ack_messages,
+            "rate": 0,
+        },
+        "database": {
+            "poolSize": ps.max_size as i64,
+            "idleConnections": (ps.available as i64).max(0),
+            "waitingRequests": 0,
+        },
+        "memory": {
+            "rss": st.metrics.resident_bytes(),
+            "heapTotal": 0, "heapUsed": 0, "external": 0, "arrayBuffers": 0,
+        },
+        "cpu": { "user": 0, "system": 0 },
+    });
+    json(StatusCode::OK, out.to_string())
 }
 
 // ============================================================ management surface
@@ -61,7 +77,7 @@ pub async fn handle_api_status(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_status(&client, &filters_json).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("status failed: ", &e),
@@ -83,7 +99,7 @@ pub async fn handle_status_queues(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::get_status_queues(&client, &filters_json, limit, offset).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("status queues failed: ", &e),
@@ -137,35 +153,72 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
         Ok(v) => v,
         Err(_) => return,
     };
-    // DB-persisted lifetime totals (queen.worker_metrics_summary). Emitted under
-    // a distinct queen_db_* prefix so they do NOT collide with the in-process
-    // queen_cluster_* live counters this handler already emits (the rust broker
-    // does not write worker_metrics_summary, so these read 0 today).
+    // RUSTFIX item 24: DB-backed cluster-LIFETIME totals (queen.worker_metrics_summary,
+    // populated by the 014 trigger from syscollect.rs) under the CANONICAL
+    // queen_cluster_* names — the same names a v0.16.0 dashboard's max(queen_cluster_*)
+    // panels use. (The in-process live counters were renamed queen_process_* in
+    // metrics.rs, vacating this namespace.) Every family gets HELP/TYPE.
     if let Some(t) = v.get("system_totals").and_then(|x| x.as_object()) {
         let map = [
-            ("pushRequests", "queen_db_push_requests_total"),
-            ("popRequests", "queen_db_pop_requests_total"),
-            ("ackRequests", "queen_db_ack_requests_total"),
-            ("transactions", "queen_db_transactions_total"),
-            ("pushMessages", "queen_db_push_messages_total"),
-            ("popMessages", "queen_db_pop_messages_total"),
-            ("ackMessages", "queen_db_ack_messages_total"),
-            ("ackSuccess", "queen_db_ack_success_total"),
-            ("ackFailed", "queen_db_ack_failed_total"),
-            ("dbErrors", "queen_db_errors_total"),
-            ("dlqCount", "queen_db_dlq_total"),
+            ("pushRequests", "queen_cluster_push_requests_total"),
+            ("popRequests", "queen_cluster_pop_requests_total"),
+            ("ackRequests", "queen_cluster_ack_requests_total"),
+            ("transactions", "queen_cluster_transactions_total"),
+            ("pushMessages", "queen_cluster_push_messages_total"),
+            ("popMessages", "queen_cluster_pop_messages_total"),
+            ("ackMessages", "queen_cluster_ack_messages_total"),
+            ("dbErrors", "queen_cluster_db_errors_total"),
+            ("dlqCount", "queen_cluster_dlq_total"),
         ];
         for (k, metric) in map {
             if let Some(n) = t.get(k).and_then(|x| x.as_i64()) {
+                out.push_str(&format!("# HELP {metric} DB-backed cluster lifetime total\n# TYPE {metric} counter\n"));
                 out.push_str(metric);
                 out.push_str("{scope=\"cluster\"} ");
                 out.push_str(&n.to_string());
                 out.push('\n');
             }
         }
+        // ack success/failed as a single family split by result (prometheus.cpp:410-418).
+        out.push_str("# HELP queen_cluster_ack_total Acks by outcome (DB-backed)\n# TYPE queen_cluster_ack_total counter\n");
+        for (k, res) in [("ackSuccess", "success"), ("ackFailed", "failed")] {
+            if let Some(n) = t.get(k).and_then(|x| x.as_i64()) {
+                out.push_str(&format!("queen_cluster_ack_total{{scope=\"cluster\",result=\"{res}\"}} {n}\n"));
+            }
+        }
+    }
+    // Per-queue minute-rate gauges (RUSTFIX item 24, prometheus.cpp:442-487).
+    if let Some(arr) = v.get("per_queue_lag").and_then(|x| x.as_array()) {
+        let fams = [
+            ("queen_queue_pop_messages_per_minute", "pop_count"),
+            ("queen_queue_push_requests_per_minute", "push_request_count"),
+            ("queen_queue_push_messages_per_minute", "push_message_count"),
+            ("queen_queue_pop_empty_per_minute", "pop_empty_count"),
+            ("queen_queue_transactions_per_minute", "transaction_count"),
+            ("queen_queue_parked_consumers", "parked_count"),
+            ("queen_queue_metrics_age_seconds", "bucket_age_seconds"),
+        ];
+        for (fam, _) in fams {
+            out.push_str(&format!("# HELP {fam} Per-queue minute-rate\n# TYPE {fam} gauge\n"));
+        }
+        out.push_str("# HELP queen_queue_pop_lag_milliseconds Per-queue pop lag\n# TYPE queen_queue_pop_lag_milliseconds gauge\n");
+        out.push_str("# HELP queen_queue_ack_per_minute Per-queue acks by result\n# TYPE queen_queue_ack_per_minute gauge\n");
+        for e in arr {
+            let q = prom_label_escape(e.get("queue").and_then(|x| x.as_str()).unwrap_or(""));
+            let num = |k: &str| e.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+            for (fam, key) in fams {
+                out.push_str(&format!("{fam}{{queue=\"{q}\"}} {}\n", num(key)));
+            }
+            out.push_str(&format!("queen_queue_pop_lag_milliseconds{{queue=\"{q}\",stat=\"avg\"}} {}\n", num("avg_lag_ms")));
+            out.push_str(&format!("queen_queue_pop_lag_milliseconds{{queue=\"{q}\",stat=\"max\"}} {}\n", num("max_lag_ms")));
+            out.push_str(&format!("queen_queue_ack_per_minute{{queue=\"{q}\",result=\"success\"}} {}\n", num("ack_success_count")));
+            out.push_str(&format!("queen_queue_ack_per_minute{{queue=\"{q}\",result=\"failed\"}} {}\n", num("ack_failed_count")));
+        }
     }
     // DLQ depth (cluster total + per-queue).
     if let Some(d) = v.get("dlq") {
+        out.push_str("# HELP queen_dlq_depth Dead-letter queue depth\n# TYPE queen_dlq_depth gauge\n");
+        out.push_str("# HELP queen_dlq_depth_by_queue Dead-letter depth per queue\n# TYPE queen_dlq_depth_by_queue gauge\n");
         if let Some(n) = d.get("total").and_then(|x| x.as_i64()) {
             out.push_str("queen_dlq_depth{scope=\"cluster\"} ");
             out.push_str(&n.to_string());
@@ -185,6 +238,10 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
     }
     // Queue depth (per-queue message counts, both engines).
     if let Some(arr) = v.get("queue_depth").and_then(|x| x.as_array()) {
+        if !arr.is_empty() {
+            out.push_str("# HELP queen_queue_depth_total Total messages stored per queue\n# TYPE queen_queue_depth_total gauge\n");
+            out.push_str("# HELP queen_queue_depth_pending Pending (unconsumed) messages per queue\n# TYPE queen_queue_depth_pending gauge\n");
+        }
         for e in arr {
             let q = e.get("queue").and_then(|x| x.as_str()).unwrap_or("");
             let storage = e.get("storage").and_then(|x| x.as_str()).unwrap_or("");
@@ -210,17 +267,53 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
 // always emitted even if the DB read fails.
 pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
     let mut body = st.metrics.prometheus();
+    body.push_str("# HELP queen_seg_push_vegas_limit Adaptive push concurrency limit\n# TYPE queen_seg_push_vegas_limit gauge\n");
+    body.push_str("# HELP queen_seg_pop_vegas_limit Adaptive pop concurrency limit\n# TYPE queen_seg_pop_vegas_limit gauge\n");
     body.push_str(&format!(
         "queen_seg_push_vegas_limit {}\nqueen_seg_pop_vegas_limit {}\n",
         st.push_vegas.limit(),
         st.pop_vegas.limit()
     ));
+
+    // RUSTFIX item 24: restore the DB pool gauges (prometheus.cpp:157-174), the
+    // maintenance-mode gauge (prometheus.cpp:253-266), and the file-buffer gauges
+    // (now live, item 1). Per-worker/threadpool/registry/sidecar families are
+    // intentionally obsolete for the single-process async broker.
+    let ps = st.pool.status();
+    let active = (ps.size as i64 - ps.available as i64).max(0);
+    body.push_str("# HELP queen_db_pool_size Configured DB pool size\n# TYPE queen_db_pool_size gauge\n");
+    body.push_str(&format!("queen_db_pool_size {}\n", ps.max_size));
+    body.push_str("# HELP queen_db_pool_idle Idle pooled connections\n# TYPE queen_db_pool_idle gauge\n");
+    body.push_str(&format!("queen_db_pool_idle {}\n", (ps.available as i64).max(0)));
+    body.push_str("# HELP queen_db_pool_active Active pooled connections\n# TYPE queen_db_pool_active gauge\n");
+    body.push_str(&format!("queen_db_pool_active {active}\n"));
+    body.push_str("# HELP queen_maintenance_mode_enabled Push maintenance mode flag\n# TYPE queen_maintenance_mode_enabled gauge\n");
+    body.push_str(&format!(
+        "queen_maintenance_mode_enabled {}\n",
+        st.maintenance.load(std::sync::atomic::Ordering::Relaxed) as i32
+    ));
+    body.push_str("# HELP queen_file_buffer_pending Spooled push events awaiting drain\n# TYPE queen_file_buffer_pending gauge\n");
+    body.push_str(&format!("queen_file_buffer_pending {}\n", st.file_buffer.pending_count()));
+    body.push_str("# HELP queen_file_buffer_failed Spool write failures\n# TYPE queen_file_buffer_failed gauge\n");
+    body.push_str(&format!("queen_file_buffer_failed {}\n", st.file_buffer.failed_count()));
+    body.push_str("# HELP queen_file_buffer_db_healthy File-buffer DB-reachability hint\n# TYPE queen_file_buffer_db_healthy gauge\n");
+    body.push_str(&format!("queen_file_buffer_db_healthy {}\n", st.file_buffer.db_healthy() as i32));
+
     if let Ok(c) = st.pool.get().await {
         if let Ok(txt) = db::get_prometheus_metrics(&c).await {
             format_db_prometheus(&txt, &mut body);
         }
     }
-    text_plain(StatusCode::OK, body)
+    // RUSTFIX item 24: charset + Cache-Control: no-cache (prometheus.cpp:663-664).
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 // ========================================================= consumer groups
@@ -238,7 +331,7 @@ pub async fn handle_stats_refresh(State(st): State<Arc<AppState>>) -> Response {
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::refresh_all_stats(&client).await {
-        Ok(txt) => json(StatusCode::OK, txt),
+        Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("refresh failed: ", &e),

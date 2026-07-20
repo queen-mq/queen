@@ -200,21 +200,37 @@ BEGIN
     -- shape without referencing the dropped table. The consumer_groups_metadata
     -- join is removed because it only fed the (now removed) queen.messages
     -- subscription-timestamp predicate.
+    -- RUSTFIX item 22: real segment-native lag. The old body hardcoded NULL/0
+    -- (the rows engine's queen.messages is gone) and joined the ROWS partition
+    -- tables, which no longer match the seg cursor's partition_id — always []. This
+    -- repoints to seg_partitions/seg_queues and computes pending frames + oldest
+    -- unconsumed created_at from queen.seg_segments against the cursor (next_seq,
+    -- next_off).
     WITH consumer_lag AS (
-        SELECT 
+        SELECT
             pc.consumer_group,
             q.name as queue_name,
             p.name as partition_name,
             p.id as partition_id,
             pc.worker_id,
             pc.last_consumed_at,
-            NULL::timestamptz as oldest_unconsumed_at,
-            0::bigint as unconsumed_count,
-            NULL::integer as lag_seconds
+            MIN(s.created_at) FILTER (
+                WHERE s.seq >= pc.next_seq
+                  AND s.msg_count > CASE WHEN s.seq = pc.next_seq THEN pc.next_off ELSE 0 END
+            ) as oldest_unconsumed_at,
+            COALESCE(SUM(CASE WHEN s.seq >= pc.next_seq
+                              THEN s.msg_count - CASE WHEN s.seq = pc.next_seq THEN pc.next_off ELSE 0 END
+                              ELSE 0 END), 0) as unconsumed_count,
+            EXTRACT(EPOCH FROM (NOW() - MIN(s.created_at) FILTER (
+                WHERE s.seq >= pc.next_seq
+                  AND s.msg_count > CASE WHEN s.seq = pc.next_seq THEN pc.next_off ELSE 0 END
+            )))::integer as lag_seconds
         FROM queen.partition_consumers pc
-        JOIN queen.partitions p ON p.id = pc.partition_id
-        JOIN queen.queues q ON q.id = p.queue_id
-        GROUP BY pc.consumer_group, q.name, p.name, p.id, pc.worker_id, pc.last_consumed_at
+        JOIN queen.seg_partitions p ON p.id = pc.partition_id
+        JOIN queen.seg_queues q ON q.id = p.queue_id
+        LEFT JOIN queen.seg_segments s ON s.partition_id = pc.partition_id
+        GROUP BY pc.consumer_group, q.name, p.name, p.id, pc.worker_id, pc.last_consumed_at,
+                 pc.next_seq, pc.next_off
     )
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
@@ -247,32 +263,32 @@ AS $$
 DECLARE
     v_result JSONB;
 BEGIN
+    -- RUSTFIX item 22: repoint to the seg tables (the ROWS partition join matched
+    -- ZERO rows for seg cursors → always {}) and compute real per-partition lag
+    -- from queen.seg_segments against the cursor. The old consumer_groups_metadata
+    -- LEFT JOIN was unused by the output and referenced seg-absent namespace/task
+    -- columns, so it is removed.
     WITH partition_data AS (
-        SELECT 
+        SELECT
             q.name as queue_name,
             p.name as partition_name,
             pc.worker_id,
             pc.last_consumed_at,
             pc.total_messages_consumed,
             pc.lease_expires_at,
-            -- Rows storage retired: queen.messages has been dropped (segments-only broker).
-            -- For segment queues this table was always empty, so the original correlated
-            -- subqueries collapsed to their empty-table results: COUNT(*) => 0 and the
-            -- ORDER BY ... LIMIT 1 scalar => NULL. Substituted verbatim below so the
-            -- COALESCE(...) in the output continues to yield offsetLag=0 / timeLagSeconds=0.
-            0::integer as offset_lag,
-            NULL::integer as time_lag_seconds
+            (SELECT COALESCE(SUM(CASE WHEN s.seq >= pc.next_seq
+                                      THEN s.msg_count - CASE WHEN s.seq = pc.next_seq THEN pc.next_off ELSE 0 END
+                                      ELSE 0 END), 0)
+             FROM queen.seg_segments s WHERE s.partition_id = pc.partition_id)::integer as offset_lag,
+            EXTRACT(EPOCH FROM (NOW() - (
+                SELECT MIN(s.created_at) FROM queen.seg_segments s
+                WHERE s.partition_id = pc.partition_id
+                  AND s.seq >= pc.next_seq
+                  AND s.msg_count > CASE WHEN s.seq = pc.next_seq THEN pc.next_off ELSE 0 END
+            )))::integer as time_lag_seconds
         FROM queen.partition_consumers pc
-        JOIN queen.partitions p ON p.id = pc.partition_id
-        JOIN queen.queues q ON q.id = p.queue_id
-        LEFT JOIN queen.consumer_groups_metadata cgm 
-            ON cgm.consumer_group = pc.consumer_group
-            AND (
-                (cgm.queue_name = q.name AND cgm.partition_name = p.name)
-                OR (cgm.queue_name = q.name AND cgm.partition_name = '')
-                OR (cgm.queue_name = '' AND cgm.namespace = q.namespace)
-                OR (cgm.queue_name = '' AND cgm.task = q.task)
-            )
+        JOIN queen.seg_partitions p ON p.id = pc.partition_id
+        JOIN queen.seg_queues q ON q.id = p.queue_id
         WHERE pc.consumer_group = p_consumer_group
         ORDER BY q.name, p.name
     )
@@ -340,7 +356,11 @@ BEGIN
                q.name AS queue_name,
                c.total_consumed,
                COALESCE(l.pending, 0) AS pending,
-               l.oldest_unconsumed_at
+               l.oldest_unconsumed_at,
+               -- RUSTFIX item 22/13: durable subscription registration.
+               cgm.subscription_mode,
+               cgm.subscription_timestamp,
+               cgm.created_at AS subscription_created_at
         FROM queen.partition_consumers c
         JOIN queen.seg_partitions p ON p.id = c.partition_id
         JOIN queen.seg_queues q ON q.id = p.queue_id
@@ -348,6 +368,10 @@ BEGIN
         JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
         LEFT JOIN pend l ON l.partition_id = c.partition_id
                         AND l.consumer_group = c.consumer_group
+        LEFT JOIN queen.consumer_groups_metadata cgm
+               ON cgm.consumer_group = c.consumer_group
+              AND cgm.queue_name = q.name
+              AND cgm.partition_name = ''
     ),
     v2_aggregated AS (
         SELECT consumer_group,
@@ -356,6 +380,9 @@ BEGIN
                SUM(CASE WHEN pending > 0 THEN 1 ELSE 0 END) AS partitions_with_lag,
                SUM(pending) AS total_lag,
                COALESCE(MAX(EXTRACT(EPOCH FROM (NOW() - oldest_unconsumed_at))::integer), 0) AS max_time_lag,
+               MAX(subscription_mode) AS subscription_mode,
+               MAX(subscription_timestamp) AS subscription_timestamp,
+               MAX(subscription_created_at) AS subscription_created_at,
                CASE
                    WHEN COALESCE(MAX(EXTRACT(EPOCH FROM (NOW() - oldest_unconsumed_at))::integer), 0) > 300 THEN 'Lagging'
                    WHEN MAX(total_consumed) > 0 THEN 'Stable'
@@ -375,9 +402,11 @@ BEGIN
             'maxTimeLag', max_time_lag,
             'state', state,
             'storage', 'segments',
-            'subscriptionMode', NULL,
-            'subscriptionTimestamp', NULL,
-            'subscriptionCreatedAt', NULL
+            'subscriptionMode', subscription_mode,
+            'subscriptionTimestamp', CASE WHEN subscription_timestamp IS NOT NULL
+                THEN to_char(subscription_timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+            'subscriptionCreatedAt', CASE WHEN subscription_created_at IS NOT NULL
+                THEN to_char(subscription_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
         ) ORDER BY consumer_group, queue_name
     ), '[]'::jsonb) INTO v_v2
     FROM v2_aggregated;

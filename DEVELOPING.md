@@ -113,6 +113,74 @@ That's the whole loop. Everything else in this guide expands on one of these ste
 
 ---
 
+## Segments engine: operational notes
+
+### Segment dedup — hash-collision risk (accepted, documented)
+
+The segments engine dedups pushes on a **64-bit hash** of the transactionId, not the
+raw string: `queen.seg_dedup` is keyed `PRIMARY KEY (partition_id, txn_hash)` with
+`txn_hash BIGINT = hashtextextended(transactionId, 0)` (`023_storage_v2.sql`). This
+is a deliberate space/CPU optimization over the rows engine, which used an
+exact-string unique constraint on `(partition_id, transaction_id)` (zero collision
+risk by construction).
+
+**Consequence of a collision.** Two *distinct* transactionIds that hash to the same
+64-bit value **in the same partition, within the live dedup window** collide: on
+push the second is counted as a duplicate and its frame is silently dropped; more
+rarely, an ack-by-transactionId (`seg_ack_by_txn_v1`, which resolves positions
+through the same `txn_hash`) could resolve to the colliding position. Dedup is a
+bounded **window** (`dedup_window_seconds`, default 3600), not permanent.
+
+**Birthday-bound math.** With `N` live dedup entries in one partition-window, the
+collision probability is ≈ `N² / 2⁶⁵`, where `N = (push rate to that partition) ×
+dedup_window_seconds`:
+
+| N (live entries / partition-window) | P(collision) per partition-window |
+| ----------------------------------- | --------------------------------- |
+| 10 000                              | ~5 × 10⁻¹²                        |
+| 1 000 000                           | ~5 × 10⁻⁸                         |
+
+Aggregated across many partitions and windows the total scales roughly linearly,
+and stays negligible at realistic rates (e.g. 1 × 10⁶ partition-windows/day at
+N = 10 000 → ~5 × 10⁻⁶/day).
+
+**Decision: accept and document.** The probability is astronomically small at
+realistic N, whereas the alternative (revert to an exact-string unique constraint —
+add a raw `txn TEXT` column, re-key uniqueness on `(partition_id, txn)`, and update
+every resolver that joins on `txn_hash`: push probe, `seg_find_dups_v1`, the
+ack-by-txn durable + legacy walks, the multi-push dup path) is a high-blast-radius
+uniqueness-model change that forfeits the fixed-width-key advantage. The real tuning
+lever is the **dedup window**: a shorter `dedup_window_seconds` lowers `N` (and thus
+collision odds) but also shortens how long an ack-by-transactionId remains
+resolvable — balance the two.
+
+### Mixed C++ / Rust clusters are out of scope for a rolling upgrade
+
+The C++ (v0.16.0) and Rust brokers use **different UDP payload codecs** for
+inter-replica sync (C++ msgpack vs Rust JSON; the framing and HMAC are identical,
+but the bodies are not interchangeable — see `server/src/udp.rs`). Therefore a
+**mixed C++/Rust cluster does not exchange cross-replica sync**: MESSAGE_AVAILABLE
+wakeups, maintenance-mode flips, and queue-config cache invalidations do **not**
+cross the codec boundary, and C++ nodes will report Rust peers (and vice versa) as
+**dead** in their peer tables.
+
+This does **not** block a rolling `C++ → Rust` migration, because every replica
+still converges through the shared Postgres source of truth:
+
+- Maintenance flags heal within `QUEEN_CACHE_REFRESH_INTERVAL_MS` (default 60 s) via
+  the DB reconcile loop (`server/src/reconcile.rs`), independent of UDP.
+- Queue-config / lease-cache staleness heals on the same reconcile cadence.
+- Cross-replica consume still works — a consumer on any replica reads committed
+  segments from the DB; it just isn't *woken* early by a push landing on a
+  different-codec peer (it falls back to its long-poll re-query interval).
+
+Recommended upgrade path: drain/upgrade replicas one at a time; expect transient
+"peer dead" log noise and slightly higher long-poll latency (no sub-millisecond
+cross-replica wakeups) during the window when both codecs are present. Do **not**
+rely on cross-replica UDP sync while the cluster is mixed.
+
+---
+
 ## Where to ask
 
 - Issues or external contributions: [github.com/queen-mq/queen](https://github.com/queen-mq/queen)

@@ -54,6 +54,11 @@ DECLARE
     v_cand_cap INTEGER;
     v_first_seen INTEGER;
     v_from_ts TIMESTAMPTZ;
+    -- RUSTFIX item 12: throttle floor + lease-ignoring re-check for the watermark.
+    v_verified_at TIMESTAMPTZ;
+    v_has_pending BOOLEAN;
+    -- RUSTFIX item 13: durable subscription mode written to consumer_groups_metadata.
+    v_sub_mode_stored TEXT;
 BEGIN
     SELECT id INTO v_qid FROM queen.seg_queues WHERE name = p_queue;
     IF v_qid IS NULL THEN
@@ -73,27 +78,39 @@ BEGIN
     -- time). The watermark row doubles as the once-per-(queue,group) marker: its
     -- first insertion (ROW_COUNT>0) means this group has never scanned this queue.
     -- Queue mode never seeds a backlog, so it is excluded.
+    -- RUSTFIX item 13: register the subscription DURABLY in
+    -- queen.consumer_groups_metadata (parity with 002d_pop_unified_v4.sql:206-271),
+    -- which doubles as the once-per-(queue,group) bulk-seed marker. This fixes
+    -- collision (a): the empty-scan path (item 12) still writes consumer_watermarks,
+    -- so row-existence there can no longer be the marker. The stored timestamp lets
+    -- a LATER-created partition seed from the subscription time on first contact
+    -- (seg_pop_segments_v1), instead of last_seq+1 which skips its backlog.
     IF p_group <> '__QUEUE_MODE__'
        AND (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '') THEN
-        INSERT INTO queen.consumer_watermarks (queue_name, consumer_group)
-        VALUES (p_queue, p_group)
-        ON CONFLICT (queue_name, consumer_group) DO NOTHING;
+        IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
+            BEGIN
+                v_from_ts := p_sub_from::timestamptz;
+            EXCEPTION WHEN OTHERS THEN
+                v_from_ts := NULL;  -- unparsable: fall back to registration-time 'new'
+            END;
+        END IF;
+        IF v_from_ts IS NULL THEN
+            v_from_ts := v_now; v_sub_mode_stored := 'new';
+        ELSE
+            v_sub_mode_stored := 'timestamp';
+        END IF;
+
+        INSERT INTO queen.consumer_groups_metadata
+            (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+        VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
+        ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
         GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
         IF v_first_seen > 0 THEN
-            IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
-                BEGIN
-                    v_from_ts := p_sub_from::timestamptz;
-                EXCEPTION WHEN OTHERS THEN
-                    v_from_ts := NULL;  -- unparsable: fall back to full backlog seed
-                END;
-            END IF;
-
-            IF v_from_ts IS NOT NULL THEN
+            IF v_sub_mode_stored = 'timestamp' THEN
                 -- timestamp seed: first segment at/after v_from_ts per partition
                 -- (created_at monotone in seq -> forward walk from retention_seq),
                 -- else last_seq+1 (nothing that recent yet -> future-only cursor).
-                -- Identical rule to seg_pop_segments_v1's lazy timestamp seed.
                 INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
                 SELECT p.id, p_group,
                        COALESCE(
@@ -120,11 +137,13 @@ BEGIN
     -- Empty-scan watermark: only consider partitions written since this group last
     -- found the queue empty. A caught-up consumer skips cold partitions instead of
     -- scanning the whole partition set every long-poll (decisive at 10-20k parts).
-    SELECT last_empty_scan_at INTO v_watermark
+    -- RUSTFIX item 12: also read updated_at as the 30s re-check throttle floor.
+    SELECT last_empty_scan_at, updated_at INTO v_watermark, v_verified_at
     FROM queen.consumer_watermarks
     WHERE queue_name = p_queue AND consumer_group = p_group;
     IF v_watermark IS NULL THEN
         v_watermark := '1970-01-01 00:00:00+00'::timestamptz;
+        v_verified_at := NULL;
     END IF;
 
     -- Fetch more candidates than requested: some will be claimed by concurrent
@@ -173,15 +192,39 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Nothing claimable this cycle: advance the empty-scan watermark so the next
-    -- long-poll only re-checks partitions written after now (skips the quiet ones).
+    -- Nothing claimable this cycle. RUSTFIX item 12: DO NOT advance the empty-scan
+    -- watermark blindly — a partition may have been skipped only because another
+    -- worker held its lease, not because it is empty. Throttled to 30s, re-check for
+    -- pending data IGNORING the lease filter (parity with 002d_pop_unified_v4:395-426):
+    -- advance only if genuinely empty; otherwise just record the verification time so
+    -- a lease-held backlog is never stranded once the lease expires with no new push.
     IF v_claimed = 0 THEN
-        INSERT INTO queen.consumer_watermarks
-            (queue_name, consumer_group, last_empty_scan_at, updated_at)
-        VALUES (p_queue, p_group, v_now, v_now)
-        ON CONFLICT (queue_name, consumer_group)
-        DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
-                      updated_at = EXCLUDED.updated_at;
+        IF v_verified_at IS NULL OR v_verified_at <= v_now - interval '30 seconds' THEN
+            SELECT EXISTS (
+                SELECT 1 FROM queen.seg_partitions p
+                LEFT JOIN queen.partition_consumers c
+                  ON c.partition_id = p.id AND c.consumer_group = p_group
+                WHERE p.queue_id = v_qid
+                  AND p.last_write_at >= v_watermark - interval '2 minutes'
+                  AND (c.partition_id IS NULL OR p.last_seq >= c.next_seq)
+            ) INTO v_has_pending;
+            IF NOT v_has_pending THEN
+                INSERT INTO queen.consumer_watermarks
+                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_queue, p_group, v_now, v_now)
+                ON CONFLICT (queue_name, consumer_group)
+                DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
+                              updated_at = EXCLUDED.updated_at;
+            ELSE
+                -- Pending backlog exists (possibly lease-held): record the check time
+                -- only, keep the floor so the partition stays a candidate.
+                INSERT INTO queen.consumer_watermarks
+                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_queue, p_group, '1970-01-01 00:00:00+00'::timestamptz, v_now)
+                ON CONFLICT (queue_name, consumer_group)
+                DO UPDATE SET updated_at = EXCLUDED.updated_at;
+            END IF;
+        END IF;
     END IF;
 
     RETURN jsonb_build_object('partitions', v_out);
@@ -204,6 +247,34 @@ $$;
 -- queue) count as NOT acked: the cursor stops right before their position and
 -- those frames are redelivered. Redelivery over data loss — by design.
 -- ============================================================================
+-- ============================================================================
+-- seg_ack_by_txn_v1 — RUSTFIX items 10 & 11: v0.16.0 ack semantics.
+--
+-- Restores the exact client-observable contract of the row engine's
+-- ack_messages_v2 (003_ack.sql), replacing the Rust-only contiguous-prefix /
+-- batch_positions machinery:
+--
+--   * IMPLICIT-ACK: acking position P advances the cursor to just past the MAX
+--     acked-ok position in the leased range, unconditionally — every earlier
+--     unacked position is below the cursor and is completed, never redelivered.
+--     "Ack the last message of the batch" completes the whole batch.
+--   * RETRY COUNTING: a single per-(partition,group) counter, batch_retry_count,
+--     charged ONCE per explicit `failed` ack while budget remains, reset on batch
+--     completion, and NEVER charged on lease expiry or a plain lease release.
+--   * status = 'retry': release the lease, cursor untouched (past completed),
+--     counter untouched — budget-free explicit retry.
+--   * status = 'dlq': force immediate dead-letter of that message, bypassing any
+--     remaining retry budget (broker hand-off via the dlq:true signal, unchanged).
+--   * Exhausted `failed` on a DLQ-enabled queue: dead-letter (item 2 default true);
+--     on a DLQ-disabled queue: drop the poison and advance past it.
+--
+-- Item 11: the worker/expiry lease check runs ONLY when a non-empty p_worker is
+-- supplied — a lease-less ack (client sent no leaseId → p_worker='') still
+-- advances the cursor, matching 003_ack.sql:52-59.
+--
+-- p_acks is a JSON array [{"txn":..,"status":..}] where status is
+-- completed|success|acked|ok (default) | failed | retry | dlq.
+-- ============================================================================
 CREATE OR REPLACE FUNCTION queen.seg_ack_by_txn_v1(
     p_partition_id UUID,
     p_group TEXT,
@@ -214,406 +285,254 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_c RECORD;
-    v_seg RECORD;
-    -- Acked-ok positions as a {"<seq>:<frame_idx>": true} lookup object.
-    v_acked JSONB;
-    -- Explicitly nacked positions (ok=false), same shape. Distinguishes a
-    -- genuine failure (retry/DLQ) from a frame the client simply did not ack
-    -- in this request (partial ack -> plain redelivery, no attempt charged).
-    v_nacked JSONB;
-    v_pos_seq BIGINT;
-    v_pos_off INTEGER;
-    v_adv BIGINT := 0;
-    v_stop BOOLEAN := FALSE;
-    v_start INTEGER;
-    v_end INTEGER;
-    v_i INTEGER;
-    v_end_count INTEGER;
-    -- Retry/DLQ decision inputs (from queen.queues, the config source of truth).
-    v_retry_limit INTEGER;
-    v_dlq_enabled BOOLEAN;
-    v_attempt INTEGER;
-    v_poison_count INTEGER;
-    -- Durable per-position path (Trap 2): the leased batch's ordered position map
-    -- (queen.partition_consumers.batch_positions) + the contiguous-prefix computation.
-    v_bp JSONB;
-    v_el JSONB;
-    v_prefix_last_seq BIGINT;
-    v_prefix_last_off INTEGER;
-    v_head_seq BIGINT;
-    v_head_off INTEGER;
-    v_head_nacked BOOLEAN;
+    v_has_lease BOOLEAN;
+    -- max acked-ok position within the ack range
+    v_max_ok_seq BIGINT;
+    v_max_ok_off INTEGER;
+    -- cursor after implicit-ack of the completed prefix
     v_new_seq BIGINT;
     v_new_off INTEGER;
+    v_delta BIGINT := 0;
     v_pc INTEGER;
-    v_delta BIGINT;
+    -- normalized position just past the leased batch end
+    v_bend_seq BIGINT;
+    v_bend_off INTEGER;
+    v_reached_end BOOLEAN := FALSE;
+    -- nack detection
+    v_nack_kind TEXT;          -- 'dlq' | 'failed' | NULL
+    v_has_retry BOOLEAN := FALSE;
+    v_poison_seq BIGINT;
+    v_poison_off INTEGER;
+    v_retry_limit INTEGER;
+    v_dlq_enabled BOOLEAN;
+    v_retry_ct INTEGER;
 BEGIN
     SELECT * INTO v_c FROM queen.partition_consumers c
     WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
     FOR UPDATE;
-    IF NOT FOUND OR v_c.worker_id IS DISTINCT FROM p_worker
-       OR v_c.lease_expires_at IS NULL OR v_c.lease_expires_at < clock_timestamp() THEN
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'consumer not found');
+    END IF;
+
+    -- RUSTFIX item 11: validate the lease ONLY when a non-empty leaseId/worker was
+    -- supplied. A lease-less ack (p_worker = '' or NULL) falls straight through and
+    -- still advances the cursor, matching 003_ack.sql:52-59 / 004_transaction.sql.
+    IF p_worker IS NOT NULL AND p_worker <> ''
+       AND (v_c.worker_id IS DISTINCT FROM p_worker
+            OR v_c.lease_expires_at IS NULL
+            OR v_c.lease_expires_at < clock_timestamp()) THEN
         RETURN jsonb_build_object('ok', false, 'error', 'invalid or expired lease');
     END IF;
-    IF v_c.batch_end_seq IS NULL OR v_c.batch_end_off IS NULL THEN
-        RETURN jsonb_build_object('ok', false, 'error', 'no leased batch');
+
+    v_has_lease := (v_c.batch_end_seq IS NOT NULL AND v_c.batch_end_off IS NOT NULL);
+
+    -- ------------------------------------------------------------------ (1)
+    -- IMPLICIT-ACK: the MAX acked-ok position in the ack range. Resolved through
+    -- the dedup window. With a live lease the batch_end clamps the range; without
+    -- one (lease-less ack) any position at/after the cursor counts.
+    SELECT d.seq, d.frame_idx INTO v_max_ok_seq, v_max_ok_off
+    FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
+    JOIN queen.seg_dedup d
+      ON d.partition_id = p_partition_id
+     AND d.txn_hash = hashtextextended(a.txn, 0)
+    WHERE COALESCE(a.status, CASE WHEN a.ok IS FALSE THEN 'failed' ELSE 'completed' END)
+          IN ('completed', 'success', 'acked', 'ok')
+      AND (d.seq, d.frame_idx) >= (v_c.next_seq, v_c.next_off)
+      AND (NOT v_has_lease
+           OR (d.seq, d.frame_idx) <= (v_c.batch_end_seq, v_c.batch_end_off))
+    ORDER BY d.seq DESC, d.frame_idx DESC
+    LIMIT 1;
+
+    -- New cursor = just past the max acked-ok position (normalized on the segment
+    -- boundary). No acked-ok positions -> cursor unchanged.
+    IF v_max_ok_seq IS NULL THEN
+        v_new_seq := v_c.next_seq; v_new_off := v_c.next_off;
+    ELSE
+        SELECT msg_count INTO v_pc FROM queen.seg_segments
+        WHERE partition_id = p_partition_id AND seq = v_max_ok_seq;
+        IF v_pc IS NOT NULL AND v_max_ok_off + 1 >= v_pc THEN
+            v_new_seq := v_max_ok_seq + 1; v_new_off := 0;
+        ELSE
+            v_new_seq := v_max_ok_seq; v_new_off := v_max_ok_off + 1;
+        END IF;
     END IF;
 
-    -- ================================================================
-    -- Durable per-position ack (Trap 2). When the pop recorded a position
-    -- map, each ack MARKS its position(s) here and the lease is NOT released
-    -- on the first ack: the cursor advances over the highest CONTIGUOUS
-    -- acked-OR-dlq prefix and the lease is held until every position is
-    -- resolved (or it expires). This is what lets .batch(N).each() acks land
-    -- in any order (and on any replica — the map is on the row) without the
-    -- first ack finalizing the batch out from under the other in-flight acks.
-    -- ================================================================
-    IF v_c.batch_positions IS NOT NULL THEN
-        -- Resolve THIS request's acked-ok / nacked txns to (seq:frame_idx) keys
-        -- through the dedup window (same resolver as the legacy walk below).
-        SELECT COALESCE(jsonb_object_agg(d.seq::text || ':' || d.frame_idx::text, true),
-                        '{}'::jsonb)
-        INTO v_acked
-        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, ok BOOLEAN)
+    -- Frames crossed old->new cursor (for total_consumed). Retention gaps are
+    -- simply absent from seg_segments and don't count.
+    SELECT COALESCE(SUM(
+             (CASE WHEN s.seq = v_new_seq THEN v_new_off ELSE s.msg_count END)
+           - (CASE WHEN s.seq = v_c.next_seq THEN v_c.next_off ELSE 0 END)
+           ), 0)
+    INTO v_delta
+    FROM queen.seg_segments s
+    WHERE s.partition_id = p_partition_id
+      AND s.seq >= v_c.next_seq AND s.seq <= v_new_seq;
+    v_delta := GREATEST(v_delta, 0);
+
+    -- ------------------------------------------------------------------ (2)
+    -- Detect a real nack at/after the NEW cursor (a failed/dlq below the completed
+    -- max is implicitly completed and ignored). dlq wins over failed; among a kind,
+    -- the lowest position is the poison head.
+    SELECT d.seq, d.frame_idx,
+           CASE WHEN COALESCE(a.status,'') = 'dlq' THEN 'dlq' ELSE 'failed' END
+    INTO v_poison_seq, v_poison_off, v_nack_kind
+    FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
+    JOIN queen.seg_dedup d
+      ON d.partition_id = p_partition_id
+     AND d.txn_hash = hashtextextended(a.txn, 0)
+    WHERE COALESCE(a.status, CASE WHEN a.ok IS FALSE THEN 'failed' ELSE 'completed' END)
+          IN ('failed', 'dlq')
+      AND (d.seq, d.frame_idx) >= (v_new_seq, v_new_off)
+      AND (NOT v_has_lease
+           OR (d.seq, d.frame_idx) <= (v_c.batch_end_seq, v_c.batch_end_off))
+    ORDER BY (COALESCE(a.status,'') = 'dlq') DESC, d.seq, d.frame_idx
+    LIMIT 1;
+
+    -- Any explicit 'retry' at/after the new cursor (only consulted if no nack).
+    IF v_nack_kind IS NULL THEN
+        SELECT TRUE INTO v_has_retry
+        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
         JOIN queen.seg_dedup d
           ON d.partition_id = p_partition_id
          AND d.txn_hash = hashtextextended(a.txn, 0)
-        WHERE a.ok;
+        WHERE COALESCE(a.status, '') = 'retry'
+          AND (d.seq, d.frame_idx) >= (v_new_seq, v_new_off)
+          AND (NOT v_has_lease
+               OR (d.seq, d.frame_idx) <= (v_c.batch_end_seq, v_c.batch_end_off))
+        LIMIT 1;
+        v_has_retry := COALESCE(v_has_retry, FALSE);
+    END IF;
 
-        SELECT COALESCE(jsonb_object_agg(d.seq::text || ':' || d.frame_idx::text, true),
-                        '{}'::jsonb)
-        INTO v_nacked
-        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, ok BOOLEAN)
-        JOIN queen.seg_dedup d
-          ON d.partition_id = p_partition_id
-         AND d.txn_hash = hashtextextended(a.txn, 0)
-        WHERE NOT a.ok;
-
-        -- Apply the acked-ok marks to the durable map (idempotent; positions
-        -- already acked/dlq are left as-is).
-        SELECT COALESCE(jsonb_agg(
-                 CASE WHEN NOT COALESCE((e->>'acked')::boolean, false)
-                       AND NOT COALESCE((e->>'dlq')::boolean, false)
-                       AND (v_acked ? ((e->>'seq') || ':' || (e->>'off')))
-                      THEN jsonb_set(e, '{acked}', 'true'::jsonb)
-                      ELSE e END), '[]'::jsonb)
-        INTO v_bp
-        FROM jsonb_array_elements(v_c.batch_positions) e;
-
-        -- Highest contiguous acked/dlq prefix + first unresolved (head) position.
-        v_prefix_last_seq := NULL; v_prefix_last_off := NULL;
-        v_head_seq := NULL; v_head_off := NULL; v_head_nacked := FALSE;
-        FOR v_el IN SELECT value FROM jsonb_array_elements(v_bp) LOOP
-            IF COALESCE((v_el->>'acked')::boolean, false)
-               OR COALESCE((v_el->>'dlq')::boolean, false) THEN
-                v_prefix_last_seq := (v_el->>'seq')::bigint;
-                v_prefix_last_off := (v_el->>'off')::int;
-            ELSE
-                v_head_seq := (v_el->>'seq')::bigint;
-                v_head_off := (v_el->>'off')::int;
-                v_head_nacked := (v_nacked ? ((v_el->>'seq') || ':' || (v_el->>'off')));
-                EXIT;
-            END IF;
-        END LOOP;
-
-        -- New cursor = position just past the contiguous prefix (normalized on
-        -- the segment boundary via msg_count). Empty prefix keeps the cursor.
-        IF v_prefix_last_seq IS NULL THEN
-            v_new_seq := v_c.next_seq; v_new_off := v_c.next_off;
-        ELSE
-            SELECT msg_count INTO v_pc FROM queen.seg_segments
-            WHERE partition_id = p_partition_id AND seq = v_prefix_last_seq;
-            IF v_pc IS NOT NULL AND v_prefix_last_off + 1 >= v_pc THEN
-                v_new_seq := v_prefix_last_seq + 1; v_new_off := 0;
-            ELSE
-                v_new_seq := v_prefix_last_seq; v_new_off := v_prefix_last_off + 1;
-            END IF;
-        END IF;
-        -- Positions newly crossed by the cursor this call (for total_consumed).
-        SELECT count(*) INTO v_delta
-        FROM jsonb_array_elements(v_bp) e
-        WHERE ((e->>'seq')::bigint, (e->>'off')::int) >= (v_c.next_seq, v_c.next_off)
-          AND ((e->>'seq')::bigint, (e->>'off')::int) <  (v_new_seq, v_new_off);
-
-        -- Fully resolved: every position acked or dlq'd -> release the lease.
-        IF v_head_seq IS NULL THEN
-            UPDATE queen.partition_consumers SET
-                next_seq = v_new_seq, next_off = v_new_off,
-                worker_id = NULL, lease_expires_at = NULL,
-                batch_end_seq = NULL, batch_end_off = NULL,
-                batch_positions = NULL,
-                total_consumed = total_consumed + v_delta
-            WHERE partition_id = p_partition_id AND consumer_group = p_group;
-            RETURN jsonb_build_object('ok', true, 'acked', v_delta,
-                                      'seq', v_new_seq, 'off', v_new_off);
-        END IF;
-
-        -- Head unresolved AND explicitly nacked -> retry / DLQ / drop, keyed off
-        -- the queue's retry_limit + the delivery attempt of the poison head.
-        IF v_head_nacked THEN
-            SELECT COALESCE(qq.retry_limit, 3),
-                   COALESCE(qq.dead_letter_queue, false)
-                   OR COALESCE(qq.dlq_after_max_retries, false)
-            INTO v_retry_limit, v_dlq_enabled
-            FROM queen.seg_partitions sp
-            JOIN queen.seg_queues sq ON sq.id = sp.queue_id
-            LEFT JOIN queen.queues qq ON qq.name = sq.name
-            WHERE sp.id = p_partition_id;
-            v_retry_limit := COALESCE(v_retry_limit, 3);
-            v_dlq_enabled := COALESCE(v_dlq_enabled, false);
-            v_attempt := CASE
-                WHEN (v_c.attempt_seq, v_c.attempt_off)
-                     IS NOT DISTINCT FROM (v_head_seq, v_head_off)
-                THEN COALESCE(v_c.attempt_count, 1) ELSE 1 END;
-
-            IF v_attempt > v_retry_limit THEN
-                IF v_dlq_enabled THEN
-                    -- Persist this call's acks + advance to the prefix end, but
-                    -- KEEP the lease so the broker can decode+snapshot the poison
-                    -- head frame and call queen.seg_dlq_head_v1 (which marks the
-                    -- position dlq, re-extends the prefix past it, and releases
-                    -- the lease iff the whole batch is then resolved).
-                    UPDATE queen.partition_consumers SET
-                        next_seq = v_new_seq, next_off = v_new_off,
-                        batch_positions = v_bp,
-                        total_consumed = total_consumed + v_delta
-                    WHERE partition_id = p_partition_id AND consumer_group = p_group;
-                    RETURN jsonb_build_object(
-                        'ok', true, 'dlq', true,
-                        'partitionId', p_partition_id, 'group', p_group,
-                        'worker', p_worker, 'seq', v_head_seq, 'frameIdx', v_head_off,
-                        'acked', v_delta);
-                ELSE
-                    -- No DLQ: DROP the poison head (mark it dlq/disposed), then
-                    -- re-extend the contiguous prefix past it and re-resolve.
-                    SELECT COALESCE(jsonb_agg(
-                             CASE WHEN (e->>'seq')::bigint = v_head_seq
-                                   AND (e->>'off')::int = v_head_off
-                                  THEN jsonb_set(e, '{dlq}', 'true'::jsonb)
-                                  ELSE e END), '[]'::jsonb)
-                    INTO v_bp
-                    FROM jsonb_array_elements(v_bp) e;
-
-                    v_prefix_last_seq := NULL; v_prefix_last_off := NULL;
-                    v_head_seq := NULL; v_head_off := NULL;
-                    FOR v_el IN SELECT value FROM jsonb_array_elements(v_bp) LOOP
-                        IF COALESCE((v_el->>'acked')::boolean, false)
-                           OR COALESCE((v_el->>'dlq')::boolean, false) THEN
-                            v_prefix_last_seq := (v_el->>'seq')::bigint;
-                            v_prefix_last_off := (v_el->>'off')::int;
-                        ELSE
-                            v_head_seq := (v_el->>'seq')::bigint;
-                            EXIT;
-                        END IF;
-                    END LOOP;
-                    SELECT msg_count INTO v_pc FROM queen.seg_segments
-                    WHERE partition_id = p_partition_id AND seq = v_prefix_last_seq;
-                    IF v_pc IS NOT NULL AND v_prefix_last_off + 1 >= v_pc THEN
-                        v_new_seq := v_prefix_last_seq + 1; v_new_off := 0;
-                    ELSE
-                        v_new_seq := v_prefix_last_seq; v_new_off := v_prefix_last_off + 1;
-                    END IF;
-                    SELECT count(*) INTO v_delta
-                    FROM jsonb_array_elements(v_bp) e
-                    WHERE ((e->>'seq')::bigint, (e->>'off')::int) >= (v_c.next_seq, v_c.next_off)
-                      AND ((e->>'seq')::bigint, (e->>'off')::int) <  (v_new_seq, v_new_off);
-
-                    IF v_head_seq IS NULL THEN
-                        UPDATE queen.partition_consumers SET
-                            next_seq = v_new_seq, next_off = v_new_off,
-                            worker_id = NULL, lease_expires_at = NULL,
-                            batch_end_seq = NULL, batch_end_off = NULL,
-                            batch_positions = NULL,
-                            attempt_seq = NULL, attempt_off = NULL, attempt_count = 0,
-                            total_consumed = total_consumed + v_delta
-                        WHERE partition_id = p_partition_id AND consumer_group = p_group;
-                    ELSE
-                        UPDATE queen.partition_consumers SET
-                            next_seq = v_new_seq, next_off = v_new_off,
-                            batch_positions = v_bp,
-                            total_consumed = total_consumed + v_delta
-                        WHERE partition_id = p_partition_id AND consumer_group = p_group;
-                    END IF;
-                    RETURN jsonb_build_object('ok', true, 'dropped', true,
-                        'acked', v_delta, 'seq', v_new_seq, 'off', v_new_off);
-                END IF;
-            ELSE
-                -- Retry budget remains: release the lease so the poison head (and
-                -- everything after the acked prefix) is redelivered; the attempt
-                -- columns are preserved so the next delivery increments the count.
-                UPDATE queen.partition_consumers SET
-                    next_seq = v_new_seq, next_off = v_new_off,
-                    worker_id = NULL, lease_expires_at = NULL,
-                    batch_end_seq = NULL, batch_end_off = NULL,
-                    batch_positions = NULL,
-                    total_consumed = total_consumed + v_delta
-                WHERE partition_id = p_partition_id AND consumer_group = p_group;
-                RETURN jsonb_build_object('ok', true, 'acked', v_delta,
-                                          'seq', v_new_seq, 'off', v_new_off);
-            END IF;
-        END IF;
-
-        -- Head is merely un-acked (waiting for its own ok-ack, arriving in a
-        -- separate call): advance over the contiguous prefix but RETAIN the lease
-        -- and the (updated) map. This is the out-of-order accumulation fix.
+    -- ------------------------------------------------------------------ (3)
+    -- Forced DLQ ('dlq' status): dead-letter immediately, bypassing retry budget.
+    -- Advance over the completed prefix, KEEP the lease so the broker can snapshot
+    -- the poison frame and call seg_dlq_head_v1 (which advances past it + releases).
+    IF v_nack_kind = 'dlq' AND v_has_lease THEN
         UPDATE queen.partition_consumers SET
             next_seq = v_new_seq, next_off = v_new_off,
-            batch_positions = v_bp,
+            batch_positions = NULL,
             total_consumed = total_consumed + v_delta
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
-        RETURN jsonb_build_object('ok', true, 'acked', v_delta,
-                                  'seq', v_new_seq, 'off', v_new_off);
+        RETURN jsonb_build_object(
+            'ok', true, 'dlq', true,
+            'partitionId', p_partition_id, 'group', p_group, 'worker', p_worker,
+            'seq', v_poison_seq, 'frameIdx', v_poison_off, 'acked', v_delta);
     END IF;
 
-    -- Resolve acked-ok txns to positions. Txns with ok=false, or without a
-    -- surviving dedup entry, simply never enter the lookup => not acked.
-    SELECT COALESCE(jsonb_object_agg(d.seq::text || ':' || d.frame_idx::text, true),
-                    '{}'::jsonb)
-    INTO v_acked
-    FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, ok BOOLEAN)
-    JOIN queen.seg_dedup d
-      ON d.partition_id = p_partition_id
-     AND d.txn_hash = hashtextextended(a.txn, 0)
-    WHERE a.ok;
-
-    -- ... and the explicitly-nacked (ok=false) positions, so the head-frame
-    -- retry/DLQ logic below fires ONLY on a real nack, never on a frame that
-    -- was merely left un-acked (which keeps the redeliver-on-release behavior).
-    SELECT COALESCE(jsonb_object_agg(d.seq::text || ':' || d.frame_idx::text, true),
-                    '{}'::jsonb)
-    INTO v_nacked
-    FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, ok BOOLEAN)
-    JOIN queen.seg_dedup d
-      ON d.partition_id = p_partition_id
-     AND d.txn_hash = hashtextextended(a.txn, 0)
-    WHERE NOT a.ok;
-
-    -- Walk the delivered range. Offset rules mirror queen.seg_pop_segments_v1:
-    -- next_off applies only to the exact cursor segment; batch_end_off caps
-    -- the exact batch-end segment.
-    v_pos_seq := v_c.next_seq;
-    v_pos_off := v_c.next_off;
-    FOR v_seg IN
-        SELECT s.seq, s.msg_count FROM queen.seg_segments s
-        WHERE s.partition_id = p_partition_id
-          AND s.seq >= v_c.next_seq AND s.seq <= v_c.batch_end_seq
-        ORDER BY s.seq
-    LOOP
-        v_start := CASE WHEN v_seg.seq = v_c.next_seq THEN v_c.next_off ELSE 0 END;
-        v_end   := CASE WHEN v_seg.seq = v_c.batch_end_seq
-                        THEN LEAST(v_c.batch_end_off, v_seg.msg_count)
-                        ELSE v_seg.msg_count END;
-        v_i := v_start;
-        WHILE v_i < v_end LOOP
-            IF v_acked ? (v_seg.seq::text || ':' || v_i::text) THEN
-                v_adv := v_adv + 1;
-                IF v_i + 1 >= v_seg.msg_count THEN
-                    v_pos_seq := v_seg.seq + 1; v_pos_off := 0;  -- normalized
-                ELSE
-                    v_pos_seq := v_seg.seq; v_pos_off := v_i + 1;
-                END IF;
-            ELSE
-                v_stop := TRUE;
-                EXIT;
-            END IF;
-            v_i := v_i + 1;
-        END LOOP;
-        EXIT WHEN v_stop;
-    END LOOP;
-
-    -- --------------------------------------------------------- retry / DLQ
-    -- The walk stopped at the head un-acked frame (v_pos_seq, v_pos_off). If
-    -- that frame was EXPLICITLY nacked, charge the delivery attempt against the
-    -- queue's retry_limit and decide: redeliver (budget remains), DROP (budget
-    -- exhausted, no DLQ), or hand the poison to the broker for dead-lettering
-    -- (budget exhausted, DLQ enabled). A frame that is only un-acked (not in the
-    -- request) falls through to the plain lease-release redelivery below.
-    IF v_stop AND (v_nacked ? (v_pos_seq::text || ':' || v_pos_off::text)) THEN
+    -- ------------------------------------------------------------------ (4)
+    -- Explicit 'failed' nack with a live lease: charge the per-(partition,group)
+    -- retry counter and decide redeliver / DLQ / drop.
+    IF v_nack_kind = 'failed' AND v_has_lease THEN
+        -- RUSTFIX item 2: DLQ defaults to TRUE (unconfigured queue always DLQs).
         SELECT COALESCE(qq.retry_limit, 3),
-               COALESCE(qq.dead_letter_queue, false)
-               OR COALESCE(qq.dlq_after_max_retries, false)
+               COALESCE(qq.dead_letter_queue, true)
+               OR COALESCE(qq.dlq_after_max_retries, true)
         INTO v_retry_limit, v_dlq_enabled
         FROM queen.seg_partitions sp
         JOIN queen.seg_queues sq ON sq.id = sp.queue_id
         LEFT JOIN queen.queues qq ON qq.name = sq.name
         WHERE sp.id = p_partition_id;
         v_retry_limit := COALESCE(v_retry_limit, 3);
-        v_dlq_enabled := COALESCE(v_dlq_enabled, false);
+        v_dlq_enabled := COALESCE(v_dlq_enabled, true);
+        v_retry_ct := COALESCE(v_c.batch_retry_count, 0);
 
-        -- Attempt count for THIS poison head: the accumulated per-(partition,
-        -- group) count when the poison is the tracked batch-start frame
-        -- (attempt_seq/off set by seg_pop_segments_v1 on delivery), else a fresh
-        -- 1 (this frame is failing at this position for the first time).
-        v_attempt := CASE
-            WHEN (v_c.attempt_seq, v_c.attempt_off)
-                 IS NOT DISTINCT FROM (v_pos_seq, v_pos_off)
-            THEN COALESCE(v_c.attempt_count, 1) ELSE 1 END;
-
-        -- v1 parity: redeliver while attempt_count <= retry_limit; the delivery
-        -- that EXCEEDS retry_limit is dead-lettered/dropped (retry_limit=0 =>
-        -- the very first nack, attempt 1 > 0, is exhausted).
-        IF v_attempt > v_retry_limit THEN
-            IF v_dlq_enabled THEN
-                -- Hand off to the broker: it alone can decompress the frame,
-                -- snapshot its payload, and call queen.seg_dlq_head_v1 (which
-                -- files the DLQ row, advances the cursor past this one frame,
-                -- resets attempt state, and releases the lease). Leave the lease
-                -- held so that follow-up call validates the worker.
-                RETURN jsonb_build_object(
-                    'ok', true, 'dlq', true,
-                    'partitionId', p_partition_id, 'group', p_group,
-                    'worker', p_worker, 'seq', v_pos_seq, 'frameIdx', v_pos_off,
-                    'acked', v_adv);
-            ELSE
-                -- No DLQ: DROP the poison frame — advance the cursor past it so
-                -- it is not redelivered (normalized on the segment boundary),
-                -- reset attempt state, release the lease.
-                SELECT msg_count INTO v_poison_count FROM queen.seg_segments
-                WHERE partition_id = p_partition_id AND seq = v_pos_seq;
-                IF v_poison_count IS NOT NULL AND v_pos_off + 1 >= v_poison_count THEN
-                    v_pos_seq := v_pos_seq + 1; v_pos_off := 0;
-                ELSE
-                    v_pos_off := v_pos_off + 1;
-                END IF;
-                v_adv := v_adv + 1;   -- the dropped frame is disposed of
-                UPDATE queen.partition_consumers SET
-                    next_seq = v_pos_seq, next_off = v_pos_off,
-                    worker_id = NULL, lease_expires_at = NULL,
-                    batch_end_seq = NULL, batch_end_off = NULL,
-                    attempt_seq = NULL, attempt_off = NULL, attempt_count = 0,
-                    total_consumed = total_consumed + v_adv
-                WHERE partition_id = p_partition_id AND consumer_group = p_group;
-                RETURN jsonb_build_object('ok', true, 'dropped', true,
-                    'acked', v_adv, 'seq', v_pos_seq, 'off', v_pos_off);
-            END IF;
-        END IF;
-        -- else: budget remains -> fall through to the plain release below;
-        -- cursor stays at the poison and the attempt columns are preserved, so
-        -- the next delivery from this position increments attempt_count.
-    END IF;
-
-    IF NOT v_stop THEN
-        -- Every delivered position acked ok (or none survive retention):
-        -- advance straight to batch_end, normalized like ack_segments_v1.
-        SELECT msg_count INTO v_end_count FROM queen.seg_segments
-        WHERE partition_id = p_partition_id AND seq = v_c.batch_end_seq;
-        IF v_end_count IS NOT NULL AND v_c.batch_end_off >= v_end_count THEN
-            v_pos_seq := v_c.batch_end_seq + 1; v_pos_off := 0;
+        IF v_retry_ct < v_retry_limit THEN
+            -- Budget remains: release the lease so the poison (and everything after
+            -- the completed prefix) redelivers; charge the counter ONCE. Cursor
+            -- stays at the completed prefix.
+            UPDATE queen.partition_consumers SET
+                next_seq = v_new_seq, next_off = v_new_off,
+                worker_id = NULL, lease_expires_at = NULL,
+                batch_end_seq = NULL, batch_end_off = NULL,
+                batch_positions = NULL,
+                batch_retry_count = v_retry_ct + 1,
+                total_consumed = total_consumed + v_delta
+            WHERE partition_id = p_partition_id AND consumer_group = p_group;
+            RETURN jsonb_build_object('ok', true, 'acked', v_delta,
+                                      'seq', v_new_seq, 'off', v_new_off);
+        ELSIF v_dlq_enabled THEN
+            -- Budget exhausted + DLQ: hand the poison to the broker (keep the lease).
+            UPDATE queen.partition_consumers SET
+                next_seq = v_new_seq, next_off = v_new_off,
+                batch_positions = NULL,
+                total_consumed = total_consumed + v_delta
+            WHERE partition_id = p_partition_id AND consumer_group = p_group;
+            RETURN jsonb_build_object(
+                'ok', true, 'dlq', true,
+                'partitionId', p_partition_id, 'group', p_group, 'worker', p_worker,
+                'seq', v_poison_seq, 'frameIdx', v_poison_off, 'acked', v_delta);
         ELSE
-            v_pos_seq := v_c.batch_end_seq; v_pos_off := v_c.batch_end_off;
+            -- Budget exhausted, no DLQ: DROP the poison — advance the cursor past it
+            -- (normalized), reset the counter, release the lease.
+            SELECT msg_count INTO v_pc FROM queen.seg_segments
+            WHERE partition_id = p_partition_id AND seq = v_poison_seq;
+            IF v_pc IS NOT NULL AND v_poison_off + 1 >= v_pc THEN
+                v_new_seq := v_poison_seq + 1; v_new_off := 0;
+            ELSE
+                v_new_seq := v_poison_seq; v_new_off := v_poison_off + 1;
+            END IF;
+            UPDATE queen.partition_consumers SET
+                next_seq = v_new_seq, next_off = v_new_off,
+                worker_id = NULL, lease_expires_at = NULL,
+                batch_end_seq = NULL, batch_end_off = NULL,
+                batch_positions = NULL,
+                batch_retry_count = 0,
+                total_consumed = total_consumed + v_delta + 1
+            WHERE partition_id = p_partition_id AND consumer_group = p_group;
+            RETURN jsonb_build_object('ok', true, 'dropped', true,
+                'acked', v_delta, 'seq', v_new_seq, 'off', v_new_off);
         END IF;
     END IF;
 
-    UPDATE queen.partition_consumers SET
-        next_seq = v_pos_seq,
-        next_off = v_pos_off,
-        worker_id = NULL, lease_expires_at = NULL,
-        batch_end_seq = NULL, batch_end_off = NULL,
-        total_consumed = total_consumed + v_adv
-    WHERE partition_id = p_partition_id AND consumer_group = p_group;
+    -- ------------------------------------------------------------------ (5)
+    -- Explicit 'retry' (no failure): release the lease, cursor at the completed
+    -- prefix, counter UNTOUCHED — budget-free retry (003_ack.sql:193-203).
+    IF v_has_retry AND v_has_lease THEN
+        UPDATE queen.partition_consumers SET
+            next_seq = v_new_seq, next_off = v_new_off,
+            worker_id = NULL, lease_expires_at = NULL,
+            batch_end_seq = NULL, batch_end_off = NULL,
+            batch_positions = NULL,
+            total_consumed = total_consumed + v_delta
+        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+        RETURN jsonb_build_object('ok', true, 'acked', v_delta,
+                                  'seq', v_new_seq, 'off', v_new_off);
+    END IF;
 
-    RETURN jsonb_build_object('ok', true, 'acked', v_adv,
-                              'seq', v_pos_seq, 'off', v_pos_off);
+    -- ------------------------------------------------------------------ (6)
+    -- All completed (or a lease-less ack). Advance the cursor. If it reached the
+    -- leased batch end, release the lease AND reset the retry counter (batch
+    -- complete); otherwise keep the lease so the rest of the batch can be acked.
+    IF v_has_lease THEN
+        SELECT msg_count INTO v_pc FROM queen.seg_segments
+        WHERE partition_id = p_partition_id AND seq = v_c.batch_end_seq;
+        IF v_pc IS NOT NULL AND v_c.batch_end_off >= v_pc THEN
+            v_bend_seq := v_c.batch_end_seq + 1; v_bend_off := 0;
+        ELSE
+            v_bend_seq := v_c.batch_end_seq; v_bend_off := v_c.batch_end_off;
+        END IF;
+        v_reached_end := (v_new_seq, v_new_off) >= (v_bend_seq, v_bend_off);
+    END IF;
+
+    IF v_has_lease AND v_reached_end THEN
+        UPDATE queen.partition_consumers SET
+            next_seq = v_new_seq, next_off = v_new_off,
+            worker_id = NULL, lease_expires_at = NULL,
+            batch_end_seq = NULL, batch_end_off = NULL,
+            batch_positions = NULL,
+            attempt_seq = NULL, attempt_off = NULL, attempt_count = 0,
+            batch_retry_count = 0,
+            total_consumed = total_consumed + v_delta
+        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+    ELSE
+        UPDATE queen.partition_consumers SET
+            next_seq = v_new_seq, next_off = v_new_off,
+            total_consumed = total_consumed + v_delta
+        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+    END IF;
+
+    RETURN jsonb_build_object('ok', true, 'acked', v_delta,
+                              'seq', v_new_seq, 'off', v_new_off);
 END;
 $$;
 

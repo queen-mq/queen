@@ -30,7 +30,11 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     pub stmt_timeout: Duration,
     pub pop_default_timeout_ms: u64,
-    pub pop_wait_poll_ms: u64,
+    // RUSTFIX item 19: exponential-backoff knobs for the long-poll re-query interval.
+    pub pop_wait_initial_interval_ms: u64,
+    pub pop_wait_backoff_threshold: u32,
+    pub pop_wait_backoff_multiplier: f64,
+    pub pop_wait_max_interval_ms: u64,
     // zstd level for broker-packed segments on the transaction push path (the
     // fusion path carries its own copy).
     pub zstd_level: i32,
@@ -38,10 +42,16 @@ pub struct AppState {
     // first use. No invalidation for now (queue-config invalidation is a later
     // slice); a reconfigure of leaseTime is not reflected until restart.
     pub lease_cache: Mutex<HashMap<String, i32>>,
+    // RUSTFIX item 8: at-rest payload encryption. `encryption` holds the key (or is
+    // disabled); `enc_cache` memoizes each queue's encryption_enabled flag (same
+    // lazy-fetch + UDP-invalidation lifecycle as lease_cache).
+    pub encryption: Arc<crate::encryption::Encryption>,
+    pub enc_cache: Mutex<HashMap<String, bool>>,
     // System maintenance flags, mirrored to queen.system_state (the SAME
-    // {"enabled":..} rows the C++ SharedStateManager uses). `maintenance` is
-    // reported only — the segments broker has no file buffer, so it does not
-    // divert pushes and bufferedMessages is always 0. `pop_maintenance` pauses
+    // {"enabled":..} rows the C++ SharedStateManager uses). When `maintenance` is
+    // on, pushes are diverted to the file buffer (RUSTFIX item 17) and reported
+    // status:"buffered", exactly like C++ — nothing reaches queen.seg_segments
+    // until maintenance is disabled and the buffer drains. `pop_maintenance` pauses
     // pops (handle_pop / handle_pop_partition early-return {messages:[],paused:true}).
     pub maintenance: AtomicBool,
     pub pop_maintenance: AtomicBool,
@@ -50,9 +60,15 @@ pub struct AppState {
     // / maintenance / queue-config changes out to peer replicas. With no peers it is
     // a pure in-process waker — no packets, behaviour otherwise unchanged.
     pub notifier: Arc<crate::notify::Notifier>,
+    // Disk spool for DB-outage durability (RUSTFIX item 1) and maintenance-mode
+    // buffering (item 17). Failed pushes and maintenance-diverted pushes are
+    // appended here and replayed to the DB by the background drain loop.
+    pub file_buffer: Arc<crate::file_buffer::FileBufferManager>,
 }
 
-const DEFAULT_LEASE_SECONDS: i32 = 300;
+// RUSTFIX item 18: fallback lease when a queue has no seg_queues row / DB is
+// unreachable — the "60" floor of COALESCE(request, queue.lease_time, 60).
+const DEFAULT_LEASE_SECONDS: i32 = 60;
 
 impl AppState {
     // Resolve the queue's lease time, caching the lookup. Falls back to
@@ -73,6 +89,41 @@ impl AppState {
         self.lease_cache.lock().unwrap().insert(queue.to_string(), v);
         v
     }
+
+    // RUSTFIX item 8: resolve the queue's encryption_enabled flag, caching the
+    // lookup (same shape as lease_time_for). False when the queue has no
+    // queen.queues row yet or the DB is unreachable. Guard dropped before .await.
+    pub(crate) async fn encryption_enabled_for(&self, queue: &str) -> bool {
+        if let Some(v) = self.enc_cache.lock().unwrap().get(queue).copied() {
+            return v;
+        }
+        let v = match self.pool.get().await {
+            Ok(c) => db::queue_encryption_enabled(&c, queue)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        self.enc_cache.lock().unwrap().insert(queue.to_string(), v);
+        v
+    }
+
+    // RUSTFIX item 19: the next long-poll re-query interval for a given consecutive
+    // empty-wait count (C++ _set_next_backoff_time, lib/queen.hpp:2281-2296). Below
+    // the threshold it is the initial interval; above it grows
+    // initial*count*multiplier, clamped to max. A push-wake resets `count` to 0.
+    pub(crate) fn pop_backoff_interval(&self, backoff_count: u32) -> Duration {
+        let ms = if backoff_count > self.pop_wait_backoff_threshold {
+            let v = (self.pop_wait_initial_interval_ms as f64)
+                * (backoff_count as f64)
+                * self.pop_wait_backoff_multiplier;
+            (v as u64).min(self.pop_wait_max_interval_ms)
+        } else {
+            self.pop_wait_initial_interval_ms
+        };
+        Duration::from_millis(ms.max(1))
+    }
 }
 
 pub(crate) fn json(status: StatusCode, body: String) -> Response {
@@ -91,6 +142,29 @@ pub(crate) fn json_err(prefix: &str, e: impl std::fmt::Display) -> String {
     json_escape_into(&mut out, &e.to_string());
     out.push_str("\"}");
     out
+}
+
+// RUSTFIX item 25: map an SP result carrying an embedded {"error":...} to the
+// right HTTP status (parity with every C++ submit_sp_call): 404 when the error
+// text contains "not found" (case-insensitive), else 500; otherwise 200. The
+// original body bytes are preserved so the client-visible error text is unchanged.
+pub(crate) fn sp_result_to_response(txt: String) -> Response {
+    match serde_json::from_str::<serde_json::Value>(&txt) {
+        Ok(v) => {
+            if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+                let msg = err.as_str().unwrap_or("").to_ascii_lowercase();
+                let code = if msg.contains("not found") {
+                    StatusCode::NOT_FOUND
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                };
+                return json(code, txt);
+            }
+            json(StatusCode::OK, txt)
+        }
+        // Not JSON (SPs always return JSON; a parse failure means a raw body already).
+        Err(_) => json(StatusCode::OK, txt),
+    }
 }
 
 
@@ -124,6 +198,20 @@ pub(crate) fn status_is_ok(s: Option<&str>) -> bool {
     match s {
         Some(v) => matches!(v, "completed" | "success" | "acked" | "ok"),
         None => true,
+    }
+}
+
+// RUSTFIX item 10: normalize a client ack status to the four v0.16.0 outcomes the
+// segment ack SP branches on. `retry` and `dlq` must survive to SQL (the old code
+// collapsed everything to a bool). Absent / unrecognized => completed / failed
+// respectively (matching status_is_ok's completed set; anything else is a nack).
+pub(crate) fn normalize_ack_status(s: Option<&str>) -> &'static str {
+    match s {
+        None => "completed",
+        Some("completed") | Some("success") | Some("acked") | Some("ok") => "completed",
+        Some("retry") => "retry",
+        Some("dlq") => "dlq",
+        Some(_) => "failed",
     }
 }
 
