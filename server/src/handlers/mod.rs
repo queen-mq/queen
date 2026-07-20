@@ -64,7 +64,15 @@ pub struct AppState {
     // buffering (item 17). Failed pushes and maintenance-diverted pushes are
     // appended here and replayed to the DB by the background drain loop.
     pub file_buffer: Arc<crate::file_buffer::FileBufferManager>,
+    // Partition-id -> queue-name memo, used to attribute the partitionId-keyed
+    // ack wire to a queue for the per-queue ack metrics. Filled by keyed pops
+    // (queue known at zero cost) and lazily by a DB lookup on an ack-first miss.
+    // The mapping is immutable (a partition never changes queue), so entries
+    // never go stale; the map is only size-capped.
+    pub partition_queue: Mutex<HashMap<String, String>>,
 }
+
+const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
 
 // RUSTFIX item 18: fallback lease when a queue has no seg_queues row / DB is
 // unreachable — the "60" floor of COALESCE(request, queue.lease_time, 60).
@@ -107,6 +115,38 @@ impl AppState {
         };
         self.enc_cache.lock().unwrap().insert(queue.to_string(), v);
         v
+    }
+
+    // Record a partition -> queue mapping learned from a pop response.
+    pub(crate) fn remember_partition_queue(&self, partition_id: &str, queue: &str) {
+        if partition_id.is_empty() || queue.is_empty() {
+            return;
+        }
+        let mut m = self.partition_queue.lock().unwrap();
+        if m.len() >= PARTITION_QUEUE_CACHE_CAP {
+            m.clear(); // rare, cheap reset; repopulates from live traffic
+        }
+        m.entry(partition_id.to_string()).or_insert_with(|| queue.to_string());
+    }
+
+    // Resolve a partition id to its queue name for ack attribution: memo first,
+    // then one DB lookup on miss. None when the partition is unknown (deleted /
+    // rows-engine id) — the ack still succeeds, it just goes unattributed.
+    pub(crate) async fn queue_for_partition(
+        &self,
+        client: &deadpool_postgres::Client,
+        partition_id: &str,
+    ) -> Option<String> {
+        if let Some(q) = self.partition_queue.lock().unwrap().get(partition_id).cloned() {
+            return Some(q);
+        }
+        match db::partition_queue_name(client, partition_id).await {
+            Ok(Some(q)) => {
+                self.remember_partition_queue(partition_id, &q);
+                Some(q)
+            }
+            _ => None,
+        }
     }
 
     // RUSTFIX item 19: the next long-poll re-query interval for a given consecutive

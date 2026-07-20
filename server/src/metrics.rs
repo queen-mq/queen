@@ -87,6 +87,15 @@ pub struct Metrics {
     pub db_errors: AtomicU64,
     /// RUSTFIX item 24: per-queue throughput, flushed into queen.queue_lag_metrics.
     pub per_queue: PerQueue,
+    /// Parked long-poll gauge (dashboard Parked row / queue_parked_replica).
+    pub parked: Parked,
+    /// Scheduler ("event loop") lag probe accumulators: a 100 ms ticker measures
+    /// sleep overshoot — the tokio analogue of Node's event-loop lag that the
+    /// dashboard's "Event loop" row reads from worker_metrics.avg/max_event_loop_lag_ms.
+    /// sum/count are cumulative (collector diffs); max is swap(0)-drained per flush.
+    pub evl_sum_us: AtomicU64,
+    pub evl_count: AtomicU64,
+    pub evl_max_us: AtomicU64,
     start: Instant,
 }
 
@@ -112,11 +121,10 @@ pub struct Counters {
 /// (queen_queue_*_per_minute) and the /analytics/queue-lag|queue-ops views show
 /// real data instead of zeros.
 ///
-/// Only fields the broker can attribute to a queue CHEAPLY on the hot path are
-/// tracked here — the queue name is in scope at push and at keyed pop. Deliberately
-/// NOT tracked (left 0 in the bucket): ack_* (the ack wire is keyed by partitionId,
-/// with no queue), pop lag (needs per-message age), wildcard-discover pops (span
-/// queues), and parked_count (a gauge). See syscollect.rs for the flush.
+/// ack_* is attributed via the AppState partition->queue cache (the ack wire is
+/// keyed by partitionId only); pop lag is the per-message age at delivery,
+/// computed from each segment's createdAt in the pop renderer. Wildcard-discover
+/// pops (which span queues) remain unattributed.
 #[derive(Default)]
 pub struct QueueCounters {
     pub push_requests: AtomicU64,
@@ -124,9 +132,19 @@ pub struct QueueCounters {
     pub pop_count: AtomicU64,
     pub pop_empty: AtomicU64,
     pub transactions: AtomicU64,
+    pub ack_requests: AtomicU64,
+    pub ack_success: AtomicU64,
+    pub ack_failed: AtomicU64,
+    // Pop lag: cumulative sum of message ages (ms) + message count for a
+    // weighted average, and an interval max the collector swap(0)-drains.
+    pub lag_sum_ms: AtomicU64,
+    pub lag_count: AtomicU64,
+    pub lag_max_ms: AtomicU64,
 }
 
 /// A per-queue snapshot the collector diffs into per-minute deltas.
+/// (`lag_max_ms` is NOT here — a max isn't diffable; the collector drains it
+/// separately via take_lag_max.)
 #[derive(Clone, Copy, Default)]
 pub struct QueueSnap {
     pub push_requests: u64,
@@ -134,6 +152,11 @@ pub struct QueueSnap {
     pub pop_count: u64,
     pub pop_empty: u64,
     pub transactions: u64,
+    pub ack_requests: u64,
+    pub ack_success: u64,
+    pub ack_failed: u64,
+    pub lag_sum_ms: u64,
+    pub lag_count: u64,
 }
 
 #[derive(Default)]
@@ -164,6 +187,23 @@ impl PerQueue {
     pub fn add_transaction(&self, queue: &str) {
         self.counters(queue).transactions.fetch_add(1, Ordering::Relaxed);
     }
+    /// Ack outcome counts for one ack call touching `queue` (ok/failed item counts).
+    pub fn add_ack(&self, queue: &str, ok: u64, failed: u64) {
+        let c = self.counters(queue);
+        c.ack_requests.fetch_add(1, Ordering::Relaxed);
+        c.ack_success.fetch_add(ok, Ordering::Relaxed);
+        c.ack_failed.fetch_add(failed, Ordering::Relaxed);
+    }
+    /// Pop lag observed on one delivery: `sum_ms` across `n` messages + batch max.
+    pub fn add_pop_lag(&self, queue: &str, sum_ms: u64, max_ms: u64, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let c = self.counters(queue);
+        c.lag_sum_ms.fetch_add(sum_ms, Ordering::Relaxed);
+        c.lag_count.fetch_add(n, Ordering::Relaxed);
+        c.lag_max_ms.fetch_max(max_ms, Ordering::Relaxed);
+    }
     /// Snapshot every queue's cumulative counters (Relaxed loads — the collector
     /// diffs successive snapshots, so it only needs eventual monotone values).
     pub fn snapshot(&self) -> HashMap<String, QueueSnap> {
@@ -180,9 +220,119 @@ impl PerQueue {
                         pop_count: c.pop_count.load(Ordering::Relaxed),
                         pop_empty: c.pop_empty.load(Ordering::Relaxed),
                         transactions: c.transactions.load(Ordering::Relaxed),
+                        ack_requests: c.ack_requests.load(Ordering::Relaxed),
+                        ack_success: c.ack_success.load(Ordering::Relaxed),
+                        ack_failed: c.ack_failed.load(Ordering::Relaxed),
+                        lag_sum_ms: c.lag_sum_ms.load(Ordering::Relaxed),
+                        lag_count: c.lag_count.load(Ordering::Relaxed),
                     },
                 )
             })
+            .collect()
+    }
+    /// Drain each queue's interval-max pop lag (swap to 0 so the next interval
+    /// starts fresh). Called once per collector flush.
+    pub fn take_lag_max(&self) -> HashMap<String, u64> {
+        self.map
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|(k, c)| {
+                let v = c.lag_max_ms.swap(0, Ordering::Relaxed);
+                if v > 0 {
+                    Some((k.clone(), v))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parked long-poll gauge (dashboard "Parked" row + queen_queue_parked_consumers)
+// ---------------------------------------------------------------------------
+//
+// C++ sampled the currently-parked long-poll POPs per queue at ~1Hz and flushed
+// the minute-average into queue_lag_metrics.parked_count (a gauge: SUM across
+// workers, AVG across buckets — see 014_worker_metrics.sql:104-135). Here:
+// each parked pop holds a ParkedGuard for the duration of its wait; a 1 Hz
+// sampler (spawn_samplers) accumulates the instantaneous per-queue gauge, and
+// syscollect drains sum/samples once per flush to compute the same average.
+#[derive(Default)]
+pub struct Parked {
+    current: RwLock<HashMap<String, Arc<std::sync::atomic::AtomicI64>>>,
+    acc: Mutex<HashMap<String, (u64, u32)>>, // queue -> (sum of samples, n samples)
+}
+
+pub struct ParkedGuard {
+    gauge: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl Drop for ParkedGuard {
+    fn drop(&mut self) {
+        self.gauge.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Parked {
+    /// Mark one pop as parked on `queue` until the returned guard drops.
+    pub fn enter(&self, queue: &str) -> ParkedGuard {
+        let gauge = self.gauge(queue);
+        gauge.fetch_add(1, Ordering::Relaxed);
+        ParkedGuard { gauge }
+    }
+
+    // Early-return style is load-bearing: in edition 2021 an `if let/else`
+    // scrutinee temporary (the read guard) lives across the else branch, so
+    // taking the write lock there self-deadlocks the thread. Returning out of
+    // the `if let` drops the read guard before the write() below.
+    fn gauge(&self, queue: &str) -> Arc<std::sync::atomic::AtomicI64> {
+        if let Some(g) = self.current.read().unwrap().get(queue) {
+            return g.clone();
+        }
+        self.current
+            .write()
+            .unwrap()
+            .entry(queue.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// One 1 Hz sample: fold every queue's live gauge into the accumulator.
+    /// Zero samples are skipped — the flush divides by elapsed seconds, so an
+    /// absent queue naturally averages toward 0.
+    fn sample(&self) {
+        let live: Vec<(String, i64)> = self
+            .current
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, g)| (k.clone(), g.load(Ordering::Relaxed)))
+            .collect();
+        let mut acc = self.acc.lock().unwrap();
+        for (q, v) in live {
+            if v > 0 {
+                let e = acc.entry(q).or_insert((0, 0));
+                e.0 += v as u64;
+                e.1 += 1;
+            }
+        }
+    }
+
+    /// Drain the per-queue accumulated (sum, samples) pairs for this interval.
+    pub fn drain(&self) -> HashMap<String, (u64, u32)> {
+        std::mem::take(&mut *self.acc.lock().unwrap())
+    }
+
+    /// Live instantaneous total (for the in-process Prometheus block).
+    pub fn live(&self) -> Vec<(String, i64)> {
+        self.current
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, g)| (k.clone(), g.load(Ordering::Relaxed).max(0)))
+            .filter(|(_, v)| *v > 0)
             .collect()
     }
 }
@@ -199,6 +349,10 @@ impl Metrics {
             dlq_moved: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
             per_queue: PerQueue::default(),
+            parked: Parked::default(),
+            evl_sum_us: AtomicU64::new(0),
+            evl_count: AtomicU64::new(0),
+            evl_max_us: AtomicU64::new(0),
             start: Instant::now(),
         }
     }
@@ -270,6 +424,32 @@ impl Metrics {
             ht(&mut s, name, help, "counter");
             g(&mut s, name, "", ctr.load(Ordering::Relaxed).to_string());
         }
+        // Live parked long-polls per queue (instantaneous; the DB-backed
+        // queen_queue_parked_consumers in status.rs is the minute-average).
+        ht(&mut s, "queen_parked_long_polls", "Currently parked long-poll pops on this process", "gauge");
+        for (q, v) in self.parked.live() {
+            let mut lbl = String::from("{queue=\"");
+            for c in q.chars() {
+                match c {
+                    '\\' => lbl.push_str("\\\\"),
+                    '"' => lbl.push_str("\\\""),
+                    '\n' => lbl.push_str("\\n"),
+                    _ => lbl.push(c),
+                }
+            }
+            lbl.push_str("\"}");
+            g(&mut s, "queen_parked_long_polls", &lbl, v.to_string());
+        }
+        // Scheduler lag (the worker_metrics event-loop columns carry the
+        // per-minute view; this is the live cumulative probe state).
+        let evl_n = self.evl_count.load(Ordering::Relaxed);
+        let evl_avg_ms = if evl_n > 0 {
+            self.evl_sum_us.load(Ordering::Relaxed) as f64 / evl_n as f64 / 1000.0
+        } else {
+            0.0
+        };
+        ht(&mut s, "queen_event_loop_lag_avg_milliseconds", "Mean scheduler (event-loop) lag since start", "gauge");
+        g(&mut s, "queen_event_loop_lag_avg_milliseconds", "", format!("{:.3}", evl_avg_ms));
         ht(&mut s, "queen_batches_fired_total", "Fusion batches flushed", "counter");
         ht(&mut s, "queen_batch_items_fired_total", "Items flushed across fusion batches", "counter");
         ht(&mut s, "queen_fusion_items_per_batch", "Mean items per fusion batch", "gauge");
@@ -286,6 +466,39 @@ impl Metrics {
         }
         s
     }
+}
+
+/// Spawn the background samplers feeding the dashboard-facing gauges:
+///  * a 100 ms scheduler-lag probe (sleep-overshoot => "event loop" lag), and
+///  * a 1 Hz parked-long-poll sampler (minute-averaged into queue_lag_metrics
+///    by syscollect).
+/// Both are tiny (two atomic ops / a map scan per tick).
+pub fn spawn_samplers(metrics: Arc<Metrics>) {
+    // Scheduler-lag probe. sleep(100ms) resolving late == the runtime (or the
+    // host) was too busy to run a ready timer — the same signal Node's
+    // monitorEventLoopDelay gives, which the C++ server reported per worker.
+    {
+        let m = metrics.clone();
+        tokio::spawn(async move {
+            const TICK: Duration = Duration::from_millis(100);
+            loop {
+                let t0 = Instant::now();
+                tokio::time::sleep(TICK).await;
+                let lag = t0.elapsed().saturating_sub(TICK);
+                let us = lag.as_micros() as u64;
+                m.evl_sum_us.fetch_add(us, Ordering::Relaxed);
+                m.evl_count.fetch_add(1, Ordering::Relaxed);
+                m.evl_max_us.fetch_max(us, Ordering::Relaxed);
+            }
+        });
+    }
+    // Parked 1 Hz sampler.
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            metrics.parked.sample();
+        }
+    });
 }
 
 fn resident_bytes() -> u64 {

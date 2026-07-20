@@ -23,7 +23,7 @@ import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
 // Test configuration
 
 export const TEST_CONFIG_SINGLE = {
-    baseUrls: ['http://localhost:6632'],
+    baseUrls: [process.env.QUEEN_SERVER_URL || 'http://localhost:6632'],
     loadBalancingStrategy: 'affinity',
     dbConfig: {
       host: process.env.PG_HOST || 'localhost',
@@ -89,6 +89,8 @@ function printResults() {
 }
 
 export const cleanupTestData = async () => {
+    // All the LIKE patterns test queues use.
+    const patterns = ['test-%', 'edge-%', 'pattern-%', 'workflow-%'];
     try {
       // Drop streaming queries first (CASCADE removes their state rows).
       // Safe even when queen_streams isn't installed yet — we swallow the
@@ -99,11 +101,38 @@ export const cleanupTestData = async () => {
         // queen_streams schema not installed — ignore.
       }
 
-      await dbPool.query(`DELETE FROM queen.queues WHERE name LIKE 'test-%' OR name LIKE 'edge-%' OR name LIKE 'pattern-%' OR name LIKE 'workflow-%'`);
+      // SEGMENTS ENGINE cleanup. Deleting queen.queues (below) only cascades
+      // through the rows-engine tables; the segments engine keeps its own
+      // queue/partition rows plus several tables with NO foreign keys
+      // (seg_dedup, partition_consumers, seg_dlq, consumer_watermarks,
+      // consumer_groups_metadata). Without purging these, every suite run
+      // inherits the previous run's messages, cursors, and dedup entries —
+      // fixed-transactionId tests report 'duplicate' on their FIRST push,
+      // and delayed/window/buffer tests pop stale messages. seg_partitions
+      // and seg_segments cascade from seg_queues; the rest is explicit.
+      try {
+        await dbPool.query(`
+          WITH parts AS (
+            SELECT sp.id FROM queen.seg_partitions sp
+            JOIN queen.seg_queues sq ON sq.id = sp.queue_id
+            WHERE sq.name LIKE ANY($1::text[])
+          ),
+          d1 AS (DELETE FROM queen.seg_dedup          WHERE partition_id IN (SELECT id FROM parts)),
+          d2 AS (DELETE FROM queen.partition_consumers WHERE partition_id IN (SELECT id FROM parts)),
+          d3 AS (DELETE FROM queen.seg_dlq            WHERE partition_id IN (SELECT id FROM parts))
+          SELECT 1`, [patterns]);
+        await dbPool.query(`DELETE FROM queen.consumer_watermarks WHERE queue_name LIKE ANY($1::text[])`, [patterns]);
+        await dbPool.query(`DELETE FROM queen.consumer_groups_metadata WHERE queue_name LIKE ANY($1::text[])`, [patterns]);
+        await dbPool.query(`DELETE FROM queen.seg_queues WHERE name LIKE ANY($1::text[])`, [patterns]);
+      } catch (e) {
+        // Segments schema not installed (rows-only server) — ignore.
+      }
 
-      log('Test data cleaned up');
+      await dbPool.query(`DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])`, [patterns]);
+
+      log(true, 'Test data cleaned up (rows + segments)');
     } catch (error) {
-      log(`Cleanup error: ${error.message}`, 'warning');
+      log(false, `Cleanup error: ${error.message}`);
     }
   };
 
@@ -226,10 +255,9 @@ async function main() {
     
     //await cleanupTestData()
     await closeDb()
-
-    // Exit explicitly: the client's keep-alive sockets hold the event loop
-    // open indefinitely (Queen.close() doesn't destroy agents), and an
-    // explicit exit code makes the suite usable from CI.
+    // Queen.close() destroys the per-client HTTP agent, releasing keep-alive
+    // sockets so the loop can drain; the explicit exit code is for CI.
+    await client.close()
     const failedCount = testResults.filter(x => !x.success).length
     process.exit(failedCount > 0 ? 1 : 0)
 }

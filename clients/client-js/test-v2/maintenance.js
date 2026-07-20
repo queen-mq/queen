@@ -6,8 +6,8 @@ export async function test_maintenance_mode(client = null) {
   
   const queen = client
   
-  // Use port 6632 (default Queen port) for API calls
-  const API_URL = 'http://localhost:6632';
+  // Default Queen port; override with QUEEN_SERVER_URL (same as run.js).
+  const API_URL = process.env.QUEEN_SERVER_URL || 'http://localhost:6632';
   const QUEUE_NAME = 'test-maintenance-queue';
   const MESSAGES_PER_SECOND = 10;
   const MAINTENANCE_DURATION_SECONDS = 10;

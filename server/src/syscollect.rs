@@ -46,6 +46,9 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
     // Baseline cumulative CPU: the CPU gauge is the DELTA over each interval,
     // expressed as (percent × 100) — the units System.vue divides by 100 to plot %.
     let (mut last_user_us, mut last_sys_us, _) = rusage();
+    // Baseline for the scheduler-lag ("event loop") probe accumulators.
+    let mut last_evl_sum: u64 = 0;
+    let mut last_evl_cnt: u64 = 0;
     // Stable pid for the (hostname, worker_id, pid, bucket) uniqueness key.
     let pid: i32 = std::process::id() as i32;
 
@@ -64,6 +67,38 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         };
 
         // --- worker throughput (per-minute deltas) ------------------------
+        // Scheduler ("event loop") lag over this interval: diff the cumulative
+        // sum/count from the 100ms probe (metrics::spawn_samplers), swap-drain the
+        // interval max. Feeds worker_metrics.avg/max_event_loop_lag_ms — the
+        // dashboard's "Event loop" row.
+        let evl_sum = metrics.evl_sum_us.load(std::sync::atomic::Ordering::Relaxed);
+        let evl_cnt = metrics.evl_count.load(std::sync::atomic::Ordering::Relaxed);
+        let d_evl_sum = evl_sum.saturating_sub(last_evl_sum);
+        let d_evl_cnt = evl_cnt.saturating_sub(last_evl_cnt);
+        last_evl_sum = evl_sum;
+        last_evl_cnt = evl_cnt;
+        let avg_evl_ms: i32 = if d_evl_cnt > 0 {
+            ((d_evl_sum / d_evl_cnt) as f64 / 1000.0).round() as i32
+        } else {
+            0
+        };
+        let max_evl_ms: i32 =
+            (metrics.evl_max_us.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000) as i32;
+
+        // Worker-level pop lag for this interval: fold the per-queue lag deltas
+        // (worker_metrics.avg/max_lag_ms + lag_count feed the System view's
+        // worker-health and the dashboard Time-lag aggregation).
+        let now_pq = metrics.per_queue.snapshot();
+        let lag_max = metrics.per_queue.take_lag_max();
+        let (mut w_lag_sum, mut w_lag_n) = (0u64, 0u64);
+        for (queue, cur) in &now_pq {
+            let prev = last_pq.get(queue).copied().unwrap_or_default();
+            w_lag_sum += cur.lag_sum_ms.saturating_sub(prev.lag_sum_ms);
+            w_lag_n += cur.lag_count.saturating_sub(prev.lag_count);
+        }
+        let w_lag_avg: i64 = if w_lag_n > 0 { (w_lag_sum / w_lag_n) as i64 } else { 0 };
+        let w_lag_max: i64 = lag_max.values().copied().max().unwrap_or(0) as i64;
+
         if let Err(e) = db::insert_worker_metrics(
             &client,
             &hostname,
@@ -80,6 +115,11 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             d.transactions as i64,
             d.dlq_moved as i64,
             d.db_errors as i64,
+            avg_evl_ms,
+            max_evl_ms,
+            w_lag_avg,
+            w_lag_max,
+            w_lag_n as i64,
         )
         .await
         {
@@ -115,10 +155,11 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
 
         // --- per-queue throughput -> queue_lag_metrics --------------------
         // RUSTFIX item 24: diff each queue's cumulative counters into a per-minute
-        // bucket (UPSERT-accumulate across replicas). Only queues with activity this
-        // interval are written. Lag/ack/parked columns keep their table defaults —
-        // the segments broker does not track them per queue.
-        let now_pq = metrics.per_queue.snapshot();
+        // bucket (UPSERT-accumulate across replicas). Lag merges weighted, parked
+        // is this replica's minute-average of the 1 Hz parked samples. Only queues
+        // with any activity (including parked-only idle consumers) are written.
+        // (now_pq / lag_max were captured above for the worker-level fold.)
+        let mut parked = drain_parked_avg(&metrics, interval);
         for (queue, cur) in &now_pq {
             let prev = last_pq.get(queue).copied().unwrap_or_default();
             let d = QueueSnap {
@@ -127,15 +168,24 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 pop_count: cur.pop_count.saturating_sub(prev.pop_count),
                 pop_empty: cur.pop_empty.saturating_sub(prev.pop_empty),
                 transactions: cur.transactions.saturating_sub(prev.transactions),
+                ack_requests: cur.ack_requests.saturating_sub(prev.ack_requests),
+                ack_success: cur.ack_success.saturating_sub(prev.ack_success),
+                ack_failed: cur.ack_failed.saturating_sub(prev.ack_failed),
+                lag_sum_ms: cur.lag_sum_ms.saturating_sub(prev.lag_sum_ms),
+                lag_count: cur.lag_count.saturating_sub(prev.lag_count),
             };
+            let parked_avg = parked.remove(queue.as_str()).unwrap_or(0);
             if d.push_requests == 0
                 && d.push_messages == 0
                 && d.pop_count == 0
                 && d.pop_empty == 0
                 && d.transactions == 0
+                && d.ack_requests == 0
+                && parked_avg == 0
             {
                 continue;
             }
+            let avg_lag = if d.lag_count > 0 { (d.lag_sum_ms / d.lag_count) as i64 } else { 0 };
             if let Err(e) = db::upsert_queue_lag_metrics(
                 &client,
                 queue,
@@ -144,14 +194,64 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 d.push_messages as i64,
                 d.pop_empty as i64,
                 d.transactions as i64,
+                d.ack_requests as i64,
+                d.ack_success as i64,
+                d.ack_failed as i64,
+                avg_lag,
+                lag_max.get(queue.as_str()).copied().unwrap_or(0) as i64,
+                d.lag_count as i64,
+                parked_avg,
             )
             .await
             {
                 eprintln!("syscollect: queue_lag_metrics upsert error ({queue}): {e}");
             }
+            if parked_avg > 0 {
+                if let Err(e) =
+                    db::upsert_queue_parked_replica(&client, queue, &hostname, 0, parked_avg).await
+                {
+                    eprintln!("syscollect: queue_parked_replica upsert error ({queue}): {e}");
+                }
+            }
+        }
+        // Queues that ONLY had parked long-polls this interval (no per_queue
+        // counter entry yet — e.g. consumers idling on a never-pushed queue).
+        for (queue, parked_avg) in parked {
+            if parked_avg == 0 {
+                continue;
+            }
+            if let Err(e) = db::upsert_queue_lag_metrics(
+                &client, &queue, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, parked_avg,
+            )
+            .await
+            {
+                eprintln!("syscollect: queue_lag_metrics upsert error ({queue}): {e}");
+            }
+            if let Err(e) =
+                db::upsert_queue_parked_replica(&client, &queue, &hostname, 0, parked_avg).await
+            {
+                eprintln!("syscollect: queue_parked_replica upsert error ({queue}): {e}");
+            }
         }
         last_pq = now_pq;
     }
+}
+
+// Minute-average of the 1 Hz parked samples for this interval: sum of samples
+// divided by the interval's seconds (a queue parked for the whole minute with
+// one consumer averages 1; parked 30s averages 0 after integer rounding-down
+// only when < half — round to nearest instead).
+fn drain_parked_avg(
+    metrics: &Metrics,
+    interval: Duration,
+) -> std::collections::HashMap<String, i32> {
+    let secs = interval.as_secs().max(1);
+    metrics
+        .parked
+        .drain()
+        .into_iter()
+        .map(|(q, (sum, _n))| (q, ((sum as f64 / secs as f64).round()) as i32))
+        .collect()
 }
 
 fn delta(prev: &Counters, now: &Counters) -> Counters {

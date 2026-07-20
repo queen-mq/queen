@@ -504,7 +504,7 @@ pub async fn handle_pop(
         // echoes back in ack/renew. autoAck pops advance the cursor server-side and
         // carry no lease, so they report an empty leaseId.
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count) = build_pop_response(&txt, &queue, &group, lease_id, &st.encryption);
+        let (body, count, meta) = build_pop_response(&txt, &queue, &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
             // Park on the queue's wake gate; a push wakes us at once.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -513,6 +513,9 @@ pub async fn handle_pop(
             let waitd = deadline
                 .saturating_duration_since(Instant::now())
                 .min(interval);
+            // Parked gauge: held for exactly the awaited window (dashboard
+            // Parked row / queue_parked_replica, sampled at 1 Hz).
+            let _parked = st.metrics.parked.enter(&queue);
             if st.notifier.wait_queue(&queue, waitd).await {
                 backoff_count = 0;
             }
@@ -523,6 +526,12 @@ pub async fn handle_pop(
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
         if count > 0 {
             st.metrics.per_queue.add_pop(&queue, count as u64);
+            st.metrics
+                .per_queue
+                .add_pop_lag(&queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+            for pid in &meta.partition_ids {
+                st.remember_partition_queue(pid, &queue);
+            }
         } else {
             st.metrics.per_queue.add_pop_empty(&queue);
         }
@@ -530,6 +539,7 @@ pub async fn handle_pop(
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
         if auto_ack && count > 0 {
+            st.metrics.per_queue.add_ack(&queue, count as u64, 0);
             st.metrics.ack.record_request(count);
             st.metrics
                 .ack_success
@@ -597,7 +607,7 @@ pub async fn handle_pop_partition(
         };
 
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count) = build_pop_specific_response(&txt, &queue, &partition, &group, lease_id, &st.encryption);
+        let (body, count, meta) = build_pop_specific_response(&txt, &queue, &partition, &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
             // A push to any partition of this queue wakes us.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -606,6 +616,8 @@ pub async fn handle_pop_partition(
             let waitd = deadline
                 .saturating_duration_since(Instant::now())
                 .min(interval);
+            // Parked gauge: held for exactly the awaited window.
+            let _parked = st.metrics.parked.enter(&queue);
             if st.notifier.wait_queue(&queue, waitd).await {
                 backoff_count = 0;
             }
@@ -616,6 +628,12 @@ pub async fn handle_pop_partition(
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
         if count > 0 {
             st.metrics.per_queue.add_pop(&queue, count as u64);
+            st.metrics
+                .per_queue
+                .add_pop_lag(&queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+            for pid in &meta.partition_ids {
+                st.remember_partition_queue(pid, &queue);
+            }
         } else {
             st.metrics.per_queue.add_pop_empty(&queue);
         }
@@ -623,6 +641,7 @@ pub async fn handle_pop_partition(
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
         if auto_ack && count > 0 {
+            st.metrics.per_queue.add_ack(&queue, count as u64, 0);
             st.metrics.ack.record_request(count);
             st.metrics
                 .ack_success
@@ -731,8 +750,10 @@ pub async fn handle_pop_discover(
         let lease_id: &str = if auto_ack { "" } else { &worker };
         // Discovery spans queues, so there is no single top-level queue name; the
         // per-message JSON carries partitionId/leaseId/consumerGroup (all the ack
-        // needs), and the top-level "queue" field is left empty.
-        let (body, count) = build_pop_response(&txt, "", &group, lease_id, &st.encryption);
+        // needs), and the top-level "queue" field is left empty. Per-queue lag /
+        // cache attribution is skipped here for the same reason (acks on these
+        // partitions attribute via the DB-lookup fallback).
+        let (body, count, _meta) = build_pop_response(&txt, "", &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
             // Discovery pops span queues -> shared gate, woken by any push.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -761,11 +782,23 @@ pub async fn handle_pop_discover(
     }
 }
 
-fn pop_error_body(e: &str) -> (String, usize) {
+// Delivery-side observations gathered while rendering a pop response: the
+// per-message age at delivery ("pop lag" — dashboard Time-lag / Prometheus
+// queen_queue_pop_lag_milliseconds) and the partitionIds delivered (which seed
+// the AppState partition->queue memo used for ack attribution).
+#[derive(Default)]
+pub(crate) struct PopMeta {
+    pub lag_sum_ms: u64,
+    pub lag_max_ms: u64,
+    pub lag_n: u64,
+    pub partition_ids: Vec<String>,
+}
+
+fn pop_error_body(e: &str) -> (String, usize, PopMeta) {
     let mut out = String::from("{\"success\":false,\"error\":\"");
     json_escape_into(&mut out, e);
     out.push_str("\",\"messages\":[]}");
-    (out, 0)
+    (out, 0, PopMeta::default())
 }
 
 // Wildcard pop response: SP result is {"partitions":[{partition,partitionId,segments}]}.
@@ -775,7 +808,7 @@ fn build_pop_response(
     group: &str,
     lease_id: &str,
     enc: &crate::encryption::Encryption,
-) -> (String, usize) {
+) -> (String, usize, PopMeta) {
     let parsed: PopResult = match serde_json::from_str(txt) {
         Ok(p) => p,
         Err(_) => return pop_error_body("parse"),
@@ -798,7 +831,7 @@ fn build_pop_specific_response(
     group: &str,
     lease_id: &str,
     enc: &crate::encryption::Encryption,
-) -> (String, usize) {
+) -> (String, usize, PopMeta) {
     let parsed: PopSpecificResult = match serde_json::from_str(txt) {
         Ok(p) => p,
         Err(_) => return pop_error_body("parse"),
@@ -822,19 +855,28 @@ fn render_pop_parts(
     group: &str,
     lease_id: &str,
     enc: &crate::encryption::Encryption,
-) -> (String, usize) {
+) -> (String, usize, PopMeta) {
     let mut msgs = String::new();
     let mut count = 0usize;
     let mut first_name = String::new();
     let mut first_id = String::new();
     let mut first_set = false;
+    let mut meta = PopMeta::default();
+    let now_ms = crate::util::now_epoch_ms();
     for part in parts {
         if !first_set {
             first_name = part.partition.clone();
             first_id = part.partition_id.clone();
             first_set = true;
         }
+        if !part.partition_id.is_empty() {
+            meta.partition_ids.push(part.partition_id.clone());
+        }
         for seg in &part.segments {
+            // Pop lag: message age at delivery. All frames of a segment share the
+            // segment's createdAt (one push call), so parse it once per segment.
+            let seg_age_ms: Option<u64> = crate::util::parse_iso_ms(&seg.created_at)
+                .map(|c| (now_ms - c).max(0) as u64);
             // Postgres encode(...,'base64') wraps lines at 76 cols — strip
             // whitespace before decoding (STANDARD rejects non-alphabet bytes).
             let b64: Vec<u8> = seg
@@ -905,6 +947,11 @@ fn render_pop_parts(
                 json_escape_into(&mut msgs, group);
                 msgs.push_str("\"}");
                 count += 1;
+                if let Some(age) = seg_age_ms {
+                    meta.lag_sum_ms += age;
+                    meta.lag_max_ms = meta.lag_max_ms.max(age);
+                    meta.lag_n += 1;
+                }
             }
         }
     }
@@ -924,7 +971,7 @@ fn render_pop_parts(
     out.push_str("],\"partitionsClaimed\":");
     out.push_str(&parts.len().to_string());
     out.push('}');
-    (out, count)
+    (out, count, meta)
 }
 
 // ------------------------------------------------------------------- ack
@@ -1048,6 +1095,10 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
     };
 
     for ((pid, worker), idxs) in groups {
+        // Per-queue ack attribution (queue_lag_metrics ack_* columns): the ack wire
+        // is partitionId-keyed, so resolve the queue via the pop-fed memo (DB lookup
+        // on a miss). None (unknown/deleted partition) leaves the ack unattributed.
+        let queue_name = st.queue_for_partition(&client, &pid).await;
         // RUSTFIX item 10: send [{txn, status}] so seg_ack_by_txn_v1 distinguishes
         // completed / failed / retry / dlq (the SP also still accepts a legacy
         // "ok" boolean for the transaction path).
@@ -1127,14 +1178,28 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                 }
             }
         }
+
+        if let Some(q) = queue_name {
+            // ack_success = accepted COMPLETIONS; everything else (nacks —
+            // failed/retry/dlq — and rejected acks) counts as ack_failed,
+            // matching the worker_metrics column comments ("Failed acks
+            // (retries, errors)").
+            let ok = idxs
+                .iter()
+                .filter(|&&i| success[i] && acks[i].status == "completed")
+                .count() as u64;
+            let failed = idxs.len() as u64 - ok;
+            st.metrics.per_queue.add_ack(&q, ok, failed);
+        }
     }
 
     // Metrics: one ACK API call carrying N acknowledged items, split by outcome.
     // Mirrors the C++ WorkerMetrics ack counters that syscollect.rs flushes into
-    // queen.worker_metrics (ack_request/message/success/failed + dlq).
+    // queen.worker_metrics (ack_request/message/success/failed + dlq). Same
+    // completion-vs-nack split as the per-queue counters above.
     {
         use std::sync::atomic::Ordering::Relaxed;
-        let ok = success.iter().filter(|&&s| s).count() as u64;
+        let ok = (0..n).filter(|&i| success[i] && acks[i].status == "completed").count() as u64;
         let dlq = dlq_flags.iter().filter(|&&d| d).count() as u64;
         st.metrics.ack.record_request(n);
         st.metrics.ack_success.fetch_add(ok, Relaxed);

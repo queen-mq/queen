@@ -217,7 +217,7 @@ DECLARE
 BEGIN
     INSERT INTO queen.seg_dlq
         (partition_id, consumer_group, seq, frame_idx,
-         message_id, transaction_id, payload, error, failed_at)
+         message_id, transaction_id, payload, error, failed_at, retry_count)
     SELECT d.partition_id,
            d.consumer_group,
            0,                       -- seq: no segment position in the rows engine
@@ -226,7 +226,8 @@ BEGIN
            m.transaction_id,        -- NULL if the source message was retention-deleted
            m.payload,               -- payload snapshot; NULL if already deleted
            d.error_message,
-           d.failed_at
+           d.failed_at,
+           COALESCE(d.retry_count, 0)
     FROM queen.dead_letter_queue d
     LEFT JOIN queen.messages m ON m.id = d.message_id;
 

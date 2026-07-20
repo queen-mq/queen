@@ -132,6 +132,10 @@ async fn main() {
     // (+ summary trigger) and host/process gauges -> queen.system_metrics. Feeds the
     // System view and the dashboard throughput / lifetime totals.
     syscollect::spawn(pool.clone(), metrics.clone(), &cfg);
+    // Scheduler-lag ("event loop") probe + 1 Hz parked-long-poll sampler — the
+    // sources for worker_metrics.avg/max_event_loop_lag_ms and
+    // queue_lag_metrics.parked_count (dashboard Event-loop and Parked rows).
+    metrics::spawn_samplers(metrics.clone());
 
     let fusion = fusion::Fusion::new(
         cfg.fusion_shards,
@@ -197,6 +201,7 @@ async fn main() {
         pop_maintenance: std::sync::atomic::AtomicBool::new(init_pop_maint),
         notifier: notifier.clone(),
         file_buffer: file_buffer.clone(),
+        partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // RUSTFIX item 16: periodic reconcile — re-read the maintenance flags from

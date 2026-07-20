@@ -405,7 +405,7 @@ pub async fn seg_message_detail(
             JOIN queen.seg_queues sq ON sq.id = sp.queue_id \
             LEFT JOIN queen.queues qq ON qq.name = sq.name \
             WHERE sp.id = $1::text::uuid ), \
-        d AS ( SELECT error FROM queen.seg_dlq \
+        d AS ( SELECT error, COALESCE(retry_count, 0) AS retry_count FROM queen.seg_dlq \
                WHERE partition_id = $1::text::uuid AND seq = $2::bigint AND frame_idx = $3::int LIMIT 1 ), \
         g AS ( \
             SELECT COALESCE(jsonb_agg(jsonb_build_object( \
@@ -429,6 +429,7 @@ pub async fn seg_message_detail(
                 'retryDelay', q.retry_delay, 'ttl', q.ttl, 'priority', q.priority), \
             'errorMessage', (SELECT error FROM d), \
             'isDlq', EXISTS(SELECT 1 FROM d), \
+            'dlqRetryCount', COALESCE((SELECT retry_count FROM d), 0), \
             'consumerGroups', (SELECT arr FROM g), \
             'leaseExpiresAt', (SELECT qmode_lease FROM g), \
             'busAllPassed', COALESCE((SELECT bus_all_passed FROM g), false), \
@@ -739,6 +740,7 @@ pub async fn seg_refresh_all_stats(
 // guards a same-minute double flush (rare; drops one delta rather than firing the
 // summary trigger twice).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_worker_metrics(
     client: &deadpool_postgres::Client,
     hostname: &str,
@@ -755,14 +757,20 @@ pub async fn insert_worker_metrics(
     transactions: i64,
     dlq: i64,
     db_errors: i64,
+    avg_event_loop_lag_ms: i32,
+    max_event_loop_lag_ms: i32,
+    avg_lag_ms: i64,
+    max_lag_ms: i64,
+    lag_count: i64,
 ) -> Result<(), tokio_postgres::Error> {
     let stmt = "INSERT INTO queen.worker_metrics (\
             hostname, worker_id, pid, bucket_time, \
             jobs_done, push_request_count, pop_request_count, ack_request_count, transaction_count, \
             push_message_count, pop_message_count, ack_message_count, ack_success_count, ack_failed_count, \
-            db_error_count, dlq_count) \
+            db_error_count, dlq_count, avg_event_loop_lag_ms, max_event_loop_lag_ms, \
+            avg_lag_ms, max_lag_ms, lag_count) \
         VALUES ($1,$2,$3, date_trunc('second', NOW()), \
-            $4,$4,$6,$8,$12, $5,$7,$9,$10,$11, $14,$13) \
+            $4,$4,$6,$8,$12, $5,$7,$9,$10,$11, $14,$13, $15,$16, $17,$18,$19) \
         ON CONFLICT (hostname, worker_id, pid, bucket_time) DO NOTHING";
     client
         .execute(
@@ -782,6 +790,11 @@ pub async fn insert_worker_metrics(
                 &transactions,   // $12
                 &dlq,            // $13
                 &db_errors,      // $14
+                &avg_event_loop_lag_ms, // $15
+                &max_event_loop_lag_ms, // $16
+                &avg_lag_ms,     // $17
+                &max_lag_ms,     // $18
+                &lag_count,      // $19
             ],
         )
         .await?;
@@ -826,9 +839,10 @@ pub async fn insert_system_metrics(
 // RUSTFIX item 24: accumulate one replica's per-minute per-queue throughput into
 // queen.queue_lag_metrics (UNIQUE(bucket_time, queue_name)). ON CONFLICT SUMs, so
 // several replicas writing the same minute bucket aggregate cluster-wide (matching
-// the "aggregated across all workers" semantics the readers expect). The lag / ack
-// / parked columns keep their table defaults — the segments broker does not track
-// them per queue (the ack wire is partitionId-keyed and lag needs per-message age).
+// the "aggregated across all workers" semantics the readers expect).
+// Lag merges as a weighted average (SUM(avg*count)/SUM(count), the same identity
+// the read-side SPs use across buckets), max as GREATEST, parked additively (a
+// gauge SUMmed across workers — 014_worker_metrics.sql:104-111).
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_queue_lag_metrics(
     client: &deadpool_postgres::Client,
@@ -838,17 +852,37 @@ pub async fn upsert_queue_lag_metrics(
     push_message_count: i64,
     pop_empty_count: i64,
     transaction_count: i64,
+    ack_request_count: i64,
+    ack_success_count: i64,
+    ack_failed_count: i64,
+    avg_lag_ms: i64,
+    max_lag_ms: i64,
+    lag_count: i64,
+    parked_count: i32,
 ) -> Result<(), tokio_postgres::Error> {
     let stmt = "INSERT INTO queen.queue_lag_metrics \
         (bucket_time, queue_name, pop_count, push_request_count, push_message_count, \
-         pop_empty_count, transaction_count) \
-        VALUES (date_trunc('minute', NOW()), $1, $2, $3, $4, $5, $6) \
+         pop_empty_count, transaction_count, ack_request_count, ack_success_count, \
+         ack_failed_count, avg_lag_ms, max_lag_ms, lag_count, parked_count) \
+        VALUES (date_trunc('minute', NOW()), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
         ON CONFLICT (bucket_time, queue_name) DO UPDATE SET \
             pop_count = queen.queue_lag_metrics.pop_count + EXCLUDED.pop_count, \
             push_request_count = queen.queue_lag_metrics.push_request_count + EXCLUDED.push_request_count, \
             push_message_count = queen.queue_lag_metrics.push_message_count + EXCLUDED.push_message_count, \
             pop_empty_count = queen.queue_lag_metrics.pop_empty_count + EXCLUDED.pop_empty_count, \
-            transaction_count = queen.queue_lag_metrics.transaction_count + EXCLUDED.transaction_count";
+            transaction_count = queen.queue_lag_metrics.transaction_count + EXCLUDED.transaction_count, \
+            ack_request_count = queen.queue_lag_metrics.ack_request_count + EXCLUDED.ack_request_count, \
+            ack_success_count = queen.queue_lag_metrics.ack_success_count + EXCLUDED.ack_success_count, \
+            ack_failed_count = queen.queue_lag_metrics.ack_failed_count + EXCLUDED.ack_failed_count, \
+            avg_lag_ms = CASE \
+                WHEN queen.queue_lag_metrics.lag_count + EXCLUDED.lag_count > 0 \
+                THEN (queen.queue_lag_metrics.avg_lag_ms * queen.queue_lag_metrics.lag_count \
+                      + EXCLUDED.avg_lag_ms * EXCLUDED.lag_count) \
+                     / (queen.queue_lag_metrics.lag_count + EXCLUDED.lag_count) \
+                ELSE 0 END, \
+            max_lag_ms = GREATEST(queen.queue_lag_metrics.max_lag_ms, EXCLUDED.max_lag_ms), \
+            lag_count = queen.queue_lag_metrics.lag_count + EXCLUDED.lag_count, \
+            parked_count = COALESCE(queen.queue_lag_metrics.parked_count, 0) + EXCLUDED.parked_count";
     client
         .execute(
             stmt,
@@ -859,10 +893,50 @@ pub async fn upsert_queue_lag_metrics(
                 &push_message_count,
                 &pop_empty_count,
                 &transaction_count,
+                &ack_request_count,
+                &ack_success_count,
+                &ack_failed_count,
+                &avg_lag_ms,
+                &max_lag_ms,
+                &lag_count,
+                &parked_count,
             ],
         )
         .await?;
     Ok(())
+}
+
+// Per-replica parked-count breakdown (queen.queue_parked_replica): each worker
+// writes its own minute-averaged gauge; the System view charts the per-replica
+// series while queue_lag_metrics.parked_count stays the cluster aggregate.
+pub async fn upsert_queue_parked_replica(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    hostname: &str,
+    worker_id: i32,
+    parked_count: i32,
+) -> Result<(), tokio_postgres::Error> {
+    let stmt = "INSERT INTO queen.queue_parked_replica \
+        (bucket_time, queue_name, hostname, worker_id, parked_count) \
+        VALUES (date_trunc('minute', NOW()), $1, $2, $3, $4) \
+        ON CONFLICT (bucket_time, queue_name, hostname, worker_id) DO UPDATE SET \
+            parked_count = EXCLUDED.parked_count";
+    client
+        .execute(stmt, &[&queue, &hostname, &worker_id, &parked_count])
+        .await?;
+    Ok(())
+}
+
+// Partition-id -> queue-name lookup backing the AppState ack-attribution memo.
+pub async fn partition_queue_name(
+    client: &deadpool_postgres::Client,
+    partition_id: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let stmt = "SELECT sq.name FROM queen.seg_partitions sp \
+                JOIN queen.seg_queues sq ON sq.id = sp.queue_id \
+                WHERE sp.id = $1::text::uuid";
+    let rows = client.query(stmt, &[&partition_id]).await?;
+    Ok(rows.first().map(|r| r.get(0)))
 }
 
 // Trim worker/lag/parked metrics older than the retention window (called

@@ -155,13 +155,31 @@ pub struct FileBufferManager {
 
 impl FileBufferManager {
     pub fn new(cfg: FileBufferConfig, zstd_level: i32) -> FileBufferManager {
-        let dir = PathBuf::from(&cfg.dir);
+        let mut dir = PathBuf::from(&cfg.dir);
         if let Err(e) = std::fs::create_dir_all(&dir) {
+            // The C++-parity default (/var/lib/queen/buffers) is only writable in
+            // Linux/Docker deployments. On a dev machine (macOS, non-root) the
+            // create fails — and without a fallback EVERY buffered push would be
+            // dropped and counted as failed (the "N failed buffered messages"
+            // dashboard symptom). Fall back to a per-user temp spool instead of
+            // silently disabling durability; production should still set
+            // FILE_BUFFER_DIR explicitly.
+            let fallback = std::env::temp_dir().join("queen-buffers");
             eprintln!(
-                "file_buffer: could not create spool dir {}: {} (buffering will fail)",
+                "file_buffer: could not create spool dir {}: {} — falling back to {}",
                 dir.display(),
-                e
+                e,
+                fallback.display()
             );
+            if let Err(e2) = std::fs::create_dir_all(&fallback) {
+                eprintln!(
+                    "file_buffer: fallback spool dir {} also failed: {} (buffering WILL fail)",
+                    fallback.display(),
+                    e2
+                );
+            } else {
+                dir = fallback;
+            }
         }
         // RUSTFIX item 1: quarantine dir for poison files. It sits inside the spool
         // dir but is invisible to the drain (list_buf_files / finalized_file_stats /

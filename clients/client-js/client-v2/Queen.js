@@ -555,6 +555,15 @@ export class Queen {
     }
     this.#shutdownHandlers = []
 
+    // Release the HTTP agent's keep-alive sockets — without this the Node
+    // event loop stays pinned by open sockets and the process never exits
+    // naturally after close().
+    try {
+      await this.#httpClient.destroy()
+    } catch (error) {
+      logger.warn('Queen.close', { error: error.message, phase: 'http-destroy' })
+    }
+
     logger.log('Queen.close', 'Client closed successfully')
   }
 }

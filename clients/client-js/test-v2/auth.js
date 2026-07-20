@@ -20,7 +20,7 @@
 
 import crypto from 'crypto'
 
-const SERVER_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+const SERVER_URL = process.env.QUEEN_URL || process.env.QUEEN_SERVER_URL || 'http://localhost:6632'
 const JWT_SECRET = process.env.JWT_SECRET || ''
 const JWT_ENABLED = JWT_SECRET.length > 0
 

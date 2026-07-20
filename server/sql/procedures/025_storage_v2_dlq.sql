@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS queen.seg_dlq (
 );
 CREATE INDEX IF NOT EXISTS idx_q2_dlq_partition_failed_at
     ON queen.seg_dlq (partition_id, failed_at DESC);
+-- Retries consumed when the frame was dead-lettered: a snapshot of the
+-- (partition, group) batch_retry_count taken by seg_dlq_head_v1 — the
+-- old dead_letter_queue.retry_count analogue for the wire's retryCount field
+-- (ALTER covers pre-existing databases of this branch).
+ALTER TABLE queen.seg_dlq ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
 
 -- ============================================================================
 -- pop (redefinition of 023's queen.seg_pop_segments_v1; supersedes it at boot).
@@ -419,9 +424,10 @@ BEGIN
     END IF;
 
     INSERT INTO queen.seg_dlq (partition_id, consumer_group, seq, frame_idx,
-                        message_id, transaction_id, payload, error)
+                        message_id, transaction_id, payload, error, retry_count)
     VALUES (p_partition_id, p_group, p_seq, p_frame_idx,
-            p_message_id, p_txn, p_payload, p_error)
+            p_message_id, p_txn, p_payload, p_error,
+            COALESCE(v_c.batch_retry_count, 0))
     RETURNING id INTO v_id;
 
     -- Durable per-position path: dispose the poison position within the map so

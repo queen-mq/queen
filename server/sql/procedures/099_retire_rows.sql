@@ -593,7 +593,7 @@ BEGIN
                        'partition', p2.name,
                        'consumerGroup', d2.consumer_group,
                        'errorMessage', d2.error,
-                       'retryCount', COALESCE(qq.retry_limit, 3),
+                       'retryCount', COALESCE(d2.retry_count, 0),
                        'data', d2.payload,
                        'producerSub', NULL,
                        'createdAt', to_char(d2.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -626,7 +626,11 @@ DECLARE
         'execute_transaction_v2',
         'renew_lease_v2',
         'lock_push_partition',
-        'update_partition_lookup_v1', 'reconcile_partition_lookup_v1'
+        'update_partition_lookup_v1', 'reconcile_partition_lookup_v1',
+        -- rows-based streams cycle (superseded by seg_streams_cycle_v1 in 029;
+        -- also the last remaining writer of rows-partition ids into
+        -- partition_consumers, which the FK in (5) below forbids)
+        'streams_cycle_v1'
     ];
 BEGIN
     FOR r IN
@@ -654,3 +658,35 @@ DROP TABLE IF EXISTS queen.messages_consumed CASCADE;
 -- ----------------------------------------------------------------------------
 ALTER TABLE queen.queues ALTER COLUMN storage SET DEFAULT 'segments';
 UPDATE queen.queues SET storage = 'segments' WHERE storage IS DISTINCT FROM 'segments';
+
+-- ----------------------------------------------------------------------------
+-- (5) partition_consumers is segments-only now. Every surviving writer keys it
+--     by queen.seg_partitions(id) — the rows-engine writers (pop/ack/transaction
+--     and streams_cycle_v1) were dropped in (2), so the FK the coordination fold
+--     had to remove in 023 (when the column could reference either engine's
+--     partition table) is valid again, pointing at the segments table this time.
+--     Restores the ON DELETE CASCADE the rows engine used to provide: deleting a
+--     seg queue/partition now cleans its cursors without relying on the explicit
+--     delete paths (which remain as belt-and-braces).
+--
+--     Guarded so the orphan purge + full-table FK validation run only once; the
+--     purge removes leftover rows-era cursor rows (their partition ids live in
+--     the retired queen.partitions UUID space and can never match).
+-- ----------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'partition_consumers_seg_partition_fkey'
+          AND conrelid = 'queen.partition_consumers'::regclass
+    ) THEN
+        DELETE FROM queen.partition_consumers pc
+        WHERE NOT EXISTS (
+            SELECT 1 FROM queen.seg_partitions sp WHERE sp.id = pc.partition_id
+        );
+        ALTER TABLE queen.partition_consumers
+            ADD CONSTRAINT partition_consumers_seg_partition_fkey
+            FOREIGN KEY (partition_id) REFERENCES queen.seg_partitions(id)
+            ON DELETE CASCADE;
+    END IF;
+END $$;

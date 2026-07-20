@@ -109,6 +109,10 @@ ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS partition_count    
 --   - Across time buckets we AVG (typical gauge value over the window).
 -- See get_queue_ops_v1 below.
 ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS parked_count       INTEGER DEFAULT 0;
+-- Number of messages the avg_lag_ms average covers in this bucket. Lets the
+-- cross-replica upsert merge avg_lag_ms as a weighted average (the same
+-- SUM(avg*count)/SUM(count) identity the worker_metrics readers use).
+ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS lag_count          BIGINT DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_queue_lag_bucket ON queen.queue_lag_metrics(bucket_time DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_lag_queue ON queen.queue_lag_metrics(queue_name);

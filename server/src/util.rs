@@ -1,6 +1,47 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub fn now_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+// Parse the SPs' UTC timestamp text ('YYYY-MM-DD"T"HH24:MI:SS[.fraction]"Z"')
+// to epoch milliseconds without a date-time dependency. Used to compute
+// per-message pop lag (age at delivery) from PopSeg.created_at. Returns None
+// on any shape mismatch — lag is best-effort instrumentation, never an error.
+pub fn parse_iso_ms(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<i64> { s.get(r)?.parse::<i64>().ok() };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (hh, mm, ss) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    // Fractional seconds: any number of digits after '.', truncated to ms.
+    let mut frac_ms: i64 = 0;
+    if b.len() > 19 && b[19] == b'.' {
+        let digits: String = s[20..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            let v = digits.parse::<i64>().ok()?;
+            let scale = 10_i64.pow(digits.len() as u32);
+            frac_ms = v * 1000 / scale;
+        }
+    }
+    // days_from_civil (Howard Hinnant): days since 1970-01-01 for a proleptic
+    // Gregorian date.
+    let y_adj = if m <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // Mar=0 .. Feb=11
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146097 + doe - 719468;
+    Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + frac_ms)
+}
+
 // UUIDv7 (time-ordered) as raw bytes — mirrors the C++/Go generators.
 static LAST_MS: AtomicU64 = AtomicU64::new(0);
 static SEQ: AtomicU64 = AtomicU64::new(0);

@@ -164,11 +164,11 @@ pub async fn handle_get_message(
         "task": get("task"),
         "status": status,
         "errorMessage": get("errorMessage"),
-        // The segments engine has no per-message retry counter: seg_dlq stores no
-        // retry_count, and retries are tracked per-(partition,group) on
-        // partition_consumers.batch_retry_count. Surfacing a true per-message count
-        // would need a seg_dlq schema addition populated at dead-letter time.
-        "retryCount": 0,
+        // For a dead-lettered message this is the (partition,group) retry counter
+        // snapshotted onto queen.seg_dlq.retry_count at dead-letter time (the old
+        // dead_letter_queue.retry_count analogue). Live messages report 0: the
+        // segments engine tracks retries per-(partition,group), not per-message.
+        "retryCount": detail.get("dlqRetryCount").and_then(|x| x.as_i64()).unwrap_or(0),
         "leaseExpiresAt": get("leaseExpiresAt"),
         "queueConfig": get("queueConfig"),
         "mode": serde_json::json!({
