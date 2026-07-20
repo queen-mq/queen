@@ -739,6 +739,7 @@ dependencies = [
  "bytes",
  "deadpool-postgres",
  "hmac 0.12.1",
+ "libc",
  "rand 0.8.7",
  "serde",
  "serde_json",

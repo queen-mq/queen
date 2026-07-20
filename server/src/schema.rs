@@ -60,6 +60,9 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("031_seg_consumer_groups.sql", include_str!("../sql/procedures/031_seg_consumer_groups.sql")),
     ("032_seg_push_multi.sql", include_str!("../sql/procedures/032_seg_push_multi.sql")),
     ("033_seg_pop_discover.sql", include_str!("../sql/procedures/033_seg_pop_discover.sql")),
+    // Segments-native queen.stats refresh + segments-aware get_queue_detail_v2.
+    // Loads after the originals (013/027) it complements/supersedes.
+    ("034_seg_stats_refresh.sql", include_str!("../sql/procedures/034_seg_stats_refresh.sql")),
     // Applied LAST: retire the rows engine (drop rows message store + hot-path,
     // redefine kept observability/trace functions segments-only, default to segments).
     ("099_retire_rows.sql", include_str!("../sql/procedures/099_retire_rows.sql")),

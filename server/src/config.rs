@@ -176,6 +176,12 @@ pub struct Config {
     pub fusion_hold_ms: u64,
     // background retention/eviction sweep cadence (ms)
     pub retention_interval_ms: u64,
+    // stats reconciler cadence (ms) — segments-native queen.stats refresh
+    // (server/src/stats.rs). Mirrors the C++ StatsService STATS_INTERVAL_MS.
+    pub stats_interval_ms: u64,
+    // worker/system metrics flush cadence (ms) — server/src/syscollect.rs writes
+    // one queen.worker_metrics + queen.system_metrics row per replica per window.
+    pub metrics_flush_ms: u64,
     // JWT authentication (disabled by default).
     pub auth: AuthConfig,
     // Inter-instance UDP notifications (enabled by default, but inert with no peers).
@@ -228,6 +234,8 @@ pub fn load() -> Config {
         // RetentionService cadence (C++ parity). retention.js starts the server
         // with RETENTION_INTERVAL=2000; default matches the C++ 5-minute sweep.
         retention_interval_ms: env_int("RETENTION_INTERVAL", 300000).max(1) as u64,
+        stats_interval_ms: env_int("STATS_INTERVAL_MS", 10000).max(1000) as u64,
+        metrics_flush_ms: env_int("METRICS_FLUSH_MS", 60000).max(1000) as u64,
         auth: AuthConfig::from_env(),
         sync: SyncConfig::from_env(),
     }

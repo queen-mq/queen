@@ -20,6 +20,9 @@ zstd = "0.13"
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
+# getrusage(2) for cross-platform process CPU + RSS in the metrics collector
+# (syscollect.rs). Tiny, ubiquitous, no_std-friendly FFI shim only.
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

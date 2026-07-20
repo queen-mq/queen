@@ -10,6 +10,8 @@ mod migrate;
 mod notify;
 mod retention;
 mod schema;
+mod stats;
+mod syscollect;
 mod udp;
 mod util;
 mod vegas;
@@ -80,6 +82,17 @@ async fn main() {
     // the HTTP server so the RETENTION_INTERVAL cadence is live as soon as the
     // broker accepts pushes (retention.js starts us with RETENTION_INTERVAL=2000).
     retention::spawn(pool.clone(), &cfg);
+
+    // Background stats reconciler: recomputes queen.stats from the segments tables
+    // on a cadence (the v1 reconciler reads the empty queen.messages under segments,
+    // so this segments-native path is what keeps the dashboard's stats-backed pages
+    // from reading zero). Advisory-locked -> one replica refreshes per cycle.
+    stats::spawn(pool.clone(), &cfg);
+
+    // Background metrics collector: per-minute worker throughput -> queen.worker_metrics
+    // (+ summary trigger) and host/process gauges -> queen.system_metrics. Feeds the
+    // System view and the dashboard throughput / lifetime totals.
+    syscollect::spawn(pool.clone(), metrics.clone(), &cfg);
 
     let fusion = fusion::Fusion::new(
         cfg.fusion_shards,
@@ -224,7 +237,47 @@ async fn main() {
             get(handlers::handle_message_traces),
         )
         .route("/api/v1/status", get(handlers::handle_api_status))
+        // Static `/status/analytics` + `/status/buffers` registered before the
+        // `/status/queues/:queue` param route so matchit keeps them distinct.
+        .route("/api/v1/status/analytics", get(handlers::handle_status_analytics))
+        .route("/api/v1/status/buffers", get(handlers::handle_status_buffers))
         .route("/api/v1/status/queues", get(handlers::handle_status_queues))
+        .route(
+            "/api/v1/status/queues/:queue",
+            get(handlers::handle_queue_detail),
+        )
+        // -------------------------------------------------- analytics / metrics
+        .route(
+            "/api/v1/analytics/system-metrics",
+            get(handlers::handle_system_metrics),
+        )
+        .route(
+            "/api/v1/analytics/worker-metrics",
+            get(handlers::handle_worker_metrics),
+        )
+        .route("/api/v1/analytics/queue-lag", get(handlers::handle_queue_lag))
+        .route("/api/v1/analytics/queue-ops", get(handlers::handle_queue_ops))
+        .route(
+            "/api/v1/analytics/queue-parked-replicas",
+            get(handlers::handle_queue_parked_replicas),
+        )
+        .route("/api/v1/analytics/retention", get(handlers::handle_retention))
+        .route(
+            "/api/v1/analytics/postgres-stats",
+            get(handlers::handle_postgres_stats),
+        )
+        // ------------------------------------------------------------ migration
+        .route(
+            "/api/v1/migration/test-connection",
+            post(handlers::handle_migration_test),
+        )
+        .route("/api/v1/migration/start", post(handlers::handle_migration_start))
+        .route("/api/v1/migration/status", get(handlers::handle_migration_status))
+        .route(
+            "/api/v1/migration/validate",
+            post(handlers::handle_migration_validate),
+        )
+        .route("/api/v1/migration/reset", post(handlers::handle_migration_reset))
         // ------------------------------------------------ consumer groups
         .route(
             "/api/v1/consumer-groups",

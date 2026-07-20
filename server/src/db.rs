@@ -498,6 +498,223 @@ pub async fn ping(client: &deadpool_postgres::Client) -> Result<(), tokio_postgr
     Ok(())
 }
 
+// ============================================================================
+// Analytics / metrics read wrappers (dashboard System / Analytics / QueueOps).
+// Each returns the stored-procedure JSON as raw text; the handler serves it
+// verbatim (the C++ routes did the same — no envelope). All the SPs already
+// ship in sql/procedures/{009,013,014,015,017,034}; these just dispatch them.
+// ============================================================================
+
+// get_queue_detail_v2 (segments-aware in 034) — /api/v1/status/queues/:queue.
+pub async fn get_queue_detail(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_queue_detail_v2($1))::text", &[&queue])
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_analytics_v1 — /api/v1/status/analytics (message time-series).
+pub async fn get_analytics(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_analytics_v1($1::text::jsonb))::text", &[&filters_json])
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_system_metrics_v1 — /api/v1/analytics/system-metrics (per-replica series).
+pub async fn get_system_metrics(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_system_metrics_v1($1::text::jsonb))::text", &[&filters_json])
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_worker_metrics_timeseries_v1 — /api/v1/analytics/worker-metrics.
+pub async fn get_worker_metrics_ts(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one(
+            "SELECT (queen.get_worker_metrics_timeseries_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_queue_lag_v1 — /api/v1/analytics/queue-lag. Positional (from,to,queue) args;
+// NULLs fall back to the SP defaults (last hour). Returns a BARE JSON array.
+pub async fn get_queue_lag(
+    client: &deadpool_postgres::Client,
+    from: Option<&str>,
+    to: Option<&str>,
+    queue: Option<&str>,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = "SELECT (queen.get_queue_lag_v1(\
+                COALESCE($1::text::timestamptz, NOW() - INTERVAL '1 hour'), \
+                COALESCE($2::text::timestamptz, NOW()), $3::text))::text";
+    let row = client.query_one(stmt, &[&from, &to, &queue]).await?;
+    Ok(row.get(0))
+}
+
+// get_queue_ops_v1 — /api/v1/analytics/queue-ops (per-queue push/pop/ack + parts).
+pub async fn get_queue_ops(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_queue_ops_v1($1::text::jsonb))::text", &[&filters_json])
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_queue_parked_per_replica_v1 — /api/v1/analytics/queue-parked-replicas.
+pub async fn get_queue_parked_replicas(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one(
+            "SELECT (queen.get_queue_parked_per_replica_v1($1::text::jsonb))::text",
+            &[&filters_json],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_retention_timeseries_v1 — /api/v1/analytics/retention.
+pub async fn get_retention_ts(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_retention_timeseries_v1($1::text::jsonb))::text", &[&filters_json])
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_postgres_stats_v1 — /api/v1/analytics/postgres-stats (pg_stat_* snapshot).
+pub async fn get_postgres_stats(
+    client: &deadpool_postgres::Client,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_postgres_stats_v1())::text", &[])
+        .await?;
+    Ok(row.get(0))
+}
+
+// ============================================================================
+// Background collector writes (stats.rs / syscollect.rs).
+// ============================================================================
+
+// Segments-native queen.stats refresh (034). Returns the SP summary JSON.
+pub async fn seg_refresh_all_stats(
+    client: &deadpool_postgres::Client,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.seg_refresh_all_stats_v1())::text", &[])
+        .await?;
+    Ok(row.get(0))
+}
+
+// Insert one per-minute worker_metrics row (deltas). The AFTER INSERT trigger
+// (queen.update_worker_metrics_summary) rolls these into worker_metrics_summary,
+// so the lifetime totals the dashboard reads stay correct. ON CONFLICT DO NOTHING
+// guards a same-minute double flush (rare; drops one delta rather than firing the
+// summary trigger twice).
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_worker_metrics(
+    client: &deadpool_postgres::Client,
+    hostname: &str,
+    worker_id: i32,
+    pid: i32,
+    push_requests: i64,
+    push_messages: i64,
+    pop_requests: i64,
+    pop_messages: i64,
+    ack_requests: i64,
+    ack_messages: i64,
+    ack_success: i64,
+    ack_failed: i64,
+    transactions: i64,
+    dlq: i64,
+    db_errors: i64,
+) -> Result<(), tokio_postgres::Error> {
+    let stmt = "INSERT INTO queen.worker_metrics (\
+            hostname, worker_id, pid, bucket_time, \
+            jobs_done, push_request_count, pop_request_count, ack_request_count, transaction_count, \
+            push_message_count, pop_message_count, ack_message_count, ack_success_count, ack_failed_count, \
+            db_error_count, dlq_count) \
+        VALUES ($1,$2,$3, date_trunc('second', NOW()), \
+            $4,$4,$6,$8,$12, $5,$7,$9,$10,$11, $14,$13) \
+        ON CONFLICT (hostname, worker_id, pid, bucket_time) DO NOTHING";
+    client
+        .execute(
+            stmt,
+            &[
+                &hostname,       // $1
+                &worker_id,      // $2
+                &pid,            // $3
+                &push_requests,  // $4  (also jobs_done + push_request_count)
+                &push_messages,  // $5
+                &pop_requests,   // $6
+                &pop_messages,   // $7
+                &ack_requests,   // $8
+                &ack_messages,   // $9
+                &ack_success,    // $10
+                &ack_failed,     // $11
+                &transactions,   // $12
+                &dlq,            // $13
+                &db_errors,      // $14
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+// Insert one per-window system_metrics row (host/process gauges as a JSONB blob
+// shaped exactly like the C++ AggregatedMetrics.to_json(), which
+// queen.get_system_metrics_v1 re-aggregates). ON CONFLICT keeps the latest.
+pub async fn insert_system_metrics(
+    client: &deadpool_postgres::Client,
+    hostname: &str,
+    port: i32,
+    worker_id: &str,
+    sample_count: i32,
+    metrics_json: &str,
+) -> Result<(), tokio_postgres::Error> {
+    let stmt = "INSERT INTO queen.system_metrics (timestamp, hostname, port, worker_id, sample_count, metrics) \
+        VALUES (date_trunc('second', NOW()), $1, $2, $3, $4, $5::text::jsonb) \
+        ON CONFLICT (timestamp, hostname, port, worker_id) DO UPDATE SET \
+            metrics = EXCLUDED.metrics, sample_count = EXCLUDED.sample_count";
+    client
+        .execute(stmt, &[&hostname, &port, &worker_id, &sample_count, &metrics_json])
+        .await?;
+    Ok(())
+}
+
+// Trim worker/lag/parked metrics older than the retention window (called
+// occasionally by the stats loop). Returns the SP JSON summary.
+pub async fn cleanup_worker_metrics(
+    client: &deadpool_postgres::Client,
+    days: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.cleanup_worker_metrics_v1($1::int))::text", &[&days])
+        .await?;
+    Ok(row.get(0))
+}
+
 // ---------------------------------------------------------------- retention
 // Segment-queue max_wait_time_seconds eviction — the one maintenance rule the
 // segments SQL has no function for. The C++ EvictionService

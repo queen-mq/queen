@@ -321,6 +321,15 @@ pub async fn handle_pop(
         }
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
+        // autoAck advances the cursor server-side (no client ack round-trip), but it
+        // IS an acknowledgement — count it so the ack throughput / completed totals
+        // on the dashboard reflect auto-acked consumption too.
+        if auto_ack && count > 0 {
+            st.metrics.ack.record_request(count);
+            st.metrics
+                .ack_success
+                .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
     }
 }
@@ -390,6 +399,15 @@ pub async fn handle_pop_partition(
         }
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
+        // autoAck advances the cursor server-side (no client ack round-trip), but it
+        // IS an acknowledgement — count it so the ack throughput / completed totals
+        // on the dashboard reflect auto-acked consumption too.
+        if auto_ack && count > 0 {
+            st.metrics.ack.record_request(count);
+            st.metrics
+                .ack_success
+                .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
     }
 }
@@ -498,6 +516,15 @@ pub async fn handle_pop_discover(
         }
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
+        // autoAck advances the cursor server-side (no client ack round-trip), but it
+        // IS an acknowledgement — count it so the ack throughput / completed totals
+        // on the dashboard reflect auto-acked consumption too.
+        if auto_ack && count > 0 {
+            st.metrics.ack.record_request(count);
+            st.metrics
+                .ack_success
+                .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
     }
 }
@@ -847,6 +874,19 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
         }
     }
 
+    // Metrics: one ACK API call carrying N acknowledged items, split by outcome.
+    // Mirrors the C++ WorkerMetrics ack counters that syscollect.rs flushes into
+    // queen.worker_metrics (ack_request/message/success/failed + dlq).
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let ok = success.iter().filter(|&&s| s).count() as u64;
+        let dlq = dlq_flags.iter().filter(|&&d| d).count() as u64;
+        st.metrics.ack.record_request(n);
+        st.metrics.ack_success.fetch_add(ok, Relaxed);
+        st.metrics.ack_failed.fetch_add((n as u64).saturating_sub(ok), Relaxed);
+        st.metrics.dlq_moved.fetch_add(dlq, Relaxed);
+    }
+
     render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags)
 }
 
@@ -1161,6 +1201,9 @@ pub async fn handle_transaction(
             return txn_fail_body(&txn_id, "transaction requires an operations array", StatusCode::BAD_REQUEST)
         }
     };
+    st.metrics
+        .transactions
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // Combined lease hints: top-level requiredLeases (where the JS/Go builders
     // put the leaseId) + any per-op ack leaseId (raw HTTP callers).

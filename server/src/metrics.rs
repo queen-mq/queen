@@ -73,7 +73,35 @@ pub struct Metrics {
     pub push: std::sync::Arc<OpMetrics>,
     pub pop: std::sync::Arc<OpMetrics>,
     pub ack: std::sync::Arc<OpMetrics>,
+    /// Transaction requests (execute_transaction). Kept alongside push/pop/ack so
+    /// the worker-metrics collector (syscollect.rs) can flush a per-minute count.
+    pub transactions: AtomicU64,
+    /// Successful / failed ack items, accumulated across all ack calls. ack.requests
+    /// counts ACK API calls; these count individual acknowledged items by outcome so
+    /// the collector can populate worker_metrics.ack_{success,failed}_count.
+    pub ack_success: AtomicU64,
+    pub ack_failed: AtomicU64,
+    /// DLQ transitions and DB errors observed on the ack path (worker_metrics parity).
+    pub dlq_moved: AtomicU64,
+    pub db_errors: AtomicU64,
     start: Instant,
+}
+
+/// A point-in-time read of the cumulative counters, taken by the collector each
+/// minute; the collector diffs successive snapshots to derive per-minute deltas.
+#[derive(Clone, Copy, Default)]
+pub struct Counters {
+    pub push_requests: u64,
+    pub push_messages: u64,
+    pub pop_requests: u64,
+    pub pop_messages: u64,
+    pub ack_requests: u64,
+    pub ack_messages: u64,
+    pub ack_success: u64,
+    pub ack_failed: u64,
+    pub transactions: u64,
+    pub dlq_moved: u64,
+    pub db_errors: u64,
 }
 
 impl Metrics {
@@ -82,7 +110,30 @@ impl Metrics {
             push: std::sync::Arc::new(OpMetrics::new("push")),
             pop: std::sync::Arc::new(OpMetrics::new("pop")),
             ack: std::sync::Arc::new(OpMetrics::new("ack")),
+            transactions: AtomicU64::new(0),
+            ack_success: AtomicU64::new(0),
+            ack_failed: AtomicU64::new(0),
+            dlq_moved: AtomicU64::new(0),
+            db_errors: AtomicU64::new(0),
             start: Instant::now(),
+        }
+    }
+
+    /// Snapshot the cumulative counters (Relaxed loads — the collector only needs
+    /// eventual, monotone values to diff, not a consistent cross-counter instant).
+    pub fn snapshot(&self) -> Counters {
+        Counters {
+            push_requests: self.push.requests.load(Ordering::Relaxed),
+            push_messages: self.push.messages.load(Ordering::Relaxed),
+            pop_requests: self.pop.requests.load(Ordering::Relaxed),
+            pop_messages: self.pop.messages.load(Ordering::Relaxed),
+            ack_requests: self.ack.requests.load(Ordering::Relaxed),
+            ack_messages: self.ack.messages.load(Ordering::Relaxed),
+            ack_success: self.ack_success.load(Ordering::Relaxed),
+            ack_failed: self.ack_failed.load(Ordering::Relaxed),
+            transactions: self.transactions.load(Ordering::Relaxed),
+            dlq_moved: self.dlq_moved.load(Ordering::Relaxed),
+            db_errors: self.db_errors.load(Ordering::Relaxed),
         }
     }
 
