@@ -1,12 +1,11 @@
 # Multi-stage Dockerfile for Queen Message Queue
 #
-# This Dockerfile builds the complete Queen Message Queue system:
-# - C++ server with full C++17 support
-# - Vue.js frontend dashboard
+# Builds the complete Queen stack:
+# - Rust broker (server/, segments-only engine; SQL schema baked in via include_str!)
+# - Vue.js frontend dashboard (served by the broker's SPA fallback)
 # - queenctl operator CLI (Go static binary)
-# - Optimized runtime image (~250MB final size)
 #
-# Build: docker build -t queen-mq .
+# Build: DOCKER_BUILDKIT=1 docker build -t queen-mq .
 # Run:   docker run -p 6632:6632 -e PG_HOST=your-db queen-mq
 #
 # Operator CLI access from inside the container:
@@ -14,18 +13,6 @@
 #   docker exec -it queen queenctl tail orders --cg debug --follow
 #
 # For full stack with PostgreSQL, use docker-compose.yml
-#
-# Build optimizations:
-# - Layered COPY: Makefile+deps cached separately from source code
-# - Precompiled headers: spdlog + json.hpp parsed once, not 30+ times
-# - ccache: compiler cache persisted across builds via BuildKit mount
-# - Auto parallelism: uses $(nproc) instead of hardcoded -j value
-# - queenctl built CGO-free against the local client-go via go.mod replace,
-#   so a single static binary lands in the final image with no runtime deps.
-#
-# Pass --build-arg QUEENCTL_VERSION=$(jq -r .version server/server.json)
-# to embed the same version string the broker reports. Defaults to "dev"
-# when omitted.
 #
 # Requires BuildKit: DOCKER_BUILDKIT=1 docker build -t queen-mq .
 #
@@ -46,39 +33,27 @@ COPY app/ ./
 # Build frontend
 RUN npm run build
 
-# Stage 2: Build C++ Server
-FROM ubuntu:24.04 AS cpp-builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-RUN sed -i -e 's|security.ubuntu.com|mirrors.edge.kernel.org|g' -e 's|archive.ubuntu.com|mirrors.edge.kernel.org|g' /etc/apt/sources.list.d/ubuntu.sources || true \
-    && apt-get update && apt-get install -y \
-    build-essential libpq-dev libssl-dev zlib1g-dev \
-    curl unzip ca-certificates cmake ccache \
-    && rm -rf /var/lib/apt/lists/*
-
-# Enable ccache - wraps g++/gcc transparently for compilation caching
-ENV PATH="/usr/lib/ccache:${PATH}"
+# Stage 2: Build the Rust broker
+FROM rust:1-bookworm AS server-builder
 
 WORKDIR /usr/build/server
 
-# Layer 1: Copy only the Makefile (changes rarely - only when dep URLs change)
-# This layer caches the dependency download so source code changes don't re-download
-COPY server/Makefile ./Makefile
+# Layer 1: manifests + build script + version file (build.rs embeds
+# server.json's version into the binary via env!("QUEEN_VERSION")).
+COPY server/Cargo.toml server/Cargo.lock server/server.json server/build.rs ./
 
-# Download and build dependencies (cached unless Makefile changes)
-RUN make deps
+# Layer 2: source + the SQL schema (embedded into the binary with include_str!).
+COPY server/src ./src
+COPY server/sql ./sql
 
-# Layer 2: Copy source code (changes frequently, only triggers recompile)
-COPY server/src/ ./src/
-COPY server/include/ ./include/
-COPY lib/ /usr/build/lib/
-
-# Build with ccache persistent cache and auto-detected parallelism
-RUN --mount=type=cache,target=/root/.ccache \
-    make -j$(nproc) build-only
+# Build. Cargo registry + target dirs are BuildKit caches; copy the binary out of
+# the (non-persisted) target cache so it lands in the image layer.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/build/server/target \
+    cargo build --release && cp target/release/queen-seg /queen-seg
 
 # Verify
-RUN test -f bin/queen-server && echo "Build successful"
+RUN test -f /queen-seg && echo "Build successful"
 
 # Stage 3: Build queenctl (Go operator CLI)
 FROM golang:1.24-alpine AS cli-builder
@@ -114,8 +89,8 @@ RUN /out/queenctl version --short
 # Stage 4: Runtime Image
 FROM ubuntu:24.04
 
-# Install runtime dependencies + PostgreSQL 18 client tools (pg_dump, pg_restore)
-# The PGDG repo is required because Ubuntu 24.04 only ships up to PG 16.
+# Runtime dependencies + PostgreSQL 18 client tools (pg_dump, pg_restore for
+# operator use). The PGDG repo is required because Ubuntu 24.04 only ships PG 16.
 RUN sed -i -e 's|security.ubuntu.com|mirrors.edge.kernel.org|g' -e 's|archive.ubuntu.com|mirrors.edge.kernel.org|g' /etc/apt/sources.list.d/ubuntu.sources || true \
     && apt-get update && apt-get install -y \
     libssl3 \
@@ -134,26 +109,23 @@ RUN sed -i -e 's|security.ubuntu.com|mirrors.edge.kernel.org|g' -e 's|archive.ub
 
 WORKDIR /app
 
-# Copy C++ server binary from builder
-COPY --from=cpp-builder /usr/build/server/bin/queen-server ./bin/queen-server
+# Rust broker binary (SQL schema is compiled in — no schema files to copy).
+COPY --from=server-builder /queen-seg ./bin/queen-seg
 
-# Copy schema and procedures for database initialization (from libqueen)
-COPY --from=cpp-builder /usr/build/lib/schema ./schema
-
-# Copy frontend build from builder
+# Frontend build — served by the broker's SPA fallback from QUEEN_STATIC_DIR.
 COPY --from=frontend-builder /app/webapp/dist ./webapp/dist
 
-# Copy the queenctl operator CLI onto $PATH. With QUEEN_SERVER pre-set
-# below, an in-container invocation needs no flags:
-#   docker exec -it queen queenctl status
+# The queenctl operator CLI onto $PATH. With QUEEN_SERVER pre-set below, an
+# in-container invocation needs no flags:  docker exec -it queen queenctl status
 COPY --from=cli-builder /out/queenctl /usr/local/bin/queenctl
 
-# In-container default for queenctl. Overridden by an explicit --server
-# flag or by setting QUEEN_SERVER at `docker run -e ...` time.
+# In-container default for queenctl. Overridden by --server or `docker run -e ...`.
 ENV QUEEN_SERVER=http://localhost:6632
+# Where the broker serves the dashboard from (matches the COPY above).
+ENV QUEEN_STATIC_DIR=/app/webapp/dist
 
-# Expose the server port
+# Expose the broker port
 EXPOSE 6632
 
-# Run the C++ server
-CMD ["./bin/queen-server"]
+# Run the Rust broker
+CMD ["./bin/queen-seg"]
