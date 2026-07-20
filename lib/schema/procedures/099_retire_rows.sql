@@ -44,6 +44,25 @@ AS $$
     );
 $$;
 
+-- delete_message_v1: the rows per-message delete (DELETE FROM queen.messages).
+-- The segments broker's db::delete_message already handles the real deletion via
+-- queen.seg_dlq separately, then folds in this function's result as
+-- (seg_deleted OR rows_deleted). queen.messages was always EMPTY for segment
+-- queues, so this always returned success=false — preserve that exactly without
+-- touching the dropped table (live segment-message deletion is a seg concern,
+-- unchanged here).
+CREATE OR REPLACE FUNCTION queen.delete_message_v1(p_partition_id UUID, p_transaction_id TEXT)
+RETURNS JSONB
+LANGUAGE sql
+AS $$
+    SELECT jsonb_build_object(
+        'success', false,
+        'partitionId', p_partition_id,
+        'transactionId', p_transaction_id,
+        'message', 'Message not found'
+    );
+$$;
+
 -- ===== record_trace_v1 =====
 CREATE OR REPLACE FUNCTION queen.record_trace_v1(p_data JSONB)
 RETURNS JSONB
