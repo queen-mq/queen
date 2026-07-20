@@ -60,6 +60,9 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("031_seg_consumer_groups.sql", include_str!("../../lib/schema/procedures/031_seg_consumer_groups.sql")),
     ("032_seg_push_multi.sql", include_str!("../../lib/schema/procedures/032_seg_push_multi.sql")),
     ("033_seg_pop_discover.sql", include_str!("../../lib/schema/procedures/033_seg_pop_discover.sql")),
+    // Applied LAST: retire the rows engine (drop rows message store + hot-path,
+    // redefine kept observability/trace functions segments-only, default to segments).
+    ("099_retire_rows.sql", include_str!("../../lib/schema/procedures/099_retire_rows.sql")),
 ];
 
 /// Apply the schema at boot. Set `QUEEN_APPLY_SCHEMA=0` to skip (e.g. when the DB

@@ -7,7 +7,7 @@
 -- is retargeted from the rows store (queen.messages / push_messages_v3 /
 -- partition_consumers) to the segments store:
 --
---   * source cursor      -> queen.seg_consumers (next_seq/next_off + lease),
+--   * source cursor      -> queen.partition_consumers (next_seq/next_off + lease),
 --                            NOT queen.partition_consumers.
 --   * sink push          -> queen.seg_push_segment_v1 INLINE (same txn), on
 --                            broker-prepacked segments (metas + base64 zstd
@@ -19,7 +19,7 @@
 --
 -- One streaming cycle (fat JS-client Runner) runs as:
 --   1. Pop a segment batch for a partition (non-autoAck -> lease on
---      queen.seg_consumers, batch_end_* recorded). The leaseId is the pop
+--      queen.partition_consumers, batch_end_* recorded). The leaseId is the pop
 --      worker id, threaded back into the response by the Rust pop handler.
 --   2. (optional) read state for the partition (streams_state_get_v1).
 --   3. user operators run client-side -> state_ops, sink frames, ack.
@@ -261,7 +261,7 @@ BEGIN
                 -- exactly-once guard: a RAISE here rolls back the inline sink
                 -- push above. (IS DISTINCT FROM for null-safety, as in
                 -- seg_ack_segments_v1.)
-                SELECT * INTO v_c FROM queen.seg_consumers c
+                SELECT * INTO v_c FROM queen.partition_consumers c
                 WHERE c.partition_id = v_partition_id
                   AND c.consumer_group = v_consumer_group
                 FOR UPDATE;
@@ -275,7 +275,7 @@ BEGIN
 
                 IF NOT v_ack_ok THEN
                     -- nack: release the lease, cursor untouched (redelivery).
-                    UPDATE queen.seg_consumers SET
+                    UPDATE queen.partition_consumers SET
                         worker_id = NULL, lease_expires_at = NULL,
                         batch_end_seq = NULL, batch_end_off = NULL
                     WHERE partition_id = v_partition_id
@@ -297,7 +297,7 @@ BEGIN
                     v_new_off := CASE WHEN v_end_count IS NOT NULL AND v_c.batch_end_off >= v_end_count
                                       THEN 0 ELSE v_c.batch_end_off END;
 
-                    UPDATE queen.seg_consumers SET
+                    UPDATE queen.partition_consumers SET
                         next_seq = v_new_seq,
                         next_off = v_new_off,
                         worker_id = NULL, lease_expires_at = NULL,
@@ -348,7 +348,7 @@ BEGIN
                         END LOOP;
                     END IF;
 
-                    UPDATE queen.seg_consumers SET
+                    UPDATE queen.partition_consumers SET
                         next_seq = v_pos_seq,
                         next_off = v_pos_off,
                         total_consumed = total_consumed + GREATEST(v_ack_count, 0)

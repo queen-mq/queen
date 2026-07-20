@@ -395,7 +395,7 @@ async fn migrate_partition_txn(
         .execute("DELETE FROM queen.seg_dedup WHERE partition_id = $1::text::uuid", &[&pid])
         .await?;
     client
-        .execute("DELETE FROM queen.seg_consumers WHERE partition_id = $1::text::uuid", &[&pid])
+        .execute("DELETE FROM queen.partition_consumers WHERE partition_id = $1::text::uuid", &[&pid])
         .await?;
 
     // ---- Read the rows-engine cursors and compute each group's consumed count. --

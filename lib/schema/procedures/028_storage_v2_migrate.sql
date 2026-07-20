@@ -118,7 +118,7 @@ BEGIN
     v_next_seq := v_consumed / v_k + 1;
     v_next_off := (v_consumed % v_k)::INTEGER;
 
-    INSERT INTO queen.seg_consumers
+    INSERT INTO queen.partition_consumers
         (partition_id, consumer_group, next_seq, next_off, total_consumed)
     VALUES (p_partition_id, p_group, v_next_seq, v_next_off, v_consumed)
     ON CONFLICT (partition_id, consumer_group) DO UPDATE SET

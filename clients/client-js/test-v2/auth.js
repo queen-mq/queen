@@ -19,7 +19,6 @@
 // unattended in either server configuration.
 
 import crypto from 'crypto'
-import { dbPool } from './run.js'
 
 const SERVER_URL = process.env.QUEEN_URL || 'http://localhost:6632'
 const JWT_SECRET = process.env.JWT_SECRET || ''
@@ -48,23 +47,6 @@ function makeToken(sub, role = 'read-write') {
         { sub, username: sub, role, iat: now, exp: now + 3600 },
         JWT_SECRET
     )
-}
-
-// ---------------------------------------------------------------------------
-// Ground-truth helper: read producer_sub directly from Postgres, bypassing
-// the API so we can tell the difference between a server that actually stores
-// the value and one that just echoes the client's input.
-// ---------------------------------------------------------------------------
-async function getStoredProducerSub(queueName, transactionId) {
-    const res = await dbPool.query(
-        `SELECT m.producer_sub
-         FROM queen.messages m
-         JOIN queen.partitions p ON p.id = m.partition_id
-         JOIN queen.queues q ON q.id = p.queue_id
-         WHERE q.name = $1 AND m.transaction_id = $2`,
-        [queueName, transactionId]
-    )
-    return res.rows.length > 0 ? res.rows[0].producer_sub : null
 }
 
 // Raw HTTP push so we can control the Authorization header and inject
@@ -144,132 +126,17 @@ async function poppedProducerSub(queue, transactionId, bearerToken) {
     return { found: false, producerSub: undefined }
 }
 
-// Direct SP call via dbPool — bypasses HTTP and JWT entirely. Used by the
-// SP-level tests below so they work regardless of whether the server has
-// auth enabled or not.
-async function callPushMessagesV3(items) {
-    await dbPool.query(
-        'SELECT queen.push_messages_v3($1::jsonb)',
-        [JSON.stringify(items)]
-    )
-}
-
-// Direct SP pop. Returns the `messages` array for the first (only) partition.
-async function callPopSpecificBatch(queueName) {
-    const reqs = [{
-        idx: 0,
-        queue_name: queueName,
-        partition_name: 'Default',
-        consumer_group: '__QUEUE_MODE__',
-        lease_seconds: 60,
-        worker_id: `test-worker-${Date.now()}`,
-        batch_size: 10,
-        sub_mode: 'all',
-        sub_from: ''
-    }]
-    const res = await dbPool.query(
-        'SELECT queen.pop_specific_batch($1::jsonb) as out',
-        [JSON.stringify(reqs)]
-    )
-    const out = res.rows[0].out
-    return out[0]?.result?.messages || []
-}
-
 // ===========================================================================
-// TEST 1: Stored procedure round-trip (SQL-only, no HTTP, no JWT)
-// ---------------------------------------------------------------------------
-// Exercises the schema + SP contract end-to-end purely via SQL. If this fails,
-// the migration or 001_push.sql / 002_pop_unified.sql is wrong. Runs in any
-// server configuration because it talks to Postgres directly.
+// (Retired) SP-level producer_sub round-trip / NULL / empty-string tests.
+// These drove the ROWS engine directly (queen.push_messages_v3 +
+// queen.pop_specific_batch + a queen.messages read) to verify the SP's
+// producer_sub NULLIF handling. The rows engine is retired (segments-only), so
+// they were removed — the segments engine stores payloads in queen.seg_segments
+// and stamps producer_sub in the broker, never in queen.messages. The shipping
+// producer_sub behavior (server-stamped, body-ignored without auth, spoof-proof
+// under JWT) is covered black-box through the HTTP push -> pop path by the tests
+// below.
 // ===========================================================================
-export async function producerSubRoundTripViaStoredProcedure(client) {
-    const q = 'test-auth-sp-roundtrip'
-    const tx = `tx-sp-${Date.now()}`
-
-    await callPushMessagesV3([{
-        queue: q,
-        partition: 'Default',
-        transactionId: tx,
-        payload: { x: 1 },
-        producerSub: 'sp-test-sub'
-    }])
-
-    const stored = await getStoredProducerSub(q, tx)
-    if (stored !== 'sp-test-sub') {
-        return { success: false, message: `Expected producer_sub='sp-test-sub' in DB, got ${JSON.stringify(stored)}` }
-    }
-
-    const popped = await callPopSpecificBatch(q)
-    const target = popped.find(m => m.transactionId === tx)
-    if (!target) {
-        return { success: false, message: `Expected to find tx ${tx} in pop result` }
-    }
-    if (target.producerSub !== 'sp-test-sub') {
-        return { success: false, message: `Pop returned producerSub=${JSON.stringify(target.producerSub)}, expected 'sp-test-sub'` }
-    }
-
-    return { success: true, message: 'producer_sub round-trips through push_messages_v3 and pop exposes it' }
-}
-
-// ===========================================================================
-// TEST 2: SP with no producerSub => producer_sub is NULL
-// ---------------------------------------------------------------------------
-// Guards against an accidental "default to empty string" regression in the SP.
-// ===========================================================================
-export async function producerSubNullWhenNotProvided(client) {
-    const q = 'test-auth-sp-null'
-    const tx = `tx-sp-null-${Date.now()}`
-
-    await callPushMessagesV3([{
-        queue: q,
-        partition: 'Default',
-        transactionId: tx,
-        payload: { x: 1 }
-        // no producerSub
-    }])
-
-    const stored = await getStoredProducerSub(q, tx)
-    if (stored !== null) {
-        return { success: false, message: `Expected NULL producer_sub, got ${JSON.stringify(stored)}` }
-    }
-
-    const popped = await callPopSpecificBatch(q)
-    const target = popped.find(m => m.transactionId === tx)
-    if (!target) {
-        return { success: false, message: `Expected to find tx ${tx} in pop result` }
-    }
-    if (target.producerSub != null) {
-        return { success: false, message: `Pop returned producerSub=${JSON.stringify(target.producerSub)}, expected null` }
-    }
-
-    return { success: true, message: 'Omitting producerSub yields NULL in DB and null in pop response' }
-}
-
-// ===========================================================================
-// TEST 3: SP treats empty string producerSub as NULL
-// ---------------------------------------------------------------------------
-// The SP uses NULLIF(..., '') to avoid storing a literal empty string when a
-// client accidentally sends "". Verifies that invariant.
-// ===========================================================================
-export async function producerSubEmptyStringStoredAsNull(client) {
-    const q = 'test-auth-sp-empty'
-    const tx = `tx-sp-empty-${Date.now()}`
-
-    await callPushMessagesV3([{
-        queue: q,
-        partition: 'Default',
-        transactionId: tx,
-        payload: { x: 1 },
-        producerSub: ''
-    }])
-
-    const stored = await getStoredProducerSub(q, tx)
-    if (stored !== null) {
-        return { success: false, message: `Expected NULL for empty-string producerSub, got ${JSON.stringify(stored)}` }
-    }
-
-    return { success: true, message: 'Empty-string producerSub is stored as NULL' }
-}
 
 // ===========================================================================
 // TEST 4: HTTP push without JWT => producer_sub is NULL

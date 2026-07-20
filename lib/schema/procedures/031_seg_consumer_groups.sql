@@ -3,7 +3,7 @@
 -- ============================================================================
 -- The coordination-layer consumer-group SPs in 008 (list/details/lagging/
 -- delete/subscription) operate on queen.partition_consumers (the rows cursor).
--- For a segments queue the cursor lives in queen.seg_consumers instead, so the
+-- For a segments queue the cursor lives in queen.partition_consumers instead, so the
 -- three MUTATING operations the management API drives — DELETE a group, and
 -- SEEK its cursor (per-queue and per-partition) — need segment-native
 -- implementations. The read paths (get_consumer_groups_v4 / get_lagging /
@@ -16,7 +16,7 @@
 
 -- ============================================================================
 -- queen.seg_delete_consumer_group_v1: drop a group's SEGMENT cursor state.
--- Removes every queen.seg_consumers row for the group (across all partitions of
+-- Removes every queen.partition_consumers row for the group (across all partitions of
 -- every queue) and its per-(queue, group) empty-scan watermarks. The rows-side
 -- coordination tables (queen.partition_consumers / consumer_groups_metadata /
 -- consumer_watermarks) are handled by the sibling queen.delete_consumer_group_v1
@@ -32,13 +32,20 @@ AS $$
 DECLARE
     v_deleted INTEGER;
 BEGIN
-    DELETE FROM queen.seg_consumers WHERE consumer_group = p_group;
+    -- Scope to SEGMENT cursors (partition_id in queen.seg_partitions): the fold
+    -- put both engines' cursors in queen.partition_consumers, so an unscoped
+    -- delete would also remove rows-engine cursors that the sibling
+    -- queen.delete_consumer_group_v1 owns. Scoping keeps the two engines'
+    -- deletes disjoint (exact pre-fold semantics) and the count order-independent.
+    DELETE FROM queen.partition_consumers pc
+    USING queen.seg_partitions sp
+    WHERE pc.partition_id = sp.id AND pc.consumer_group = p_group;
     GET DIAGNOSTICS v_deleted = ROW_COUNT;
 
     -- Drop the empty-scan watermark so a later group of the same name does not
     -- inherit a stale "queue is empty since T" floor and silently skip cold
     -- partitions (symmetric with the watermark cleanup in seg_seek_* below).
-    DELETE FROM queen.seg_consumer_watermarks WHERE consumer_group = p_group;
+    DELETE FROM queen.consumer_watermarks WHERE consumer_group = p_group;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -86,7 +93,7 @@ BEGIN
         END IF;
     END IF;
 
-    INSERT INTO queen.seg_consumers (
+    INSERT INTO queen.partition_consumers (
         partition_id, consumer_group, next_seq, next_off,
         worker_id, lease_expires_at, batch_end_seq, batch_end_off,
         attempt_seq, attempt_off, attempt_count)
@@ -136,7 +143,7 @@ BEGIN
 
     -- Clear the empty-scan watermark so a backward seek re-exposes cold
     -- partitions to the wildcard candidate filter on the next pop.
-    DELETE FROM queen.seg_consumer_watermarks
+    DELETE FROM queen.consumer_watermarks
     WHERE queue_name = p_queue AND consumer_group = p_group;
 
     RETURN jsonb_build_object(
@@ -188,7 +195,7 @@ BEGIN
     PERFORM queen.seg_seek_one_v1(v_id, v_last_seq, v_retention_seq,
                                   p_group, p_to_end, p_timestamp);
 
-    DELETE FROM queen.seg_consumer_watermarks
+    DELETE FROM queen.consumer_watermarks
     WHERE queue_name = p_queue AND consumer_group = p_group;
 
     RETURN jsonb_build_object(

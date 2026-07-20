@@ -136,7 +136,7 @@ BEGIN
         -- explicit "drop unconsumed data after N seconds" knob).
         IF v_p.completed_retention_seconds > 0 THEN
             SELECT MIN(c.next_seq) INTO v_min_next
-            FROM queen.seg_consumers c WHERE c.partition_id = v_p.id;
+            FROM queen.partition_consumers c WHERE c.partition_id = v_p.id;
 
             IF v_min_next IS NOT NULL AND v_min_next > v_p.retention_seq THEN
                 v_boundary := GREATEST(v_boundary, LEAST(
@@ -252,7 +252,7 @@ BEGIN
     LOOP
         -- Slowest cursor; no groups => everything counts as pending.
         SELECT MIN(c.next_seq) INTO v_min_next
-        FROM queen.seg_consumers c WHERE c.partition_id = v_p.id;
+        FROM queen.partition_consumers c WHERE c.partition_id = v_p.id;
         v_min_next := COALESCE(v_min_next, 0);
 
         SELECT COALESCE(SUM(s.msg_count), 0) INTO v_pending
@@ -333,7 +333,7 @@ $$;
 --   * acks address the q2 partition by uuid ("partitionId", echoed by
 --     pop_segments_wire_v1); it is resolved back to (queue, partition) names.
 --   * acks execute in ascending (partition_id, group) order — NOT input
---     order: each ack locks its (partition, group) queen.seg_consumers row until
+--     order: each ack locks its (partition, group) queen.partition_consumers row until
 --     commit, so concurrent transactions acking overlapping sets must take
 --     those locks in one total order (the same ascending-uuid discipline the
 --     push pre-pass and the maintenance sweeps use for queen.seg_partitions).

@@ -60,7 +60,7 @@ WITH parts AS (
 worst AS (
     SELECT DISTINCT ON (c.partition_id)
            c.partition_id, c.next_seq, c.next_off
-    FROM queen.seg_consumers c
+    FROM queen.partition_consumers c
     JOIN parts pa ON pa.partition_id = c.partition_id
     ORDER BY c.partition_id, c.next_seq, c.next_off
 ),
@@ -140,7 +140,7 @@ GRANT EXECUTE ON FUNCTION queen.seg_stats_v1(TEXT) TO PUBLIC;
 -- The rows-engine block is copied verbatim from 008 (with an added
 -- storage <> 'segments' guard that is a no-op for rows queues, since v2
 -- queues never get queen.partition_consumers rows); segments-engine groups
--- are computed from queen.seg_consumers/queen.seg_segments and APPENDED to the array.
+-- are computed from queen.partition_consumers/queen.seg_segments and APPENDED to the array.
 -- v2 entries carry the same keys plus "storage":"segments"; unlike the rows
 -- branch, totalLag IS populated (pending frames beyond the cursor are a
 -- cheap PK-range SUM in v2). maxTimeLag = age of the oldest unconsumed
@@ -278,7 +278,7 @@ BEGIN
                     AND s.msg_count >
                         CASE WHEN s.seq = c.next_seq THEN c.next_off ELSE 0 END)
                     AS oldest_unconsumed_at
-        FROM queen.seg_consumers c
+        FROM queen.partition_consumers c
         LEFT JOIN queen.seg_segments s ON s.partition_id = c.partition_id
         GROUP BY c.partition_id, c.consumer_group
     ),
@@ -288,7 +288,7 @@ BEGIN
                c.total_consumed,
                COALESCE(l.pending, 0) AS pending,
                l.oldest_unconsumed_at
-        FROM queen.seg_consumers c
+        FROM queen.partition_consumers c
         JOIN queen.seg_partitions p ON p.id = c.partition_id
         JOIN queen.seg_queues q ON q.id = p.queue_id
         -- Strict guard: only queues currently routed to the segments engine.
@@ -516,7 +516,7 @@ BEGIN
                     LEFT JOIN (
                         SELECT DISTINCT ON (c.partition_id)
                                c.partition_id, c.next_seq, c.next_off
-                        FROM queen.seg_consumers c
+                        FROM queen.partition_consumers c
                         ORDER BY c.partition_id, c.next_seq, c.next_off
                     ) w ON w.partition_id = s2.partition_id
                     GROUP BY s2.partition_id
@@ -564,7 +564,7 @@ BEGIN
             SELECT 1
             FROM queen.seg_partitions p
             JOIN queen.seg_queues q ON q.id = p.queue_id AND q.name = p_queue_name
-            LEFT JOIN queen.seg_consumers c
+            LEFT JOIN queen.partition_consumers c
                 ON c.partition_id = p.id
                AND c.consumer_group = p_consumer_group
             WHERE (p_partition_name IS NULL OR p.name = p_partition_name)
@@ -674,7 +674,7 @@ BEGIN
                 FROM queen.seg_segments s
                 JOIN queen.seg_partitions p ON p.id = s.partition_id
                 JOIN queen.seg_queues q ON q.id = p.queue_id
-                LEFT JOIN queen.seg_consumers c
+                LEFT JOIN queen.partition_consumers c
                     ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
                 WHERE q.name = p_queue_name
                 ORDER BY s.created_at DESC, s.seq DESC
@@ -939,11 +939,11 @@ BEGIN
                            THEN 'processing'
                        ELSE 'pending'
                    END AS final_status,
-                   (SELECT COUNT(*)::integer FROM queen.seg_consumers c2
+                   (SELECT COUNT(*)::integer FROM queen.partition_consumers c2
                     WHERE c2.partition_id = d.partition_id
                       AND c2.consumer_group <> '__QUEUE_MODE__'
                       AND (d.seq, d.frame_idx) < (c2.next_seq, c2.next_off)) AS consumed_by_groups,
-                   (SELECT COUNT(*)::integer FROM queen.seg_consumers c2
+                   (SELECT COUNT(*)::integer FROM queen.partition_consumers c2
                     WHERE c2.partition_id = d.partition_id
                       AND c2.consumer_group <> '__QUEUE_MODE__') AS total_bus_groups
             FROM queen.seg_dedup d
@@ -951,7 +951,7 @@ BEGIN
             JOIN queen.seg_queues q ON q.id = p.queue_id
             -- Strict guard: only queues currently routed to the segments engine.
             JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
-            LEFT JOIN queen.seg_consumers c
+            LEFT JOIN queen.partition_consumers c
                 ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
             WHERE d.created_at >= v_from_ts AND d.created_at < v_to_ts
               AND (v_queue IS NULL OR q.name = v_queue)

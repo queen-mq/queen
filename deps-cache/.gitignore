@@ -1,8 +1,0 @@
-# Ignore cached dependency files (they're large and should be downloaded as needed)
-*.zip
-*.hpp
-*.h
-!README.md
-!download-deps.sh
-!.gitignore
-

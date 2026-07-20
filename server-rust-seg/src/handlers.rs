@@ -1025,7 +1025,7 @@ fn render_ack_results(
 
 // ---------------------------------------------------------------- lease/extend
 // POST /api/v1/lease/:leaseId/extend  body {"seconds":60} (default 60).
-// Renews every seg_consumers lease held by :leaseId (= the worker id minted at
+// Renews every partition_consumers lease held by :leaseId (= the worker id minted at
 // pop) via queen.seg_renew_lease_v1. Always HTTP 200 (best-effort renewal, like
 // the rows engine). The response carries every key the clients read:
 //   JS:  result.leaseId ? result.newExpiresAt : result.lease_expires_at
@@ -1368,10 +1368,10 @@ pub async fn handle_transaction(
     // from the request alone — requiredLeases has no (lease -> partition) mapping,
     // and the single-hint fallback goes ambiguous the moment two leases appear
     // (the transactionWithPartitions / transactionMultipleQueues failures). The
-    // authoritative source is queen.seg_consumers: exactly one live lease exists
+    // authoritative source is queen.partition_consumers: exactly one live lease exists
     // per (partition, group), so read worker_id straight from it. Precedence:
     //   1. a per-op leaseId (raw HTTP callers), already set during parse;
-    //   2. the current seg_consumers.worker_id for (partition, group);
+    //   2. the current partition_consumers.worker_id for (partition, group);
     //   3. the single unambiguous requiredLeases hint (last resort).
     for ag in &mut ack_groups {
         if !ag.worker.is_empty() || ag.partition_id.is_empty() {
@@ -1379,7 +1379,7 @@ pub async fn handle_transaction(
         }
         if let Ok(Some(r)) = client
             .query_opt(
-                "SELECT worker_id FROM queen.seg_consumers \
+                "SELECT worker_id FROM queen.partition_consumers \
                  WHERE partition_id = $1::text::uuid AND consumer_group = $2",
                 &[&ag.partition_id, &ag.group],
             )
@@ -2449,7 +2449,7 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
 // Management surface for consumer groups on the segments engine. list/lagging/
 // details are read-only over queen.get_consumer_groups_v4 (dual-engine, 027) and
 // the 008 lag/detail readers; delete/subscription/seek mutate the segment cursor
-// state (queen.seg_consumers) plus the shared coordination tables. These ADD to
+// state (queen.partition_consumers) plus the shared coordination tables. These ADD to
 // the handlers above; they never touch push/pop/ack/transaction/configure.
 
 // GET /api/v1/consumer-groups — every group across both engines. Returns the
@@ -2516,7 +2516,7 @@ fn qbool(params: &HashMap<String, String>, key: &str, def: bool) -> bool {
 }
 
 // DELETE /api/v1/consumer-groups/:group?deleteMetadata= — drop the group. Removes
-// its segment cursors (seg_consumers, all partitions) + seg_consumer_watermarks
+// its segment cursors (partition_consumers, all partitions) + consumer_watermarks
 // AND its rows-side coordination state (partition_consumers, consumer_watermarks,
 // consumer_groups_metadata when deleteMetadata). deletedPartitions sums both
 // engines. HTTP 200 with the merged SP JSON (a 204 would make the JS client
@@ -2562,7 +2562,7 @@ pub async fn handle_delete_consumer_group(
 
 // DELETE /api/v1/consumer-groups/:group/queues/:queue?deleteMetadata= — drop the
 // group FOR ONE QUEUE only. Removes the group's segment cursors for every
-// partition of THAT queue (seg_consumers) + its seg_consumer_watermarks row for
+// partition of THAT queue (partition_consumers) + its consumer_watermarks row for
 // (queue, group), AND the rows-side per-queue coordination state via
 // queen.delete_consumer_group_for_queue_v1 (partition_consumers, consumer_watermarks,
 // and consumer_groups_metadata when deleteMetadata). Clearing the empty-scan

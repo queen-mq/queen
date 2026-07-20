@@ -94,7 +94,7 @@ BEGIN
                 -- (created_at monotone in seq -> forward walk from retention_seq),
                 -- else last_seq+1 (nothing that recent yet -> future-only cursor).
                 -- Identical rule to seg_pop_segments_v1's lazy timestamp seed.
-                INSERT INTO queen.seg_consumers (partition_id, consumer_group, next_seq)
+                INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
                 SELECT p.id, p_group,
                        COALESCE(
                            (SELECT s.seq FROM queen.seg_segments s
@@ -108,7 +108,7 @@ BEGIN
                 ON CONFLICT (partition_id, consumer_group) DO NOTHING;
             ELSE
                 -- 'new' (or 'now') seed: skip the entire existing backlog.
-                INSERT INTO queen.seg_consumers (partition_id, consumer_group, next_seq)
+                INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
                 SELECT p.id, p_group, p.last_seq + 1
                 FROM queen.seg_partitions p
                 WHERE p.queue_id = v_qid
@@ -137,7 +137,7 @@ BEGIN
     FOR v_p IN
         SELECT p.id, p.name
         FROM queen.seg_partitions p
-        LEFT JOIN queen.seg_consumers c
+        LEFT JOIN queen.partition_consumers c
           ON c.partition_id = p.id AND c.consumer_group = p_group
         WHERE p.queue_id = v_qid
           AND p.last_write_at >= v_watermark - interval '2 minutes'
@@ -235,7 +235,7 @@ DECLARE
     v_attempt INTEGER;
     v_poison_count INTEGER;
     -- Durable per-position path (Trap 2): the leased batch's ordered position map
-    -- (queen.seg_consumers.batch_positions) + the contiguous-prefix computation.
+    -- (queen.partition_consumers.batch_positions) + the contiguous-prefix computation.
     v_bp JSONB;
     v_el JSONB;
     v_prefix_last_seq BIGINT;
@@ -248,7 +248,7 @@ DECLARE
     v_pc INTEGER;
     v_delta BIGINT;
 BEGIN
-    SELECT * INTO v_c FROM queen.seg_consumers c
+    SELECT * INTO v_c FROM queen.partition_consumers c
     WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
     FOR UPDATE;
     IF NOT FOUND OR v_c.worker_id IS DISTINCT FROM p_worker
@@ -337,7 +337,7 @@ BEGIN
 
         -- Fully resolved: every position acked or dlq'd -> release the lease.
         IF v_head_seq IS NULL THEN
-            UPDATE queen.seg_consumers SET
+            UPDATE queen.partition_consumers SET
                 next_seq = v_new_seq, next_off = v_new_off,
                 worker_id = NULL, lease_expires_at = NULL,
                 batch_end_seq = NULL, batch_end_off = NULL,
@@ -373,7 +373,7 @@ BEGIN
                     -- head frame and call queen.seg_dlq_head_v1 (which marks the
                     -- position dlq, re-extends the prefix past it, and releases
                     -- the lease iff the whole batch is then resolved).
-                    UPDATE queen.seg_consumers SET
+                    UPDATE queen.partition_consumers SET
                         next_seq = v_new_seq, next_off = v_new_off,
                         batch_positions = v_bp,
                         total_consumed = total_consumed + v_delta
@@ -419,7 +419,7 @@ BEGIN
                       AND ((e->>'seq')::bigint, (e->>'off')::int) <  (v_new_seq, v_new_off);
 
                     IF v_head_seq IS NULL THEN
-                        UPDATE queen.seg_consumers SET
+                        UPDATE queen.partition_consumers SET
                             next_seq = v_new_seq, next_off = v_new_off,
                             worker_id = NULL, lease_expires_at = NULL,
                             batch_end_seq = NULL, batch_end_off = NULL,
@@ -428,7 +428,7 @@ BEGIN
                             total_consumed = total_consumed + v_delta
                         WHERE partition_id = p_partition_id AND consumer_group = p_group;
                     ELSE
-                        UPDATE queen.seg_consumers SET
+                        UPDATE queen.partition_consumers SET
                             next_seq = v_new_seq, next_off = v_new_off,
                             batch_positions = v_bp,
                             total_consumed = total_consumed + v_delta
@@ -441,7 +441,7 @@ BEGIN
                 -- Retry budget remains: release the lease so the poison head (and
                 -- everything after the acked prefix) is redelivered; the attempt
                 -- columns are preserved so the next delivery increments the count.
-                UPDATE queen.seg_consumers SET
+                UPDATE queen.partition_consumers SET
                     next_seq = v_new_seq, next_off = v_new_off,
                     worker_id = NULL, lease_expires_at = NULL,
                     batch_end_seq = NULL, batch_end_off = NULL,
@@ -456,7 +456,7 @@ BEGIN
         -- Head is merely un-acked (waiting for its own ok-ack, arriving in a
         -- separate call): advance over the contiguous prefix but RETAIN the lease
         -- and the (updated) map. This is the out-of-order accumulation fix.
-        UPDATE queen.seg_consumers SET
+        UPDATE queen.partition_consumers SET
             next_seq = v_new_seq, next_off = v_new_off,
             batch_positions = v_bp,
             total_consumed = total_consumed + v_delta
@@ -576,7 +576,7 @@ BEGIN
                     v_pos_off := v_pos_off + 1;
                 END IF;
                 v_adv := v_adv + 1;   -- the dropped frame is disposed of
-                UPDATE queen.seg_consumers SET
+                UPDATE queen.partition_consumers SET
                     next_seq = v_pos_seq, next_off = v_pos_off,
                     worker_id = NULL, lease_expires_at = NULL,
                     batch_end_seq = NULL, batch_end_off = NULL,
@@ -604,7 +604,7 @@ BEGIN
         END IF;
     END IF;
 
-    UPDATE queen.seg_consumers SET
+    UPDATE queen.partition_consumers SET
         next_seq = v_pos_seq,
         next_off = v_pos_off,
         worker_id = NULL, lease_expires_at = NULL,
@@ -631,7 +631,7 @@ AS $$
         SELECT 1
         FROM queen.seg_partitions p
         JOIN queen.seg_queues q ON q.id = p.queue_id AND q.name = p_queue
-        LEFT JOIN queen.seg_consumers c
+        LEFT JOIN queen.partition_consumers c
           ON c.partition_id = p.id AND c.consumer_group = p_group
         WHERE (c.partition_id IS NULL AND p.last_seq >= 1)
            OR p.last_seq > c.next_seq

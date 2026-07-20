@@ -104,59 +104,73 @@ ALTER TABLE queen.seg_dedup SET (
     autovacuum_vacuum_cost_delay = 0
 );
 
-CREATE TABLE IF NOT EXISTS queen.seg_consumers (
-    partition_id UUID NOT NULL REFERENCES queen.seg_partitions(id) ON DELETE CASCADE,
-    consumer_group TEXT NOT NULL DEFAULT '__QUEUE_MODE__',
-    -- Cursor: frames [0..next_off) of segment next_seq are consumed;
-    -- all segments with seq < next_seq are fully consumed.
-    next_seq BIGINT NOT NULL DEFAULT 1,
-    next_off INTEGER NOT NULL DEFAULT 0,
-    -- Lease (one in-flight batch per (partition, group), like v1).
-    worker_id TEXT,
-    lease_expires_at TIMESTAMPTZ,
-    -- End position of the leased batch (ack must not advance past it).
-    batch_end_seq BIGINT,
-    batch_end_off INTEGER,
-    total_consumed BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (partition_id, consumer_group)
-);
-ALTER TABLE queen.seg_consumers SET (
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_vacuum_threshold = 50,
-    autovacuum_vacuum_cost_delay = 0,
-    fillfactor = 50
-);
--- Durable per-position ack map for the currently leased batch (Trap 2): the
--- ordered list of delivered positions the pop handed out, one JSON element each
---   {"seq":<bigint>, "off":<frame_idx>, "acked":<bool>, "dlq":<bool>}
--- recorded by the pop in the SAME UPDATE that sets worker_id/lease_expires_at/
--- batch_end_*. Each ack MARKS its position here instead of releasing the lease,
--- and the cursor (next_seq,next_off) advances over the highest CONTIGUOUS
--- acked-OR-dlq prefix. This is what makes out-of-order per-message ack within a
--- single leased batch (.batch(N).each().concurrency(N)) work: the first ack no
--- longer finalizes+releases the lease under the other in-flight acks. The map is
--- durable on the row, so an ack landing on ANY replica resolves by reading it
--- (no in-process LeaseRegistry as the source of truth). NULL when no batch is
--- leased (or after a full resolve / release).
-ALTER TABLE queen.seg_consumers ADD COLUMN IF NOT EXISTS batch_positions JSONB;
+-- ============================================================================
+-- Coordination fold (v2b): the segment cursor / lease / attempt / durable
+-- per-position ack map live on the CANONICAL queen.partition_consumers row
+-- (defined in schema.sql), keyed by (partition_id, consumer_group) exactly as
+-- the rows engine keys it. There is now ONE coordination table, not a cloned
+-- seg_consumers. These idempotent ALTERs extend partition_consumers with the
+-- segment cursor columns and retire the two rows-only invariants that would
+-- otherwise block a segment cursor row:
+--
+--   * FK partition_id -> queen.partitions(id): a segment cursor keys on
+--     queen.seg_partitions(id), an INDEPENDENT UUID space (native segment
+--     queues never create queen.partitions rows, and configure creates them
+--     with freshly-generated ids), so the FK can never hold for a seg row.
+--     Dropped. The ON DELETE CASCADE it provided is replaced by explicit
+--     deletes on the seg queue / group / seek delete paths (031 + db.rs).
+--   * CHECK (last_consumed_id / last_consumed_created_at pairing): a rows-era
+--     invariant. Segment rows leave those columns at their defaults (zero-uuid
+--     / NULL), which already satisfies the first CHECK branch, but the
+--     constraint is dropped so no rows-era coupling remains on the folded row.
+--
+-- Cursor columns (mirror the retired seg_consumers, same names/defaults so the
+-- function bodies fold by table-name alone):
+--   next_seq/next_off        -- cursor: frames [0..next_off) of next_seq consumed
+--   batch_end_seq/off         -- end of the leased batch (ack cannot pass it)
+--   total_consumed            -- lifetime consumed count (segment-native)
+--   attempt_seq/off/count     -- retry tracking (025), redelivery detection
+--   batch_positions JSONB     -- durable per-position ack map (Trap 2): ordered
+--       [{"seq":..,"off":..,"acked":bool,"dlq":bool}] recorded by the pop in the
+--       SAME UPDATE that sets worker_id/lease_expires_at/batch_end_*; each ack
+--       MARKS its position instead of releasing the lease, and the cursor
+--       advances over the highest CONTIGUOUS acked-OR-dlq prefix. Durable on the
+--       row so an ack landing on ANY replica resolves by reading it (no
+--       in-process LeaseRegistry as the source of truth). NULL when no batch is
+--       leased. Kept as its own column (not overloaded onto the rows-era
+--       message_batch) so the fold is a pure table-name swap and the two engines
+--       never share a JSONB slot while both still exist (rows retires in 099).
+-- Existing partition_consumers columns are reused for the lease: worker_id,
+-- lease_expires_at, lease_acquired_at.
+-- ============================================================================
+ALTER TABLE queen.partition_consumers
+    ADD COLUMN IF NOT EXISTS next_seq        BIGINT  NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS next_off        INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS batch_end_seq   BIGINT,
+    ADD COLUMN IF NOT EXISTS batch_end_off   INTEGER,
+    ADD COLUMN IF NOT EXISTS total_consumed  BIGINT  NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS batch_positions JSONB,
+    ADD COLUMN IF NOT EXISTS attempt_seq     BIGINT,
+    ADD COLUMN IF NOT EXISTS attempt_off     INTEGER,
+    ADD COLUMN IF NOT EXISTS attempt_count   INTEGER NOT NULL DEFAULT 0;
 
--- Per-(queue, consumer_group) empty-scan watermark — the segments analogue of
--- queen.consumer_watermarks in the rows engine. `last_empty_scan_at` records when
--- this group last found the queue empty; wildcard pop uses it as a time floor
--- (only consider partitions written since) so a caught-up consumer skips cold
--- partitions instead of re-scanning all of them on every long-poll cycle.
-CREATE TABLE IF NOT EXISTS queen.seg_consumer_watermarks (
-    queue_name TEXT NOT NULL,
-    consumer_group TEXT NOT NULL,
-    last_empty_scan_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01 00:00:00+00',
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (queue_name, consumer_group)
-);
-ALTER TABLE queen.seg_consumer_watermarks SET (
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_vacuum_threshold = 50,
-    fillfactor = 50
-);
+-- Retire the rows-only FK + CHECK so segment cursor rows are insertable.
+-- (anonymous constraints get PostgreSQL's conventional auto-names.)
+ALTER TABLE queen.partition_consumers DROP CONSTRAINT IF EXISTS partition_consumers_partition_id_fkey;
+ALTER TABLE queen.partition_consumers DROP CONSTRAINT IF EXISTS partition_consumers_check;
+
+-- The empty-scan watermark already lives on the canonical
+-- queen.consumer_watermarks (defined in schema.sql); the segments engine writes
+-- it directly from the wildcard pop / discover paths (024/033). No seg-specific
+-- watermark table is needed.
+
+-- Retire the pre-fold cursor/watermark tables. Nothing references them after the
+-- fold (every seg function now reads/writes queen.partition_consumers /
+-- queen.consumer_watermarks). Safe to DROP here: no other table FKs into them,
+-- and the function bodies below bind these names at runtime (plpgsql late
+-- binding), never at CREATE-time — so dropping now cannot break schema apply.
+DROP TABLE IF EXISTS queen.seg_consumers;
+DROP TABLE IF EXISTS queen.seg_consumer_watermarks;
 
 -- ============================================================================
 -- push: one call = one segment for one partition.
@@ -317,7 +331,7 @@ BEGIN
     -- convoy that stalled wildcard pop. Claim first; create the row only on the
     -- first pop for this (partition, group).
     SELECT c.next_seq, c.next_off INTO v_next_seq, v_next_off
-    FROM queen.seg_consumers c
+    FROM queen.partition_consumers c
     WHERE c.partition_id = v_pid AND c.consumer_group = p_group
       AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
     FOR UPDATE SKIP LOCKED;
@@ -325,14 +339,14 @@ BEGIN
         -- Distinguish "row missing" (create it) from "present but leased/locked"
         -- (skip, non-blocking). Only the missing case touches ON CONFLICT, so the
         -- steady-state hot path never contends.
-        PERFORM 1 FROM queen.seg_consumers
+        PERFORM 1 FROM queen.partition_consumers
         WHERE partition_id = v_pid AND consumer_group = p_group;
         IF FOUND THEN RETURN; END IF;
-        INSERT INTO queen.seg_consumers (partition_id, consumer_group)
+        INSERT INTO queen.partition_consumers (partition_id, consumer_group)
         VALUES (v_pid, p_group)
         ON CONFLICT DO NOTHING;
         SELECT c.next_seq, c.next_off INTO v_next_seq, v_next_off
-        FROM queen.seg_consumers c
+        FROM queen.partition_consumers c
         WHERE c.partition_id = v_pid AND c.consumer_group = p_group
           AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
         FOR UPDATE SKIP LOCKED;
@@ -374,7 +388,7 @@ BEGIN
     IF v_taken = 0 THEN RETURN; END IF;
 
     IF p_auto_ack THEN
-        UPDATE queen.seg_consumers SET
+        UPDATE queen.partition_consumers SET
             next_seq = CASE WHEN v_end_off >= v_end_count THEN v_end_seq + 1 ELSE v_end_seq END,
             next_off = CASE WHEN v_end_off >= v_end_count THEN 0 ELSE v_end_off END,
             worker_id = NULL, lease_expires_at = NULL,
@@ -382,7 +396,7 @@ BEGIN
             total_consumed = total_consumed + v_taken
         WHERE partition_id = v_pid AND consumer_group = p_group;
     ELSE
-        UPDATE queen.seg_consumers SET
+        UPDATE queen.partition_consumers SET
             worker_id = p_worker,
             lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
             batch_end_seq = v_end_seq,
@@ -424,7 +438,7 @@ BEGIN
         RETURN jsonb_build_object('ok', false, 'error', 'partition not found');
     END IF;
 
-    SELECT * INTO v_c FROM queen.seg_consumers c
+    SELECT * INTO v_c FROM queen.partition_consumers c
     WHERE c.partition_id = v_pid AND c.consumer_group = p_group
     FOR UPDATE;
     IF NOT FOUND OR v_c.worker_id IS DISTINCT FROM p_worker
@@ -446,7 +460,7 @@ BEGIN
         SELECT msg_count INTO v_count FROM queen.seg_segments
         WHERE partition_id = v_pid AND seq = p_upto_seq;
 
-        UPDATE queen.seg_consumers SET
+        UPDATE queen.partition_consumers SET
             next_seq = CASE WHEN v_count IS NOT NULL AND p_upto_off >= v_count
                             THEN p_upto_seq + 1 ELSE p_upto_seq END,
             next_off = CASE WHEN v_count IS NOT NULL AND p_upto_off >= v_count
@@ -459,7 +473,7 @@ BEGIN
         v_acked := GREATEST(p_acked_count, 0);
     ELSE
         -- nack / failed batch: release the lease, cursor untouched.
-        UPDATE queen.seg_consumers SET
+        UPDATE queen.partition_consumers SET
             worker_id = NULL, lease_expires_at = NULL,
             batch_end_seq = NULL, batch_end_off = NULL,
             batch_positions = NULL
@@ -597,7 +611,7 @@ DECLARE
     v_exp TIMESTAMPTZ;
 BEGIN
     WITH updated AS (
-        UPDATE queen.seg_consumers
+        UPDATE queen.partition_consumers
         SET lease_expires_at = GREATEST(
                 lease_expires_at,
                 clock_timestamp() + make_interval(secs => GREATEST(p_seconds, 1)))

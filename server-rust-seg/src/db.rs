@@ -189,11 +189,23 @@ pub async fn delete_queue(
 }
 
 // Drop the queue's segment data. Deleting the seg_queues row cascades to
-// seg_partitions -> seg_segments / seg_consumers / seg_dedup.
+// seg_partitions -> seg_segments / seg_dedup. The coordination fold dropped the
+// partition_consumers -> partitions FK (segment cursors key on seg_partitions.id
+// with no FK), so the cursor rows are NO LONGER cascade-deleted; remove them
+// explicitly first, while seg_partitions still resolves the queue.
 pub async fn delete_seg_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
 ) -> Result<(), tokio_postgres::Error> {
+    client
+        .execute(
+            "DELETE FROM queen.partition_consumers pc \
+             USING queen.seg_partitions sp \
+             JOIN queen.seg_queues sq ON sq.id = sp.queue_id \
+             WHERE pc.partition_id = sp.id AND sq.name = $1",
+            &[&queue],
+        )
+        .await?;
     client
         .execute("DELETE FROM queen.seg_queues WHERE name=$1", &[&queue])
         .await?;
@@ -616,7 +628,7 @@ pub async fn pop_discover(
 
 // ------------------------------------------------------ consumer groups
 // GET /api/v1/consumer-groups -> queen.get_consumer_groups_v4() (027 redefined
-// it dual-engine; the segments branch reads queen.seg_consumers). Returns the
+// it dual-engine; the segments branch reads queen.partition_consumers). Returns the
 // SP result JSON array as text.
 pub async fn get_consumer_groups(
     client: &deadpool_postgres::Client,
@@ -671,8 +683,8 @@ pub async fn delete_consumer_group_rows(
     Ok(row.get(0))
 }
 
-// Segment-side delete: queen.seg_delete_consumer_group_v1 clears queen.seg_consumers
-// (all partitions) + seg_consumer_watermarks for the group.
+// Segment-side delete: queen.seg_delete_consumer_group_v1 clears queen.partition_consumers
+// (all partitions) + consumer_watermarks for the group.
 pub async fn delete_consumer_group_seg(
     client: &deadpool_postgres::Client,
     group: &str,
@@ -688,8 +700,8 @@ pub async fn delete_consumer_group_seg(
 }
 
 // Segment-side per-queue delete: drop this group's segment cursors for EVERY
-// partition of the named queue (queen.seg_consumers) + the seg empty-scan
-// watermark row for (queue, group). Returns the number of seg_consumers rows
+// partition of the named queue (queen.partition_consumers) + the seg empty-scan
+// watermark row for (queue, group). Returns the number of partition_consumers rows
 // removed (the segment analogue of deletedPartitions). No seg SQL proc exists
 // for the queue-scoped delete, so the two DELETEs are issued directly.
 pub async fn delete_consumer_group_for_queue_seg(
@@ -699,7 +711,7 @@ pub async fn delete_consumer_group_for_queue_seg(
 ) -> Result<u64, tokio_postgres::Error> {
     let n = client
         .execute(
-            "DELETE FROM queen.seg_consumers c \
+            "DELETE FROM queen.partition_consumers c \
              USING queen.seg_partitions p \
              JOIN queen.seg_queues q ON q.id = p.queue_id \
              WHERE c.partition_id = p.id \
@@ -710,7 +722,7 @@ pub async fn delete_consumer_group_for_queue_seg(
         .await?;
     client
         .execute(
-            "DELETE FROM queen.seg_consumer_watermarks \
+            "DELETE FROM queen.consumer_watermarks \
              WHERE queue_name = $1 AND consumer_group = $2",
             &[&queue, &group],
         )

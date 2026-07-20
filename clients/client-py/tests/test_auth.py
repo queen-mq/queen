@@ -23,7 +23,6 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-import asyncpg
 import httpx
 import pytest
 
@@ -60,48 +59,35 @@ def _make_token(sub: str, role: str = "read-write") -> str:
 
 
 # ---------------------------------------------------------------------------
-# DB helpers
+# Black-box observation helper: pop the message back over HTTP and read its
+# producerSub. The segments engine stores payloads in queen.seg_segments (never
+# queen.messages) and stamps producer_sub in the broker, so a push is only
+# observable via pop — the seg-native ground truth. Optional bearer authorizes
+# the pop when JWT is enabled.
 # ---------------------------------------------------------------------------
-async def _get_stored_producer_sub(
-    pool: asyncpg.Pool, queue_name: str, transaction_id: str
-) -> Optional[str]:
-    row = await pool.fetchrow(
-        """SELECT m.producer_sub
-           FROM queen.messages m
-           JOIN queen.partitions p ON p.id = m.partition_id
-           JOIN queen.queues q ON q.id = p.queue_id
-           WHERE q.name = $1 AND m.transaction_id = $2""",
-        queue_name,
-        transaction_id,
+async def _popped_producer_sub(
+    queue: str, transaction_id: str, bearer_token: Optional[str] = None
+) -> tuple:
+    headers = {}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    url = (
+        f"{SERVER_URL}/api/v1/pop/queue/{queue}"
+        "?batch=20&wait=true&timeout=5000&autoAck=true"
     )
-    return row["producer_sub"] if row else None
-
-
-async def _call_push_messages_v2(pool: asyncpg.Pool, items: List[Dict[str, Any]]) -> None:
-    await pool.execute(
-        "SELECT queen.push_messages_v2($1::jsonb)", json.dumps(items)
-    )
-
-
-async def _call_pop_specific_batch(
-    pool: asyncpg.Pool, queue_name: str
-) -> List[Dict[str, Any]]:
-    reqs = [{
-        "idx": 0,
-        "queue_name": queue_name,
-        "partition_name": "Default",
-        "consumer_group": "__QUEUE_MODE__",
-        "lease_seconds": 60,
-        "worker_id": f"test-worker-{int(time.time() * 1000)}",
-        "batch_size": 10,
-        "sub_mode": "all",
-        "sub_from": "",
-    }]
-    raw = await pool.fetchval(
-        "SELECT queen.pop_specific_batch($1::jsonb)", json.dumps(reqs)
-    )
-    out = json.loads(raw) if isinstance(raw, str) else raw
-    return (out[0] or {}).get("result", {}).get("messages", [])
+    deadline = time.time() + 6.0
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        while time.time() < deadline:
+            res = await http.get(url, headers=headers)
+            if res.status_code == 204:
+                await asyncio.sleep(0.15)
+                continue
+            res.raise_for_status()
+            for m in (res.json().get("messages") or []):
+                if m and m.get("transactionId") == transaction_id:
+                    return True, m.get("producerSub")
+            await asyncio.sleep(0.15)
+    return False, None
 
 
 async def _http_push(
@@ -134,96 +120,23 @@ async def _http_push(
     return res.json()
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-@pytest.fixture
-async def pool():
-    p = await asyncpg.create_pool(
-        host=os.environ.get("PG_HOST", "localhost"),
-        port=int(os.environ.get("PG_PORT", 5432)),
-        database=os.environ.get("PG_DB", "postgres"),
-        user=os.environ.get("PG_USER", "postgres"),
-        password=os.environ.get("PG_PASSWORD", "postgres"),
-    )
-    try:
-        yield p
-    finally:
-        await p.close()
+# ===========================================================================
+# (Retired) SP-level producer_sub tests — they drove the ROWS engine directly
+# (queen.push_messages_v2 + queen.pop_specific_batch + a queen.messages read) to
+# verify the SP's producer_sub NULLIF handling. The rows engine is retired
+# (segments-only): payloads live in queen.seg_segments and producer_sub is
+# stamped in the broker, never in queen.messages. The shipping producer_sub
+# behavior is covered black-box (HTTP push -> pop) by the tests below.
+# ===========================================================================
 
 
 # ===========================================================================
-# SP-LEVEL TESTS (always run, independent of HTTP / JWT)
-# ===========================================================================
-@pytest.mark.asyncio
-async def test_producer_sub_round_trip_via_stored_procedure(pool):
-    """producer_sub persisted through push_messages_v2 and surfaced by pop."""
-    q = "test-auth-sp-roundtrip-py"
-    tx = f"tx-sp-py-{int(time.time() * 1000)}"
-
-    await _call_push_messages_v2(pool, [{
-        "queue": q,
-        "partition": "Default",
-        "transactionId": tx,
-        "payload": {"x": 1},
-        "producerSub": "sp-test-sub",
-    }])
-
-    stored = await _get_stored_producer_sub(pool, q, tx)
-    assert stored == "sp-test-sub", f"expected 'sp-test-sub', got {stored!r}"
-
-    popped = await _call_pop_specific_batch(pool, q)
-    target = next((m for m in popped if m.get("transactionId") == tx), None)
-    assert target is not None, f"did not find tx {tx} in pop result"
-    assert target["producerSub"] == "sp-test-sub"
-
-
-@pytest.mark.asyncio
-async def test_producer_sub_null_when_not_provided(pool):
-    """Omitting producerSub yields NULL in DB and null in pop response."""
-    q = "test-auth-sp-null-py"
-    tx = f"tx-sp-null-py-{int(time.time() * 1000)}"
-
-    await _call_push_messages_v2(pool, [{
-        "queue": q,
-        "partition": "Default",
-        "transactionId": tx,
-        "payload": {"x": 1},
-    }])
-
-    stored = await _get_stored_producer_sub(pool, q, tx)
-    assert stored is None, f"expected NULL, got {stored!r}"
-
-    popped = await _call_pop_specific_batch(pool, q)
-    target = next((m for m in popped if m.get("transactionId") == tx), None)
-    assert target is not None
-    assert target.get("producerSub") is None
-
-
-@pytest.mark.asyncio
-async def test_producer_sub_empty_string_stored_as_null(pool):
-    """Empty-string producerSub must be stored as NULL (NULLIF invariant)."""
-    q = "test-auth-sp-empty-py"
-    tx = f"tx-sp-empty-py-{int(time.time() * 1000)}"
-
-    await _call_push_messages_v2(pool, [{
-        "queue": q,
-        "partition": "Default",
-        "transactionId": tx,
-        "payload": {"x": 1},
-        "producerSub": "",
-    }])
-
-    stored = await _get_stored_producer_sub(pool, q, tx)
-    assert stored is None, f"expected NULL for empty-string input, got {stored!r}"
-
-
-# ===========================================================================
-# HTTP-LEVEL TESTS (require a running Queen server)
+# HTTP-LEVEL TESTS — observe producer_sub black-box via the HTTP pop path
+# (queen.seg_segments is the seg-native ground truth; queen.messages is gone).
 # ===========================================================================
 @pytest.mark.asyncio
 @pytest.mark.skipif(JWT_ENABLED, reason="JWT_SECRET set - see HTTP-JWT test")
-async def test_producer_sub_ignored_from_body_without_auth(pool):
+async def test_producer_sub_ignored_from_body_without_auth():
     """Body-supplied producerSub must be ignored when auth is disabled."""
     q = "test-auth-http-no-jwt-py"
     tx = f"tx-noauth-py-{int(time.time() * 1000)}"
@@ -241,15 +154,16 @@ async def test_producer_sub_ignored_from_body_without_auth(pool):
         extra_item_fields={"producerSub": "attacker-no-jwt"},
     )
 
-    stored = await _get_stored_producer_sub(pool, q, tx)
-    assert stored is None, (
-        f"expected NULL (auth disabled), got {stored!r} - client was able to set it!"
+    found, producer_sub = await _popped_producer_sub(q, tx)
+    assert found, f"did not observe tx {tx} via pop"
+    assert producer_sub is None, (
+        f"expected null (auth disabled), got {producer_sub!r} - client was able to set it!"
     )
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not JWT_ENABLED, reason="set JWT_SECRET to run (server must have JWT enabled)")
-async def test_producer_sub_stamped_from_jwt(pool):
+async def test_producer_sub_stamped_from_jwt():
     """producer_sub must equal the validated JWT sub claim."""
     q = "test-auth-http-jwt-stamp-py"
     tx = f"tx-jwt-py-{int(time.time() * 1000)}"
@@ -273,13 +187,14 @@ async def test_producer_sub_stamped_from_jwt(pool):
         bearer_token=token,
     )
 
-    stored = await _get_stored_producer_sub(pool, q, tx)
-    assert stored == "alice-producer"
+    found, producer_sub = await _popped_producer_sub(q, tx, token)
+    assert found, f"did not observe tx {tx} via pop"
+    assert producer_sub == "alice-producer"
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not JWT_ENABLED, reason="set JWT_SECRET to run (server must have JWT enabled)")
-async def test_producer_sub_spoofing_ignored_with_jwt(pool):
+async def test_producer_sub_spoofing_ignored_with_jwt():
     """Body-supplied producerSub must be ignored even with a valid JWT."""
     q = "test-auth-http-jwt-spoof-py"
     tx = f"tx-spoof-py-{int(time.time() * 1000)}"
@@ -303,7 +218,8 @@ async def test_producer_sub_spoofing_ignored_with_jwt(pool):
         extra_item_fields={"producerSub": "attacker"},
     )
 
-    stored = await _get_stored_producer_sub(pool, q, tx)
-    assert stored == "legit-producer", (
-        f"impersonation not prevented: stored={stored!r}, expected 'legit-producer'"
+    found, producer_sub = await _popped_producer_sub(q, tx, token)
+    assert found, f"did not observe tx {tx} via pop"
+    assert producer_sub == "legit-producer", (
+        f"impersonation not prevented: stored={producer_sub!r}, expected 'legit-producer'"
     )

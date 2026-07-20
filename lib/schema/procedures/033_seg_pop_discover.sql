@@ -102,7 +102,7 @@ BEGIN
                     -- timestamp seed: first segment at/after v_from_ts per
                     -- partition, else last_seq+1 (identical to the lazy seed in
                     -- queen.seg_pop_segments_v1).
-                    INSERT INTO queen.seg_consumers (partition_id, consumer_group, next_seq)
+                    INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
                     SELECT p.id, p_group,
                            COALESCE(
                                (SELECT s.seq FROM queen.seg_segments s
@@ -116,7 +116,7 @@ BEGIN
                     ON CONFLICT (partition_id, consumer_group) DO NOTHING;
                 ELSE
                     -- 'new' (or 'now') seed: skip the entire existing backlog.
-                    INSERT INTO queen.seg_consumers (partition_id, consumer_group, next_seq)
+                    INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
                     SELECT p.id, p_group, p.last_seq + 1
                     FROM queen.seg_partitions p
                     WHERE p.queue_id = v_q.qid
@@ -156,7 +156,7 @@ BEGIN
         FROM queen.seg_partitions p
         JOIN queen.seg_queues sq ON sq.id = p.queue_id
         JOIN queen.queues qq ON qq.name = sq.name
-        LEFT JOIN queen.seg_consumers c
+        LEFT JOIN queen.partition_consumers c
           ON c.partition_id = p.id AND c.consumer_group = p_group
         WHERE (v_ns = '' OR qq.namespace = v_ns)
           AND (v_task = '' OR qq.task = v_task)
