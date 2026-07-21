@@ -1,0 +1,1 @@
+import{I as o,X as n,o as a,b as u}from"./index-D4y6H0nC.js";function f(e){const s=o(),r=n("registerRefreshCallback",null),t=n("unregisterRefreshCallback",null);a(()=>{r&&e&&r(s.path,e)}),u(()=>{t&&t(s.path)})}export{f as u};

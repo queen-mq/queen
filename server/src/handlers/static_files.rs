@@ -2,16 +2,15 @@
 use super::*;
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use rust_embed::RustEmbed;
 
-// Static dashboard root, resolved once from QUEEN_STATIC_DIR (default
-// "webapp/dist" — the path the Dockerfile copies the built Vue app to).
-static STATIC_DIR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn static_root() -> &'static str {
-    STATIC_DIR.get_or_init(|| {
-        std::env::var("QUEEN_STATIC_DIR").unwrap_or_else(|_| "webapp/dist".to_string())
-    })
-}
+// The built Vue dashboard, embedded into the binary at compile time from
+// server/webapp/dist (populated by `app` -> `npm run build` + copied into the
+// crate; the Dockerfile copies it into the build context). No QUEEN_STATIC_DIR,
+// no on-disk assets at runtime — a single self-contained binary serves the SPA.
+#[derive(RustEmbed)]
+#[folder = "webapp/dist"]
+struct Assets;
 
 fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
@@ -33,32 +32,31 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-/// Router FALLBACK: serve the SPA dashboard from QUEEN_STATIC_DIR. A real file
-/// under the root is served with a guessed content-type; any other path falls
-/// back to index.html so the client-side (Vue) router can take over. This is
-/// ONLY the fallback, so it never shadows an /api/v1 route; when the directory
-/// is absent (dev / CI) it just 404s. Mirrors the static surface the retired C++
-/// server exposed. Path traversal is rejected (no ".." / backslash / NUL, and
-/// percent-encoded escapes never decode to a real parent path on disk).
-pub async fn handle_static(uri: Uri) -> Response {
-    let root = static_root();
-    let rel = uri.path().trim_start_matches('/');
-    let index = format!("{root}/index.html");
+fn serve(path: &str) -> Option<Response> {
+    Assets::get(path).map(|f| {
+        (
+            [(header::CONTENT_TYPE, content_type(path))],
+            f.data.into_owned(),
+        )
+            .into_response()
+    })
+}
 
-    let safe = !rel.contains("..") && !rel.contains('\\') && !rel.contains('\0');
-    if safe && !rel.is_empty() {
-        let candidate = format!("{root}/{rel}");
-        if let Ok(bytes) = tokio::fs::read(&candidate).await {
-            return ([(header::CONTENT_TYPE, content_type(&candidate))], bytes).into_response();
+/// Router FALLBACK: serve the embedded SPA dashboard. A real asset under the
+/// root is served with a guessed content-type; any other path falls back to
+/// index.html so the client-side (Vue) router takes over. This is ONLY the
+/// fallback, so it never shadows an /api/v1 route. When the dashboard wasn't
+/// bundled at build time it 404s. Mirrors the static surface the retired C++
+/// server exposed.
+pub async fn handle_static(uri: Uri) -> Response {
+    let rel = uri.path().trim_start_matches('/');
+    if !rel.is_empty() {
+        if let Some(resp) = serve(rel) {
+            return resp;
         }
     }
-
-    match tokio::fs::read(&index).await {
-        Ok(bytes) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+    match serve("index.html") {
+        Some(resp) => resp,
+        None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
     }
 }

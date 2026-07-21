@@ -28,30 +28,28 @@ docker run -d --name "$PG" --network "$NET" --ulimit nofile=65535:65535 --shm-si
   -c autovacuum_analyze_scale_factor=0.02 -c autovacuum_vacuum_cost_limit=4000 -c autovacuum_vacuum_cost_delay=0 >/dev/null
 for i in $(seq 1 60); do docker exec "$PG" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
 
-CPORT=6681; cn="b$CPORT"; docker rm -fv "$cn" >/dev/null 2>&1
-log "boot C++ broker (schema init) + configure $Q storage=segments dedup=$DEDUP"
-docker run -d --name "$cn" --network "$NET" -p "$CPORT":6632 \
-  -e PG_HOST="$PG" -e PG_PASSWORD=postgres -e PG_USER=postgres -e PG_DATABASE=postgres \
-  -e NUM_WORKERS=4 -e DB_POOL_SIZE=20 -e SIDECAR_POOL_SIZE=10 "$CIMG" >/dev/null
-for i in $(seq 1 150); do curl -sf "http://localhost:$CPORT/api/v1/status" >/dev/null 2>&1 && break; sleep 1; done
-curl -s -X POST "http://localhost:$CPORT/api/v1/configure" -H 'Content-Type: application/json' \
-  -d "{\"queue\":\"$Q\",\"options\":{\"storage\":\"segments\",\"dedupWindowSeconds\":${DEDUP},\"leaseTime\":60,\"retryLimit\":3}}" >/dev/null
-log "seg queue: $(q "select name||' dedup='||dedup_window_seconds from queen.seg_queues where name='$Q';")"
-docker rm -fv "$cn" >/dev/null 2>&1
-
+# Single-binary flow: the Rust broker self-applies schema.sql + procedures at boot
+# (advisory-locked, fail-fast). No C++ bootstrap needed.
 rn="r$RPORT"; docker rm -fv "$rn" >/dev/null 2>&1
-log "start tuned Rust broker :$RPORT"
-docker run -d --name "$rn" --network "$NET" --ulimit nofile=65535:65535 -p "$RPORT":6632 \
+# DASH_PORT publishes the broker on the host for the dashboard (default 6632,
+# reachable from the internet at http://<broker-public-ip>:6632).
+DASH_PORT="${DASH_PORT:-6632}"
+log "start tuned Rust broker :$RPORT (+dashboard :$DASH_PORT) (self-applies schema at boot)"
+docker run -d --name "$rn" --network "$NET" --ulimit nofile=65535:65535 -p "$RPORT":6632 -p "$DASH_PORT":6632 \
   -e PG_HOST="$PG" -e PG_PASSWORD=postgres -e PG_USER=postgres -e PG_DATABASE=postgres \
   -e DB_POOL_SIZE="${POOL:-300}" -e QUEEN_V2_ZSTD_LEVEL="${ZSTD:-3}" \
   -e QUEEN_V2_FUSION_SHARDS="${FSHARDS:-16}" -e QUEEN_V2_FUSION_FRAMES="${FFRAMES:-500}" \
-  -e QUEEN_V2_FUSION_HOLD_MS="${FHOLD:-15}" \
+  -e QUEEN_V2_FUSION_HOLD_MS="${FHOLD:-30}" -e QUEEN_V2_FUSION_MAX_INFLIGHT="${MAXINFLIGHT:-64}" \
   -e QUEEN_SEG_PUSH_INIT="${PINIT:-64}" -e QUEEN_SEG_PUSH_MIN=16 -e QUEEN_SEG_PUSH_MAX="${PMAX:-256}" \
   -e QUEEN_SEG_POP_INIT="${OINIT:-64}" -e QUEEN_SEG_POP_MIN=16 -e QUEEN_SEG_POP_MAX="${OMAX:-256}" \
   -e QUEEN_VEGAS_ALPHA="${VA:-6}" -e QUEEN_VEGAS_BETA="${VB:-12}" \
   "$RIMG" >/dev/null
-for i in $(seq 1 60); do curl -sf "http://localhost:$RPORT/status" >/dev/null 2>&1 && break; sleep 1; done
-docker logs "$rn" 2>&1 | tail -1
+for i in $(seq 1 90); do curl -sf "http://localhost:$RPORT/status" >/dev/null 2>&1 && break; sleep 1; done
+docker logs "$rn" 2>&1 | tail -3
+
+log "configure $Q dedup=$DEDUP (segments engine)"
+curl -s -X POST "http://localhost:$RPORT/api/v1/configure" -H 'Content-Type: application/json' \
+  -d "{\"queue\":\"$Q\",\"options\":{\"storage\":\"segments\",\"dedupWindowSeconds\":${DEDUP},\"leaseTime\":60,\"retryLimit\":3}}"; echo
 
 # background monitor
 cat > /tmp/mon.sh <<'MON'

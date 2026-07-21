@@ -41,6 +41,9 @@ jsonwebtoken = "9"
 # getrusage(2) for cross-platform process CPU + RSS in the metrics collector
 # (syscollect.rs). Tiny, ubiquitous, no_std-friendly FFI shim only.
 libc = "0.2"
+# Embed the built Vue dashboard (webapp/dist) into the binary so the broker
+# serves the SPA with zero external files — single self-contained binary.
+rust-embed = "8"
 
 [profile.release]
 opt-level = 3

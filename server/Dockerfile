@@ -2,8 +2,11 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml ./
 COPY Cargo.lock ./
+COPY build.rs ./
+COPY server.json ./
 COPY src ./src
 COPY sql ./sql
+COPY webapp ./webapp
 RUN cargo build --release
 
 FROM debian:bookworm-slim
