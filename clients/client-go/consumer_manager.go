@@ -243,7 +243,7 @@ func (cm *ConsumerManager) worker(
 		var processErr error
 		if opts.Each {
 			// Process one at a time
-			for _, msg := range messages {
+			for i, msg := range messages {
 				select {
 				case <-ctx.Done():
 					if renewalCancel != nil {
@@ -253,8 +253,22 @@ func (cm *ConsumerManager) worker(
 				default:
 				}
 
-				processErr = cm.processMessage(ctx, msg, handler, opts.AutoAck, opts.Group)
+				var handledOK bool
+				handledOK, processErr = cm.processMessage(ctx, msg, handler, opts.AutoAck, opts.Group)
 				processedCount++
+
+				// A nack releases the lease and clamps the server cursor at the
+				// failed message: everything after it in this popped batch WILL
+				// be redelivered. Processing it now would only produce
+				// duplicates and rejected acks — abandon the rest of the batch.
+				if opts.AutoAck && !handledOK {
+					logDebug("ConsumerManager.worker", map[string]interface{}{
+						"workerId":  workerID,
+						"status":    "batch-abandoned-after-nack",
+						"remaining": len(messages) - i - 1,
+					})
+					break
+				}
 
 				if opts.Limit > 0 && processedCount >= opts.Limit {
 					break
@@ -264,7 +278,7 @@ func (cm *ConsumerManager) worker(
 			// Process as batch (or single message if batch=1)
 			if opts.Batch == 1 && len(messages) == 1 {
 				// For batch=1, pass single message (not array) - wrap in single-element batch
-				processErr = cm.processMessage(ctx, messages[0], handler, opts.AutoAck, opts.Group)
+				_, processErr = cm.processMessage(ctx, messages[0], handler, opts.AutoAck, opts.Group)
 				processedCount++
 			} else {
 				// For batch>1, pass array of messages
@@ -292,8 +306,11 @@ func (cm *ConsumerManager) worker(
 	}
 }
 
-// processMessage processes a single message.
-func (cm *ConsumerManager) processMessage(ctx context.Context, msg *Message, handler BatchMessageHandler, autoAck bool, group string) error {
+// processMessage processes a single message. The bool result reports whether
+// the message was handled (and acked) successfully; false means it was nacked
+// and the caller must abandon the rest of the popped batch (the nack released
+// the lease server-side).
+func (cm *ConsumerManager) processMessage(ctx context.Context, msg *Message, handler BatchMessageHandler, autoAck bool, group string) (bool, error) {
 	err := handler(ctx, []*Message{msg})
 
 	if autoAck {
@@ -305,12 +322,18 @@ func (cm *ConsumerManager) processMessage(ctx context.Context, msg *Message, han
 		if err != nil {
 			// Auto-nack on error
 			ackOpts.Error = err.Error()
-			_, ackErr := cm.queen.Ack(ctx, msg, false, ackOpts)
+			res, ackErr := cm.queen.Ack(ctx, msg, false, ackOpts)
 			if ackErr != nil {
 				logError("ConsumerManager.processMessage", map[string]interface{}{
 					"transactionId": msg.TransactionID,
 					"error":         ackErr.Error(),
 					"status":        "nack-failed",
+				})
+			} else if len(res) > 0 && !res[0].Success {
+				logError("ConsumerManager.processMessage", map[string]interface{}{
+					"transactionId": msg.TransactionID,
+					"error":         res[0].Error,
+					"status":        "nack-rejected",
 				})
 			} else {
 				logDebug("ConsumerManager.processMessage", map[string]interface{}{
@@ -319,16 +342,22 @@ func (cm *ConsumerManager) processMessage(ctx context.Context, msg *Message, han
 				})
 			}
 			// Don't propagate error when autoAck is enabled
-			return nil
+			return false, nil
 		}
 
 		// Auto-ack on success
-		_, ackErr := cm.queen.Ack(ctx, msg, true, ackOpts)
+		res, ackErr := cm.queen.Ack(ctx, msg, true, ackOpts)
 		if ackErr != nil {
 			logError("ConsumerManager.processMessage", map[string]interface{}{
 				"transactionId": msg.TransactionID,
 				"error":         ackErr.Error(),
 				"status":        "ack-failed",
+			})
+		} else if len(res) > 0 && !res[0].Success {
+			logError("ConsumerManager.processMessage", map[string]interface{}{
+				"transactionId": msg.TransactionID,
+				"error":         res[0].Error,
+				"status":        "ack-rejected",
 			})
 		} else {
 			logDebug("ConsumerManager.processMessage", map[string]interface{}{
@@ -336,10 +365,10 @@ func (cm *ConsumerManager) processMessage(ctx context.Context, msg *Message, han
 				"status":        "acked",
 			})
 		}
-		return nil
+		return true, nil
 	}
 
-	return err
+	return err == nil, err
 }
 
 // processBatch processes a batch of messages.
@@ -372,7 +401,7 @@ func (cm *ConsumerManager) processBatch(ctx context.Context, msgs []*Message, ha
 		}
 
 		// Auto-ack on success
-		_, ackErr := cm.queen.Ack(ctx, msgs, true, ackOpts)
+		res, ackErr := cm.queen.Ack(ctx, msgs, true, ackOpts)
 		if ackErr != nil {
 			logError("ConsumerManager.processBatch", map[string]interface{}{
 				"count":  len(msgs),
@@ -380,10 +409,24 @@ func (cm *ConsumerManager) processBatch(ctx context.Context, msgs []*Message, ha
 				"status": "ack-failed",
 			})
 		} else {
-			logDebug("ConsumerManager.processBatch", map[string]interface{}{
-				"count":  len(msgs),
-				"status": "acked",
-			})
+			rejected := 0
+			for _, r := range res {
+				if !r.Success {
+					rejected++
+				}
+			}
+			if rejected > 0 {
+				logError("ConsumerManager.processBatch", map[string]interface{}{
+					"count":    len(msgs),
+					"rejected": rejected,
+					"status":   "ack-rejected",
+				})
+			} else {
+				logDebug("ConsumerManager.processBatch", map[string]interface{}{
+					"count":  len(msgs),
+					"status": "acked",
+				})
+			}
 		}
 		return nil
 	}

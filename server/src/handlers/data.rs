@@ -1074,6 +1074,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
     let mut errors: Vec<Option<String>> = vec![None; n];
     let mut lease_released = vec![false; n];
     let mut dlq_flags = vec![false; n];
+    let mut noop_flags = vec![false; n];
 
     // Group item indices by (partition_id, worker): one seg_ack_by_txn_v1 call each.
     let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
@@ -1086,11 +1087,11 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
 
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => {
+            Err(_) => {
             for e in errors.iter_mut() {
                 *e = Some("pool".to_string());
             }
-            return render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags);
+            return render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags);
         }
     };
 
@@ -1160,6 +1161,37 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                             lease_released[i] = true;
                         }
                     }
+                    // Below-cursor honesty (ack-as-commit): the SP reports txns
+                    // whose position resolved below the committed cursor.
+                    // Completed ones are harmless duplicate commits -> noop:true;
+                    // explicit signals (failed/retry/dlq) can no longer be
+                    // honored -> rejected per item instead of a silent ok.
+                    let txn_list = |key: &str| -> Vec<String> {
+                        v.get(key)
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|s| s.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let noop_txns = txn_list("noopTxns");
+                    let stale_txns = txn_list("staleTxns");
+                    if !noop_txns.is_empty() || !stale_txns.is_empty() {
+                        for &i in &idxs {
+                            if stale_txns.iter().any(|t| t == &acks[i].txn) {
+                                success[i] = false;
+                                dlq_flags[i] = false;
+                                errors[i] = Some(
+                                    "already committed: the cursor moved past this message before this ack"
+                                        .to_string(),
+                                );
+                            } else if noop_txns.iter().any(|t| t == &acks[i].txn) {
+                                noop_flags[i] = true;
+                            }
+                        }
+                    }
                 } else {
                     let err = v
                         .get("error")
@@ -1207,7 +1239,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
         st.metrics.dlq_moved.fetch_add(dlq, Relaxed);
     }
 
-    render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags)
+    render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags)
 }
 
 // Decode the leased segment, extract the poison HEAD frame (payload snapshot,
@@ -1275,6 +1307,7 @@ fn render_ack_results(
     errors: &[Option<String>],
     lease_released: &[bool],
     dlq_flags: &[bool],
+    noop_flags: &[bool],
 ) -> String {
     let mut out = String::from("[");
     for (i, a) in acks.iter().enumerate() {
@@ -1300,6 +1333,8 @@ fn render_ack_results(
         out.push_str(if lease_released[i] { "true" } else { "false" });
         out.push_str(",\"dlq\":");
         out.push_str(if dlq_flags[i] { "true" } else { "false" });
+        out.push_str(",\"noop\":");
+        out.push_str(if noop_flags[i] { "true" } else { "false" });
         out.push('}');
     }
     out.push(']');

@@ -25,6 +25,17 @@
  *     boolean).
  * 13. Per-request ?leaseSeconds= override wins over the queue default.
  *
+ * Ack-as-commit contract (explicit signals are never skipped):
+ *
+ * 14. A `failed` nack in the same ack call as later completed acks clamps the
+ *     cursor: the nacked message and everything after it redelivers.
+ * 15. Same for `retry`: a later completed ack in the same call cannot skip it.
+ * 16. A nack that resolves BELOW the committed cursor is rejected
+ *     (success=false, 'already committed') instead of a silent no-op.
+ * 17. A completed ack below the cursor succeeds but is flagged noop:true.
+ * 18. `.each()` consumers stop the current batch after a nack: messages after
+ *     the failed one are not processed on a dead lease (no double delivery).
+ *
  * Run: node run.js <testName>   e.g. node run.js implicitAckCompletesBatch
  */
 
@@ -527,6 +538,213 @@ export async function transactionAckHonorsRetryAndDlq(client) {
         return { success: false, message: 'Message still deliverable after transactional forced DLQ' }
     }
     return { success: true, message: 'Transactions honored retry (budget-free) and dlq (immediate) statuses' }
+}
+
+// ============================================================================
+// 14. Ack-as-commit: a `failed` nack is never skipped by later completed acks
+//     sent in the SAME ack call (cursor clamps at the nack).
+// ============================================================================
+export async function nackNotSkippedByLaterAckSameCall(client) {
+    const queue = uniq('nack-clamp')
+    await client.queue(queue).config({ leaseTime: 30 }).create()
+
+    await client.queue(queue).partition('Default')
+        .push([1, 2, 3, 4, 5].map(n => ({ data: { n }, transactionId: `${queue}-tx-${n}` })))
+
+    const msgs = await popRetry(client, queue, { batch: 5 })
+    if (msgs.length !== 5) {
+        return { success: false, message: `Expected 5 messages, got ${msgs.length}` }
+    }
+
+    // One batch ack call: #2 failed, everything else completed. The Promise.allSettled
+    // pattern: parallel processing, per-message outcome, single commit.
+    msgs[0]._status = 'completed'
+    msgs[1]._status = 'failed'
+    msgs[1]._error = 'sem-test poison'
+    msgs[2]._status = 'completed'
+    msgs[3]._status = 'completed'
+    msgs[4]._status = 'completed'
+    await client.ack(msgs)
+
+    // Contract: the cursor must clamp just before #2. The nack releases the
+    // lease, so #2..#5 redeliver immediately (later completed acks above a nack
+    // are redelivered — at-least-once duplicates, never a lost nack).
+    const again = await popRetry(client, queue, { batch: 10 })
+    const txs = again.map(m => m.transactionId).sort()
+    const want = [2, 3, 4, 5].map(n => `${queue}-tx-${n}`).sort()
+    if (JSON.stringify(txs) !== JSON.stringify(want)) {
+        return {
+            success: false,
+            message: `Nacked message skipped by later acks in the same call: redelivered [${txs.join(', ')}], want [${want.join(', ')}]`
+        }
+    }
+    return { success: true, message: 'failed nack clamped the cursor: nacked message and later ones redelivered' }
+}
+
+// ============================================================================
+// 15. Ack-as-commit: same clamp for `retry` (budget-free) in the same call
+// ============================================================================
+export async function retryNotSkippedByLaterAckSameCall(client) {
+    const queue = uniq('retry-clamp')
+    await client.queue(queue).config({ leaseTime: 30 }).create()
+
+    await client.queue(queue).partition('Default')
+        .push([1, 2, 3].map(n => ({ data: { n }, transactionId: `${queue}-tx-${n}` })))
+
+    const msgs = await popRetry(client, queue, { batch: 3 })
+    if (msgs.length !== 3) {
+        return { success: false, message: `Expected 3 messages, got ${msgs.length}` }
+    }
+
+    msgs[0]._status = 'completed'
+    msgs[1]._status = 'retry'
+    msgs[2]._status = 'completed'
+    await client.ack(msgs)
+
+    const again = await popRetry(client, queue, { batch: 10 })
+    const txs = again.map(m => m.transactionId).sort()
+    const want = [2, 3].map(n => `${queue}-tx-${n}`).sort()
+    if (JSON.stringify(txs) !== JSON.stringify(want)) {
+        return {
+            success: false,
+            message: `'retry' skipped by a later ack in the same call: redelivered [${txs.join(', ')}], want [${want.join(', ')}]`
+        }
+    }
+    if (await dlqCount(client, queue) !== 0) {
+        return { success: false, message: `'retry' clamp leaked into the DLQ` }
+    }
+    return { success: true, message: `'retry' clamped the cursor without charging budget` }
+}
+
+// ============================================================================
+// 16. Ack-as-commit honesty: a nack BELOW the committed cursor is rejected,
+//     not silently swallowed as a no-op.
+// ============================================================================
+export async function nackBelowCursorIsRejected(client) {
+    const queue = uniq('late-nack')
+    await client.queue(queue).config({ leaseTime: 30 }).create()
+
+    await client.queue(queue).partition('Default')
+        .push([1, 2, 3].map(n => ({ data: { n }, transactionId: `${queue}-tx-${n}` })))
+
+    const msgs = await popRetry(client, queue, { batch: 3 })
+    if (msgs.length !== 3) {
+        return { success: false, message: `Expected 3 messages, got ${msgs.length}` }
+    }
+
+    // Ack the MIDDLE message: cursor commits past #1 and #2, lease stays live
+    // (batch end not reached).
+    const mid = await client.ack(msgs[1])
+    if (!mid.success) {
+        return { success: false, message: `Ack of middle message failed: ${mid.error}` }
+    }
+
+    // Nack #1, which is now below the cursor. The server can no longer honor
+    // it — it must SAY so instead of answering ok.
+    const late = await client.ack(msgs[0], false, { error: 'too late' })
+    if (late.success) {
+        return {
+            success: false,
+            message: 'Nack below the committed cursor was silently accepted (must be rejected as already committed)'
+        }
+    }
+    if (!/committed/i.test(late.error || '')) {
+        return {
+            success: false,
+            message: `Nack below cursor rejected with wrong error: '${late.error}' (want mention of 'committed')`
+        }
+    }
+    return { success: true, message: 'Late nack below the cursor rejected explicitly' }
+}
+
+// ============================================================================
+// 17. Ack-as-commit honesty: a completed ack below the cursor succeeds but is
+//     flagged noop:true (harmless duplicate commit).
+// ============================================================================
+export async function ackBelowCursorIsNoopFlagged(client) {
+    const queue = uniq('late-ack')
+    await client.queue(queue).config({ leaseTime: 30 }).create()
+
+    await client.queue(queue).partition('Default')
+        .push([1, 2, 3].map(n => ({ data: { n }, transactionId: `${queue}-tx-${n}` })))
+
+    const msgs = await popRetry(client, queue, { batch: 3 })
+    if (msgs.length !== 3) {
+        return { success: false, message: `Expected 3 messages, got ${msgs.length}` }
+    }
+
+    const mid = await client.ack(msgs[1])
+    if (!mid.success) {
+        return { success: false, message: `Ack of middle message failed: ${mid.error}` }
+    }
+
+    // Completed ack of #1, already below the cursor: fine, but must carry noop.
+    const late = await client.ack(msgs[0])
+    if (!late.success) {
+        return { success: false, message: `Completed ack below cursor failed: ${late.error}` }
+    }
+    if (late.noop !== true) {
+        return {
+            success: false,
+            message: `Completed ack below cursor not flagged (noop=${JSON.stringify(late.noop)}, want true)`
+        }
+    }
+
+    // A normal in-range ack must NOT carry the flag.
+    const fresh = await client.ack(msgs[2])
+    if (!fresh.success || fresh.noop === true) {
+        return { success: false, message: `In-range ack wrongly flagged noop (success=${fresh.success}, noop=${fresh.noop})` }
+    }
+    return { success: true, message: 'Below-cursor completed ack flagged noop:true; in-range ack clean' }
+}
+
+// ============================================================================
+// 18. `.each()` consumer stops the current batch after a nack — messages after
+//     the failure are not processed on a dead lease (no systematic duplicates).
+// ============================================================================
+export async function eachStopsBatchAfterNack(client) {
+    const queue = uniq('each-stop')
+    await client.queue(queue).config({ leaseTime: 30, retryLimit: 1 }).create()
+
+    await client.queue(queue).partition('Default')
+        .push([1, 2, 3, 4, 5].map(n => ({ data: { n }, transactionId: `${queue}-tx-${n}` })))
+
+    const seen = new Map() // txn -> handler invocations
+    await client.queue(queue)
+        .batch(5)
+        .wait(false)
+        .idleMillis(3000)
+        .each()
+        .consume(async msg => {
+            seen.set(msg.transactionId, (seen.get(msg.transactionId) || 0) + 1)
+            if (msg.data && msg.data.n === 2) {
+                throw new Error('sem-test poison')
+            }
+        })
+
+    // #2 is poison (retryLimit=1: delivered twice, then DLQ'd). Every other
+    // message must be handled EXACTLY once: after the nack the client must
+    // abandon the rest of the popped batch (dead lease) instead of processing
+    // messages that are guaranteed to be redelivered.
+    const dupes = [1, 3, 4, 5]
+        .map(n => `${queue}-tx-${n}`)
+        .filter(tx => (seen.get(tx) || 0) > 1)
+    if (dupes.length > 0) {
+        return {
+            success: false,
+            message: `Messages processed more than once after a mid-batch nack: ${dupes.map(tx => `${tx}x${seen.get(tx)}`).join(', ')}`
+        }
+    }
+    const missing = [1, 3, 4, 5]
+        .map(n => `${queue}-tx-${n}`)
+        .filter(tx => !seen.has(tx))
+    if (missing.length > 0) {
+        return { success: false, message: `Messages never processed: ${missing.join(', ')}` }
+    }
+    if (await dlqCount(client, queue) !== 1) {
+        return { success: false, message: 'Poison message did not end up in the DLQ' }
+    }
+    return { success: true, message: 'each() abandoned the dead-lease batch after the nack; no duplicates' }
 }
 
 // ============================================================================

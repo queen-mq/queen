@@ -214,12 +214,28 @@ class ConsumerManager:
                     # Process messages
                     if each:
                         # Process one at a time
-                        for message in messages:
+                        for idx, message in enumerate(messages):
                             if signal and signal.is_set():
                                 break
 
-                            await self._process_message(message, handler, auto_ack, group)
+                            ok = await self._process_message(message, handler, auto_ack, group)
                             processed_count += 1
+
+                            # A nack releases the lease and clamps the server
+                            # cursor at the failed message: everything after it
+                            # in this popped batch WILL be redelivered.
+                            # Processing it now would only produce duplicates
+                            # and rejected acks — abandon the rest of the batch.
+                            if auto_ack and not ok:
+                                logger.warn(
+                                    "ConsumerManager.worker",
+                                    {
+                                        "worker_id": worker_id,
+                                        "status": "batch-abandoned-after-nack",
+                                        "remaining": len(messages) - idx - 1,
+                                    },
+                                )
+                                break
 
                             if limit and processed_count >= limit:
                                 break
@@ -288,24 +304,49 @@ class ConsumerManager:
 
     async def _process_message(
         self, message: Dict[str, Any], handler: Callable[[Any], Any], auto_ack: bool, group: Optional[str]
-    ) -> None:
-        """Process single message"""
+    ) -> bool:
+        """Process single message.
+
+        Returns True when the message was handled (and acked) successfully,
+        False when it was nacked — the caller must abandon the rest of the
+        popped batch (the nack released the lease server-side).
+        """
         try:
             await handler(message)
 
             # Auto-ack on success if enabled
             if auto_ack:
                 context = {"group": group} if group else {}
-                await self._queen.ack(message, True, context)
-                logger.log(
-                    "ConsumerManager.processMessage",
-                    {"transaction_id": message.get("transactionId"), "status": "acked"},
-                )
+                res = await self._queen.ack(message, True, context)
+                if isinstance(res, dict) and res.get("success") is False:
+                    logger.error(
+                        "ConsumerManager.processMessage",
+                        {
+                            "transaction_id": message.get("transactionId"),
+                            "status": "ack-rejected",
+                            "error": res.get("error"),
+                        },
+                    )
+                else:
+                    logger.log(
+                        "ConsumerManager.processMessage",
+                        {"transaction_id": message.get("transactionId"), "status": "acked"},
+                    )
+            return True
         except Exception as error:
             # Auto-nack on error if enabled
             if auto_ack:
-                context = {"group": group} if group else {}
-                await self._queen.ack(message, False, context)
+                context = {"group": group, "error": str(error)} if group else {"error": str(error)}
+                res = await self._queen.ack(message, False, context)
+                if isinstance(res, dict) and res.get("success") is False:
+                    logger.error(
+                        "ConsumerManager.processMessage",
+                        {
+                            "transaction_id": message.get("transactionId"),
+                            "status": "nack-rejected",
+                            "error": res.get("error"),
+                        },
+                    )
                 logger.error(
                     "ConsumerManager.processMessage",
                     {
@@ -316,7 +357,7 @@ class ConsumerManager:
                 )
                 # Don't rethrow when autoAck is enabled - NACK was already sent
                 # This allows the consumer to continue and retry
-                return
+                return False
             logger.error(
                 "ConsumerManager.processMessage",
                 {"transaction_id": message.get("transactionId"), "error": str(error)},
@@ -337,12 +378,18 @@ class ConsumerManager:
             # Auto-ack on success if enabled
             if auto_ack:
                 context = {"group": group} if group else {}
-                await self._queen.ack(messages, True, context)
-                logger.log("ConsumerManager.processBatch", {"count": len(messages), "status": "acked"})
+                res = await self._queen.ack(messages, True, context)
+                if isinstance(res, dict) and res.get("success") is False:
+                    logger.error(
+                        "ConsumerManager.processBatch",
+                        {"count": len(messages), "status": "ack-rejected", "error": res.get("error")},
+                    )
+                else:
+                    logger.log("ConsumerManager.processBatch", {"count": len(messages), "status": "acked"})
         except Exception as error:
             # Auto-nack on error if enabled
             if auto_ack:
-                context = {"group": group} if group else {}
+                context = {"group": group, "error": str(error)} if group else {"error": str(error)}
                 await self._queen.ack(messages, False, context)
                 logger.error(
                     "ConsumerManager.processBatch",

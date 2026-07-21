@@ -255,9 +255,21 @@ $$;
 -- batch_positions machinery:
 --
 --   * IMPLICIT-ACK: acking position P advances the cursor to just past the MAX
---     acked-ok position in the leased range, unconditionally — every earlier
---     unacked position is below the cursor and is completed, never redelivered.
---     "Ack the last message of the batch" completes the whole batch.
+--     acked-ok position in the leased range — every earlier UNACKED position is
+--     below the cursor and is completed, never redelivered. "Ack the last
+--     message of the batch" completes the whole batch.
+--   * EXPLICIT SIGNALS ARE NEVER SKIPPED (ack-as-commit honesty): the cursor is
+--     clamped at the LOWEST explicit failed/dlq/retry position in the same ack
+--     call, even when a later position was acked completed. That lowest signal
+--     decides the action (retry charge / DLQ hand-off / budget-free release);
+--     completed positions above it simply redeliver (at-least-once duplicates,
+--     never a lost nack). Only silent gaps are implicitly completed.
+--   * BELOW-CURSOR HONESTY: an ack whose position resolved BELOW the committed
+--     cursor cannot have any effect anymore. The txn is reported back so the
+--     broker can answer per item: completed -> success with noop:true (harmless
+--     duplicate commit); failed/dlq/retry -> rejected ('already committed')
+--     instead of a silent no-op. Wire: 'noopTxns' / 'staleTxns' arrays on every
+--     ok:true return.
 --   * RETRY COUNTING: a single per-(partition,group) counter, batch_retry_count,
 --     charged ONCE per explicit `failed` ack while budget remains, reset on batch
 --     completion, and NEVER charged on lease expiry or a plain lease release.
@@ -306,6 +318,13 @@ DECLARE
     v_retry_limit INTEGER;
     v_dlq_enabled BOOLEAN;
     v_retry_ct INTEGER;
+    -- lowest explicit signal (failed/dlq/retry) at/after the old cursor
+    v_sig_seq BIGINT;
+    v_sig_off INTEGER;
+    v_sig_kind TEXT;
+    -- below-cursor honesty: txns whose position was already committed
+    v_noop_txns JSONB := '[]'::jsonb;
+    v_stale_txns JSONB := '[]'::jsonb;
 BEGIN
     SELECT * INTO v_c FROM queen.partition_consumers c
     WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
@@ -326,10 +345,57 @@ BEGIN
 
     v_has_lease := (v_c.batch_end_seq IS NOT NULL AND v_c.batch_end_off IS NOT NULL);
 
+    -- ------------------------------------------------------------------ (0)
+    -- BELOW-CURSOR HONESTY: acks that resolve below the committed cursor can no
+    -- longer have any effect. Report them back per txn instead of silently
+    -- swallowing them: completed -> noop (harmless duplicate commit);
+    -- failed/dlq/retry -> stale (an explicit signal the store cannot honor —
+    -- the broker rejects the item as 'already committed').
+    SELECT COALESCE(jsonb_agg(t.txn) FILTER (
+               WHERE t.st IN ('completed', 'success', 'acked', 'ok')), '[]'::jsonb),
+           COALESCE(jsonb_agg(t.txn) FILTER (
+               WHERE t.st IN ('failed', 'dlq', 'retry')), '[]'::jsonb)
+    INTO v_noop_txns, v_stale_txns
+    FROM (
+        SELECT a.txn,
+               COALESCE(a.status, CASE WHEN a.ok IS FALSE THEN 'failed' ELSE 'completed' END) AS st
+        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
+        JOIN queen.seg_dedup d
+          ON d.partition_id = p_partition_id
+         AND d.txn_hash = hashtextextended(a.txn, 0)
+        WHERE (d.seq, d.frame_idx) < (v_c.next_seq, v_c.next_off)
+    ) t;
+
+    -- ------------------------------------------------------------------ (0b)
+    -- HEAD SIGNAL: the LOWEST explicit failed/dlq/retry position in the ack
+    -- range. The cursor may never advance past it — an explicit signal is never
+    -- implicitly completed by a later acked-ok position in the same call. At
+    -- the same position dlq > failed > retry.
+    SELECT t.seq, t.frame_idx, t.st
+    INTO v_sig_seq, v_sig_off, v_sig_kind
+    FROM (
+        SELECT d.seq, d.frame_idx,
+               COALESCE(a.status, CASE WHEN a.ok IS FALSE THEN 'failed' ELSE 'completed' END) AS st
+        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
+        JOIN queen.seg_dedup d
+          ON d.partition_id = p_partition_id
+         AND d.txn_hash = hashtextextended(a.txn, 0)
+        WHERE (d.seq, d.frame_idx) >= (v_c.next_seq, v_c.next_off)
+          AND (NOT v_has_lease
+               OR (d.seq, d.frame_idx) <= (v_c.batch_end_seq, v_c.batch_end_off))
+    ) t
+    WHERE t.st IN ('failed', 'dlq', 'retry')
+    ORDER BY t.seq, t.frame_idx,
+             CASE t.st WHEN 'dlq' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END
+    LIMIT 1;
+
     -- ------------------------------------------------------------------ (1)
-    -- IMPLICIT-ACK: the MAX acked-ok position in the ack range. Resolved through
-    -- the dedup window. With a live lease the batch_end clamps the range; without
-    -- one (lease-less ack) any position at/after the cursor counts.
+    -- IMPLICIT-ACK: the MAX acked-ok position in the ack range, CLAMPED below
+    -- the head signal. Resolved through the dedup window. With a live lease the
+    -- batch_end clamps the range; without one (lease-less ack) any position
+    -- at/after the cursor counts. Silent gaps below the max still commit
+    -- implicitly; acked-ok positions above the head signal are ignored here and
+    -- simply redeliver (at-least-once duplicates, never a lost signal).
     SELECT d.seq, d.frame_idx INTO v_max_ok_seq, v_max_ok_off
     FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
     JOIN queen.seg_dedup d
@@ -340,6 +406,8 @@ BEGIN
       AND (d.seq, d.frame_idx) >= (v_c.next_seq, v_c.next_off)
       AND (NOT v_has_lease
            OR (d.seq, d.frame_idx) <= (v_c.batch_end_seq, v_c.batch_end_off))
+      AND (v_sig_seq IS NULL
+           OR (d.seq, d.frame_idx) < (v_sig_seq, v_sig_off))
     ORDER BY d.seq DESC, d.frame_idx DESC
     LIMIT 1;
 
@@ -370,37 +438,15 @@ BEGIN
     v_delta := GREATEST(v_delta, 0);
 
     -- ------------------------------------------------------------------ (2)
-    -- Detect a real nack at/after the NEW cursor (a failed/dlq below the completed
-    -- max is implicitly completed and ignored). dlq wins over failed; among a kind,
-    -- the lowest position is the poison head.
-    SELECT d.seq, d.frame_idx,
-           CASE WHEN COALESCE(a.status,'') = 'dlq' THEN 'dlq' ELSE 'failed' END
-    INTO v_poison_seq, v_poison_off, v_nack_kind
-    FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
-    JOIN queen.seg_dedup d
-      ON d.partition_id = p_partition_id
-     AND d.txn_hash = hashtextextended(a.txn, 0)
-    WHERE COALESCE(a.status, CASE WHEN a.ok IS FALSE THEN 'failed' ELSE 'completed' END)
-          IN ('failed', 'dlq')
-      AND (d.seq, d.frame_idx) >= (v_new_seq, v_new_off)
-      AND (NOT v_has_lease
-           OR (d.seq, d.frame_idx) <= (v_c.batch_end_seq, v_c.batch_end_off))
-    ORDER BY (COALESCE(a.status,'') = 'dlq') DESC, d.seq, d.frame_idx
-    LIMIT 1;
-
-    -- Any explicit 'retry' at/after the new cursor (only consulted if no nack).
-    IF v_nack_kind IS NULL THEN
-        SELECT TRUE INTO v_has_retry
-        FROM jsonb_to_recordset(p_acks) AS a(txn TEXT, status TEXT, ok BOOLEAN)
-        JOIN queen.seg_dedup d
-          ON d.partition_id = p_partition_id
-         AND d.txn_hash = hashtextextended(a.txn, 0)
-        WHERE COALESCE(a.status, '') = 'retry'
-          AND (d.seq, d.frame_idx) >= (v_new_seq, v_new_off)
-          AND (NOT v_has_lease
-               OR (d.seq, d.frame_idx) <= (v_c.batch_end_seq, v_c.batch_end_off))
-        LIMIT 1;
-        v_has_retry := COALESCE(v_has_retry, FALSE);
+    -- The head signal (0b) decides the action. By construction the new cursor
+    -- is clamped at or below it, so the signal is always at/after the cursor:
+    -- the poison head is exactly the lowest explicit signal.
+    IF v_sig_kind IN ('failed', 'dlq') THEN
+        v_nack_kind := v_sig_kind;
+        v_poison_seq := v_sig_seq;
+        v_poison_off := v_sig_off;
+    ELSIF v_sig_kind = 'retry' THEN
+        v_has_retry := TRUE;
     END IF;
 
     -- ------------------------------------------------------------------ (3)
@@ -416,7 +462,8 @@ BEGIN
         RETURN jsonb_build_object(
             'ok', true, 'dlq', true,
             'partitionId', p_partition_id, 'group', p_group, 'worker', p_worker,
-            'seq', v_poison_seq, 'frameIdx', v_poison_off, 'acked', v_delta);
+            'seq', v_poison_seq, 'frameIdx', v_poison_off, 'acked', v_delta,
+            'noopTxns', v_noop_txns, 'staleTxns', v_stale_txns);
     END IF;
 
     -- ------------------------------------------------------------------ (4)
@@ -449,7 +496,8 @@ BEGIN
                 total_consumed = total_consumed + v_delta
             WHERE partition_id = p_partition_id AND consumer_group = p_group;
             RETURN jsonb_build_object('ok', true, 'acked', v_delta,
-                                      'seq', v_new_seq, 'off', v_new_off);
+                                      'seq', v_new_seq, 'off', v_new_off,
+                                      'noopTxns', v_noop_txns, 'staleTxns', v_stale_txns);
         ELSIF v_dlq_enabled THEN
             -- Budget exhausted + DLQ: hand the poison to the broker (keep the lease).
             UPDATE queen.partition_consumers SET
@@ -460,7 +508,8 @@ BEGIN
             RETURN jsonb_build_object(
                 'ok', true, 'dlq', true,
                 'partitionId', p_partition_id, 'group', p_group, 'worker', p_worker,
-                'seq', v_poison_seq, 'frameIdx', v_poison_off, 'acked', v_delta);
+                'seq', v_poison_seq, 'frameIdx', v_poison_off, 'acked', v_delta,
+                'noopTxns', v_noop_txns, 'staleTxns', v_stale_txns);
         ELSE
             -- Budget exhausted, no DLQ: DROP the poison — advance the cursor past it
             -- (normalized), reset the counter, release the lease.
@@ -480,7 +529,8 @@ BEGIN
                 total_consumed = total_consumed + v_delta + 1
             WHERE partition_id = p_partition_id AND consumer_group = p_group;
             RETURN jsonb_build_object('ok', true, 'dropped', true,
-                'acked', v_delta, 'seq', v_new_seq, 'off', v_new_off);
+                'acked', v_delta, 'seq', v_new_seq, 'off', v_new_off,
+                'noopTxns', v_noop_txns, 'staleTxns', v_stale_txns);
         END IF;
     END IF;
 
@@ -496,7 +546,8 @@ BEGIN
             total_consumed = total_consumed + v_delta
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
         RETURN jsonb_build_object('ok', true, 'acked', v_delta,
-                                  'seq', v_new_seq, 'off', v_new_off);
+                                  'seq', v_new_seq, 'off', v_new_off,
+                                  'noopTxns', v_noop_txns, 'staleTxns', v_stale_txns);
     END IF;
 
     -- ------------------------------------------------------------------ (6)
@@ -532,7 +583,8 @@ BEGIN
     END IF;
 
     RETURN jsonb_build_object('ok', true, 'acked', v_delta,
-                              'seq', v_new_seq, 'off', v_new_off);
+                              'seq', v_new_seq, 'off', v_new_off,
+                              'noopTxns', v_noop_txns, 'staleTxns', v_stale_txns);
 END;
 $$;
 
