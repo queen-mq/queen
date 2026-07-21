@@ -1,3 +1,22 @@
+// Ordering assertion that tolerates REDELIVERY (at-least-once is the broker's
+// contract: a lease expiry / ack timeout on a slow machine legally replays a
+// batch). What it still catches is the real bug class — SKIPPED messages: the
+// stream must never jump PAST an id it hasn't delivered yet. Throwing on a
+// redelivered (already-seen) id instead would nack the batch, and four nacks
+// dead-letter the head (v0.16.0 retry semantics) — turning one benign
+// redelivery into message loss and a failed test.
+function makeOrderingTracker() {
+    let maxId = -1
+    return {
+        observe(id) {
+            if (id > maxId + 1) {
+                throw new Error(`Message ordering violation: jumped from ${maxId} to ${id} (skipped ${id - maxId - 1})`)
+            }
+            if (id > maxId) maxId = id
+        }
+    }
+}
+
 export async function testLoad(client) { 
     const queue = await client
     .queue('test-queue-v2-load')
@@ -19,24 +38,22 @@ export async function testLoad(client) {
     await client.queue('test-queue-v2-load').push(messages)    
 
     let uniqueIds = new Set();
-    let lastId = null;
+    const order = makeOrderingTracker();
 
+    // idleMillis instead of limit(10000): a hard per-worker delivery budget
+    // counts redeliveries too, so one replayed batch makes workers return
+    // "complete" with messages still queued (or spin forever waiting to hit an
+    // exact share). Draining until idle is redelivery-proof — same pattern as
+    // the bootstrap tests.
     await client
     .queue('test-queue-v2-load')
     .concurrency(10)
     .batch(100)
     .wait(false)
-    .limit(10000)
+    .idleMillis(5000)
     .consume(async msgs => {
         for (const msg of msgs) {
-            if (lastId === null) {
-                lastId = msg.data.id
-            } else {
-                if (msg.data.id !== lastId + 1) {
-                    throw new Error('Message ordering violation')
-                }
-                lastId = msg.data.id
-            }
+            order.observe(msg.data.id)
             uniqueIds.add(msg.data.id)
         }
     })
@@ -76,24 +93,16 @@ export async function testLoadPartition(client) {
     
     
     for (let i = 0; i < 10; i++) {
-        let lastId = null;
+        const order = makeOrderingTracker();
     await client
     .queue('test-queue-v2-load-partition')
     .partition(i.toString())
     .batch(100)
     .wait(false)
-    .limit(10000)
+    .idleMillis(5000)
     .consume(async msgs => {
         for (const msg of msgs) {
-            if (lastId === null) {
-                lastId = msg.data.id
-            } else {
-                if (msg.data.id !== lastId + 1) {
-                    console.log(`Message ordering violation: ${msg.data.id} !== ${lastId + 1}`)
-                    throw new Error('Message ordering violation')
-                }
-                lastId = msg.data.id
-            }
+            order.observe(msg.data.id)
             uniqueIds.add(msg.data.id)
         }
     })
@@ -126,7 +135,7 @@ export async function testLoadConsumerGroup(client) {
     await client.queue('test-queue-v2-load-consumer-group').push(messages)    
 
     let uniqueIdsA = new Set();
-    let lastIdA = null;
+    const orderA = makeOrderingTracker();
 
     await client
     .queue('test-queue-v2-load-consumer-group')
@@ -135,23 +144,16 @@ export async function testLoadConsumerGroup(client) {
     .concurrency(10)
     .batch(100)
     .wait(false)
-    .limit(10000)
+    .idleMillis(5000)
     .consume(async msgs => {
         for (const msg of msgs) {
-            if (lastIdA === null) {
-                lastIdA = msg.data.id
-            } else {
-                if (msg.data.id !== lastIdA + 1) {
-                    throw new Error('Message ordering violation')
-                }
-                lastIdA = msg.data.id
-            }
+            orderA.observe(msg.data.id)
             uniqueIdsA.add(msg.data.id)
         }
     })
     
     let uniqueIdsB = new Set();
-    let lastIdB = null;
+    const orderB = makeOrderingTracker();
 
     await client
     .queue('test-queue-v2-load-consumer-group')
@@ -160,22 +162,16 @@ export async function testLoadConsumerGroup(client) {
     .concurrency(10)
     .batch(100)
     .wait(false)
-    .limit(10000)
+    .idleMillis(5000)
     .consume(async msgs => {
         for (const msg of msgs) {
-            if (lastIdB === null) {
-                lastIdB = msg.data.id
-            } else {
-                if (msg.data.id !== lastIdB + 1) {
-                    throw new Error('Message ordering violation')
-                }
-                lastIdB = msg.data.id
-            }
+            orderB.observe(msg.data.id)
             uniqueIdsB.add(msg.data.id)
         }
     })    
 
     const uniqueIdsCountA = uniqueIdsA.size;
     const uniqueIdsCountB = uniqueIdsB.size;
+    console.log(`Unique IDs: groupA=${uniqueIdsCountA} groupB=${uniqueIdsCountB}`)
     return { success: uniqueIdsCountA === messagesToPush && uniqueIdsCountB === messagesToPush, message: 'Load test completed successfully' }
 }

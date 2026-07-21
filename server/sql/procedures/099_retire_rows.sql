@@ -448,13 +448,21 @@ BEGIN
     v_limit := COALESCE((p_filters->>'limit')::integer, 200);
     v_offset := COALESCE((p_filters->>'offset')::integer, 0);
 
-    -- Segments-only: the rows engine (queen.messages) is retired and its table is
-    -- always empty. The rows contribution to the mode summary is therefore fixed:
-    --   bool_or() over 0 rows -> NULL (has_queue_mode), COUNT() over 0 rows -> 0.
-    -- and the rows message list is empty ([]). These are inlined below instead of
-    -- scanning queen.messages.
-    v_has_queue_mode := NULL;
-    v_total_bus_groups := 0;
+    -- Mode summary from the SEGMENTS consumers (the rows engine is retired; the
+    -- old inlined NULL/0 made every segment queue report mode 'none', so the
+    -- webapp rendered bus queues as if nothing ever consumed them).
+    SELECT bool_or(pc.consumer_group = '__QUEUE_MODE__'),
+           COUNT(DISTINCT pc.consumer_group)
+               FILTER (WHERE pc.consumer_group <> '__QUEUE_MODE__')::integer
+    INTO v_has_queue_mode, v_total_bus_groups
+    FROM queen.partition_consumers pc
+    JOIN queen.seg_partitions p ON p.id = pc.partition_id
+    JOIN queen.seg_queues q ON q.id = p.queue_id
+    LEFT JOIN queen.queues quv ON quv.name = q.name
+    WHERE (v_queue IS NULL OR q.name = v_queue)
+      AND (v_partition IS NULL OR p.name = v_partition)
+      AND (v_namespace IS NULL OR quv.namespace = v_namespace)
+      AND (v_task IS NULL OR quv.task = v_task);
 
     v_result := jsonb_build_object(
         'messages', '[]'::jsonb,
@@ -504,43 +512,60 @@ BEGIN
                     THEN to_char(vd.lease_expires_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
             ) AS obj
         FROM (
-            SELECT d.message_id, d.txn_hash, d.seq, d.frame_idx, d.created_at,
-                   p.id AS partition_id, p.name AS partition_name,
-                   q.name AS queue_name,
-                   quv.namespace, quv.task, quv.priority AS queue_priority,
-                   c.lease_expires_at,
-                   -- Frame consumed iff (seq, frame_idx) < cursor (next_seq, next_off).
+            -- Dual-mode status (same rule as the message-detail endpoint):
+            --   dead_letter  a seg_dlq snapshot exists for this position
+            --   completed    BUS queue: every named group's cursor passed it;
+            --                QUEUE mode: the __QUEUE_MODE__ cursor passed it
+            --   processing   any live lease on the partition
+            --   pending      otherwise
+            -- (The old code compared against the __QUEUE_MODE__ cursor only, so
+            -- bus-consumed messages showed 'pending' forever even though every
+            -- group had completed them.)
+            SELECT vb.*,
                    CASE
-                       WHEN EXISTS (SELECT 1 FROM queen.seg_dlq dl
-                                    WHERE dl.partition_id = d.partition_id
-                                      AND dl.seq = d.seq AND dl.frame_idx = d.frame_idx)
-                           THEN 'dead_letter'
-                       WHEN c.next_seq IS NOT NULL
-                            AND (d.seq, d.frame_idx) < (c.next_seq, c.next_off)
+                       WHEN vb.is_dlq THEN 'dead_letter'
+                       WHEN (vb.total_bus_groups > 0 AND vb.consumed_by_groups = vb.total_bus_groups)
+                            OR (vb.total_bus_groups = 0 AND vb.qmode_passed)
                            THEN 'completed'
-                       WHEN c.lease_expires_at IS NOT NULL AND c.lease_expires_at > NOW()
-                           THEN 'processing'
+                       WHEN vb.any_live_lease THEN 'processing'
                        ELSE 'pending'
-                   END AS final_status,
-                   (SELECT COUNT(*)::integer FROM queen.partition_consumers c2
-                    WHERE c2.partition_id = d.partition_id
-                      AND c2.consumer_group <> '__QUEUE_MODE__'
-                      AND (d.seq, d.frame_idx) < (c2.next_seq, c2.next_off)) AS consumed_by_groups,
-                   (SELECT COUNT(*)::integer FROM queen.partition_consumers c2
-                    WHERE c2.partition_id = d.partition_id
-                      AND c2.consumer_group <> '__QUEUE_MODE__') AS total_bus_groups
-            FROM queen.seg_dedup d
-            JOIN queen.seg_partitions p ON p.id = d.partition_id
-            JOIN queen.seg_queues q ON q.id = p.queue_id
-            -- Strict guard: only queues currently routed to the segments engine.
-            JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
-            LEFT JOIN queen.partition_consumers c
-                ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
-            WHERE d.created_at >= v_from_ts AND d.created_at < v_to_ts
-              AND (v_queue IS NULL OR q.name = v_queue)
-              AND (v_partition IS NULL OR p.name = v_partition)
-              AND (v_namespace IS NULL OR quv.namespace = v_namespace)
-              AND (v_task IS NULL OR quv.task = v_task)
+                   END AS final_status
+            FROM (
+                SELECT d.message_id, d.txn_hash, d.seq, d.frame_idx, d.created_at,
+                       p.id AS partition_id, p.name AS partition_name,
+                       q.name AS queue_name,
+                       quv.namespace, quv.task, quv.priority AS queue_priority,
+                       c.lease_expires_at,
+                       EXISTS (SELECT 1 FROM queen.seg_dlq dl
+                               WHERE dl.partition_id = d.partition_id
+                                 AND dl.seq = d.seq AND dl.frame_idx = d.frame_idx) AS is_dlq,
+                       -- Frame consumed iff (seq, frame_idx) < cursor (next_seq, next_off).
+                       (c.next_seq IS NOT NULL
+                        AND (d.seq, d.frame_idx) < (c.next_seq, c.next_off)) AS qmode_passed,
+                       EXISTS (SELECT 1 FROM queen.partition_consumers cl
+                               WHERE cl.partition_id = d.partition_id
+                                 AND cl.lease_expires_at IS NOT NULL
+                                 AND cl.lease_expires_at > NOW()) AS any_live_lease,
+                       (SELECT COUNT(*)::integer FROM queen.partition_consumers c2
+                        WHERE c2.partition_id = d.partition_id
+                          AND c2.consumer_group <> '__QUEUE_MODE__'
+                          AND (d.seq, d.frame_idx) < (c2.next_seq, c2.next_off)) AS consumed_by_groups,
+                       (SELECT COUNT(*)::integer FROM queen.partition_consumers c2
+                        WHERE c2.partition_id = d.partition_id
+                          AND c2.consumer_group <> '__QUEUE_MODE__') AS total_bus_groups
+                FROM queen.seg_dedup d
+                JOIN queen.seg_partitions p ON p.id = d.partition_id
+                JOIN queen.seg_queues q ON q.id = p.queue_id
+                -- Strict guard: only queues currently routed to the segments engine.
+                JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
+                LEFT JOIN queen.partition_consumers c
+                    ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
+                WHERE d.created_at >= v_from_ts AND d.created_at < v_to_ts
+                  AND (v_queue IS NULL OR q.name = v_queue)
+                  AND (v_partition IS NULL OR p.name = v_partition)
+                  AND (v_namespace IS NULL OR quv.namespace = v_namespace)
+                  AND (v_task IS NULL OR quv.task = v_task)
+            ) vb
         ) vd
         WHERE (v_status IS NULL OR vd.final_status = v_status)
         ORDER BY vd.created_at DESC, vd.message_id DESC

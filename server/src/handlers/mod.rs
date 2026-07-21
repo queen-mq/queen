@@ -167,6 +167,15 @@ impl AppState {
 }
 
 pub(crate) fn json(status: StatusCode, body: String) -> Response {
+    // RFC 9110 §15.3.5: 204 responses MUST NOT carry content. Announcing a
+    // content-length on a body hyper then elides makes strict HTTP/1.1 clients
+    // (Node's undici/llhttp) treat the connection as poisoned and drop it —
+    // under empty-poll load that snowballed into ECONNRESET storms. The empty
+    // pop/maintenance bodies carried no information the clients read (they all
+    // early-return on status 204), so drop the body, keep the status.
+    if status == StatusCode::NO_CONTENT {
+        return StatusCode::NO_CONTENT.into_response();
+    }
     (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
