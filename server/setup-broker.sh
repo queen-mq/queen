@@ -42,7 +42,7 @@ docker run -d --name "$rn" --network "$NET" --ulimit nofile=65535:65535 -p "$RPO
   -e QUEEN_V2_FUSION_HOLD_MS="${FHOLD:-30}" -e QUEEN_V2_FUSION_MAX_INFLIGHT="${MAXINFLIGHT:-64}" \
   -e QUEEN_V2_BUNDLE_MAX="${BUNDLEMAX:-32}" \
   -e QUEEN_SEG_PUSH_INIT="${PINIT:-64}" -e QUEEN_SEG_PUSH_MIN="${PMIN:-16}" -e QUEEN_SEG_PUSH_MAX="${PMAX:-256}" \
-  -e QUEEN_SEG_POP_INIT="${OINIT:-64}" -e QUEEN_SEG_POP_MIN=16 -e QUEEN_SEG_POP_MAX="${OMAX:-256}" \
+  -e QUEEN_SEG_POP_INIT="${OINIT:-64}" -e QUEEN_SEG_POP_MIN="${OMIN:-16}" -e QUEEN_SEG_POP_MAX="${OMAX:-256}" \
   -e QUEEN_VEGAS_ALPHA="${VA:-6}" -e QUEEN_VEGAS_BETA="${VB:-12}" \
   "$RIMG" >/dev/null
 for i in $(seq 1 90); do curl -sf "http://localhost:$RPORT/status" >/dev/null 2>&1 && break; sleep 1; done

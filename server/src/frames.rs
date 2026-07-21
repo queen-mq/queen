@@ -84,23 +84,31 @@ pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
         if f.encrypted {
             flags |= FLAG_ENCRYPTED;
         }
-        let mut body: Vec<u8> = Vec::with_capacity(f.payload.len() + f.txn.len() + 40);
-        body.push(flags);
-        body.extend_from_slice(&f.message_id);
-        if let Some(t) = &f.trace_id {
-            body.extend_from_slice(t);
-        }
+        // Body length is fully determined up front, so the frame is written
+        // straight into `out` — no per-frame temp Vec (that was one extra
+        // malloc + full memcpy per message on the flush hot path).
         let txn = f.txn.as_bytes();
-        body.extend_from_slice(&(txn.len() as u16).to_le_bytes());
-        body.extend_from_slice(txn);
+        let mut body_len = 1 + 16 + 2 + txn.len() + f.payload.len();
+        if f.trace_id.is_some() {
+            body_len += 16;
+        }
+        if let Some(ps) = f.producer_sub {
+            body_len += 2 + ps.len();
+        }
+        out.extend_from_slice(&(body_len as u32).to_le_bytes());
+        out.push(flags);
+        out.extend_from_slice(&f.message_id);
+        if let Some(t) = &f.trace_id {
+            out.extend_from_slice(t);
+        }
+        out.extend_from_slice(&(txn.len() as u16).to_le_bytes());
+        out.extend_from_slice(txn);
         if let Some(ps) = f.producer_sub {
             let ps = ps.as_bytes();
-            body.extend_from_slice(&(ps.len() as u16).to_le_bytes());
-            body.extend_from_slice(ps);
+            out.extend_from_slice(&(ps.len() as u16).to_le_bytes());
+            out.extend_from_slice(ps);
         }
-        body.extend_from_slice(f.payload);
-        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        out.extend_from_slice(&body);
+        out.extend_from_slice(f.payload);
     }
     out
 }
@@ -156,7 +164,12 @@ pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
         if p + txn_len > end {
             return None;
         }
-        f.txn = String::from_utf8_lossy(&raw[p..p + txn_len]).into_owned();
+        // Fast path: txn was written by pack_frames from a &str, so it is valid
+        // UTF-8; from_utf8's optimized validation beats the lossy chunk iterator.
+        f.txn = match std::str::from_utf8(&raw[p..p + txn_len]) {
+            Ok(s) => s.to_owned(),
+            Err(_) => String::from_utf8_lossy(&raw[p..p + txn_len]).into_owned(),
+        };
         p += txn_len;
         if flags & FLAG_PSUB != 0 {
             if p + 2 > end {
@@ -167,7 +180,10 @@ pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
             if p + ps_len > end {
                 return None;
             }
-            f.producer_sub = Some(String::from_utf8_lossy(&raw[p..p + ps_len]).into_owned());
+            f.producer_sub = Some(match std::str::from_utf8(&raw[p..p + ps_len]) {
+                Ok(s) => s.to_owned(),
+                Err(_) => String::from_utf8_lossy(&raw[p..p + ps_len]).into_owned(),
+            });
             p += ps_len;
         }
         f.payload = raw[p..end].to_vec();

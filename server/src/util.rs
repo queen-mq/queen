@@ -1,6 +1,36 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// FNV-1a hasher for the hot-path HashMaps/HashSets keyed by short strings
+// (queue/partition/txn). std's default SipHash showed up at ~3% of broker CPU
+// under load; these maps hold request-scoped, non-adversarial keys, so a fast
+// non-DoS-resistant hash is appropriate.
+pub struct FnvHasher(u64);
+
+impl Default for FnvHasher {
+    fn default() -> Self {
+        FnvHasher(0xcbf29ce484222325)
+    }
+}
+
+impl std::hash::Hasher for FnvHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        self.0 = h;
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub type FnvBuild = std::hash::BuildHasherDefault<FnvHasher>;
+pub type FnvHashMap<K, V> = std::collections::HashMap<K, V, FnvBuild>;
+pub type FnvHashSet<K> = std::collections::HashSet<K, FnvBuild>;
+
 pub fn now_epoch_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

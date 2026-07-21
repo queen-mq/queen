@@ -22,7 +22,7 @@ use crate::frames::{
 };
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
-use crate::util::uuidv7_bytes;
+use crate::util::{uuidv7_bytes, FnvHashMap};
 use crate::vegas::Vegas;
 
 // ------------------------------------------------------------------ push
@@ -70,7 +70,9 @@ fn resolve_push_followers(results: &mut [ItemResult]) {
 }
 
 fn render_push_results(results: &[ItemResult]) -> String {
-    let mut out = String::with_capacity(results.len() * 96);
+    // ~150B/item with two 36-char ids + queue name; undersizing costs a full
+    // realloc+copy of the response on every push.
+    let mut out = String::with_capacity(results.len() * 176 + 2);
     out.push('[');
     for (i, item) in results.iter().enumerate() {
         if i > 0 {
@@ -119,12 +121,14 @@ pub async fn handle_push(
     }
 
     let mut results: Vec<ItemResult> = Vec::with_capacity(n);
-    let mut groups: HashMap<(String, String), Vec<PreFrame>> = HashMap::new();
+    let mut groups: FnvHashMap<(String, String), Vec<PreFrame>> = FnvHashMap::default();
     // Layer 1 — intra-request first-wins dedup: (queue, partition, txn) -> the
     // leader item's index. A repeat within THIS request becomes a duplicate
     // follower of the leader and produces no frame; at render it copies the
-    // leader's final message_id.
-    let mut seen: HashMap<(String, String, String), usize> = HashMap::new();
+    // leader's final message_id. Keyed by one composed string (fields joined on
+    // \x1f, which cannot appear in queue/partition/txn) instead of a 3-String
+    // tuple: one allocation per item instead of six clones (lookup + insert).
+    let mut seen: FnvHashMap<String, usize> = FnvHashMap::default();
     // RUSTFIX item 8: memoize each distinct queue's encryption_enabled flag so the
     // hot loop does at most one async lookup per queue (not per item).
     let mut enc_flags: HashMap<String, bool> = HashMap::new();
@@ -138,20 +142,32 @@ pub async fn handle_push(
         let queue = it.queue.to_string();
         let partition = it.partition.unwrap_or("Default").to_string();
 
-        if let Some(&leader) = seen.get(&(queue.clone(), partition.clone(), txn.clone())) {
-            // Intra-request duplicate: follower of `leader`. message_id is
-            // provisional (the leader's minted id) and finalized at render time.
-            let provisional = results[leader].message_id.clone();
-            results.push(ItemResult {
-                message_id: provisional,
-                txn,
-                queue,
-                status: "duplicate",
-                dup_of: Some(leader),
-            });
-            continue;
+        let mut seen_key =
+            String::with_capacity(queue.len() + partition.len() + txn.len() + 2);
+        seen_key.push_str(&queue);
+        seen_key.push('\x1f');
+        seen_key.push_str(&partition);
+        seen_key.push('\x1f');
+        seen_key.push_str(&txn);
+        match seen.entry(seen_key) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let leader = *e.get();
+                // Intra-request duplicate: follower of `leader`. message_id is
+                // provisional (the leader's minted id) and finalized at render time.
+                let provisional = results[leader].message_id.clone();
+                results.push(ItemResult {
+                    message_id: provisional,
+                    txn,
+                    queue,
+                    status: "duplicate",
+                    dup_of: Some(leader),
+                });
+                continue;
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(i);
+            }
         }
-        seen.insert((queue.clone(), partition.clone(), txn.clone()), i);
         results.push(ItemResult {
             message_id: mid_str,
             txn: txn.clone(),
@@ -856,19 +872,39 @@ fn render_pop_parts(
     lease_id: &str,
     enc: &crate::encryption::Encryption,
 ) -> (String, usize, PopMeta) {
-    let mut msgs = String::new();
     let mut count = 0usize;
-    let mut first_name = String::new();
-    let mut first_id = String::new();
-    let mut first_set = false;
     let mut meta = PopMeta::default();
     let now_ms = crate::util::now_epoch_ms();
+    // The top-level partition/partitionId are the FIRST claimed partition's —
+    // known up front, so the whole response renders into ONE buffer (the old
+    // two-buffer shape re-copied the entire messages array at the end, and an
+    // un-sized accumulator realloc'd its way through ~hundreds of KB per pop).
+    let (first_name, first_id) = parts
+        .first()
+        .map(|p| (p.partition.as_str(), p.partition_id.as_str()))
+        .unwrap_or(("", ""));
+    // Capacity estimate: base64 is ~4/3 of the compressed blob; JSON adds fixed
+    // per-message fields. Underestimates only cost one doubling; the per-segment
+    // reserve below refines it with the real decompressed size.
+    let mut est = 256 + queue.len() + group.len() + 2 * lease_id.len();
     for part in parts {
-        if !first_set {
-            first_name = part.partition.clone();
-            first_id = part.partition_id.clone();
-            first_set = true;
+        for seg in &part.segments {
+            est += seg.blob.len() + 256;
         }
+    }
+    let mut out = String::with_capacity(est);
+    out.push_str("{\"success\":true,\"queue\":\"");
+    json_escape_into(&mut out, queue);
+    out.push_str("\",\"partition\":\"");
+    json_escape_into(&mut out, first_name);
+    out.push_str("\",\"partitionId\":\"");
+    json_escape_into(&mut out, first_id);
+    out.push_str("\",\"leaseId\":\"");
+    json_escape_into(&mut out, lease_id);
+    out.push_str("\",\"consumerGroup\":\"");
+    json_escape_into(&mut out, group);
+    out.push_str("\",\"messages\":[");
+    for part in parts {
         if !part.partition_id.is_empty() {
             meta.partition_ids.push(part.partition_id.clone());
         }
@@ -879,11 +915,8 @@ fn render_pop_parts(
                 .map(|c| (now_ms - c).max(0) as u64);
             // Postgres encode(...,'base64') wraps lines at 76 cols — strip
             // whitespace before decoding (STANDARD rejects non-alphabet bytes).
-            let b64: Vec<u8> = seg
-                .blob
-                .bytes()
-                .filter(|b| !b.is_ascii_whitespace())
-                .collect();
+            let mut b64: Vec<u8> = Vec::with_capacity(seg.blob.len());
+            b64.extend(seg.blob.bytes().filter(|b| !b.is_ascii_whitespace()));
             let blob = match base64::engine::general_purpose::STANDARD.decode(&b64) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -896,56 +929,59 @@ fn render_pop_parts(
             let start = seg.start_off.max(0) as usize;
             let take = seg.take.max(0) as usize;
             let end = (start + take).min(frames.len());
+            // Refine capacity with the real decompressed size: payload bytes are
+            // spliced verbatim, plus ~192B of fixed JSON fields per message.
+            out.reserve(raw.len() + (end.saturating_sub(start)) * 192);
             for f in frames.iter().take(end).skip(start) {
-                if !msgs.is_empty() {
-                    msgs.push(',');
+                if count > 0 {
+                    out.push(',');
                 }
-                msgs.push_str("{\"id\":\"");
-                json_escape_into(&mut msgs, &f.message_id);
-                msgs.push_str("\",\"transactionId\":\"");
-                json_escape_into(&mut msgs, &f.txn);
-                msgs.push_str("\",\"traceId\":");
+                out.push_str("{\"id\":\"");
+                json_escape_into(&mut out, &f.message_id);
+                out.push_str("\",\"transactionId\":\"");
+                json_escape_into(&mut out, &f.txn);
+                out.push_str("\",\"traceId\":");
                 match &f.trace_id {
                     Some(t) => {
-                        msgs.push('"');
-                        json_escape_into(&mut msgs, t);
-                        msgs.push('"');
+                        out.push('"');
+                        json_escape_into(&mut out, t);
+                        out.push('"');
                     }
-                    None => msgs.push_str("null"),
+                    None => out.push_str("null"),
                 }
-                msgs.push_str(",\"data\":");
+                out.push_str(",\"data\":");
                 if f.payload.is_empty() {
-                    msgs.push_str("null");
+                    out.push_str("null");
                 } else if let Some(pt) = enc.decrypt_payload_bytes(&f.payload) {
                     // RUSTFIX item 8: decrypted envelope -> plaintext JSON. The sniff
                     // is by envelope shape (not FLAG_ENCRYPTED), so migrated v0.16.0
                     // messages decrypt too. Disabled encryption early-returns None.
-                    msgs.push_str(&String::from_utf8_lossy(&pt));
+                    push_utf8(&mut out, &pt);
                 } else {
                     // raw splice: plaintext JSON, or an envelope we could not decrypt
                     // (served as-is — C++ swallows decrypt failures).
-                    msgs.push_str(&String::from_utf8_lossy(&f.payload));
+                    push_utf8(&mut out, &f.payload);
                 }
-                msgs.push_str(",\"producerSub\":");
+                out.push_str(",\"producerSub\":");
                 match &f.producer_sub {
                     Some(ps) => {
-                        msgs.push('"');
-                        json_escape_into(&mut msgs, ps);
-                        msgs.push('"');
+                        out.push('"');
+                        json_escape_into(&mut out, ps);
+                        out.push('"');
                     }
-                    None => msgs.push_str("null"),
+                    None => out.push_str("null"),
                 }
-                msgs.push_str(",\"createdAt\":\"");
-                json_escape_into(&mut msgs, &seg.created_at);
-                msgs.push_str("\",\"partitionId\":\"");
-                json_escape_into(&mut msgs, &part.partition_id);
-                msgs.push_str("\",\"partition\":\"");
-                json_escape_into(&mut msgs, &part.partition);
-                msgs.push_str("\",\"leaseId\":\"");
-                json_escape_into(&mut msgs, lease_id);
-                msgs.push_str("\",\"consumerGroup\":\"");
-                json_escape_into(&mut msgs, group);
-                msgs.push_str("\"}");
+                out.push_str(",\"createdAt\":\"");
+                json_escape_into(&mut out, &seg.created_at);
+                out.push_str("\",\"partitionId\":\"");
+                json_escape_into(&mut out, &part.partition_id);
+                out.push_str("\",\"partition\":\"");
+                json_escape_into(&mut out, &part.partition);
+                out.push_str("\",\"leaseId\":\"");
+                json_escape_into(&mut out, lease_id);
+                out.push_str("\",\"consumerGroup\":\"");
+                json_escape_into(&mut out, group);
+                out.push_str("\"}");
                 count += 1;
                 if let Some(age) = seg_age_ms {
                     meta.lag_sum_ms += age;
@@ -955,23 +991,20 @@ fn render_pop_parts(
             }
         }
     }
-    let mut out = String::with_capacity(msgs.len() + 256);
-    out.push_str("{\"success\":true,\"queue\":\"");
-    json_escape_into(&mut out, queue);
-    out.push_str("\",\"partition\":\"");
-    json_escape_into(&mut out, &first_name);
-    out.push_str("\",\"partitionId\":\"");
-    json_escape_into(&mut out, &first_id);
-    out.push_str("\",\"leaseId\":\"");
-    json_escape_into(&mut out, lease_id);
-    out.push_str("\",\"consumerGroup\":\"");
-    json_escape_into(&mut out, group);
-    out.push_str("\",\"messages\":[");
-    out.push_str(&msgs);
     out.push_str("],\"partitionsClaimed\":");
     out.push_str(&parts.len().to_string());
     out.push('}');
     (out, count, meta)
+}
+
+// Append raw bytes that are expected to be valid UTF-8 (payloads stored from
+// client JSON). std's from_utf8 validation is markedly cheaper than the lossy
+// chunk iterator; invalid bytes fall back to lossy replacement.
+fn push_utf8(out: &mut String, bytes: &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => out.push_str(s),
+        Err(_) => out.push_str(&String::from_utf8_lossy(bytes)),
+    }
 }
 
 // ------------------------------------------------------------------- ack

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use crate::util::{FnvHashMap, FnvHashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,7 +25,11 @@ pub static SEGMENTS_FIRED: AtomicU64 = AtomicU64::new(0);
 fn record_bundle(parts: usize) {
     let commits = BUNDLES_FIRED.fetch_add(1, Ordering::Relaxed) + 1;
     let segments = SEGMENTS_FIRED.fetch_add(parts as u64, Ordering::Relaxed) + parts as u64;
-    let log_each = std::env::var("QUEEN_V2_BUNDLE_LOG").ok().as_deref() == Some("1");
+    // Read the env flag once — env::var takes a process-wide lock and allocates,
+    // and this runs on every bundle commit (thousands/s under load).
+    static LOG_EACH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let log_each =
+        *LOG_EACH.get_or_init(|| std::env::var("QUEEN_V2_BUNDLE_LOG").ok().as_deref() == Some("1"));
     if log_each && parts >= 2 {
         eprintln!("[bundle] committed {parts} partitions in 1 txn");
     }
@@ -214,8 +218,8 @@ async fn shard_loop(
     max_inflight: usize,
     bundle_max: usize,
 ) {
-    let mut groups: HashMap<String, FusionGroup> = HashMap::new();
-    let mut inflight: HashSet<String> = HashSet::new();
+    let mut groups: FnvHashMap<String, FusionGroup> = FnvHashMap::default();
+    let mut inflight: FnvHashSet<String> = FnvHashSet::default();
     // Concurrently in-flight bundles for THIS shard (each holds one push Vegas
     // permit and commits one multi-segment transaction). The fan-out fairness cap
     // (`max_inflight`) now bounds concurrent bundles, not partitions — a single
@@ -276,8 +280,8 @@ async fn shard_loop(
 // mutually disjoint), each marked in-flight for the bundle's duration.
 #[allow(clippy::too_many_arguments)]
 fn try_dispatch_bundle(
-    groups: &mut HashMap<String, FusionGroup>,
-    inflight: &mut HashSet<String>,
+    groups: &mut FnvHashMap<String, FusionGroup>,
+    inflight: &mut FnvHashSet<String>,
     inflight_bundles: &mut usize,
     max_inflight: usize,
     bundle_max: usize,
@@ -321,8 +325,8 @@ fn try_dispatch_bundle(
 // `bundle_max` distinct partitions.
 #[allow(clippy::too_many_arguments)]
 fn sweep_bundles(
-    groups: &mut HashMap<String, FusionGroup>,
-    inflight: &mut HashSet<String>,
+    groups: &mut FnvHashMap<String, FusionGroup>,
+    inflight: &mut FnvHashSet<String>,
     inflight_bundles: &mut usize,
     max_inflight: usize,
     bundle_max: usize,
@@ -345,7 +349,7 @@ struct BundleGroup {
     group: FusionGroup,
     leader_idx: Vec<usize>,                     // per-frame txn-leader index
     pending: Vec<usize>,                        // kept frame indices still to push
-    verdict: HashMap<usize, (&'static str, String)>,
+    verdict: FnvHashMap<usize, (&'static str, String)>,
     total: usize,
     db_ok: bool,
 }
@@ -354,7 +358,7 @@ struct BundleGroup {
 // of each txn is the "leader" (the only frame that reaches the segment); every
 // later same-txn frame is a follower that inherits the leader's final verdict.
 fn layer2_dedup(frames: &[OwnedFrame]) -> (Vec<usize>, Vec<usize>) {
-    let mut leader_of_txn: HashMap<&str, usize> = HashMap::new();
+    let mut leader_of_txn: FnvHashMap<&str, usize> = FnvHashMap::default();
     let mut leader_idx: Vec<usize> = Vec::with_capacity(frames.len());
     let mut kept: Vec<usize> = Vec::new();
     for (i, f) in frames.iter().enumerate() {
@@ -455,7 +459,7 @@ fn spawn_bundle_flush(
                     group,
                     leader_idx,
                     pending: kept,
-                    verdict: HashMap::new(),
+                    verdict: FnvHashMap::default(),
                     total,
                     db_ok: true,
                 }
@@ -600,8 +604,8 @@ fn spawn_bundle_flush(
         // this bundle's partitions set PushState.pending = its group count, so it
         // must be signalled once for each of those groups here.
         for g in gs {
-            let mut per_state: HashMap<usize, (Arc<PushState>, Vec<(usize, &'static str, String)>)> =
-                HashMap::new();
+            let mut per_state: FnvHashMap<usize, (Arc<PushState>, Vec<(usize, &'static str, String)>)> =
+                FnvHashMap::default();
             for (i, f) in g.group.frames.iter().enumerate() {
                 let l = g.leader_idx[i];
                 let (st, mid): (&'static str, String) = match g.verdict.get(&l) {
@@ -700,15 +704,80 @@ fn parse_multi_outcome(txt: &str, expected: usize) -> Option<Vec<PushOutcome>> {
 }
 
 pub fn json_escape_into(out: &mut String, s: &str) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+    // Byte-scan fast path: every byte needing an escape ('"', '\\', <0x20) is
+    // ASCII, and multi-byte UTF-8 units are all >= 0x80, so splitting the string
+    // only at escape bytes always lands on char boundaries. Clean runs (the
+    // overwhelmingly common case — UUIDs, txn ids, ISO timestamps) are appended
+    // wholesale instead of char-by-char.
+    let b = s.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'"' || c == b'\\' || c < 0x20 {
+            if start < i {
+                out.push_str(&s[start..i]);
+            }
+            match c {
+                b'"' => out.push_str("\\\""),
+                b'\\' => out.push_str("\\\\"),
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                b'\t' => out.push_str("\\t"),
+                _ => {
+                    out.push_str("\\u00");
+                    out.push(char::from(b"0123456789abcdef"[(c >> 4) as usize]));
+                    out.push(char::from(b"0123456789abcdef"[(c & 0x0f) as usize]));
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if start < b.len() {
+        out.push_str(&s[start..]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_escape_into;
+
+    // Reference implementation (the original char-by-char escape) — the
+    // byte-scan fast path must match it byte-for-byte.
+    fn escape_ref(s: &str) -> String {
+        let mut out = String::new();
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn escape_matches_reference() {
+        let cases = [
+            "",
+            "plain",
+            "0198f0a4-7b1e-7c3d-9a2b-1c4d5e6f7a8b",
+            "with \"quotes\" and \\backslash\\",
+            "line\nbreak\r\ttab",
+            "\u{1}\u{2}\u{1f}",
+            "unicode: èàò 日本語 🚀 mixed \" with 中文\\",
+            "trailing escape\\",
+            "\"leading",
+        ];
+        for c in cases {
+            let mut got = String::new();
+            json_escape_into(&mut got, c);
+            assert_eq!(got, escape_ref(c), "mismatch for {c:?}");
         }
     }
 }
