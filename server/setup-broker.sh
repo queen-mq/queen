@@ -40,7 +40,8 @@ docker run -d --name "$rn" --network "$NET" --ulimit nofile=65535:65535 -p "$RPO
   -e DB_POOL_SIZE="${POOL:-300}" -e QUEEN_V2_ZSTD_LEVEL="${ZSTD:-3}" \
   -e QUEEN_V2_FUSION_SHARDS="${FSHARDS:-16}" -e QUEEN_V2_FUSION_FRAMES="${FFRAMES:-500}" \
   -e QUEEN_V2_FUSION_HOLD_MS="${FHOLD:-30}" -e QUEEN_V2_FUSION_MAX_INFLIGHT="${MAXINFLIGHT:-64}" \
-  -e QUEEN_SEG_PUSH_INIT="${PINIT:-64}" -e QUEEN_SEG_PUSH_MIN=16 -e QUEEN_SEG_PUSH_MAX="${PMAX:-256}" \
+  -e QUEEN_V2_BUNDLE_MAX="${BUNDLEMAX:-32}" \
+  -e QUEEN_SEG_PUSH_INIT="${PINIT:-64}" -e QUEEN_SEG_PUSH_MIN="${PMIN:-16}" -e QUEEN_SEG_PUSH_MAX="${PMAX:-256}" \
   -e QUEEN_SEG_POP_INIT="${OINIT:-64}" -e QUEEN_SEG_POP_MIN=16 -e QUEEN_SEG_POP_MAX="${OMAX:-256}" \
   -e QUEEN_VEGAS_ALPHA="${VA:-6}" -e QUEEN_VEGAS_BETA="${VB:-12}" \
   "$RIMG" >/dev/null
@@ -85,4 +86,6 @@ pkill -f /tmp/mon.sh >/dev/null 2>&1 || true   # stop any stale monitor from a p
 sleep 1
 nohup bash /tmp/mon.sh >/tmp/mon.log 2>&1 &
 log "monitor started (pid $!) -> /tmp/mon.log"
+
+# dedup is set OFF by goload's own /configure (dedupWindowSeconds=0) — no pinner.
 log "READY queue=$Q broker_priv=$(hostname -I | awk '{print $3}'):$RPORT"
