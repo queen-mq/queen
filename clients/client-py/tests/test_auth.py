@@ -29,7 +29,7 @@ import pytest
 from queen import Queen
 
 
-SERVER_URL = os.environ.get("QUEEN_URL", "http://localhost:6632")
+SERVER_URL = os.environ.get("QUEEN_URL") or os.environ.get("QUEEN_SERVER_URL", "http://localhost:6632")
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 JWT_ENABLED = len(JWT_SECRET) > 0
 

@@ -35,7 +35,7 @@ export function mkName(testName, suffix = '') {
   return `test-stream-${slug}-${stamp}-${_nameCounter}${tail}`
 }
 
-export const STREAMS_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+export const STREAMS_URL = process.env.QUEEN_URL || process.env.QUEEN_SERVER_URL || 'http://localhost:6632'
 
 /**
  * Sleep helper.
