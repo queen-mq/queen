@@ -113,6 +113,25 @@ pub fn pack_frames(frames: &[FrameIn]) -> Vec<u8> {
     out
 }
 
+// Append the 36-char hyphenated hex form of a UUID without allocating (the
+// owned uuid_bytes_to_string costs one String allocation per frame — visible
+// at ~1M frames/s on the pop render path).
+pub fn uuid_hex_into(out: &mut String, b: &[u8; 16]) {
+    let mut buf = [0u8; 36];
+    let mut p = 0;
+    for i in 0..16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            buf[p] = b'-';
+            p += 1;
+        }
+        buf[p] = HEX[(b[i] >> 4) as usize];
+        buf[p + 1] = HEX[(b[i] & 0x0f) as usize];
+        p += 2;
+    }
+    // All bytes are ASCII hex or '-'.
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&buf) });
+}
+
 pub struct FrameOut {
     pub message_id: String,
     pub txn: String,
@@ -120,6 +139,86 @@ pub struct FrameOut {
     pub producer_sub: Option<String>,
     pub payload: Vec<u8>,
     pub encrypted: bool,
+}
+
+// Borrowed frame view for the hot pop-render path: no per-frame String/Vec
+// allocations — txn/psub/payload point into the decompressed segment buffer.
+// Returns None on a malformed segment OR invalid UTF-8 in txn/psub (both were
+// written from &str by pack_frames, so that never happens for data this engine
+// stored); callers treat None exactly like unpack_frames' None.
+pub struct FrameRef<'a> {
+    pub message_id: [u8; 16],
+    pub txn: &'a str,
+    pub trace_id: Option<[u8; 16]>,
+    pub producer_sub: Option<&'a str>,
+    pub payload: &'a [u8],
+    pub encrypted: bool,
+}
+
+pub fn unpack_frames_ref(raw: &[u8]) -> Option<Vec<FrameRef<'_>>> {
+    let mut out = Vec::new();
+    let mut o = 0usize;
+    let rd_u16 = |raw: &[u8], p: usize| -> u16 { (raw[p] as u16) | ((raw[p + 1] as u16) << 8) };
+    while o + 4 <= raw.len() {
+        let len = u32::from_le_bytes([raw[o], raw[o + 1], raw[o + 2], raw[o + 3]]) as usize;
+        let end = o + 4 + len;
+        if end > raw.len() || len < 19 {
+            return None;
+        }
+        let mut p = o + 4;
+        let flags = raw[p];
+        p += 1;
+        let mut mid = [0u8; 16];
+        mid.copy_from_slice(&raw[p..p + 16]);
+        p += 16;
+        let mut trace_id = None;
+        if flags & FLAG_TRACE != 0 {
+            if p + 16 > end {
+                return None;
+            }
+            let mut t = [0u8; 16];
+            t.copy_from_slice(&raw[p..p + 16]);
+            trace_id = Some(t);
+            p += 16;
+        }
+        if p + 2 > end {
+            return None;
+        }
+        let txn_len = rd_u16(raw, p) as usize;
+        p += 2;
+        if p + txn_len > end {
+            return None;
+        }
+        let txn = std::str::from_utf8(&raw[p..p + txn_len]).ok()?;
+        p += txn_len;
+        let mut producer_sub = None;
+        if flags & FLAG_PSUB != 0 {
+            if p + 2 > end {
+                return None;
+            }
+            let ps_len = rd_u16(raw, p) as usize;
+            p += 2;
+            if p + ps_len > end {
+                return None;
+            }
+            producer_sub = Some(std::str::from_utf8(&raw[p..p + ps_len]).ok()?);
+            p += ps_len;
+        }
+        out.push(FrameRef {
+            message_id: mid,
+            txn,
+            trace_id,
+            producer_sub,
+            payload: &raw[p..end],
+            encrypted: (flags & FLAG_ENCRYPTED) != 0,
+        });
+        o = end;
+    }
+    if o == raw.len() {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
@@ -199,6 +298,56 @@ pub fn unpack_frames(raw: &[u8]) -> Option<Vec<FrameOut>> {
 
 pub fn zstd_compress(raw: &[u8], level: i32) -> Vec<u8> {
     zstd::stream::encode_all(raw, level).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_unpack_ref_round_trip() {
+        let mid1 = [1u8; 16];
+        let mid2 = [2u8; 16];
+        let trace = [9u8; 16];
+        let fins = vec![
+            FrameIn {
+                message_id: mid1,
+                txn: "txn-one",
+                trace_id: Some(trace),
+                producer_sub: Some("sub@x"),
+                payload: br#"{"a":1}"#,
+                encrypted: false,
+            },
+            FrameIn {
+                message_id: mid2,
+                txn: "txn-two",
+                trace_id: None,
+                producer_sub: None,
+                payload: b"",
+                encrypted: true,
+            },
+        ];
+        let packed = pack_frames(&fins);
+
+        // Owned and borrowed decoders must agree with the input and each other.
+        let owned = unpack_frames(&packed).expect("owned unpack");
+        let brw = unpack_frames_ref(&packed).expect("ref unpack");
+        assert_eq!(owned.len(), 2);
+        assert_eq!(brw.len(), 2);
+        for (o, b) in owned.iter().zip(brw.iter()) {
+            assert_eq!(o.txn, b.txn);
+            assert_eq!(o.producer_sub.as_deref(), b.producer_sub);
+            assert_eq!(o.payload, b.payload);
+            assert_eq!(o.encrypted, b.encrypted);
+            let mut hex = String::new();
+            uuid_hex_into(&mut hex, &b.message_id);
+            assert_eq!(o.message_id, hex);
+            assert_eq!(o.message_id, uuid_bytes_to_string(&b.message_id));
+        }
+        assert_eq!(brw[0].trace_id, Some(trace));
+        assert_eq!(brw[1].trace_id, None);
+        assert_eq!(brw[0].payload, br#"{"a":1}"#);
+    }
 }
 
 pub fn zstd_decompress(blob: &[u8]) -> Vec<u8> {

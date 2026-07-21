@@ -71,7 +71,11 @@ pub struct PushState {
 pub struct OwnedFrame {
     pub message_id: [u8; 16],
     pub txn: String,
-    pub payload: Vec<u8>,
+    // Zero-copy: for a plaintext push this is a refcounted slice of the HTTP
+    // request body (Bytes::slice_ref) — no per-message payload copy on ingest,
+    // and dropping a flushed bundle decrements refcounts instead of freeing
+    // one allocation per message. Encrypted payloads own their envelope.
+    pub payload: bytes::Bytes,
     // Authenticated producer `sub` (from the validated JWT), carried THROUGH
     // fusion so auth-enabled pushes can still coalesce across requests. When set,
     // pack_frames stamps it into the frame (FLAG_PSUB) and pop echoes it back as
@@ -405,7 +409,7 @@ fn build_metas_and_blob(group: &FusionGroup, pending: &[usize], zstd_level: i32)
                 // Stamp the authenticated producer sub into the packed frame
                 // (FLAG_PSUB) so it survives fusion and is readable at pop.
                 producer_sub: f.producer_sub.as_deref(),
-                payload: &f.payload,
+                payload: f.payload.as_ref(),
                 // RUSTFIX item 8: propagate the frame's encrypted flag (crypto was
                 // done at the push handler; fusion only carries the bit).
                 encrypted: f.encrypted,

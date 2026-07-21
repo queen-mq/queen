@@ -232,6 +232,190 @@ END;
 $$;
 
 -- ============================================================================
+-- Binary wildcard pop (broker-internal): same claim algorithm as
+-- seg_pop_wildcard_wire_v1 above, but segment blobs are returned as a NATIVE
+-- bytea[] instead of base64 text inside the JSON — no encode() on the PG side,
+-- no whitespace-stripping + base64 decode on the broker side, ~25% fewer bytes
+-- on the wire. `meta` carries the partition/segment metadata WITHOUT blobs
+-- (and without seq/msgCount, which the broker renderer never reads); `blobs`
+-- is flattened in traversal order (partitions in claim order, segments in seq
+-- order — both aggregates below share ORDER BY r_seq, keeping them aligned).
+-- KEEP THE CLAIM LOGIC IN SYNC with seg_pop_wildcard_wire_v1.
+-- ============================================================================
+DROP FUNCTION IF EXISTS queen.seg_pop_wildcard_bin_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT);
+CREATE FUNCTION queen.seg_pop_wildcard_bin_v1(
+    p_queue TEXT,
+    p_group TEXT,
+    p_budget INTEGER,
+    p_lease_seconds INTEGER,
+    p_worker TEXT,
+    p_auto_ack BOOLEAN,
+    p_max_partitions INTEGER,
+    p_sub_mode TEXT DEFAULT 'all',
+    p_sub_from TEXT DEFAULT ''
+) RETURNS TABLE(meta JSONB, blobs BYTEA[])
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_qid UUID;
+    v_p RECORD;
+    v_remaining INTEGER := GREATEST(p_budget, 1);
+    v_max_parts INTEGER := CASE WHEN p_max_partitions IS NULL OR p_max_partitions <= 0
+                                THEN 2147483647 ELSE p_max_partitions END;
+    v_claimed INTEGER := 0;
+    v_out JSONB := '[]'::jsonb;
+    v_segments JSONB;
+    v_part_blobs BYTEA[];
+    v_all_blobs BYTEA[] := '{}'::bytea[];
+    v_taken INTEGER;
+    v_now TIMESTAMPTZ := clock_timestamp();
+    v_watermark TIMESTAMPTZ;
+    v_cand_cap INTEGER;
+    v_first_seen INTEGER;
+    v_from_ts TIMESTAMPTZ;
+    v_verified_at TIMESTAMPTZ;
+    v_has_pending BOOLEAN;
+    v_sub_mode_stored TEXT;
+BEGIN
+    SELECT id INTO v_qid FROM queen.seg_queues WHERE name = p_queue;
+    IF v_qid IS NULL THEN
+        meta := jsonb_build_object('partitions', '[]'::jsonb);
+        blobs := '{}'::bytea[];
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Bulk subscription bootstrap — identical to seg_pop_wildcard_wire_v1.
+    IF p_group <> '__QUEUE_MODE__'
+       AND (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '') THEN
+        IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
+            BEGIN
+                v_from_ts := p_sub_from::timestamptz;
+            EXCEPTION WHEN OTHERS THEN
+                v_from_ts := NULL;
+            END;
+        END IF;
+        IF v_from_ts IS NULL THEN
+            v_from_ts := v_now; v_sub_mode_stored := 'new';
+        ELSE
+            v_sub_mode_stored := 'timestamp';
+        END IF;
+
+        INSERT INTO queen.consumer_groups_metadata
+            (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+        VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
+        ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+        GET DIAGNOSTICS v_first_seen = ROW_COUNT;
+
+        IF v_first_seen > 0 THEN
+            IF v_sub_mode_stored = 'timestamp' THEN
+                INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
+                SELECT p.id, p_group,
+                       COALESCE(
+                           (SELECT s.seq FROM queen.seg_segments s
+                            WHERE s.partition_id = p.id
+                              AND s.seq >= p.retention_seq
+                              AND s.created_at >= v_from_ts
+                            ORDER BY s.seq LIMIT 1),
+                           p.last_seq + 1)
+                FROM queen.seg_partitions p
+                WHERE p.queue_id = v_qid
+                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+            ELSE
+                INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
+                SELECT p.id, p_group, p.last_seq + 1
+                FROM queen.seg_partitions p
+                WHERE p.queue_id = v_qid
+                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+            END IF;
+        END IF;
+    END IF;
+
+    SELECT last_empty_scan_at, updated_at INTO v_watermark, v_verified_at
+    FROM queen.consumer_watermarks
+    WHERE queue_name = p_queue AND consumer_group = p_group;
+    IF v_watermark IS NULL THEN
+        v_watermark := '1970-01-01 00:00:00+00'::timestamptz;
+        v_verified_at := NULL;
+    END IF;
+
+    v_cand_cap := LEAST(GREATEST(v_max_parts * 4, 64), 512);
+
+    FOR v_p IN
+        SELECT p.id, p.name
+        FROM queen.seg_partitions p
+        LEFT JOIN queen.partition_consumers c
+          ON c.partition_id = p.id AND c.consumer_group = p_group
+        WHERE p.queue_id = v_qid
+          AND p.last_write_at >= v_watermark - interval '2 minutes'
+          AND (c.partition_id IS NULL OR p.last_seq >= c.next_seq)
+          AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL
+               OR c.lease_expires_at < v_now)
+        ORDER BY random()
+        LIMIT v_cand_cap
+    LOOP
+        -- Blobs go to the aligned bytea[]; meta keeps only what the broker
+        -- renderer reads (startOff/take/createdAt). Both aggregates ORDER BY
+        -- r_seq so meta position k maps to v_part_blobs[k].
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                   'startOff', r_start_off,
+                   'take', r_take,
+                   'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+               ) ORDER BY r_seq), '[]'::jsonb),
+               COALESCE(SUM(r_take), 0),
+               COALESCE(array_agg(r_blob ORDER BY r_seq), '{}'::bytea[])
+        INTO v_segments, v_taken, v_part_blobs
+        FROM queen.seg_pop_segments_v1(p_queue, v_p.name, p_group,
+                                v_remaining, p_lease_seconds, p_worker, p_auto_ack,
+                                p_sub_mode, p_sub_from);
+
+        IF v_taken > 0 THEN
+            v_out := v_out || jsonb_build_object(
+                'partition', v_p.name,
+                'partitionId', v_p.id,
+                'segments', v_segments);
+            v_all_blobs := v_all_blobs || v_part_blobs;
+            v_claimed := v_claimed + 1;
+            v_remaining := v_remaining - v_taken;
+            EXIT WHEN v_remaining <= 0 OR v_claimed >= v_max_parts;
+        END IF;
+    END LOOP;
+
+    -- Empty-scan watermark maintenance — identical to seg_pop_wildcard_wire_v1.
+    IF v_claimed = 0 THEN
+        IF v_verified_at IS NULL OR v_verified_at <= v_now - interval '30 seconds' THEN
+            SELECT EXISTS (
+                SELECT 1 FROM queen.seg_partitions p
+                LEFT JOIN queen.partition_consumers c
+                  ON c.partition_id = p.id AND c.consumer_group = p_group
+                WHERE p.queue_id = v_qid
+                  AND p.last_write_at >= v_watermark - interval '2 minutes'
+                  AND (c.partition_id IS NULL OR p.last_seq >= c.next_seq)
+            ) INTO v_has_pending;
+            IF NOT v_has_pending THEN
+                INSERT INTO queen.consumer_watermarks
+                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_queue, p_group, v_now, v_now)
+                ON CONFLICT (queue_name, consumer_group)
+                DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
+                              updated_at = EXCLUDED.updated_at;
+            ELSE
+                INSERT INTO queen.consumer_watermarks
+                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_queue, p_group, '1970-01-01 00:00:00+00'::timestamptz, v_now)
+                ON CONFLICT (queue_name, consumer_group)
+                DO UPDATE SET updated_at = EXCLUDED.updated_at;
+            END IF;
+        END IF;
+    END IF;
+
+    meta := jsonb_build_object('partitions', v_out);
+    blobs := v_all_blobs;
+    RETURN NEXT;
+END;
+$$;
+
+-- ============================================================================
 -- Ack-by-transaction fallback: used when the broker's in-memory LeaseRegistry
 -- (server/include/queen/storage_v2.hpp) misses — e.g. the pop was answered by
 -- another broker process. p_acks = [{"txn":text,"ok":bool}].

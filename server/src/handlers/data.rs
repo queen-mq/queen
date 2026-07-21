@@ -46,7 +46,9 @@ struct PushBody<'a> {
 struct PreFrame {
     mid: [u8; 16],
     txn: String,
-    payload: Vec<u8>,
+    // Plaintext: refcounted slice of the request body (no copy). Encrypted:
+    // owned envelope bytes.
+    payload: Bytes,
     // RUSTFIX item 8: true when `payload` is an encryption envelope (encrypted at
     // push for a queue with encryption_enabled).
     encrypted: bool,
@@ -194,14 +196,16 @@ pub async fn handle_push(
         };
         let (payload, encrypted) = if enc_on {
             match st.encryption.encrypt(raw) {
-                Some(env) => (env, true),
+                Some(env) => (Bytes::from(env), true),
                 None => {
                     eprintln!("PUSH: encryption failed for queue '{queue}', storing plaintext");
-                    (raw.to_vec(), false)
+                    (body.slice_ref(raw), false)
                 }
             }
         } else {
-            (raw.to_vec(), false)
+            // Zero-copy: `raw` borrows from the request body Bytes, so this is a
+            // refcount bump, not a per-message copy.
+            (body.slice_ref(raw), false)
         };
 
         groups.entry((queue, partition)).or_default().push(PreFrame {
@@ -444,6 +448,9 @@ struct PopSeg {
     take: i32,
     #[serde(rename = "createdAt")]
     created_at: String,
+    // base64 text on the wire_v1 paths; absent on the bin_v1 path (blobs travel
+    // out-of-band as a native bytea[] aligned with segment traversal order).
+    #[serde(default)]
     blob: String,
 }
 
@@ -499,7 +506,7 @@ pub async fn handle_pop(
         let t0 = Instant::now();
         let res = tokio::time::timeout(
             st.stmt_timeout,
-            db::pop_wildcard(
+            db::pop_wildcard_bin(
                 &client, &queue, &group, batch, lease_seconds, &worker, auto_ack, max_parts,
                 &sub_mode, &sub_from,
             ),
@@ -509,7 +516,7 @@ pub async fn handle_pop(
         st.pop_vegas.record(rtt);
         drop(permit);
 
-        let txt = match res {
+        let (txt, blobs) = match res {
             Ok(Ok(t)) => t,
             _ => {
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
@@ -520,7 +527,8 @@ pub async fn handle_pop(
         // echoes back in ack/renew. autoAck pops advance the cursor server-side and
         // carry no lease, so they report an empty leaseId.
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count, meta) = build_pop_response(&txt, &queue, &group, lease_id, &st.encryption);
+        let (body, count, meta) =
+            build_pop_response(&txt, Some(&blobs), &queue, &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
             // Park on the queue's wake gate; a push wakes us at once.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -769,7 +777,8 @@ pub async fn handle_pop_discover(
         // needs), and the top-level "queue" field is left empty. Per-queue lag /
         // cache attribution is skipped here for the same reason (acks on these
         // partitions attribute via the DB-lookup fallback).
-        let (body, count, _meta) = build_pop_response(&txt, "", &group, lease_id, &st.encryption);
+        let (body, count, _meta) =
+            build_pop_response(&txt, None, "", &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
             // Discovery pops span queues -> shared gate, woken by any push.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -818,8 +827,11 @@ fn pop_error_body(e: &str) -> (String, usize, PopMeta) {
 }
 
 // Wildcard pop response: SP result is {"partitions":[{partition,partitionId,segments}]}.
+// `bin_blobs`: Some on the bin_v1 path — native bytea[] blobs aligned with the
+// meta's segment traversal order (base64 `blob` fields absent from the JSON).
 fn build_pop_response(
     txt: &str,
+    bin_blobs: Option<&[Vec<u8>]>,
     queue: &str,
     group: &str,
     lease_id: &str,
@@ -832,7 +844,7 @@ fn build_pop_response(
     if let Some(e) = parsed.error {
         return pop_error_body(&e);
     }
-    render_pop_parts(&parsed.partitions, queue, group, lease_id, enc)
+    render_pop_parts(&parsed.partitions, bin_blobs, queue, group, lease_id, enc)
 }
 
 // Specific-partition pop response: SP result is single-partition shaped
@@ -860,13 +872,14 @@ fn build_pop_specific_response(
         partition_id: parsed.partition_id,
         segments: parsed.segments,
     };
-    render_pop_parts(std::slice::from_ref(&part), queue, group, lease_id, enc)
+    render_pop_parts(std::slice::from_ref(&part), None, queue, group, lease_id, enc)
 }
 
 // Shared renderer: decode + slice each partition's segment frames into the
 // wire per-message JSON, then wrap with the common top-level fields.
 fn render_pop_parts(
     parts: &[PopPart],
+    bin_blobs: Option<&[Vec<u8>]>,
     queue: &str,
     group: &str,
     lease_id: &str,
@@ -875,6 +888,9 @@ fn render_pop_parts(
     let mut count = 0usize;
     let mut meta = PopMeta::default();
     let now_ms = crate::util::now_epoch_ms();
+    // Running index into bin_blobs — the SP flattens blobs in exactly this
+    // traversal order (partitions in claim order, segments in seq order).
+    let mut blob_idx = 0usize;
     // The top-level partition/partitionId are the FIRST claimed partition's —
     // known up front, so the whole response renders into ONE buffer (the old
     // two-buffer shape re-copied the entire messages array at the end, and an
@@ -890,6 +906,11 @@ fn render_pop_parts(
     for part in parts {
         for seg in &part.segments {
             est += seg.blob.len() + 256;
+        }
+    }
+    if let Some(bs) = bin_blobs {
+        for b in bs {
+            est += b.len() * 2;
         }
     }
     let mut out = String::with_capacity(est);
@@ -913,18 +934,51 @@ fn render_pop_parts(
             // segment's createdAt (one push call), so parse it once per segment.
             let seg_age_ms: Option<u64> = crate::util::parse_iso_ms(&seg.created_at)
                 .map(|c| (now_ms - c).max(0) as u64);
-            // Postgres encode(...,'base64') wraps lines at 76 cols — strip
-            // whitespace before decoding (STANDARD rejects non-alphabet bytes).
-            let mut b64: Vec<u8> = Vec::with_capacity(seg.blob.len());
-            b64.extend(seg.blob.bytes().filter(|b| !b.is_ascii_whitespace()));
-            let blob = match base64::engine::general_purpose::STANDARD.decode(&b64) {
-                Ok(b) => b,
-                Err(_) => continue,
+            // bin path: the blob arrives as native bytes, positionally aligned.
+            // wire path: Postgres encode(...,'base64') wraps lines at 76 cols —
+            // strip whitespace before decoding (STANDARD rejects non-alphabet bytes).
+            let decoded: Vec<u8>;
+            let blob: &[u8] = if let Some(bs) = bin_blobs {
+                let Some(b) = bs.get(blob_idx) else { continue };
+                blob_idx += 1;
+                b
+            } else {
+                let mut b64: Vec<u8> = Vec::with_capacity(seg.blob.len());
+                b64.extend(seg.blob.bytes().filter(|b| !b.is_ascii_whitespace()));
+                decoded = match base64::engine::general_purpose::STANDARD.decode(&b64) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                &decoded
             };
-            let raw = zstd_decompress(&blob);
-            let frames = match unpack_frames(&raw) {
+            let raw = zstd_decompress(blob);
+            // Borrowed frames: no per-frame String/Vec allocations. The owned
+            // fallback only fires on invalid UTF-8 in txn/psub, which this engine
+            // never writes (kept for parity with the old lossy behavior).
+            let owned_frames: Vec<crate::frames::FrameOut>;
+            let frames: Vec<crate::frames::FrameRef> = match crate::frames::unpack_frames_ref(&raw)
+            {
                 Some(f) => f,
-                None => continue,
+                None => {
+                    owned_frames = match unpack_frames(&raw) {
+                        Some(f) => f,
+                        None => continue,
+                    };
+                    owned_frames
+                        .iter()
+                        .map(|f| crate::frames::FrameRef {
+                            message_id: uuid_string_to_bytes(&f.message_id).unwrap_or([0; 16]),
+                            txn: &f.txn,
+                            trace_id: f
+                                .trace_id
+                                .as_deref()
+                                .and_then(uuid_string_to_bytes),
+                            producer_sub: f.producer_sub.as_deref(),
+                            payload: &f.payload,
+                            encrypted: f.encrypted,
+                        })
+                        .collect()
+                }
             };
             let start = seg.start_off.max(0) as usize;
             let take = seg.take.max(0) as usize;
@@ -937,14 +991,14 @@ fn render_pop_parts(
                     out.push(',');
                 }
                 out.push_str("{\"id\":\"");
-                json_escape_into(&mut out, &f.message_id);
+                crate::frames::uuid_hex_into(&mut out, &f.message_id);
                 out.push_str("\",\"transactionId\":\"");
-                json_escape_into(&mut out, &f.txn);
+                json_escape_into(&mut out, f.txn);
                 out.push_str("\",\"traceId\":");
                 match &f.trace_id {
                     Some(t) => {
                         out.push('"');
-                        json_escape_into(&mut out, t);
+                        crate::frames::uuid_hex_into(&mut out, t);
                         out.push('"');
                     }
                     None => out.push_str("null"),
@@ -952,7 +1006,7 @@ fn render_pop_parts(
                 out.push_str(",\"data\":");
                 if f.payload.is_empty() {
                     out.push_str("null");
-                } else if let Some(pt) = enc.decrypt_payload_bytes(&f.payload) {
+                } else if let Some(pt) = enc.decrypt_payload_bytes(f.payload) {
                     // RUSTFIX item 8: decrypted envelope -> plaintext JSON. The sniff
                     // is by envelope shape (not FLAG_ENCRYPTED), so migrated v0.16.0
                     // messages decrypt too. Disabled encryption early-returns None.
@@ -960,7 +1014,7 @@ fn render_pop_parts(
                 } else {
                     // raw splice: plaintext JSON, or an envelope we could not decrypt
                     // (served as-is — C++ swallows decrypt failures).
-                    push_utf8(&mut out, &f.payload);
+                    push_utf8(&mut out, f.payload);
                 }
                 out.push_str(",\"producerSub\":");
                 match &f.producer_sub {

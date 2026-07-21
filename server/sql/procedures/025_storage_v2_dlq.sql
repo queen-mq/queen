@@ -223,12 +223,15 @@ BEGIN
         END IF;
     END IF;
 
-    INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
-    VALUES (v_pid, p_group, COALESCE(v_seed_seq, 1))
-    ON CONFLICT DO NOTHING;
-
     -- Claim: skip if another worker holds a live lease (or the row is being
     -- popped concurrently — SKIP LOCKED keeps concurrent pops non-blocking).
+    -- NB (parity with 023, regression fix): we do NOT unconditionally INSERT the
+    -- consumer row on every pop. An INSERT ... ON CONFLICT DO NOTHING per pop
+    -- makes concurrent pops serialize on the inserter's transactionid
+    -- (ShareLock), and because the wildcard pop claims several partitions per
+    -- transaction IN RANDOM ORDER, those waits form cycles — the "deadlock
+    -- detected" storms that stalled every high-concurrency run. Claim first;
+    -- create the row only on the first pop for this (partition, group).
     SELECT c.next_seq, c.next_off, c.attempt_seq, c.attempt_off, c.attempt_count,
            COALESCE(c.batch_retry_count, 0)
     INTO v_next_seq, v_next_off, v_att_seq, v_att_off, v_att_count, v_retry_ct
@@ -236,7 +239,25 @@ BEGIN
     WHERE c.partition_id = v_pid AND c.consumer_group = p_group
       AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
     FOR UPDATE SKIP LOCKED;
-    IF NOT FOUND THEN RETURN; END IF;
+    IF NOT FOUND THEN
+        -- Distinguish "row missing" (create it, seeded) from "present but
+        -- leased/locked" (skip, non-blocking). Only the missing case touches
+        -- ON CONFLICT, so the steady-state hot path never contends.
+        PERFORM 1 FROM queen.partition_consumers
+        WHERE partition_id = v_pid AND consumer_group = p_group;
+        IF FOUND THEN RETURN; END IF;
+        INSERT INTO queen.partition_consumers (partition_id, consumer_group, next_seq)
+        VALUES (v_pid, p_group, COALESCE(v_seed_seq, 1))
+        ON CONFLICT DO NOTHING;
+        SELECT c.next_seq, c.next_off, c.attempt_seq, c.attempt_off, c.attempt_count,
+               COALESCE(c.batch_retry_count, 0)
+        INTO v_next_seq, v_next_off, v_att_seq, v_att_off, v_att_count, v_retry_ct
+        FROM queen.partition_consumers c
+        WHERE c.partition_id = v_pid AND c.consumer_group = p_group
+          AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
+        FOR UPDATE SKIP LOCKED;
+        IF NOT FOUND THEN RETURN; END IF;
+    END IF;
 
     -- delayed_processing: only segments at least v_delayed seconds old are
     -- visible. Monotone created_at => the filter cuts a contiguous suffix;

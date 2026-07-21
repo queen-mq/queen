@@ -1075,6 +1075,33 @@ pub async fn pop_wildcard(
     Ok(row.get(0))
 }
 
+// Binary wildcard pop: same claim algorithm, but blobs come back as a NATIVE
+// bytea[] aligned with the meta's segment traversal order — no base64 encode
+// on PG, no whitespace-strip + decode on the broker (see seg_pop_wildcard_bin_v1).
+#[allow(clippy::too_many_arguments)]
+pub async fn pop_wildcard_bin(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: &str,
+    budget: i32,
+    lease_seconds: i32,
+    worker: &str,
+    auto_ack: bool,
+    max_partitions: i32,
+    sub_mode: &str,
+    sub_from: &str,
+) -> Result<(String, Vec<Vec<u8>>), tokio_postgres::Error> {
+    let stmt = "SELECT (t.meta)::text, t.blobs FROM queen.seg_pop_wildcard_bin_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9) t";
+    let row = client
+        .query_one(
+            stmt,
+            &[&queue, &group, &budget, &lease_seconds, &worker, &auto_ack,
+              &max_partitions, &sub_mode, &sub_from],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1)))
+}
+
 // Namespace/task discovery pop — GET /api/v1/pop (no queue in path). Wildcard-pops
 // across every segment queue whose queen.queues row matches the namespace/task
 // filter, returning the SAME {"partitions":[...]} shape as pop_wildcard. Empty
