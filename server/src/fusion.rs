@@ -100,6 +100,77 @@ struct FusionGroup {
     queue: String,
     partition: String,
     frames: Vec<OwnedFrame>,
+    // Monotonic arrival stamp of this group's FIRST frame (set when the group is
+    // created and reused for its whole accumulation). Only consulted by the
+    // fat-batch FLOOR (below) to age a below-threshold segment against
+    // MIN_WAIT_MS; when the floor is OFF it is written but never read.
+    first_frame: Instant,
+}
+
+// ---------------------------------------------------------------------------
+// FAT-BATCH FLOOR (experiment flag; default OFF — see Fusion::new for the env
+// wiring and the measurement that motivates it).
+//
+// Fire-on-idle makes a segment's size EMERGENT: a partition's accumulating
+// segment is dispatched the instant the partition has no flush in flight, so the
+// segment is exactly whatever landed during the previous flush's RTT. In the
+// thin equilibrium a short RTT ⇒ small segments ⇒ more commits ⇒ higher per-msg
+// cost, because throughput = WAL_flush_rate × msgs/flush and each fdatasync is
+// ~fixed (~128µs on the VM). Measured 2026-07-22: across identical runs
+// msgs/commit swung 39 ↔ 99 and throughput tracked it 1:1 (663k vs 845k msg/s
+// per side). The FLOOR lets an operator DELAY dispatch of a still-small segment
+// by a bounded time so segments fatten deterministically toward a target
+// msgs/commit, trading a little worst-case latency (capped at MIN_WAIT_MS) for a
+// higher, steadier msgs/commit. This is a knob for experiments, not a product
+// contract — with MIN_FRAMES=0 (the default) every predicate here short-circuits
+// to the pre-floor behavior and the binary is byte-identical.
+#[derive(Clone, Copy)]
+struct Floor {
+    // Frame count a group must reach to be dispatch-eligible early. 0 = OFF.
+    min_frames: usize,
+    // Max time a below-threshold group may be held from its first frame's arrival
+    // before it dispatches anyway (the bounded-latency escape). Only consulted
+    // when min_frames > 0.
+    min_wait: Duration,
+}
+
+impl Floor {
+    #[inline]
+    fn enabled(&self) -> bool {
+        self.min_frames > 0
+    }
+
+    // Is a group dispatch-ELIGIBLE right now? OFF ⇒ always true, so the bundle
+    // selector picks exactly the groups it did before the floor existed. ON ⇒
+    // eligible only once the group has reached MIN_FRAMES *or* its oldest frame
+    // has waited MIN_WAIT (so a held group is never stranded past the bound).
+    #[inline]
+    fn eligible(&self, frames_len: usize, first_frame: Instant, now: Instant) -> bool {
+        if self.min_frames == 0 {
+            return true;
+        }
+        frames_len >= self.min_frames || now.duration_since(first_frame) >= self.min_wait
+    }
+
+    // The wake deadline for one group the floor is actively HOLDING below the
+    // frame threshold: Some(first_frame + MIN_WAIT) iff ON, still below
+    // MIN_FRAMES, and not yet aged out. None when OFF, when the group already
+    // meets the frame floor (it dispatches on size, no timer needed), or when it
+    // has already aged past MIN_WAIT (then it is eligible and the shared-permit
+    // backstop, not this timer, governs it). The returned instant is ALWAYS
+    // strictly in the future (age < MIN_WAIT ⇒ first_frame + MIN_WAIT > now) — the
+    // invariant that keeps the shard loop's re-arm from busy-spinning on an
+    // already-elapsed deadline.
+    #[inline]
+    fn deadline(&self, frames_len: usize, first_frame: Instant, now: Instant) -> Option<Instant> {
+        if self.min_frames == 0 || frames_len >= self.min_frames {
+            return None;
+        }
+        if now.duration_since(first_frame) >= self.min_wait {
+            return None;
+        }
+        Some(first_frame + self.min_wait)
+    }
 }
 
 pub struct AddMsg {
@@ -230,6 +301,33 @@ impl Fusion {
         // shard. Not a latency floor for the common path — fire-on-idle dispatches
         // on arrival and completions re-dispatch immediately.
         let hold_ms = hold_ms.max(1);
+        // FAT-BATCH FLOOR (experiment flag; see the Floor doc comment above for
+        // the 39↔99 msgs/commit measurement that motivates it). Internal env
+        // override only, NOT part of the product contract — exactly like
+        // QUEEN_V2_BUNDLE_MAX / QUEEN_V2_FUSION_MAX_INFLIGHT above.
+        //   QUEEN_V2_FUSION_MIN_FRAMES — default 0 = feature OFF (dispatch stays
+        //     byte-for-byte the pre-floor fire-on-idle behavior).
+        //   QUEEN_V2_FUSION_MIN_WAIT_MS — default 2; the bounded max hold from a
+        //     group's first frame. Only meaningful when MIN_FRAMES > 0.
+        let floor = Floor {
+            min_frames: std::env::var("QUEEN_V2_FUSION_MIN_FRAMES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0),
+            min_wait: Duration::from_millis(
+                std::env::var("QUEEN_V2_FUSION_MIN_WAIT_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(2),
+            ),
+        };
+        if floor.enabled() {
+            eprintln!(
+                "[fusion] fat-batch floor ON: MIN_FRAMES={} MIN_WAIT_MS={} (experiment flag)",
+                floor.min_frames,
+                floor.min_wait.as_millis()
+            );
+        }
         // fusion_frames (QUEEN_V2_FUSION_FRAMES) is retained for API/env compat but
         // is no longer a flush trigger: segment size is now emergent. At low load
         // fire-on-idle flushes one push at a time (segment≈1); under load the next
@@ -256,7 +354,7 @@ impl Fusion {
                 pg_ssl_reject_unauthorized,
                 part_meta: Mutex::new(FnvHashMap::default()),
             });
-            tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max));
+            tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max, floor));
         }
         Arc::new(Fusion { senders })
     }
@@ -304,6 +402,7 @@ async fn shard_loop(
     hold_ms: u64,
     max_inflight: usize,
     bundle_max: usize,
+    floor: Floor,
 ) {
     let mut groups: FnvHashMap<String, FusionGroup> = FnvHashMap::default();
     let mut inflight: FnvHashSet<String> = FnvHashSet::default();
@@ -318,22 +417,44 @@ async fn shard_loop(
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Vec<String>>();
     let mut tick = tokio::time::interval(Duration::from_millis(hold_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // FAT-BATCH FLOOR wakeup (experiment flag; default OFF). When the floor holds
+    // a still-small segment below MIN_FRAMES, the `hold_ms` backstop tick (~15ms
+    // by default) is far too coarse to honor the MIN_WAIT_MS bound (default 2ms),
+    // so a DEDICATED deadline timer wakes the loop at the earliest held group's
+    // (first_frame + MIN_WAIT_MS). `floor_armed` records the instant the timer is
+    // armed for; its `is_some()` GATES the select arm, so with MIN_FRAMES=0 the
+    // arm is never polled, the timer is never reset off its dummy far-future
+    // deadline, and this entire mechanism is inert — the loop is byte-identical to
+    // the pre-floor select.
+    let floor_timer = tokio::time::sleep(Duration::from_secs(3600));
+    tokio::pin!(floor_timer);
+    let mut floor_armed: Option<Instant> = None;
+
     loop {
         tokio::select! {
             maybe = rx.recv() => {
                 let Some(msg) = maybe else { break; };
                 let key = format!("{}\x1f{}", msg.queue, msg.partition);
+                // Stamp the group's first-frame arrival at (re)creation — the clock
+                // the floor ages a held segment against. Cheap monotonic read;
+                // reused for the group's whole accumulation, ignored when OFF.
+                let arrival = Instant::now();
                 let g = groups.entry(key.clone()).or_insert_with(|| FusionGroup {
                     queue: msg.queue.clone(),
                     partition: msg.partition.clone(),
                     frames: Vec::new(),
+                    first_frame: arrival,
                 });
                 g.frames.extend(msg.frames);
-                // Fire-on-idle: if a permit is free, bundle every ready partition
-                // (usually just this one when idle) and dispatch now; otherwise the
-                // groups stay and accumulate (dispatched on the next completion/sweep).
+                // Fire-on-idle: if a permit is free AND the group is dispatch-
+                // eligible (floor OFF ⇒ always; floor ON ⇒ reached MIN_FRAMES or
+                // aged past MIN_WAIT), bundle every ready partition and dispatch
+                // now; otherwise the groups stay and accumulate (dispatched on the
+                // next completion, backstop tick, or floor deadline). ON ⇒
+                // fire-on-idle respects the floor, so idle lanes can't defeat it.
                 try_dispatch_bundle(&mut groups, &mut inflight, &mut inflight_bundles,
-                    max_inflight, bundle_max, &ctx, &done_tx);
+                    max_inflight, bundle_max, floor, &ctx, &done_tx);
             }
             Some(keys) = done_rx.recv() => {
                 for k in &keys {
@@ -345,17 +466,88 @@ async fn shard_loop(
                 // next segments — which necessarily commit AFTER the bundle that
                 // just committed, so per-partition offset order == commit order).
                 sweep_bundles(&mut groups, &mut inflight, &mut inflight_bundles,
-                    max_inflight, bundle_max, &ctx, &done_tx);
+                    max_inflight, bundle_max, floor, &ctx, &done_tx);
             }
             _ = tick.tick() => {
                 // Liveness backstop: retry held groups whose dispatch depends on a
                 // permit freed on another shard (the push Vegas lane is shared),
                 // which no local arrival/completion would have woken us for.
                 sweep_bundles(&mut groups, &mut inflight, &mut inflight_bundles,
-                    max_inflight, bundle_max, &ctx, &done_tx);
+                    max_inflight, bundle_max, floor, &ctx, &done_tx);
+            }
+            _ = &mut floor_timer, if floor_armed.is_some() => {
+                // A floor-held group has reached MIN_WAIT_MS since its first frame
+                // and is now eligible by age. Sweep dispatches it (and any peer
+                // that became eligible meanwhile). The bottom-of-loop recompute
+                // then re-arms for the next-earliest held group or disarms.
+                sweep_bundles(&mut groups, &mut inflight, &mut inflight_bundles,
+                    max_inflight, bundle_max, floor, &ctx, &done_tx);
+            }
+        }
+
+        // Re-arm the floor deadline over whatever remains held below the frame
+        // floor. `earliest_floor_deadline` only returns strictly-future instants,
+        // so once the timer fires the freshly computed `next` can never equal the
+        // now-past `floor_armed`: the `!=` guard therefore ALWAYS re-arms or
+        // disarms and can never leave an elapsed timer armed (⇒ no busy-spin).
+        // When OFF this is a single `enabled()` false test ⇒ skipped entirely, so
+        // `floor_armed` stays None, the timer is never touched, and the loop is
+        // identical to the pre-floor version.
+        if floor.enabled() {
+            let next = earliest_floor_deadline(&groups, &inflight, floor, Instant::now());
+            if next != floor_armed {
+                if let Some(dl) = next {
+                    floor_timer.as_mut().reset(tokio::time::Instant::from_std(dl));
+                }
+                floor_armed = next;
             }
         }
     }
+}
+
+// The earliest floor wake deadline over every group this shard is holding below
+// the frame threshold (skipping empty and in-flight groups — an in-flight
+// partition can't dispatch until its flush completes, at which point the
+// completion arm re-computes this). None ⇒ nothing is floor-held ⇒ the timer
+// stays disarmed. O(live groups); only walked when the feature is on.
+fn earliest_floor_deadline(
+    groups: &FnvHashMap<String, FusionGroup>,
+    inflight: &FnvHashSet<String>,
+    floor: Floor,
+    now: Instant,
+) -> Option<Instant> {
+    earliest_deadline(
+        groups
+            .iter()
+            .map(|(k, g)| (g.frames.len(), g.first_frame, inflight.contains(k))),
+        floor,
+        now,
+    )
+}
+
+// Pure core of `earliest_floor_deadline`: fold `Floor::deadline` over the held,
+// not-in-flight, non-empty groups and keep the soonest. Separated from the map
+// walk so it is unit-testable without constructing OwnedFrame/PushState.
+fn earliest_deadline<I>(items: I, floor: Floor, now: Instant) -> Option<Instant>
+where
+    I: IntoIterator<Item = (usize, Instant, bool)>, // (frames_len, first_frame, inflight)
+{
+    if !floor.enabled() {
+        return None;
+    }
+    let mut best: Option<Instant> = None;
+    for (frames_len, first_frame, inflight) in items {
+        if inflight || frames_len == 0 {
+            continue;
+        }
+        if let Some(dl) = floor.deadline(frames_len, first_frame, now) {
+            best = Some(match best {
+                Some(b) if b <= dl => b,
+                _ => dl,
+            });
+        }
+    }
+    best
 }
 
 // Form and dispatch ONE bundle now. Returns true if a bundle was fired. Gates, in
@@ -372,19 +564,29 @@ fn try_dispatch_bundle(
     inflight_bundles: &mut usize,
     max_inflight: usize,
     bundle_max: usize,
+    floor: Floor,
     ctx: &Arc<FlushCtx>,
     done: &mpsc::UnboundedSender<Vec<String>>,
 ) -> bool {
     if *inflight_bundles >= max_inflight {
         return false;
     }
-    // Collect up to K ready, not-in-flight partition keys (disjoint by the gate).
+    // Collect up to K ready, not-in-flight, dispatch-ELIGIBLE partition keys
+    // (disjoint by the in-flight gate). `floor.eligible` is `true` for every
+    // non-empty group when the feature is OFF, so the chosen set is byte-identical
+    // to the pre-floor selection; when ON, a group below MIN_FRAMES whose oldest
+    // frame is younger than MIN_WAIT is held back to fatten (the floor deadline
+    // timer or a later arrival dispatches it within the bound).
+    let now = Instant::now();
     let mut chosen: Vec<String> = Vec::with_capacity(bundle_max);
     for (k, g) in groups.iter() {
         if chosen.len() >= bundle_max {
             break;
         }
-        if !g.frames.is_empty() && !inflight.contains(k) {
+        if !g.frames.is_empty()
+            && !inflight.contains(k)
+            && floor.eligible(g.frames.len(), g.first_frame, now)
+        {
             chosen.push(k.clone());
         }
     }
@@ -417,11 +619,14 @@ fn sweep_bundles(
     inflight_bundles: &mut usize,
     max_inflight: usize,
     bundle_max: usize,
+    floor: Floor,
     ctx: &Arc<FlushCtx>,
     done: &mpsc::UnboundedSender<Vec<String>>,
 ) {
     while *inflight_bundles < max_inflight {
-        if !try_dispatch_bundle(groups, inflight, inflight_bundles, max_inflight, bundle_max, ctx, done) {
+        if !try_dispatch_bundle(
+            groups, inflight, inflight_bundles, max_inflight, bundle_max, floor, ctx, done,
+        ) {
             break;
         }
     }
@@ -1177,7 +1382,10 @@ pub fn json_escape_into(out: &mut String, s: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_escape_into, layer2_dedup, parse_multi_outcome, PushOutcome};
+    use super::{
+        earliest_deadline, json_escape_into, layer2_dedup, parse_multi_outcome, Floor, PushOutcome,
+    };
+    use std::time::{Duration, Instant};
 
     // Reference implementation (the original char-by-char escape) — the
     // byte-scan fast path must match it byte-for-byte.
@@ -1251,5 +1459,102 @@ mod tests {
         assert!(parse_multi_outcome(r#"[{"status":"queued"}]"#, 1).is_none());
         // Length mismatch fails too.
         assert!(parse_multi_outcome(r#"[{"status":"queued","baseOffset":1,"createdAt":"x"}]"#, 2).is_none());
+    }
+
+    // ---- FAT-BATCH FLOOR (experiment flag) --------------------------------
+
+    fn off() -> Floor {
+        Floor { min_frames: 0, min_wait: Duration::from_millis(2) }
+    }
+    fn on() -> Floor {
+        Floor { min_frames: 200, min_wait: Duration::from_millis(2) }
+    }
+
+    #[test]
+    fn floor_off_is_inert() {
+        // MIN_FRAMES=0 ⇒ every group is eligible regardless of size/age, nothing
+        // is ever held, and no deadline is ever produced. This is the byte-
+        // identical-when-off guarantee at the predicate level.
+        let f = off();
+        let now = Instant::now();
+        let young = now - Duration::from_micros(1);
+        let old = now - Duration::from_secs(10);
+        assert!(!f.enabled());
+        assert!(f.eligible(0, young, now));
+        assert!(f.eligible(1, young, now));
+        assert!(f.eligible(0, old, now));
+        assert!(f.eligible(999_999, young, now));
+        assert_eq!(f.deadline(0, young, now), None);
+        assert_eq!(f.deadline(1, young, now), None);
+        // The fold short-circuits to None even with held-looking inputs.
+        assert_eq!(
+            earliest_deadline([(10usize, young, false), (1usize, young, false)], f, now),
+            None
+        );
+    }
+
+    #[test]
+    fn floor_on_eligibility_by_size_or_age() {
+        let f = on();
+        let now = Instant::now();
+        let young = now - Duration::from_millis(1); // < MIN_WAIT (2ms)
+        let aged = now - Duration::from_millis(3); // >= MIN_WAIT
+        assert!(f.enabled());
+        // Below floor AND young ⇒ HELD (not eligible).
+        assert!(!f.eligible(1, young, now));
+        assert!(!f.eligible(199, young, now));
+        // Reached the frame floor ⇒ eligible regardless of age.
+        assert!(f.eligible(200, young, now));
+        assert!(f.eligible(1_000, young, now));
+        // Below floor but aged past MIN_WAIT ⇒ eligible (bounded-latency escape).
+        assert!(f.eligible(1, aged, now));
+        assert!(f.eligible(199, aged, now));
+    }
+
+    #[test]
+    fn floor_on_deadline_is_strictly_future_and_bounded() {
+        let f = on();
+        let now = Instant::now();
+        let young = now - Duration::from_millis(1);
+        let aged = now - Duration::from_millis(3);
+        // Held (below floor, young): deadline = first_frame + MIN_WAIT, and it is
+        // ALWAYS strictly in the future — the no-busy-spin invariant.
+        let dl = f.deadline(50, young, now).expect("held group has a deadline");
+        assert_eq!(dl, young + Duration::from_millis(2));
+        assert!(dl > now, "held deadline must be strictly future (no busy-spin)");
+        // At/above the frame floor ⇒ no hold deadline (dispatches on size).
+        assert_eq!(f.deadline(200, young, now), None);
+        // Already aged out ⇒ no hold deadline: it is eligible, so the shared-permit
+        // backstop governs it, not the floor timer. Returning None here is exactly
+        // what prevents the shard loop re-arming on an elapsed instant.
+        assert_eq!(f.deadline(50, aged, now), None);
+    }
+
+    #[test]
+    fn earliest_deadline_picks_soonest_held_and_skips_the_rest() {
+        let f = on();
+        let now = Instant::now();
+        let older = now - Duration::from_millis(1); // deadline older+2ms (sooner)
+        let newer = now - Duration::from_micros(200); // deadline newer+2ms (later)
+        let items = [
+            (10usize, newer, false),  // held, later deadline
+            (10usize, older, false),  // held, SOONER deadline → wins
+            (300usize, older, false), // at floor ⇒ eligible, no deadline
+            (10usize, older, true),   // in-flight ⇒ skipped
+            (0usize, older, false),   // empty ⇒ skipped
+        ];
+        assert_eq!(
+            earliest_deadline(items, f, now),
+            Some(older + Duration::from_millis(2))
+        );
+        // Nothing held (all eligible / in-flight / empty) ⇒ None.
+        assert_eq!(
+            earliest_deadline(
+                [(300usize, older, false), (0usize, older, false), (10usize, older, true)],
+                f,
+                now
+            ),
+            None
+        );
     }
 }

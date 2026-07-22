@@ -1,0 +1,18 @@
+  time  | pushReq popReq | push/s  pop/s | bCPU   pgCPU | commit/s | pgWait(active)
+  60s   |      0      0 |      0      0 |  200%  1973% |    4976 | 
+  90s   |      0      0 |      0      0 |  218%  1262% |   11074 | LWLock:LockManager=31 CPU:run=15 IPC:ProcarrayGroupUpdate=8
+  120s  |      0      0 |      0      0 |  246%  2076% |    7982 | CPU:run=38 LWLock:WALWrite=5 Lock:transactionid=2
+  150s  |      0      0 |      0      0 |  257%  1934% |   11065 | CPU:run=23 LWLock:BufferContent=6 LWLock:WALWrite=5
+  180s  |      0      0 |      0      0 |  337%  2003% |    8320 | CPU:run=19 LWLock:LockManager=17 LWLock:WALWrite=13
+  210s  |      0      0 |      0      0 |  717%  1979% |   11105 | LWLock:WALWrite=65 CPU:run=12 Client:ClientRead=1
+  240s  |      0      0 |      0      0 |  219%  1943% |    8496 | Client:ClientRead=19 LWLock:WALWrite=19 CPU:run=14
+  270s  |      0      0 |      0      0 |  400%  1142% |   10542 | CPU:run=13 LWLock:WALWrite=13 LWLock:LockManager=7
+  300s  |      0      0 |      0      0 |  226%  2075% |    8820 | CPU:run=28 LWLock:BufferContent=18 LWLock:WALWrite=12
+  330s  |      0      0 |      0      0 |    0%    15% |    3226 | 
+  360s  |      0      0 |      0      0 |    1%    34% |      52 | 
+  390s  |      0      0 |      0      0 |    1%     0% |      44 | 
+  420s  |      0      0 |      0      0 |    1%    12% |      51 | 
+  450s  |      0      0 |      0      0 |    1%    33% |      51 | 
+  480s  |      0      0 |      0      0 |    0%     0% |      44 | 
+  510s  |      0      0 |      0      0 |    1%     9% |      51 | 
+  540s  |      0      0 |      0      0 |    1%     1% |      51 | CPU:run=1

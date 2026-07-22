@@ -1,0 +1,33 @@
+=== START 1784732096 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+35142,1049,9590500,0,2026-07-22 14:54:45.11813+00
+=== t=1784732156 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+4834390,1205,2910616109,0,2026-07-22 14:54:45.11813+00
+=== t=1784732216 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+9965899,1304,5950994679,0,2026-07-22 14:54:45.11813+00
+=== t=1784732277 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+15316235,1404,9016319057,0,2026-07-22 14:54:45.11813+00
+=== t=1784732337 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+20915229,1515,12170043964,0,2026-07-22 14:54:45.11813+00
+=== t=1784732398 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+26716791,1633,15574908415,0,2026-07-22 14:54:45.11813+00
+=== t=1784732458 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+34183060,1697,18899942164,0,2026-07-22 14:54:45.11813+00
+=== t=1784732518 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+41635268,1752,22152235686,0,2026-07-22 14:54:45.11813+00
+=== t=1784732579 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+49567731,1809,25753838045,0,2026-07-22 14:54:45.11813+00
+=== t=1784732639 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+57557061,1865,29281716412,0,2026-07-22 14:54:45.11813+00
+=== t=1784732699 ===
+wal_records,wal_fpi,wal_bytes,wal_buffers_full,stats_reset
+65384811,1918,32642525595,0,2026-07-22 14:54:45.11813+00

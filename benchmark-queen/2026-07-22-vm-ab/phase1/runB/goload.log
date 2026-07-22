@@ -1,0 +1,13 @@
+goload -> http://10.114.0.2:6682 queue=segbench partitions=100 producers=1500 consumers=850 pushBatch=100 popBatch=500 payload=256B idleConns=512 retries=2
+[configure] queue=segbench completedRetentionSeconds=300
+[14:43:04] push=  781143/s pop=  780782/s | tot push=46868600 pop=46846900 | errs p=5 c=1249 empty=13
+[14:44:04] push=  817100/s pop=  817212/s | tot push=95894600 pop=95879600 | errs p=6 c=3180 empty=13
+[14:45:04] push=  809252/s pop=  809222/s | tot push=144449700 pop=144432900 | errs p=39 c=6053 empty=17
+[14:46:04] push=  866220/s pop=  866213/s | tot push=196422900 pop=196405700 | errs p=46 c=8076 empty=17
+[14:47:04] push=  839298/s pop=  839520/s | tot push=246780800 pop=246776900 | errs p=52 c=10002 empty=17
+[14:48:04] push=  919345/s pop=  919337/s | tot push=301941500 pop=301937100 | errs p=54 c=11457 empty=17
+[14:49:04] push=  873927/s pop=  873563/s | tot push=354377100 pop=354350900 | errs p=54 c=12810 empty=17
+[14:50:04] push=  835923/s pop=  836308/s | tot push=404532500 pop=404529400 | errs p=54 c=14320 empty=17
+[14:51:04] push=  831912/s pop=  831940/s | tot push=454447200 pop=454445800 | errs p=60 c=16405 empty=17
+[14:52:04] push=  867823/s pop=  866852/s | tot push=506516600 pop=506456900 | errs p=63 c=17990 empty=17
+[final] pushed=506577900 popped=506521400 pushErr=63 popErr=17990 emptyPops=17

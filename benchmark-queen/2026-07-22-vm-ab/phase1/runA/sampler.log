@@ -1,0 +1,2 @@
+/root/sampler.sh: line 53: syntax error near unexpected token `}'
+/root/sampler.sh: line 53: `c "select * from pg_stat_wal"; } >> "$OUT/wal_stat.csv"'
