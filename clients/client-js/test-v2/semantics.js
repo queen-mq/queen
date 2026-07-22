@@ -389,9 +389,9 @@ export async function leasedBacklogNotStrandedByEmptyPolls(client) {
     // Defeat the 2-minute candidate-filter grace so a wrongly-advanced
     // watermark actually hides the partition (same trick as watermark.js).
     await dbPool.query(`
-        UPDATE queen.seg_partitions p
+        UPDATE queen.log_partitions p
         SET last_write_at = last_write_at - interval '10 minutes'
-        FROM queen.seg_queues q
+        FROM queen.log_queues q
         WHERE p.queue_id = q.id AND q.name = $1
     `, [queue])
 
@@ -447,7 +447,7 @@ export async function pushOnlyQueueIsDiscoverable(client) {
 
     // Cleanup: dotted name doesn't match the harness' 'test-%' LIKE, so drop it here.
     await dbPool.query(`DELETE FROM queen.queues WHERE name = $1`, [queue])
-    await dbPool.query(`DELETE FROM queen.seg_queues WHERE name = $1`, [queue])
+    await dbPool.query(`DELETE FROM queen.log_queues WHERE name = $1`, [queue])
 
     if (!found) {
         return { success: false, message: 'Namespace discovery pop never found the push-only queue' }

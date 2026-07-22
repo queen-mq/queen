@@ -115,7 +115,7 @@ pub async fn handle_push(
     let producer_sub = authed.0.filter(|s| !s.is_empty());
 
     // RUSTFIX item 17: maintenance mode diverts EVERY push to the file buffer
-    // (parity with push.cpp:307-359) — nothing reaches queen.seg_segments; the
+    // (parity with push.cpp:307-359) — nothing reaches queen.log_segments; the
     // background drain replays on disable. Return 201 with per-item
     // status:"buffered" (or "failed" on a spool write error).
     if st.maintenance.load(Ordering::Relaxed) {
@@ -418,7 +418,7 @@ pub struct PopParams {
     consumer_group: Option<String>,
     // Subscription seeding for a NEW (partition, group) cursor on first contact:
     // subscriptionMode 'new' | 'all' (default), subscriptionFrom 'now' | ISO
-    // timestamp | '' (default). Threaded to the seg pop SPs (p_sub_mode /
+    // timestamp | '' (default). Threaded to the log pop SPs (p_sub_mode /
     // p_sub_from); existing cursors are never re-seeded.
     #[serde(rename = "subscriptionMode")]
     subscription_mode: Option<String>,
@@ -454,8 +454,11 @@ struct PopSeg {
     blob: String,
 }
 
-// Single-partition pop result (queen.seg_pop_segments_wire_v1): segments +
-// partitionId, no partition name (the caller knows it from the path).
+// Single-partition pop result (db::pop_specific assembles the queen.log_pop_v1
+// rows into this shape): segments + partitionId, no partition name (the caller
+// knows it from the path). `seq` in the segment JSON carries base_offset and
+// `startOff` the start frame index — opaque tokens (§11); the renderer only
+// reads startOff/take/createdAt/blob.
 #[derive(Deserialize)]
 struct PopSpecificResult {
     #[serde(default)]
@@ -515,6 +518,10 @@ pub async fn handle_pop(
         let rtt = t0.elapsed();
         st.pop_vegas.record(rtt);
         drop(permit);
+        // Spec §10 (parked long-poll): release the pooled connection BEFORE any
+        // parking below — a parked pop must never pin a PG connection. The next
+        // loop iteration re-acquires from the pool.
+        drop(client);
 
         let (txt, blobs) = match res {
             Ok(Ok(t)) => t,
@@ -622,6 +629,10 @@ pub async fn handle_pop_partition(
         let rtt = t0.elapsed();
         st.pop_vegas.record(rtt);
         drop(permit);
+        // Spec §10 (parked long-poll): release the pooled connection BEFORE any
+        // parking below — a parked pop must never pin a PG connection. The next
+        // loop iteration re-acquires from the pool.
+        drop(client);
 
         let txt = match res {
             Ok(Ok(t)) => t,
@@ -687,7 +698,7 @@ pub struct PopDiscoverParams {
     wait: Option<bool>,
     timeout: Option<u64>,
     // RUSTFIX item 18: per-request lease override; 0/absent lets each discovered
-    // partition use its own queue's seg_queues.lease_time (else 60).
+    // partition use its own queue's log_queues.lease_time (else 60).
     #[serde(rename = "leaseSeconds")]
     lease_seconds: Option<i32>,
     #[serde(rename = "consumerGroup")]
@@ -703,9 +714,9 @@ pub struct PopDiscoverParams {
 // GET /api/v1/pop?namespace=&task=&consumerGroup=... — namespace/task discovery
 // pop. Resolves every segment queue whose queen.queues row matches the requested
 // namespace/task and wildcard-pops across their partitions in one call
-// (queen.seg_pop_discover_wire_v1), returning the SAME response shape as
+// (queen.log_pop_discover_wire_v1), returning the SAME response shape as
 // handle_pop. Same long-poll + lease/leaseId semantics; ack/attempt work
-// identically because the SP reuses the per-partition seg_pop_segments_v1 path.
+// identically because the SP reuses the per-partition queen.log_pop_v1 path.
 // At least one of namespace/task must be provided (the clients never send a bare
 // pop without one — QueueBuilder.pop throws first — so a neither-provided call is
 // a 400 rather than an unbounded scan of every queue).
@@ -736,7 +747,7 @@ pub async fn handle_pop_discover(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     // No single queue to read a lease from: the SP leases each partition with its
     // own queue's configured lease_time; this is only the fallback for a matching
-    // queue that has no seg_queues.lease_time.
+    // queue that has no log_queues.lease_time.
     // RUSTFIX item 18: pass the RAW request override (0 = none) so the discover SP
     // resolves COALESCE(NULLIF(request,0), sq.lease_time, 60) PER partition.
     let lease_seconds = p.lease_seconds.filter(|v| *v > 0).unwrap_or(0);
@@ -763,6 +774,10 @@ pub async fn handle_pop_discover(
         let rtt = t0.elapsed();
         st.pop_vegas.record(rtt);
         drop(permit);
+        // Spec §10 (parked long-poll): release the pooled connection BEFORE any
+        // parking below — a parked pop must never pin a PG connection. The next
+        // loop iteration re-acquires from the pool.
+        drop(client);
 
         let txt = match res {
             Ok(Ok(t)) => t,
@@ -889,7 +904,7 @@ fn render_pop_parts(
     let mut meta = PopMeta::default();
     let now_ms = crate::util::now_epoch_ms();
     // Running index into bin_blobs — the SP flattens blobs in exactly this
-    // traversal order (partitions in claim order, segments in seq order).
+    // traversal order (partitions in claim order, segments in base_offset order).
     let mut blob_idx = 0usize;
     // The top-level partition/partitionId are the FIRST claimed partition's —
     // known up front, so the whole response renders into ONE buffer (the old
@@ -1109,10 +1124,22 @@ struct Ack {
     partition_id: String,
     worker: String,
     // RUSTFIX item 10: the normalized outcome (completed|failed|retry|dlq) threaded
-    // through to seg_ack_by_txn_v1 so retry/dlq survive to SQL.
+    // through to queen.log_ack_by_hash_v1 so retry/dlq survive to SQL.
     status: &'static str,
     // Nack failure reason, threaded into the DLQ snapshot when retries exhaust.
     error: Option<String>,
+}
+
+// Lowercase hex of a 16-byte txn hash — the token format queen.log_ack_by_hash_v1
+// returns in noopHashes/staleHashes (PG encode(..,'hex') is lowercase) and the
+// 32-hex-per-frame stride the transaction wire's hashesHex/acks[].h carry.
+fn hex16(b: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(32);
+    for x in b {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{:02x}", x);
+    }
+    s
 }
 
 pub async fn handle_ack(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
@@ -1153,8 +1180,10 @@ pub async fn handle_ack_batch(State(st): State<Arc<AppState>>, body: Bytes) -> R
     json(StatusCode::OK, body)
 }
 
-// Resolve acks per (partition, worker) via seg_ack_by_txn_v1, then emit the
-// per-item result array in the original order.
+// Resolve acks per (partition, worker) via queen.log_ack_by_hash_v1, then emit
+// the per-item result array in the original order. The broker computes the
+// xxh3_128 txn hashes (spec §3 — SQL never sees txn strings) and maps the SP's
+// noopHashes/staleHashes hex tokens back to the request's txns.
 async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String {
     let n = acks.len();
     let mut success = vec![false; n];
@@ -1163,7 +1192,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
     let mut dlq_flags = vec![false; n];
     let mut noop_flags = vec![false; n];
 
-    // Group item indices by (partition_id, worker): one seg_ack_by_txn_v1 call each.
+    // Group item indices by (partition_id, worker): one log_ack_by_hash_v1 call each.
     let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (i, a) in acks.iter().enumerate() {
         groups
@@ -1187,23 +1216,21 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
         // is partitionId-keyed, so resolve the queue via the pop-fed memo (DB lookup
         // on a miss). None (unknown/deleted partition) leaves the ack unattributed.
         let queue_name = st.queue_for_partition(&client, &pid).await;
-        // RUSTFIX item 10: send [{txn, status}] so seg_ack_by_txn_v1 distinguishes
-        // completed / failed / retry / dlq (the SP also still accepts a legacy
-        // "ok" boolean for the transaction path).
-        let mut aj = String::from("[");
-        for (k, &i) in idxs.iter().enumerate() {
-            if k > 0 {
-                aj.push(',');
-            }
-            aj.push_str("{\"txn\":\"");
-            json_escape_into(&mut aj, &acks[i].txn);
-            aj.push_str("\",\"status\":\"");
-            aj.push_str(acks[i].status);
-            aj.push_str("\"}");
+        // RUSTFIX item 10 on the log wire: aligned hash/status arrays so
+        // log_ack_by_hash_v1 distinguishes completed / failed / retry / dlq.
+        // `hexes` keeps each item's 32-hex token for mapping the SP's
+        // noopHashes/staleHashes back to request items.
+        let mut hashes: Vec<Vec<u8>> = Vec::with_capacity(idxs.len());
+        let mut statuses: Vec<String> = Vec::with_capacity(idxs.len());
+        let mut hexes: Vec<String> = Vec::with_capacity(idxs.len());
+        for &i in &idxs {
+            let h = crate::util::txn_hash128(&acks[i].txn);
+            hexes.push(hex16(&h));
+            hashes.push(h.to_vec());
+            statuses.push(acks[i].status.to_string());
         }
-        aj.push(']');
 
-        match db::ack_by_txn(&client, &pid, group, &worker, &aj).await {
+        match db::ack_by_hash(&client, &pid, group, &worker, &hashes, &statuses).await {
             Ok(txt) => {
                 // {"ok":bool,"error":?,...}
                 let v: serde_json::Value =
@@ -1211,16 +1238,16 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                 let sp_ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
                 if sp_ok {
                     // DLQ hand-off: the SP signalled that the head un-acked frame
-                    // is poison (a nack whose delivery attempt exceeded the queue's
-                    // retry_limit on a DLQ-enabled queue). It kept the lease held
-                    // so we can decode the leased segment, snapshot the poison
-                    // frame's payload, and file the seg_dlq row (seg_dlq_head then
-                    // advances the cursor + releases the lease).
+                    // is poison (a forced 'dlq' status, or a nack whose retry
+                    // budget is exhausted on a DLQ-enabled queue). It kept the
+                    // lease held so we can decode the covering segment, snapshot
+                    // the poison frame's payload, and file the queen.log_dlq row
+                    // (log_dlq_head_v1 then advances the cursor + releases the
+                    // lease). 'off' carries the poison OFFSET in this return —
+                    // not the cursor (044 contract).
                     if v.get("dlq").and_then(|x| x.as_bool()).unwrap_or(false) {
-                        let seq = v.get("seq").and_then(|x| x.as_i64()).unwrap_or(0);
-                        let frame_idx =
-                            v.get("frameIdx").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
-                        match dlq_file_head(&client, &pid, group, &worker, seq, frame_idx, &acks, &idxs)
+                        let off = v.get("off").and_then(|x| x.as_i64()).unwrap_or(0);
+                        match dlq_file_head(&client, &pid, group, &worker, off, &acks, &idxs)
                             .await
                         {
                             Ok(true) => {
@@ -1248,33 +1275,36 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                             lease_released[i] = true;
                         }
                     }
-                    // Below-cursor honesty (ack-as-commit): the SP reports txns
+                    // Below-cursor honesty (ack-as-commit): the SP reports hashes
                     // whose position resolved below the committed cursor.
                     // Completed ones are harmless duplicate commits -> noop:true;
                     // explicit signals (failed/retry/dlq) can no longer be
-                    // honored -> rejected per item instead of a silent ok.
-                    let txn_list = |key: &str| -> Vec<String> {
+                    // honored -> rejected per item instead of a silent ok. The
+                    // wire tokens are 32-hex hashes — map them back to items via
+                    // this group's aligned `hexes`.
+                    let hash_set = |key: &str| -> std::collections::HashSet<String> {
                         v.get(key)
                             .and_then(|x| x.as_array())
                             .map(|a| {
                                 a.iter()
-                                    .filter_map(|s| s.as_str().map(str::to_string))
+                                    .filter_map(|s| s.as_str())
+                                    .map(|s| s.to_ascii_lowercase())
                                     .collect()
                             })
                             .unwrap_or_default()
                     };
-                    let noop_txns = txn_list("noopTxns");
-                    let stale_txns = txn_list("staleTxns");
-                    if !noop_txns.is_empty() || !stale_txns.is_empty() {
-                        for &i in &idxs {
-                            if stale_txns.iter().any(|t| t == &acks[i].txn) {
+                    let noop_hashes = hash_set("noopHashes");
+                    let stale_hashes = hash_set("staleHashes");
+                    if !noop_hashes.is_empty() || !stale_hashes.is_empty() {
+                        for (k, &i) in idxs.iter().enumerate() {
+                            if stale_hashes.contains(&hexes[k]) {
                                 success[i] = false;
                                 dlq_flags[i] = false;
                                 errors[i] = Some(
                                     "already committed: the cursor moved past this message before this ack"
                                         .to_string(),
                                 );
-                            } else if noop_txns.iter().any(|t| t == &acks[i].txn) {
+                            } else if noop_hashes.contains(&hexes[k]) {
                                 noop_flags[i] = true;
                             }
                         }
@@ -1329,25 +1359,33 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
     render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags)
 }
 
-// Decode the leased segment, extract the poison HEAD frame (payload snapshot,
-// txn, message_id), pick the failure reason from the matching nack, and file the
-// seg_dlq row via seg_dlq_head (which advances the cursor + releases the lease).
+// Decode the segment COVERING the poison offset, extract the poison frame
+// (payload snapshot, txn, message_id), pick the failure reason from the matching
+// nack, and file the queen.log_dlq row via queen.log_dlq_head_v1 (which advances
+// the cursor past the frame + releases the lease). `off` is the absolute poison
+// offset from the ack SP's dlq:true return; the frame index inside the covering
+// blob is pure subtraction (off - base_offset).
 // Ok(true) => filed, Ok(false) => couldn't extract / SP rejected.
 async fn dlq_file_head(
     client: &deadpool_postgres::Client,
     partition_id: &str,
     group: &str,
     worker: &str,
-    seq: i64,
-    frame_idx: i32,
+    off: i64,
     acks: &[Ack],
     idxs: &[usize],
 ) -> Result<bool, tokio_postgres::Error> {
-    let (payload, txn, message_id) = match db::seg_fetch_segment(client, partition_id, seq).await? {
-        Some((_created, _pname, blob)) => {
+    let (payload, txn, message_id) = match db::log_segment_covering(client, partition_id, off).await?
+    {
+        Some((base, end, blob)) => {
+            // log_segment_at_v1 returns the last segment with base <= off; a
+            // retention gap can leave `off` past its end — nothing to snapshot.
+            if off < base || off > end {
+                return Ok(false);
+            }
             let raw = zstd_decompress(&blob);
             match unpack_frames(&raw) {
-                Some(frames) => match frames.get(frame_idx.max(0) as usize) {
+                Some(frames) => match frames.get((off - base) as usize) {
                     Some(f) => {
                         let payload = if f.payload.is_empty() {
                             "null".to_string()
@@ -1380,8 +1418,11 @@ async fn dlq_file_head(
         })
         .unwrap_or_else(|| "Retries exhausted".to_string());
 
+    // db::seg_dlq_head keeps its pre-log signature: the position travels in the
+    // `seq` argument (now the absolute offset); the frame_idx argument is
+    // vestigial and ignored by the wrapper (pass 0).
     let res = db::seg_dlq_head(
-        client, partition_id, group, worker, seq, frame_idx, &message_id, &txn, &payload, &error,
+        client, partition_id, group, worker, off, 0, &message_id, &txn, &payload, &error,
     )
     .await?;
     let v: serde_json::Value = serde_json::from_str(&res).unwrap_or(serde_json::Value::Null);
@@ -1430,8 +1471,8 @@ fn render_ack_results(
 
 // ---------------------------------------------------------------- lease/extend
 // POST /api/v1/lease/:leaseId/extend  body {"seconds":60} (default 60).
-// Renews every partition_consumers lease held by :leaseId (= the worker id minted at
-// pop) via queen.seg_renew_lease_v1. Always HTTP 200 (best-effort renewal, like
+// Renews every log_consumers lease held by :leaseId (= the worker id minted at
+// pop) via queen.log_renew_lease_v1. Always HTTP 200 (best-effort renewal, like
 // the rows engine). The response carries every key the clients read:
 //   JS:  result.leaseId ? result.newExpiresAt : result.lease_expires_at
 //   Go:  result["newExpiresAt"] (RFC3339 string)
@@ -1498,7 +1539,7 @@ pub async fn handle_lease_extend(
 
 // ------------------------------------------------------------------ transaction
 // POST /api/v1/transaction — atomic multi-op push+ack through one call to
-// queen.seg_transaction_wire_v1. Body:
+// queen.log_transaction_wire_v1. Body:
 //   {"operations":[
 //      {"type":"push","items":[{queue,partition?,payload,transactionId?,traceId?}]}
 //      | {"type":"push",queue,payload,...}            (flat form)
@@ -1534,7 +1575,7 @@ struct TxnPushGroup {
     frames: Vec<TxnFrame>,
     // txn -> first message_id (intra-batch first-wins dedup, matching the C++
     // broker: a repeated txn in one (queue,partition) group would otherwise
-    // trip seg_push_segment_v1's per-segment dedup and raise QDUP).
+    // trip log_push_one_v1's per-segment dedup and raise QDUP).
     seen: HashMap<String, String>,
 }
 // RUSTFIX item 10: one ack op inside a transaction. Carries the normalized status
@@ -1805,17 +1846,17 @@ pub async fn handle_transaction(
     // from the request alone — requiredLeases has no (lease -> partition) mapping,
     // and the single-hint fallback goes ambiguous the moment two leases appear
     // (the transactionWithPartitions / transactionMultipleQueues failures). The
-    // authoritative source is queen.partition_consumers: exactly one live lease exists
+    // authoritative source is queen.log_consumers: exactly one live lease exists
     // per (partition, group), so read worker_id straight from it. Precedence:
     //   1. a per-op leaseId (raw HTTP callers), already set during parse;
-    //   2. the current partition_consumers.worker_id for (partition, group);
+    //   2. the current log_consumers.worker_id for (partition, group);
     //   3. the single unambiguous requiredLeases hint (last resort).
-    // RUSTFIX item 11: only resolve a worker from partition_consumers / requiredLeases
+    // RUSTFIX item 11: only resolve a worker from log_consumers / requiredLeases
     // when the client actually supplied lease info somewhere in the transaction. If
     // NO leaseId was sent at all, every ack is a lease-less ack: leave the worker
-    // empty so seg_ack_by_txn_v1 skips the worker/expiry check and still advances the
-    // cursor — matching the direct /ack path, where a post-expiry lease-less ack must
-    // succeed, not fail. The JS/Go builders always put the popped leaseId in
+    // empty so log_ack_by_hash_v1 skips the worker/expiry check and still advances
+    // the cursor — matching the direct /ack path, where a post-expiry lease-less ack
+    // must succeed, not fail. The JS/Go builders always put the popped leaseId in
     // requiredLeases, so normal pop-then-ack transactions still resolve as before
     // (live leases → back-fill runs → validation passes; a supplied-but-expired
     // leaseId still fails, per item 11's second clause).
@@ -1824,16 +1865,20 @@ pub async fn handle_transaction(
         if !client_supplied_lease || !ag.worker.is_empty() || ag.partition_id.is_empty() {
             continue;
         }
-        if let Ok(Some(r)) = client
-            .query_opt(
-                "SELECT worker_id FROM queen.partition_consumers \
+        if let Ok(stmt) = client
+            .prepare_cached(
+                "SELECT worker_id FROM queen.log_consumers \
                  WHERE partition_id = $1::text::uuid AND consumer_group = $2",
-                &[&ag.partition_id, &ag.group],
             )
             .await
         {
-            if let Some(w) = r.get::<_, Option<String>>(0) {
-                ag.worker = w;
+            if let Ok(Some(r)) = client
+                .query_opt(&stmt, &[&ag.partition_id, &ag.group])
+                .await
+            {
+                if let Some(w) = r.get::<_, Option<String>>(0) {
+                    ag.worker = w;
+                }
             }
         }
         if ag.worker.is_empty() {
@@ -1843,33 +1888,44 @@ pub async fn handle_transaction(
         }
     }
 
-    // Bogus-ack pre-check (atomic rollback). seg_ack_by_txn_v1 resolves acked
-    // txns through queen.seg_dedup and SILENTLY IGNORES any txn with no dedup
-    // entry ("without a surviving dedup entry => not acked"). So a transaction
-    // that acks a non-existent transactionId — the transactionRollback test acks
+    // Bogus-ack pre-check (atomic rollback). log_ack_by_hash_v1 resolves acked
+    // hashes through queen.log_txns and SILENTLY treats an unresolvable hash as
+    // not-acked (redelivery over loss). So a transaction that acks a
+    // non-existent transactionId — the transactionRollback test acks
     // {transactionId:'non-existent-id'} alongside a real ack on the same
     // partition — would otherwise have its pushes committed and report
     // success:true, because the merged ack call still returns ok. The SP cannot
     // surface that within one call, so reject it HERE, before running the SP: if
-    // any acked txn has no surviving dedup row for its partition, we return a
-    // v1-shaped failure and never touch the DB, so the pushes roll back too.
+    // any acked txn's hash appears in NO surviving log_txns row of its
+    // partition, we return a v1-shaped failure and never touch the DB, so the
+    // pushes roll back too. Hashes are computed broker-side (spec §3) and bound
+    // as bytea[]; the probe explodes each row's 16B-stride hash blob via
+    // queen.log_unnest_hashes (exact compare — no substring false positives).
     for ag in &ack_groups {
         if ag.partition_id.is_empty() || ag.items.is_empty() {
             continue;
         }
-        let txns: Vec<&str> = ag.items.iter().map(|it| it.txn.as_str()).collect();
-        match client
-            .query_opt(
-                "SELECT 1 FROM unnest($2::text[]) AS a(txn) \
+        let hashes: Vec<Vec<u8>> = ag
+            .items
+            .iter()
+            .map(|it| crate::util::txn_hash128(&it.txn).to_vec())
+            .collect();
+        let stmt = match client
+            .prepare_cached(
+                "SELECT 1 FROM unnest($2::bytea[]) AS a(h) \
                  WHERE NOT EXISTS ( \
-                   SELECT 1 FROM queen.seg_dedup d \
-                   WHERE d.partition_id = $1::text::uuid \
-                     AND d.txn_hash = hashtextextended(a.txn, 0)) \
+                   SELECT 1 FROM queen.log_txns t \
+                   WHERE t.partition_id = $1::text::uuid \
+                     AND EXISTS (SELECT 1 FROM queen.log_unnest_hashes(t.hashes) th \
+                                 WHERE th.h = a.h)) \
                  LIMIT 1",
-                &[&ag.partition_id, &txns],
             )
             .await
         {
+            Ok(s) => s,
+            Err(e) => return txn_fail_body(&txn_id, &e.to_string(), StatusCode::OK),
+        };
+        match client.query_opt(&stmt, &[&ag.partition_id, &hashes]).await {
             Ok(Some(_)) => {
                 return txn_fail_body(
                     &txn_id,
@@ -1906,6 +1962,11 @@ pub async fn handle_transaction(
     }
 
     // ------------------------------------------------ build the SP payload
+    // 044 transaction wire: pushes carry {queue, partition, count, hashesHex
+    // (32-hex per frame, frame order — hex of the 16*count hash bytes), blobB64,
+    // verified}. verified = -1 means "no broker dedup vouching — probe the whole
+    // window" (always correct; the transaction path is rare and skips the
+    // dedup.rs cache).
     let mut pushes_json: Vec<serde_json::Value> = Vec::new();
     for g in &groups {
         if g.frames.is_empty() {
@@ -1923,40 +1984,43 @@ pub async fn handle_transaction(
                 encrypted: f.encrypted,
             })
             .collect();
-        let metas: Vec<serde_json::Value> = g
-            .frames
-            .iter()
-            .enumerate()
-            .map(|(k, f)| {
-                serde_json::json!({"i": k, "mid": uuid_bytes_to_string(&f.mid), "txn": f.txn})
-            })
-            .collect();
+        let mut hashes_hex = String::with_capacity(g.frames.len() * 32);
+        for f in &g.frames {
+            hashes_hex.push_str(&hex16(&crate::util::txn_hash128(&f.txn)));
+        }
         let blob = zstd_compress(&pack_frames(&fins), st.zstd_level);
         let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
         pushes_json.push(serde_json::json!({
             "queue": g.queue,
             "partition": g.partition,
-            "metas": metas,
-            "blobB64": blob_b64,
             "count": g.frames.len(),
+            "hashesHex": hashes_hex,
+            "blobB64": blob_b64,
+            "verified": -1,
         }));
     }
 
     let acks_json: Vec<serde_json::Value> = ack_groups
         .iter()
         .map(|ag| {
-            // RUSTFIX item 10: send {"txn","status"} so seg_ack_by_txn_v1 honors
-            // retry/dlq (it prefers status over the legacy ok bool via COALESCE).
-            let txns: Vec<serde_json::Value> = ag
+            // RUSTFIX item 10 on the log wire: the hash form
+            // {"acks":[{"h":32-hex,"status"}]} so log_ack_by_hash_v1 honors
+            // retry/dlq (the wire SP maps a legacy ok:false to 'failed').
+            let items: Vec<serde_json::Value> = ag
                 .items
                 .iter()
-                .map(|it| serde_json::json!({"txn": it.txn, "status": it.status}))
+                .map(|it| {
+                    serde_json::json!({
+                        "h": hex16(&crate::util::txn_hash128(&it.txn)),
+                        "status": it.status,
+                    })
+                })
                 .collect();
             serde_json::json!({
                 "partitionId": ag.partition_id,
                 "group": ag.group,
                 "worker": ag.worker,
-                "txns": txns,
+                "acks": items,
             })
         })
         .collect();
@@ -1967,12 +2031,13 @@ pub async fn handle_transaction(
         Ok(txt) => {
             let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
             if v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false) {
-                // RUSTFIX item 10: DLQ hand-off. seg_ack_by_txn_v1 (via the wire SP)
+                // RUSTFIX item 10: DLQ hand-off. log_ack_by_hash_v1 (via the wire SP)
                 // returns dlq:true for a forced-dlq or budget-exhausted nack and KEEPS
                 // the lease, so the broker must snapshot the poison frame and file the
-                // seg_dlq row — exactly what process_acks does on the direct path.
-                // Without this the DLQ entry is delayed until lease expiry + a later
-                // direct nack. Runs post-commit on the same pooled client.
+                // queen.log_dlq row — exactly what process_acks does on the direct
+                // path. Without this the DLQ entry is delayed until lease expiry + a
+                // later direct nack. Runs post-commit on the same pooled client.
+                // 'off' in the dlq:true entry carries the poison OFFSET (044).
                 let mut dlq_indices: std::collections::HashSet<usize> =
                     std::collections::HashSet::new();
                 if let Some(arr) = v.get("acks").and_then(|x| x.as_array()) {
@@ -1982,9 +2047,7 @@ pub async fn handle_transaction(
                         }
                         let pid = r.get("partitionId").and_then(|x| x.as_str()).unwrap_or("");
                         let grp = r.get("group").and_then(|x| x.as_str()).unwrap_or("");
-                        let seq = r.get("seq").and_then(|x| x.as_i64()).unwrap_or(0);
-                        let frame_idx =
-                            r.get("frameIdx").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+                        let off = r.get("off").and_then(|x| x.as_i64()).unwrap_or(0);
                         // Recover the originating ack group for the worker + nack error
                         // reason, and to know which result rows to stamp dlq:true.
                         let ag = match ack_groups
@@ -2007,7 +2070,7 @@ pub async fn handle_transaction(
                             .collect();
                         let idxs: Vec<usize> = (0..acks.len()).collect();
                         let _ = dlq_file_head(
-                            &client, pid, grp, &ag.worker, seq, frame_idx, &acks, &idxs,
+                            &client, pid, grp, &ag.worker, off, &acks, &idxs,
                         )
                         .await;
                         for it in &ag.items {

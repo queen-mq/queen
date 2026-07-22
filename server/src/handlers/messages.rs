@@ -22,15 +22,16 @@ use crate::frames::{
 };
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
-use crate::util::uuidv7_bytes;
+use crate::util::{txn_hash128, uuidv7_bytes};
 use crate::vegas::Vegas;
 
 // -------------------------------------------------- GET /api/v1/messages/:pid/:txn
 // Per-message access (plan "Per-message access" decision): resolve (partitionId,
-// transactionId) -> (seq, frame_idx) via seg_dedup, fetch the segment blob,
-// zstd-decompress + unpack frames, and return the addressed frame decoded. 404
-// when the dedup row is gone (older than the dedup window) or the segment/frame
-// no longer exists.
+// transactionId) -> absolute offset via the broker-computed 16B xxh3_128 txn hash
+// probed against queen.log_txns (§3: SQL never hashes), fetch the covering
+// segment blob, zstd-decompress + unpack frames, and return frame
+// (offset - base_offset) decoded. 404 when the log_txns rows are gone (older
+// than the txns purge window) or the segment/frame no longer exists.
 pub async fn handle_get_message(
     State(st): State<Arc<AppState>>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
@@ -40,21 +41,34 @@ pub async fn handle_get_message(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    // Resolve (seq, frame_idx) via the dedup window; RUSTFIX item 23: if the dedup
-    // entry has been purged, fall back to a bounded newest-first scan of the
-    // partition's segments so a message older than the dedup window still resolves
-    // instead of 404-ing.
+    // Resolve (base_offset, frame_idx): hash the txn (xxh3_128 BE, §3) and probe
+    // queen.log_txns, then find the covering segment (frameIdx = offset - base,
+    // §11). RUSTFIX item 23: if the log_txns rows have been purged (older than
+    // the txns window), fall back to a bounded newest-first scan of the
+    // partition's segment blobs so the message still resolves instead of 404-ing.
+    let hash = txn_hash128(&transaction_id);
     let resolved: Option<(i64, i32)> =
-        match db::seg_resolve_position(&client, &partition_id, &transaction_id).await {
-            Ok(Some((seq, fidx, _))) => Some((seq, fidx)),
+        match db::log_resolve_position(&client, &partition_id, &hash).await {
+            Ok(Some(off)) => match db::log_segment_covering(&client, &partition_id, off).await {
+                Ok(Some((base, _end, _blob))) => Some((base, (off - base) as i32)),
+                // Resolved but the covering segment is gone (retention won the
+                // race): the frame is unrecoverable -> not found.
+                Ok(None) => None,
+                Err(e) => {
+                    return json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json_err("resolve failed: ", &e),
+                    )
+                }
+            },
             Ok(None) => {
                 let mut found = None;
                 if let Ok(cands) = db::seg_scan_segments(&client, &partition_id, 5000).await {
-                    'scan: for (s, blob) in cands {
+                    'scan: for (base, blob) in cands {
                         if let Some(frames) = unpack_frames(&zstd_decompress(&blob)) {
                             for (fi, fr) in frames.iter().enumerate() {
                                 if fr.txn == transaction_id {
-                                    found = Some((s, fi as i32));
+                                    found = Some((base, fi as i32));
                                     break 'scan;
                                 }
                             }
@@ -70,6 +84,8 @@ pub async fn handle_get_message(
                 )
             }
         };
+    // `seq` carries the covering segment's base_offset (the log_segments PK);
+    // the frame's absolute offset is seq + frame_idx.
     let (seq, frame_idx) = match resolved {
         Some(p) => p,
         None => {
@@ -120,8 +136,11 @@ pub async fn handle_get_message(
     // RUSTFIX item 23: the full ~20-field detail shape (010_messages.sql parity):
     // queue/namespace/task, queueConfig, mode, consumerGroups, status, errorMessage,
     // retryCount, leaseExpiresAt. Missing detail (partition gone) degrades to nulls.
+    // seg_message_detail's `seq` argument carries the ABSOLUTE offset in the log
+    // engine (scalar cursor: consumed = offset <= committed; the DLQ probe is
+    // offset-addressed too); its frame_idx argument is vestigial and ignored.
     let detail: serde_json::Value =
-        match db::seg_message_detail(&client, &partition_id, seq, frame_idx).await {
+        match db::seg_message_detail(&client, &partition_id, seq + frame_idx as i64, 0).await {
             Ok(Some(txt)) => serde_json::from_str(&txt).unwrap_or_else(|_| serde_json::json!({})),
             _ => serde_json::json!({}),
         };
@@ -165,9 +184,9 @@ pub async fn handle_get_message(
         "status": status,
         "errorMessage": get("errorMessage"),
         // For a dead-lettered message this is the (partition,group) retry counter
-        // snapshotted onto queen.seg_dlq.retry_count at dead-letter time (the old
+        // snapshotted onto queen.log_dlq.retry_count at dead-letter time (the old
         // dead_letter_queue.retry_count analogue). Live messages report 0: the
-        // segments engine tracks retries per-(partition,group), not per-message.
+        // log engine tracks retries per-(partition,group), not per-message.
         "retryCount": detail.get("dlqRetryCount").and_then(|x| x.as_i64()).unwrap_or(0),
         "leaseExpiresAt": get("leaseExpiresAt"),
         "queueConfig": get("queueConfig"),
@@ -182,8 +201,8 @@ pub async fn handle_get_message(
 }
 
 // -------------------------------------------- DELETE /api/v1/messages/:pid/:txn
-// Delete a message by address. In the segments engine live payloads live in
-// immutable segments; the deletable rows are the DLQ snapshots in queen.seg_dlq.
+// Delete a message by address. In the log engine live payloads live in
+// immutable segments; the deletable rows are the DLQ snapshots in queen.log_dlq.
 // This backs the DLQ manual-requeue workflow (dlq list -> re-push -> delete the
 // DLQ row). Always 200 with {success,...}; success:false when nothing matched.
 pub async fn handle_delete_message(
@@ -211,11 +230,14 @@ pub async fn handle_delete_message(
     }
 }
 
-// Enrich a list_messages_v1 result: segment-queue entries come back with
-// payloadAvailable:false + segment:{seq,frameIdx}; fetch each referenced segment
-// once, decode, and fill data/payload/transactionId/traceId/producerSub for the
-// addressed frame. Segments are cached per (partitionId, seq) so a page that
-// spans one segment decodes it exactly once.
+// Enrich a list_messages_v1 result: log-queue entries come back with
+// payloadAvailable:false + segment:{seq,frameIdx} — seq carries the covering
+// segment's base_offset and frameIdx carries (offset - base_offset), per 047's
+// §11 key contract. Fetch each referenced segment once (log_segments PK),
+// decode, and fill data/payload/id/transactionId/traceId/producerSub for the
+// addressed frame — 047 emits id/transactionId as NULL for log entries because
+// mids and txn text live only inside the blob. Segments are cached per
+// (partitionId, seq) so a page that spans one segment decodes it exactly once.
 async fn enrich_segment_payloads(
     client: &deadpool_postgres::Client,
     enc: &crate::encryption::Encryption,
@@ -271,6 +293,9 @@ async fn enrich_segment_payloads(
                 };
                 obj.insert("data".to_string(), payload.clone());
                 obj.insert("payload".to_string(), payload);
+                // 047's log branch emits id (and transactionId) as null — the
+                // frame is the only carrier of the mid; fill both from it.
+                obj.insert("id".to_string(), serde_json::Value::String(f.message_id.clone()));
                 obj.insert("transactionId".to_string(), serde_json::Value::String(f.txn.clone()));
                 obj.insert(
                     "traceId".to_string(),
@@ -330,7 +355,7 @@ pub async fn handle_list_messages(
 }
 
 // --------------------------------------------------------------- GET /api/v1/dlq
-// queen.seg_dlq stores payload SNAPSHOTS, so no decode is needed. Adds a `total`
+// queen.log_dlq stores payload SNAPSHOTS, so no decode is needed. Adds a `total`
 // (the DLQBuilder reads result.total) alongside the SP's {messages, pagination}.
 pub async fn handle_dlq(
     State(st): State<Arc<AppState>>,

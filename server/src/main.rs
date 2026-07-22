@@ -1,6 +1,10 @@
 mod auth;
 mod config;
 mod db;
+// Broker-side dedup cache (doc 18 §5). Storage-free; wired into the push path
+// by the fusion slice of the log-engine rewrite.
+#[allow(dead_code)]
+mod dedup;
 mod encryption;
 mod file_buffer;
 mod frames;
@@ -146,6 +150,8 @@ async fn main() {
         cfg.fusion_frames,
         cfg.fusion_hold_ms,
         cfg.stmt_timeout,
+        cfg.dedup_cache_mb,
+        cfg.dedup_cache_enabled,
     );
 
     // Seed the maintenance flags from queen.system_state (parity with the C++
@@ -462,5 +468,9 @@ async fn main() {
         VERSION, cfg.fusion_shards, cfg.fusion_frames, cfg.fusion_hold_ms, cfg.zstd_level, cfg.pool_size
     );
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    // TCP_NODELAY on every accepted connection (doc 18 §10): the broker's
+    // responses are small latency-sensitive JSON frames; Nagle would add up to
+    // one delayed-ACK RTT per response. axum 0.7.9's Serve builder exposes this
+    // directly (serve.rs sets it right after accept), so no custom accept loop.
+    axum::serve(listener, app).tcp_nodelay(true).await.unwrap();
 }

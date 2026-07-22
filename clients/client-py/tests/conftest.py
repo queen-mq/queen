@@ -45,21 +45,20 @@ async def cleanup_test_data(db_pool):
     async def cleanup():
         patterns = ["test-%", "edge-%", "pattern-%", "workflow-%"]
         try:
-            # SEGMENTS ENGINE cleanup (mirrors the JS suite's cleanupTestData):
+            # LOG ENGINE cleanup (mirrors the JS suite's cleanupTestData):
             # deleting queen.queues only cascades the retired rows-engine tables;
-            # the segments engine keeps its own queue/partition rows plus tables
-            # with no FK (seg_dedup, seg_dlq, watermarks, subscriptions).
-            # partition_consumers cascades from seg_partitions (099 FK).
+            # the log engine keeps its own queue/partition rows plus tables with
+            # no FK by design (log_txns, log_dlq, watermarks, subscriptions).
+            # log_partitions/log_segments/log_consumers cascade from log_queues.
             try:
                 await db_pool.execute(
                     """WITH parts AS (
-                           SELECT sp.id FROM queen.seg_partitions sp
-                           JOIN queen.seg_queues sq ON sq.id = sp.queue_id
-                           WHERE sq.name LIKE ANY($1::text[])
+                           SELECT lp.id FROM queen.log_partitions lp
+                           JOIN queen.log_queues lq ON lq.id = lp.queue_id
+                           WHERE lq.name LIKE ANY($1::text[])
                        ),
-                       d1 AS (DELETE FROM queen.seg_dedup WHERE partition_id IN (SELECT id FROM parts)),
-                       d2 AS (DELETE FROM queen.partition_consumers WHERE partition_id IN (SELECT id FROM parts)),
-                       d3 AS (DELETE FROM queen.seg_dlq WHERE partition_id IN (SELECT id FROM parts))
+                       d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
+                       d2 AS (DELETE FROM queen.log_dlq WHERE partition_id IN (SELECT id FROM parts))
                        SELECT 1""",
                     patterns,
                 )
@@ -70,10 +69,10 @@ async def cleanup_test_data(db_pool):
                     "DELETE FROM queen.consumer_groups_metadata WHERE queue_name LIKE ANY($1::text[])", patterns
                 )
                 await db_pool.execute(
-                    "DELETE FROM queen.seg_queues WHERE name LIKE ANY($1::text[])", patterns
+                    "DELETE FROM queen.log_queues WHERE name LIKE ANY($1::text[])", patterns
                 )
             except Exception:
-                pass  # segments schema not installed (rows-only server)
+                pass  # log-engine schema not installed (rows-only server)
 
             await db_pool.execute(
                 "DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])", patterns

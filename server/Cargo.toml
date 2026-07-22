@@ -33,6 +33,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 webpki-roots = "1"
 # hex-decode QUEEN_ENCRYPTION_KEY (item 8) + parse assorted hex config.
 hex = "0.4"
+# Log-engine dedup hashing (doc 18 §3): xxh3_128(txn) is the broker-side txn
+# fingerprint stored in queen.log_txns; SQL only ever compares the 16B bytea.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Full JWT verification (RUSTFIX item 7): HS256/384/512, RS256/384/512, EdDSA.
 # jsonwebtoken 9 uses `ring` (no aws-lc-rs), consistent with the rustls choice
 # above, so the Docker build stays cmake-free. JWKS is fetched over the bundled

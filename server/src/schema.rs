@@ -1,10 +1,10 @@
 //! Boot-time schema applier.
 //!
 //! Neither Rust experiment applied schema before — they relied on the C++ broker
-//! to create `queen.*` / `queen.seg_*`. This broker is standalone, so it applies
+//! to create `queen.*`. This broker is standalone, so it applies
 //! `lib/schema/schema.sql` + every `procedures/*.sql` at startup, in lexical order
 //! (the same order `AsyncQueueManager::initialize_schema()` uses in the C++ broker,
-//! so `027`'s dual-engine redefinitions land after the originals they supersede).
+//! so the 04x log-engine redefinitions land after the originals they supersede).
 //!
 //! Unlike the C++ applier (which only gates on `worker_id == 0` and races across
 //! replicas relying on idempotency), we take a **session advisory lock** so DDL is
@@ -49,23 +49,23 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("020_streams_register_query_v1.sql", include_str!("../sql/procedures/020_streams_register_query_v1.sql")),
     ("021_streams_cycle_v1.sql", include_str!("../sql/procedures/021_streams_cycle_v1.sql")),
     ("022_streams_state_get_v1.sql", include_str!("../sql/procedures/022_streams_state_get_v1.sql")),
-    ("023_storage_v2.sql", include_str!("../sql/procedures/023_storage_v2.sql")),
-    ("024_storage_v2_pop_ext.sql", include_str!("../sql/procedures/024_storage_v2_pop_ext.sql")),
-    ("025_storage_v2_dlq.sql", include_str!("../sql/procedures/025_storage_v2_dlq.sql")),
-    ("026_storage_v2_maintenance.sql", include_str!("../sql/procedures/026_storage_v2_maintenance.sql")),
-    ("027_storage_v2_observability.sql", include_str!("../sql/procedures/027_storage_v2_observability.sql")),
-    ("028_storage_v2_migrate.sql", include_str!("../sql/procedures/028_storage_v2_migrate.sql")),
-    ("029_seg_streams.sql", include_str!("../sql/procedures/029_seg_streams.sql")),
-    ("030_seg_traces.sql", include_str!("../sql/procedures/030_seg_traces.sql")),
-    ("031_seg_consumer_groups.sql", include_str!("../sql/procedures/031_seg_consumer_groups.sql")),
-    ("032_seg_push_multi.sql", include_str!("../sql/procedures/032_seg_push_multi.sql")),
-    ("033_seg_pop_discover.sql", include_str!("../sql/procedures/033_seg_pop_discover.sql")),
-    // Segments-native queen.stats refresh + segments-aware get_queue_detail_v2.
-    // Loads after the originals (013/027) it complements/supersedes.
-    ("034_seg_stats_refresh.sql", include_str!("../sql/procedures/034_seg_stats_refresh.sql")),
-    // Applied LAST: retire the rows engine (drop rows message store + hot-path,
-    // redefine kept observability/trace functions segments-only, default to segments).
-    ("099_retire_rows.sql", include_str!("../sql/procedures/099_retire_rows.sql")),
+    // ------------------------------------------------------------- log engine
+    // Greenfield replacement of the seg_* family (18-log-engine.md). 040 first:
+    // it idempotently drops every legacy seg_* function/table (and un-folds the
+    // seg-era columns from queen.partition_consumers) so old dev DBs boot clean
+    // before 041+ create the log schema. The later files' CREATE OR REPLACE
+    // redefinitions of shared SPs (get_consumer_groups_v4, list_messages_v1,
+    // get_dlq_messages_v1, record_trace_v1, get_queue_detail_v2, ...) load
+    // after the rows originals (007-018) they supersede.
+    ("040_log_drop_legacy.sql", include_str!("../sql/procedures/040_log_drop_legacy.sql")),
+    ("041_log_schema.sql", include_str!("../sql/procedures/041_log_schema.sql")),
+    ("042_log_push.sql", include_str!("../sql/procedures/042_log_push.sql")),
+    ("043_log_pop.sql", include_str!("../sql/procedures/043_log_pop.sql")),
+    ("044_log_ack.sql", include_str!("../sql/procedures/044_log_ack.sql")),
+    ("045_log_maintenance.sql", include_str!("../sql/procedures/045_log_maintenance.sql")),
+    ("046_log_streams.sql", include_str!("../sql/procedures/046_log_streams.sql")),
+    ("047_log_admin.sql", include_str!("../sql/procedures/047_log_admin.sql")),
+    ("048_log_stats.sql", include_str!("../sql/procedures/048_log_stats.sql")),
 ];
 
 /// Apply the schema at boot. Set `QUEEN_APPLY_SCHEMA=0` to skip (e.g. when the DB

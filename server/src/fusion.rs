@@ -1,4 +1,4 @@
-use crate::util::{FnvHashMap, FnvHashSet};
+use crate::util::{now_epoch_ms, parse_iso_ms, txn_hash128, FnvHashMap, FnvHashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,7 +8,10 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::frames::{pack_frames, uuid_bytes_to_string, zstd_compress, FrameIn};
+use crate::dedup::{DedupCache, PushCheck};
+use crate::frames::{
+    pack_frames, unpack_frames_ref, uuid_bytes_to_string, zstd_compress, zstd_decompress, FrameIn,
+};
 use crate::metrics::Metrics;
 use crate::vegas::Vegas;
 
@@ -108,18 +111,73 @@ pub struct Fusion {
     senders: Vec<mpsc::UnboundedSender<AddMsg>>,
 }
 
+// Per-partition metadata for the dedup path, TTL-cached per shard (partitions
+// are shard-affine, so each key lives in exactly one shard's map). `pid` is the
+// log_partitions uuid the hydration and duplicate-resolution SQL needs;
+// `window_secs` drives cache expiry and the window<=0 fast skip; `last_offset`
+// is the hydration fallback watermark (only ever <= the true value, which
+// under-vouches — always sound). The TTL bounds how long a /configure window
+// change can go unnoticed; a detected change forces a full rehydration
+// (`force_rehydrate`, sticky until a hydration succeeds) because the cache
+// entry's expiry bookkeeping was computed under the old window.
+#[derive(Clone)]
+struct PartMeta {
+    pid: String,
+    window_secs: i32,
+    last_offset: i64,
+    fetched_ms: i64,
+    force_rehydrate: bool,
+}
+
+const PART_META_TTL_MS: i64 = 30_000;
+
+// 5s clock-skew slack (doc 18 §5's margin, applied on the SAFE side): hydration
+// fetches and keeps slightly MORE than the window. Extra old rows only widen
+// the vouched coverage (sound — they are dropped by the next expire()); the
+// unsound direction (treating a near-expiry cache hit as a local duplicate
+// without SQL) is avoided entirely — see segment_verified.
+const DEDUP_SKEW_SLACK_MS: i64 = 5_000;
+
+// Hydration statement (a): resolve pid + dedup window + allocator watermark.
+// Doubles as the TTL meta refresh. prepare_cached: runs every ~30s/partition.
+const PART_META_SQL: &str = "SELECT q.dedup_window_seconds, p.id::text, p.last_offset \
+     FROM queen.log_queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
+     WHERE q.name = $1 AND p.name = $2";
+
+// Hydration statement (b): the partition's in-window log_txns rows (epoch ms so
+// dedup.rs stays clock-format-free). $2 = window + skew slack, seconds.
+const HYDRATE_SQL: &str = "SELECT t.base_offset, t.end_offset, \
+     (extract(epoch from t.created_at)*1000)::int8, t.hashes \
+     FROM queen.log_txns t \
+     WHERE t.partition_id = $1::text::uuid \
+       AND t.created_at >= now() - make_interval(secs => $2) \
+     ORDER BY t.base_offset";
+
+// Rare-path pid lookup for duplicate-mid resolution when the dedup meta cache
+// has no entry (cache disabled, or the meta fetch degraded this flush).
+const PART_PID_SQL: &str = "SELECT p.id::text \
+     FROM queen.log_queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
+     WHERE q.name = $1 AND p.name = $2";
+
+// Rare-path covering-segment fetch for duplicate-mid resolution (§4).
+const SEGMENT_AT_SQL: &str =
+    "SELECT r_base, r_blob FROM queen.log_segment_at_v1($1::text::uuid, $2)";
+
 struct FlushCtx {
     pool: Pool,
     vegas: Arc<Vegas>,
     metrics: Arc<Metrics>,
     zstd_level: i32,
     stmt_timeout: Duration,
-    // QUEEN_V2_PUSH_MULTI=2 switches the bundle flush to
-    // queen.seg_push_segments_multi_v2 (typed parallel arrays: no jsonb parse of
-    // the metas on the PG side, no per-segment savepoint when dedup is off, no
-    // steady-state provisioning probes). Same result contract as v1. Default 1
-    // (v1) until the A/B campaign promotes it.
-    push_multi_v2: bool,
+    // Broker-side dedup cache (doc 18 §5, src/dedup.rs) — ONE instance shared
+    // by every shard (the byte budget is global); `dedup_enabled` mirrors the
+    // kill switch so the flush can skip the meta/hydration SQL entirely when
+    // the cache would decline anyway (a disabled cache == always p_verified=-1).
+    dedup: Arc<DedupCache>,
+    dedup_enabled: bool,
+    // Per-shard PartMeta cache, keyed by the same composed queue+partition
+    // string the shard map uses (group_key).
+    part_meta: Mutex<FnvHashMap<String, PartMeta>>,
 }
 
 impl Fusion {
@@ -133,6 +191,8 @@ impl Fusion {
         fusion_frames: usize,
         hold_ms: u64,
         stmt_timeout: Duration,
+        dedup_cache_mb: usize,
+        dedup_cache_enabled: bool,
     ) -> Arc<Fusion> {
         // Distinct partitions a single shard will keep in-flight at once (the
         // C++ `QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH` analogue). A fan-out fairness
@@ -162,17 +222,16 @@ impl Fusion {
         // shard. Not a latency floor for the common path — fire-on-idle dispatches
         // on arrival and completions re-dispatch immediately.
         let hold_ms = hold_ms.max(1);
-        // Bundle-flush SQL entry point selector — see FlushCtx.push_multi_v2.
-        let push_multi_v2 = std::env::var("QUEEN_V2_PUSH_MULTI")
-            .ok()
-            .map(|v| v.trim() == "2")
-            .unwrap_or(false);
         // fusion_frames (QUEEN_V2_FUSION_FRAMES) is retained for API/env compat but
         // is no longer a flush trigger: segment size is now emergent. At low load
         // fire-on-idle flushes one push at a time (segment≈1); under load the next
         // segment accumulates for exactly one in-flight flush RTT, so segments grow
         // with offered load with no fixed frame threshold. See shard_loop.
         let _ = fusion_frames;
+        // ONE broker-global dedup cache shared across shards: partitions are
+        // shard-affine (so no cross-shard races on one partition's entry), but
+        // the QUEEN_DEDUP_CACHE_MB budget and its LRU are global.
+        let dedup = Arc::new(DedupCache::new(dedup_cache_mb, dedup_cache_enabled));
         let mut senders = Vec::with_capacity(shards);
         for _ in 0..shards {
             let (tx, rx) = mpsc::unbounded_channel::<AddMsg>();
@@ -183,7 +242,9 @@ impl Fusion {
                 metrics: metrics.clone(),
                 zstd_level,
                 stmt_timeout,
-                push_multi_v2,
+                dedup: dedup.clone(),
+                dedup_enabled: dedup_cache_enabled,
+                part_meta: Mutex::new(FnvHashMap::default()),
             });
             tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max));
         }
@@ -214,12 +275,12 @@ impl Fusion {
 // is ever in flight. While a partition's flush is in flight, its next segment
 // keeps accumulating and is dispatched only after the previous flush COMMITS
 // (the completion signal). Two flushes therefore never race on
-// `UPDATE seg_partitions SET last_seq=last_seq+1`, so `Lock:transactionid`
-// stalls disappear and per-partition seq order == commit order.
+// `UPDATE log_partitions SET last_offset=last_offset+cnt`, so `Lock:transactionid`
+// stalls disappear and per-partition offset order == commit order.
 //
 // Cross-partition BUNDLING (Trap 3b): each dispatch collects up to K =
 // `bundle_max` ready, NOT-in-flight (hence disjoint) partitions and commits all
-// of their segments in ONE `seg_push_segments_multi_v1` transaction (one commit /
+// of their segments in ONE `log_push_multi_v1` transaction (one commit /
 // one fsync for N partitions). The in-flight gate IS the bundle selector — it
 // already guarantees the chosen partitions are disjoint. K auto-tunes to load:
 // idle ⇒ one ready partition ⇒ a bundle of 1 (fire-on-idle); busy/high partition
@@ -272,7 +333,7 @@ async fn shard_loop(
                 // The freed permit + released partitions can now form new bundles
                 // over everything currently accumulated (including these partitions'
                 // next segments — which necessarily commit AFTER the bundle that
-                // just committed, so per-partition seq order == commit order).
+                // just committed, so per-partition offset order == commit order).
                 sweep_bundles(&mut groups, &mut inflight, &mut inflight_bundles,
                     max_inflight, bundle_max, &ctx, &done_tx);
             }
@@ -363,25 +424,33 @@ fn sweep_bundles(
 // group (the handler set PushState.pending = number of (queue,partition) groups).
 struct BundleGroup {
     group: FusionGroup,
-    leader_idx: Vec<usize>,                     // per-frame txn-leader index
-    pending: Vec<usize>,                        // kept frame indices still to push
+    // Per-frame txn fingerprint (doc 18 §3: xxh3_128 big-endian), aligned with
+    // group.frames. Drives layer-2 dedup, the cache watermarks, and the 16*K
+    // hash blobs the push SQL stores in log_txns.
+    hashes: Vec<[u8; 16]>,
+    leader_idx: Vec<usize>, // per-frame txn-leader index
+    pending: Vec<usize>,    // kept frame indices still to push
     verdict: FnvHashMap<usize, (&'static str, String)>,
     total: usize,
     db_ok: bool,
 }
 
-// Layer 2: intra-flush dedup by transactionId (first-wins). The first occurrence
-// of each txn is the "leader" (the only frame that reaches the segment); every
-// later same-txn frame is a follower that inherits the leader's final verdict.
-fn layer2_dedup(frames: &[OwnedFrame]) -> (Vec<usize>, Vec<usize>) {
-    let mut leader_of_txn: FnvHashMap<&str, usize> = FnvHashMap::default();
-    let mut leader_idx: Vec<usize> = Vec::with_capacity(frames.len());
+// Layer 2: intra-flush dedup by txn fingerprint (first-wins), comparing the 16B
+// xxh3_128 hashes instead of composed strings — the exact identity SQL compares
+// (§3), so a broker-local hash collision behaves identically to a SQL one. The
+// first occurrence of each hash is the "leader" (the only frame that reaches
+// the segment); every later same-hash frame is a follower that inherits the
+// leader's final verdict.
+fn layer2_dedup(hashes: &[[u8; 16]]) -> (Vec<usize>, Vec<usize>) {
+    let mut leader_of: FnvHashMap<u128, usize> = FnvHashMap::default();
+    let mut leader_idx: Vec<usize> = Vec::with_capacity(hashes.len());
     let mut kept: Vec<usize> = Vec::new();
-    for (i, f) in frames.iter().enumerate() {
-        if let Some(&l) = leader_of_txn.get(f.txn.as_str()) {
+    for (i, h) in hashes.iter().enumerate() {
+        let k = u128::from_be_bytes(*h);
+        if let Some(&l) = leader_of.get(&k) {
             leader_idx.push(l);
         } else {
-            leader_of_txn.insert(f.txn.as_str(), i);
+            leader_of.insert(k, i);
             leader_idx.push(i);
             kept.push(i);
         }
@@ -389,27 +458,20 @@ fn layer2_dedup(frames: &[OwnedFrame]) -> (Vec<usize>, Vec<usize>) {
     (leader_idx, kept)
 }
 
-// Build the metas JSON + zstd blob for a group's current `pending` subset. meta
-// "i" is the position WITHIN this subset — the same index the SP echoes in dups
-// and records as frame_idx, matching the packed blob layout.
-fn build_metas_and_blob(group: &FusionGroup, pending: &[usize], zstd_level: i32) -> (String, Vec<u8>) {
-    let mut metas = String::with_capacity(pending.len() * 80 + 2);
-    metas.push('[');
-    for (pos, &fi) in pending.iter().enumerate() {
-        if pos > 0 {
-            metas.push(',');
-        }
-        let f = &group.frames[fi];
-        metas.push_str("{\"i\":");
-        metas.push_str(&pos.to_string());
-        metas.push_str(",\"mid\":\"");
-        metas.push_str(&uuid_bytes_to_string(&f.message_id));
-        metas.push_str("\",\"txn\":\"");
-        json_escape_into(&mut metas, &f.txn);
-        metas.push_str("\"}");
+// Build one segment's SQL inputs for a group's current `pending` subset: the
+// 16*K hash blob (frame order — position k in the blob is packed frame k, the
+// same "i" the SP echoes in dups) and the packed zstd payload blob (frame
+// packing UNCHANGED from the seg engine).
+fn build_hashes_and_blob(
+    group: &FusionGroup,
+    hashes: &[[u8; 16]],
+    pending: &[usize],
+    zstd_level: i32,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut hblob: Vec<u8> = Vec::with_capacity(pending.len() * 16);
+    for &fi in pending {
+        hblob.extend_from_slice(&hashes[fi]);
     }
-    metas.push(']');
-
     let fins: Vec<FrameIn> = pending
         .iter()
         .map(|&fi| {
@@ -429,45 +491,224 @@ fn build_metas_and_blob(group: &FusionGroup, pending: &[usize], zstd_level: i32)
         })
         .collect();
     let blob = zstd_compress(&pack_frames(&fins), zstd_level);
-    (metas, blob)
+    (hblob, blob)
 }
 
 // Push a bundle of N segments (distinct partitions) in ONE multi-segment
-// transaction via queen.seg_push_segments_multi_v1. `segments_json` is the input
-// JSON array; `blobs` are the aligned zstd blobs bound as NATIVE binary bytea[]
-// (Vec<Vec<u8>> -> bytea[]), dropping the base64 text round-trip the single-
-// segment wire wrapper uses. Returns the per-segment result array JSON as text,
-// index-aligned with the input.
-async fn push_segments_multi(
-    client: &deadpool_postgres::Client,
-    segments_json: &str,
-    blobs: Vec<Vec<u8>>,
-) -> Result<String, tokio_postgres::Error> {
-    // $1::text::jsonb pins the segments param to TEXT so a &str binds; $2 is bound
-    // as the native bytea[] the function expects (no cast, no base64).
-    let stmt = "SELECT (queen.seg_push_segments_multi_v1($1::text::jsonb, $2))::text";
-    let row = client.query_one(stmt, &[&segments_json, &blobs]).await?;
-    Ok(row.get(0))
-}
-
-// v2 entry point (QUEEN_V2_PUSH_MULTI=2): typed parallel arrays instead of one
-// jsonb payload. Same per-segment result contract as v1 (input-order array of
-// {"status":"queued",...} / {"status":"duplicate","dups":[...]}), so the demux
-// (parse_multi_outcome) is shared. metas stay per-segment JSON text; the SP only
-// casts them to jsonb for segments whose queue has dedup enabled.
-async fn push_segments_multi_v2(
+// transaction via queen.log_push_multi_v1 — typed parallel arrays (text[],
+// text[], int4[], bytea[], int8[], bytea[]) with zero jsonb parsed on the PG
+// hot path, prepared once per connection (prepare_cached). Returns the
+// per-segment result array JSON as text, index-aligned with the input.
+async fn push_log_multi(
     client: &deadpool_postgres::Client,
     queues: &[String],
     partitions: &[String],
     msg_counts: &[i32],
-    metas: &[String],
+    hashes: &[Vec<u8>],
+    verified: &[i64],
     blobs: Vec<Vec<u8>>,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.seg_push_segments_multi_v2($1, $2, $3, $4, $5))::text";
+    let stmt = client
+        .prepare_cached("SELECT (queen.log_push_multi_v1($1, $2, $3, $4, $5, $6))::text")
+        .await?;
     let row = client
-        .query_one(stmt, &[&queues, &partitions, &msg_counts, &metas, &blobs])
+        .query_one(&stmt, &[&queues, &partitions, &msg_counts, &hashes, &verified, &blobs])
         .await?;
     Ok(row.get(0))
+}
+
+// ---------------------------------------------------------------------------
+// Dedup-cache plumbing (doc 18 §5). All of it is best-effort: every SQL or
+// consistency failure degrades to p_verified = -1 (SQL probes the full window —
+// always sound) and never fails the bundle.
+// ---------------------------------------------------------------------------
+
+// Fetch (TTL-cached) the partition's dedup meta. Returns None when the
+// partition is not provisioned yet (first push ever — SQL will provision it)
+// or the lookup failed; both mean "can't vouch this flush".
+async fn get_meta(
+    ctx: &FlushCtx,
+    client: &deadpool_postgres::Client,
+    key: &str,
+    queue: &str,
+    partition: &str,
+) -> Option<PartMeta> {
+    let now = now_epoch_ms();
+    {
+        let map = ctx.part_meta.lock().unwrap();
+        if let Some(e) = map.get(key) {
+            if now - e.fetched_ms < PART_META_TTL_MS {
+                return Some(e.clone());
+            }
+        }
+    }
+    let stmt = client.prepare_cached(PART_META_SQL).await.ok()?;
+    let rows = client.query(&stmt, &[&queue, &partition]).await.ok()?;
+    let mut map = ctx.part_meta.lock().unwrap();
+    let Some(row) = rows.first() else {
+        // Not provisioned (or deleted): drop any stale meta so we never hand
+        // out a dead pid for duplicate resolution.
+        map.remove(key);
+        return None;
+    };
+    let window: i32 = row.get(0);
+    let meta = PartMeta {
+        pid: row.get(1),
+        window_secs: window,
+        last_offset: row.get(2),
+        fetched_ms: now,
+        // A window change invalidates the cache entry's expiry bookkeeping
+        // (a WIDENED window means expired-away hashes may be back in scope, so
+        // vouching would be unsound) — force a full rebuild, sticky until one
+        // succeeds.
+        force_rehydrate: map
+            .get(key)
+            .map(|old| old.force_rehydrate || old.window_secs != window)
+            .unwrap_or(false),
+    };
+    map.insert(key.to_string(), meta.clone());
+    Some(meta)
+}
+
+// (Re)hydrate one partition's cache entry from log_txns. ALWAYS a full-window
+// fetch, even when the cache only asked for an interleave Span top-up: between
+// needs_hydration() and hydrate() another partition's flush can LRU-evict this
+// entry, and hydrate() would then rebuild it from the span rows alone — a
+// partial entry that vouches unsoundly. Full-window rows are correct for BOTH
+// hydrate() branches (the span merge skips bases already held), and interleave
+// gaps are rare enough that the extra rows don't matter.
+async fn hydrate_partition(
+    ctx: &FlushCtx,
+    client: &deadpool_postgres::Client,
+    key: &str,
+    meta: &PartMeta,
+) -> Result<(), tokio_postgres::Error> {
+    let secs: f64 = meta.window_secs as f64 + (DEDUP_SKEW_SLACK_MS as f64 / 1000.0);
+    let stmt = client.prepare_cached(HYDRATE_SQL).await?;
+    let rows = client.query(&stmt, &[&meta.pid, &secs]).await?;
+    let mut v: Vec<(i64, i64, i64, Vec<u8>)> = Vec::with_capacity(rows.len());
+    for r in rows {
+        v.push((r.get(0), r.get(1), r.get(2), r.get(3)));
+    }
+    let window_start_ms = now_epoch_ms() - meta.window_secs as i64 * 1000 - DEDUP_SKEW_SLACK_MS;
+    ctx.dedup.hydrate(key, v, window_start_ms, meta.last_offset);
+    if let Some(e) = ctx.part_meta.lock().unwrap().get_mut(key) {
+        e.force_rehydrate = false;
+    }
+    Ok(())
+}
+
+// Compute one segment's p_verified watermark for this flush attempt:
+// expire → (re)hydrate if needed → verified_for_push. -1 on any degradation.
+//
+// LocalDuplicate deliberately does NOT short-circuit: the §5 margin rule wants
+// a local reject only when the matched entry sits >5s inside the window
+// (clock-skew safety), but DedupCache's public API exposes no per-entry age —
+// so known-duplicate segments are routed to SQL with the full-window probe
+// (p_verified = -1), which returns the authoritative duplicate verdict WITH the
+// original offsets the wire response needs anyway. The cache still pays off on
+// the hot path: clean segments push with a vouched watermark that skips the
+// probe entirely.
+async fn segment_verified(
+    ctx: &FlushCtx,
+    client: &deadpool_postgres::Client,
+    key: &str,
+    queue: &str,
+    partition: &str,
+    pending_hashes: &[[u8; 16]],
+) -> i64 {
+    let meta = match get_meta(ctx, client, key, queue, partition).await {
+        Some(m) => m,
+        None => return -1,
+    };
+    if meta.window_secs <= 0 {
+        // Window 0 = dedup off for this queue: skip the cache entirely (SQL
+        // skips the probe too — the seg engine's window-0 landmine is dead).
+        return -1;
+    }
+    // Window-expire BEFORE consulting the cache (the dedup.rs contract): keeps
+    // the entry's coverage bookkeeping accurate under the current window.
+    ctx.dedup
+        .expire(key, meta.window_secs as i64 * 1000, now_epoch_ms());
+    if meta.force_rehydrate || ctx.dedup.needs_hydration(key).is_some() {
+        if hydrate_partition(ctx, client, key, &meta).await.is_err() {
+            return -1;
+        }
+    }
+    match ctx.dedup.verified_for_push(key, pending_hashes) {
+        PushCheck::Verified(w) => w,
+        PushCheck::LocalDuplicate(_) => -1,
+    }
+}
+
+fn zero_uuid() -> String {
+    uuid_bytes_to_string(&[0u8; 16])
+}
+
+// Resolve each duplicate's ORIGINAL message id (wire contract §4/§11: dup
+// responses return the canonical first-occurrence mid) by fetching the covering
+// segment's blob and unpacking frame (off - base). Rare path — plain
+// (non-cached) queries. Every failure mode (segment already retained away,
+// retention gap, malformed blob, SQL error) resolves to the zero uuid, the
+// spec's "original unknown" sentinel. Returns mids aligned with `dups`.
+async fn resolve_dup_mids(
+    ctx: &FlushCtx,
+    client: &deadpool_postgres::Client,
+    key: &str,
+    queue: &str,
+    partition: &str,
+    dups: &[(usize, i64)],
+) -> Vec<String> {
+    let mut out = vec![zero_uuid(); dups.len()];
+    // Partition uuid: from the meta cache when the dedup path populated it,
+    // else one inline lookup (cache disabled, or meta degraded this flush).
+    let cached: Option<String> = ctx.part_meta.lock().unwrap().get(key).map(|m| m.pid.clone());
+    let pid: Option<String> = match cached {
+        Some(p) => Some(p),
+        None => match client.query(PART_PID_SQL, &[&queue, &partition]).await {
+            Ok(rows) => rows.first().map(|r| r.get(0)),
+            Err(e) => {
+                eprintln!("[bundle] dup pid lookup error {}/{}: {}", queue, partition, e);
+                None
+            }
+        },
+    };
+    let Some(pid) = pid else { return out };
+    // Memoize the last covering segment — a batch's dups usually share one.
+    let mut seg: Option<(i64, i64, Vec<[u8; 16]>)> = None;
+    for (pos, (_i, off)) in dups.iter().enumerate() {
+        let covered = seg
+            .as_ref()
+            .map(|(b, e, _)| *b <= *off && *off <= *e)
+            .unwrap_or(false);
+        if !covered {
+            seg = None;
+            match client.query(SEGMENT_AT_SQL, &[&pid, off]).await {
+                Ok(rows) => {
+                    if let Some(row) = rows.first() {
+                        let base: i64 = row.get(0);
+                        let blob: Vec<u8> = row.get(1);
+                        let raw = zstd_decompress(&blob);
+                        if let Some(frames) = unpack_frames_ref(&raw) {
+                            let mids: Vec<[u8; 16]> =
+                                frames.iter().map(|f| f.message_id).collect();
+                            let end = base + mids.len() as i64 - 1;
+                            seg = Some((base, end, mids));
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[bundle] log_segment_at error off={}: {}", off, e);
+                }
+            }
+        }
+        if let Some((base, end, mids)) = seg.as_ref() {
+            if *base <= *off && *off <= *end {
+                out[pos] = uuid_bytes_to_string(&mids[(*off - *base) as usize]);
+            }
+        }
+    }
+    out
 }
 
 // Flush ONE bundle of N disjoint partitions as a single committed transaction.
@@ -475,8 +716,8 @@ async fn push_segments_multi_v2(
 // fire-on-idle) is held until the DB op returns. On completion the bundle's
 // partition keys are sent back so the shard releases each in-flight slot and
 // dispatches each partition's accumulated next segment — the signal is sent AFTER
-// commit, so a partition's next flush (hence its `last_seq` allocation) strictly
-// follows this one's commit (per-partition seq order == commit order).
+// commit, so a partition's next flush (hence its `last_offset` allocation) strictly
+// follows this one's commit (per-partition offset order == commit order).
 fn spawn_bundle_flush(
     ctx: Arc<FlushCtx>,
     keys: Vec<String>,
@@ -485,14 +726,19 @@ fn spawn_bundle_flush(
     done: mpsc::UnboundedSender<Vec<String>>,
 ) {
     tokio::spawn(async move {
-        // Per-group layer-2 dedup up front; pending starts as the kept leaders.
+        // Per-group hashing + layer-2 dedup up front; pending starts as the
+        // kept leaders. keys[i] is group i's composed cache key (same order as
+        // the bundle — try_dispatch_bundle built both from `chosen`).
         let mut gs: Vec<BundleGroup> = bundle
             .into_iter()
             .map(|group| {
                 let total = group.frames.len();
-                let (leader_idx, kept) = layer2_dedup(&group.frames);
+                let hashes: Vec<[u8; 16]> =
+                    group.frames.iter().map(|f| txn_hash128(&f.txn)).collect();
+                let (leader_idx, kept) = layer2_dedup(&hashes);
                 BundleGroup {
                     group,
+                    hashes,
                     leader_idx,
                     pending: kept,
                     verdict: FnvHashMap::default(),
@@ -508,11 +754,12 @@ fn spawn_bundle_flush(
 
         // Retry loop: every iteration commits ONE multi-segment transaction over
         // the groups that still have pending frames. A group returns `queued`
-        // (all its pending frames committed) or `duplicate` (its whole segment
-        // rolled back on its own savepoint — the surviving non-dup frames are
-        // repacked and retried in a fresh transaction). Queued groups drop out; a
-        // no-dup bundle finishes in exactly one iteration (one commit). Bounded
-        // defensively by total frames + 2.
+        // (all its pending frames committed) or `duplicate` (probe-before-
+        // allocate wrote NOTHING for that segment — the surviving non-dup frames
+        // are repacked and retried in a fresh transaction, with a FRESH verified
+        // watermark: the cache learned the segments that just committed). Queued
+        // groups drop out; a no-dup bundle finishes in exactly one iteration
+        // (one commit). Bounded defensively by total frames + 2.
         for _attempt in 0..(sum_total + 2) {
             let participants: Vec<usize> = gs
                 .iter()
@@ -524,82 +771,84 @@ fn spawn_bundle_flush(
                 break;
             }
 
-            // Build the index-aligned bundle for the participants. v1 wants one
-            // {segments JSON, blobs} pair; v2 wants typed parallel arrays (queue
-            // and partition names travel RAW as text[], no JSON escaping).
-            let mut segs = String::new();
-            let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(participants.len());
-            let mut v2_queues: Vec<String> = Vec::new();
-            let mut v2_partitions: Vec<String> = Vec::new();
-            let mut v2_counts: Vec<i32> = Vec::new();
-            let mut v2_metas: Vec<String> = Vec::new();
-            if ctx.push_multi_v2 {
-                v2_queues.reserve(participants.len());
-                v2_partitions.reserve(participants.len());
-                v2_counts.reserve(participants.len());
-                v2_metas.reserve(participants.len());
-                for &gi in participants.iter() {
-                    let g = &gs[gi];
-                    let (metas, blob) = build_metas_and_blob(&g.group, &g.pending, ctx.zstd_level);
-                    v2_queues.push(g.group.queue.clone());
-                    v2_partitions.push(g.group.partition.clone());
-                    v2_counts.push(g.pending.len() as i32);
-                    v2_metas.push(metas);
-                    blobs.push(blob);
-                }
-            } else {
-                segs.reserve(participants.len() * 160);
-                segs.push('[');
-                for (pos, &gi) in participants.iter().enumerate() {
-                    if pos > 0 {
-                        segs.push(',');
-                    }
-                    let g = &gs[gi];
-                    let (metas, blob) = build_metas_and_blob(&g.group, &g.pending, ctx.zstd_level);
-                    segs.push_str("{\"queue\":\"");
-                    json_escape_into(&mut segs, &g.group.queue);
-                    segs.push_str("\",\"partition\":\"");
-                    json_escape_into(&mut segs, &g.group.partition);
-                    segs.push_str("\",\"metas\":");
-                    segs.push_str(&metas);
-                    segs.push_str(",\"msg_count\":");
-                    segs.push_str(&g.pending.len().to_string());
-                    segs.push('}');
-                    blobs.push(blob);
-                }
-                segs.push(']');
-            }
-
-            let outcome = match ctx.pool.get().await {
-                Ok(client) => match tokio::time::timeout(ctx.stmt_timeout, async {
-                    if ctx.push_multi_v2 {
-                        push_segments_multi_v2(
-                            &client,
-                            &v2_queues,
-                            &v2_partitions,
-                            &v2_counts,
-                            &v2_metas,
-                            blobs,
-                        )
-                        .await
-                    } else {
-                        push_segments_multi(&client, &segs, blobs).await
-                    }
-                })
-                .await
-                {
-                    Ok(Ok(txt)) => parse_multi_outcome(&txt, participants.len()),
-                    Ok(Err(e)) => {
-                        eprintln!("[bundle] push_segments_multi error parts={}: {}", participants.len(), e);
-                        None
-                    }
-                    Err(_) => {
-                        eprintln!("[bundle] push_segments_multi timeout parts={}", participants.len());
-                        None
-                    }
-                },
+            // One pooled client serves the whole attempt: dedup meta/hydration,
+            // the bundle push, and (rarely) duplicate-mid resolution.
+            let client = match ctx.pool.get().await {
+                Ok(c) => c,
                 Err(e) => {
                     eprintln!("[bundle] pool.get error: {}", e);
+                    for &gi in &participants {
+                        gs[gi].db_ok = false;
+                        gs[gi].pending.clear();
+                    }
+                    break;
+                }
+            };
+
+            // Per-segment dedup watermarks (doc 18 §5), index-aligned with
+            // participants. Failures degrade to -1 and never fail the bundle;
+            // the timeout is only a hang backstop.
+            let mut verified: Vec<i64> = vec![-1i64; participants.len()];
+            if ctx.dedup_enabled {
+                let vres = tokio::time::timeout(ctx.stmt_timeout, async {
+                    let mut v: Vec<i64> = Vec::with_capacity(participants.len());
+                    for &gi in &participants {
+                        let g = &gs[gi];
+                        let pending_hashes: Vec<[u8; 16]> =
+                            g.pending.iter().map(|&fi| g.hashes[fi]).collect();
+                        v.push(
+                            segment_verified(
+                                &ctx,
+                                &client,
+                                &keys[gi],
+                                &g.group.queue,
+                                &g.group.partition,
+                                &pending_hashes,
+                            )
+                            .await,
+                        );
+                    }
+                    v
+                })
+                .await;
+                match vres {
+                    Ok(v) => verified = v,
+                    Err(_) => eprintln!("[bundle] dedup hydration timeout parts={}", participants.len()),
+                }
+            }
+
+            // Build the index-aligned typed arrays: queue/partition names travel
+            // RAW as text[] (no JSON escaping), hashes as 16*count bytea each,
+            // blobs as the packed zstd bytea.
+            let mut queues: Vec<String> = Vec::with_capacity(participants.len());
+            let mut partitions: Vec<String> = Vec::with_capacity(participants.len());
+            let mut counts: Vec<i32> = Vec::with_capacity(participants.len());
+            let mut hash_blobs: Vec<Vec<u8>> = Vec::with_capacity(participants.len());
+            let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(participants.len());
+            for &gi in participants.iter() {
+                let g = &gs[gi];
+                let (hblob, blob) =
+                    build_hashes_and_blob(&g.group, &g.hashes, &g.pending, ctx.zstd_level);
+                queues.push(g.group.queue.clone());
+                partitions.push(g.group.partition.clone());
+                counts.push(g.pending.len() as i32);
+                hash_blobs.push(hblob);
+                blobs.push(blob);
+            }
+
+            let outcome = match tokio::time::timeout(
+                ctx.stmt_timeout,
+                push_log_multi(&client, &queues, &partitions, &counts, &hash_blobs, &verified, blobs),
+            )
+            .await
+            {
+                Ok(Ok(txt)) => parse_multi_outcome(&txt, participants.len()),
+                Ok(Err(e)) => {
+                    eprintln!("[bundle] log_push_multi error parts={}: {}", participants.len(), e);
+                    None
+                }
+                Err(_) => {
+                    eprintln!("[bundle] log_push_multi timeout parts={}", participants.len());
                     None
                 }
             };
@@ -617,7 +866,15 @@ fn spawn_bundle_flush(
 
             for (pos, &gi) in participants.iter().enumerate() {
                 match &results[pos] {
-                    PushOutcome::Queued => {
+                    PushOutcome::Queued { base, created_ms } => {
+                        // Teach the cache the committed segment BEFORE touching
+                        // verdicts (contiguity math needs the pending hashes).
+                        if ctx.dedup_enabled {
+                            let g = &gs[gi];
+                            let hs: Vec<[u8; 16]> =
+                                g.pending.iter().map(|&fi| g.hashes[fi]).collect();
+                            ctx.dedup.on_push_committed(&keys[gi], *base, &hs, *created_ms);
+                        }
                         let g = &mut gs[gi];
                         for &fi in &g.pending {
                             let mid = uuid_bytes_to_string(&g.group.frames[fi].message_id);
@@ -626,14 +883,34 @@ fn spawn_bundle_flush(
                         g.pending.clear();
                     }
                     PushOutcome::Duplicate(dups) => {
+                        // dups: (pos-in-pending, original absolute offset). The
+                        // wire reports the ORIGINAL mid — resolve it from the
+                        // covering segment (rare path, own timeout; failures
+                        // fall back to the zero uuid, never to a bundle error:
+                        // the push side effects are already decided).
+                        let mids = match tokio::time::timeout(
+                            ctx.stmt_timeout,
+                            resolve_dup_mids(
+                                &ctx,
+                                &client,
+                                &keys[gi],
+                                &gs[gi].group.queue,
+                                &gs[gi].group.partition,
+                                dups,
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(v) => v,
+                            Err(_) => vec![zero_uuid(); dups.len()],
+                        };
                         let g = &mut gs[gi];
-                        // dups: (pos-in-pending, original message_id). Mark those
-                        // duplicate, then repack+retry the survivors.
+                        // Mark the dups, then repack+retry the survivors.
                         let mut is_dup = vec![false; g.pending.len()];
-                        for (i, mid) in dups {
+                        for ((i, _off), mid) in dups.iter().zip(mids) {
                             if *i < g.pending.len() {
                                 is_dup[*i] = true;
-                                g.verdict.insert(g.pending[*i], ("duplicate", mid.clone()));
+                                g.verdict.insert(g.pending[*i], ("duplicate", mid));
                             }
                         }
                         let survivors: Vec<usize> = g
@@ -724,28 +1001,42 @@ fn spawn_bundle_flush(
     });
 }
 
-// Parsed outcome of one segment within a seg_push_segments_multi_v1 result array.
+// Parsed outcome of one segment within a log_push_multi_v1 result array.
 enum PushOutcome {
-    Queued,
-    // (frame index within the sent metas, original message_id) for each dup.
-    Duplicate(Vec<(usize, String)>),
+    // baseOffset of the committed segment + its PG createdAt (epoch ms; the
+    // dedup ring's expiry clock — PG-stamped so hydration rows and live pushes
+    // age on the same clock).
+    Queued { base: i64, created_ms: i64 },
+    // (frame index within the sent segment, original absolute offset) per dup.
+    Duplicate(Vec<(usize, i64)>),
 }
 
-// Parse ONE segment result object. {"status":"queued",...} -> Queued;
-// {"status":"duplicate","dups":[{"i":..,"mid":".."}]} -> Duplicate. None on an
-// unexpected status (treated as a whole-bundle error by the caller).
+// Parse ONE segment result object (042 contract).
+// {"status":"queued","baseOffset":B,"createdAt":".."} -> Queued;
+// {"status":"duplicate","dups":[{"i":..,"off":..}]} -> Duplicate. None on an
+// unexpected status or a queued result without a baseOffset (treated as a
+// whole-bundle error by the caller — a base the broker can't parse must never
+// silently skip the cache commit).
 fn parse_one_outcome(v: &serde_json::Value) -> Option<PushOutcome> {
     match v.get("status").and_then(|s| s.as_str()) {
-        Some("queued") => Some(PushOutcome::Queued),
+        Some("queued") => {
+            let base = v.get("baseOffset").and_then(|x| x.as_i64())?;
+            let created_ms = v
+                .get("createdAt")
+                .and_then(|c| c.as_str())
+                .and_then(parse_iso_ms)
+                .unwrap_or_else(now_epoch_ms);
+            Some(PushOutcome::Queued { base, created_ms })
+        }
         Some("duplicate") => {
             let mut dups = Vec::new();
             if let Some(arr) = v.get("dups").and_then(|d| d.as_array()) {
                 for d in arr {
                     let i = d.get("i").and_then(|x| x.as_i64());
-                    let mid = d.get("mid").and_then(|x| x.as_str());
-                    if let (Some(i), Some(mid)) = (i, mid) {
+                    let off = d.get("off").and_then(|x| x.as_i64());
+                    if let (Some(i), Some(off)) = (i, off) {
                         if i >= 0 {
-                            dups.push((i as usize, mid.to_string()));
+                            dups.push((i as usize, off));
                         }
                     }
                 }
@@ -811,7 +1102,7 @@ pub fn json_escape_into(out: &mut String, s: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::json_escape_into;
+    use super::{json_escape_into, layer2_dedup, parse_multi_outcome, PushOutcome};
 
     // Reference implementation (the original char-by-char escape) — the
     // byte-scan fast path must match it byte-for-byte.
@@ -849,5 +1140,41 @@ mod tests {
             json_escape_into(&mut got, c);
             assert_eq!(got, escape_ref(c), "mismatch for {c:?}");
         }
+    }
+
+    #[test]
+    fn layer2_first_wins_on_hashes() {
+        let a = crate::util::txn_hash128("txn-a");
+        let b = crate::util::txn_hash128("txn-b");
+        let (leader_idx, kept) = layer2_dedup(&[a, b, a, a]);
+        assert_eq!(leader_idx, vec![0, 1, 0, 0]);
+        assert_eq!(kept, vec![0, 1]);
+    }
+
+    #[test]
+    fn parse_outcomes_042_contract() {
+        let txt = r#"[
+            {"status":"queued","baseOffset":41,"createdAt":"2026-07-22T10:00:00.123456Z"},
+            {"status":"duplicate","dups":[{"i":0,"off":7},{"i":2,"off":39}]}
+        ]"#;
+        let out = parse_multi_outcome(txt, 2).expect("parses");
+        match &out[0] {
+            PushOutcome::Queued { base, created_ms } => {
+                assert_eq!(*base, 41);
+                // 2026-07-22T10:00:00.123Z — exact epoch math is parse_iso_ms's
+                // tested concern; here just assert the fraction survived.
+                assert_eq!(*created_ms % 1000, 123);
+            }
+            _ => panic!("expected queued"),
+        }
+        match &out[1] {
+            PushOutcome::Duplicate(d) => assert_eq!(d, &vec![(0usize, 7i64), (2usize, 39i64)]),
+            _ => panic!("expected duplicate"),
+        }
+        // A queued element without baseOffset must fail the WHOLE bundle (the
+        // broker would otherwise skip the cache commit silently).
+        assert!(parse_multi_outcome(r#"[{"status":"queued"}]"#, 1).is_none());
+        // Length mismatch fails too.
+        assert!(parse_multi_outcome(r#"[{"status":"queued","baseOffset":1,"createdAt":"x"}]"#, 2).is_none());
     }
 }

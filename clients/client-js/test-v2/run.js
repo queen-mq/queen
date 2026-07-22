@@ -101,31 +101,30 @@ export const cleanupTestData = async () => {
         // queen_streams schema not installed — ignore.
       }
 
-      // SEGMENTS ENGINE cleanup. Deleting queen.queues (below) only cascades
-      // through the rows-engine tables; the segments engine keeps its own
-      // queue/partition rows plus several tables with NO foreign keys
-      // (seg_dedup, partition_consumers, seg_dlq, consumer_watermarks,
-      // consumer_groups_metadata). Without purging these, every suite run
-      // inherits the previous run's messages, cursors, and dedup entries —
-      // fixed-transactionId tests report 'duplicate' on their FIRST push,
-      // and delayed/window/buffer tests pop stale messages. seg_partitions
-      // and seg_segments cascade from seg_queues; the rest is explicit.
+      // LOG ENGINE cleanup. Deleting queen.queues (below) only cascades
+      // through the rows-engine tables; the log engine keeps its own
+      // queue/partition rows plus tables with NO foreign keys (log_txns,
+      // log_dlq, consumer_watermarks, consumer_groups_metadata). Without
+      // purging these, every suite run inherits the previous run's messages,
+      // cursors, and dedup window entries — fixed-transactionId tests report
+      // 'duplicate' on their FIRST push, and delayed/window/buffer tests pop
+      // stale messages. log_partitions/log_segments/log_consumers cascade
+      // from log_queues; log_txns and log_dlq are explicit (no FK by design).
       try {
         await dbPool.query(`
           WITH parts AS (
-            SELECT sp.id FROM queen.seg_partitions sp
-            JOIN queen.seg_queues sq ON sq.id = sp.queue_id
-            WHERE sq.name LIKE ANY($1::text[])
+            SELECT lp.id FROM queen.log_partitions lp
+            JOIN queen.log_queues lq ON lq.id = lp.queue_id
+            WHERE lq.name LIKE ANY($1::text[])
           ),
-          d1 AS (DELETE FROM queen.seg_dedup          WHERE partition_id IN (SELECT id FROM parts)),
-          d2 AS (DELETE FROM queen.partition_consumers WHERE partition_id IN (SELECT id FROM parts)),
-          d3 AS (DELETE FROM queen.seg_dlq            WHERE partition_id IN (SELECT id FROM parts))
+          d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
+          d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
           SELECT 1`, [patterns]);
         await dbPool.query(`DELETE FROM queen.consumer_watermarks WHERE queue_name LIKE ANY($1::text[])`, [patterns]);
         await dbPool.query(`DELETE FROM queen.consumer_groups_metadata WHERE queue_name LIKE ANY($1::text[])`, [patterns]);
-        await dbPool.query(`DELETE FROM queen.seg_queues WHERE name LIKE ANY($1::text[])`, [patterns]);
+        await dbPool.query(`DELETE FROM queen.log_queues WHERE name LIKE ANY($1::text[])`, [patterns]);
       } catch (e) {
-        // Segments schema not installed (rows-only server) — ignore.
+        // Log-engine schema not installed (rows-only server) — ignore.
       }
 
       await dbPool.query(`DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])`, [patterns]);

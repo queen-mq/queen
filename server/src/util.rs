@@ -72,6 +72,17 @@ pub fn parse_iso_ms(s: &str) -> Option<i64> {
     Some(((days * 24 + hh) * 60 + mm) * 60_000 + ss * 1000 + frac_ms)
 }
 
+// Log-engine txn fingerprint (doc 18 §3): xxh3_128 of the txn id's utf8 bytes,
+// serialized big-endian. The broker is the ONLY place hashing happens — SQL
+// stores and compares the 16-byte bytea verbatim (queen.log_txns.hashes,
+// 16*msg_count frame-order stride). 128 bits retires the 64-bit collision
+// concern for ack-by-txn resolution and dedup probes.
+// Wired by fusion/ack in the log-engine slice; tests exercise it meanwhile.
+#[allow(dead_code)]
+pub fn txn_hash128(txn: &str) -> [u8; 16] {
+    xxhash_rust::xxh3::xxh3_128(txn.as_bytes()).to_be_bytes()
+}
+
 // UUIDv7 (time-ordered) as raw bytes — mirrors the C++/Go generators.
 static LAST_MS: AtomicU64 = AtomicU64::new(0);
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -109,4 +120,40 @@ pub fn uuidv7_bytes() -> [u8; 16] {
     b[14] = (r >> 10) as u8;
     b[15] = (r >> 2) as u8;
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pinned vectors: these assert OUR serialization (xxh3_128, big-endian) never
+    // drifts across refactors/crate bumps — hashes are persisted in log_txns, so
+    // a silent change would orphan every stored fingerprint. Values are snapshots
+    // of this implementation's output, not external reference vectors.
+    #[test]
+    fn txn_hash128_stable_vectors() {
+        assert_eq!(
+            txn_hash128(""),
+            [
+                0x99, 0xaa, 0x06, 0xd3, 0x01, 0x47, 0x98, 0xd8, 0x60, 0x01, 0xc3, 0x24, 0x46,
+                0x8d, 0x49, 0x7f
+            ]
+        );
+        assert_eq!(
+            txn_hash128("txn-0001"),
+            [
+                0xe6, 0xdb, 0x1a, 0x37, 0x61, 0x71, 0xf0, 0x85, 0x29, 0x9a, 0x00, 0x09, 0x43,
+                0x06, 0x5f, 0x9c
+            ]
+        );
+    }
+
+    #[test]
+    fn txn_hash128_deterministic_and_distinct() {
+        let a = txn_hash128("queue/partition/txn-A");
+        let b = txn_hash128("queue/partition/txn-A");
+        let c = txn_hash128("queue/partition/txn-B");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
 }

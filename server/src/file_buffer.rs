@@ -29,8 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::config::FileBufferConfig;
-use crate::frames::{pack_frames, uuid_bytes_to_string, zstd_compress, FrameIn};
-use crate::fusion::json_escape_into;
+use crate::frames::{pack_frames, zstd_compress, FrameIn};
 use crate::util::uuidv7_bytes;
 
 /// Circuit breaker (file_buffer.hpp:150-151): after this many consecutive drain
@@ -557,8 +556,16 @@ impl FileBufferManager {
     }
 
     /// Replay one batch of events as a single multi-segment transaction: group by
-    /// (queue, partition), rebuild one segment per group, push. An Err means the DB
-    /// is (probably) down — leave the file for retry.
+    /// (queue, partition), rebuild one segment per group, push via
+    /// queen.log_push_multi_v1 (db::log_push_multi typed arrays). Hashes are
+    /// recomputed from the spooled transactionIds (crate::util::txn_hash128 — the
+    /// on-disk format already carries the txn strings, unchanged); `verified` is
+    /// -1 for every replayed segment, so SQL probes the whole dedup window — the
+    /// correct posture for replay (an earlier partially-committed drain attempt
+    /// must be detected server-side, the broker cache can't vouch for it). A
+    /// fully-committed-before segment therefore comes back {"status":"duplicate"}
+    /// and writes nothing, which is exactly the idempotent-replay contract. An
+    /// Err means the DB is (probably) down — leave the file for retry.
     async fn replay_batch(&self, pool: &Pool, events: &[StoredEvent]) -> Result<(), DrainErr> {
         let mut order: Vec<(String, String)> = Vec::new();
         let mut groups: std::collections::HashMap<(String, String), Vec<&StoredEvent>> =
@@ -571,34 +578,29 @@ impl FileBufferManager {
             groups.entry(key).or_default().push(ev);
         }
 
-        let mut segs = String::with_capacity(order.len() * 160);
-        segs.push('[');
+        let mut queues: Vec<String> = Vec::with_capacity(order.len());
+        let mut partitions: Vec<String> = Vec::with_capacity(order.len());
+        let mut counts: Vec<i32> = Vec::with_capacity(order.len());
+        let mut hashes: Vec<Vec<u8>> = Vec::with_capacity(order.len());
+        let mut verified: Vec<i64> = Vec::with_capacity(order.len());
         let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(order.len());
-        for (pos, key) in order.iter().enumerate() {
-            if pos > 0 {
-                segs.push(',');
-            }
+        for key in &order {
             let evs = &groups[key];
-            let (metas, blob) = build_segment(evs, self.zstd_level);
-            segs.push_str("{\"queue\":\"");
-            json_escape_into(&mut segs, &key.0);
-            segs.push_str("\",\"partition\":\"");
-            json_escape_into(&mut segs, &key.1);
-            segs.push_str("\",\"metas\":");
-            segs.push_str(&metas);
-            segs.push_str(",\"msg_count\":");
-            segs.push_str(&evs.len().to_string());
-            segs.push('}');
+            let (seg_hashes, blob) = build_segment(evs, self.zstd_level);
+            queues.push(key.0.clone());
+            partitions.push(key.1.clone());
+            counts.push(evs.len() as i32);
+            hashes.push(seg_hashes);
+            verified.push(-1); // no broker vouching on replay — full-window probe
             blobs.push(blob);
         }
-        segs.push(']');
 
         // Pool acquisition failure = DB unreachable = transient.
         let client = pool
             .get()
             .await
             .map_err(|e| DrainErr::Transient(format!("pool: {e}")))?;
-        db::push_segments_multi(&client, &segs, blobs)
+        db::log_push_multi(&client, &queues, &partitions, &counts, &hashes, &verified, &blobs)
             .await
             .map_err(|e| classify_push_error(&e))?;
         Ok(())
@@ -607,26 +609,17 @@ impl FileBufferManager {
 
 use crate::db;
 
-/// Build (metas JSON, zstd blob) for a group of spooled events. Fresh message ids
-/// are minted (dedup keys on transactionId, not message_id), original
-/// transactionIds and producer_sub are preserved.
-fn build_segment(evs: &[&StoredEvent], zstd_level: i32) -> (String, Vec<u8>) {
+/// Build (hash blob, zstd blob) for a group of spooled events: 16 bytes of
+/// xxh3_128(transactionId) per frame in frame order — the log-engine dedup /
+/// ack-resolution token (18-log-engine.md §3) — plus the packed frame blob.
+/// Fresh message ids are minted (dedup keys on the txn hash, not message_id),
+/// original transactionIds and producer_sub are preserved.
+fn build_segment(evs: &[&StoredEvent], zstd_level: i32) -> (Vec<u8>, Vec<u8>) {
     let mids: Vec<[u8; 16]> = evs.iter().map(|_| uuidv7_bytes()).collect();
-    let mut metas = String::with_capacity(evs.len() * 80 + 2);
-    metas.push('[');
-    for (i, ev) in evs.iter().enumerate() {
-        if i > 0 {
-            metas.push(',');
-        }
-        metas.push_str("{\"i\":");
-        metas.push_str(&i.to_string());
-        metas.push_str(",\"mid\":\"");
-        metas.push_str(&uuid_bytes_to_string(&mids[i]));
-        metas.push_str("\",\"txn\":\"");
-        json_escape_into(&mut metas, &ev.transaction_id);
-        metas.push_str("\"}");
+    let mut hashes: Vec<u8> = Vec::with_capacity(evs.len() * 16);
+    for ev in evs.iter() {
+        hashes.extend_from_slice(&crate::util::txn_hash128(&ev.transaction_id));
     }
-    metas.push(']');
 
     let fins: Vec<FrameIn> = evs
         .iter()
@@ -643,7 +636,7 @@ fn build_segment(evs: &[&StoredEvent], zstd_level: i32) -> (String, Vec<u8>) {
         })
         .collect();
     let blob = zstd_compress(&pack_frames(&fins), zstd_level);
-    (metas, blob)
+    (hashes, blob)
 }
 
 /// Rename an active `.tmp` to its `.buf` sibling (drainable). Best-effort.

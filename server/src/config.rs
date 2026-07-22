@@ -225,6 +225,15 @@ pub struct Config {
     pub fusion_hold_ms: u64,
     // background retention/eviction sweep cadence (ms)
     pub retention_interval_ms: u64,
+    // Broker-side dedup cache (doc 18 §5, server/src/dedup.rs). `dedup_cache_mb`
+    // caps the global cache footprint (whole-partition LRU eviction);
+    // `dedup_cache_enabled` is the kill switch — disabled, the broker always
+    // sends p_verified = -1 and SQL probes the full window (always sound).
+    // Consumed when fusion wires the dedup cache (log-engine slice).
+    #[allow(dead_code)]
+    pub dedup_cache_mb: usize,
+    #[allow(dead_code)]
+    pub dedup_cache_enabled: bool,
     // Retention/metrics background-job knobs (RUSTFIX item 20 — C++ JobsConfig,
     // config.hpp:286-329). `retention_batch_size` bounds each metrics-purge DELETE;
     // `metrics_retention_days` is the worker/system-metrics purge window (default
@@ -347,9 +356,17 @@ pub fn load() -> Config {
         fusion_shards: env_int("QUEEN_V2_FUSION_SHARDS", 8).max(1) as usize,
         fusion_frames: env_int("QUEEN_V2_FUSION_FRAMES", 500).max(1) as usize,
         fusion_hold_ms: env_int("QUEEN_V2_FUSION_HOLD_MS", 15).max(1) as u64,
-        // RetentionService cadence (C++ parity). retention.js starts the server
-        // with RETENTION_INTERVAL=2000; default matches the C++ 5-minute sweep.
-        retention_interval_ms: env_int("RETENTION_INTERVAL", 300000).max(1) as u64,
+        // Segments/log-engine sweep cadence (docs 17-18): retention runs as
+        // frequent, incremental, bounded steps (advisory-locked, p_max_rows per
+        // call) instead of the old C++ 5-minute monolith — a 5s default keeps
+        // each step tiny so sweeps never stall pushes with long row locks.
+        retention_interval_ms: env_int("RETENTION_INTERVAL", 5000).max(1) as u64,
+        dedup_cache_mb: env_int("QUEEN_DEDUP_CACHE_MB", 512).max(1) as usize,
+        // Kill switch semantics (doc 18 §5): QUEEN_DEDUP_CACHE=0 disables; any
+        // other value (or unset) enables. Correctness never depends on the cache.
+        dedup_cache_enabled: std::env::var("QUEEN_DEDUP_CACHE")
+            .map(|v| v != "0")
+            .unwrap_or(true),
         retention_batch_size: env_int("RETENTION_BATCH_SIZE", 1000).max(1) as usize,
         retention_parallelism: env_int("RETENTION_PARALLELISM", 1).max(1) as usize,
         metrics_retention_days: env_int("METRICS_RETENTION_DAYS", 90).max(1) as i32,

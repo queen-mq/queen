@@ -1,13 +1,16 @@
-//! Background stats reconciler for the segments engine.
+//! Background stats reconciler for the log engine.
 //!
 //! Ports the cadence of the C++ StatsService (server/src/services/stats_service.cpp)
 //! onto a tokio task: every `STATS_INTERVAL_MS` ms, on ONE pooled connection under a
-//! transaction-level advisory lock, run `queen.seg_refresh_all_stats_v1()` — which
-//! recomputes `queen.stats` (queue/namespace/task/system rows) DIRECTLY from the
-//! segments tables (`seg_*`), since the v1 reconciler reads `queen.messages` (empty
-//! under segments). Without this loop `queen.stats` stays empty and every
-//! stats-backed reader (get_system_overview_v3 / get_status_v3 / get_status_queues_v2
-//! / get_queue_detail_v2) returns zeros — the "pages show no data" regression.
+//! transaction-level advisory lock, run `queen.log_refresh_all_stats_v1()` (048) —
+//! which recomputes `queen.stats` (queue/namespace/task/system rows) DIRECTLY from
+//! the log tables (`log_*`) with O(partitions) watermark arithmetic, since the v1
+//! reconciler reads `queen.messages` (empty under the log engine). Without this loop
+//! `queen.stats` stays empty and every stats-backed reader (get_system_overview_v3 /
+//! get_status_v3 / get_status_queues_v2 / get_queue_detail_v2) returns zeros — the
+//! "pages show no data" regression. The summary the SP returns keeps the seg-era
+//! keys ('engine':'segments', 'segPartitions' — telemetry labels aligned with the
+//! queen.queues.storage compat value, 048) and is printed verbatim below.
 //!
 //! Leader election via `pg_try_advisory_xact_lock` (non-blocking): behind a load
 //! balancer only one replica refreshes per cycle; a replica that can't take the lock

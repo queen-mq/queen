@@ -22,7 +22,7 @@ use crate::frames::{
 };
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
-use crate::util::uuidv7_bytes;
+use crate::util::{txn_hash128, uuidv7_bytes};
 use crate::vegas::Vegas;
 
 // Unwrap the streaming SP's [{idx, result}] array to the single inner result
@@ -125,9 +125,9 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
     }
 }
 
-// POST /streams/v1/cycle — atomic streaming cycle commit on the segments engine
-// (queen.seg_streams_cycle_v1, 029). This is the packing handler: it converts the
-// SDK's high-level push_items into broker-prepacked `sink_segments` (metas +
+// POST /streams/v1/cycle — atomic streaming cycle commit on the log engine
+// (queen.log_streams_cycle_v1, 046). This is the packing handler: it converts the
+// SDK's high-level push_items into broker-prepacked `sink_segments` (txn hashes +
 // base64 zstd blob, exactly like handle_transaction packs `pushes`) and maps the
 // SDK ack {transactionId, leaseId, status, count} to the SP's ack {ok, count}
 // plus the top-level `worker` (= the source leaseId) and `release_lease`.
@@ -137,10 +137,14 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
 //    ack:{transactionId, leaseId, status, count}|null, release_lease}
 // Each push_item (SinkOperator.buildPushItems): {queue, partition, payload}.
 //
-// SP element (029):
+// SP element (046):
 //   {idx:0, query_id, partition_id, consumer_group, worker, release_lease,
-//    state_ops, sink_segments:[{queue, partition, metas:[{i,mid,txn}], blobB64,
-//    count}], ack:{ok, count}|null}
+//    state_ops, sink_segments:[{queue, partition, hashesB64, blobB64, count}],
+//    ack:{ok, count}|null}
+// hashesB64 = base64 of the concatenated 16-byte xxh3_128 txn hashes, frame
+// order (046's replacement for the seg-era metas:[{i,mid,txn}]) — the log
+// engine's only per-frame SQL metadata (§3: the broker hashes, SQL stores
+// bytea); mids and txn text live only inside the blob.
 //
 // Returns the inner result {success, query_id, partition_id, queueName,
 // state_ops_applied, push_results, ack_result}. Always HTTP 200 on a completed
@@ -265,17 +269,19 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                 encrypted: f.encrypted,
             })
             .collect();
-        let metas: Vec<serde_json::Value> = frames
-            .iter()
-            .enumerate()
-            .map(|(k, f)| serde_json::json!({"i": k, "mid": uuid_bytes_to_string(&f.mid), "txn": f.txn}))
-            .collect();
+        // 16B xxh3_128 per frame, concatenated in frame order then base64'd —
+        // a misaligned length fails the element loudly via log_push_one_v1's
+        // stride guard rather than silently mis-addressing acks (046).
+        let mut hashes: Vec<u8> = Vec::with_capacity(frames.len() * 16);
+        for f in frames {
+            hashes.extend_from_slice(&txn_hash128(&f.txn));
+        }
         let blob = zstd_compress(&pack_frames(&fins), st.zstd_level);
         let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
         sink_segments.push(serde_json::json!({
             "queue": queue,
             "partition": partition,
-            "metas": metas,
+            "hashesB64": base64::engine::general_purpose::STANDARD.encode(&hashes),
             "blobB64": blob_b64,
             "count": frames.len(),
         }));
