@@ -1,0 +1,33 @@
+goload -> http://localhost:6640 queue=soakq partitions=100 producers=16 consumers=12 pushBatch=100 popBatch=500 payload=256B idleConns=512 retries=2
+[configure] queue=soakq completedRetentionSeconds=300
+[06:56:53] push=   74748/s pop=   74727/s | tot push=4484900 pop=4483600 | errs p=0 c=0 empty=0
+[06:57:53] push=   52692/s pop=   52682/s | tot push=7646400 pop=7644500 | errs p=0 c=0 empty=0
+[06:58:53] push=   50835/s pop=   50845/s | tot push=10696500 pop=10695200 | errs p=0 c=0 empty=0
+[06:59:53] push=   43155/s pop=   43153/s | tot push=13285800 pop=13284400 | errs p=0 c=0 empty=0
+[07:00:53] push=   36272/s pop=   36275/s | tot push=15462100 pop=15460900 | errs p=0 c=0 empty=0
+[07:01:53] push=   34302/s pop=   34303/s | tot push=17520200 pop=17519100 | errs p=0 c=0 empty=0
+[07:02:53] push=   58438/s pop=   58423/s | tot push=21026500 pop=21024500 | errs p=0 c=0 empty=0
+[07:03:53] push=   87105/s pop=   87117/s | tot push=26252800 pop=26251500 | errs p=0 c=0 empty=0
+[07:04:53] push=   72730/s pop=   72725/s | tot push=30616600 pop=30615000 | errs p=0 c=0 empty=0
+[07:05:53] push=   74222/s pop=   74230/s | tot push=35069900 pop=35068800 | errs p=0 c=0 empty=0
+[07:06:53] push=   74570/s pop=   74562/s | tot push=39544100 pop=39542500 | errs p=0 c=0 empty=0
+[07:07:53] push=   69835/s pop=   69835/s | tot push=43734200 pop=43732600 | errs p=0 c=0 empty=0
+[07:08:53] push=   78758/s pop=   78758/s | tot push=48459700 pop=48458100 | errs p=0 c=0 empty=0
+[07:09:53] push=   74505/s pop=   74507/s | tot push=52930000 pop=52928500 | errs p=0 c=0 empty=0
+[07:10:53] push=   66932/s pop=   66937/s | tot push=56945900 pop=56944700 | errs p=0 c=0 empty=0
+[07:11:53] push=   57495/s pop=   57488/s | tot push=60395600 pop=60394000 | errs p=0 c=0 empty=0
+[07:12:53] push=   66370/s pop=   66360/s | tot push=64377800 pop=64375600 | errs p=0 c=0 empty=0
+[07:13:53] push=   63458/s pop=   63453/s | tot push=68185300 pop=68182800 | errs p=0 c=0 empty=0
+[07:14:53] push=   65810/s pop=   65817/s | tot push=72133900 pop=72131800 | errs p=0 c=0 empty=0
+[07:15:53] push=   62582/s pop=   62598/s | tot push=75888800 pop=75887700 | errs p=0 c=0 empty=0
+[07:16:53] push=   63330/s pop=   63307/s | tot push=79688600 pop=79686100 | errs p=0 c=0 empty=0
+[07:17:53] push=   64473/s pop=   64480/s | tot push=83557000 pop=83554900 | errs p=0 c=0 empty=0
+[07:18:53] push=   65047/s pop=   65055/s | tot push=87459800 pop=87458200 | errs p=0 c=0 empty=0
+[07:19:53] push=   72882/s pop=   72887/s | tot push=91832700 pop=91831400 | errs p=0 c=0 empty=0
+[07:20:53] push=   69120/s pop=   69133/s | tot push=95979900 pop=95979400 | errs p=0 c=0 empty=0
+[07:21:53] push=   83213/s pop=   83210/s | tot push=100972700 pop=100972000 | errs p=0 c=0 empty=0
+[07:22:53] push=   67305/s pop=   67293/s | tot push=105011000 pop=105009600 | errs p=0 c=0 empty=0
+[07:23:53] push=   74372/s pop=   74365/s | tot push=109473300 pop=109471500 | errs p=0 c=0 empty=0
+[07:24:53] push=   65568/s pop=   65575/s | tot push=113407400 pop=113406000 | errs p=0 c=0 empty=0
+[07:25:53] push=   63173/s pop=   63180/s | tot push=117197800 pop=117196800 | errs p=0 c=0 empty=0
+[final] pushed=117197800 popped=117196800 pushErr=0 popErr=0 emptyPops=0

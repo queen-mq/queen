@@ -1,0 +1,14 @@
+goload -> http://localhost:6640 queue=soakq partitions=100 producers=16 consumers=12 pushBatch=100 popBatch=500 payload=256B idleConns=512 retries=2
+[configure] queue=soakq completedRetentionSeconds=300
+[06:46:28] push=  126808/s pop=  126763/s | tot push=7608500 pop=7605800 | errs p=0 c=0 empty=0
+[06:47:28] push=   92600/s pop=   92622/s | tot push=13164500 pop=13163100 | errs p=0 c=0 empty=0
+[06:48:28] push=   59792/s pop=   59790/s | tot push=16752000 pop=16750500 | errs p=0 c=0 empty=0
+[06:49:28] push=   49965/s pop=   49965/s | tot push=19749900 pop=19748400 | errs p=0 c=0 empty=0
+[06:50:28] push=   43765/s pop=   43763/s | tot push=22375800 pop=22374200 | errs p=0 c=0 empty=0
+[06:51:28] push=   34057/s pop=   34055/s | tot push=24419200 pop=24417500 | errs p=0 c=0 empty=8
+[06:52:28] push=   42630/s pop=   42648/s | tot push=26977000 pop=26976400 | errs p=0 c=0 empty=8
+[06:53:28] push=   52583/s pop=   52570/s | tot push=30132000 pop=30130600 | errs p=0 c=0 empty=8
+[06:54:33] push=   52762/s pop=   52750/s | tot push=33297700 pop=33295600 | errs p=0 c=0 empty=8
+
+[signal] stopping...
+[final] pushed=35827600 popped=35826800 pushErr=0 popErr=0 emptyPops=8

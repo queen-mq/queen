@@ -1,0 +1,998 @@
+schema: applied schema.sql + 38 procedures
+retention: service started (interval=5000ms, advisory_lock=737001, metrics_retention_days=90)
+stats: reconciler started (interval=10000ms, advisory_lock=737002)
+syscollect: metrics collector started (flush=60000ms, replica=queen-e3d66861)
+file_buffer: could not create spool dir /var/lib/queen/buffers: Permission denied (os error 13) — falling back to /var/folders/8w/phmp5hgd4nz3z4h3b9zksy5c0000gp/T/queen-buffers
+file_buffer: drain loop started (dir=/var/folders/8w/phmp5hgd4nz3z4h3b9zksy5c0000gp/T/queen-buffers, flush=100ms)
+reconcile: state reconcile loop started (interval=60000ms)
+queen-seg-rust: UDP sync enabled but no peers configured — local waker only
+queen-seg-rust v1.0.0-alpha-01 listening on 0.0.0.0:6640 (fusion shards=8 frames=500 hold=15ms, zstd=1, pool=60)
+retention: cycle sweep={"queues": 0, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:15:54.615Z", "queuesUpdated": 0, "segPartitions": 0}
+[bundle] commits=500 segments=500 segments_per_commit=1.00
+[bundle] commits=1000 segments=1000 segments_per_commit=1.00
+[bundle] commits=1500 segments=1500 segments_per_commit=1.00
+[bundle] commits=2000 segments=2000 segments_per_commit=1.00
+[bundle] commits=2500 segments=2500 segments_per_commit=1.00
+[bundle] commits=3000 segments=3000 segments_per_commit=1.00
+[bundle] commits=3500 segments=3500 segments_per_commit=1.00
+[bundle] commits=4000 segments=4000 segments_per_commit=1.00
+[bundle] commits=4500 segments=4500 segments_per_commit=1.00
+[bundle] commits=5000 segments=5000 segments_per_commit=1.00
+[bundle] commits=5500 segments=5500 segments_per_commit=1.00
+[bundle] commits=6000 segments=6000 segments_per_commit=1.00
+[bundle] commits=6500 segments=6500 segments_per_commit=1.00
+[bundle] commits=7000 segments=7000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=7500 segments=7500 segments_per_commit=1.00
+[bundle] commits=8000 segments=8000 segments_per_commit=1.00
+[bundle] commits=8500 segments=8500 segments_per_commit=1.00
+[bundle] commits=9000 segments=9000 segments_per_commit=1.00
+[bundle] commits=9500 segments=9500 segments_per_commit=1.00
+[bundle] commits=10000 segments=10000 segments_per_commit=1.00
+[bundle] commits=10500 segments=10500 segments_per_commit=1.00
+[bundle] commits=11000 segments=11000 segments_per_commit=1.00
+[bundle] commits=11500 segments=11500 segments_per_commit=1.00
+[bundle] commits=12000 segments=12000 segments_per_commit=1.00
+[bundle] commits=12500 segments=12500 segments_per_commit=1.00
+[bundle] commits=13000 segments=13000 segments_per_commit=1.00
+[bundle] commits=13500 segments=13500 segments_per_commit=1.00
+[bundle] commits=14000 segments=14000 segments_per_commit=1.00
+[bundle] commits=14500 segments=14500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:16:04.611Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=15000 segments=15000 segments_per_commit=1.00
+[bundle] commits=15500 segments=15500 segments_per_commit=1.00
+[bundle] commits=16000 segments=16000 segments_per_commit=1.00
+[bundle] commits=16500 segments=16500 segments_per_commit=1.00
+[bundle] commits=17000 segments=17000 segments_per_commit=1.00
+[bundle] commits=17500 segments=17500 segments_per_commit=1.00
+[bundle] commits=18000 segments=18000 segments_per_commit=1.00
+[bundle] commits=18500 segments=18500 segments_per_commit=1.00
+[bundle] commits=19000 segments=19000 segments_per_commit=1.00
+[bundle] commits=19500 segments=19500 segments_per_commit=1.00
+[bundle] commits=20000 segments=20000 segments_per_commit=1.00
+[bundle] commits=20500 segments=20500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=21000 segments=21000 segments_per_commit=1.00
+[bundle] commits=21500 segments=21500 segments_per_commit=1.00
+[bundle] commits=22000 segments=22000 segments_per_commit=1.00
+[bundle] commits=22500 segments=22500 segments_per_commit=1.00
+[bundle] commits=23000 segments=23000 segments_per_commit=1.00
+[bundle] commits=23500 segments=23500 segments_per_commit=1.00
+[bundle] commits=24000 segments=24000 segments_per_commit=1.00
+[bundle] commits=24500 segments=24500 segments_per_commit=1.00
+[bundle] commits=25000 segments=25000 segments_per_commit=1.00
+[bundle] commits=25500 segments=25500 segments_per_commit=1.00
+[bundle] commits=26000 segments=26000 segments_per_commit=1.00
+[bundle] commits=26500 segments=26500 segments_per_commit=1.00
+[bundle] commits=27000 segments=27000 segments_per_commit=1.00
+[bundle] commits=27500 segments=27500 segments_per_commit=1.00
+[bundle] commits=28000 segments=28000 segments_per_commit=1.00
+[bundle] commits=28500 segments=28500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:16:14.612Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=29000 segments=29000 segments_per_commit=1.00
+[bundle] commits=29500 segments=29500 segments_per_commit=1.00
+[bundle] commits=30000 segments=30000 segments_per_commit=1.00
+[bundle] commits=30500 segments=30500 segments_per_commit=1.00
+[bundle] commits=31000 segments=31000 segments_per_commit=1.00
+[bundle] commits=31500 segments=31500 segments_per_commit=1.00
+[bundle] commits=32000 segments=32000 segments_per_commit=1.00
+[bundle] commits=32500 segments=32500 segments_per_commit=1.00
+[bundle] commits=33000 segments=33000 segments_per_commit=1.00
+[bundle] commits=33500 segments=33500 segments_per_commit=1.00
+[bundle] commits=34000 segments=34000 segments_per_commit=1.00
+[bundle] commits=34500 segments=34500 segments_per_commit=1.00
+[bundle] commits=35000 segments=35000 segments_per_commit=1.00
+[bundle] commits=35500 segments=35500 segments_per_commit=1.00
+[bundle] commits=36000 segments=36000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=36500 segments=36500 segments_per_commit=1.00
+[bundle] commits=37000 segments=37000 segments_per_commit=1.00
+[bundle] commits=37500 segments=37500 segments_per_commit=1.00
+[bundle] commits=38000 segments=38000 segments_per_commit=1.00
+[bundle] commits=38500 segments=38500 segments_per_commit=1.00
+[bundle] commits=39000 segments=39000 segments_per_commit=1.00
+[bundle] commits=39500 segments=39500 segments_per_commit=1.00
+[bundle] commits=40000 segments=40000 segments_per_commit=1.00
+[bundle] commits=40500 segments=40500 segments_per_commit=1.00
+[bundle] commits=41000 segments=41000 segments_per_commit=1.00
+[bundle] commits=41500 segments=41500 segments_per_commit=1.00
+[bundle] commits=42000 segments=42000 segments_per_commit=1.00
+[bundle] commits=42500 segments=42500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:16:24.614Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=43000 segments=43000 segments_per_commit=1.00
+[bundle] commits=43500 segments=43500 segments_per_commit=1.00
+[bundle] commits=44000 segments=44000 segments_per_commit=1.00
+[bundle] commits=44500 segments=44500 segments_per_commit=1.00
+[bundle] commits=45000 segments=45000 segments_per_commit=1.00
+[bundle] commits=45500 segments=45500 segments_per_commit=1.00
+[bundle] commits=46000 segments=46000 segments_per_commit=1.00
+[bundle] commits=46500 segments=46500 segments_per_commit=1.00
+[bundle] commits=47000 segments=47000 segments_per_commit=1.00
+[bundle] commits=47500 segments=47500 segments_per_commit=1.00
+[bundle] commits=48000 segments=48000 segments_per_commit=1.00
+[bundle] commits=48500 segments=48500 segments_per_commit=1.00
+[bundle] commits=49000 segments=49000 segments_per_commit=1.00
+[bundle] commits=49500 segments=49500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=50000 segments=50000 segments_per_commit=1.00
+[bundle] commits=50500 segments=50500 segments_per_commit=1.00
+[bundle] commits=51000 segments=51000 segments_per_commit=1.00
+[bundle] commits=51500 segments=51500 segments_per_commit=1.00
+[bundle] commits=52000 segments=52000 segments_per_commit=1.00
+[bundle] commits=52500 segments=52500 segments_per_commit=1.00
+[bundle] commits=53000 segments=53000 segments_per_commit=1.00
+[bundle] commits=53500 segments=53500 segments_per_commit=1.00
+[bundle] commits=54000 segments=54000 segments_per_commit=1.00
+[bundle] commits=54500 segments=54500 segments_per_commit=1.00
+[bundle] commits=55000 segments=55000 segments_per_commit=1.00
+[bundle] commits=55500 segments=55500 segments_per_commit=1.00
+[bundle] commits=56000 segments=56000 segments_per_commit=1.00
+[bundle] commits=56500 segments=56500 segments_per_commit=1.00
+[bundle] commits=57000 segments=57000 segments_per_commit=1.00
+[bundle] commits=57500 segments=57500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:16:34.615Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=58000 segments=58000 segments_per_commit=1.00
+[bundle] commits=58500 segments=58500 segments_per_commit=1.00
+[bundle] commits=59000 segments=59000 segments_per_commit=1.00
+[bundle] commits=59500 segments=59500 segments_per_commit=1.00
+[bundle] commits=60000 segments=60000 segments_per_commit=1.00
+[bundle] commits=60500 segments=60500 segments_per_commit=1.00
+[bundle] commits=61000 segments=61000 segments_per_commit=1.00
+[bundle] commits=61500 segments=61500 segments_per_commit=1.00
+[bundle] commits=62000 segments=62000 segments_per_commit=1.00
+[bundle] commits=62500 segments=62500 segments_per_commit=1.00
+[bundle] commits=63000 segments=63000 segments_per_commit=1.00
+[bundle] commits=63500 segments=63500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=64000 segments=64000 segments_per_commit=1.00
+[bundle] commits=64500 segments=64500 segments_per_commit=1.00
+[bundle] commits=65000 segments=65000 segments_per_commit=1.00
+[bundle] commits=65500 segments=65500 segments_per_commit=1.00
+[bundle] commits=66000 segments=66000 segments_per_commit=1.00
+[bundle] commits=66500 segments=66500 segments_per_commit=1.00
+[bundle] commits=67000 segments=67000 segments_per_commit=1.00
+[bundle] commits=67500 segments=67500 segments_per_commit=1.00
+[bundle] commits=68000 segments=68000 segments_per_commit=1.00
+[bundle] commits=68500 segments=68500 segments_per_commit=1.00
+[bundle] commits=69000 segments=69000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:16:44.617Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=69500 segments=69500 segments_per_commit=1.00
+[bundle] commits=70000 segments=70000 segments_per_commit=1.00
+[bundle] commits=70500 segments=70500 segments_per_commit=1.00
+[bundle] commits=71000 segments=71000 segments_per_commit=1.00
+[bundle] commits=71500 segments=71500 segments_per_commit=1.00
+[bundle] commits=72000 segments=72000 segments_per_commit=1.00
+[bundle] commits=72500 segments=72500 segments_per_commit=1.00
+[bundle] commits=73000 segments=73000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=73500 segments=73500 segments_per_commit=1.00
+[bundle] commits=74000 segments=74000 segments_per_commit=1.00
+[bundle] commits=74500 segments=74500 segments_per_commit=1.00
+[bundle] commits=75000 segments=75000 segments_per_commit=1.00
+[bundle] commits=75500 segments=75500 segments_per_commit=1.00
+[bundle] commits=76000 segments=76000 segments_per_commit=1.00
+[bundle] commits=76500 segments=76500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:16:54.618Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=77000 segments=77000 segments_per_commit=1.00
+[bundle] commits=77500 segments=77500 segments_per_commit=1.00
+[bundle] commits=78000 segments=78000 segments_per_commit=1.00
+[bundle] commits=78500 segments=78500 segments_per_commit=1.00
+[bundle] commits=79000 segments=79000 segments_per_commit=1.00
+[bundle] commits=79500 segments=79500 segments_per_commit=1.00
+[bundle] commits=80000 segments=80000 segments_per_commit=1.00
+[bundle] commits=80500 segments=80500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=81000 segments=81000 segments_per_commit=1.00
+[bundle] commits=81500 segments=81500 segments_per_commit=1.00
+[bundle] commits=82000 segments=82000 segments_per_commit=1.00
+[bundle] commits=82500 segments=82500 segments_per_commit=1.00
+[bundle] commits=83000 segments=83000 segments_per_commit=1.00
+[bundle] commits=83500 segments=83500 segments_per_commit=1.00
+[bundle] commits=84000 segments=84000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:17:04.619Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=84500 segments=84500 segments_per_commit=1.00
+[bundle] commits=85000 segments=85000 segments_per_commit=1.00
+[bundle] commits=85500 segments=85500 segments_per_commit=1.00
+[bundle] commits=86000 segments=86000 segments_per_commit=1.00
+[bundle] commits=86500 segments=86500 segments_per_commit=1.00
+[bundle] commits=87000 segments=87000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=87500 segments=87500 segments_per_commit=1.00
+[bundle] commits=88000 segments=88000 segments_per_commit=1.00
+[bundle] commits=88500 segments=88500 segments_per_commit=1.00
+[bundle] commits=89000 segments=89000 segments_per_commit=1.00
+[bundle] commits=89500 segments=89500 segments_per_commit=1.00
+[bundle] commits=90000 segments=90000 segments_per_commit=1.00
+[bundle] commits=90500 segments=90500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:17:14.620Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=91000 segments=91000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=91500 segments=91500 segments_per_commit=1.00
+[bundle] commits=92000 segments=92000 segments_per_commit=1.00
+[bundle] commits=92500 segments=92500 segments_per_commit=1.00
+[bundle] commits=93000 segments=93000 segments_per_commit=1.00
+[bundle] commits=93500 segments=93500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=94000 segments=94000 segments_per_commit=1.00
+[bundle] commits=94500 segments=94500 segments_per_commit=1.00
+[bundle] commits=95000 segments=95000 segments_per_commit=1.00
+[bundle] commits=95500 segments=95500 segments_per_commit=1.00
+[bundle] commits=96000 segments=96000 segments_per_commit=1.00
+[bundle] commits=96500 segments=96500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:17:24.620Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=97000 segments=97000 segments_per_commit=1.00
+[bundle] commits=97500 segments=97500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=98000 segments=98000 segments_per_commit=1.00
+[bundle] commits=98500 segments=98500 segments_per_commit=1.00
+[bundle] commits=99000 segments=99000 segments_per_commit=1.00
+[bundle] commits=99500 segments=99500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=100000 segments=100000 segments_per_commit=1.00
+[bundle] commits=100500 segments=100500 segments_per_commit=1.00
+[bundle] commits=101000 segments=101000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:17:34.627Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=101500 segments=101500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=102000 segments=102000 segments_per_commit=1.00
+[bundle] commits=102500 segments=102500 segments_per_commit=1.00
+[bundle] commits=103000 segments=103000 segments_per_commit=1.00
+[bundle] commits=103500 segments=103500 segments_per_commit=1.00
+[bundle] commits=104000 segments=104000 segments_per_commit=1.00
+[bundle] commits=104500 segments=104500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=105000 segments=105000 segments_per_commit=1.00
+[bundle] commits=105500 segments=105500 segments_per_commit=1.00
+[bundle] commits=106000 segments=106000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:17:44.631Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=106500 segments=106500 segments_per_commit=1.00
+[bundle] commits=107000 segments=107000 segments_per_commit=1.00
+[bundle] commits=107500 segments=107500 segments_per_commit=1.00
+[bundle] commits=108000 segments=108000 segments_per_commit=1.00
+[bundle] commits=108500 segments=108500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=109000 segments=109000 segments_per_commit=1.00
+[bundle] commits=109500 segments=109500 segments_per_commit=1.00
+[bundle] commits=110000 segments=110000 segments_per_commit=1.00
+[bundle] commits=110500 segments=110500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:17:54.629Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=111000 segments=111000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=111500 segments=111500 segments_per_commit=1.00
+[bundle] commits=112000 segments=112000 segments_per_commit=1.00
+[bundle] commits=112500 segments=112500 segments_per_commit=1.00
+[bundle] commits=113000 segments=113000 segments_per_commit=1.00
+[bundle] commits=113500 segments=113500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=114000 segments=114000 segments_per_commit=1.00
+[bundle] commits=114500 segments=114500 segments_per_commit=1.00
+[bundle] commits=115000 segments=115000 segments_per_commit=1.00
+[bundle] commits=115500 segments=115500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:18:04.626Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=116000 segments=116000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=116500 segments=116500 segments_per_commit=1.00
+[bundle] commits=117000 segments=117000 segments_per_commit=1.00
+[bundle] commits=117500 segments=117500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=118000 segments=118000 segments_per_commit=1.00
+[bundle] commits=118500 segments=118500 segments_per_commit=1.00
+[bundle] commits=119000 segments=119000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:18:14.629Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=119500 segments=119500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=120000 segments=120000 segments_per_commit=1.00
+[bundle] commits=120500 segments=120500 segments_per_commit=1.00
+[bundle] commits=121000 segments=121000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=121500 segments=121500 segments_per_commit=1.00
+[bundle] commits=122000 segments=122000 segments_per_commit=1.00
+[bundle] commits=122500 segments=122500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:18:24.631Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=123000 segments=123000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=123500 segments=123500 segments_per_commit=1.00
+[bundle] commits=124000 segments=124000 segments_per_commit=1.00
+[bundle] commits=124500 segments=124500 segments_per_commit=1.00
+[bundle] commits=125000 segments=125000 segments_per_commit=1.00
+[bundle] commits=125500 segments=125500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=126000 segments=126000 segments_per_commit=1.00
+[bundle] commits=126500 segments=126500 segments_per_commit=1.00
+[bundle] commits=127000 segments=127000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:18:34.630Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=127500 segments=127500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=128000 segments=128000 segments_per_commit=1.00
+[bundle] commits=128500 segments=128500 segments_per_commit=1.00
+[bundle] commits=129000 segments=129000 segments_per_commit=1.00
+[bundle] commits=129500 segments=129500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:18:44.632Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=130000 segments=130000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=130500 segments=130500 segments_per_commit=1.00
+[bundle] commits=131000 segments=131000 segments_per_commit=1.00
+[bundle] commits=131500 segments=131500 segments_per_commit=1.00
+[bundle] commits=132000 segments=132000 segments_per_commit=1.00
+[bundle] commits=132500 segments=132500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=133000 segments=133000 segments_per_commit=1.00
+[bundle] commits=133500 segments=133500 segments_per_commit=1.00
+[bundle] commits=134000 segments=134000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:18:54.637Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=134500 segments=134500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=135000 segments=135000 segments_per_commit=1.00
+[bundle] commits=135500 segments=135500 segments_per_commit=1.00
+[bundle] commits=136000 segments=136000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=136500 segments=136500 segments_per_commit=1.00
+[bundle] commits=137000 segments=137000 segments_per_commit=1.00
+[bundle] commits=137500 segments=137500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:19:04.638Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=138000 segments=138000 segments_per_commit=1.00
+[bundle] commits=138500 segments=138500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=139000 segments=139000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=139500 segments=139500 segments_per_commit=1.00
+[bundle] commits=140000 segments=140000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:19:14.654Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=140500 segments=140500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=141000 segments=141000 segments_per_commit=1.00
+[bundle] commits=141500 segments=141500 segments_per_commit=1.00
+[bundle] commits=142000 segments=142000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:19:24.641Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=142500 segments=142500 segments_per_commit=1.00
+[bundle] commits=143000 segments=143000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=143500 segments=143500 segments_per_commit=1.00
+[bundle] commits=144000 segments=144000 segments_per_commit=1.00
+[bundle] commits=144500 segments=144500 segments_per_commit=1.00
+[bundle] commits=145000 segments=145000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=145500 segments=145500 segments_per_commit=1.00
+[bundle] commits=146000 segments=146000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:19:34.643Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=146500 segments=146500 segments_per_commit=1.00
+[bundle] commits=147000 segments=147000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=147500 segments=147500 segments_per_commit=1.00
+[bundle] commits=148000 segments=148000 segments_per_commit=1.00
+[bundle] commits=148500 segments=148500 segments_per_commit=1.00
+[bundle] commits=149000 segments=149000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=149500 segments=149500 segments_per_commit=1.00
+[bundle] commits=150000 segments=150000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:19:44.645Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=150500 segments=150500 segments_per_commit=1.00
+[bundle] commits=151000 segments=151000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=151500 segments=151500 segments_per_commit=1.00
+[bundle] commits=152000 segments=152000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=152500 segments=152500 segments_per_commit=1.00
+[bundle] commits=153000 segments=153000 segments_per_commit=1.00
+[bundle] commits=153500 segments=153500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:19:54.643Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=154000 segments=154000 segments_per_commit=1.00
+[bundle] commits=154500 segments=154500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=155000 segments=155000 segments_per_commit=1.00
+[bundle] commits=155500 segments=155500 segments_per_commit=1.00
+[bundle] commits=156000 segments=156000 segments_per_commit=1.00
+[bundle] commits=156500 segments=156500 segments_per_commit=1.00
+[bundle] commits=157000 segments=157000 segments_per_commit=1.00
+[bundle] commits=157500 segments=157500 segments_per_commit=1.00
+[bundle] commits=158000 segments=158000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:20:04.644Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=158500 segments=158500 segments_per_commit=1.00
+[bundle] commits=159000 segments=159000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=159500 segments=159500 segments_per_commit=1.00
+[bundle] commits=160000 segments=160000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=160500 segments=160500 segments_per_commit=1.00
+[bundle] commits=161000 segments=161000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:20:14.644Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=161500 segments=161500 segments_per_commit=1.00
+[bundle] commits=162000 segments=162000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=162500 segments=162500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:20:24.645Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=163000 segments=163000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=163500 segments=163500 segments_per_commit=1.00
+[bundle] commits=164000 segments=164000 segments_per_commit=1.00
+[bundle] commits=164500 segments=164500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=165000 segments=165000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:20:34.648Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=165500 segments=165500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=166000 segments=166000 segments_per_commit=1.00
+[bundle] commits=166500 segments=166500 segments_per_commit=1.00
+[bundle] commits=167000 segments=167000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=167500 segments=167500 segments_per_commit=1.00
+[bundle] commits=168000 segments=168000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:20:44.649Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=168500 segments=168500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=169000 segments=169000 segments_per_commit=1.00
+[bundle] commits=169500 segments=169500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:20:54.649Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=170000 segments=170000 segments_per_commit=1.00
+[bundle] commits=170500 segments=170500 segments_per_commit=1.00
+[bundle] commits=171000 segments=171000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=171500 segments=171500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 5378} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=172000 segments=172000 segments_per_commit=1.00
+[bundle] commits=172500 segments=172500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:21:04.651Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 7744} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=173000 segments=173000 segments_per_commit=1.00
+[bundle] commits=173500 segments=173500 segments_per_commit=1.00
+[bundle] commits=174000 segments=174000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 6241} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=174500 segments=174500 segments_per_commit=1.00
+[bundle] commits=175000 segments=175000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:21:14.654Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 7677} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=175500 segments=175500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 7702} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=176000 segments=176000 segments_per_commit=1.00
+[bundle] commits=176500 segments=176500 segments_per_commit=1.00
+[bundle] commits=177000 segments=177000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 6532} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:21:24.655Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=177500 segments=177500 segments_per_commit=1.00
+[bundle] commits=178000 segments=178000 segments_per_commit=1.00
+[bundle] commits=178500 segments=178500 segments_per_commit=1.00
+[bundle] commits=179000 segments=179000 segments_per_commit=1.00
+[bundle] commits=179500 segments=179500 segments_per_commit=1.00
+[bundle] commits=180000 segments=180000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 7195} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=180500 segments=180500 segments_per_commit=1.00
+[bundle] commits=181000 segments=181000 segments_per_commit=1.00
+[bundle] commits=181500 segments=181500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:21:34.657Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 0, "segments_deleted": 7494} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=182000 segments=182000 segments_per_commit=1.00
+[bundle] commits=182500 segments=182500 segments_per_commit=1.00
+[bundle] commits=183000 segments=183000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 198600, "segments_deleted": 6642} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=183500 segments=183500 segments_per_commit=1.00
+[bundle] commits=184000 segments=184000 segments_per_commit=1.00
+[bundle] commits=184500 segments=184500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:21:44.658Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 551300, "segments_deleted": 5513} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=185000 segments=185000 segments_per_commit=1.00
+[bundle] commits=185500 segments=185500 segments_per_commit=1.00
+[bundle] commits=186000 segments=186000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 393600, "segments_deleted": 3936} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=186500 segments=186500 segments_per_commit=1.00
+[bundle] commits=187000 segments=187000 segments_per_commit=1.00
+[bundle] commits=187500 segments=187500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:21:54.659Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 376400, "segments_deleted": 3764} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=188000 segments=188000 segments_per_commit=1.00
+[bundle] commits=188500 segments=188500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 373400, "segments_deleted": 3734} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=189000 segments=189000 segments_per_commit=1.00
+[bundle] commits=189500 segments=189500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:22:04.660Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 351000, "segments_deleted": 3510} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=190000 segments=190000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 316500, "segments_deleted": 3165} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=190500 segments=190500 segments_per_commit=1.00
+[bundle] commits=191000 segments=191000 segments_per_commit=1.00
+[bundle] commits=191500 segments=191500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:22:14.664Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 359300, "segments_deleted": 3593} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=192000 segments=192000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 300200, "segments_deleted": 3002} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=192500 segments=192500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:22:24.662Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 317400, "segments_deleted": 3174} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=193000 segments=193000 segments_per_commit=1.00
+[bundle] commits=193500 segments=193500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 267000, "segments_deleted": 2670} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=194000 segments=194000 segments_per_commit=1.00
+[bundle] commits=194500 segments=194500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:22:34.664Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 188700, "segments_deleted": 1887} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+retention: cycle sweep={"queues": 1, "dedup_purged": 314200, "segments_deleted": 3142} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=195000 segments=195000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:22:44.746Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 214600, "segments_deleted": 2146} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+retention: cycle sweep={"queues": 1, "dedup_purged": 277400, "segments_deleted": 2774} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=195500 segments=195500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:22:54.668Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=196000 segments=196000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 234200, "segments_deleted": 2342} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=196500 segments=196500 segments_per_commit=1.00
+[bundle] commits=197000 segments=197000 segments_per_commit=1.00
+[bundle] commits=197500 segments=197500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 257400, "segments_deleted": 2574} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=198000 segments=198000 segments_per_commit=1.00
+[bundle] commits=198500 segments=198500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:23:04.669Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=199000 segments=199000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 238300, "segments_deleted": 2383} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+retention: cycle sweep={"queues": 1, "dedup_purged": 137100, "segments_deleted": 1371} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=199500 segments=199500 segments_per_commit=1.00
+[bundle] commits=200000 segments=200000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:23:14.675Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=200500 segments=200500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 206500, "segments_deleted": 2065} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=201000 segments=201000 segments_per_commit=1.00
+[bundle] commits=201500 segments=201500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 173000, "segments_deleted": 1730} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=202000 segments=202000 segments_per_commit=1.00
+[bundle] commits=202500 segments=202500 segments_per_commit=1.00
+[bundle] commits=203000 segments=203000 segments_per_commit=1.00
+[bundle] commits=203500 segments=203500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:23:24.671Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=204000 segments=204000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 217500, "segments_deleted": 2175} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=204500 segments=204500 segments_per_commit=1.00
+[bundle] commits=205000 segments=205000 segments_per_commit=1.00
+[bundle] commits=205500 segments=205500 segments_per_commit=1.00
+[bundle] commits=206000 segments=206000 segments_per_commit=1.00
+[bundle] commits=206500 segments=206500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 213700, "segments_deleted": 2137} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=207000 segments=207000 segments_per_commit=1.00
+[bundle] commits=207500 segments=207500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:23:34.674Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=208000 segments=208000 segments_per_commit=1.00
+[bundle] commits=208500 segments=208500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 199700, "segments_deleted": 1997} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=209000 segments=209000 segments_per_commit=1.00
+[bundle] commits=209500 segments=209500 segments_per_commit=1.00
+[bundle] commits=210000 segments=210000 segments_per_commit=1.00
+[bundle] commits=210500 segments=210500 segments_per_commit=1.00
+[bundle] commits=211000 segments=211000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 156200, "segments_deleted": 1562} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=211500 segments=211500 segments_per_commit=1.00
+[bundle] commits=212000 segments=212000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:23:44.674Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=212500 segments=212500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 104600, "segments_deleted": 1046} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=213000 segments=213000 segments_per_commit=1.00
+[bundle] commits=213500 segments=213500 segments_per_commit=1.00
+[bundle] commits=214000 segments=214000 segments_per_commit=1.00
+[bundle] commits=214500 segments=214500 segments_per_commit=1.00
+[bundle] commits=215000 segments=215000 segments_per_commit=1.00
+[bundle] commits=215500 segments=215500 segments_per_commit=1.00
+[bundle] commits=216000 segments=216000 segments_per_commit=1.00
+[bundle] commits=216500 segments=216500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 238400, "segments_deleted": 2384} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=217000 segments=217000 segments_per_commit=1.00
+[bundle] commits=217500 segments=217500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:23:54.677Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=218000 segments=218000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 185700, "segments_deleted": 1857} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=218500 segments=218500 segments_per_commit=1.00
+[bundle] commits=219000 segments=219000 segments_per_commit=1.00
+[bundle] commits=219500 segments=219500 segments_per_commit=1.00
+[bundle] commits=220000 segments=220000 segments_per_commit=1.00
+[bundle] commits=220500 segments=220500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 186300, "segments_deleted": 1863} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=221000 segments=221000 segments_per_commit=1.00
+[bundle] commits=221500 segments=221500 segments_per_commit=1.00
+[bundle] commits=222000 segments=222000 segments_per_commit=1.00
+[bundle] commits=222500 segments=222500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:24:04.677Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=223000 segments=223000 segments_per_commit=1.00
+[bundle] commits=223500 segments=223500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 195700, "segments_deleted": 1957} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=224000 segments=224000 segments_per_commit=1.00
+[bundle] commits=224500 segments=224500 segments_per_commit=1.00
+[bundle] commits=225000 segments=225000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 76200, "segments_deleted": 762} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=225500 segments=225500 segments_per_commit=1.00
+[bundle] commits=226000 segments=226000 segments_per_commit=1.00
+[bundle] commits=226500 segments=226500 segments_per_commit=1.00
+[bundle] commits=227000 segments=227000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:24:14.678Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=227500 segments=227500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 175600, "segments_deleted": 1756} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=228000 segments=228000 segments_per_commit=1.00
+[bundle] commits=228500 segments=228500 segments_per_commit=1.00
+[bundle] commits=229000 segments=229000 segments_per_commit=1.00
+[bundle] commits=229500 segments=229500 segments_per_commit=1.00
+[bundle] commits=230000 segments=230000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 112000, "segments_deleted": 1120} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=230500 segments=230500 segments_per_commit=1.00
+[bundle] commits=231000 segments=231000 segments_per_commit=1.00
+[bundle] commits=231500 segments=231500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:24:24.679Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=232000 segments=232000 segments_per_commit=1.00
+[bundle] commits=232500 segments=232500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 95000, "segments_deleted": 950} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=233000 segments=233000 segments_per_commit=1.00
+[bundle] commits=233500 segments=233500 segments_per_commit=1.00
+[bundle] commits=234000 segments=234000 segments_per_commit=1.00
+[bundle] commits=234500 segments=234500 segments_per_commit=1.00
+[bundle] commits=235000 segments=235000 segments_per_commit=1.00
+[bundle] commits=235500 segments=235500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 222300, "segments_deleted": 2223} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=236000 segments=236000 segments_per_commit=1.00
+[bundle] commits=236500 segments=236500 segments_per_commit=1.00
+[bundle] commits=237000 segments=237000 segments_per_commit=1.00
+[bundle] commits=237500 segments=237500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:24:34.680Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=238000 segments=238000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 193400, "segments_deleted": 1934} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=238500 segments=238500 segments_per_commit=1.00
+[bundle] commits=239000 segments=239000 segments_per_commit=1.00
+[bundle] commits=239500 segments=239500 segments_per_commit=1.00
+[bundle] commits=240000 segments=240000 segments_per_commit=1.00
+[bundle] commits=240500 segments=240500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 230700, "segments_deleted": 2307} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=241000 segments=241000 segments_per_commit=1.00
+[bundle] commits=241500 segments=241500 segments_per_commit=1.00
+[bundle] commits=242000 segments=242000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:24:44.683Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=242500 segments=242500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 131200, "segments_deleted": 1312} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=243000 segments=243000 segments_per_commit=1.00
+[bundle] commits=243500 segments=243500 segments_per_commit=1.00
+[bundle] commits=244000 segments=244000 segments_per_commit=1.00
+[bundle] commits=244500 segments=244500 segments_per_commit=1.00
+[bundle] commits=245000 segments=245000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 100900, "segments_deleted": 1009} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=245500 segments=245500 segments_per_commit=1.00
+[bundle] commits=246000 segments=246000 segments_per_commit=1.00
+[bundle] commits=246500 segments=246500 segments_per_commit=1.00
+[bundle] commits=247000 segments=247000 segments_per_commit=1.00
+[bundle] commits=247500 segments=247500 segments_per_commit=1.00
+[bundle] commits=248000 segments=248000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:24:54.683Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=248500 segments=248500 segments_per_commit=1.00
+[bundle] commits=249000 segments=249000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 276100, "segments_deleted": 2761} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=249500 segments=249500 segments_per_commit=1.00
+[bundle] commits=250000 segments=250000 segments_per_commit=1.00
+[bundle] commits=250500 segments=250500 segments_per_commit=1.00
+[bundle] commits=251000 segments=251000 segments_per_commit=1.00
+[bundle] commits=251500 segments=251500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 287600, "segments_deleted": 2876} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=252000 segments=252000 segments_per_commit=1.00
+[bundle] commits=252500 segments=252500 segments_per_commit=1.00
+[bundle] commits=253000 segments=253000 segments_per_commit=1.00
+[bundle] commits=253500 segments=253500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:25:04.684Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=254000 segments=254000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 124100, "segments_deleted": 1241} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=254500 segments=254500 segments_per_commit=1.00
+[bundle] commits=255000 segments=255000 segments_per_commit=1.00
+[bundle] commits=255500 segments=255500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 102000, "segments_deleted": 1020} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=256000 segments=256000 segments_per_commit=1.00
+[bundle] commits=256500 segments=256500 segments_per_commit=1.00
+[bundle] commits=257000 segments=257000 segments_per_commit=1.00
+[bundle] commits=257500 segments=257500 segments_per_commit=1.00
+[bundle] commits=258000 segments=258000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:25:14.687Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=258500 segments=258500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 194500, "segments_deleted": 1945} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=259000 segments=259000 segments_per_commit=1.00
+[bundle] commits=259500 segments=259500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 61700, "segments_deleted": 617} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=260000 segments=260000 segments_per_commit=1.00
+[bundle] commits=260500 segments=260500 segments_per_commit=1.00
+[bundle] commits=261000 segments=261000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:25:24.694Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=261500 segments=261500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 116900, "segments_deleted": 1169} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=262000 segments=262000 segments_per_commit=1.00
+[bundle] commits=262500 segments=262500 segments_per_commit=1.00
+[bundle] commits=263000 segments=263000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 140400, "segments_deleted": 1404} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=263500 segments=263500 segments_per_commit=1.00
+[bundle] commits=264000 segments=264000 segments_per_commit=1.00
+[bundle] commits=264500 segments=264500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:25:34.688Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=265000 segments=265000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 123300, "segments_deleted": 1233} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=265500 segments=265500 segments_per_commit=1.00
+[bundle] commits=266000 segments=266000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 117200, "segments_deleted": 1172} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=266500 segments=266500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:25:44.689Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 126300, "segments_deleted": 1263} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=267000 segments=267000 segments_per_commit=1.00
+[bundle] commits=267500 segments=267500 segments_per_commit=1.00
+[bundle] commits=268000 segments=268000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 104200, "segments_deleted": 1042} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=268500 segments=268500 segments_per_commit=1.00
+[bundle] commits=269000 segments=269000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:25:54.691Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=269500 segments=269500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 102100, "segments_deleted": 1021} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=270000 segments=270000 segments_per_commit=1.00
+[bundle] commits=270500 segments=270500 segments_per_commit=1.00
+[bundle] commits=271000 segments=271000 segments_per_commit=1.00
+[bundle] commits=271500 segments=271500 segments_per_commit=1.00
+[bundle] commits=272000 segments=272000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 159900, "segments_deleted": 1599} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=272500 segments=272500 segments_per_commit=1.00
+[bundle] commits=273000 segments=273000 segments_per_commit=1.00
+[bundle] commits=273500 segments=273500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:26:04.691Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 119500, "segments_deleted": 1195} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=274000 segments=274000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 105900, "segments_deleted": 1059} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=274500 segments=274500 segments_per_commit=1.00
+[bundle] commits=275000 segments=275000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:26:14.691Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=275500 segments=275500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 112600, "segments_deleted": 1126} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=276000 segments=276000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 65100, "segments_deleted": 651} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=276500 segments=276500 segments_per_commit=1.00
+[bundle] commits=277000 segments=277000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:26:24.699Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 236800, "segments_deleted": 2368} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=277500 segments=277500 segments_per_commit=1.00
+[bundle] commits=278000 segments=278000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 206000, "segments_deleted": 2060} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=278500 segments=278500 segments_per_commit=1.00
+[bundle] commits=279000 segments=279000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:26:34.702Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=279500 segments=279500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 165100, "segments_deleted": 1651} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=280000 segments=280000 segments_per_commit=1.00
+[bundle] commits=280500 segments=280500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 151700, "segments_deleted": 1517} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=281000 segments=281000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:26:44.695Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=281500 segments=281500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 142500, "segments_deleted": 1425} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=282000 segments=282000 segments_per_commit=1.00
+[bundle] commits=282500 segments=282500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 154300, "segments_deleted": 1543} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=283000 segments=283000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:26:54.704Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=283500 segments=283500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 157100, "segments_deleted": 1571} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=284000 segments=284000 segments_per_commit=1.00
+[bundle] commits=284500 segments=284500 segments_per_commit=1.00
+[bundle] commits=285000 segments=285000 segments_per_commit=1.00
+[bundle] commits=285500 segments=285500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 101400, "segments_deleted": 1014} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=286000 segments=286000 segments_per_commit=1.00
+[bundle] commits=286500 segments=286500 segments_per_commit=1.00
+[bundle] commits=287000 segments=287000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:27:04.698Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=287500 segments=287500 segments_per_commit=1.00
+[bundle] commits=288000 segments=288000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 72700, "segments_deleted": 727} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=288500 segments=288500 segments_per_commit=1.00
+[bundle] commits=289000 segments=289000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 55600, "segments_deleted": 556} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=289500 segments=289500 segments_per_commit=1.00
+[bundle] commits=290000 segments=290000 segments_per_commit=1.00
+[bundle] commits=290500 segments=290500 segments_per_commit=1.00
+[bundle] commits=291000 segments=291000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:27:14.697Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=291500 segments=291500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 150500, "segments_deleted": 1505} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=292000 segments=292000 segments_per_commit=1.00
+[bundle] commits=292500 segments=292500 segments_per_commit=1.00
+[bundle] commits=293000 segments=293000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 40900, "segments_deleted": 409} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=293500 segments=293500 segments_per_commit=1.00
+[bundle] commits=294000 segments=294000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:27:24.700Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=294500 segments=294500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 65900, "segments_deleted": 659} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=295000 segments=295000 segments_per_commit=1.00
+[bundle] commits=295500 segments=295500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 98400, "segments_deleted": 984} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=296000 segments=296000 segments_per_commit=1.00
+[bundle] commits=296500 segments=296500 segments_per_commit=1.00
+[bundle] commits=297000 segments=297000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:27:34.700Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=297500 segments=297500 segments_per_commit=1.00
+[bundle] commits=298000 segments=298000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 83000, "segments_deleted": 830} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=298500 segments=298500 segments_per_commit=1.00
+[bundle] commits=299000 segments=299000 segments_per_commit=1.00
+[bundle] commits=299500 segments=299500 segments_per_commit=1.00
+[bundle] commits=300000 segments=300000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 7400, "segments_deleted": 74} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=300500 segments=300500 segments_per_commit=1.00
+[bundle] commits=301000 segments=301000 segments_per_commit=1.00
+[bundle] commits=301500 segments=301500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:27:44.703Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=302000 segments=302000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 47800, "segments_deleted": 478} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=302500 segments=302500 segments_per_commit=1.00
+[bundle] commits=303000 segments=303000 segments_per_commit=1.00
+[bundle] commits=303500 segments=303500 segments_per_commit=1.00
+[bundle] commits=304000 segments=304000 segments_per_commit=1.00
+[bundle] commits=304500 segments=304500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 1700, "segments_deleted": 17} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=305000 segments=305000 segments_per_commit=1.00
+[bundle] commits=305500 segments=305500 segments_per_commit=1.00
+[bundle] commits=306000 segments=306000 segments_per_commit=1.00
+[bundle] commits=306500 segments=306500 segments_per_commit=1.00
+[bundle] commits=307000 segments=307000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:27:54.702Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=307500 segments=307500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 79300, "segments_deleted": 793} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=308000 segments=308000 segments_per_commit=1.00
+[bundle] commits=308500 segments=308500 segments_per_commit=1.00
+[bundle] commits=309000 segments=309000 segments_per_commit=1.00
+[bundle] commits=309500 segments=309500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 181000, "segments_deleted": 1810} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=310000 segments=310000 segments_per_commit=1.00
+[bundle] commits=310500 segments=310500 segments_per_commit=1.00
+[bundle] commits=311000 segments=311000 segments_per_commit=1.00
+[bundle] commits=311500 segments=311500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:28:04.703Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 118400, "segments_deleted": 1184} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=312000 segments=312000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 46400, "segments_deleted": 464} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=312500 segments=312500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:28:14.712Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=313000 segments=313000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 105500, "segments_deleted": 1055} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+retention: cycle sweep={"queues": 1, "dedup_purged": 132300, "segments_deleted": 1323} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=313500 segments=313500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:28:24.707Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=314000 segments=314000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 238500, "segments_deleted": 2385} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=314500 segments=314500 segments_per_commit=1.00
+[bundle] commits=315000 segments=315000 segments_per_commit=1.00
+[bundle] commits=315500 segments=315500 segments_per_commit=1.00
+[bundle] commits=316000 segments=316000 segments_per_commit=1.00
+[bundle] commits=316500 segments=316500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 236900, "segments_deleted": 2369} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=317000 segments=317000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:28:34.712Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=317500 segments=317500 segments_per_commit=1.00
+[bundle] commits=318000 segments=318000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 193500, "segments_deleted": 1935} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=318500 segments=318500 segments_per_commit=1.00
+[bundle] commits=319000 segments=319000 segments_per_commit=1.00
+[bundle] commits=319500 segments=319500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 253100, "segments_deleted": 2531} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=320000 segments=320000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:28:44.709Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=320500 segments=320500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 211300, "segments_deleted": 2113} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=321000 segments=321000 segments_per_commit=1.00
+[bundle] commits=321500 segments=321500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:28:54.712Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 332600, "segments_deleted": 3326} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=322000 segments=322000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 180400, "segments_deleted": 1804} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=322500 segments=322500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:29:04.713Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 240300, "segments_deleted": 2403} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+retention: cycle sweep={"queues": 1, "dedup_purged": 299200, "segments_deleted": 2992} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=323000 segments=323000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:29:14.715Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 162500, "segments_deleted": 1625} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=323500 segments=323500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 249000, "segments_deleted": 2490} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=324000 segments=324000 segments_per_commit=1.00
+[bundle] commits=324500 segments=324500 segments_per_commit=1.00
+[bundle] commits=325000 segments=325000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 244700, "segments_deleted": 2447} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=325500 segments=325500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:29:24.719Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=326000 segments=326000 segments_per_commit=1.00
+[bundle] commits=326500 segments=326500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 224300, "segments_deleted": 2240} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=327000 segments=327000 segments_per_commit=1.00
+[bundle] commits=327500 segments=327500 segments_per_commit=1.00
+[bundle] commits=328000 segments=328000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:29:34.718Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues": 1, "dedup_purged": 313300, "segments_deleted": 3133} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=328500 segments=328500 segments_per_commit=1.00
+[bundle] commits=329000 segments=329000 segments_per_commit=1.00
+[bundle] commits=329500 segments=329500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 258900, "segments_deleted": 2589} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=330000 segments=330000 segments_per_commit=1.00
+[bundle] commits=330500 segments=330500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 263600, "segments_deleted": 2636} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=331000 segments=331000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:29:44.718Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=331500 segments=331500 segments_per_commit=1.00
+[bundle] commits=332000 segments=332000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 165600, "segments_deleted": 1656} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=332500 segments=332500 segments_per_commit=1.00
+[bundle] commits=333000 segments=333000 segments_per_commit=1.00
+[bundle] commits=333500 segments=333500 segments_per_commit=1.00
+[bundle] commits=334000 segments=334000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 325400, "segments_deleted": 3253} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=334500 segments=334500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:29:54.721Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=335000 segments=335000 segments_per_commit=1.00
+[bundle] commits=335500 segments=335500 segments_per_commit=1.00
+[bundle] commits=336000 segments=336000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 345700, "segments_deleted": 3457} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=336500 segments=336500 segments_per_commit=1.00
+[bundle] commits=337000 segments=337000 segments_per_commit=1.00
+[bundle] commits=337500 segments=337500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 259900, "segments_deleted": 2599} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=338000 segments=338000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:30:04.724Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=338500 segments=338500 segments_per_commit=1.00
+[bundle] commits=339000 segments=339000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 230400, "segments_deleted": 2304} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=339500 segments=339500 segments_per_commit=1.00
+[bundle] commits=340000 segments=340000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 179200, "segments_deleted": 1792} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=340500 segments=340500 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:30:14.724Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=341000 segments=341000 segments_per_commit=1.00
+[bundle] commits=341500 segments=341500 segments_per_commit=1.00
+[bundle] commits=342000 segments=342000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 260500, "segments_deleted": 2605} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=342500 segments=342500 segments_per_commit=1.00
+[bundle] commits=343000 segments=343000 segments_per_commit=1.00
+[bundle] commits=343500 segments=343500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 107700, "segments_deleted": 1076} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:30:24.732Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=344000 segments=344000 segments_per_commit=1.00
+[bundle] commits=344500 segments=344500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 205300, "segments_deleted": 2053} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=345000 segments=345000 segments_per_commit=1.00
+[bundle] commits=345500 segments=345500 segments_per_commit=1.00
+[bundle] commits=346000 segments=346000 segments_per_commit=1.00
+[bundle] commits=346500 segments=346500 segments_per_commit=1.00
+[bundle] commits=347000 segments=347000 segments_per_commit=1.00
+[bundle] commits=347500 segments=347500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 182600, "segments_deleted": 1826} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=348000 segments=348000 segments_per_commit=1.00
+[bundle] commits=348500 segments=348500 segments_per_commit=1.00
+[bundle] commits=349000 segments=349000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:30:34.726Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=349500 segments=349500 segments_per_commit=1.00
+[bundle] commits=350000 segments=350000 segments_per_commit=1.00
+[bundle] commits=350500 segments=350500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 174100, "segments_deleted": 1741} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=351000 segments=351000 segments_per_commit=1.00
+[bundle] commits=351500 segments=351500 segments_per_commit=1.00
+[bundle] commits=352000 segments=352000 segments_per_commit=1.00
+[bundle] commits=352500 segments=352500 segments_per_commit=1.00
+[bundle] commits=353000 segments=353000 segments_per_commit=1.00
+[bundle] commits=353500 segments=353500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 78300, "segments_deleted": 783} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=354000 segments=354000 segments_per_commit=1.00
+[bundle] commits=354500 segments=354500 segments_per_commit=1.00
+[bundle] commits=355000 segments=355000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:30:44.728Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=355500 segments=355500 segments_per_commit=1.00
+[bundle] commits=356000 segments=356000 segments_per_commit=1.00
+[bundle] commits=356500 segments=356500 segments_per_commit=1.00
+[bundle] commits=357000 segments=357000 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 91400, "segments_deleted": 914} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=357500 segments=357500 segments_per_commit=1.00
+[bundle] commits=358000 segments=358000 segments_per_commit=1.00
+[bundle] commits=358500 segments=358500 segments_per_commit=1.00
+retention: cycle sweep={"queues": 1, "dedup_purged": 108500, "segments_deleted": 1085} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+[bundle] commits=359000 segments=359000 segments_per_commit=1.00
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T08:30:54.729Z", "queuesUpdated": 1, "segPartitions": 100}
+[bundle] commits=359500 segments=359500 segments_per_commit=1.00

@@ -1,0 +1,1927 @@
+1784702721,CPU,-,1,       SELECT '1784702721'  c.relname   
+1784702728,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702728,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702730,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702730,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702730,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702730,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702731,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702731,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702731,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702731,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702731,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702732,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702732,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702732,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702732,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702732,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702733,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702733,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702733,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702733,LWLock,BufferContent,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702733,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702734,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702734,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702734,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702734,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702735,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702735,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702735,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702735,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702735,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702735,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784702736,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702736,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702736,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702736,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702737,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702737,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702737,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702737,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702737,IO,DataFileExtend,1,SELECT (queen.seg_push_segments_multi_v1
+1784702737,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702738,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702738,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702738,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702738,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702738,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702739,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702739,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702739,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702741,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702741,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702741,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702741,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702742,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702742,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702742,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702743,Client,ClientRead,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702743,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702743,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702743,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702743,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702744,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702744,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702744,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702744,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702744,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702745,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702745,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702745,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702745,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702746,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702746,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702746,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702746,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702747,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702747,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702747,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702747,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702748,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702748,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702748,CPU,-,5,SELECT (queen.seg_push_segments_multi_v1
+1784702748,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702748,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702749,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702749,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702749,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702749,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702749,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702750,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702750,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702750,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702750,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702752,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702752,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702752,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702752,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702753,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702753,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702753,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702753,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702753,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702754,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702754,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702754,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702754,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702754,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702754,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702755,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702755,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702755,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702755,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702755,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702756,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702756,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702756,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702756,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702756,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702757,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702757,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702757,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702757,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702758,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702758,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702758,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702758,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702758,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702759,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702759,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702759,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702759,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702759,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702760,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702760,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702760,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702760,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702762,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702762,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702762,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702762,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702762,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702763,Client,ClientRead,6,SELECT (queen.seg_push_segments_multi_v1
+1784702763,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702763,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702763,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702763,LWLock,BufferContent,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702763,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702764,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702764,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702764,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702764,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702764,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702765,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702765,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702765,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702765,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702766,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702766,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702766,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702766,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702766,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702767,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702767,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702767,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702767,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702768,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702768,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702768,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702768,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702768,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702768,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702769,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702769,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702769,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702769,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702769,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702771,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702771,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702771,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702771,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702771,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702772,CPU,-,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702773,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702773,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702773,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702773,Client,ClientRead,2,SELECT (queen.seg_push_segments_multi_v1
+1784702773,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702773,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702774,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702774,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702774,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702774,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702775,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702775,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702775,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702775,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702775,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702777,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702777,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702777,IO,WALInitSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702779,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702779,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702779,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702779,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784702779,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702779,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702779,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702779,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784702781,CPU,-,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702781,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702781,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702781,LWLock,BufferContent,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702781,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702781,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784702781,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702782,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702782,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702782,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702782,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702782,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702782,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702783,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702783,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702783,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702783,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702783,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784702783,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702784,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702784,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702784,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702784,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702785,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702785,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702785,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702787,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702787,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702787,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702787,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702787,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702788,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702788,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702788,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702788,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702788,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702789,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702789,LWLock,WALWrite,9,SELECT (t.meta)::text  t.blobs FROM quee
+1784702789,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702789,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702790,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702790,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702790,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702790,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702790,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702791,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784702791,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702791,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702791,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702791,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702793,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702793,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702793,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702793,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702794,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784702794,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702794,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702794,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702794,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702795,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702795,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702795,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702795,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702796,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702796,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702796,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702796,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702796,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702797,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784702797,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702797,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702797,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702797,IO,DataFileExtend,1,SELECT (queen.seg_push_segments_multi_v1
+1784702797,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702799,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702799,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702799,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702799,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702799,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702799,LWLock,BufferContent,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702800,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702800,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702800,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702800,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702801,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702801,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702801,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702801,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702801,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702802,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702802,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702802,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702802,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702804,CPU,-,1,       SELECT '1784702804'  c.relname   
+1784702804,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702804,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702804,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702804,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702804,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702805,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702805,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702805,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702805,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702806,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702806,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702807,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702807,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702807,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702807,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702809,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702809,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702809,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702810,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702810,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702810,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702811,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702811,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702811,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702811,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702811,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702812,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702812,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702812,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702812,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702813,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702813,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702813,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702813,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702814,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702814,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702814,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702814,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702814,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702816,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702816,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702816,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702817,IPC,XactGroupUpdate,7,SELECT (queen.seg_push_segments_multi_v1
+1784702817,IPC,XactGroupUpdate,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702817,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702817,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702818,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702818,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702818,IO,WALInitSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702819,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702819,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702819,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702819,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702820,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702820,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702820,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702820,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702822,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702822,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702822,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702822,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702822,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702822,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702823,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702823,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702823,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702823,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702824,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702824,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702824,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702824,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702824,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702825,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702825,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702825,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702826,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702826,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702826,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702826,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702826,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702827,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702827,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702827,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702827,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702828,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702828,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702830,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702830,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702831,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702831,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702831,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702831,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702831,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702832,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702832,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702832,IO,WALInitWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702833,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702833,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702833,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702833,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702833,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784702833,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702833,LWLock,LockManager,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702835,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784702835,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702835,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702835,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702835,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702836,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702836,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702836,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702836,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702836,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702837,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702837,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702837,IO,WALInitSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702838,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702838,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702838,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702838,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702838,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702839,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702839,Client,ClientRead,3,SELECT (queen.seg_push_segments_multi_v1
+1784702839,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702839,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702839,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702839,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702840,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702840,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702840,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702840,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702840,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702842,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702842,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702842,IO,WALInitSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702843,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702843,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702843,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702843,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702843,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702843,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784702844,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702844,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702844,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702845,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702845,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702845,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702845,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702845,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702846,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702846,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702846,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702846,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702848,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702848,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702848,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702848,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702848,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702849,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702849,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702849,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702849,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702850,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702850,Client,ClientRead,2,SELECT (queen.seg_push_segments_multi_v1
+1784702850,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702850,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702850,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702850,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702851,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702851,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702851,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702851,Lock,extend,1,SELECT (queen.seg_push_segments_multi_v1
+1784702851,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702852,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702852,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702852,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702852,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702854,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702854,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702854,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702855,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702855,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702855,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702856,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702856,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702856,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702856,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702856,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702857,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702857,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702857,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702857,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702859,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702859,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702859,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702859,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702860,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702860,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702860,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702860,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702861,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702861,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702861,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702861,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702861,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702862,LWLock,WALWrite,16,SELECT (queen.seg_push_segments_multi_v1
+1784702862,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702862,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702862,Client,ClientRead,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702863,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702863,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702863,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702863,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702863,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702865,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702865,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702865,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702865,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702865,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702865,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702866,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702866,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702866,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702866,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702867,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702867,CPU,-,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702867,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702867,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702867,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702868,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702868,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702868,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702869,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702869,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702869,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702869,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702869,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702871,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702871,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702871,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702871,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702871,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702872,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702872,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702872,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702872,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702872,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702873,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784702873,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702875,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784702875,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702875,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702875,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702875,LWLock,BufferContent,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702876,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702876,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702876,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702877,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702877,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702877,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702877,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702877,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702879,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702879,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702879,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702880,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702880,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702880,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702883,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702883,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702883,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702883,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702883,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702885,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702885,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702885,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702885,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702885,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702886,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784702886,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702886,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702886,Client,ClientRead,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702886,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702886,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702888,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702888,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702888,CPU,-,1,       SELECT '1784702888'  c.relname   
+1784702888,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702888,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702888,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702889,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702889,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702889,CPU,-,1,DELETE FROM queen.system_metrics WHERE c
+1784702889,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702889,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784702889,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702891,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702891,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702891,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702891,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702892,CPU,-,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702892,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702892,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702892,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702893,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702893,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702893,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702895,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702895,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702895,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702895,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702896,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702896,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702896,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702896,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702896,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702896,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702897,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702897,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702897,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702899,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702899,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702899,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702900,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702900,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702900,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702900,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702902,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702902,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702902,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702902,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702902,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702903,CPU,-,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702903,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702903,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702903,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702903,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702904,CPU,-,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702904,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702904,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702904,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702905,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702905,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702905,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702905,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702905,CPU,-,1,autovacuum: VACUUM pg_toast.pg_toast_209
+1784702905,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702907,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702907,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702907,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702907,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702908,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702908,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702908,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702908,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702909,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702909,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702909,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702909,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702910,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702910,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702910,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702910,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702910,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702910,LWLock,WALInsert,1,SELECT (queen.seg_push_segments_multi_v1
+1784702912,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784702912,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702912,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702912,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702912,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702913,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702913,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702913,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702913,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702914,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702914,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702914,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702914,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702914,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702914,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702915,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702915,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702915,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702915,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702917,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702917,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702917,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702917,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702917,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702918,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702918,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702918,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702918,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702919,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702919,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702919,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702919,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702919,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702919,LWLock,BufferContent,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702920,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702920,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702920,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702920,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702920,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702922,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702922,CPU,-,5,SELECT (queen.seg_push_segments_multi_v1
+1784702922,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702922,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702922,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702922,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702923,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702923,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702923,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702923,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702923,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702924,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702924,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702924,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702924,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702926,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702926,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702926,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702926,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702927,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784702927,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702927,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702927,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702927,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702928,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702928,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702928,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702928,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702928,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702930,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702930,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784702930,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702930,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702930,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702931,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702931,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702931,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702931,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702932,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702932,CPU,-,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702932,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702932,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702934,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702934,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702934,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702935,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784702935,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702935,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702935,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702935,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702936,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702936,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702936,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702936,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702938,LWLock,WALWrite,10,SELECT (t.meta)::text  t.blobs FROM quee
+1784702938,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702938,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702938,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702939,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702940,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702940,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702940,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702940,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702940,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702940,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702943,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702943,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702943,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702943,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702943,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702945,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702945,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702945,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702945,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702945,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702947,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702947,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702947,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702947,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702947,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702949,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702949,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702949,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702949,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702949,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702950,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702950,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702950,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702951,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702951,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702951,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702953,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702953,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702953,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702953,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702954,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702954,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702954,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702955,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784702955,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702955,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702955,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702955,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702957,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784702957,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702957,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702957,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702957,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702958,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784702958,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702958,IO,WALInitWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702959,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702959,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702959,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702959,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784702959,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702961,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784702961,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702961,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702961,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702961,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702961,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702962,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702962,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702962,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702962,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702963,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784702963,LWLock,WALWrite,10,SELECT (t.meta)::text  t.blobs FROM quee
+1784702963,Lock,extend,2,SELECT (queen.seg_push_segments_multi_v1
+1784702963,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702963,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702963,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702964,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784702964,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702964,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702964,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702964,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784702966,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784702966,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702966,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702966,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702967,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702967,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702967,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702968,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784702968,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702968,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702968,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702968,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784702970,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702970,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702970,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702970,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702972,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702972,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702972,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702972,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702973,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702973,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702973,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702973,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702975,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702975,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702975,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702975,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702977,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784702977,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702977,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702978,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784702978,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702978,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702978,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702978,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702979,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784702979,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702979,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702979,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702980,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702980,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702980,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702980,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702980,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702982,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784702982,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702982,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702982,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702982,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702983,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702983,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702983,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784702983,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702985,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702985,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702985,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702985,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702986,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702986,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784702986,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702987,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702987,LWLock,WALWrite,9,SELECT (t.meta)::text  t.blobs FROM quee
+1784702987,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702989,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702989,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702989,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702989,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702990,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702990,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784702990,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784702990,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702990,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702991,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702991,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784702991,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702991,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702993,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784702993,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784702993,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702994,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784702994,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702994,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784702994,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702994,IO,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784702994,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784702995,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784702995,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702995,IO,WALInitSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702996,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784702996,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784702996,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784702996,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702996,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784702998,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784702998,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784702998,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784702998,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784702999,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784702999,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784702999,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703001,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703001,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703001,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703001,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703004,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703004,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703004,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703004,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703005,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703005,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703005,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703005,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703006,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703006,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703006,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703006,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703006,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703008,CPU,-,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703008,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703008,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703009,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703009,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703009,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703010,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703010,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703010,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703010,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703012,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703012,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703012,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703012,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703013,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703013,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703013,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703013,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703014,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703014,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703016,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703016,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703017,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703017,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703017,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703017,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703019,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784703019,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703019,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703019,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703020,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703020,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703020,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703020,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703020,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703020,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784703022,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703022,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703022,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703022,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784703023,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703023,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703023,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703023,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784703024,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703024,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703024,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703024,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703024,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784703025,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703025,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703025,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703025,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703025,CPU,-,1,autovacuum: VACUUM pg_toast.pg_toast_209
+1784703025,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703027,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784703027,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703027,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703027,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703027,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703028,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703028,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703028,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703028,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703028,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703029,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703029,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703029,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703029,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703029,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703031,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703031,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703031,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703031,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703032,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703032,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784703032,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703032,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703032,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703033,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703033,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703033,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703033,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703033,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703034,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703034,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703034,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703034,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703034,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703034,Lock,transactionid,1,SELECT (queen.seg_push_segments_multi_v1
+1784703036,LWLock,WALWrite,10,SELECT (t.meta)::text  t.blobs FROM quee
+1784703036,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703036,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703036,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703037,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703037,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703037,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703037,LWLock,BufferMapping,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703037,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703037,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703038,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703038,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703038,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703038,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703038,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703040,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784703040,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703040,Lock,transactionid,2,SELECT (queen.seg_push_segments_multi_v1
+1784703040,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703040,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784703040,Lock,transactionid,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703041,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784703041,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703041,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703043,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703043,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703043,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703043,Lock,transactionid,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703043,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703044,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703044,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703044,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703044,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703045,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703045,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703045,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703047,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703047,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703047,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703047,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703049,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703049,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703049,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703049,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703050,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703050,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703050,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703050,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703050,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703052,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703052,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703052,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703052,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703054,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703054,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703054,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703054,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703055,Lock,transactionid,8,SELECT (queen.seg_push_segments_multi_v1
+1784703055,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784703055,LWLock,LockManager,2,SELECT (queen.seg_push_segments_multi_v1
+1784703055,CPU,-,1,COMMIT
+1784703057,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703057,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703057,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703057,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703057,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703058,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703058,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703058,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703061,Lock,transactionid,13,SELECT (queen.seg_push_segments_multi_v1
+1784703061,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703061,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703061,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703061,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703061,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703061,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703064,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703064,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703064,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703064,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703066,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703066,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703066,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703066,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703066,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703066,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703067,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703067,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703067,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703067,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703067,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703068,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703068,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703068,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703068,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703070,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703070,CPU,-,5,SELECT (queen.seg_push_segments_multi_v1
+1784703070,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703072,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703072,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703072,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703072,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703073,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703073,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703073,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703073,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703073,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703074,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703074,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703074,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703074,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703074,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703076,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703076,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703076,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703076,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703079,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703079,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703079,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703079,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703079,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703080,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703080,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703080,Timeout,VacuumTruncate,1,autovacuum: VACUUM ANALYZE queen.seg_par
+1784703082,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703082,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703082,CPU,-,1,autovacuum: VACUUM pg_toast.pg_toast_209
+1784703082,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703082,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703082,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703084,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703084,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703084,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703084,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703085,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703085,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703085,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703085,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703087,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703087,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703087,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703087,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703088,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784703088,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703088,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703089,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703089,Lock,transactionid,2,SELECT (queen.seg_push_segments_multi_v1
+1784703089,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784703089,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703089,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703089,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703091,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703091,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703091,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703091,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703092,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703092,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703092,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703092,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703094,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703094,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703094,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703094,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703095,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703095,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703095,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703097,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703097,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703097,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703097,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703098,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703098,CPU,-,1,       SELECT '1784703098'  t.relname  s
+1784703098,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703100,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703100,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703100,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703100,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703101,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703101,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703101,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703103,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703103,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703103,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703103,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703103,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703104,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703104,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703104,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703104,Lock,transactionid,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703106,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703106,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703106,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703106,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703107,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703107,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703107,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703107,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703107,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703108,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784703108,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703108,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703110,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703110,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703112,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703112,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703112,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703112,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703113,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703113,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703113,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703113,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703113,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703114,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703114,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703114,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703114,Client,ClientRead,2,SELECT (queen.seg_push_segments_multi_v1
+1784703114,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703114,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703116,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703116,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703116,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703116,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703116,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703117,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703117,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703117,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703117,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703118,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703118,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703118,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703118,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703118,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703119,Lock,transactionid,7,SELECT (queen.seg_push_segments_multi_v1
+1784703119,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703119,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703119,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703121,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703121,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703121,CPU,-,1,       SELECT '1784703121'  c.relname   
+1784703121,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703121,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703123,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703123,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703123,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703123,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703124,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703124,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703124,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703124,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703126,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703126,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703126,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703127,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703127,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703127,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703127,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703128,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703128,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703128,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703128,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703130,Lock,transactionid,15,SELECT (queen.seg_push_segments_multi_v1
+1784703130,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703130,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703131,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703131,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703131,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703131,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703132,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784703132,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703132,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703134,LWLock,WALWrite,15,SELECT (queen.seg_push_segments_multi_v1
+1784703134,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703134,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703135,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784703135,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703135,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703135,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703135,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703136,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703136,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703136,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703136,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703138,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703138,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703138,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703138,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703139,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703139,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703139,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703139,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703140,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703140,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703140,CPU,-,1,autovacuum: VACUUM ANALYZE queen.partiti
+1784703140,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703140,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703141,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703141,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703141,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703141,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703141,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703143,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703143,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703143,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703143,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703143,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703144,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703144,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703144,Lock,transactionid,3,SELECT (queen.seg_push_segments_multi_v1
+1784703144,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703144,Client,ClientRead,2,SELECT (queen.seg_push_segments_multi_v1
+1784703144,Lock,transactionid,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703144,IO,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703146,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703146,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703146,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703146,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703148,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703148,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703148,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703148,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703149,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703149,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703149,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784703149,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703149,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703149,IO,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703149,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703151,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703151,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703151,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703151,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703151,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703152,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703152,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703152,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703153,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703153,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703153,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703153,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703155,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703155,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703155,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703155,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703155,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703157,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703157,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703157,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703157,Client,ClientRead,2,SELECT (queen.seg_push_segments_multi_v1
+1784703157,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703157,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703158,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703158,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703158,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703158,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703158,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703159,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703159,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703159,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703159,LWLock,LockManager,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703159,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703159,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703161,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703161,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703161,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703161,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703162,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703162,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703162,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703162,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703163,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703163,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703163,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703163,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703165,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703165,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703165,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703165,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703166,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703166,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703166,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703166,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703168,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703168,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703168,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703168,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703168,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703169,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703169,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703169,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703169,LWLock,WALWrite,1,COMMIT
+1784703169,Lock,transactionid,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703169,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703169,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703171,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703171,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703171,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703171,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703172,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703172,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703172,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703173,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703173,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703174,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703174,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703174,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703174,Lock,transactionid,1,SELECT (queen.seg_push_segments_multi_v1
+1784703174,Lock,transactionid,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703176,CPU,-,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703176,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703176,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703176,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703177,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703177,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703177,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703177,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703178,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703178,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703178,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703178,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703178,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703179,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703179,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703179,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784703179,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703179,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703181,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703181,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703181,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703181,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703181,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703182,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703182,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703182,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703182,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703182,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703184,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703184,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703184,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703185,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703185,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703185,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703185,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703185,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703186,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703186,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703186,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703186,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703186,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703186,LWLock,BufferContent,1,SELECT (queen.seg_push_segments_multi_v1
+1784703188,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703188,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703188,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703188,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703189,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703189,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703189,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703189,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703190,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703190,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703190,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703190,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703191,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703191,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703191,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703193,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703193,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703193,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703193,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703194,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703194,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703194,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703194,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703194,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703195,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703195,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703195,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703195,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703195,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703196,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784703196,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703196,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703196,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703198,LWLock,WALWrite,16,SELECT (queen.seg_push_segments_multi_v1
+1784703198,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703198,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703198,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703199,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703199,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703199,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703199,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703200,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703200,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703200,CPU,-,1,autovacuum: VACUUM pg_toast.pg_toast_209
+1784703200,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703200,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703202,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703202,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703202,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703202,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703203,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703203,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703203,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703204,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703204,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703204,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703204,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703205,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703205,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703205,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703207,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703207,CPU,-,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703207,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703207,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703207,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703208,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703208,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703208,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703208,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703208,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703208,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703209,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703209,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703209,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703209,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703210,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703210,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703210,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703210,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703210,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703212,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703212,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703212,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703212,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703213,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703213,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703213,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703213,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703214,Lock,transactionid,8,SELECT (queen.seg_push_segments_multi_v1
+1784703214,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703214,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703214,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703216,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703216,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703216,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703216,IO,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703217,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784703217,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703217,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703217,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703217,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703219,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703219,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703219,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703219,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703219,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703220,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703220,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703220,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703220,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703220,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703221,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703221,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703221,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703221,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703221,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703223,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703223,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703223,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703223,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703224,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703224,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703224,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703224,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703224,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703225,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703225,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703225,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703225,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703226,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784703226,CPU,-,5,SELECT (queen.seg_push_segments_multi_v1
+1784703226,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703226,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703228,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703228,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703228,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703228,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703228,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703229,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703229,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703229,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703229,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703229,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703230,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703230,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703230,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703230,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703230,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703237,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703238,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703238,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703238,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703238,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703238,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703240,CPU,-,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703240,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703240,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703240,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703241,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703241,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703241,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703241,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703242,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703242,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703242,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703242,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703242,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703242,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703244,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703244,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703244,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703244,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703244,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703245,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703245,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703245,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703248,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703248,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703248,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703248,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703248,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703249,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703249,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703249,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703249,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703249,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703249,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703250,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703250,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703250,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703250,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703250,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703252,CPU,-,7,SELECT (queen.seg_push_segments_multi_v1
+1784703252,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703252,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703252,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703252,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703253,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703253,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703253,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703253,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703253,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703254,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703254,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703254,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703254,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703254,Lock,transactionid,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703254,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703254,CPU,-,1,SELECT (queen.seg_refresh_all_stats_v1()
+1784703256,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784703256,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703256,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703256,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703257,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703257,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703257,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703257,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703257,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703258,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703258,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703258,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703258,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703259,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703259,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703259,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703259,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703261,CPU,-,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703261,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703261,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703261,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703261,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703262,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703262,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703262,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703262,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703262,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703263,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703263,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703263,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703263,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703263,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703264,Lock,transactionid,8,SELECT (queen.seg_push_segments_multi_v1
+1784703264,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784703264,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703264,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703264,IO,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703264,Lock,transactionid,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703266,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703266,CPU,-,1,autovacuum: VACUUM pg_toast.pg_toast_209
+1784703266,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703267,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703267,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703267,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703267,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703267,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703268,LWLock,WALWrite,11,SELECT (queen.seg_push_segments_multi_v1
+1784703268,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703268,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703268,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703270,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703270,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703270,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703270,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703270,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703271,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703271,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703271,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703271,Lock,transactionid,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703272,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784703272,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703272,CPU,-,6,SELECT (queen.seg_push_segments_multi_v1
+1784703272,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703272,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703274,LWLock,WALWrite,13,SELECT (queen.seg_push_segments_multi_v1
+1784703274,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703274,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703274,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703275,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703275,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703275,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703275,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703275,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703276,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703276,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703276,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703276,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703276,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703277,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703277,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703277,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703277,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703279,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703279,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703279,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703279,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703279,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703280,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703280,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703280,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703280,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703280,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703281,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703281,LWLock,WALWrite,6,SELECT (t.meta)::text  t.blobs FROM quee
+1784703281,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703281,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703283,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703283,CPU,-,5,SELECT (queen.seg_push_segments_multi_v1
+1784703283,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703283,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703283,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703283,LWLock,ProcArray,1,SELECT (queen.seg_push_segments_multi_v1
+1784703284,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703284,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703284,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703284,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703285,LWLock,WALWrite,12,SELECT (queen.seg_push_segments_multi_v1
+1784703285,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703285,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703287,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703287,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703287,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703287,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703288,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703288,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703288,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703288,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703288,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703289,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703289,LWLock,WALWrite,2,SELECT (queen.seg_push_segments_multi_v1
+1784703289,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703289,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703289,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703290,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703290,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703290,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703292,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703292,LWLock,WALWrite,4,SELECT (queen.seg_push_segments_multi_v1
+1784703292,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703292,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703292,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703293,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703293,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703293,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703293,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703293,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703294,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703294,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703294,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703294,LWLock,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703295,LWLock,WALWrite,7,SELECT (queen.seg_push_segments_multi_v1
+1784703295,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703295,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703297,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703297,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703297,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703297,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703298,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703298,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703298,Client,ClientRead,2,SELECT (queen.seg_push_segments_multi_v1
+1784703298,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703298,Client,ClientRead,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703298,IO,WALWrite,1,SELECT (queen.seg_push_segments_multi_v1
+1784703298,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703299,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703299,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703299,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703299,Lock,transactionid,1,SELECT (queen.seg_push_segments_multi_v1
+1784703301,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703301,CPU,-,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703301,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703301,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703301,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703302,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703302,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703302,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703302,IO,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703303,LWLock,WALWrite,8,SELECT (t.meta)::text  t.blobs FROM quee
+1784703303,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703303,CPU,-,3,SELECT (queen.seg_push_segments_multi_v1
+1784703303,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703304,Lock,transactionid,15,SELECT (queen.seg_push_segments_multi_v1
+1784703304,LWLock,WALWrite,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703304,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703304,CPU,-,1,SELECT (queen.seg_retention_sweep_v1()):
+1784703304,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703306,LWLock,WALWrite,10,SELECT (queen.seg_push_segments_multi_v1
+1784703306,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703306,CPU,-,2,SELECT (queen.seg_push_segments_multi_v1
+1784703306,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703306,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703308,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703308,CPU,-,4,SELECT (queen.seg_push_segments_multi_v1
+1784703308,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703308,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703308,LWLock,WALWrite,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703309,LWLock,WALWrite,8,SELECT (queen.seg_push_segments_multi_v1
+1784703309,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703309,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703311,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703311,CPU,-,5,SELECT (queen.seg_push_segments_multi_v1
+1784703311,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703311,CPU,-,4,SELECT (t.meta)::text  t.blobs FROM quee
+1784703311,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703312,LWLock,WALWrite,14,SELECT (queen.seg_push_segments_multi_v1
+1784703312,LWLock,WALWrite,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703312,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703312,Client,ClientRead,1,SELECT (queen.seg_push_segments_multi_v1
+1784703312,Client,ClientRead,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703312,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703313,LWLock,WALWrite,6,SELECT (queen.seg_push_segments_multi_v1
+1784703313,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703313,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703313,CPU,-,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703313,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703315,LWLock,WALWrite,3,SELECT (queen.seg_push_segments_multi_v1
+1784703315,LWLock,WALWrite,3,SELECT (t.meta)::text  t.blobs FROM quee
+1784703315,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703315,CPU,-,1,SELECT (queen.seg_push_segments_multi_v1
+1784703315,IO,WALSync,1,SELECT (t.meta)::text  t.blobs FROM quee
+1784703316,LWLock,WALWrite,5,SELECT (queen.seg_push_segments_multi_v1
+1784703316,LWLock,WALWrite,5,SELECT (t.meta)::text  t.blobs FROM quee
+1784703316,CPU,-,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703316,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1
+1784703317,LWLock,WALWrite,9,SELECT (queen.seg_push_segments_multi_v1
+1784703317,CPU,-,7,SELECT (t.meta)::text  t.blobs FROM quee
+1784703317,LWLock,WALWrite,2,SELECT (t.meta)::text  t.blobs FROM quee
+1784703317,IO,WALSync,1,SELECT (queen.seg_push_segments_multi_v1

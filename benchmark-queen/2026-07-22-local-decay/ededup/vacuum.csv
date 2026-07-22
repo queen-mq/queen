@@ -1,0 +1,15 @@
+1784708469,queen.seg_partitions,truncating heap,246,246
+1784708534,queen.seg_dedup,scanning heap,27718,149085
+1784708589,queen.seg_partitions,truncating heap,246,246
+1784708653,queen.seg_partitions,truncating heap,246,246
+1784708717,queen.seg_dedup,vacuuming indexes,149555,149555
+1784708772,queen.seg_partitions,truncating heap,246,246
+1784708838,queen.seg_segments,truncating heap,1820,1820
+1784708849,pg_toast.pg_toast_2939394,truncating heap,58414,58414
+1784708860,pg_toast.pg_toast_2939394,truncating heap,58414,58414
+1784708891,queen.seg_partitions,truncating heap,246,246
+1784708902,queen.seg_dedup,vacuuming indexes,149555,149555
+1784708913,pg_toast.pg_toast_2939394,truncating heap,45760,45760
+1784708958,queen.seg_segments,truncating heap,1820,1820
+1784709012,queen.seg_partitions,truncating heap,246,246
+1784709023,queen.seg_dedup,vacuuming indexes,143110,143110

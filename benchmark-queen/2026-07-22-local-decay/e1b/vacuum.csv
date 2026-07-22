@@ -1,0 +1,17 @@
+1784703913,queen.partition_consumers,truncating heap,319,319
+1784704024,queen.seg_partitions,truncating heap,352,352
+1784704201,queen.seg_partitions,truncating heap,414,414
+1784704268,pg_toast.pg_toast_16973,scanning heap,62493,92752
+1784704324,queen.seg_partitions,truncating heap,368,368
+1784704391,queen.partition_consumers,truncating heap,743,743
+1784704447,queen.seg_segments,truncating heap,2863,2863
+1784704458,pg_toast.pg_toast_16973,vacuuming indexes,92752,92752
+1784704503,queen.seg_partitions,truncating heap,368,368
+1784704514,queen.partition_consumers,truncating heap,743,743
+1784704570,queen.seg_segments,truncating heap,2863,2863
+1784704626,queen.seg_segments,truncating heap,2863,2863
+1784704683,queen.seg_partitions,truncating heap,368,368
+1784704694,queen.partition_consumers,truncating heap,584,584
+1784704750,queen.seg_segments,truncating heap,2863,2863
+1784704805,pg_toast.pg_toast_16973,scanning heap,75470,79470
+1784705128,queen.seg_partitions,truncating heap,509,509

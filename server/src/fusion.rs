@@ -114,6 +114,12 @@ struct FlushCtx {
     metrics: Arc<Metrics>,
     zstd_level: i32,
     stmt_timeout: Duration,
+    // QUEEN_V2_PUSH_MULTI=2 switches the bundle flush to
+    // queen.seg_push_segments_multi_v2 (typed parallel arrays: no jsonb parse of
+    // the metas on the PG side, no per-segment savepoint when dedup is off, no
+    // steady-state provisioning probes). Same result contract as v1. Default 1
+    // (v1) until the A/B campaign promotes it.
+    push_multi_v2: bool,
 }
 
 impl Fusion {
@@ -156,6 +162,11 @@ impl Fusion {
         // shard. Not a latency floor for the common path — fire-on-idle dispatches
         // on arrival and completions re-dispatch immediately.
         let hold_ms = hold_ms.max(1);
+        // Bundle-flush SQL entry point selector — see FlushCtx.push_multi_v2.
+        let push_multi_v2 = std::env::var("QUEEN_V2_PUSH_MULTI")
+            .ok()
+            .map(|v| v.trim() == "2")
+            .unwrap_or(false);
         // fusion_frames (QUEEN_V2_FUSION_FRAMES) is retained for API/env compat but
         // is no longer a flush trigger: segment size is now emergent. At low load
         // fire-on-idle flushes one push at a time (segment≈1); under load the next
@@ -172,6 +183,7 @@ impl Fusion {
                 metrics: metrics.clone(),
                 zstd_level,
                 stmt_timeout,
+                push_multi_v2,
             });
             tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max));
         }
@@ -438,6 +450,26 @@ async fn push_segments_multi(
     Ok(row.get(0))
 }
 
+// v2 entry point (QUEEN_V2_PUSH_MULTI=2): typed parallel arrays instead of one
+// jsonb payload. Same per-segment result contract as v1 (input-order array of
+// {"status":"queued",...} / {"status":"duplicate","dups":[...]}), so the demux
+// (parse_multi_outcome) is shared. metas stay per-segment JSON text; the SP only
+// casts them to jsonb for segments whose queue has dedup enabled.
+async fn push_segments_multi_v2(
+    client: &deadpool_postgres::Client,
+    queues: &[String],
+    partitions: &[String],
+    msg_counts: &[i32],
+    metas: &[String],
+    blobs: Vec<Vec<u8>>,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = "SELECT (queen.seg_push_segments_multi_v2($1, $2, $3, $4, $5))::text";
+    let row = client
+        .query_one(stmt, &[&queues, &partitions, &msg_counts, &metas, &blobs])
+        .await?;
+    Ok(row.get(0))
+}
+
 // Flush ONE bundle of N disjoint partitions as a single committed transaction.
 // The push Vegas permit (acquired by the shard loop so availability can gate
 // fire-on-idle) is held until the DB op returns. On completion the bundle's
@@ -492,34 +524,68 @@ fn spawn_bundle_flush(
                 break;
             }
 
-            // Build the index-aligned {segments JSON, blobs} for the participants.
-            let mut segs = String::with_capacity(participants.len() * 160);
-            segs.push('[');
+            // Build the index-aligned bundle for the participants. v1 wants one
+            // {segments JSON, blobs} pair; v2 wants typed parallel arrays (queue
+            // and partition names travel RAW as text[], no JSON escaping).
+            let mut segs = String::new();
             let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(participants.len());
-            for (pos, &gi) in participants.iter().enumerate() {
-                if pos > 0 {
-                    segs.push(',');
+            let mut v2_queues: Vec<String> = Vec::new();
+            let mut v2_partitions: Vec<String> = Vec::new();
+            let mut v2_counts: Vec<i32> = Vec::new();
+            let mut v2_metas: Vec<String> = Vec::new();
+            if ctx.push_multi_v2 {
+                v2_queues.reserve(participants.len());
+                v2_partitions.reserve(participants.len());
+                v2_counts.reserve(participants.len());
+                v2_metas.reserve(participants.len());
+                for &gi in participants.iter() {
+                    let g = &gs[gi];
+                    let (metas, blob) = build_metas_and_blob(&g.group, &g.pending, ctx.zstd_level);
+                    v2_queues.push(g.group.queue.clone());
+                    v2_partitions.push(g.group.partition.clone());
+                    v2_counts.push(g.pending.len() as i32);
+                    v2_metas.push(metas);
+                    blobs.push(blob);
                 }
-                let g = &gs[gi];
-                let (metas, blob) = build_metas_and_blob(&g.group, &g.pending, ctx.zstd_level);
-                segs.push_str("{\"queue\":\"");
-                json_escape_into(&mut segs, &g.group.queue);
-                segs.push_str("\",\"partition\":\"");
-                json_escape_into(&mut segs, &g.group.partition);
-                segs.push_str("\",\"metas\":");
-                segs.push_str(&metas);
-                segs.push_str(",\"msg_count\":");
-                segs.push_str(&g.pending.len().to_string());
-                segs.push('}');
-                blobs.push(blob);
+            } else {
+                segs.reserve(participants.len() * 160);
+                segs.push('[');
+                for (pos, &gi) in participants.iter().enumerate() {
+                    if pos > 0 {
+                        segs.push(',');
+                    }
+                    let g = &gs[gi];
+                    let (metas, blob) = build_metas_and_blob(&g.group, &g.pending, ctx.zstd_level);
+                    segs.push_str("{\"queue\":\"");
+                    json_escape_into(&mut segs, &g.group.queue);
+                    segs.push_str("\",\"partition\":\"");
+                    json_escape_into(&mut segs, &g.group.partition);
+                    segs.push_str("\",\"metas\":");
+                    segs.push_str(&metas);
+                    segs.push_str(",\"msg_count\":");
+                    segs.push_str(&g.pending.len().to_string());
+                    segs.push('}');
+                    blobs.push(blob);
+                }
+                segs.push(']');
             }
-            segs.push(']');
 
             let outcome = match ctx.pool.get().await {
-                Ok(client) => match tokio::time::timeout(
-                    ctx.stmt_timeout,
-                    push_segments_multi(&client, &segs, blobs),
-                )
+                Ok(client) => match tokio::time::timeout(ctx.stmt_timeout, async {
+                    if ctx.push_multi_v2 {
+                        push_segments_multi_v2(
+                            &client,
+                            &v2_queues,
+                            &v2_partitions,
+                            &v2_counts,
+                            &v2_metas,
+                            blobs,
+                        )
+                        .await
+                    } else {
+                        push_segments_multi(&client, &segs, blobs).await
+                    }
+                })
                 .await
                 {
                     Ok(Ok(txt)) => parse_multi_outcome(&txt, participants.len()),

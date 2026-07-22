@@ -1,0 +1,11 @@
+goload -> http://localhost:6640 queue=expq partitions=100 producers=16 consumers=12 pushBatch=100 popBatch=500 payload=256B idleConns=512 retries=2
+[configure] queue=expq completedRetentionSeconds=300
+[08:07:23] push=   99652/s pop=   99625/s | tot push=5979100 pop=5977500 | errs p=0 c=0 empty=0
+[08:08:23] push=   71443/s pop=   71448/s | tot push=10265700 pop=10264400 | errs p=0 c=0 empty=0
+[08:09:23] push=   57615/s pop=   57612/s | tot push=13722600 pop=13721100 | errs p=0 c=0 empty=0
+[08:10:23] push=   55580/s pop=   55565/s | tot push=17057400 pop=17055000 | errs p=0 c=0 empty=0
+[08:11:23] push=   37077/s pop=   37098/s | tot push=19282000 pop=19280900 | errs p=0 c=0 empty=0
+[08:12:23] push=   52333/s pop=   52343/s | tot push=22422000 pop=22421500 | errs p=0 c=0 empty=0
+[08:13:23] push=   57608/s pop=   57583/s | tot push=25878500 pop=25876500 | errs p=0 c=0 empty=0
+[08:14:23] push=   58905/s pop=   58922/s | tot push=29412800 pop=29411800 | errs p=0 c=0 empty=0
+[final] pushed=29413200 popped=29411800 pushErr=0 popErr=0 emptyPops=0
