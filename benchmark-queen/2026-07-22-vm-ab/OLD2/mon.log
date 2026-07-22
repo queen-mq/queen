@@ -1,0 +1,10 @@
+  time  | pushReq popReq | push/s  pop/s | bCPU   pgCPU | commit/s | pgWait(active)
+  60s   |      0      0 |      0      0 |  215%  1843% |   17158 | Client:ClientRead=28 CPU:run=3 LWLock:WALWrite=2
+  90s   |      0      0 |      0      0 |  761%  1590% |   18823 | LWLock:WALWrite=19 CPU:run=18 Lock:extend=11
+  120s  |      0      0 |      0      0 |  250%  1719% |   18027 | 
+  150s  |      0      0 |      0      0 |  542%  1582% |   17179 | LWLock:WALWrite=35 CPU:run=18 LWLock:BufferContent=10
+  180s  |      0      0 |      0      0 |  311%  1636% |   19252 | LWLock:WALWrite=26 CPU:run=20 LWLock:BufferContent=12
+  210s  |      0      0 |      0      0 |  789%  1657% |   16918 | LWLock:WALWrite=41 CPU:run=17 LWLock:BufferContent=6
+  240s  |      0      0 |      0      0 |  372%  1576% |   20392 | CPU:run=20 LWLock:WALWrite=14 Client:ClientRead=9
+  270s  |      0      0 |      0      0 |  889%  1545% |   16091 | IPC:ProcArrayGroupUpdate=22 CPU:run=21 Client:ClientRead=8
+  300s  |      0      0 |      0      0 |    1%     5% |    8425 | 

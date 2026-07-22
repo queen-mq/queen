@@ -1,0 +1,5 @@
+[bundle] commits=499000 segments=1104460 segments_per_commit=2.21
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T12:26:24.410Z", "queuesUpdated": 1, "segPartitions": 100}
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T12:26:34.411Z", "queuesUpdated": 1, "segPartitions": 100}
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T12:26:44.413Z", "queuesUpdated": 1, "segPartitions": 100}
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T12:26:54.413Z", "queuesUpdated": 1, "segPartitions": 100}

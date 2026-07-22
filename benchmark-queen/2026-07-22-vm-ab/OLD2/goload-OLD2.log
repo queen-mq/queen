@@ -1,0 +1,8 @@
+goload -> http://10.114.0.2:6682 queue=segbench partitions=100 producers=1500 consumers=850 pushBatch=100 popBatch=500 payload=256B idleConns=512 retries=2
+[configure] queue=segbench completedRetentionSeconds=300
+[12:36:21] push=  688148/s pop=  687958/s | tot push=41288900 pop=41277500 | errs p=207 c=5208 empty=52
+[12:37:21] push=  645103/s pop=  645015/s | tot push=79995100 pop=79978400 | errs p=267 c=9497 empty=53
+[12:38:21] push=  645540/s pop=  645887/s | tot push=118727500 pop=118731600 | errs p=295 c=12888 empty=54
+[12:39:21] push=  660595/s pop=  660627/s | tot push=158363200 pop=158369200 | errs p=426 c=16825 empty=62
+[12:40:21] push=  678810/s pop=  678595/s | tot push=199091800 pop=199084900 | errs p=427 c=18881 empty=63
+[final] pushed=199173500 popped=199164800 pushErr=427 popErr=18881 emptyPops=63

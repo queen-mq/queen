@@ -229,7 +229,16 @@ pub struct Config {
     // caps the global cache footprint (whole-partition LRU eviction);
     // `dedup_cache_enabled` is the kill switch — disabled, the broker always
     // sends p_verified = -1 and SQL probes the full window (always sound).
-    // Consumed when fusion wires the dedup cache (log-engine slice).
+    //
+    // SIZING: the cache holds ~16 bytes per in-window message hash across all
+    // active partitions, so the working set is roughly
+    //     needed_mb ≈ 16 × msg_rate(msg/s) × dedup_window_seconds / 1e6
+    // (e.g. 700k msg/s × 300s ≈ 3.4 GB → set QUEEN_DEDUP_CACHE_MB≈6144). Under
+    // the cap the cache degrades GRACEFULLY, not catastrophically: partitions
+    // that don't fit are SUPPRESSED (they push with p_verified=-1 and pay a PG
+    // full-window probe instead of a broker re-hydration) rather than triggering
+    // a re-hydration thrash loop. A one-line rate-limited warning with this
+    // formula is logged while suppression is active.
     #[allow(dead_code)]
     pub dedup_cache_mb: usize,
     #[allow(dead_code)]

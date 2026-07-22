@@ -1,5 +1,8 @@
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 use deadpool_postgres::{Pool, PoolConfig, Runtime};
-use tokio_postgres::NoTls;
+use tokio_postgres::{CancelToken, NoTls};
 
 use crate::config::Config;
 
@@ -21,6 +24,120 @@ pub fn create_pool(cfg: &Config) -> Pool {
     } else {
         pg.create_pool(Some(Runtime::Tokio1), NoTls)
             .expect("failed to create pool")
+    }
+}
+
+// ============================================================================
+// Server-side statement cancellation on broker-side timeout.
+//
+// A `tokio::time::timeout(stmt_timeout, db_call)` that elapses DROPS the in-flight
+// query future but leaves the PostgreSQL backend running the statement — still
+// holding its locks. Under the first-contact `Lock:transactionid` convoy (18-log-
+// engine.md) that is the terminal amplifier: abandoned-but-still-executing
+// statements accumulate and poison the pool. These helpers (a) fire a best-effort
+// SERVER-SIDE cancel so the backend actually stops, and (b) QUARANTINE the pooled
+// connection (deadpool `Object::take`) so a connection whose statement we abandoned
+// is never recycled to the next caller.
+// ============================================================================
+
+/// TLS connector for out-of-band query cancellation. `CancelToken::cancel_query`
+/// opens a NEW short-lived connection to deliver the cancel request, so it needs a
+/// connector matching how the pool itself was built (`create_pool` / pgtls.rs):
+/// `NoTls` normally, a rustls connector when `PG_USE_SSL=true`. Built once from the
+/// same env `config::load()` reads, so a mismatch with the pool is impossible.
+#[derive(Clone)]
+enum CancelTls {
+    NoTls,
+    Rustls(tokio_postgres_rustls::MakeRustlsConnect),
+}
+
+fn cancel_tls() -> CancelTls {
+    static CANCEL_TLS: OnceLock<CancelTls> = OnceLock::new();
+    CANCEL_TLS
+        .get_or_init(|| {
+            // Mirror config::load(): PG_USE_SSL / PG_SSL_REJECT_UNAUTHORIZED, with
+            // the C++ get_env_bool parity (only the exact literal "true" is truthy).
+            let use_ssl = std::env::var("PG_USE_SSL").map(|v| v == "true").unwrap_or(false);
+            if use_ssl {
+                let reject = std::env::var("PG_SSL_REJECT_UNAUTHORIZED")
+                    .map(|v| v == "true")
+                    .unwrap_or(true);
+                CancelTls::Rustls(crate::pgtls::make_connector(reject))
+            } else {
+                CancelTls::NoTls
+            }
+        })
+        .clone()
+}
+
+/// Log at most once per 30s per event class, so a cancellation storm (exactly the
+/// scenario this exists for) does not flood the log. `what` is the event class
+/// (e.g. "pop_wildcard").
+fn log_cancel_once(what: &'static str, msg: &str) {
+    static LAST: OnceLock<Mutex<std::collections::HashMap<&'static str, Instant>>> = OnceLock::new();
+    let map = LAST.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut g = map.lock().unwrap();
+    let now = Instant::now();
+    let fire = g.get(what).map_or(true, |&t| now.duration_since(t) >= Duration::from_secs(30));
+    if fire {
+        g.insert(what, now);
+        drop(g);
+        eprintln!("{msg}");
+    }
+}
+
+/// Best-effort SERVER-SIDE cancellation of the statement whose broker-side future a
+/// tokio timeout abandoned. Spawned detached (cancellation is inherently racy and
+/// must never block the request path); `cancel_query` opens its OWN connection, so
+/// it does not touch the poisoned pooled connection. Logging is throttled per class.
+fn spawn_cancel(cancel: CancelToken, what: &'static str) {
+    let tls = cancel_tls();
+    log_cancel_once(what, &format!("stmt-timeout ({what}): issuing server-side query cancellation"));
+    tokio::spawn(async move {
+        let r = match tls {
+            CancelTls::NoTls => cancel.cancel_query(NoTls).await,
+            CancelTls::Rustls(c) => cancel.cancel_query(c).await,
+        };
+        if let Err(e) = r {
+            log_cancel_once(what, &format!("stmt-timeout ({what}): cancel request could not be delivered: {e}"));
+        }
+    });
+}
+
+/// Resolve a `tokio::time::timeout(stmt_timeout, db_call).await` result, handling
+/// the timeout arm with server-side cancellation + connection quarantine.
+///
+/// * `Ok(Ok(v))`  — success: the pooled connection is healthy, so it is dropped
+///   back to the pool (this also satisfies the spec-§10 "release the connection
+///   before a parked long-poll" rule the callers rely on), and `Some(v)` returned.
+/// * `Ok(Err(_))` — the statement itself errored (not a timeout): the connection is
+///   still usable, so it is dropped back to the pool; `None`.
+/// * `Err(Elapsed)` — broker-side timeout: fire a best-effort server-side cancel and
+///   DETACH the connection from the pool (never recycle one whose in-flight
+///   statement we abandoned + cancelled); `None`.
+pub fn resolve_query_timeout<T>(
+    res: Result<Result<T, tokio_postgres::Error>, tokio::time::error::Elapsed>,
+    client: deadpool_postgres::Client,
+    cancel: CancelToken,
+    what: &'static str,
+) -> Option<T> {
+    match res {
+        Ok(Ok(v)) => {
+            drop(client);
+            Some(v)
+        }
+        Ok(Err(_)) => {
+            drop(client);
+            None
+        }
+        Err(_elapsed) => {
+            spawn_cancel(cancel, what);
+            // Quarantine: take() removes the object from the pool permanently; the
+            // returned ClientWrapper is dropped here, closing the connection so the
+            // still-running (now cancelled) statement's connection is not reused.
+            let _ = deadpool_postgres::Object::take(client);
+            None
+        }
     }
 }
 

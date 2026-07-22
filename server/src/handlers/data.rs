@@ -506,6 +506,10 @@ pub async fn handle_pop(
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
             }
         };
+        // Cancel token captured BEFORE issuing the query: on a broker-side timeout
+        // we cancel the still-running statement server-side and quarantine this
+        // connection instead of abandoning it (db::resolve_query_timeout).
+        let cancel_token = client.cancel_token();
         let t0 = Instant::now();
         let res = tokio::time::timeout(
             st.stmt_timeout,
@@ -518,14 +522,13 @@ pub async fn handle_pop(
         let rtt = t0.elapsed();
         st.pop_vegas.record(rtt);
         drop(permit);
-        // Spec §10 (parked long-poll): release the pooled connection BEFORE any
-        // parking below — a parked pop must never pin a PG connection. The next
-        // loop iteration re-acquires from the pool.
-        drop(client);
-
-        let (txt, blobs) = match res {
-            Ok(Ok(t)) => t,
-            _ => {
+        // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
+        // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
+        // parking below — a parked pop must never pin a PG connection. The next loop
+        // iteration re-acquires from the pool.
+        let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard") {
+            Some(t) => t,
+            None => {
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
             }
         };
@@ -617,6 +620,10 @@ pub async fn handle_pop_partition(
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
             }
         };
+        // Cancel token captured BEFORE issuing the query (see handle_pop): a
+        // broker-side timeout cancels the running statement server-side and
+        // quarantines this connection rather than abandoning it.
+        let cancel_token = client.cancel_token();
         let t0 = Instant::now();
         let res = tokio::time::timeout(
             st.stmt_timeout,
@@ -629,14 +636,12 @@ pub async fn handle_pop_partition(
         let rtt = t0.elapsed();
         st.pop_vegas.record(rtt);
         drop(permit);
-        // Spec §10 (parked long-poll): release the pooled connection BEFORE any
-        // parking below — a parked pop must never pin a PG connection. The next
-        // loop iteration re-acquires from the pool.
-        drop(client);
-
-        let txt = match res {
-            Ok(Ok(t)) => t,
-            _ => {
+        // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
+        // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
+        // parking below — a parked pop must never pin a PG connection.
+        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_specific") {
+            Some(t) => t,
+            None => {
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
             }
         };
@@ -762,6 +767,10 @@ pub async fn handle_pop_discover(
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
             }
         };
+        // Cancel token captured BEFORE issuing the query (see handle_pop): a
+        // broker-side timeout cancels the running statement server-side and
+        // quarantines this connection rather than abandoning it.
+        let cancel_token = client.cancel_token();
         let t0 = Instant::now();
         let res = tokio::time::timeout(
             st.stmt_timeout,
@@ -774,14 +783,12 @@ pub async fn handle_pop_discover(
         let rtt = t0.elapsed();
         st.pop_vegas.record(rtt);
         drop(permit);
-        // Spec §10 (parked long-poll): release the pooled connection BEFORE any
-        // parking below — a parked pop must never pin a PG connection. The next
-        // loop iteration re-acquires from the pool.
-        drop(client);
-
-        let txt = match res {
-            Ok(Ok(t)) => t,
-            _ => {
+        // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
+        // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
+        // parking below — a parked pop must never pin a PG connection.
+        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_discover") {
+            Some(t) => t,
+            None => {
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
             }
         };

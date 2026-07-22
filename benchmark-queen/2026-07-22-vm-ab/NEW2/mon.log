@@ -1,0 +1,10 @@
+  time  | pushReq popReq | push/s  pop/s | bCPU   pgCPU | commit/s | pgWait(active)
+  60s   |      0      0 |      0      0 |  417%   995% |   10093 | CPU:run=5 Client:ClientRead=3 IO:WALSync=1
+  90s   |      0      0 |      0      0 |  670%   958% |    9047 | LWLock:WALWrite=6 CPU:run=5
+  120s  |      0      0 |      0      0 |  211%  1110% |    9413 | CPU:run=6 LWLock:WALWrite=5 Client:ClientRead=2
+  150s  |      0      0 |      0      0 |  625%   924% |    8281 | CPU:run=15 Lock:extend=5 LWLock:WALWrite=5
+  180s  |      0      0 |      0      0 |  266%  1090% |    9516 | CPU:run=11 LWLock:WALWrite=6 IO:WALSync=1
+  210s  |      0      0 |      0      0 |  683%  1007% |    8214 | CPU:run=1 IO:WALSync=1
+  240s  |      0      0 |      0      0 |  344%  1015% |    9759 | CPU:run=4 LWLock:WALWrite=3 IO:WALSync=1
+  270s  |      0      0 |      0      0 |  438%   925% |    8584 | CPU:run=1
+  300s  |      0      0 |      0      0 |    0%     0% |    4002 | 

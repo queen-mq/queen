@@ -1,0 +1,6 @@
+retention: cycle sweep={"queues":1,"segments_deleted":28352,"txns_purged":0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T12:47:34.817Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues":1,"segments_deleted":27507,"txns_purged":0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+retention: cycle sweep={"queues":1,"segments_deleted":28331,"txns_purged":0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0
+stats: refresh {"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-07-22T12:47:44.819Z", "queuesUpdated": 1, "segPartitions": 100}
+retention: cycle sweep={"queues":1,"segments_deleted":15532,"txns_purged":0} max_wait_segments_deleted=0 metrics_purge=worker={"deletedMetrics": 0, "deletedLagMetrics": 0, "deletedParkedReplica": 0} system_rows=0

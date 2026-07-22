@@ -1,0 +1,13 @@
+2026-07-22 12:35:22.127 UTC [85] ERROR:  deadlock detected
+2026-07-22 12:35:22.127 UTC [85] DETAIL:  Process 85 waits for ShareLock on transaction 1088; blocked by process 168.
+	Process 168 waits for ShareLock on transaction 1137; blocked by process 174.
+	Process 174 waits for ShareLock on transaction 1082; blocked by process 85.
+	Process 85: SELECT (t.meta)::text, t.blobs FROM queen.seg_pop_wildcard_bin_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9) t
+	Process 168: SELECT (t.meta)::text, t.blobs FROM queen.seg_pop_wildcard_bin_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9) t
+--
+2026-07-22 12:35:22.139 UTC [161] ERROR:  deadlock detected
+2026-07-22 12:35:22.139 UTC [161] DETAIL:  Process 161 waits for ShareLock on transaction 1170; blocked by process 226.
+	Process 226 waits for ShareLock on transaction 1171; blocked by process 194.
+	Process 194 waits for ShareLock on transaction 1168; blocked by process 203.
+	Process 203 waits for ShareLock on transaction 1059; blocked by process 161.
+	Process 161: SELECT (t.meta)::text, t.blobs FROM queen.seg_pop_wildcard_bin_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9) t

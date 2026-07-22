@@ -391,73 +391,106 @@ BEGIN
         RETURN jsonb_build_object('partitions', '[]'::jsonb);
     END IF;
 
-    -- Bulk subscription bootstrap (mirrors the rows engine's
-    -- pop_unified_batch_v4: consumer_groups_metadata insert → bulk
-    -- log_consumers seed). When a consumer group first registers with
-    -- subscriptionMode='new' or a subscriptionFrom timestamp, seed the cursor
-    -- of EVERY partition of the queue in one set-based pass, BEFORE any
-    -- messages the group is meant to skip can be overtaken by newer writes.
-    -- Without this, log_pop_v1 only seeds a partition on first contact:
-    -- partitions first touched AFTER post-registration messages arrive would
-    -- compute their 'new' seed (last_offset) past those new messages and never
-    -- deliver them (the 5000-partition testCgBootstrapNew bug — only the
-    -- ~cand_cap partitions scanned by the registering pop were seeded in time).
-    -- RUSTFIX item 13: the DURABLE consumer_groups_metadata row is the
-    -- once-per-(queue,group) marker (its first insertion, ROW_COUNT>0, means
-    -- this group has never scanned this queue) — consumer_watermarks existence
-    -- cannot be the marker because item 12's empty-scan path also writes it.
-    -- The stored timestamp lets a LATER-created partition seed from the
-    -- subscription time on first contact (log_pop_v1), instead of last_offset
-    -- which would skip its backlog. Queue mode never seeds a backlog, so it is
-    -- excluded.
-    IF p_group <> '__QUEUE_MODE__'
-       AND (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '') THEN
-        IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
-            BEGIN
-                v_from_ts := p_sub_from::timestamptz;
-            EXCEPTION WHEN OTHERS THEN
-                v_from_ts := NULL;  -- unparsable: fall back to registration-time 'new'
-            END;
-        END IF;
-        IF v_from_ts IS NULL THEN
-            v_from_ts := v_now; v_sub_mode_stored := 'new';
-        ELSE
+    -- Group-first-contact bulk seed (extends RUSTFIX item 13). The wildcard/
+    -- discover pop claims several partitions per transaction IN RANDOM ORDER, and
+    -- log_pop_v1's claim-first dance lazily does INSERT INTO queen.log_consumers
+    -- ... ON CONFLICT DO NOTHING on the FIRST contact of each (partition, group).
+    -- Under many concurrent consumers of a FRESH queue that first-contact insert
+    -- convoys: a waiter blocks on the inserter's transactionid (ShareLock), and
+    -- because every backend holds several such pending inserts across partitions
+    -- claimed in random order, the waits form CHAINS — and chains (unlike cycles)
+    -- are never broken by the deadlock detector, so backends wedge for minutes.
+    --
+    -- Fix: on the FIRST contact of a (queue, group), seed the cursor of EVERY
+    -- partition once, set-based, behind a SINGLE-ROW metadata marker. The other
+    -- callers then wait briefly on ONE transactionid (the marker-row conflict, a
+    -- fan-in — not a chain) and proceed; log_pop_v1's per-partition lazy creation
+    -- stays as the fallback (specific-partition pops, and partitions created after
+    -- the seed), rare by construction.
+    --
+    -- This now runs for the DEFAULT 'all' mode and for '__QUEUE_MODE__' too — the
+    -- storm the fix targets is many wildcard consumers of ONE (default) group on a
+    -- fresh queue, i.e. exactly sub_mode='all' / __QUEUE_MODE__ (the goload/
+    -- wildcard path uses '__QUEUE_MODE__' when no group is set). RUSTFIX item 13
+    -- had bootstrapped only the 'new'/timestamp subscriptions.
+    --
+    -- Marker: the consumer_groups_metadata row (UNIQUE(consumer_group, queue_name,
+    -- partition_name='', namespace, task)); its first insertion (ROW_COUNT>0)
+    -- elects the single seeder. It is the RIGHT marker precisely because item 12's
+    -- empty-scan path also writes consumer_watermarks, so watermark existence
+    -- cannot mean "seeded". __QUEUE_MODE__ is admitted here: log_pop_v1's lazy
+    -- seeding branch explicitly ignores __QUEUE_MODE__ metadata rows (no delivery
+    -- side effect), and the admin/stats views derive groups from the consumers
+    -- tables (metadata is enrichment-only), so no phantom group appears.
+    --
+    -- Seed value per mode — delivery-IDENTICAL to log_pop_v1's lazy first contact:
+    --   'all' / __QUEUE_MODE__ : committed = GREATEST(log_start-1, -1) → next
+    --        wanted lands on the oldest retained offset (or 0), never skipping
+    --        backlog; matches the lazy default committed=-1.
+    --   'new' / 'now'          : committed = last_offset (skip the whole backlog).
+    --   'timestamp'            : committed = first-seg-at/after-ts.base_offset - 1,
+    --        else last_offset.
+    -- subscription_timestamp is NOT NULL, so 'all' stores the epoch sentinel: the
+    -- "new mode" lag enrichment reads it as "everything is lag" (== all-mode), and
+    -- a LATER-created partition's lazy timestamp-walk in log_pop_v1
+    -- (created_at >= epoch) lands on its first retained segment → deliver
+    -- everything, identical to committed=-1.
+    IF p_group = '__QUEUE_MODE__' THEN
+        v_sub_mode_stored := 'all';
+        v_from_ts := '1970-01-01 00:00:00+00'::timestamptz;
+    ELSIF COALESCE(p_sub_from, '') <> '' AND COALESCE(p_sub_from, '') <> 'now' THEN
+        BEGIN
+            v_from_ts := p_sub_from::timestamptz;
             v_sub_mode_stored := 'timestamp';
-        END IF;
+        EXCEPTION WHEN OTHERS THEN
+            v_from_ts := v_now; v_sub_mode_stored := 'new';  -- unparsable: registration-time 'new'
+        END;
+    ELSIF COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') = 'now' THEN
+        v_from_ts := v_now; v_sub_mode_stored := 'new';
+    ELSE
+        v_from_ts := '1970-01-01 00:00:00+00'::timestamptz; v_sub_mode_stored := 'all';
+    END IF;
 
-        INSERT INTO queen.consumer_groups_metadata
-            (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
-        VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
-        ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
-        GET DIAGNOSTICS v_first_seen = ROW_COUNT;
+    INSERT INTO queen.consumer_groups_metadata
+        (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+    VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
+    ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+    GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
-        IF v_first_seen > 0 THEN
-            IF v_sub_mode_stored = 'timestamp' THEN
-                -- timestamp seed: cursor just before the first segment
-                -- at/after v_from_ts per partition (created_at monotone in
-                -- base_offset → forward walk from the retention watermark),
-                -- else last_offset (nothing that recent yet → future-only
-                -- cursor).
-                INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
-                SELECT p.id, p_group,
-                       COALESCE(
-                           (SELECT s.base_offset - 1 FROM queen.log_segments s
-                            WHERE s.partition_id = p.id
-                              AND s.base_offset >= p.log_start
-                              AND s.created_at >= v_from_ts
-                            ORDER BY s.base_offset LIMIT 1),
-                           p.last_offset)
-                FROM queen.log_partitions p
-                WHERE p.queue_id = v_qid
-                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
-            ELSE
-                -- 'new' (or 'now') seed: skip the entire existing backlog.
-                INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
-                SELECT p.id, p_group, p.last_offset
-                FROM queen.log_partitions p
-                WHERE p.queue_id = v_qid
-                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
-            END IF;
+    IF v_first_seen > 0 THEN
+        IF v_sub_mode_stored = 'timestamp' THEN
+            -- timestamp seed: cursor just before the first segment at/after
+            -- v_from_ts per partition (created_at monotone in base_offset →
+            -- forward walk from the retention watermark), else last_offset
+            -- (nothing that recent yet → future-only cursor).
+            INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+            SELECT p.id, p_group,
+                   COALESCE(
+                       (SELECT s.base_offset - 1 FROM queen.log_segments s
+                        WHERE s.partition_id = p.id
+                          AND s.base_offset >= p.log_start
+                          AND s.created_at >= v_from_ts
+                        ORDER BY s.base_offset LIMIT 1),
+                       p.last_offset)
+            FROM queen.log_partitions p
+            WHERE p.queue_id = v_qid
+            ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+        ELSIF v_sub_mode_stored = 'new' THEN
+            -- 'new' (or 'now') seed: skip the entire existing backlog.
+            INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+            SELECT p.id, p_group, p.last_offset
+            FROM queen.log_partitions p
+            WHERE p.queue_id = v_qid
+            ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+        ELSE
+            -- 'all' (default) / __QUEUE_MODE__: deliver the full retained backlog.
+            -- committed = GREATEST(log_start-1, -1) → next wanted is the oldest
+            -- retained offset (or 0); delivery-identical to the lazy default -1.
+            INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+            SELECT p.id, p_group, GREATEST(p.log_start - 1, -1)
+            FROM queen.log_partitions p
+            WHERE p.queue_id = v_qid
+            ON CONFLICT (partition_id, consumer_group) DO NOTHING;
         END IF;
     END IF;
 
@@ -622,50 +655,61 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Bulk subscription bootstrap — identical to log_pop_wildcard_wire_v1
-    -- (RUSTFIX item 13; see its header for the full rationale).
-    IF p_group <> '__QUEUE_MODE__'
-       AND (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '') THEN
-        IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
-            BEGIN
-                v_from_ts := p_sub_from::timestamptz;
-            EXCEPTION WHEN OTHERS THEN
-                v_from_ts := NULL;
-            END;
-        END IF;
-        IF v_from_ts IS NULL THEN
-            v_from_ts := v_now; v_sub_mode_stored := 'new';
-        ELSE
+    -- Group-first-contact bulk seed — identical mechanism to
+    -- log_pop_wildcard_wire_v1 (see its header for the full convoy rationale):
+    -- extends RUSTFIX item 13 to the DEFAULT 'all' mode and to '__QUEUE_MODE__',
+    -- seeding EVERY partition once behind the single-row consumer_groups_metadata
+    -- marker so the first-contact log_consumers insert never convoys.
+    IF p_group = '__QUEUE_MODE__' THEN
+        v_sub_mode_stored := 'all';
+        v_from_ts := '1970-01-01 00:00:00+00'::timestamptz;
+    ELSIF COALESCE(p_sub_from, '') <> '' AND COALESCE(p_sub_from, '') <> 'now' THEN
+        BEGIN
+            v_from_ts := p_sub_from::timestamptz;
             v_sub_mode_stored := 'timestamp';
-        END IF;
+        EXCEPTION WHEN OTHERS THEN
+            v_from_ts := v_now; v_sub_mode_stored := 'new';
+        END;
+    ELSIF COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') = 'now' THEN
+        v_from_ts := v_now; v_sub_mode_stored := 'new';
+    ELSE
+        v_from_ts := '1970-01-01 00:00:00+00'::timestamptz; v_sub_mode_stored := 'all';
+    END IF;
 
-        INSERT INTO queen.consumer_groups_metadata
-            (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
-        VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
-        ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
-        GET DIAGNOSTICS v_first_seen = ROW_COUNT;
+    INSERT INTO queen.consumer_groups_metadata
+        (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+    VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
+    ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+    GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
-        IF v_first_seen > 0 THEN
-            IF v_sub_mode_stored = 'timestamp' THEN
-                INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
-                SELECT p.id, p_group,
-                       COALESCE(
-                           (SELECT s.base_offset - 1 FROM queen.log_segments s
-                            WHERE s.partition_id = p.id
-                              AND s.base_offset >= p.log_start
-                              AND s.created_at >= v_from_ts
-                            ORDER BY s.base_offset LIMIT 1),
-                           p.last_offset)
-                FROM queen.log_partitions p
-                WHERE p.queue_id = v_qid
-                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
-            ELSE
-                INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
-                SELECT p.id, p_group, p.last_offset
-                FROM queen.log_partitions p
-                WHERE p.queue_id = v_qid
-                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
-            END IF;
+    IF v_first_seen > 0 THEN
+        IF v_sub_mode_stored = 'timestamp' THEN
+            INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+            SELECT p.id, p_group,
+                   COALESCE(
+                       (SELECT s.base_offset - 1 FROM queen.log_segments s
+                        WHERE s.partition_id = p.id
+                          AND s.base_offset >= p.log_start
+                          AND s.created_at >= v_from_ts
+                        ORDER BY s.base_offset LIMIT 1),
+                       p.last_offset)
+            FROM queen.log_partitions p
+            WHERE p.queue_id = v_qid
+            ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+        ELSIF v_sub_mode_stored = 'new' THEN
+            INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+            SELECT p.id, p_group, p.last_offset
+            FROM queen.log_partitions p
+            WHERE p.queue_id = v_qid
+            ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+        ELSE
+            -- 'all' / __QUEUE_MODE__: committed = GREATEST(log_start-1, -1) →
+            -- full retained backlog, delivery-identical to the lazy default -1.
+            INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+            SELECT p.id, p_group, GREATEST(p.log_start - 1, -1)
+            FROM queen.log_partitions p
+            WHERE p.queue_id = v_qid
+            ON CONFLICT (partition_id, consumer_group) DO NOTHING;
         END IF;
     END IF;
 
@@ -829,72 +873,80 @@ DECLARE
     -- RUSTFIX item 13: durable subscription mode written to consumer_groups_metadata.
     v_sub_mode_stored TEXT;
 BEGIN
-    -- Bulk subscription bootstrap (mirrors log_pop_wildcard_wire_v1). When a
-    -- consumer group first registers with subscriptionMode='new' or a
-    -- subscriptionFrom timestamp, seed the cursor of EVERY partition of EVERY
-    -- matching queue before newer writes can overtake the backlog the group is
-    -- meant to skip. RUSTFIX item 13: register the subscription DURABLY per
-    -- matching queue in consumer_groups_metadata (the once-per-(queue,group)
-    -- marker, replacing consumer_watermarks-existence which item 12's
-    -- empty-scan path now also writes). A late-created partition of any
-    -- matching queue seeds from the stored timestamp on first contact
-    -- (log_pop_v1). Queue mode never seeds a backlog, so it is excluded.
-    IF p_group <> '__QUEUE_MODE__'
-       AND (COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') <> '') THEN
-        IF p_sub_from <> '' AND p_sub_from <> 'now' THEN
-            BEGIN
-                v_from_ts := p_sub_from::timestamptz;
-            EXCEPTION WHEN OTHERS THEN
-                v_from_ts := NULL;  -- unparsable: fall back to registration-time 'new'
-            END;
-        END IF;
-        IF v_from_ts IS NULL THEN
-            v_from_ts := v_now; v_sub_mode_stored := 'new';
-        ELSE
+    -- Group-first-contact bulk seed (mirrors log_pop_wildcard_wire_v1; see its
+    -- header for the full convoy rationale). Extends RUSTFIX item 13 to the
+    -- DEFAULT 'all' mode and to '__QUEUE_MODE__': on the FIRST contact of a
+    -- (queue, group) seed the cursor of EVERY partition of EVERY matching queue
+    -- once, set-based, behind the single-row consumer_groups_metadata marker, so
+    -- log_pop_v1's per-partition first-contact insert never convoys across the
+    -- randomly-ordered candidates. The mode/timestamp are decided once, then each
+    -- matching queue's marker+seed runs in the loop (a queue matching later still
+    -- seeds on the discover pop that first reaches it).
+    IF p_group = '__QUEUE_MODE__' THEN
+        v_sub_mode_stored := 'all';
+        v_from_ts := '1970-01-01 00:00:00+00'::timestamptz;
+    ELSIF COALESCE(p_sub_from, '') <> '' AND COALESCE(p_sub_from, '') <> 'now' THEN
+        BEGIN
+            v_from_ts := p_sub_from::timestamptz;
             v_sub_mode_stored := 'timestamp';
-        END IF;
-
-        FOR v_q IN
-            SELECT lq.id AS qid, lq.name AS qname
-            FROM queen.log_queues lq
-            JOIN queen.queues qq ON qq.name = lq.name
-            WHERE (v_ns = '' OR qq.namespace = v_ns)
-              AND (v_task = '' OR qq.task = v_task)
-        LOOP
-            INSERT INTO queen.consumer_groups_metadata
-                (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
-            VALUES (p_group, v_q.qname, '', v_sub_mode_stored, v_from_ts)
-            ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
-            GET DIAGNOSTICS v_first_seen = ROW_COUNT;
-
-            IF v_first_seen > 0 THEN
-                IF v_sub_mode_stored = 'timestamp' THEN
-                    -- timestamp seed: cursor just before the first segment
-                    -- at/after v_from_ts per partition, else last_offset
-                    -- (identical to the lazy seed in queen.log_pop_v1).
-                    INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
-                    SELECT p.id, p_group,
-                           COALESCE(
-                               (SELECT s.base_offset - 1 FROM queen.log_segments s
-                                WHERE s.partition_id = p.id
-                                  AND s.base_offset >= p.log_start
-                                  AND s.created_at >= v_from_ts
-                                ORDER BY s.base_offset LIMIT 1),
-                               p.last_offset)
-                    FROM queen.log_partitions p
-                    WHERE p.queue_id = v_q.qid
-                    ON CONFLICT (partition_id, consumer_group) DO NOTHING;
-                ELSE
-                    -- 'new' (or 'now') seed: skip the entire existing backlog.
-                    INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
-                    SELECT p.id, p_group, p.last_offset
-                    FROM queen.log_partitions p
-                    WHERE p.queue_id = v_q.qid
-                    ON CONFLICT (partition_id, consumer_group) DO NOTHING;
-                END IF;
-            END IF;
-        END LOOP;
+        EXCEPTION WHEN OTHERS THEN
+            v_from_ts := v_now; v_sub_mode_stored := 'new';  -- unparsable: registration-time 'new'
+        END;
+    ELSIF COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') = 'now' THEN
+        v_from_ts := v_now; v_sub_mode_stored := 'new';
+    ELSE
+        v_from_ts := '1970-01-01 00:00:00+00'::timestamptz; v_sub_mode_stored := 'all';
     END IF;
+
+    FOR v_q IN
+        SELECT lq.id AS qid, lq.name AS qname
+        FROM queen.log_queues lq
+        JOIN queen.queues qq ON qq.name = lq.name
+        WHERE (v_ns = '' OR qq.namespace = v_ns)
+          AND (v_task = '' OR qq.task = v_task)
+    LOOP
+        INSERT INTO queen.consumer_groups_metadata
+            (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+        VALUES (p_group, v_q.qname, '', v_sub_mode_stored, v_from_ts)
+        ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+        GET DIAGNOSTICS v_first_seen = ROW_COUNT;
+
+        IF v_first_seen > 0 THEN
+            IF v_sub_mode_stored = 'timestamp' THEN
+                -- timestamp seed: cursor just before the first segment
+                -- at/after v_from_ts per partition, else last_offset
+                -- (identical to the lazy seed in queen.log_pop_v1).
+                INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+                SELECT p.id, p_group,
+                       COALESCE(
+                           (SELECT s.base_offset - 1 FROM queen.log_segments s
+                            WHERE s.partition_id = p.id
+                              AND s.base_offset >= p.log_start
+                              AND s.created_at >= v_from_ts
+                            ORDER BY s.base_offset LIMIT 1),
+                           p.last_offset)
+                FROM queen.log_partitions p
+                WHERE p.queue_id = v_q.qid
+                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+            ELSIF v_sub_mode_stored = 'new' THEN
+                -- 'new' (or 'now') seed: skip the entire existing backlog.
+                INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+                SELECT p.id, p_group, p.last_offset
+                FROM queen.log_partitions p
+                WHERE p.queue_id = v_q.qid
+                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+            ELSE
+                -- 'all' (default) / __QUEUE_MODE__: committed =
+                -- GREATEST(log_start-1, -1) → full retained backlog,
+                -- delivery-identical to log_pop_v1's lazy default -1.
+                INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+                SELECT p.id, p_group, GREATEST(p.log_start - 1, -1)
+                FROM queen.log_partitions p
+                WHERE p.queue_id = v_q.qid
+                ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+            END IF;
+        END IF;
+    END LOOP;
 
     -- Empty-scan floor: the OLDEST last_empty_scan_at across matching queues
     -- (missing rows count as the epoch ⇒ full scan). Only consider partitions

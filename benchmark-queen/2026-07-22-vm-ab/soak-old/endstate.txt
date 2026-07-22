@@ -1,0 +1,8 @@
+RUN=SOAK-OLD image=queen-seg-rust:old (seg engine, 54697a3) duration=600s MON_N=24
+boot=2026-07-22T12:57:29Z load_launch=12:57:39Z final=13:07:39Z
+end_db_size_bytes=11200289815  (10.43 GiB)
+end_seg_segments_count=12518  (live, load stopped)
+end_seg_segments_total_relsize=10 GB
+seg_segments_peak_early=27759 (~8s in)
+deadlocks=0
+goload_final: pushed=378746200 popped=378727900 pushErr=511 popErr=25923 emptyPops=1902

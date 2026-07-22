@@ -7,6 +7,7 @@ use deadpool_postgres::Pool;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio_postgres::NoTls;
 
 use crate::dedup::{DedupCache, PushCheck};
 use crate::frames::{
@@ -175,6 +176,11 @@ struct FlushCtx {
     // the cache would decline anyway (a disabled cache == always p_verified=-1).
     dedup: Arc<DedupCache>,
     dedup_enabled: bool,
+    // Postgres TLS mode (mirrors config.rs / db.rs). Needed to pick the right
+    // connector when best-effort cancelling a wedged server-side query on a
+    // flush timeout (CancelToken::cancel_query wants the same TLS as the pool).
+    pg_use_ssl: bool,
+    pg_ssl_reject_unauthorized: bool,
     // Per-shard PartMeta cache, keyed by the same composed queue+partition
     // string the shard map uses (group_key).
     part_meta: Mutex<FnvHashMap<String, PartMeta>>,
@@ -193,6 +199,8 @@ impl Fusion {
         stmt_timeout: Duration,
         dedup_cache_mb: usize,
         dedup_cache_enabled: bool,
+        pg_use_ssl: bool,
+        pg_ssl_reject_unauthorized: bool,
     ) -> Arc<Fusion> {
         // Distinct partitions a single shard will keep in-flight at once (the
         // C++ `QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH` analogue). A fan-out fairness
@@ -244,6 +252,8 @@ impl Fusion {
                 stmt_timeout,
                 dedup: dedup.clone(),
                 dedup_enabled: dedup_cache_enabled,
+                pg_use_ssl,
+                pg_ssl_reject_unauthorized,
                 part_meta: Mutex::new(FnvHashMap::default()),
             });
             tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max));
@@ -517,6 +527,40 @@ async fn push_log_multi(
     Ok(row.get(0))
 }
 
+// Best-effort cancellation of a wedged server-side query after a flush timeout.
+// tokio::time::timeout only drops the client future — the PG backend keeps
+// executing the statement (this amplified a separate wedge), so we send an
+// out-of-band CancelRequest on a fresh connection via the connection's
+// CancelToken. Fire-and-forget on its own task (cancel_query itself dials PG and
+// must not block the flush); the log line is rate-limited process-wide. Picks
+// the same TLS mode the pool uses, so the cancel connection negotiates
+// identically. A failed cancel is harmless — the query just finishes on its own.
+fn spawn_query_cancel(ctx: &Arc<FlushCtx>, token: tokio_postgres::CancelToken, what: &'static str) {
+    static LAST_CANCEL_LOG_MS: AtomicU64 = AtomicU64::new(0);
+    let now = now_epoch_ms() as u64;
+    let prev = LAST_CANCEL_LOG_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) >= 5_000
+        && LAST_CANCEL_LOG_MS
+            .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        eprintln!("[bundle] {what} timed out — cancelling server-side query (best-effort)");
+    }
+    let use_ssl = ctx.pg_use_ssl;
+    let reject = ctx.pg_ssl_reject_unauthorized;
+    tokio::spawn(async move {
+        let res = if use_ssl {
+            token
+                .cancel_query(crate::pgtls::make_connector(reject))
+                .await
+        } else {
+            token.cancel_query(NoTls).await
+        };
+        // Best-effort: a failed cancel just means the query completes on its own.
+        let _ = res;
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Dedup-cache plumbing (doc 18 §5). All of it is best-effort: every SQL or
 // consistency failure degrades to p_verified = -1 (SQL probes the full window —
@@ -590,8 +634,9 @@ async fn hydrate_partition(
     for r in rows {
         v.push((r.get(0), r.get(1), r.get(2), r.get(3)));
     }
-    let window_start_ms = now_epoch_ms() - meta.window_secs as i64 * 1000 - DEDUP_SKEW_SLACK_MS;
-    ctx.dedup.hydrate(key, v, window_start_ms, meta.last_offset);
+    let now = now_epoch_ms();
+    let window_start_ms = now - meta.window_secs as i64 * 1000 - DEDUP_SKEW_SLACK_MS;
+    ctx.dedup.hydrate(key, v, window_start_ms, meta.last_offset, now);
     if let Some(e) = ctx.part_meta.lock().unwrap().get_mut(key) {
         e.force_rehydrate = false;
     }
@@ -626,16 +671,22 @@ async fn segment_verified(
         // skips the probe too — the seg engine's window-0 landmine is dead).
         return -1;
     }
+    // One `now` for the whole decision so expire/suppression-cooldown/eviction
+    // all reason on the same instant.
+    let now = now_epoch_ms();
     // Window-expire BEFORE consulting the cache (the dedup.rs contract): keeps
     // the entry's coverage bookkeeping accurate under the current window.
-    ctx.dedup
-        .expire(key, meta.window_secs as i64 * 1000, now_epoch_ms());
-    if meta.force_rehydrate || ctx.dedup.needs_hydration(key).is_some() {
+    ctx.dedup.expire(key, meta.window_secs as i64 * 1000, now);
+    // needs_hydration() may answer None because the partition is SUPPRESSED under
+    // cap pressure (Fix 1) — in that case we deliberately DO NOT run the
+    // multi-MB hydration query and fall through to verified_for_push, which
+    // returns -1 (full-window SQL probe — always sound).
+    if meta.force_rehydrate || ctx.dedup.needs_hydration(key, now).is_some() {
         if hydrate_partition(ctx, client, key, &meta).await.is_err() {
             return -1;
         }
     }
-    match ctx.dedup.verified_for_push(key, pending_hashes) {
+    match ctx.dedup.verified_for_push(key, pending_hashes, now) {
         PushCheck::Verified(w) => w,
         PushCheck::LocalDuplicate(_) => -1,
     }
@@ -813,7 +864,13 @@ fn spawn_bundle_flush(
                 .await;
                 match vres {
                     Ok(v) => verified = v,
-                    Err(_) => eprintln!("[bundle] dedup hydration timeout parts={}", participants.len()),
+                    Err(_) => {
+                        eprintln!("[bundle] dedup hydration timeout parts={}", participants.len());
+                        // The vres future (and its borrow of `client`) is dropped
+                        // by the `let vres = ...;` above, so cancelling the wedged
+                        // meta/hydration query on this connection is safe here.
+                        spawn_query_cancel(&ctx, client.cancel_token(), "dedup hydration");
+                    }
                 }
             }
 
@@ -836,12 +893,15 @@ fn spawn_bundle_flush(
                 blobs.push(blob);
             }
 
-            let outcome = match tokio::time::timeout(
+            // Bind the timeout result to a `let` so the push future (and its
+            // borrow of `client`) is dropped before the match arms — the timeout
+            // branch then re-borrows `client` to cancel the wedged query.
+            let push_res = tokio::time::timeout(
                 ctx.stmt_timeout,
                 push_log_multi(&client, &queues, &partitions, &counts, &hash_blobs, &verified, blobs),
             )
-            .await
-            {
+            .await;
+            let outcome = match push_res {
                 Ok(Ok(txt)) => parse_multi_outcome(&txt, participants.len()),
                 Ok(Err(e)) => {
                     eprintln!("[bundle] log_push_multi error parts={}: {}", participants.len(), e);
@@ -849,6 +909,10 @@ fn spawn_bundle_flush(
                 }
                 Err(_) => {
                     eprintln!("[bundle] log_push_multi timeout parts={}", participants.len());
+                    // Cancel the still-running INSERT/allocator query so it stops
+                    // holding the log_partitions row lock (which would otherwise
+                    // wedge this partition's next flush until stmt_timeout on PG).
+                    spawn_query_cancel(&ctx, client.cancel_token(), "log_push_multi");
                     None
                 }
             };
@@ -944,6 +1008,17 @@ fn spawn_bundle_flush(
             ctx.metrics.push.record_batch(g.total, g.db_ok, rtt);
         }
         record_bundle(n_parts);
+        // Minimal dedup observability hookup (Fix 3): surface the cache counters
+        // alongside the periodic bundle summary. hydrations_total exploding while
+        // suppressed_partitions stays 0 = healthy; a rising suppressed gauge =
+        // cap pressure, size QUEEN_DEDUP_CACHE_MB per the warning line's formula.
+        if ctx.dedup_enabled && BUNDLES_FIRED.load(Ordering::Relaxed) % 500 == 0 {
+            eprintln!(
+                "[dedup] hydrations={} suppressed_partitions={}",
+                ctx.dedup.hydrations_total(),
+                ctx.dedup.suppressed_partitions()
+            );
+        }
 
         // ---- Assign every frame's result, PER GROUP, grouped by owning request.
         // Critical: decrement each owning request's pending counter exactly ONCE

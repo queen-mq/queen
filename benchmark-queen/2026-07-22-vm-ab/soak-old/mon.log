@@ -1,0 +1,24 @@
+  time  | pushReq popReq | push/s  pop/s | bCPU   pgCPU | commit/s | pgWait(active)
+  60s   |      0      0 |      0      0 |  241%  1765% |   18526 | Client:ClientRead=32 LWLock:WALWrite=6 IO:WALSync=1
+  90s   |      0      0 |      0      0 |  727%  1551% |   18942 | LWLock:WALWrite=61 Lock:transactionid=20 CPU:run=2
+  120s  |      0      0 |      0      0 |  301%  1840% |   19411 | LWLock:BufferContent=37 CPU:run=24 LWLock:WALWrite=17
+  150s  |      0      0 |      0      0 |  467%  1660% |   16492 | CPU:run=30 LWLock:BufferContent=11 LWLock:WALWrite=8
+  180s  |      0      0 |      0      0 |  561%  1833% |   19740 | Client:ClientRead=26 CPU:run=6 LWLock:WALWrite=5
+  210s  |      0      0 |      0      0 |  796%  1586% |   16365 | CPU:run=23 LWLock:WALWrite=19 LWLock:BufferContent=14
+  240s  |      0      0 |      0      0 |  381%  1850% |   18338 | LWLock:WALWrite=37 Client:ClientRead=9 CPU:run=5
+  270s  |      0      0 |      0      0 |  800%  1595% |   15545 | LWLock:WALWrite=20 CPU:run=16 Client:ClientRead=14
+  300s  |      0      0 |      0      0 |  175%  1823% |   19365 | LWLock:BufferContent=51 CPU:run=7 LWLock:WALWrite=5
+  330s  |      0      0 |      0      0 |  495%  1922% |   15929 | LWLock:BufferContent=36 Client:ClientRead=27 CPU:run=7
+  360s  |      0      0 |      0      0 |  332%  1885% |   20064 | CPU:run=17 Client:ClientRead=15 LWLock:WALWrite=14
+  390s  |      0      0 |      0      0 |  404%  1850% |   16115 | LWLock:WALWrite=25 CPU:run=4 Client:ClientRead=3
+  420s  |      0      0 |      0      0 |  358%  1607% |   19101 | LWLock:WALWrite=29 LWLock:BufferContent=19 CPU:run=17
+  450s  |      0      0 |      0      0 |  346%  1371% |   15975 | CPU:run=21 LWLock:WALWrite=20 LWLock:BufferContent=14
+  480s  |      0      0 |      0      0 |  859%  1804% |   18234 | LWLock:BufferContent=30 CPU:run=16 LWLock:WALWrite=11
+  510s  |      0      0 |      0      0 |  362%  1883% |   16640 | CPU:run=1
+  540s  |      0      0 |      0      0 |   25%   195% |   18728 | Lock:transactionid=18 CPU:run=1
+  570s  |      0      0 |      0      0 |    1%     5% |    2771 | 
+  600s  |      0      0 |      0      0 |    1%     0% |       3 | CPU:run=1
+  630s  |      0      0 |      0      0 |    1%     5% |       3 | 
+  660s  |      0      0 |      0      0 |    1%     5% |       3 | 
+  690s  |      0      0 |      0      0 |    1%     0% |       2 | 
+  720s  |      0      0 |      0      0 |    1%     0% |       1 | 

@@ -1,0 +1,20 @@
+2026-07-22 12:28:19.639 UTC [88] ERROR:  deadlock detected
+2026-07-22 12:28:19.639 UTC [88] DETAIL:  Process 88 waits for ShareLock on transaction 810; blocked by process 141.
+	Process 141 waits for ShareLock on transaction 808; blocked by process 87.
+	Process 87 waits for ShareLock on transaction 809; blocked by process 88.
+	Process 88: SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9) t
+	Process 141: SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9) t
+	Process 87: SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9) t
+--
+2026-07-22 12:28:20.639 UTC [87] ERROR:  deadlock detected
+2026-07-22 12:28:20.639 UTC [87] DETAIL:  Process 87 waits for ShareLock on transaction 989; blocked by process 162.
+	Process 162 waits for ShareLock on transaction 808; blocked by process 87.
+	Process 87: SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9) t
+	Process 162: SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9) t
+2026-07-22 12:28:20.639 UTC [87] HINT:  See server log for query details.
+2026-07-22 12:28:20.639 UTC [87] CONTEXT:  while inserting index tuple (1,5) in relation "log_consumers"
+--
+2026-07-22 12:28:21.641 UTC [86] ERROR:  deadlock detected
+2026-07-22 12:28:21.641 UTC [86] DETAIL:  Process 86 waits for ShareLock on transaction 1004; blocked by process 145.
+	Process 145 waits for ShareLock on transaction 989; blocked by process 162.
+	Process 162 waits for ShareLock on transaction 1000; blocked by process 86.
