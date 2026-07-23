@@ -60,6 +60,13 @@ pub const T_MESSAGE_AVAILABLE: u8 = 1;
 pub const T_MESSAGE_AVAILABLE_BATCH: u8 = 2;
 pub const T_HEARTBEAT: u8 = 3;
 pub const T_HELLO: u8 = 4;
+// 19-wildcard-hotlist §5: batched, coalesced dirty(queue, partition) hints for a
+// peer's candidate hot-list, sent only on a vuoto→pending transition (not per
+// message). Receipt = an idempotent, commutative mark on the peer's hot-list
+// (set + epoch bump). Separate from MESSAGE_AVAILABLE (which is a parked-pop wake
+// on EVERY push): a dropped hint is healed by the reseed floor (§8), so — like
+// every mesh frame — it is best-effort and never blocks a caller.
+pub const T_HOTLIST_DIRTY_BATCH: u8 = 5;
 pub const T_QUEUE_CONFIG_SET: u8 = 10;
 pub const T_QUEUE_CONFIG_DELETE: u8 = 11;
 pub const T_MAINTENANCE_MODE_SET: u8 = 40;
@@ -85,6 +92,9 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5);
 /// they must be cheap and non-blocking (they only touch atomics / in-memory maps).
 pub struct SyncHandlers {
     pub on_message_available: Box<dyn Fn(&str, &str) + Send + Sync>,
+    // 19-wildcard-hotlist §5: a peer's coalesced hot-list dirty hint — mark the
+    // local hot-list (idempotent, no re-broadcast).
+    pub on_hotlist_dirty: Box<dyn Fn(&str, &str) + Send + Sync>,
     pub on_maintenance: Box<dyn Fn(bool) + Send + Sync>,
     pub on_pop_maintenance: Box<dyn Fn(bool) + Send + Sync>,
     pub on_queue_config_set: Box<dyn Fn(&str) + Send + Sync>,
@@ -236,6 +246,22 @@ impl MeshTransport {
             .collect();
         let payload = serde_json::to_vec(&serde_json::json!({ "items": arr })).unwrap_or_default();
         self.broadcast(encode_frame(T_MESSAGE_AVAILABLE_BATCH, &payload).into());
+    }
+
+    /// 19-wildcard-hotlist §5: batched hot-list dirty hints. Same wire shape as
+    /// the batched MESSAGE_AVAILABLE (`{"items":[{queue,partition}]}`), a distinct
+    /// tag so a peer marks its hot-list without conflating it with a pop wake.
+    /// Empty input is a no-op.
+    pub fn send_hotlist_dirty_batch(&self, items: &[(String, String)]) {
+        if items.is_empty() {
+            return;
+        }
+        let arr: Vec<serde_json::Value> = items
+            .iter()
+            .map(|(q, p)| serde_json::json!({ "queue": q, "partition": p }))
+            .collect();
+        let payload = serde_json::to_vec(&serde_json::json!({ "items": arr })).unwrap_or_default();
+        self.broadcast(encode_frame(T_HOTLIST_DIRTY_BATCH, &payload).into());
     }
 
     pub fn send_maintenance(&self, enabled: bool) {
@@ -454,6 +480,18 @@ impl MeshTransport {
                     }
                     let p = it.get("partition").and_then(|x| x.as_str()).unwrap_or("");
                     (self.handlers.on_message_available)(q, p);
+                }
+            }
+            T_HOTLIST_DIRTY_BATCH => {
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+                let Some(items) = v.get("items").and_then(|x| x.as_array()) else { return };
+                for it in items {
+                    let q = it.get("queue").and_then(|x| x.as_str()).unwrap_or("");
+                    if q.is_empty() {
+                        continue;
+                    }
+                    let p = it.get("partition").and_then(|x| x.as_str()).unwrap_or("");
+                    (self.handlers.on_hotlist_dirty)(q, p);
                 }
             }
             T_MAINTENANCE_MODE_SET => {
@@ -732,9 +770,15 @@ mod tests {
     use tokio::sync::mpsc as tmpsc;
 
     fn forwarding_handlers(tx: tmpsc::UnboundedSender<(String, String)>) -> SyncHandlers {
+        let dtx = tx.clone();
         SyncHandlers {
             on_message_available: Box::new(move |q, p| {
                 let _ = tx.send((q.to_string(), p.to_string()));
+            }),
+            // route dirty hints to the same channel, tagged, so the e2e test can
+            // assert a HOTLIST_DIRTY frame round-trips.
+            on_hotlist_dirty: Box::new(move |q, p| {
+                let _ = dtx.send((format!("dirty:{q}"), p.to_string()));
             }),
             on_maintenance: Box::new(|_| {}),
             on_pop_maintenance: Box::new(|_| {}),
@@ -820,8 +864,17 @@ mod tests {
             [("q2".to_string(), "pa".to_string()), ("q2".to_string(), "pb".to_string())]
         );
 
-        // Received-frame counter advanced on B (single + batch = 2 frames).
-        assert!(tb.stats()["messages_received"].as_u64().unwrap() >= 2);
+        // 19-wildcard-hotlist §5: batched HOTLIST_DIRTY round-trips to a distinct
+        // handler (tagged "dirty:" by forwarding_handlers).
+        ta.send_hotlist_dirty_batch(&[("q3".into(), "p3".into())]);
+        let gd = tokio::time::timeout(Duration::from_secs(2), brx.recv())
+            .await
+            .expect("no dirty within 2s")
+            .unwrap();
+        assert_eq!(gd, ("dirty:q3".to_string(), "p3".to_string()));
+
+        // Received-frame counter advanced on B (single + batch + dirty = 3 frames).
+        assert!(tb.stats()["messages_received"].as_u64().unwrap() >= 3);
     }
 
     #[tokio::test]

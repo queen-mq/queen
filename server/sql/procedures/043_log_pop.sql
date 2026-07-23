@@ -58,7 +58,17 @@
 -- addition would brick boot re-apply. Boot applies the whole 04x sequence
 -- before serving traffic, so the gap is invisible.
 -- ----------------------------------------------------------------------------
+-- p_skip_window_debounce (19-wildcard-hotlist §6): when TRUE, the partition-level
+-- windowBuffer quiet-debounce below is BYPASSED — visibility becomes immediate at
+-- the SQL level so the broker-side hot-list timer wheel is the sole windowBuffer
+-- authority (min(first-mark + windowBuffer, batch full)). It defaults FALSE, so
+-- EVERY existing caller (the wildcard/discover pops, db::pop_specific — all pass
+-- 9 positional args) is byte-identical: the debounce fires exactly as before.
+-- delayed_processing is NEVER skipped (it stays SQL-enforced; the wheel only
+-- schedules revisits for it, §6). Both prior signatures are dropped so a re-apply
+-- over a DB carrying the old 9-arg function leaves no ambiguous overload.
 DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
+DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN);
 CREATE FUNCTION queen.log_pop_v1(
     p_queue TEXT,
     p_partition TEXT,
@@ -68,7 +78,8 @@ CREATE FUNCTION queen.log_pop_v1(
     p_worker TEXT,
     p_auto_ack BOOLEAN DEFAULT FALSE,
     p_sub_mode TEXT DEFAULT 'all',
-    p_sub_from TEXT DEFAULT ''
+    p_sub_from TEXT DEFAULT '',
+    p_skip_window_debounce BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE (
     r_base BIGINT,
     r_start_idx INTEGER,
@@ -122,7 +133,7 @@ BEGIN
     -- newest message the same way, before touching the consumer row).
     -- created_at is monotone in base_offset, so the newest segment is the
     -- max base_offset — one backward PK step.
-    IF v_win_buf > 0 THEN
+    IF v_win_buf > 0 AND NOT p_skip_window_debounce THEN
         SELECT s.created_at INTO v_newest
         FROM queen.log_segments s
         WHERE s.partition_id = v_pid
@@ -1119,4 +1130,170 @@ AS $$
           ON c.partition_id = p.id AND c.consumer_group = p_group
         WHERE p.last_offset > COALESCE(c.committed, -1)
     );
+$$;
+
+-- ============================================================================
+-- 19-wildcard-hotlist §7/§9 — candidate-list pop (broker hot-list serve path).
+--
+-- The broker's in-memory hot-list (server/src/hotlist.rs) hands this the K
+-- candidate partition NAMES it pulled from the (queue, group) ring, INSTEAD of
+-- the SQL candidate scan (log_partitions ⋈ log_consumers, ORDER BY random()).
+-- The claim core is the wildcard pop's, verbatim: the loop over candidates
+-- calls queen.log_pop_v1 (INVARIANT) per candidate. What is NEW is a TRI-STATE
+-- verdict per candidate so the broker maintains the ring with NO second probe
+-- (§7 — the lease_expires_at is already on the consumer row the claim read):
+--
+--   took   — log_pop_v1 returned >0 frames (segments in `meta`, blobs aligned);
+--   empty  — 0 frames AND no live foreign lease → the broker CAS-clears the
+--            ring entry (epoch-guarded, §4), or on a deferral queue schedules a
+--            revisit instead (the broker knows the queue config, never clears);
+--   leased — 0 frames because ANOTHER worker holds a live lease until T → the
+--            broker parks the entry in the wheel at T + pad (NEVER cleared, §7).
+--
+-- p_skip_window (§6) forwards to log_pop_v1's p_skip_window_debounce so a
+-- windowBuffer queue's visibility is immediate here and the broker wheel owns
+-- the hold. delayed_processing stays SQL-enforced (never skipped).
+--
+-- Returns ONE row: meta = {"partitions":[{partition,partitionId,segments}]}
+-- (bin shape — blobs out-of-band, IDENTICAL to log_pop_wildcard_bin_v1 so the
+-- broker's render_pop_parts is unchanged); blobs = aligned bytea[]; states =
+-- JSONB [{"p":name,"s":"took|empty|leased","until":iso?}] for every EVALUATED
+-- candidate (a budget-exhausted tail is omitted → the broker re-appends anything
+-- it sent that got no verdict). NO group-first-contact bulk seed here: the
+-- broker only routes a (queue,group) to this path AFTER the wildcard/reseed path
+-- carried the seed (st.group_seeded gate), so the per-partition lazy insert in
+-- log_pop_v1 never storms (the 51e50c4 anti-convoy invariant is preserved).
+-- ============================================================================
+DROP FUNCTION IF EXISTS queen.log_pop_list_v1(TEXT, TEXT, TEXT[], INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, BOOLEAN);
+CREATE FUNCTION queen.log_pop_list_v1(
+    p_queue TEXT,
+    p_group TEXT,
+    p_partitions TEXT[],
+    p_budget INTEGER,
+    p_lease_seconds INTEGER,
+    p_worker TEXT,
+    p_auto_ack BOOLEAN,
+    p_max_partitions INTEGER,
+    p_sub_mode TEXT DEFAULT 'all',
+    p_sub_from TEXT DEFAULT '',
+    p_skip_window BOOLEAN DEFAULT FALSE
+) RETURNS TABLE(meta JSONB, blobs BYTEA[], states JSONB)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_qid UUID;
+    v_name TEXT;
+    v_remaining INTEGER := GREATEST(p_budget, 1);
+    v_max_parts INTEGER := CASE WHEN p_max_partitions IS NULL OR p_max_partitions <= 0
+                                THEN 2147483647 ELSE p_max_partitions END;
+    v_claimed INTEGER := 0;
+    v_out JSONB := '[]'::jsonb;
+    v_states JSONB := '[]'::jsonb;
+    v_segments JSONB;
+    v_part_blobs BYTEA[];
+    v_all_blobs BYTEA[] := '{}'::bytea[];
+    v_taken INTEGER;
+    v_now TIMESTAMPTZ := clock_timestamp();
+    v_pid UUID;
+    v_lease TIMESTAMPTZ;
+BEGIN
+    SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue;
+    IF v_qid IS NULL THEN
+        meta := jsonb_build_object('partitions', '[]'::jsonb);
+        blobs := '{}'::bytea[];
+        states := '[]'::jsonb;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    FOREACH v_name IN ARRAY COALESCE(p_partitions, ARRAY[]::text[]) LOOP
+        -- budget spent OR partition cap reached: leave the rest for the ring
+        EXIT WHEN v_remaining <= 0 OR v_claimed >= v_max_parts;
+
+        -- Same row shape / keys as log_pop_wildcard_bin_v1 (blobs out-of-band,
+        -- meta carries seq/startOff/take/createdAt); ORDER BY r_base keeps meta
+        -- and blobs position-aligned. p_skip_window forwarded (§6).
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                   'seq', r_base,
+                   'startOff', r_start_idx,
+                   'take', r_take,
+                   'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+               ) ORDER BY r_base), '[]'::jsonb),
+               COALESCE(SUM(r_take), 0),
+               COALESCE(array_agg(r_blob ORDER BY r_base), '{}'::bytea[])
+        INTO v_segments, v_taken, v_part_blobs
+        FROM queen.log_pop_v1(p_queue, v_name, p_group,
+                              v_remaining, p_lease_seconds, p_worker, p_auto_ack,
+                              p_sub_mode, p_sub_from, p_skip_window);
+
+        IF v_taken > 0 THEN
+            SELECT p.id INTO v_pid FROM queen.log_partitions p
+              WHERE p.queue_id = v_qid AND p.name = v_name;
+            v_out := v_out || jsonb_build_object(
+                'partition', v_name, 'partitionId', v_pid, 'segments', v_segments);
+            v_all_blobs := v_all_blobs || v_part_blobs;
+            v_remaining := v_remaining - v_taken;
+            v_claimed := v_claimed + 1;
+            v_states := v_states || jsonb_build_object('p', v_name, 's', 'took');
+        ELSE
+            -- 0 frames: distinguish a live FOREIGN lease from genuinely empty.
+            -- One indexed point lookup on the consumer row the claim already
+            -- read (worker <> this pop's fresh uuid ⇒ never a self false-positive).
+            SELECT c.lease_expires_at INTO v_lease
+            FROM queen.log_consumers c
+            JOIN queen.log_partitions p ON p.id = c.partition_id
+            WHERE p.queue_id = v_qid AND p.name = v_name
+              AND c.consumer_group = p_group
+              AND c.worker_id IS NOT NULL
+              AND c.worker_id <> p_worker
+              AND c.lease_expires_at IS NOT NULL
+              AND c.lease_expires_at > v_now
+            LIMIT 1;
+            IF FOUND THEN
+                v_states := v_states || jsonb_build_object(
+                    'p', v_name, 's', 'leased',
+                    'until', to_char(v_lease, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+            ELSE
+                v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
+            END IF;
+        END IF;
+    END LOOP;
+
+    meta := jsonb_build_object('partitions', v_out);
+    blobs := v_all_blobs;
+    states := v_states;
+    RETURN NEXT;
+END;
+$$;
+
+-- ============================================================================
+-- 19-wildcard-hotlist §8 — reseed / cold-start discovery (correctness floor).
+--
+-- Enumerates the (queue, group)'s probably-pending partitions the SAME way the
+-- wildcard candidate scan does (last_offset > committed OR no consumer row), but
+-- KEYSET-paginated in id order (never ORDER BY random() on a large set, §8) so
+-- the broker walks it in bounded ~10k chunks, staggered/throttled, to (re)seed
+-- the ring. Lease-held partitions ARE included (a lease-held partition is still
+-- pending; the ring must hold it and the tri-state will mark it leased) — reseed
+-- is the correctness floor, so it errs toward over-inclusion. Returns (id, name)
+-- so the broker interns the name and remembers the id for the ack bridge.
+-- p_after_id is the keyset cursor; pass the NIL uuid to start a fresh walk.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.log_hotlist_reseed_v1(
+    p_queue TEXT,
+    p_group TEXT,
+    p_after_id UUID,
+    p_limit INTEGER
+) RETURNS TABLE(r_id UUID, r_name TEXT)
+LANGUAGE sql STABLE
+AS $$
+    SELECT p.id, p.name
+    FROM queen.log_partitions p
+    JOIN queen.log_queues q ON q.id = p.queue_id AND q.name = p_queue
+    LEFT JOIN queen.log_consumers c
+      ON c.partition_id = p.id AND c.consumer_group = p_group
+    WHERE p.id > p_after_id
+      AND p.last_offset > COALESCE(c.committed, -1)
+    ORDER BY p.id
+    LIMIT GREATEST(p_limit, 1);
 $$;

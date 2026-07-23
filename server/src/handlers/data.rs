@@ -224,6 +224,17 @@ pub async fn handle_push(
     // Capture the pushed (queue, partition) set before the submit loop consumes
     // `groups`, so we can wake parked pops / notify peers once the write lands.
     let notify_keys: Vec<(String, String)> = groups.keys().cloned().collect();
+    // 19-wildcard-hotlist §2: capture (queue, partition, count) before `groups`
+    // is consumed, so the post-commit mark knows each partition's frame count
+    // (windowBuffer batch fattening). Only when the flag is on (else zero cost).
+    let hotlist_marks: Vec<(String, String, u32)> = if st.hotlist.enabled() {
+        groups
+            .iter()
+            .map(|((q, p), v)| (q.clone(), p.clone(), v.len() as u32))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let state = Arc::new(PushState {
         results: Mutex::new(results),
@@ -262,6 +273,17 @@ pub async fn handle_push(
     // (local) and notify peer replicas so cross-replica consume is immediate. One
     // batched MESSAGE_AVAILABLE frame covers every partition this bundle touched.
     st.notifier.notify_pushed_batch(&notify_keys);
+    // 19-wildcard-hotlist §2 (mark, caso base): the fusion flush committed, so
+    // set each pushed (queue, partition) pending on every group ring + queue a
+    // coalesced mesh dirty hint. Incondizionato; a mark on a partition whose push
+    // actually failed is the usual harmless false positive (one empty claim). No-op
+    // when the flag is off.
+    if !hotlist_marks.is_empty() {
+        let now_ms = crate::util::now_epoch_ms();
+        for (q, p, n) in &hotlist_marks {
+            st.hotlist.mark_local(q, p, *n, now_ms);
+        }
+    }
 
     // RUSTFIX item 1: an "error" status means the whole DB transaction failed
     // (connection/timeout) — fusion committed nothing. Spool those items to the
@@ -461,6 +483,17 @@ struct PopSeg {
     blob: String,
 }
 
+// 19-wildcard-hotlist §7: one per-candidate tri-state verdict from
+// queen.log_pop_list_v1's `states` array. `until` is the lease-expiry ISO for
+// the `leased` verdict.
+#[derive(Deserialize)]
+struct ListState {
+    p: String,
+    s: String,
+    #[serde(default)]
+    until: Option<String>,
+}
+
 // Single-partition pop result (db::pop_specific assembles the queen.log_pop_v1
 // rows into this shape): segments + partitionId, no partition name (the caller
 // knows it from the path). `seq` in the segment JSON carries base_offset and
@@ -502,6 +535,17 @@ pub async fn handle_pop(
         Some(v) if v > 0 => v,
         _ => st.lease_time_for(&queue).await,
     };
+
+    // 19-wildcard-hotlist: with QUEEN_HOTLIST on, serve the wildcard pop from the
+    // broker-side candidate ring instead of the SQL candidate scan. Flag off ⇒
+    // this branch is never taken and the path below is byte-identical.
+    if st.hotlist.enabled() {
+        return serve_pop_hotlist(
+            &st, &queue, &group, batch, max_parts, auto_ack, wait, deadline, lease_seconds,
+            &sub_mode, &sub_from, &worker,
+        )
+        .await;
+    }
 
     let mut backoff_count: u32 = 0;
     loop {
@@ -732,6 +776,324 @@ async fn try_targeted_serve(
             .fetch_add(count as u64, Ordering::Relaxed);
     }
     Some(json(StatusCode::OK, body))
+}
+
+// 19-wildcard-hotlist §8: how often a (queue, group) re-runs the keyset reseed
+// (correctness floor for missed marks / dropped mesh hints / cold start) is
+// AppState.hotlist_reseed_ms (QUEEN_HOTLIST_RESEED_MS, default 30s).
+// Bounded reseed page size and page cap (§8: ~10k chunks, keyset).
+const HOTLIST_RESEED_PAGE: i32 = 10_000;
+const HOTLIST_RESEED_MAX_PAGES: usize = 200;
+const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
+// Queue deferral-config cache TTL (§6): a /configure change is picked up within
+// this window.
+const HOTLIST_CFG_TTL_MS: i64 = 30_000;
+
+// 19-wildcard-hotlist: serve a wildcard pop from the broker candidate ring. One
+// ring-serve attempt per loop iteration; an empty ring / all-empty candidate set
+// parks on the SAME queue wake gate (woken by a local push, a peer's mesh dirty
+// hint, an ack-promote, or the background wheel tick) and re-takes on wake —
+// never re-runs the SQL candidate scan. Response shape / lease / metrics are
+// identical to the SQL wildcard path.
+#[allow(clippy::too_many_arguments)]
+async fn serve_pop_hotlist(
+    st: &Arc<AppState>,
+    queue: &str,
+    group: &str,
+    batch: i32,
+    max_parts: i32,
+    auto_ack: bool,
+    wait: bool,
+    deadline: Instant,
+    lease_seconds: i32,
+    sub_mode: &str,
+    sub_from: &str,
+    worker: &str,
+) -> Response {
+    let lease_id: &str = if auto_ack { "" } else { worker };
+    let mut backoff_count: u32 = 0;
+    loop {
+        let (body, count, meta, rtt) = hotlist_pop_attempt(
+            st, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
+            worker, lease_id,
+        )
+        .await;
+
+        if count == 0 && wait && Instant::now() < deadline {
+            backoff_count += 1;
+            let interval = st.pop_backoff_interval(backoff_count);
+            let waitd = deadline
+                .saturating_duration_since(Instant::now())
+                .min(interval);
+            let _parked = st.metrics.parked.enter(queue);
+            if st.notifier.wait_queue(queue, waitd).await {
+                backoff_count = 0;
+            }
+            continue;
+        }
+
+        register_leases(st, group, worker, lease_seconds, &meta);
+        st.metrics.pop.record_request(count);
+        st.metrics.pop.record_batch(count, true, rtt);
+        if count > 0 {
+            st.metrics.per_queue.add_pop(queue, count as u64);
+            st.metrics
+                .per_queue
+                .add_pop_lag(queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+            for pid in &meta.partition_ids {
+                st.remember_partition_queue(pid, queue);
+            }
+        } else {
+            st.metrics.per_queue.add_pop_empty(queue);
+        }
+        if auto_ack && count > 0 {
+            st.metrics.per_queue.add_ack(queue, count as u64, 0);
+            st.metrics.ack.record_request(count);
+            st.metrics
+                .ack_success
+                .fetch_add(count as u64, Ordering::Relaxed);
+        }
+        return json(
+            if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK },
+            body,
+        );
+    }
+}
+
+// One ring-serve attempt: (lazily) refresh the queue deferral config, take K
+// candidates from the (queue, group) ring, call queen.log_pop_list_v1 on them,
+// check the tri-state verdicts back into the ring (§4/§6/§7), and render. An
+// empty ring triggers a throttled keyset reseed (§8) before giving up. Returns
+// (body, count, meta, rtt); count==0 means the caller should park.
+#[allow(clippy::too_many_arguments)]
+async fn hotlist_pop_attempt(
+    st: &Arc<AppState>,
+    queue: &str,
+    group: &str,
+    batch: i32,
+    max_parts: i32,
+    auto_ack: bool,
+    lease_seconds: i32,
+    sub_mode: &str,
+    sub_from: &str,
+    worker: &str,
+    lease_id: &str,
+) -> (String, usize, PopMeta, Duration) {
+    let now_ms = crate::util::now_epoch_ms();
+    let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption);
+    // Register the (queue, group) ring so pushes' marks reach it even before the
+    // first serve completes (a mark for an unknown group ring is otherwise lost
+    // until reseed, §8).
+    st.hotlist.ensure_group(queue, group);
+
+    // First-contact BOOTSTRAP (spec §2 / §9, the st.group_seeded gate): the ring
+    // path's log_pop_list_v1 does NOT carry the group-first-contact BULK SEED that
+    // the wildcard SP does — and without seeded cursors, log_pop_v1's per-partition
+    // lazy consumer-row creation hits its advisory-lock guard under many concurrent
+    // consumers and mostly SKIPs (the 51e50c4 empty-storm / convoy). So until the
+    // seed marker exists for (queue, group), serve THIS pop via the wildcard SP
+    // (which carries the seed and serves) — flipping group_seeded true; every
+    // subsequent pop takes the ring path. group_seeded is a cache hit (zero DB,
+    // zero pool.get) once seeded, so steady state is pure ring.
+    if !st.group_seeded(queue, group).await {
+        let permit = st.pop_vegas.acquire().await;
+        let client = match st.pool.get().await {
+            Ok(c) => c,
+            Err(_) => {
+                drop(permit);
+                let (b, c, m) = empty();
+                return (b, c, m, Duration::ZERO);
+            }
+        };
+        let cancel_token = client.cancel_token();
+        let t0 = Instant::now();
+        let res = tokio::time::timeout(
+            st.stmt_timeout,
+            db::pop_wildcard_bin(
+                &client, queue, group, batch, lease_seconds, worker, auto_ack, max_parts,
+                sub_mode, sub_from,
+            ),
+        )
+        .await;
+        let rtt = t0.elapsed();
+        st.pop_vegas.record(rtt);
+        drop(permit);
+        let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard")
+        {
+            Some(t) => t,
+            None => {
+                let (b, c, m) = empty();
+                return (b, c, m, rtt);
+            }
+        };
+        // Learn ids for the ack bridge; the ring is populated by the next pop's
+        // reseed (cursors now seeded ⇒ pending partitions become visible to it).
+        if let Ok(parsed) = serde_json::from_str::<PopResult>(&txt) {
+            for part in &parsed.partitions {
+                st.hotlist
+                    .note_partition_id(queue, &part.partition, &part.partition_id);
+            }
+            let (body, count, meta) = render_pop_parts(
+                &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption,
+            );
+            return (body, count, meta, rtt);
+        }
+        let (b, c, m) = empty();
+        return (b, c, m, rtt);
+    }
+
+    let permit = st.pop_vegas.acquire().await;
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => {
+            drop(permit);
+            let (b, c, m) = empty();
+            return (b, c, m, Duration::ZERO);
+        }
+    };
+
+    // Lazy deferral-config refresh (§6), TTL-throttled.
+    if !st.hotlist.cfg_fresh(queue, now_ms, HOTLIST_CFG_TTL_MS) {
+        if let Ok((d, w)) = db::queue_defer_cfg(&client, queue).await {
+            st.hotlist.set_queue_cfg(queue, d, w, now_ms);
+        }
+    }
+
+    // Take candidates; reseed (bounded, throttled) if the ring is cold.
+    let k = ((max_parts.max(1) as usize) * 8).clamp(16, 256);
+    let mut cands = st.hotlist.take_batch(queue, group, k, now_ms);
+    if cands.is_empty() && st.hotlist.reseed_due(queue, group, now_ms, st.hotlist_reseed_ms) {
+        hotlist_reseed_scan(st, &client, queue, group, now_ms).await;
+        cands = st.hotlist.take_batch(queue, group, k, now_ms);
+    }
+    if cands.is_empty() {
+        drop(client);
+        drop(permit);
+        let (b, c, m) = empty();
+        return (b, c, m, Duration::ZERO);
+    }
+
+    let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
+    let skip_window = st.hotlist.skip_window(queue);
+    let cancel_token = client.cancel_token();
+    let t0 = Instant::now();
+    let res = tokio::time::timeout(
+        st.stmt_timeout,
+        db::pop_list(
+            &client, queue, group, &names, batch, lease_seconds, worker, auto_ack, max_parts,
+            sub_mode, sub_from, skip_window,
+        ),
+    )
+    .await;
+    let rtt = t0.elapsed();
+    st.pop_vegas.record(rtt);
+    drop(permit);
+
+    let (meta_txt, blobs, states_txt) =
+        match db::resolve_query_timeout(res, client, cancel_token, "pop_list") {
+            Some(t) => t,
+            None => {
+                // DB error/timeout — the candidates were checked out (INFLIGHT).
+                // Re-append them all (Requeue) so nothing is stranded, then park.
+                let back: Vec<crate::hotlist::CheckinResult> = cands
+                    .iter()
+                    .map(|c| crate::hotlist::CheckinResult {
+                        name: c.name.clone(),
+                        epoch: c.epoch,
+                        verdict: crate::hotlist::Verdict::Requeue,
+                    })
+                    .collect();
+                st.hotlist
+                    .checkin(queue, group, back, now_ms, auto_ack, lease_seconds.max(1) as i64 * 1000);
+                let (b, c, m) = empty();
+                return (b, c, m, rtt);
+            }
+        };
+
+    // Map the tri-state verdicts back to the candidates we sent (§7).
+    let states: Vec<ListState> = serde_json::from_str(&states_txt).unwrap_or_default();
+    let mut vmap: HashMap<&str, &ListState> = HashMap::with_capacity(states.len());
+    for s in &states {
+        vmap.insert(s.p.as_str(), s);
+    }
+    let results: Vec<crate::hotlist::CheckinResult> = cands
+        .iter()
+        .map(|c| {
+            let verdict = match vmap.get(c.name.as_str()) {
+                Some(s) => match s.s.as_str() {
+                    "took" => crate::hotlist::Verdict::Took,
+                    "leased" => {
+                        let until = s
+                            .until
+                            .as_deref()
+                            .and_then(crate::util::parse_iso_ms)
+                            .unwrap_or(now_ms + lease_seconds.max(1) as i64 * 1000);
+                        crate::hotlist::Verdict::Leased(until)
+                    }
+                    _ => crate::hotlist::Verdict::Empty,
+                },
+                // Not evaluated by the SQL (budget / partition-cap) — re-append.
+                None => crate::hotlist::Verdict::Requeue,
+            };
+            crate::hotlist::CheckinResult {
+                name: c.name.clone(),
+                epoch: c.epoch,
+                verdict,
+            }
+        })
+        .collect();
+    st.hotlist
+        .checkin(queue, group, results, now_ms, auto_ack, lease_seconds.max(1) as i64 * 1000);
+
+    // Parse the served partitions, learn their ids (ack bridge), and render.
+    let parsed: PopResult = match serde_json::from_str(&meta_txt) {
+        Ok(p) => p,
+        Err(_) => {
+            let (b, c, m) = empty();
+            return (b, c, m, rtt);
+        }
+    };
+    for part in &parsed.partitions {
+        st.hotlist
+            .note_partition_id(queue, &part.partition, &part.partition_id);
+    }
+    let (body, count, meta) =
+        render_pop_parts(&parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption);
+    (body, count, meta, rtt)
+}
+
+// 19-wildcard-hotlist §8: keyset-paginated reseed. Walk the (queue, group)'s
+// probably-pending partitions in id order (bounded ~10k pages), interning each
+// name + remembering its id and marking it into the ring, then stamp the reseed
+// clock. This is the cold-start populator AND the correctness floor for any
+// missed mark / dropped mesh hint. Errors abandon the walk (the next attempt
+// retries) — the ring simply stays as-is, never wrong.
+async fn hotlist_reseed_scan(
+    st: &Arc<AppState>,
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: &str,
+    now_ms: i64,
+) {
+    let mut after = NIL_UUID.to_string();
+    for _ in 0..HOTLIST_RESEED_MAX_PAGES {
+        let rows = match db::hotlist_reseed(client, queue, group, &after, HOTLIST_RESEED_PAGE).await
+        {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        if rows.is_empty() {
+            break;
+        }
+        for (id, name) in &rows {
+            st.hotlist.reseed_row(queue, group, id, name, now_ms);
+        }
+        after = rows.last().map(|(id, _)| id.clone()).unwrap_or(after);
+        if rows.len() < HOTLIST_RESEED_PAGE as usize {
+            break;
+        }
+    }
+    st.hotlist.reseed_done(queue, group, now_ms);
 }
 
 // GET /api/v1/pop/queue/:queue/partition/:partition — pop from ONE named
@@ -1513,6 +1875,13 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                     if let Some(q) = queue_name.as_ref() {
                         let okc = idxs.len() as u64; // all completed on the fast path
                         st.metrics.per_queue.add_ack(q, okc, 0);
+                        // 19-wildcard-hotlist §7: ack = lease released. If pushes
+                        // arrived during the lease the entry is still pending —
+                        // promote it to ready NOW + wake, so it is claimable
+                        // immediately instead of at lease expiry. No-op if unknown.
+                        if st.hotlist.enabled() {
+                            st.hotlist.promote_ack(q, group, &pid, crate::util::now_epoch_ms());
+                        }
                     }
                     continue; // whole group handled — skip the SQL path
                 }
@@ -1649,6 +2018,11 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                 .count() as u64;
             let failed = idxs.len() as u64 - ok;
             st.metrics.per_queue.add_ack(&q, ok, failed);
+            // 19-wildcard-hotlist §7 promote-on-ack (SQL path): a completed ack
+            // released the lease — promote the entry if pushes landed during it.
+            if ok > 0 && st.hotlist.enabled() {
+                st.hotlist.promote_ack(&q, group, &pid, crate::util::now_epoch_ms());
+            }
         }
     }
 
@@ -2399,6 +2773,25 @@ pub async fn handle_transaction(
                     st.metrics
                         .dlq_moved
                         .fetch_add(dlq_indices.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                }
+                // 19-wildcard-hotlist §7 (transaction): the txn committed in the
+                // procedure (NOT via the fusion flush), so mark every (queue,
+                // partition) it pushed to + promote every partition it acked (the
+                // txn released those leases). Rollback is safe by construction —
+                // this only runs on a committed txn; an abort marks nothing.
+                if st.hotlist.enabled() {
+                    let now_ms = crate::util::now_epoch_ms();
+                    for g in &groups {
+                        if !g.frames.is_empty() {
+                            st.hotlist
+                                .mark_local(&g.queue, &g.partition, g.frames.len() as u32, now_ms);
+                        }
+                    }
+                    for ag in &ack_groups {
+                        if let Some(q) = st.queue_for_partition(&client, &ag.partition_id).await {
+                            st.hotlist.promote_ack(&q, &ag.group, &ag.partition_id, now_ms);
+                        }
+                    }
                 }
                 let mut results: Vec<serde_json::Value> = vec![serde_json::Value::Null; flat];
                 for e in &echoes {

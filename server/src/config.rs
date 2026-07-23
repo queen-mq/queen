@@ -292,6 +292,18 @@ pub struct Config {
     pub sync: SyncConfig,
     // Disk spool for DB-outage / maintenance push durability (RUSTFIX items 1, 17).
     pub file_buffer: FileBufferConfig,
+    // Wildcard candidate hot-list (19-wildcard-hotlist.md, server/src/hotlist.rs).
+    // QUEEN_HOTLIST=1 (or =true) activates broker-side candidate selection for
+    // wildcard pops. Default OFF ⇒ the current per-pop candidate scan is
+    // byte-identical (every hook is a no-op / one branch). `hotlist_shards` sub-
+    // shards each (queue,group) ring (defaults to fusion_shards); `hotlist_window_batch`
+    // is the windowBuffer early-promotion threshold (§6).
+    pub hotlist_enabled: bool,
+    pub hotlist_shards: usize,
+    pub hotlist_window_batch: u32,
+    // Reseed / cold-start interval (ms) — §8 correctness floor for missed marks /
+    // dropped mesh hints. Default 30s; lower for tests / tighter cross-broker floor.
+    pub hotlist_reseed_ms: i64,
 }
 
 /// File-buffer configuration, mirroring the C++ `FileBufferConfig`
@@ -413,5 +425,14 @@ pub fn load() -> Config {
         auth: AuthConfig::from_env(),
         sync: SyncConfig::from_env(),
         file_buffer: FileBufferConfig::from_env(),
+        // QUEEN_HOTLIST accepts "1" or "true" (env_bool is strict-"true" only, so
+        // spell it out here — the spec/operator use QUEEN_HOTLIST=1).
+        hotlist_enabled: std::env::var("QUEEN_HOTLIST")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false),
+        hotlist_shards: env_int("QUEEN_HOTLIST_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
+            .max(1) as usize,
+        hotlist_window_batch: env_int("QUEEN_HOTLIST_WINDOW_BATCH", 100).max(1) as u32,
+        hotlist_reseed_ms: env_int("QUEEN_HOTLIST_RESEED_MS", 30000).max(1),
     }
 }

@@ -90,6 +90,12 @@ pub struct AppState {
     // alongside the other per-queue caches by reconcile so a delete+recreate
     // self-heals within one interval.
     pub seeded_groups: Mutex<HashMap<String, HashSet<String>>>,
+    // Wildcard candidate hot-list (19-wildcard-hotlist.md, server/src/hotlist.rs).
+    // Disabled (QUEEN_HOTLIST unset) ⇒ every hook is a no-op / one branch and the
+    // wildcard pop takes the unchanged SQL candidate-scan path (byte-identical).
+    pub hotlist: Arc<crate::hotlist::HotList>,
+    // §8 reseed/cold-start interval (ms). QUEEN_HOTLIST_RESEED_MS (default 30s).
+    pub hotlist_reseed_ms: i64,
 }
 
 const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;

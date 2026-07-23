@@ -11,6 +11,7 @@ mod file_buffer;
 mod frames;
 mod fusion;
 mod handlers;
+mod hotlist;
 mod httpget;
 mod internal;
 mod mesh;
@@ -199,6 +200,21 @@ async fn main() {
         cfg.ack_registry_enabled,
     ));
 
+    // Wildcard candidate hot-list (19-wildcard-hotlist.md). Wakes parked pops
+    // through the same notifier the long-poll parks on.
+    let hotlist = hotlist::HotList::new(
+        cfg.hotlist_enabled,
+        cfg.hotlist_shards,
+        cfg.hotlist_window_batch,
+    );
+    hotlist.attach_notifier(notifier.clone());
+    if cfg.hotlist_enabled {
+        println!(
+            "queen-seg-rust: QUEEN_HOTLIST on (shards={}, window_batch={})",
+            cfg.hotlist_shards, cfg.hotlist_window_batch
+        );
+    }
+
     let state = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
@@ -222,7 +238,23 @@ async fn main() {
         file_buffer: file_buffer.clone(),
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
+        hotlist: hotlist.clone(),
+        hotlist_reseed_ms: cfg.hotlist_reseed_ms,
     });
+
+    // Hot-list background wheel tick (§6): promote due deferred/leased entries to
+    // ready and wake parked pops, even when every consumer is parked. Cheap and
+    // idle-safe (a no-op when the flag is off / no rings exist).
+    if cfg.hotlist_enabled {
+        let hl = hotlist.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(50));
+            loop {
+                iv.tick().await;
+                hl.tick(crate::util::now_epoch_ms());
+            }
+        });
+    }
 
     // RUSTFIX item 16: periodic reconcile — re-read the maintenance flags from
     // queen.system_state and drop the per-queue caches, so a replica heals within
@@ -244,6 +276,17 @@ async fn main() {
                 // single and batched MESSAGE_AVAILABLE forms route through here.
                 let n = notifier.clone();
                 Box::new(move |q: &str, p: &str| n.wake_local_hint(q, p))
+            },
+            on_hotlist_dirty: {
+                // 19-wildcard-hotlist §5: a peer's dirty hint marks our hot-list
+                // (idempotent, no re-broadcast). mark_remote wakes any parked
+                // wildcard pop on a vuoto→pending transition. No-op when the flag
+                // is off. Disjoint from MESSAGE_AVAILABLE (a pop wake), so no
+                // double-marking.
+                let hl = hotlist.clone();
+                Box::new(move |q: &str, p: &str| {
+                    hl.mark_remote(q, p, crate::util::now_epoch_ms())
+                })
             },
             on_maintenance: {
                 let s = state.clone();
@@ -284,6 +327,26 @@ async fn main() {
             Ok((t, bindings)) => {
                 notifier.attach_transport(t.clone());
                 t.start(bindings);
+                // 19-wildcard-hotlist §5: coalescing dirty-hint flusher. Drains
+                // the hot-list's local vuoto→pending transitions every ~20ms and
+                // sends ONE batched HOTLIST_DIRTY frame to peers, so a hot
+                // partition costs tens of hints/s, not one per push. Only runs
+                // with the flag on AND a live mesh.
+                if cfg.hotlist_enabled {
+                    let hl = hotlist.clone();
+                    let tt = t.clone();
+                    tokio::spawn(async move {
+                        let mut iv =
+                            tokio::time::interval(std::time::Duration::from_millis(20));
+                        loop {
+                            iv.tick().await;
+                            let items = hl.drain_dirty(50_000);
+                            if !items.is_empty() {
+                                tt.send_hotlist_dirty_batch(&items);
+                            }
+                        }
+                    });
+                }
             }
             Err(e) => eprintln!(
                 "WARN: TCP mesh bind failed on :{} ({e}) — continuing with local waker only",

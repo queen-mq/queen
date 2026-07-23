@@ -403,6 +403,86 @@ pub async fn pop_specific(
     Ok(row.get(0))
 }
 
+// 19-wildcard-hotlist §7/§9: candidate-list pop. The broker hands the K
+// candidate partition NAMES it pulled from the in-memory ring; the SP claims
+// each via queen.log_pop_v1 (invariant) and returns the bin-shaped meta + the
+// aligned blobs (IDENTICAL to pop_wildcard_bin, so render_pop_parts is reused)
+// PLUS the tri-state `states` JSON the broker checks back into the ring. When
+// `skip_window` is true the SQL windowBuffer debounce is bypassed (§6 — the
+// broker wheel owns windowBuffer). Returns (meta_json, blobs, states_json).
+#[allow(clippy::too_many_arguments)]
+pub async fn pop_list(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: &str,
+    partitions: &[String],
+    budget: i32,
+    lease_seconds: i32,
+    worker: &str,
+    auto_ack: bool,
+    max_partitions: i32,
+    sub_mode: &str,
+    sub_from: &str,
+    skip_window: bool,
+) -> Result<(String, Vec<Vec<u8>>, String), tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (t.meta)::text, t.blobs, (t.states)::text \
+             FROM queen.log_pop_list_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) t",
+        )
+        .await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,
+              &max_partitions, &sub_mode, &sub_from, &skip_window],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1), row.get(2)))
+}
+
+// 19-wildcard-hotlist §8: reseed / cold-start keyset discovery. One bounded page
+// of probably-pending partitions for (queue, group) with id > after_id, in id
+// order. Returns (partition_id_text, partition_name) rows; the broker interns
+// the name, remembers the id for the ack bridge, and marks each into the ring.
+pub async fn hotlist_reseed(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: &str,
+    after_id: &str,
+    limit: i32,
+) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT r_id::text, r_name \
+             FROM queen.log_hotlist_reseed_v1($1,$2,$3::text::uuid,$4)",
+        )
+        .await?;
+    let rows = client
+        .query(&stmt, &[&queue, &group, &after_id, &limit])
+        .await?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
+// 19-wildcard-hotlist §6: a queue's deferral config (delayed_processing,
+// window_buffer) in seconds, for the broker's hot-list mark routing / wheel /
+// skip-window decision. Absent row = (0, 0).
+pub async fn queue_defer_cfg(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+) -> Result<(i32, i32), tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT COALESCE(delayed_processing,0), COALESCE(window_buffer,0) \
+             FROM queen.queues WHERE name = $1",
+        )
+        .await?;
+    match client.query_opt(&stmt, &[&queue]).await? {
+        Some(r) => Ok((r.get(0), r.get(1))),
+        None => Ok((0, 0)),
+    }
+}
+
 // Phase 2 first-contact safety: does the group-first-contact bulk-seed MARKER
 // exist for (queue, group)? The marker is the single partition_name='' row that
 // queen.log_pop_wildcard_*_v1 / log_pop_discover_wire_v1 (043) insert on a
