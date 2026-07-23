@@ -227,8 +227,11 @@ async fn main() {
     if cfg.sync.mesh_active() {
         let handlers = mesh::SyncHandlers {
             on_message_available: {
+                // A peer push wakes local pops AND records the partition hint, so a
+                // woken pop can target it (Phase 2) — no re-broadcast. Both the
+                // single and batched MESSAGE_AVAILABLE forms route through here.
                 let n = notifier.clone();
-                Box::new(move |q: &str, _p: &str| n.wake_local(q))
+                Box::new(move |q: &str, p: &str| n.wake_local_hint(q, p))
             },
             on_maintenance: {
                 let s = state.clone();

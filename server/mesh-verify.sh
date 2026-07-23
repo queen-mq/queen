@@ -119,6 +119,11 @@ if [ "$WAKE_MS" -lt 2000 ]; then
 else
   fail "B did not wake promptly (${WAKE_MS}ms ≥ 2s) — mesh wake likely did not fire"
 fi
+# Phase 2 cross-replica: the batched MESSAGE_AVAILABLE carried the partition hint,
+# so B's woken pop served via the targeted single-partition path, not a wildcard.
+BT=$(curl -s "http://127.0.0.1:$B_HTTP/metrics/prometheus" | awk '$1=="queen_pop_targeted_total"{print $2}')
+[ "${BT:-0}" -ge 1 ] || fail "B did not serve the peer-hinted wake via the targeted path (queen_pop_targeted_total=${BT:-0})"
+log "     (Phase 2) B served the peer-hinted wake via the targeted path (queen_pop_targeted_total=$BT)"
 
 # =====================================================================
 # 2) DEAD: kill A, expect B to log the dead peer and keep serving.
