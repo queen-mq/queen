@@ -1,0 +1,14 @@
+goload -mode openloop -> http://10.114.0.2:6682 queue=segbench partitions=100 consumers=850
+  offered: rate=850000 msg/s | push-batch=100 -> 8500.0 req/s across 64 pacer workers (132.81 req/s each) | max-inflight=30000 | payload=256B
+[configure] queue=segbench completedRetentionSeconds=300
+[07:17:12] offered=   850750/s achieved=    28017/s shed=   508013/s inflight= 29670 | p50=11468.80 p99=25296.90 p999=25559.04 ms | push=840500 pop=29500 lag=811000 | errs push=64746 pop=13976 empty=13 gor=84326
+[07:17:42] offered=   850253/s achieved=   355890/s shed=   319183/s inflight=  7767 | p50=3915.78 p99=28442.62 p999=30015.49 ms | push=11517200 pop=8106500 lag=3410700 | errs push=139203 pop=19427 empty=16 gor=17837
+[07:18:12] offered=   850007/s achieved=   862633/s shed=        0/s inflight=  3835 | p50=  62.21 p99= 4685.82 p999= 6193.15 ms | push=37396200 pop=37823600 lag=-427400 | errs push=139347 pop=19429 empty=156 gor=15577
+[07:18:42] offered=   849983/s achieved=   849103/s shed=        0/s inflight=  4099 | p50=  91.65 p99=13434.88 p999=17956.86 ms | push=62869300 pop=63136400 lag=-267100 | errs push=139347 pop=19429 empty=639 gor=28405
+[07:19:12] offered=   850017/s achieved=   834567/s shed=        0/s inflight=  8734 | p50=  65.28 p99=12910.59 p999=15532.03 ms | push=87906300 pop=88381000 lag=-474700 | errs push=139347 pop=19429 empty=747 gor=33040
+[07:19:42] offered=   849987/s achieved=   819780/s shed=    20650/s inflight=  8079 | p50= 111.10 p99=15663.10 p999=19267.58 ms | push=112499700 pop=112773300 lag=-273600 | errs push=142869 pop=19601 empty=1121 gor=35627
+[07:20:12] offered=   850010/s achieved=   848253/s shed=        0/s inflight=  8605 | p50=  66.05 p99=21889.02 p999=24510.46 ms | push=137947300 pop=137857300 lag=90000 | errs push=142869 pop=19601 empty=1157 gor=37556
+[07:20:42] offered=   850013/s achieved=   797470/s shed=        0/s inflight= 16447 | p50=  56.58 p99=  203.78 p999=  342.02 ms | push=161871400 pop=162343800 lag=-472400 | errs push=150791 pop=19601 empty=1201 gor=51998
+[07:21:12] offered=   849970/s achieved=   655330/s shed=    99400/s inflight= 29959 | p50= 264.19 p99=27394.05 p999=29753.34 ms | push=181531300 pop=176760200 lag=4771100 | errs push=165851 pop=20866 empty=1294 gor=61817
+[07:21:42] offered=   849963/s achieved=   806863/s shed=    30607/s inflight= 28848 | p50=  61.70 p99=28180.48 p999=31326.21 ms | push=205737200 pop=189530200 lag=16207000 | errs push=170710 pop=21214 empty=1294 gor=74795
+[final] offered=2550292 achieved=2063384 shed=293356 (msgs: offered=255029200 achieved=206338400 shed=29335600) pushErr=170712 | pushed=206338400 popped=189994200 lag=16344200 | popErr=21214 empty=1294 | overall p50=77.31 p99=23199.74 p999=29753.34 ms
