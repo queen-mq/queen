@@ -85,6 +85,12 @@ pub struct Metrics {
     /// DLQ transitions and DB errors observed on the ack path (worker_metrics parity).
     pub dlq_moved: AtomicU64,
     pub db_errors: AtomicU64,
+    /// Pop path split (Phase 2): a woken long-poll that drains a partition hint
+    /// issues a targeted single-partition pop (`pop_targeted`) instead of the
+    /// wildcard candidate scan (`pop_wildcard`). `pop_targeted / (pop_targeted +
+    /// pop_wildcard)` is the fraction of scans the hint mailbox replaced.
+    pub pop_targeted: AtomicU64,
+    pub pop_wildcard: AtomicU64,
     /// RUSTFIX item 24: per-queue throughput, flushed into queen.queue_lag_metrics.
     pub per_queue: PerQueue,
     /// Parked long-poll gauge (dashboard Parked row / queue_parked_replica).
@@ -348,6 +354,8 @@ impl Metrics {
             ack_failed: AtomicU64::new(0),
             dlq_moved: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
+            pop_targeted: AtomicU64::new(0),
+            pop_wildcard: AtomicU64::new(0),
             per_queue: PerQueue::default(),
             parked: Parked::default(),
             evl_sum_us: AtomicU64::new(0),
@@ -424,6 +432,11 @@ impl Metrics {
             ht(&mut s, name, help, "counter");
             g(&mut s, name, "", ctr.load(Ordering::Relaxed).to_string());
         }
+        // Pop path split (Phase 2): targeted hint-driven pops vs wildcard scans.
+        ht(&mut s, "queen_pop_targeted_total", "Hinted targeted single-partition pops issued", "counter");
+        g(&mut s, "queen_pop_targeted_total", "", self.pop_targeted.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_pop_wildcard_total", "Wildcard candidate-scan pops issued", "counter");
+        g(&mut s, "queen_pop_wildcard_total", "", self.pop_wildcard.load(Ordering::Relaxed).to_string());
         // Live parked long-polls per queue (instantaneous; the DB-backed
         // queen_queue_parked_consumers in status.rs is the minute-average).
         ht(&mut s, "queen_parked_long_polls", "Currently parked long-poll pops on this process", "gauge");

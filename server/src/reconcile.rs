@@ -1,7 +1,8 @@
 //! Periodic state reconcile (RUSTFIX item 16).
 //!
-//! UDP is best-effort, so a lost MAINTENANCE_MODE_SET / QUEUE_CONFIG_SET packet
-//! would leave a replica divergent forever. This loop mirrors the C++
+//! The mesh is best-effort (frames are dropped when a peer is slow or down), so a
+//! lost MAINTENANCE_MODE_SET / QUEUE_CONFIG_SET frame would leave a replica
+//! divergent forever without this. This loop mirrors the C++
 //! SharedStateManager::refresh_loop (shared_state_manager.cpp:457-487): every
 //! `QUEEN_CACHE_REFRESH_INTERVAL_MS` (default 60s) it re-reads the maintenance
 //! flags from queen.system_state (the DB is the source of truth) into the
@@ -26,7 +27,7 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
         tokio::time::sleep(Duration::from_secs(5)).await;
         loop {
             if let Ok(c) = pool.get().await {
-                // Maintenance flags: overwrite whatever UDP left with the DB truth.
+                // Maintenance flags: overwrite whatever the mesh left with the DB truth.
                 if let Ok(m) = db::get_system_flag(&c, "maintenance_mode").await {
                     let prev = state.maintenance.swap(m, Ordering::Relaxed);
                     if prev != m {

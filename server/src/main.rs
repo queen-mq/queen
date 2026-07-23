@@ -12,6 +12,7 @@ mod fusion;
 mod handlers;
 mod httpget;
 mod internal;
+mod mesh;
 mod metrics;
 mod migrate;
 mod notify;
@@ -21,7 +22,6 @@ mod retention;
 mod schema;
 mod stats;
 mod syscollect;
-mod udp;
 mod util;
 mod vegas;
 
@@ -218,17 +218,20 @@ async fn main() {
     // also benefits from DB reconvergence).
     reconcile::spawn(state.clone(), pool.clone(), cfg.sync.cache_refresh_ms);
 
-    // Inter-instance UDP notifications. Gated on QUEEN_SYNC_ENABLED (default true)
-    // AND at least one QUEEN_UDP_PEERS entry — a single stock broker binds nothing
-    // and sends nothing, behaving exactly as before (only the in-process waker,
-    // wired above, is live). Inbound packets apply peer effects to local state:
+    // Inter-instance mesh notifications. Gated on QUEEN_SYNC_ENABLED (default true)
+    // AND at least one configured peer — a single stock broker binds nothing and
+    // sends nothing, behaving exactly as before (only the in-process waker, wired
+    // above, is live). Inbound frames apply peer effects to local state:
     // MESSAGE_AVAILABLE wakes local pops (no re-broadcast), maintenance flips flip
     // the atomics, queue-config changes drop the stale lease-cache entry.
-    if cfg.sync.udp_active() {
-        let handlers = udp::SyncHandlers {
+    if cfg.sync.mesh_active() {
+        let handlers = mesh::SyncHandlers {
             on_message_available: {
+                // A peer push wakes local pops AND records the partition hint, so a
+                // woken pop can target it (Phase 2) — no re-broadcast. Both the
+                // single and batched MESSAGE_AVAILABLE forms route through here.
                 let n = notifier.clone();
-                Box::new(move |q: &str, _p: &str| n.wake_local(q))
+                Box::new(move |q: &str, p: &str| n.wake_local_hint(q, p))
             },
             on_maintenance: {
                 let s = state.clone();
@@ -265,18 +268,18 @@ async fn main() {
                 })
             },
         };
-        match udp::UdpTransport::bind(&cfg.sync, handlers).await {
-            Ok(t) => {
+        match mesh::MeshTransport::bind(&cfg.sync, handlers).await {
+            Ok((t, bindings)) => {
                 notifier.attach_transport(t.clone());
-                t.start(&cfg.sync);
+                t.start(bindings);
             }
             Err(e) => eprintln!(
-                "WARN: UDP sync bind failed on :{} ({e}) — continuing with local waker only",
-                cfg.sync.udp_port
+                "WARN: TCP mesh bind failed on :{} ({e}) — continuing with local waker only",
+                cfg.sync.mesh_port
             ),
         }
     } else if cfg.sync.enabled {
-        println!("queen-seg-rust: UDP sync enabled but no peers configured — local waker only");
+        println!("queen-seg-rust: mesh sync enabled but no peers configured — local waker only");
     }
 
     let app = Router::new()

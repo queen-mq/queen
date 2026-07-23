@@ -108,18 +108,21 @@ impl AuthConfig {
     }
 }
 
-/// Inter-instance UDP sync configuration, mirroring the C++ `InterInstanceConfig`
-/// + `SharedStateConfig` (server/include/queen/config.hpp). Drives `udp.rs` /
+/// Inter-instance sync configuration, mirroring the C++ `InterInstanceConfig`
+/// + `SharedStateConfig` (server/include/queen/config.hpp). Drives `mesh.rs` /
 /// `notify.rs`. When `enabled` is true but `peers` is empty (a single stock
-/// broker) the UDP transport is never bound — the broker behaves exactly as
+/// broker) the mesh transport is never bound — the broker behaves exactly as
 /// before, except the in-process long-poll waker (which needs no cluster) is live.
 #[derive(Clone)]
 pub struct SyncConfig {
     pub enabled: bool,
-    pub udp_port: u16,
-    /// Parsed `QUEEN_UDP_PEERS` — (host, port) pairs. Empty ⇒ no peers ⇒ no UDP.
+    /// TCP mesh listen/dial port. `QUEEN_MESH_PORT`, falling back to the legacy
+    /// `QUEEN_UDP_NOTIFY_PORT` (default 6633).
+    pub mesh_port: u16,
+    /// Parsed peer list — (host, port) pairs from `QUEEN_MESH_PEERS` (falling back
+    /// to the legacy `QUEEN_UDP_PEERS`). Empty ⇒ no peers ⇒ no mesh.
     pub peers: Vec<(String, u16)>,
-    /// HMAC-SHA256 secret for packet auth. Empty ⇒ insecure mode (no signing).
+    /// HMAC-SHA256 secret for the connection handshake. Empty ⇒ open mode (no auth).
     pub secret: String,
     pub heartbeat_ms: u64,
     pub dead_threshold_ms: u64,
@@ -135,8 +138,18 @@ pub struct SyncConfig {
 
 impl SyncConfig {
     fn from_env() -> SyncConfig {
-        let udp_port = env_int("QUEEN_UDP_NOTIFY_PORT", 6633) as u16;
-        let peers = parse_udp_peers(&env_str("QUEEN_UDP_PEERS", ""), udp_port);
+        // Prefer the new QUEEN_MESH_* names; fall back to the legacy QUEEN_UDP_*
+        // ones so existing deployments keep working unchanged.
+        let mesh_port = env_int("QUEEN_MESH_PORT", env_int("QUEEN_UDP_NOTIFY_PORT", 6633)) as u16;
+        let peers_raw = {
+            let mesh = env_str("QUEEN_MESH_PEERS", "");
+            if !mesh.is_empty() {
+                mesh
+            } else {
+                env_str("QUEEN_UDP_PEERS", "")
+            }
+        };
+        let peers = parse_mesh_peers(&peers_raw, mesh_port);
         let server_id = std::env::var("QUEEN_SERVER_ID")
             .ok()
             .filter(|v| !v.is_empty())
@@ -144,7 +157,7 @@ impl SyncConfig {
             .unwrap_or_else(|| format!("queen-{:08x}", rand::random::<u32>()));
         SyncConfig {
             enabled: env_bool("QUEEN_SYNC_ENABLED", true),
-            udp_port,
+            mesh_port,
             peers,
             secret: env_str("QUEEN_SYNC_SECRET", ""),
             heartbeat_ms: env_int("QUEEN_SYNC_HEARTBEAT_MS", 1000).max(1) as u64,
@@ -154,17 +167,17 @@ impl SyncConfig {
         }
     }
 
-    /// The UDP transport only starts when sync is enabled AND at least one peer is
+    /// The mesh transport only starts when sync is enabled AND at least one peer is
     /// configured (matches the C++ `enabled_ = shared_state.enabled && has_udp_peers()`).
-    pub fn udp_active(&self) -> bool {
+    pub fn mesh_active(&self) -> bool {
         self.enabled && !self.peers.is_empty()
     }
 }
 
-/// Parse `QUEEN_UDP_PEERS`: comma-separated `host` or `host:port` entries (a bare
-/// host uses `default_port`). Tolerates an `http://` prefix and surrounding
-/// whitespace, matching the C++ `parse_udp_peers`.
-fn parse_udp_peers(raw: &str, default_port: u16) -> Vec<(String, u16)> {
+/// Parse the peer list: comma-separated `host` or `host:port` entries (a bare host
+/// uses `default_port`). Tolerates an `http://` prefix and surrounding whitespace,
+/// matching the C++ `parse_udp_peers`.
+fn parse_mesh_peers(raw: &str, default_port: u16) -> Vec<(String, u16)> {
     raw.split(',')
         .filter_map(|entry| {
             let mut s = entry.trim();
@@ -264,7 +277,7 @@ pub struct Config {
     pub metrics_flush_ms: u64,
     // JWT authentication (disabled by default).
     pub auth: AuthConfig,
-    // Inter-instance UDP notifications (enabled by default, but inert with no peers).
+    // Inter-instance mesh notifications (enabled by default, but inert with no peers).
     pub sync: SyncConfig,
     // Disk spool for DB-outage / maintenance push durability (RUSTFIX items 1, 17).
     pub file_buffer: FileBufferConfig,

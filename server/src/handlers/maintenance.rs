@@ -105,7 +105,7 @@ pub async fn handle_set_maintenance(State(st): State<Arc<AppState>>, body: Bytes
         st.file_buffer.force_finalize_all();
         st.file_buffer.resume_background_drain();
     }
-    // Propagate the flip to peer replicas (no-op with no UDP transport).
+    // Propagate the flip to peer replicas (no-op with no mesh transport).
     st.notifier.broadcast_maintenance(enabled);
     let out = serde_json::json!({
         "maintenanceMode": enabled,
@@ -154,7 +154,7 @@ pub async fn handle_set_pop_maintenance(State(st): State<Arc<AppState>>, body: B
     if let Ok(c) = st.pool.get().await {
         let _ = db::set_system_flag(&c, "pop_maintenance_mode", enabled).await;
     }
-    // Propagate the flip to peer replicas (no-op with no UDP transport).
+    // Propagate the flip to peer replicas (no-op with no mesh transport).
     st.notifier.broadcast_pop_maintenance(enabled);
     let out = serde_json::json!({
         "popMaintenanceMode": enabled,
@@ -167,7 +167,7 @@ pub async fn handle_set_pop_maintenance(State(st): State<Arc<AppState>>, body: B
     json(StatusCode::OK, out.to_string())
 }
 
-// GET /api/v1/system/shared-state — UDPSYNC cache stats. This broker has no
+// GET /api/v1/system/shared-state — mesh sync cache stats. This broker has no
 // cluster gossip transport, so report a single-node summary carrying the live
 // flags (parity shape with the C++ get_stats()).
 pub async fn handle_shared_state(State(st): State<Arc<AppState>>) -> Response {

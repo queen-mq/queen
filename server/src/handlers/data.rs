@@ -259,10 +259,9 @@ pub async fn handle_push(
         }
     }
     // The segment is committed — wake any parked long-poll pops on these queues
-    // (local) and notify peer replicas (UDP) so cross-replica consume is immediate.
-    for (queue, partition) in &notify_keys {
-        st.notifier.notify_pushed(queue, partition);
-    }
+    // (local) and notify peer replicas so cross-replica consume is immediate. One
+    // batched MESSAGE_AVAILABLE frame covers every partition this bundle touched.
+    st.notifier.notify_pushed_batch(&notify_keys);
 
     // RUSTFIX item 1: an "error" status means the whole DB transaction failed
     // (connection/timeout) — fusion committed nothing. Spool those items to the
@@ -532,6 +531,9 @@ pub async fn handle_pop(
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
             }
         };
+        // Phase 2 observability: this was a wildcard candidate scan (the expensive
+        // seg_partitions ⋈ partition_consumers path the hint mailbox aims to replace).
+        st.metrics.pop_wildcard.fetch_add(1, Ordering::Relaxed);
 
         // On a leased (non-autoAck) pop, the worker id IS the lease id the client
         // echoes back in ack/renew. autoAck pops advance the cursor server-side and
@@ -549,9 +551,28 @@ pub async fn handle_pop(
                 .min(interval);
             // Parked gauge: held for exactly the awaited window (dashboard
             // Parked row / queue_parked_replica, sampled at 1 Hz).
-            let _parked = st.metrics.parked.enter(&queue);
+            let parked = st.metrics.parked.enter(&queue);
             if st.notifier.wait_queue(&queue, waitd).await {
                 backoff_count = 0;
+                // No longer parked — we're actively serving now.
+                drop(parked);
+                // Phase 2: the push that woke us left a partition hint. Try a
+                // targeted single-partition pop (the cheap specific-partition SP)
+                // for the hinted partitions instead of another wildcard scan. If
+                // every hinted partition comes back empty (another consumer won the
+                // SKIP LOCKED race, or the hint was for a different group's data),
+                // fall through to the wildcard backstop on the next iteration.
+                let hints = st.notifier.drain_hints(&queue, max_parts.max(1) as usize);
+                if !hints.is_empty() {
+                    if let Some(resp) = try_targeted_serve(
+                        &st, &queue, &hints, &group, batch, lease_seconds, &worker, auto_ack,
+                        &sub_mode, &sub_from,
+                    )
+                    .await
+                    {
+                        return resp;
+                    }
+                }
             }
             continue;
         }
@@ -581,6 +602,111 @@ pub async fn handle_pop(
         }
         return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
     }
+}
+
+// Phase 2: a woken long-poll drains its partition hints and pops each hinted
+// partition directly via the specific-partition SP (`db::pop_specific`), skipping
+// the ~10ms wildcard candidate scan. Returns Some(rendered response) once at least
+// one targeted pop returns data (already metered, incl. `pop_targeted`); None when
+// every hinted partition is empty — the caller then falls through to the wildcard
+// pop, which is the correctness backstop for missed wakes / pre-existing backlog /
+// consumer-group seeding. `batch` is the shared budget across the hinted
+// partitions, decremented as data is taken, so the client never gets more than it
+// asked for. Response shape / lease / metrics match the wildcard serve path.
+#[allow(clippy::too_many_arguments)]
+async fn try_targeted_serve(
+    st: &Arc<AppState>,
+    queue: &str,
+    hints: &[String],
+    group: &str,
+    batch: i32,
+    lease_seconds: i32,
+    worker: &str,
+    auto_ack: bool,
+    sub_mode: &str,
+    sub_from: &str,
+) -> Option<Response> {
+    let lease_id: &str = if auto_ack { "" } else { worker };
+    let mut parts: Vec<PopPart> = Vec::new();
+    let mut remaining = batch;
+    let mut total_rtt = Duration::ZERO;
+    for hint in hints {
+        if remaining <= 0 {
+            break;
+        }
+        let permit = st.pop_vegas.acquire().await;
+        let client = match st.pool.get().await {
+            Ok(c) => c,
+            Err(_) => {
+                drop(permit);
+                break;
+            }
+        };
+        let cancel_token = client.cancel_token();
+        let t0 = Instant::now();
+        let res = tokio::time::timeout(
+            st.stmt_timeout,
+            db::pop_specific(
+                &client, queue, hint, group, remaining, lease_seconds, worker, auto_ack, sub_mode,
+                sub_from,
+            ),
+        )
+        .await;
+        let rtt = t0.elapsed();
+        st.pop_vegas.record(rtt);
+        total_rtt += rtt;
+        drop(permit);
+        // This is a targeted (hint-driven) pop — count it whether or not it found
+        // data; an empty result still cost ~1ms vs the wildcard's ~10ms.
+        st.metrics.pop_targeted.fetch_add(1, Ordering::Relaxed);
+        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_targeted") {
+            Some(t) => t,
+            None => break, // DB error/timeout — abandon targeted, fall back to wildcard
+        };
+        let parsed: PopSpecificResult = match serde_json::from_str(&txt) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if parsed.error.is_some() {
+            continue;
+        }
+        let seg_count: i32 = parsed.segments.iter().map(|s| s.take.max(0)).sum();
+        if seg_count > 0 {
+            parts.push(PopPart {
+                partition: hint.clone(),
+                partition_id: parsed.partition_id,
+                segments: parsed.segments,
+            });
+            remaining -= seg_count;
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let (body, count, meta) =
+        render_pop_parts(&parts, None, queue, group, lease_id, &st.encryption);
+    // A non-empty segment set that rendered to zero messages (e.g. an undecodable
+    // blob) is left to the wildcard backstop rather than served as an empty 200.
+    if count == 0 {
+        return None;
+    }
+    st.metrics.pop.record_request(count);
+    st.metrics.pop.record_batch(count, true, total_rtt);
+    st.metrics.per_queue.add_pop(queue, count as u64);
+    st.metrics
+        .per_queue
+        .add_pop_lag(queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+    for pid in &meta.partition_ids {
+        st.remember_partition_queue(pid, queue);
+    }
+    if auto_ack {
+        st.metrics.per_queue.add_ack(queue, count as u64, 0);
+        st.metrics.ack.record_request(count);
+        st.metrics
+            .ack_success
+            .fetch_add(count as u64, Ordering::Relaxed);
+    }
+    Some(json(StatusCode::OK, body))
 }
 
 // GET /api/v1/pop/queue/:queue/partition/:partition — pop from ONE named
