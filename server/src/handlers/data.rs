@@ -259,10 +259,9 @@ pub async fn handle_push(
         }
     }
     // The segment is committed — wake any parked long-poll pops on these queues
-    // (local) and notify peer replicas (UDP) so cross-replica consume is immediate.
-    for (queue, partition) in &notify_keys {
-        st.notifier.notify_pushed(queue, partition);
-    }
+    // (local) and notify peer replicas so cross-replica consume is immediate. One
+    // batched MESSAGE_AVAILABLE frame covers every partition this bundle touched.
+    st.notifier.notify_pushed_batch(&notify_keys);
 
     // RUSTFIX item 1: an "error" status means the whole DB transaction failed
     // (connection/timeout) — fusion committed nothing. Spool those items to the

@@ -10,7 +10,7 @@
 //!    per-poll timeout is still honoured, so this is a strict latency improvement:
 //!    a missed wake merely falls back to the old poll interval.
 //!
-//! 2. **Peer fan-out.** When a UDP transport is attached (multi-replica mode), the
+//! 2. **Peer fan-out.** When a mesh transport is attached (multi-replica mode), the
 //!    same PUSH/maintenance/config-change also broadcasts to peers so their parked
 //!    pops / cached flags stay current. With no transport attached (a single stock
 //!    broker) every peer call is a no-op and only the local waker runs.
@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::udp::UdpTransport;
+use crate::mesh::MeshTransport;
 
 pub struct Notifier {
     /// Per-queue wake gates. Created lazily by a waiting pop; a push only wakes an
@@ -35,7 +35,7 @@ pub struct Notifier {
     /// and so have no single gate to park on.
     any: Arc<Notify>,
     /// Optional peer transport (multi-replica mode). Set once at startup.
-    transport: OnceLock<Arc<UdpTransport>>,
+    transport: OnceLock<Arc<MeshTransport>>,
 }
 
 impl Notifier {
@@ -48,11 +48,11 @@ impl Notifier {
     }
 
     /// Wire up the peer transport. Idempotent-ish: only the first attach wins.
-    pub fn attach_transport(&self, t: Arc<UdpTransport>) {
+    pub fn attach_transport(&self, t: Arc<MeshTransport>) {
         let _ = self.transport.set(t);
     }
 
-    pub fn transport(&self) -> Option<&Arc<UdpTransport>> {
+    pub fn transport(&self) -> Option<&Arc<MeshTransport>> {
         self.transport.get()
     }
 
@@ -109,6 +109,19 @@ impl Notifier {
         self.wake_local(queue);
         if let Some(t) = self.transport.get() {
             t.send_message_available(queue, partition);
+        }
+    }
+
+    /// A committed push bundle landed, touching every (queue, partition) in `keys`:
+    /// wake local pops for each queue, then fan the whole set out to peers as ONE
+    /// batched MESSAGE_AVAILABLE frame (instead of one send per partition). The
+    /// single-item [`notify_pushed`] stays for the HTTP `/internal/api/notify` path.
+    pub fn notify_pushed_batch(&self, keys: &[(String, String)]) {
+        for (queue, _partition) in keys {
+            self.wake_local(queue);
+        }
+        if let Some(t) = self.transport.get() {
+            t.send_messages_available_batch(keys);
         }
     }
 

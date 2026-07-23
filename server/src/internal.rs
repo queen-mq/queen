@@ -1,15 +1,15 @@
 //! Internal inter-instance HTTP endpoints (port of server/src/routes/internal.cpp).
 //!
-//! These are the HTTP fallback / observability surface for the UDP sync layer:
+//! These are the HTTP fallback / observability surface for the mesh sync layer:
 //!
 //!   POST /internal/api/notify              — HTTP fallback for MESSAGE_AVAILABLE.
 //!                                            An external system (or a peer without
-//!                                            UDP reachability) posts {queue,partition?}
+//!                                            mesh reachability) posts {queue,partition?}
 //!                                            and we wake local parked pops AND fan the
-//!                                            signal out to peers over UDP — exactly like
-//!                                            a local push (matches the C++ route, which
-//!                                            calls notify_message_available).
-//!   GET  /internal/api/shared-state/stats  — UDP transport + node stats.
+//!                                            signal out to peers over the mesh — exactly
+//!                                            like a local push (matches the C++ route,
+//!                                            which calls notify_message_available).
+//!   GET  /internal/api/shared-state/stats  — mesh transport + node stats.
 //!   GET  /internal/api/inter-instance/stats — legacy alias for the same stats.
 //!
 //! All three are ADMIN-gated: `route_access_level` maps every `/internal/` path to
