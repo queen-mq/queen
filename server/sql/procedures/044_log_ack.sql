@@ -154,6 +154,84 @@ END;
 $$;
 
 -- ============================================================================
+-- log_ack_at_v1 — partition-id-addressed twin of log_ack_v1, for the broker's
+-- ACK REGISTRY fast path (server/src/ack_registry.rs). The registry, the ack
+-- wire, and log_ack_by_hash_v1 are ALL partition_id-keyed; the ack handler
+-- groups by (partition_id, worker) and never carries the partition NAME (nor,
+-- for a discovery pop, the queue name). So the fast path advances the cursor by
+-- pid directly instead of forcing a (queue, partition) name→id JOIN per ack —
+-- which would just reintroduce per-ack PG work the fast path exists to remove.
+--
+-- The body is IDENTICAL to log_ack_v1 from the consumer row lock onward — same
+-- lease validation (RUSTFIX item 11: only when p_worker is non-empty), same
+-- clamp to batch_end, same positional commit / lease release / counters. The
+-- ONLY difference is that v_pid is the supplied argument rather than resolved
+-- from names. So it is provably the same decision procedure; the fast path can
+-- ONLY reach here with p_ok=true and p_upto=batch_end (full-batch complete),
+-- and PG still re-validates the lease under the consumer lock, so a stale
+-- registry HIT for an expired/reassigned lease is rejected here exactly as the
+-- hash path would reject it (the caller then falls back to log_ack_by_hash_v1).
+CREATE OR REPLACE FUNCTION queen.log_ack_at_v1(
+    p_partition_id UUID,
+    p_group TEXT,
+    p_worker TEXT,
+    p_upto BIGINT,
+    p_ok BOOLEAN DEFAULT TRUE,
+    p_acked_count INTEGER DEFAULT 0
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_c RECORD;
+    v_acked BIGINT := 0;
+BEGIN
+    -- Same (partition, group) consumer row lock as log_ack_v1 — the ONLY lock
+    -- the ack path takes. A missing row means the partition/group is unknown or
+    -- deleted; the caller falls back to the hash path (which reports likewise).
+    SELECT * INTO v_c FROM queen.log_consumers c
+    WHERE c.partition_id = p_partition_id AND c.consumer_group = p_group
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'consumer not found');
+    END IF;
+
+    -- RUSTFIX item 11: validate the lease only when a non-empty leaseId is
+    -- supplied. The registry always supplies the pop's worker, so this is the
+    -- authoritative expiry/ownership check behind the in-memory HIT.
+    IF p_worker IS NOT NULL AND p_worker <> ''
+       AND (v_c.worker_id IS DISTINCT FROM p_worker
+            OR v_c.lease_expires_at IS NULL
+            OR v_c.lease_expires_at < clock_timestamp()) THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'invalid or expired lease');
+    END IF;
+
+    IF p_upto IS NOT NULL AND p_ok THEN
+        IF v_c.batch_end IS NULL THEN
+            RETURN jsonb_build_object('ok', false, 'error', 'no leased batch');
+        END IF;
+        IF p_upto > v_c.batch_end THEN
+            RETURN jsonb_build_object('ok', false, 'error', 'position beyond leased batch');
+        END IF;
+
+        UPDATE queen.log_consumers SET
+            committed = p_upto,
+            worker_id = NULL, lease_expires_at = NULL,
+            batch_end = NULL,
+            total_consumed = total_consumed + GREATEST(p_acked_count, 0)
+        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+        v_acked := GREATEST(p_acked_count, 0);
+    ELSE
+        UPDATE queen.log_consumers SET
+            worker_id = NULL, lease_expires_at = NULL,
+            batch_end = NULL
+        WHERE partition_id = p_partition_id AND consumer_group = p_group;
+    END IF;
+
+    RETURN jsonb_build_object('ok', true, 'acked', v_acked);
+END;
+$$;
+
+-- ============================================================================
 -- log_ack_by_hash_v1 — RUSTFIX items 10 & 11: the v0.16.0 ack semantics,
 -- ported verbatim from seg_ack_by_txn_v1 (024:474-773) with scalar offsets.
 -- The broker maps wire txn strings → xxh3_128 hashes (§3; SQL never hashes)
@@ -191,9 +269,19 @@ $$;
 --
 -- RUSTFIX item 11: worker/expiry validation only when p_worker is non-empty.
 --
--- Resolution (spec §7): ONE scan of the partition's log_txns window (its
--- steady-state size is O(rate × dedup/txn window), enforced by the txns_start
--- purge), hash-joined against the input array — per input hash we keep
+-- Resolution (spec §7): ONE join. A single CTE pipeline unnests the incoming
+-- hashes once (carrying status + array position) and joins them ONCE against
+-- the partition's log_txns rows in the ackable span, materializing a resolved
+-- set (in_idx, hash, status, eff, below) from which EVERY downstream decision
+-- is derived with scalar aggregates — no further log_txns hash scans. The join
+-- reads only rows with base_offset <= batch_end (under a lease): a row above
+-- the leased batch cannot resolve to an in-span offset (off <= batch_end) nor
+-- to a below-cursor one (off <= committed < batch_end), so bounding it out is
+-- result-preserving AND it is the whole optimization — an ack at the head no
+-- longer explodes the entire partition's hash blobs, only the batch's. The
+-- below-cursor window [txns_start, committed] lives inside [.., batch_end], so
+-- noop/stale still resolve from the same single scan; a lease-less ack
+-- (batch_end NULL) keeps the unbounded window. Per input hash we keep
 --   eff   = MIN matching offset inside the ackable span
 --           [GREATEST(committed+1, txns_start), batch_end]   (lease)
 --           (committed, ∞)                                   (lease-less)
@@ -224,8 +312,6 @@ DECLARE
     v_txns_start BIGINT := 0;
     v_n INT := COALESCE(array_length(p_hashes, 1), 0);
     v_st TEXT[];
-    v_eff BIGINT[];        -- per input ordinal: resolved in-span offset (MIN), NULL = none
-    v_below BOOLEAN[];     -- per input ordinal: some occurrence at/below committed
     v_lo BIGINT;           -- ackable-span lower bound
     -- lowest explicit signal (failed/dlq/retry) in the ackable span
     v_sig_off BIGINT;
@@ -292,69 +378,67 @@ BEGIN
     END IF;
 
     -- ------------------------------------------------------------ resolution
-    -- One pass: scan the partition's log_txns rows once, explode each row's
-    -- hash blob, hash-join against the input array (the input side is tiny).
+    -- ONE join, ONE materialized resolved set. Downstream (below-cursor
+    -- honesty, head signal, implicit-ack max-ok, delta) is scalar over it.
+    --   input    — the incoming hashes unnested once, with status + position.
+    --   occ      — log_txns hash occurrences in the ackable span, exploded
+    --              ONCE. Bounded to base_offset <= batch_end under a lease
+    --              (rows above the batch resolve to nothing — see header);
+    --              lease-less keeps the full window.
+    --   resolved — per input hash: eff (MIN in-span offset) + below (any
+    --              occurrence at/below committed).
+    --   sig      — the head signal (lowest failed/dlq/retry offset, tie
+    --              dlq>failed>retry), evaluated once and reused for the max-ok
+    --              clamp.
+    -- The final aggregate emits every scalar the branches need in one shot:
+    -- sig_off/sig_kind, noopHashes/staleHashes (input order), max-ok.
     IF v_n > 0 THEN
-        SELECT array_agg(x.eff ORDER BY x.ord),
-               array_agg(x.below ORDER BY x.ord)
-        INTO v_eff, v_below
-        FROM (
-            SELECT i.ord,
-                   MIN(m.off) FILTER (
-                       WHERE m.off >= v_lo
-                         AND (NOT v_has_lease OR m.off <= v_c.batch_end)) AS eff,
-                   COALESCE(bool_or(m.off <= v_c.committed), false) AS below
-            FROM unnest(p_hashes) WITH ORDINALITY AS i(h, ord)
-            LEFT JOIN (
-                SELECT th.h AS h, t.base_offset + th.idx AS off
-                FROM queen.log_txns t
-                CROSS JOIN LATERAL queen.log_unnest_hashes(t.hashes) th
-                WHERE t.partition_id = p_partition_id
-            ) m ON m.h = i.h
-            GROUP BY i.ord
-        ) x;
+        WITH input(in_idx, hash, status) AS (
+            SELECT u.ord, u.h, u.st
+            FROM unnest(p_hashes, v_st) WITH ORDINALITY AS u(h, st, ord)
+        ),
+        occ(h, voff) AS (
+            SELECT th.h, t.base_offset + th.idx
+            FROM queen.log_txns t
+            CROSS JOIN LATERAL queen.log_unnest_hashes(t.hashes) th
+            WHERE t.partition_id = p_partition_id
+              AND (NOT v_has_lease OR t.base_offset <= v_c.batch_end)
+        ),
+        resolved(in_idx, hash, status, eff, below) AS (
+            SELECT i.in_idx, i.hash, i.status,
+                   MIN(o.voff) FILTER (
+                       WHERE o.voff >= v_lo
+                         AND (NOT v_has_lease OR o.voff <= v_c.batch_end)),
+                   COALESCE(bool_or(o.voff <= v_c.committed), false)
+            FROM input i
+            LEFT JOIN occ o ON o.h = i.hash
+            GROUP BY i.in_idx, i.hash, i.status
+        ),
+        sig(sig_off, sig_kind) AS (
+            SELECT eff, status
+            FROM resolved
+            WHERE eff IS NOT NULL AND status IN ('failed', 'dlq', 'retry')
+            ORDER BY eff,
+                     CASE status WHEN 'dlq' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END
+            LIMIT 1
+        )
+        SELECT
+            (SELECT sig_off  FROM sig),
+            (SELECT sig_kind FROM sig),
+            COALESCE(jsonb_agg(encode(r.hash, 'hex') ORDER BY r.in_idx) FILTER (
+                WHERE r.below AND r.eff IS NULL
+                  AND r.status IN ('completed', 'success', 'acked', 'ok')), '[]'::jsonb),
+            COALESCE(jsonb_agg(encode(r.hash, 'hex') ORDER BY r.in_idx) FILTER (
+                WHERE r.below AND r.eff IS NULL
+                  AND r.status IN ('failed', 'dlq', 'retry')), '[]'::jsonb),
+            MAX(r.eff) FILTER (
+                WHERE r.eff IS NOT NULL
+                  AND r.status IN ('completed', 'success', 'acked', 'ok')
+                  AND ((SELECT sig_off FROM sig) IS NULL
+                       OR r.eff < (SELECT sig_off FROM sig)))
+        INTO v_sig_off, v_sig_kind, v_noop, v_stale, v_max_ok
+        FROM resolved r;
     END IF;
-
-    -- ------------------------------------------------------------------ (0)
-    -- BELOW-CURSOR HONESTY: hashes whose ONLY resolution sits at/below
-    -- committed can no longer have any effect. Report them per hash (hex)
-    -- instead of silently swallowing: completed → noop (harmless duplicate
-    -- commit); failed/dlq/retry → stale (an explicit signal the store cannot
-    -- honor — the broker rejects the item as 'already committed').
-    SELECT COALESCE(jsonb_agg(encode(p_hashes[g], 'hex')) FILTER (
-               WHERE v_below[g] AND v_eff[g] IS NULL
-                 AND v_st[g] IN ('completed', 'success', 'acked', 'ok')), '[]'::jsonb),
-           COALESCE(jsonb_agg(encode(p_hashes[g], 'hex')) FILTER (
-               WHERE v_below[g] AND v_eff[g] IS NULL
-                 AND v_st[g] IN ('failed', 'dlq', 'retry')), '[]'::jsonb)
-    INTO v_noop, v_stale
-    FROM generate_series(1, v_n) g;
-
-    -- ----------------------------------------------------------------- (0b)
-    -- HEAD SIGNAL: the LOWEST explicit failed/dlq/retry offset in the ackable
-    -- span. The cursor may never advance past it — an explicit signal is never
-    -- implicitly completed by a later acked-ok position in the same call. At
-    -- the same offset dlq > failed > retry.
-    SELECT v_eff[g], v_st[g]
-    INTO v_sig_off, v_sig_kind
-    FROM generate_series(1, v_n) g
-    WHERE v_eff[g] IS NOT NULL
-      AND v_st[g] IN ('failed', 'dlq', 'retry')
-    ORDER BY v_eff[g],
-             CASE v_st[g] WHEN 'dlq' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END
-    LIMIT 1;
-
-    -- ------------------------------------------------------------------ (1)
-    -- IMPLICIT-ACK: MAX acked-ok offset in the ackable span, CLAMPED strictly
-    -- below the head signal. Silent gaps below the max commit implicitly;
-    -- acked-ok positions above the head signal are ignored here and simply
-    -- redeliver (at-least-once duplicates, never a lost signal).
-    SELECT MAX(v_eff[g])
-    INTO v_max_ok
-    FROM generate_series(1, v_n) g
-    WHERE v_eff[g] IS NOT NULL
-      AND v_st[g] IN ('completed', 'success', 'acked', 'ok')
-      AND (v_sig_off IS NULL OR v_eff[g] < v_sig_off);
 
     -- New committed = the max acked-ok offset itself (committed IS the last
     -- acked offset — no "+1 then normalize" step exists in offset land).

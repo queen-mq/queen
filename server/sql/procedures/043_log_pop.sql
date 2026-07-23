@@ -740,10 +740,15 @@ BEGIN
         ORDER BY random()
         LIMIT v_cand_cap
     LOOP
-        -- Blobs go to the aligned bytea[]; meta keeps only what the broker
-        -- renderer reads (startOff/take/createdAt). Both aggregates ORDER BY
-        -- r_base so meta position k maps to v_part_blobs[k].
+        -- Blobs go to the aligned bytea[]; meta keeps what the broker renderer
+        -- reads (startOff/take/createdAt) PLUS `seq` (= base_offset), which the
+        -- ACK REGISTRY needs to derive the leased batch_end broker-side
+        -- (batch_end = seq + startOff + take - 1 of the last segment; see
+        -- server/src/ack_registry.rs). `seq` is internal broker↔PG meta — the
+        -- client never sees it — so adding it changes no wire contract; blobs
+        -- stay position-aligned (both aggregates still ORDER BY r_base).
         SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                   'seq', r_base,
                    'startOff', r_start_idx,
                    'take', r_take,
                    'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')

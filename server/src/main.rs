@@ -1,3 +1,4 @@
+mod ack_registry;
 mod auth;
 mod config;
 mod db;
@@ -189,9 +190,19 @@ async fn main() {
     }
     file_buffer::spawn_drain(file_buffer.clone(), pool.clone());
 
+    // ACK REGISTRY (server/src/ack_registry.rs): in-memory lease → (worker,
+    // batch_end, batch-hash-set) map that turns a full-batch completed ack into
+    // a single positional cursor advance, skipping the log_ack_by_hash_v1 hash
+    // resolution that caps explicit-ack consume. Miss/evicted/expired → SQL path.
+    let ack_registry = Arc::new(ack_registry::AckRegistry::new(
+        cfg.ack_registry_mb,
+        cfg.ack_registry_enabled,
+    ));
+
     let state = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
+        ack_registry,
         push_vegas: push_vegas.clone(),
         pop_vegas: pop_vegas.clone(),
         metrics: metrics.clone(),

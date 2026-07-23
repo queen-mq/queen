@@ -442,6 +442,14 @@ struct PopPart {
 }
 #[derive(Deserialize)]
 struct PopSeg {
+    // base_offset of the segment (the SP's `seq` key; §11 opaque token). The
+    // renderer proper ignores it, but the ACK REGISTRY uses it to derive the
+    // leased batch_end broker-side: batch_end = seq + startOff + take - 1 of the
+    // last (highest-base) delivered segment — the exact value queen.log_pop_v1
+    // wrote to log_consumers.batch_end. Defaults to 0 if absent (autoAck /
+    // non-leasing renders never read it).
+    #[serde(default)]
+    seq: i64,
     #[serde(rename = "startOff")]
     start_off: i32,
     take: i32,
@@ -589,6 +597,8 @@ pub async fn handle_pop(
             }
             continue;
         }
+        // ACK REGISTRY: record this pop's leases (no-op on autoAck / empty).
+        register_leases(&st, &group, &worker, lease_seconds, &meta);
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
@@ -703,6 +713,8 @@ async fn try_targeted_serve(
     if count == 0 {
         return None;
     }
+    // ACK REGISTRY: record the targeted (hint-driven) pop's leases too.
+    register_leases(st, group, worker, lease_seconds, &meta);
     st.metrics.pop.record_request(count);
     st.metrics.pop.record_batch(count, true, total_rtt);
     st.metrics.per_queue.add_pop(queue, count as u64);
@@ -802,6 +814,8 @@ pub async fn handle_pop_partition(
             }
             continue;
         }
+        // ACK REGISTRY: record this specific-partition pop's lease (no-op on autoAck).
+        register_leases(&st, &group, &worker, lease_seconds, &meta);
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
@@ -938,7 +952,7 @@ pub async fn handle_pop_discover(
         // needs), and the top-level "queue" field is left empty. Per-queue lag /
         // cache attribution is skipped here for the same reason (acks on these
         // partitions attribute via the DB-lookup fallback).
-        let (body, count, _meta) =
+        let (body, count, meta) =
             build_pop_response(&txt, None, "", &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
             // Discovery pops span queues -> shared gate, woken by any push.
@@ -953,6 +967,10 @@ pub async fn handle_pop_discover(
             }
             continue;
         }
+        // ACK REGISTRY: record the discovery pop's leases. lease_seconds is 0 here
+        // (resolved per-partition in SQL); insert_lease uses a TTL fallback — the
+        // TTL only bounds memory, PG lease validation guards correctness.
+        register_leases(&st, &group, &worker, lease_seconds, &meta);
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
         // autoAck advances the cursor server-side (no client ack round-trip), but it
@@ -978,6 +996,43 @@ pub(crate) struct PopMeta {
     pub lag_max_ms: u64,
     pub lag_n: u64,
     pub partition_ids: Vec<String>,
+    // ACK REGISTRY lease records for this pop — one per partition that delivered
+    // a LEASED (non-autoAck) batch. Empty on autoAck renders (leaseId == ""). The
+    // handler feeds these to st.ack_registry.insert_lease after rendering.
+    pub leases: Vec<LeaseInsert>,
+}
+
+// One partition's leased batch, captured during render (the txns are in hand as
+// frames are unpacked): partition_id, the batch's end offset (= the value
+// log_pop_v1 wrote to log_consumers.batch_end), and the DISTINCT-collapsible
+// xxh3_128 txn hashes of the delivered frames (frame order; the registry dedups).
+pub(crate) struct LeaseInsert {
+    pub partition_id: String,
+    pub batch_end: i64,
+    pub hashes: Vec<u128>,
+}
+
+// Feed a leased pop's per-partition lease records into the ACK REGISTRY so a
+// later full-batch completed ack resolves to one positional cursor advance
+// (queen.log_ack_at_v1) instead of per-ack hash resolution. No-op when there are
+// no leases (autoAck, or an empty/partial render) — the registry is disabled or
+// the batch simply defers to the SQL ack path.
+fn register_leases(st: &Arc<AppState>, group: &str, worker: &str, lease_seconds: i32, meta: &PopMeta) {
+    if meta.leases.is_empty() {
+        return;
+    }
+    let now_ms = crate::util::now_epoch_ms();
+    for lz in &meta.leases {
+        st.ack_registry.insert_lease(
+            &lz.partition_id,
+            group,
+            worker,
+            lz.batch_end,
+            &lz.hashes,
+            lease_seconds,
+            now_ms,
+        );
+    }
 }
 
 fn pop_error_body(e: &str) -> (String, usize, PopMeta) {
@@ -1086,10 +1141,42 @@ fn render_pop_parts(
     out.push_str("\",\"consumerGroup\":\"");
     json_escape_into(&mut out, group);
     out.push_str("\",\"messages\":[");
+    // ACK REGISTRY: collect per-partition lease records only for LEASED pops (a
+    // non-empty leaseId == the worker). autoAck renders (leaseId "") carry no
+    // lease and skip this entirely.
+    let collect_leases = !lease_id.is_empty();
     for part in parts {
         if !part.partition_id.is_empty() {
             meta.partition_ids.push(part.partition_id.clone());
         }
+        // Pre-compute (from segment metadata, before rendering) the leased
+        // batch's end offset and its expected frame count. batch_end is the
+        // last (highest-base) delivered segment's seq + startOff + take - 1 —
+        // identical to the v_last that log_pop_v1 wrote to log_consumers.batch_end
+        // (§6: v_last = base + start_idx + take - 1 for every emitted row, last
+        // wins). The hashes of the delivered frames are gathered in the loop
+        // below; the lease is registered only if EVERY expected frame actually
+        // rendered (a skipped/partial/undecodable segment leaves rendered <
+        // expected, and the batch defers to the unchanged SQL ack path).
+        let mut part_expected: i64 = 0;
+        let mut part_batch_end: i64 = i64::MIN;
+        if collect_leases {
+            for seg in &part.segments {
+                let t = seg.take.max(0) as i64;
+                part_expected += t;
+                if t > 0 {
+                    let be = seg.seq + seg.start_off.max(0) as i64 + t - 1;
+                    if be > part_batch_end {
+                        part_batch_end = be;
+                    }
+                }
+            }
+        }
+        let mut part_hashes: Vec<u128> = if collect_leases {
+            Vec::with_capacity(part_expected.max(0) as usize)
+        } else {
+            Vec::new()
+        };
         for seg in &part.segments {
             // Pop lag: message age at delivery. All frames of a segment share the
             // segment's createdAt (one push call), so parse it once per segment.
@@ -1198,12 +1285,33 @@ fn render_pop_parts(
                 json_escape_into(&mut out, group);
                 out.push_str("\"}");
                 count += 1;
+                // ACK REGISTRY: fingerprint the delivered txn (~50ns) while it is
+                // in hand — same xxh3_128 the ack path recomputes from the wire
+                // txn, so the sets compare exactly.
+                if collect_leases {
+                    part_hashes.push(u128::from_be_bytes(crate::util::txn_hash128(f.txn)));
+                }
                 if let Some(age) = seg_age_ms {
                     meta.lag_sum_ms += age;
                     meta.lag_max_ms = meta.lag_max_ms.max(age);
                     meta.lag_n += 1;
                 }
             }
+        }
+        // Register the lease only when every leased frame rendered (rendered ==
+        // expected) and the partition id is known; otherwise the batch defers to
+        // the SQL ack path (sound — a partial delivery can't be fast-path acked).
+        if collect_leases
+            && part_expected > 0
+            && part_batch_end != i64::MIN
+            && part_hashes.len() as i64 == part_expected
+            && !part.partition_id.is_empty()
+        {
+            meta.leases.push(LeaseInsert {
+                partition_id: part.partition_id.clone(),
+                batch_end: part_batch_end,
+                hashes: part_hashes,
+            });
         }
     }
     out.push_str("],\"partitionsClaimed\":");
@@ -1362,6 +1470,62 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
         // is partitionId-keyed, so resolve the queue via the pop-fed memo (DB lookup
         // on a miss). None (unknown/deleted partition) leaves the ack unattributed.
         let queue_name = st.queue_for_partition(&client, &pid).await;
+
+        // ---- ACK REGISTRY fast path ----
+        // Fire ONLY when every item in this (partition, worker) group is
+        // `completed` and the group carries a leaseId. A registry HIT (worker
+        // matches AND the acked txn set EXACTLY covers the leased batch) collapses
+        // the whole batch to ONE positional cursor advance (queen.log_ack_at_v1),
+        // skipping the log_ack_by_hash_v1 hash resolution. log_ack_at_v1 still
+        // re-validates the lease under the consumer row lock, so a stale HIT (lease
+        // expired/reassigned between pop and ack) returns ok:false and we fall
+        // through to the SQL path — the registry can never grant an ack PG refuses.
+        // ANY other case (a non-completed status, a partial/extra set, a worker
+        // mismatch, an unknown/evicted/expired entry) never reaches here and takes
+        // the verbatim SQL path below, so below-cursor honesty, the retry budget,
+        // and DLQ handoff are preserved by construction.
+        if !worker.is_empty() && idxs.iter().all(|&i| acks[i].status == "completed") {
+            let acked: Vec<u128> = idxs
+                .iter()
+                .map(|&i| u128::from_be_bytes(crate::util::txn_hash128(&acks[i].txn)))
+                .collect();
+            if let Some(batch_end) =
+                st.ack_registry.take_if_full_batch(&pid, group, &worker, &acked)
+            {
+                let hit_ok = match db::ack_at(
+                    &client, &pid, group, &worker, batch_end, true, idxs.len() as i32,
+                )
+                .await
+                {
+                    Ok(txt) => serde_json::from_str::<serde_json::Value>(&txt)
+                        .ok()
+                        .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
+                        .unwrap_or(false),
+                    Err(_) => false,
+                };
+                if hit_ok {
+                    // Same per-item result shape as the SQL happy path.
+                    for &i in &idxs {
+                        success[i] = true;
+                        lease_released[i] = true;
+                    }
+                    // Per-queue ack attribution (identical to the SQL-path tail).
+                    if let Some(q) = queue_name.as_ref() {
+                        let okc = idxs.len() as u64; // all completed on the fast path
+                        st.metrics.per_queue.add_ack(q, okc, 0);
+                    }
+                    continue; // whole group handled — skip the SQL path
+                }
+                // ack_at said ok:false (e.g. expired lease) → fall through to SQL,
+                // which resolves the true outcome. The entry was already consumed.
+            }
+        }
+
+        // Any non-fast outcome resolves this lease's state via SQL (release,
+        // partial advance, nack, DLQ), so drop our cached entry (worker-guarded)
+        // to keep the registry from ever offering a stale HIT for this batch.
+        st.ack_registry.evict(&pid, group, &worker);
+
         // RUSTFIX item 10 on the log wire: aligned hash/status arrays so
         // log_ack_by_hash_v1 distinguishes completed / failed / retry / dlq.
         // `hexes` keeps each item's 32-hex token for mapping the SP's
@@ -1501,6 +1665,10 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
         st.metrics.ack_failed.fetch_add((n as u64).saturating_sub(ok), Relaxed);
         st.metrics.dlq_moved.fetch_add(dlq, Relaxed);
     }
+
+    // ACK REGISTRY: rate-limited hit-rate line ([ack-reg] hits/misses/rate), so a
+    // run shows how much of the ack traffic took the positional fast path.
+    st.ack_registry.maybe_report(crate::util::now_epoch_ms());
 
     render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags)
 }

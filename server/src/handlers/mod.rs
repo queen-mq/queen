@@ -25,6 +25,12 @@ use crate::vegas::Vegas;
 pub struct AppState {
     pub pool: Pool,
     pub fusion: Arc<Fusion>,
+    // ACK REGISTRY fast path (server/src/ack_registry.rs): leasing pops record
+    // (worker, batch_end, delivered-batch hash set) here; a later full-batch
+    // completed ack resolves to one positional cursor advance instead of the
+    // per-ack log_ack_by_hash_v1 hash resolution. Any miss falls through to the
+    // unchanged SQL ack path — the registry is an optimization, never authority.
+    pub ack_registry: Arc<crate::ack_registry::AckRegistry>,
     pub push_vegas: Arc<Vegas>,
     pub pop_vegas: Arc<Vegas>,
     pub metrics: Arc<Metrics>,

@@ -179,6 +179,36 @@ pub async fn ack_position(
     Ok(row.get(0))
 }
 
+// ACK REGISTRY fast path (server/src/ack_registry.rs): partition-id-addressed
+// positional ack via queen.log_ack_at_v1 (044) — the pid-keyed twin of
+// log_ack_v1. The registry HIT already proved (worker matches, whole batch
+// completed), so this is a single positional cursor advance to `upto`
+// (= batch_end) with NO hash resolution. log_ack_at_v1 STILL re-validates the
+// lease under the consumer row lock, so a stale HIT for an expired/reassigned
+// lease returns {"ok":false,...} and the caller falls back to ack_by_hash.
+// Returns the SP JSON as text ({"ok":bool,"acked":i64,...}). $1::text::uuid pins
+// $1 to TEXT so the partition_id &str binds.
+#[allow(clippy::too_many_arguments)]
+pub async fn ack_at(
+    client: &deadpool_postgres::Client,
+    partition_id: &str,
+    group: &str,
+    worker: &str,
+    upto: i64,
+    ok: bool,
+    count: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_ack_at_v1($1::text::uuid, $2, $3, $4::bigint, $5::bool, $6::int))::text",
+        )
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&partition_id, &group, &worker, &upto, &ok, &count])
+        .await?;
+    Ok(row.get(0))
+}
+
 // NEW (log engine): hash-addressed ack for ONE (partition, group, worker) via
 // queen.log_ack_by_hash_v1 (044). `hashes` are the 16-byte xxh3_128 txn hashes
 // (crate::util::txn_hash128), index-aligned with `statuses`

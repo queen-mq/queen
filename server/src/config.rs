@@ -256,6 +256,17 @@ pub struct Config {
     pub dedup_cache_mb: usize,
     #[allow(dead_code)]
     pub dedup_cache_enabled: bool,
+    // Broker-side ACK REGISTRY (server/src/ack_registry.rs). Caps the in-memory
+    // lease→(worker, batch_end, batch-hash-set) map that turns a full-batch
+    // completed ack into one positional cursor advance (no PG hash resolution).
+    // Whole-entry LRU eviction under the cap; an evicted/expired lease just takes
+    // the unchanged queen.log_ack_by_hash_v1 path — always sound. Entries are
+    // small and short-lived (consumed on ack), so 64 MB holds a very large number
+    // of concurrently in-flight leases.
+    pub ack_registry_mb: usize,
+    // Kill switch (QUEEN_ACK_REGISTRY=0 disables). Disabled ⇒ every ack takes the
+    // unchanged log_ack_by_hash_v1 path — exactly the pre-registry behaviour.
+    pub ack_registry_enabled: bool,
     // Retention/metrics background-job knobs (RUSTFIX item 20 — C++ JobsConfig,
     // config.hpp:286-329). `retention_batch_size` bounds each metrics-purge DELETE;
     // `metrics_retention_days` is the worker/system-metrics purge window (default
@@ -387,6 +398,10 @@ pub fn load() -> Config {
         // Kill switch semantics (doc 18 §5): QUEEN_DEDUP_CACHE=0 disables; any
         // other value (or unset) enables. Correctness never depends on the cache.
         dedup_cache_enabled: std::env::var("QUEEN_DEDUP_CACHE")
+            .map(|v| v != "0")
+            .unwrap_or(true),
+        ack_registry_mb: env_int("QUEEN_ACK_REGISTRY_MB", 64).max(1) as usize,
+        ack_registry_enabled: std::env::var("QUEEN_ACK_REGISTRY")
             .map(|v| v != "0")
             .unwrap_or(true),
         retention_batch_size: env_int("RETENTION_BATCH_SIZE", 1000).max(1) as usize,
