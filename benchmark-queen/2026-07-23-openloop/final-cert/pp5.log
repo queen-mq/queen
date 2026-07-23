@@ -1,0 +1,12 @@
+goload -mode openloop -> http://10.114.0.2:6682 queue=segbench partitions=100 consumers=850
+  offered: rate=1000000 msg/s | push-batch=100 -> 10000.0 req/s across 64 pacer workers (156.25 req/s each) | max-inflight=30000 | payload=256B
+[configure] queue=segbench completedRetentionSeconds=300
+[06:29:30] offered=  1004120/s achieved=   906420/s shed=        0/s inflight=  9770 | p50= 872.45 p99= 2473.98 p999= 3162.11 ms | push=9064200 pop=8883000 lag=181200 | errs push=0 pop=0 empty=0 gor=24664
+[06:29:40] offered=  1000360/s achieved=   997660/s shed=        0/s inflight= 10040 | p50= 897.02 p99= 2473.98 p999= 3096.58 ms | push=19040800 pop=17886000 lag=1154800 | errs push=0 pop=0 empty=0 gor=24934
+[06:29:50] offered=  1000090/s achieved=  1006120/s shed=        0/s inflight=  9437 | p50= 897.02 p99= 2539.52 p999= 3227.65 ms | push=29102000 pop=26922000 lag=2180000 | errs push=0 pop=0 empty=0 gor=24331
+[06:30:00] offered=   999770/s achieved=  1001370/s shed=        0/s inflight=  9250 | p50= 897.02 p99= 2506.75 p999= 3260.42 ms | push=39115700 pop=35482000 lag=3633700 | errs push=27 pop=0 empty=0 gor=30492
+[06:30:10] offered=  1001270/s achieved=   996530/s shed=        0/s inflight=  9724 | p50= 823.30 p99= 2342.91 p999= 3031.04 ms | push=49081000 pop=44374000 lag=4707000 | errs push=27 pop=0 empty=0 gor=30966
+[06:30:20] offered=   998800/s achieved=   978860/s shed=        0/s inflight= 11718 | p50= 847.87 p99= 2375.68 p999= 3063.81 ms | push=58869600 pop=52773000 lag=6096600 | errs push=27 pop=0 empty=0 gor=32960
+[06:30:30] offered=   999800/s achieved=  1021890/s shed=        0/s inflight=  9509 | p50= 839.68 p99= 2408.45 p999= 3129.34 ms | push=69088500 pop=61506000 lag=7582500 | errs push=27 pop=2 empty=0 gor=30747
+[06:30:40] offered=  1000440/s achieved=  1001010/s shed=        0/s inflight=  9453 | p50= 823.30 p99= 2375.68 p999= 3096.58 ms | push=79098600 pop=70325000 lag=8773600 | errs push=27 pop=2 empty=0 gor=30691
+[final] offered=900224 achieved=896212 shed=0 (msgs: offered=90022400 achieved=89621200 shed=0) pushErr=27 | pushed=89621200 popped=79562000 lag=10059200 | popErr=2 empty=0 | overall p50=856.06 p99=2408.45 p999=3129.34 ms

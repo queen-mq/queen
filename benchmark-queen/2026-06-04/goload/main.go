@@ -17,6 +17,19 @@
 //	                      pipeline, and end-to-end latency percentiles.
 //	                      Run `goload -mode app -h` for its flags.
 //
+//	-mode openloop        Open-loop, paced offered load. Producers are a fixed
+//	                      SCHEDULE (not a closed-loop worker pool): the pacer
+//	                      offers -rate msg/s regardless of how fast the broker
+//	                      responds, launching each push at its scheduled instant
+//	                      in its own goroutine. In-flight push REQUESTS are capped
+//	                      at -max-inflight; over the cap, a request's messages are
+//	                      SHED (counted, not sent) so the pacer never blocks and
+//	                      never silently degenerates into closed-loop. Latency is
+//	                      coordinated-omission-correct (measured from each
+//	                      request's SCHEDULED time, not its actual send time).
+//	                      Consumers are the same closed-loop drainers as -mode max.
+//	                      Run `goload -mode openloop -h` for its flags.
+//
 // Build (static, for the loader VM):
 //
 //	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o goload-linux-amd64 .
@@ -26,8 +39,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
+	"math/bits"
+	"math/rand"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,10 +59,12 @@ func main() {
 	switch mode {
 	case "app":
 		runAppMode(os.Args[1:])
+	case "openloop":
+		runOpenLoopMode(os.Args[1:])
 	case "max", "":
 		runMaxMode(os.Args[1:])
 	default:
-		fmt.Printf("goload: unknown -mode %q (want: max | app)\n", mode)
+		fmt.Printf("goload: unknown -mode %q (want: max | app | openloop)\n", mode)
 		os.Exit(2)
 	}
 }
@@ -265,4 +284,445 @@ func runMaxMode(args []string) {
 	fmt.Printf("[final] pushed=%d popped=%d pushErr=%d popErr=%d emptyPops=%d\n",
 		atomic.LoadInt64(&pushed), atomic.LoadInt64(&popped),
 		atomic.LoadInt64(&pushErr), atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops))
+}
+
+// ---------------------------------------------------------------------------
+// openloop mode
+// ---------------------------------------------------------------------------
+
+// olHist is a compact log-linear latency histogram (input in microseconds).
+//
+// Layout: values in [0, olLinearMax) get unit (1µs) resolution; larger values
+// use olSubCount sub-buckets per power-of-two octave, giving ~1/olSubCount
+// (~1.6%) relative error out to ~2^olMaxOctave µs (~67s). Anything larger
+// clamps into the top bucket. All buckets are int64 counters mutated with
+// atomics, so record() is lock-free and safe from every producer goroutine.
+//
+// Percentiles are computed by the reporter. Interval-local percentiles come
+// from snapshot DIFFERENCING (snapshot() into a scratch slice, subtract the
+// previous snapshot) rather than resetting the live buckets — so producers
+// never race a reset and never pay for one. The same buckets also yield the
+// cumulative (whole-run) percentiles for the final line.
+const (
+	olLinearMax  = 1024               // µs; unit-resolution region [0,1024)
+	olSubBits    = 6                  // 2^6 = 64 sub-buckets per octave
+	olSubCount   = 1 << olSubBits    // 64
+	olBaseOctave = 10                 // log2(olLinearMax)
+	olMaxOctave  = 26                 // 2^26 µs ≈ 67.1s ceiling
+	olNumBuckets = olLinearMax + (olMaxOctave-olBaseOctave+1)*olSubCount
+)
+
+type olHist struct {
+	buckets []int64
+}
+
+func newOLHist() *olHist { return &olHist{buckets: make([]int64, olNumBuckets)} }
+
+// olBucketIndex maps a microsecond latency to its bucket index.
+func olBucketIndex(v int64) int {
+	if v <= 0 {
+		return 0
+	}
+	if v < olLinearMax {
+		return int(v)
+	}
+	octave := bits.Len64(uint64(v)) - 1 // floor(log2 v)
+	if octave > olMaxOctave {
+		return olNumBuckets - 1
+	}
+	shift := uint(octave - olSubBits)
+	sub := int((v - (int64(1) << uint(octave))) >> shift) // 0..olSubCount-1
+	return olLinearMax + (octave-olBaseOctave)*olSubCount + sub
+}
+
+func (h *olHist) record(v int64) { atomic.AddInt64(&h.buckets[olBucketIndex(v)], 1) }
+
+// snapshot copies the current counts into dst (len must be olNumBuckets).
+func (h *olHist) snapshot(dst []int64) {
+	for i := range h.buckets {
+		dst[i] = atomic.LoadInt64(&h.buckets[i])
+	}
+}
+
+// olBucketMid returns the representative value (µs) of a bucket: the midpoint
+// of the value range it covers. Used to turn a bucket index back into a latency.
+func olBucketMid(idx int) float64 {
+	if idx < olLinearMax {
+		return float64(idx) + 0.5
+	}
+	j := idx - olLinearMax
+	octave := olBaseOctave + j/olSubCount
+	sub := j % olSubCount
+	width := int64(1) << uint(octave-olSubBits)
+	lo := (int64(1) << uint(octave)) + int64(sub)*width
+	return float64(lo) + float64(width)/2
+}
+
+// olPercentile returns the p-th percentile (p in (0,1]) of a counts slice, in
+// milliseconds. counts is either a cumulative snapshot or an interval diff.
+func olPercentile(counts []int64, p float64) float64 {
+	var total int64
+	for _, c := range counts {
+		total += c
+	}
+	if total == 0 {
+		return 0
+	}
+	target := int64(math.Ceil(p * float64(total)))
+	if target < 1 {
+		target = 1
+	}
+	var cum int64
+	for i, c := range counts {
+		cum += c
+		if cum >= target {
+			return olBucketMid(i) / 1000.0
+		}
+	}
+	return olBucketMid(len(counts)-1) / 1000.0
+}
+
+func runOpenLoopMode(args []string) {
+	fs := flag.NewFlagSet("goload-openloop", flag.ExitOnError)
+	url := fs.String("url", "http://127.0.0.1:6632", "broker base URL")
+	queueName := fs.String("queue", "benchq", "queue name")
+	partitions := fs.Int("partitions", 100, "number of partitions to spread across")
+	consumers := fs.Int("consumers", 150, "consumer goroutines (closed-loop drainers)")
+	rate := fs.Int("rate", 0, "OPEN-LOOP total offered rate in msg/s across all producers (required, >0)")
+	maxInflight := fs.Int("max-inflight", 20000, "cap on in-flight push REQUESTS; over the cap a request's messages are shed (counted, not sent)")
+	pushBatch := fs.Int("push-batch", 10, "messages per push request (offered request rate = rate/push-batch)")
+	popBatch := fs.Int("pop-batch", 200, "max messages per pop request")
+	popWildcard := fs.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop instead of pinned per-partition pop")
+	popPartitions := fs.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard)")
+	popWait := fs.Bool("pop-wait", false, "long-poll pop (Wait=true)")
+	popTimeout := fs.Int("pop-timeout", 2000, "pop long-poll timeout ms (used when -pop-wait)")
+	payloadBytes := fs.Int("payload", 256, "payload size in bytes")
+	durationSec := fs.Int("duration", 0, "run duration seconds (0 = run until SIGINT)")
+	idleConns := fs.Int("idle-conns", 2048, "MaxIdleConnsPerHost for the client (keep-alive pool; size near max-inflight to avoid churn)")
+	reportSec := fs.Int("report", 5, "report interval seconds")
+	completedRet := fs.Int("completed-retention", 300, "completed_retention_seconds for the queue")
+	pendingRet := fs.Int("pending-retention", 0, "retention_seconds for pending (un-consumed) messages; 0 = keep forever")
+	timeoutMs := fs.Int("timeout", 30000, "request timeout ms")
+	emptySleepMs := fs.Int("empty-sleep", 2, "consumer sleep ms on empty pop")
+	_ = fs.String("mode", "openloop", "run mode: max | app | openloop")
+	_ = fs.Parse(args)
+
+	if *rate <= 0 {
+		fmt.Println("goload -mode openloop: -rate must be > 0 (total offered msg/s)")
+		os.Exit(2)
+	}
+	if *pushBatch <= 0 {
+		fmt.Println("goload -mode openloop: -push-batch must be > 0")
+		os.Exit(2)
+	}
+	if *maxInflight <= 0 {
+		fmt.Println("goload -mode openloop: -max-inflight must be > 0")
+		os.Exit(2)
+	}
+
+	// Offered REQUEST rate (each request carries push-batch messages). The pacer
+	// schedules at this many requests/s, split across W workers.
+	reqPerSec := float64(*rate) / float64(*pushBatch)
+	// W = min(64, requests/s / 50 + 1): ~50 req/s per worker, capped at 64 so a
+	// tiny rate still gets a single pacer and a huge rate never spawns > 64.
+	W := int(reqPerSec/50) + 1
+	if W > 64 {
+		W = 64
+	}
+	if W < 1 {
+		W = 1
+	}
+	perWorkerRPS := reqPerSec / float64(W)
+
+	fmt.Printf("goload -mode openloop -> %s queue=%s partitions=%d consumers=%d\n",
+		*url, *queueName, *partitions, *consumers)
+	fmt.Printf("  offered: rate=%d msg/s | push-batch=%d -> %.1f req/s across %d pacer workers (%.2f req/s each) | max-inflight=%d | payload=%dB\n",
+		*rate, *pushBatch, reqPerSec, W, perWorkerRPS, *maxInflight, *payloadBytes)
+
+	// Reuse ONE payload slice across every push goroutine: the client only READS
+	// payloads (buildItems copies into per-request PushItems), so sharing the
+	// backing array is race-free and avoids a per-request allocation.
+	payload := map[string]interface{}{"data": strings.Repeat("x", *payloadBytes), "src": "goload-ol"}
+	payloads := make([]interface{}, *pushBatch)
+	for j := range payloads {
+		payloads[j] = payload
+	}
+
+	// Open-loop producers do NOT retry: RetryAttempts=-1 forces exactly one
+	// attempt. A failed push is counted (pushErr) and dropped — the pacer will
+	// offer more on the next tick anyway, and retrying would double-offer and
+	// corrupt the offered-rate accounting (and hold an in-flight slot longer).
+	q, err := queen.New(queen.ClientConfig{
+		URL:                 *url,
+		TimeoutMillis:       *timeoutMs,
+		MaxIdleConnsPerHost: *idleConns,
+		RetryAttempts:       -1,
+	})
+	if err != nil {
+		fmt.Printf("client init failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Configure the queue once (retention so the table stays bounded).
+	cfgCtx, cfgCancel := context.WithTimeout(ctx, 10*time.Second)
+	if _, cerr := q.GetHttpClient().Post(cfgCtx, "/api/v1/configure", map[string]interface{}{
+		"queue": *queueName,
+		"options": map[string]interface{}{
+			"retentionEnabled":          true,
+			"completedRetentionSeconds": *completedRet,
+			"retentionSeconds":          *pendingRet,
+			"leaseTime":                 30,
+			"dedupWindowSeconds":        0,
+			"encryptionEnabled":         os.Getenv("GOLOAD_ENCRYPT") == "1",
+		},
+	}); cerr != nil {
+		fmt.Printf("[configure] WARNING: %v\n", cerr)
+	} else {
+		fmt.Printf("[configure] queue=%s completedRetentionSeconds=%d\n", *queueName, *completedRet)
+	}
+	cfgCancel()
+
+	var pushed, popped, pushErr, popErr, emptyPops int64
+	var offeredReq, sheddedReq, achievedReq int64
+	var inflight int64
+	lat := newOLHist()
+
+	var rr uint64
+	nextPart := func() string {
+		return fmt.Sprintf("p%d", int(atomic.AddUint64(&rr, 1)%uint64(*partitions)))
+	}
+
+	// In-flight cap: a buffered-channel semaphore. Acquired NON-BLOCKINGLY at
+	// each scheduled instant; if full the request is shed. NEVER block here —
+	// blocking would silently turn the pacer into a closed-loop worker pool.
+	sem := make(chan struct{}, *maxInflight)
+
+	// doPush runs one push in its own goroutine. Latency is measured from the
+	// request's SCHEDULED instant (sched), not from now, so a pacer that fell
+	// behind (GC pause, CPU saturation) shows up as latency instead of vanishing
+	// — this is the coordinated-omission correction.
+	doPush := func(sched time.Time, part string) {
+		defer func() {
+			atomic.AddInt64(&inflight, -1)
+			<-sem
+		}()
+		_, e := q.Queue(*queueName).Partition(part).Push(payloads).Execute(ctx)
+		if e != nil {
+			if ctx.Err() == nil {
+				atomic.AddInt64(&pushErr, 1)
+			}
+			return // NO retry (see RetryAttempts=-1 note above).
+		}
+		atomic.AddInt64(&pushed, int64(*pushBatch))
+		atomic.AddInt64(&achievedReq, 1)
+		lat.record(time.Since(sched).Microseconds())
+	}
+
+	var wg sync.WaitGroup
+
+	// Pacer workers. Each owns a fixed schedule anchored at t0 with a random
+	// per-worker phase offset (decorrelates the W tickers so they don't all fire
+	// in lockstep). On every wake we compute how many scheduled instants are now
+	// due from the WALL CLOCK (not by counting ticks), so a late wake still
+	// offers everything it owes — dropped ticks can't silently reduce the
+	// offered rate. To bound per-wake work at rates beyond the rig, at most
+	// maxCatchUp requests are handled individually (real semaphore try); any
+	// further backlog is bulk-counted as offered+shed and the schedule advances.
+	const maxCatchUp = 4096
+	// Ticker cadence: clamp the per-worker spacing into [minTick, maxTick].
+	//   - maxTick caps how coarse the wake is so that at LOW rates each request
+	//     is launched within ~maxTick of its scheduled instant (otherwise a
+	//     coarse spacing would add up to one full spacing of *loader* delay to
+	//     every coordinated-omission latency — a measurement artifact, not
+	//     broker latency).
+	//   - minTick floors it so we don't spin a sub-ms ticker at very HIGH rates;
+	//     there the catch-up loop launches several requests per wake instead
+	//     (which limits scheduling resolution to ~minTick — see caveats).
+	minTick := 250 * time.Microsecond
+	maxTick := 1 * time.Millisecond
+	step := time.Duration(float64(time.Second) / perWorkerRPS)
+	tickEvery := step
+	if tickEvery > maxTick {
+		tickEvery = maxTick
+	}
+	if tickEvery < minTick {
+		tickEvery = minTick
+	}
+	t0 := time.Now()
+	for w := 0; w < W; w++ {
+		// Random phase in [0, step) so the W schedules interleave.
+		offset := time.Duration(rand.Int63n(int64(step) + 1))
+		base := t0.Add(offset)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tk := time.NewTicker(tickEvery)
+			defer tk.Stop()
+			var k int64 // number of requests scheduled by this worker so far
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tk.C:
+				}
+				now := time.Now()
+				if now.Before(base) {
+					continue
+				}
+				// targetK = # of scheduled instants with schedTime <= now.
+				targetK := int64(now.Sub(base).Seconds()*perWorkerRPS) + 1
+				owed := targetK - k
+				if owed <= 0 {
+					continue
+				}
+				indiv := owed
+				var bulk int64
+				if owed > maxCatchUp {
+					indiv = maxCatchUp
+					bulk = owed - indiv
+				}
+				for n := int64(0); n < indiv; n++ {
+					sched := base.Add(time.Duration(float64(k) / perWorkerRPS * float64(time.Second)))
+					k++
+					atomic.AddInt64(&offeredReq, 1)
+					select {
+					case sem <- struct{}{}:
+						atomic.AddInt64(&inflight, 1)
+						go doPush(sched, nextPart())
+					default:
+						atomic.AddInt64(&sheddedReq, 1) // cap hit -> shed
+					}
+				}
+				if bulk > 0 {
+					// Backlog beyond the per-wake cap: these are owed but the
+					// broker is already saturated (we're at the in-flight cap),
+					// so count them as offered+shed and jump the schedule forward.
+					k += bulk
+					atomic.AddInt64(&offeredReq, bulk)
+					atomic.AddInt64(&sheddedReq, bulk)
+				}
+			}
+		}()
+	}
+
+	// Consumers: unchanged closed-loop drainers (identical to -mode max).
+	for i := 0; i < *consumers; i++ {
+		home := fmt.Sprintf("p%d", i%*partitions)
+		wg.Add(1)
+		go func(part string) {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				qb := q.Queue(*queueName)
+				if *popPartitions > 1 {
+					qb = qb.Partitions(*popPartitions)
+				} else if !*popWildcard {
+					qb = qb.Partition(part)
+				}
+				if *popWait {
+					qb = qb.Wait(true).TimeoutMillis(*popTimeout)
+				} else {
+					qb = qb.Wait(false)
+				}
+				msgs, e := qb.Batch(*popBatch).AutoAck(true).Pop(ctx)
+				if e != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					atomic.AddInt64(&popErr, 1)
+					time.Sleep(5 * time.Millisecond)
+					continue
+				}
+				if len(msgs) == 0 {
+					atomic.AddInt64(&emptyPops, 1)
+					time.Sleep(time.Duration(*emptySleepMs) * time.Millisecond)
+					continue
+				}
+				atomic.AddInt64(&popped, int64(len(msgs)))
+			}
+		}(home)
+	}
+
+	// Reporter. Percentiles are INTERVAL-LOCAL: computed from the difference
+	// between successive cumulative snapshots of the latency histogram, so each
+	// line reflects only the requests completed during that interval.
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(time.Duration(*reportSec) * time.Second)
+		defer t.Stop()
+		prev := make([]int64, olNumBuckets)
+		cur := make([]int64, olNumBuckets)
+		diff := make([]int64, olNumBuckets)
+		var lOff, lAch, lShed, lPop int64
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				secs := float64(*reportSec)
+				off := atomic.LoadInt64(&offeredReq)
+				ach := atomic.LoadInt64(&achievedReq)
+				shed := atomic.LoadInt64(&sheddedReq)
+				p := atomic.LoadInt64(&pushed)
+				pop := atomic.LoadInt64(&popped)
+				lat.snapshot(cur)
+				for i := range diff {
+					diff[i] = cur[i] - prev[i]
+					prev[i] = cur[i]
+				}
+				b := int64(*pushBatch)
+				fmt.Printf("[%s] offered=%9.0f/s achieved=%9.0f/s shed=%9.0f/s inflight=%6d | p50=%7.2f p99=%8.2f p999=%8.2f ms | push=%d pop=%d lag=%d | errs push=%d pop=%d empty=%d gor=%d\n",
+					time.Now().UTC().Format("15:04:05"),
+					float64(off-lOff)*float64(b)/secs,
+					float64(ach-lAch)*float64(b)/secs,
+					float64(shed-lShed)*float64(b)/secs,
+					atomic.LoadInt64(&inflight),
+					olPercentile(diff, 0.50), olPercentile(diff, 0.99), olPercentile(diff, 0.999),
+					p, pop, p-pop,
+					atomic.LoadInt64(&pushErr), atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops),
+					runtime.NumGoroutine())
+				lOff, lAch, lShed, lPop = off, ach, shed, pop
+				_ = lPop
+			}
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	if *durationSec > 0 {
+		go func() { time.Sleep(time.Duration(*durationSec) * time.Second); cancel() }()
+	}
+	select {
+	case <-sigCh:
+		fmt.Println("\n[signal] stopping...")
+		cancel()
+	case <-ctx.Done():
+	}
+	close(stop)
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+	}
+	_ = q.Close(context.Background())
+
+	// Final totals + cumulative (whole-run) percentiles.
+	final := make([]int64, olNumBuckets)
+	lat.snapshot(final)
+	b := int64(*pushBatch)
+	off := atomic.LoadInt64(&offeredReq)
+	shed := atomic.LoadInt64(&sheddedReq)
+	p := atomic.LoadInt64(&pushed)
+	pop := atomic.LoadInt64(&popped)
+	fmt.Printf("[final] offered=%d achieved=%d shed=%d (msgs: offered=%d achieved=%d shed=%d) pushErr=%d | pushed=%d popped=%d lag=%d | popErr=%d empty=%d | overall p50=%.2f p99=%.2f p999=%.2f ms\n",
+		off, atomic.LoadInt64(&achievedReq), shed,
+		off*b, p, shed*b,
+		atomic.LoadInt64(&pushErr),
+		p, pop, p-pop,
+		atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops),
+		olPercentile(final, 0.50), olPercentile(final, 0.99), olPercentile(final, 0.999))
 }

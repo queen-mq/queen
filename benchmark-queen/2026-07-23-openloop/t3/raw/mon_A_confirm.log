@@ -1,0 +1,36 @@
+  time  | pushReq popReq | push/s  pop/s | bCPU   pgCPU | commit/s | pgWait(active)
+  20s   |      0      0 |      0      0 |    0%     0% |       4 | 
+  30s   |      0      0 |      0      0 |    0%     5% |       3 | 
+  40s   |      0      0 |      0      0 |    0%     0% |       4 | 
+  50s   |      0      0 |      0      0 |    0%     0% |       4 | 
+  60s   |      0      0 |      0      0 |    0%     0% |       4 | 
+  70s   |      0      0 |      0      0 |    0%     1% |       4 | 
+  80s   |      0      0 |      0      0 |    0%     5% |       3 | 
+  90s   |      0      0 |      0      0 |    0%     0% |       4 | 
+  100s  |      0      0 |      0      0 |    0%     0% |       5 | 
+  110s  |      0      0 |      0      0 |  551%   648% |    2445 | LWLock:WALWrite=10 CPU:run=8 LWLock:BufferContent=3
+  120s  |      0      0 |      0      0 |  512%   637% |    8847 | LWLock:WALWrite=2 IO:WalSync=1 LWLock:BufferContent=1
+  130s  |      0      0 |      0      0 |  547%   647% |    8410 | LWLock:BufferContent=12 LWLock:WALInsert=10 LWLock:WALWrite=7
+  140s  |      0      0 |      0      0 |  540%   620% |    7705 | Client:ClientRead=1 CPU:run=1
+  150s  |      0      0 |      0      0 |  557%   581% |    8093 | LWLock:WALWrite=9 CPU:run=5 IO:DataFileExtend=1
+  160s  |      0      0 |      0      0 |  535%   593% |    8130 | LWLock:WALWrite=12 CPU:run=6 Lock:extend=5
+  170s  |      0      0 |      0      0 |  561%   612% |    8130 | LWLock:WALWrite=7 CPU:run=5 LWLock:BufferContent=3
+  180s  |      0      0 |      0      0 |  561%   601% |    8093 | LWLock:WALWrite=4 CPU:run=3 Lock:extend=3
+  190s  |      0      0 |      0      0 |  594%   620% |    7763 | LWLock:WALWrite=19 CPU:run=5 Lock:extend=4
+  200s  |      0      0 |      0      0 |  622%   590% |    7769 | CPU:run=5 LWLock:WALWrite=2
+  210s  |      0      0 |      0      0 |  559%   596% |    7741 | Client:ClientRead=4 CPU:run=3 IO:WalSync=1
+  220s  |      0      0 |      0      0 |  640%   593% |    7712 | CPU:run=4 Client:ClientRead=2 LWLock:WALWrite=2
+  230s  |      0      0 |      0      0 |  530%   607% |    7809 | LWLock:WALWrite=5 CPU:run=3 IO:WalSync=1
+  240s  |      0      0 |      0      0 |  570%   604% |    8051 | LWLock:WALWrite=8 CPU:run=3 IO:DataFileExtend=2
+  250s  |      0      0 |      0      0 |  550%   609% |    8021 | LWLock:WALWrite=10 CPU:run=5 Lock:extend=3
+  260s  |      0      0 |      0      0 |  581%   614% |    7815 | LWLock:BufferContent=11 LWLock:WALInsert=5 Timeout:SpinDelay=4
+  270s  |      0      0 |      0      0 |  516%   601% |    7957 | CPU:run=9 LWLock:WALWrite=3 IO:WalSync=1
+  280s  |      0      0 |      0      0 |  521%   606% |    7993 | CPU:run=3 LWLock:WALWrite=3 Lock:extend=2
+  290s  |      0      0 |      0      0 |  560%   627% |    7788 | CPU:run=8 LWLock:WALWrite=5 LWLock:WALInsert=1
+  300s  |      0      0 |      0      0 |  546%   616% |    8197 | 
+  310s  |      0      0 |      0      0 |  580%   604% |    7621 | LWLock:WALWrite=7 Client:ClientRead=4 CPU:run=2
+  320s  |      0      0 |      0      0 |  616%   579% |    7578 | LWLock:WALWrite=11 CPU:run=6 LWLock:BufferContent=2
+  330s  |      0      0 |      0      0 |  571%   444% |    7706 | LWLock:WALWrite=12 CPU:run=7 Client:ClientRead=3
+  340s  |      0      0 |      0      0 |    1%     0% |    2462 | 
+  350s  |      0      0 |      0      0 |    1%    25% |     289 | 
+  360s  |      0      0 |      0      0 |    1%     0% |      67 | 

@@ -1,0 +1,22 @@
+=== wait sample 1 1784786170 ===
+CPU|run|7
+Client|ClientRead|5
+LWLock|WALWrite|5
+LWLock|WALInsert|1
+=== wait sample 2 1784786171 ===
+Client|ClientRead|8
+CPU|run|5
+LWLock|WALWrite|5
+LWLock|BufferContent|2
+=== wait sample 3 1784786172 ===
+LWLock|WALWrite|31
+IO|WalSync|1
+=== wait sample 4 1784786173 ===
+LWLock|WALWrite|8
+CPU|run|3
+IO|WalSync|1
+=== wait sample 5 1784786175 ===
+CPU|run|7
+LWLock|WALWrite|5
+Client|ClientRead|2
+LWLock|BufferMapping|1

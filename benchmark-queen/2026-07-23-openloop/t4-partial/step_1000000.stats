@@ -1,0 +1,14 @@
+=== STEP 1000000 server-side (window 68.5s) ===
+commit/s           : 45   (commits=3053)
+WAL MB/s           : 0.0   (bytes=262182)
+WAL records/s      : 84   fpi/s=0  buffers_full/s=0.0
+WAL fsyncs/s       : 41   (fsyncs=2817)
+WAL writes/s       : 41   write_bytes MB/s=0.3
+avg fsync_time us  : 74.8   (fsync_time_total_ms=211)
+avg write_time us  : 2.7
+fsync busy %       : 0.3   write busy %=0.0
+srv push msg/s     : 0   srv pop msg/s=0
+srv push req/s     : 0   srv pop req/s=0
+msg/commit         : 0.0   msg/fsync=0.0
+WAL bytes/commit   : 86   WAL records/commit=1.9
+DB size (end)      : 4255 MB
