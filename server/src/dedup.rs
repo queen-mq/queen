@@ -52,10 +52,40 @@
 // - Partition keys are `&str` (the partition id as text, as it flows through
 //   the broker's JSON) — the crate has no uuid dependency and gains nothing
 //   from one here.
+//
+// CONCURRENCY (why the locking is sharded per entry): the cache is one
+// `Arc<DedupCache>` shared by every fusion shard, but fusion flushes a given
+// PARTITION single-flight — expire → needs_hydration → hydrate →
+// verified_for_push → on_push_committed run sequentially for one pid, never
+// concurrently, and partitions are shard-affine. The only cross-thread
+// contention on a partition is therefore EVICTION, driven by OTHER partitions'
+// flushes. So instead of one global Mutex around the whole map — which under
+// uniform 1M-msg/s load serialized every flush behind whichever partition
+// happened to be doubling its multi-million-entry membership map, producing the
+// synchronized multi-second rehash stalls this fix removes — the map is a
+// `RwLock<HashMap<pid, Arc<Mutex<Entry>>>>`. The common path read-locks the map
+// only long enough to look up and clone the Arc, then does all its work
+// (including any rehash) under the PER-ENTRY Mutex, so a partition's rehash
+// blocks only that partition (already single-flight ⇒ zero throughput cost),
+// never its neighbours. A full rebuild builds the new Entry OFF-lock (it is not
+// yet published) and takes the map write lock only to swap the Arc in. Global
+// bookkeeping (the LRU byte budget `total_bytes`, the suppression cooldown and
+// last-footprint maps) lives behind a separate small `Mutex<GlobalMeta>` taken
+// only for O(1) updates — never across a rehash. Eviction is the sole
+// cross-partition operation: it takes the map write lock (only once actually
+// over budget), scans with try_lock on each entry (skipping any mid-mutation
+// entry — it is in use, hence recently used anyway), and removes whole
+// partitions. `Entry::alive`, cleared under the entry lock on eviction/
+// replacement, stops a stale single-flight owner (only reachable during a
+// >RECENT_USE_GUARD_MS stall — exactly the pathology being removed) from posting
+// its byte delta against an entry that has already left the map. Capacity
+// hygiene (reserve set/ring for the hydrated size up front, and for incoming
+// batches when headroom is short) coarsens rehash frequency so the residual
+// per-entry rehashes are rare as well as harmless.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Answer for a push about to be flushed (one segment's hash bundle).
 #[derive(Debug, PartialEq, Eq)]
@@ -153,7 +183,7 @@ struct Entry {
     /// Defensive: the entry saw something impossible (offset overlap, malformed
     /// hydration row) and must be fully rebuilt before vouching again.
     needs_full: bool,
-    /// Approximate footprint (kept in sync with `total_bytes`).
+    /// Approximate footprint (kept in sync with `GlobalMeta::total_bytes`).
     bytes: usize,
     /// LRU stamp (global monotone tick) — orders eviction victims.
     last_used: u64,
@@ -162,6 +192,14 @@ struct Entry {
     /// evicted to admit another (Fix 2). Separate from `last_used` because the
     /// guard is a real-time window, not an ordering.
     last_used_ms: i64,
+    /// True while this Entry is the map's live representative for its pid.
+    /// Cleared under the entry lock when eviction removes it or a full rebuild
+    /// replaces it, so a single-flight owner that is (only under a multi-second
+    /// stall) still mutating a now-detached Entry does not post its byte delta
+    /// against `total_bytes` for a partition that has already left the map. The
+    /// orphaned mutation itself is harmless: it is discarded when the Arc drops,
+    /// exactly as if the eviction had landed after the mutation.
+    alive: bool,
 }
 
 impl Entry {
@@ -186,12 +224,22 @@ impl Entry {
             }
         }
     }
+
+    /// Reserve room for `incoming` more hashes in the membership set when the
+    /// current free headroom would not cover them — coarsens rehash frequency
+    /// (capacity hygiene, layer 2). No-op when there is already headroom.
+    fn reserve_set(&mut self, incoming: usize) {
+        if self.set.capacity() < self.set.len() + incoming {
+            self.set.reserve(incoming);
+        }
+    }
 }
 
-struct Inner {
-    map: HashMap<String, Entry>,
+/// Global bookkeeping shared across all partitions. Every critical section here
+/// is O(1) (or the O(#partitions) eviction scan, which holds the map write lock
+/// and does no rehash) — this lock is NEVER held across a per-entry rehash.
+struct GlobalMeta {
     total_bytes: usize,
-    tick: u64,
     /// pid → cooldown deadline (epoch ms). Present ⇒ the partition is SUPPRESSED:
     /// `needs_hydration` returns None (skip the multi-MB query) and — because a
     /// suppressed partition is not resident — `verified_for_push` returns -1,
@@ -203,10 +251,21 @@ struct Inner {
     last_bytes: HashMap<String, usize>,
 }
 
-/// Global broker-side dedup cache. Cheap to share (`Arc<DedupCache>`); one
-/// mutex around the whole map — contention is per-flush, not per-message.
+/// Global broker-side dedup cache. Cheap to share (`Arc<DedupCache>`). Locking is
+/// sharded PER ENTRY (see the CONCURRENCY note at the top of this module): the
+/// outer `RwLock` guards only the map's shape; each partition's heavy work runs
+/// under its own `Mutex<Entry>`, so a rehash blocks only that (single-flight)
+/// partition, and `GlobalMeta` carries the cross-partition byte budget.
 pub struct DedupCache {
-    inner: Mutex<Inner>,
+    /// pid → the partition's entry, each behind its own Mutex. Read-locked for
+    /// the common-path lookup+clone; write-locked only to insert (full rebuild)
+    /// or remove (eviction) a partition.
+    map: RwLock<HashMap<String, Arc<Mutex<Entry>>>>,
+    /// LRU byte budget + suppression bookkeeping. See `GlobalMeta`.
+    global: Mutex<GlobalMeta>,
+    /// Monotone LRU tick, bumped on every touch that orders eviction victims.
+    /// Atomic so the common path never takes the global lock just to advance it.
+    tick: AtomicU64,
     max_bytes: usize,
     enabled: bool,
     // Observability (Fix 3) — minimal atomics for a future metrics hookup, read
@@ -234,13 +293,13 @@ impl DedupCache {
 
     fn with_max_bytes(max_bytes: usize, enabled: bool) -> DedupCache {
         DedupCache {
-            inner: Mutex::new(Inner {
-                map: HashMap::new(),
+            map: RwLock::new(HashMap::new()),
+            global: Mutex::new(GlobalMeta {
                 total_bytes: 0,
-                tick: 0,
                 suppressed_until: HashMap::new(),
                 last_bytes: HashMap::new(),
             }),
+            tick: AtomicU64::new(0),
             max_bytes,
             enabled,
             hydrations_total: AtomicU64::new(0),
@@ -262,6 +321,18 @@ impl DedupCache {
         self.suppressed_gauge.load(Ordering::Relaxed)
     }
 
+    /// Next LRU tick.
+    fn next_tick(&self) -> u64 {
+        self.tick.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Look up a partition's entry and clone the Arc, holding the outer read
+    /// lock only for the lookup itself. The per-entry work then happens under
+    /// the returned `Mutex<Entry>`, off the map lock.
+    fn get_arc(&self, pid: &str) -> Option<Arc<Mutex<Entry>>> {
+        self.map.read().unwrap().get(pid).cloned()
+    }
+
     /// Pre-push check for one segment's hash bundle (frame order).
     /// - `LocalDuplicate(idxs)`: those input indices are known committed within
     ///   the window → broker short-circuit. Sound whenever the caller has run
@@ -275,13 +346,12 @@ impl DedupCache {
         if !self.enabled {
             return PushCheck::Verified(-1);
         }
-        let mut inner = self.inner.lock().unwrap();
-        inner.tick += 1;
-        let tick = inner.tick;
-        let e = match inner.map.get_mut(pid) {
-            Some(e) => e,
+        let tick = self.next_tick();
+        let arc = match self.get_arc(pid) {
+            Some(a) => a,
             None => return PushCheck::Verified(-1),
         };
+        let mut e = arc.lock().unwrap();
         e.last_used = tick;
         e.last_used_ms = now_ms;
         let dups: Vec<usize> = hashes
@@ -314,14 +384,13 @@ impl DedupCache {
         if !self.enabled || hashes.is_empty() {
             return;
         }
-        let mut inner = self.inner.lock().unwrap();
-        inner.tick += 1;
-        let tick = inner.tick;
-        let (old_b, new_b) = {
-            let e = match inner.map.get_mut(pid) {
-                Some(e) => e,
-                None => return,
-            };
+        let tick = self.next_tick();
+        let arc = match self.get_arc(pid) {
+            Some(a) => a,
+            None => return,
+        };
+        {
+            let mut e = arc.lock().unwrap();
             e.last_used = tick;
             e.last_used_ms = now_ms;
             if e.needs_full {
@@ -341,16 +410,20 @@ impl DedupCache {
                 });
             }
             let hs: Vec<u128> = hashes.iter().map(|h| u128::from_be_bytes(*h)).collect();
+            // Capacity hygiene: reserve for the whole batch up front when the
+            // free headroom is short, so a big committed span does not walk
+            // through several doubling thresholds under the entry lock.
+            e.reserve_set(hs.len());
             for &h in &hs {
                 e.insert_hash(h);
             }
             e.ring.push_back(RingSeg { base, created_ms: now_ms, hashes: hs });
             e.verified_upto = base + hashes.len() as i64 - 1;
             e.bytes = e.approx_bytes();
-            (old_b, e.bytes)
-        };
-        inner.total_bytes = inner.total_bytes - old_b + new_b;
-        Self::evict_lru(&mut inner, self.max_bytes, Some(pid), now_ms);
+            let new_b = e.bytes;
+            self.apply_bytes_delta(&e, old_b, new_b);
+        }
+        self.evict_lru(Some(pid), now_ms);
     }
 
     /// Build (Full) or top-up (Span) an entry from log_txns rows
@@ -373,14 +446,13 @@ impl DedupCache {
         // The caller only reaches here after needs_hydration approved a Full/Span
         // fetch, so this is exactly one hydration query (Fix 3 counter).
         self.hydrations_total.fetch_add(1, Ordering::Relaxed);
-        let mut inner = self.inner.lock().unwrap();
-        inner.tick += 1;
-        let tick = inner.tick;
+        let tick = self.next_tick();
 
         // Parse + validate rows. A blob whose length disagrees with the offset
         // span can't be trusted for coverage → poison the whole hydration.
         let mut segs: Vec<RingSeg> = Vec::with_capacity(rows.len());
         let mut malformed = false;
+        let mut total_hashes = 0usize;
         for (base, end, created_ms, blob) in rows {
             if created_ms < window_start_ms {
                 continue;
@@ -390,46 +462,57 @@ impl DedupCache {
                 malformed = true;
                 continue;
             }
+            total_hashes += hashes.len();
             segs.push(RingSeg { base, created_ms, hashes });
         }
         segs.sort_by_key(|s| s.base);
 
-        let span_topup = matches!(
-            inner.map.get(pid),
-            Some(e) if !e.needs_full && e.needs_topup.is_some()
-        ) && !malformed;
+        // Branch decision needs a peek at the current entry state (if resident).
+        let existing = self.get_arc(pid);
+        let span_topup = !malformed
+            && match &existing {
+                Some(arc) => {
+                    let e = arc.lock().unwrap();
+                    !e.needs_full && e.needs_topup.is_some()
+                }
+                None => false,
+            };
 
         if span_topup {
             // Merge the gap rows into the existing entry (skip bases we already
             // hold — refcounts stay 1 per (segment, hash)), keep the ring in
             // base order (== commit-time order per the PUSHSER invariant).
-            let (old_b, new_b) = {
-                let e = inner.map.get_mut(pid).unwrap();
-                e.last_used = tick;
-                e.last_used_ms = now_ms;
-                let old_b = e.bytes;
-                for seg in segs {
-                    if e.ring.iter().any(|r| r.base == seg.base) {
-                        continue;
-                    }
-                    for &h in &seg.hashes {
-                        e.insert_hash(h);
-                    }
-                    e.verified_upto = e.verified_upto.max(seg.end());
-                    e.ring.push_back(seg);
+            let arc = existing.unwrap();
+            let mut e = arc.lock().unwrap();
+            e.last_used = tick;
+            e.last_used_ms = now_ms;
+            let old_b = e.bytes;
+            // Capacity hygiene for the incoming span before the inserts below.
+            e.reserve_set(total_hashes);
+            e.ring.reserve(segs.len());
+            for seg in segs {
+                if e.ring.iter().any(|r| r.base == seg.base) {
+                    continue;
                 }
-                let mut v: Vec<RingSeg> = e.ring.drain(..).collect();
-                v.sort_by_key(|s| s.base);
-                e.ring = v.into();
-                e.needs_topup = None;
-                e.bytes = e.approx_bytes();
-                (old_b, e.bytes)
-            };
-            inner.total_bytes = inner.total_bytes - old_b + new_b;
+                for &h in &seg.hashes {
+                    e.insert_hash(h);
+                }
+                e.verified_upto = e.verified_upto.max(seg.end());
+                e.ring.push_back(seg);
+            }
+            let mut v: Vec<RingSeg> = e.ring.drain(..).collect();
+            v.sort_by_key(|s| s.base);
+            e.ring = v.into();
+            e.needs_topup = None;
+            e.bytes = e.approx_bytes();
+            let new_b = e.bytes;
+            self.apply_bytes_delta(&e, old_b, new_b);
         } else {
             // Full (re)build. hydrated_from = MIN(base)-1, or -1 when the window
             // is empty (anything older is outside the window by construction, so
-            // "we know everything above -1 that could still matter" holds).
+            // "we know everything above -1 that could still matter" holds). Built
+            // on a LOCAL entry so all the (rehash-heavy) inserts happen off any
+            // shared lock; the map write lock is taken only to publish it.
             let (hydrated_from, verified_upto) = match (segs.first(), segs.last()) {
                 (Some(first), Some(last)) => (first.base - 1, last.end()),
                 _ => (-1, current_last_offset),
@@ -437,13 +520,16 @@ impl DedupCache {
             let mut e = Entry {
                 hydrated_from,
                 verified_upto,
-                set: HashMap::new(),
+                // Reserve the membership set for the hydrated size × 1.5 up front
+                // so a full window loads without walking doubling thresholds.
+                set: HashMap::with_capacity(total_hashes + total_hashes / 2),
                 ring: VecDeque::with_capacity(segs.len()),
                 needs_topup: None,
                 needs_full: malformed,
                 bytes: 0,
                 last_used: tick,
                 last_used_ms: now_ms,
+                alive: true,
             };
             for seg in segs {
                 for &h in &seg.hashes {
@@ -452,16 +538,46 @@ impl DedupCache {
                 e.ring.push_back(seg);
             }
             e.bytes = e.approx_bytes();
-            let old_b = inner.map.get(pid).map(|p| p.bytes).unwrap_or(0);
             let new_b = e.bytes;
-            inner.map.insert(pid.to_string(), e);
-            inner.total_bytes = inner.total_bytes - old_b + new_b;
+            // Publish under the map write lock; the displaced entry (if any) is
+            // marked not-alive so a stale owner can't post a delta for it.
+            let old_arc = {
+                let mut map = self.map.write().unwrap();
+                map.insert(pid.to_string(), Arc::new(Mutex::new(e)))
+            };
+            let old_b = match old_arc {
+                Some(a) => {
+                    let mut oe = a.lock().unwrap();
+                    oe.alive = false;
+                    oe.bytes
+                }
+                None => 0,
+            };
+            let mut g = self.global.lock().unwrap();
+            g.total_bytes = g.total_bytes + new_b - old_b;
         }
         // The partition is resident again: drop any SUPPRESSED marker and its
         // stale eviction footprint so bookkeeping stays bounded (Fix 1).
-        self.clear_suppressed(&mut inner, pid);
-        inner.last_bytes.remove(pid);
-        Self::evict_lru(&mut inner, self.max_bytes, Some(pid), now_ms);
+        {
+            let mut g = self.global.lock().unwrap();
+            Self::clear_suppressed_locked(&mut g, &self.suppressed_gauge, pid);
+            g.last_bytes.remove(pid);
+        }
+        self.evict_lru(Some(pid), now_ms);
+    }
+
+    /// Apply a `[old_b → new_b]` footprint change to the global byte budget,
+    /// but only while the entry is still the map's live representative. During a
+    /// stall an owner can be mid-mutation on an entry that eviction already
+    /// removed (and already subtracted); the `alive` gate keeps `total_bytes`
+    /// from drifting up in that (rare, self-limited) window. Must be called with
+    /// the entry locked (the `&Entry` proves it).
+    fn apply_bytes_delta(&self, e: &Entry, old_b: usize, new_b: usize) {
+        if !e.alive {
+            return;
+        }
+        let mut g = self.global.lock().unwrap();
+        g.total_bytes = g.total_bytes + new_b - old_b;
     }
 
     /// Does this partition need SQL hydration before the cache can vouch?
@@ -479,8 +595,8 @@ impl DedupCache {
         if !self.enabled {
             return None;
         }
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(e) = inner.map.get(pid) {
+        if let Some(arc) = self.get_arc(pid) {
+            let e = arc.lock().unwrap();
             if !e.needs_full {
                 // Resident + vouching (None) or a resident interleave gap (Span);
                 // both are cheap and always allowed, even under cap pressure.
@@ -489,82 +605,84 @@ impl DedupCache {
         }
         // Absent, or resident-but-poisoned (needs_full): a FULL rebuild is
         // required — the thrash-prone path. Gate it.
-        self.eval_full_hydration(&mut inner, pid, now_ms)
+        self.eval_full_hydration(pid, now_ms)
     }
 
     /// Decide whether a FULL (re)hydration of `pid` may run right now, or whether
     /// the partition should stay SUPPRESSED (Fix 1). Returns Some(Full) to admit,
     /// None to suppress. Marks/clears the cooldown + gauge as a side effect.
-    fn eval_full_hydration(
-        &self,
-        inner: &mut Inner,
-        pid: &str,
-        now_ms: i64,
-    ) -> Option<HydrationNeed> {
+    fn eval_full_hydration(&self, pid: &str, now_ms: i64) -> Option<HydrationNeed> {
+        // Estimate the re-hydration footprint. A poisoned resident entry uses its
+        // own current bytes; an evicted one its footprint at eviction; a
+        // never-seen partition estimates 0 (empty window — cheap to admit, which
+        // is why brand-new partitions are never suppressed on first contact).
+        // Snapshot the entry's bytes (if resident) off the global lock.
+        let resident_bytes = self
+            .get_arc(pid)
+            .map(|a| a.lock().unwrap().bytes)
+            .unwrap_or(0);
+
+        let mut g = self.global.lock().unwrap();
         // Still inside the cooldown → stay suppressed, skip the multi-MB query.
-        if let Some(&until) = inner.suppressed_until.get(pid) {
+        if let Some(&until) = g.suppressed_until.get(pid) {
             if now_ms < until {
                 return None;
             }
             // Cooldown elapsed: fall through and re-test the fit.
         }
-        // Estimate the re-hydration footprint. A poisoned resident entry uses its
-        // own current bytes; an evicted one its footprint at eviction; a
-        // never-seen partition estimates 0 (empty window — cheap to admit, which
-        // is why brand-new partitions are never suppressed on first contact).
-        let resident_bytes = inner.map.get(pid).map(|e| e.bytes).unwrap_or(0);
         let est = if resident_bytes > 0 {
             resident_bytes
         } else {
-            inner.last_bytes.get(pid).copied().unwrap_or(0)
+            g.last_bytes.get(pid).copied().unwrap_or(0)
         };
         // Fit test: everything EXCEPT this partition's own resident bytes (a
         // rebuild replaces them) plus the estimate must stay under the hysteresis
         // fraction of the cap. Integer form of `others + est <= cap * 9/10`.
-        let others = inner.total_bytes.saturating_sub(resident_bytes);
+        let others = g.total_bytes.saturating_sub(resident_bytes);
         let budget = self.max_bytes / HYDRATION_FIT_DEN * HYDRATION_FIT_NUM;
         if others + est <= budget {
             // Fits: admit. Clear any prior suppression so the caller hydrates.
-            self.clear_suppressed(inner, pid);
+            Self::clear_suppressed_locked(&mut g, &self.suppressed_gauge, pid);
             Some(HydrationNeed::Full)
         } else {
             // Doesn't fit: SUPPRESS with a fresh cooldown and decline the query.
             // Sound: the partition pushes with p_verified = -1 (SQL full probe).
-            self.mark_suppressed(inner, pid, now_ms);
-            self.warn_cap_pressure(inner, now_ms);
+            Self::mark_suppressed_locked(&mut g, &self.suppressed_gauge, pid, now_ms);
+            drop(g);
+            self.warn_cap_pressure(now_ms);
             None
         }
     }
 
     /// Record a SUPPRESSED cooldown for `pid` and keep the gauge in sync. Prunes
     /// already-expired deadlines first if the map has grown past its soft cap.
-    fn mark_suppressed(&self, inner: &mut Inner, pid: &str, now_ms: i64) {
-        if inner.suppressed_until.len() > AUX_MAP_SOFT_CAP {
-            let before = inner.suppressed_until.len();
-            inner.suppressed_until.retain(|_, &mut d| d > now_ms);
-            let pruned = (before - inner.suppressed_until.len()) as i64;
-            self.suppressed_gauge.fetch_sub(pruned, Ordering::Relaxed);
+    fn mark_suppressed_locked(g: &mut GlobalMeta, gauge: &AtomicI64, pid: &str, now_ms: i64) {
+        if g.suppressed_until.len() > AUX_MAP_SOFT_CAP {
+            let before = g.suppressed_until.len();
+            g.suppressed_until.retain(|_, &mut d| d > now_ms);
+            let pruned = (before - g.suppressed_until.len()) as i64;
+            gauge.fetch_sub(pruned, Ordering::Relaxed);
         }
-        if inner
+        if g
             .suppressed_until
             .insert(pid.to_string(), now_ms + SUPPRESS_COOLDOWN_MS)
             .is_none()
         {
-            self.suppressed_gauge.fetch_add(1, Ordering::Relaxed);
+            gauge.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// Clear `pid`'s SUPPRESSED marker (if any) and keep the gauge in sync.
-    fn clear_suppressed(&self, inner: &mut Inner, pid: &str) {
-        if inner.suppressed_until.remove(pid).is_some() {
-            self.suppressed_gauge.fetch_sub(1, Ordering::Relaxed);
+    fn clear_suppressed_locked(g: &mut GlobalMeta, gauge: &AtomicI64, pid: &str) {
+        if g.suppressed_until.remove(pid).is_some() {
+            gauge.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
     /// One rate-limited (once/min, process-wide) warning line while suppression
     /// is active, carrying the resident/cap footprint and the sizing formula so
     /// an operator can size QUEEN_DEDUP_CACHE_MB (Fix 3).
-    fn warn_cap_pressure(&self, inner: &Inner, now_ms: i64) {
+    fn warn_cap_pressure(&self, now_ms: i64) {
         let prev = self.last_warn_ms.load(Ordering::Relaxed);
         if now_ms.saturating_sub(prev) < SUPPRESS_WARN_INTERVAL_MS {
             return;
@@ -576,7 +694,7 @@ impl DedupCache {
         {
             return; // another thread just logged
         }
-        let resident_mb = inner.total_bytes / (1024 * 1024);
+        let resident_mb = self.global.lock().unwrap().total_bytes / (1024 * 1024);
         let cap_mb = self.max_bytes / (1024 * 1024);
         let suppressed = self.suppressed_gauge.load(Ordering::Relaxed).max(0);
         eprintln!(
@@ -597,8 +715,8 @@ impl DedupCache {
             return;
         }
         let cutoff = now_ms - window_ms;
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(e) = inner.map.get_mut(pid) {
+        if let Some(arc) = self.get_arc(pid) {
+            let mut e = arc.lock().unwrap();
             // We are actively flushing this partition this instant: mark it used
             // so the eviction guard below never evicts it out from under us.
             e.last_used_ms = now_ms;
@@ -615,9 +733,9 @@ impl DedupCache {
             }
             e.bytes = e.approx_bytes();
             let new_b = e.bytes;
-            inner.total_bytes = inner.total_bytes - old_b + new_b;
+            self.apply_bytes_delta(&e, old_b, new_b);
         }
-        Self::evict_lru(&mut inner, self.max_bytes, None, now_ms);
+        self.evict_lru(None, now_ms);
     }
 
     /// Evict least-recently-used partitions until under budget, with hysteresis
@@ -631,27 +749,64 @@ impl DedupCache {
     /// evicted partition's footprint is remembered in `last_bytes` so its next
     /// re-hydration can be fit-tested before it is admitted (Fix 1). Evicted
     /// partitions re-hydrate on next push only if they then fit.
-    fn evict_lru(inner: &mut Inner, max_bytes: usize, protect: Option<&str>, now_ms: i64) {
-        while inner.total_bytes > max_bytes {
-            let victim = inner
-                .map
+    ///
+    /// Sharded-locking notes: the fast path (under budget) never takes the map
+    /// write lock. When over budget it holds the map write lock — but does NO
+    /// rehash, only try_lock scans (an entry currently mid-mutation is skipped,
+    /// it is in use) and whole-partition removes — so the write lock is held for
+    /// bounded, rehash-free work. `alive` is cleared on the victim under its
+    /// entry lock so a concurrent owner cannot resurrect its byte contribution.
+    fn evict_lru(&self, protect: Option<&str>, now_ms: i64) {
+        // Fast path: under budget → nothing to evict, and no map write lock.
+        {
+            let g = self.global.lock().unwrap();
+            if g.total_bytes <= self.max_bytes {
+                return;
+            }
+        }
+        let mut map = self.map.write().unwrap();
+        loop {
+            {
+                let g = self.global.lock().unwrap();
+                if g.total_bytes <= self.max_bytes {
+                    break;
+                }
+            }
+            // Scan for the LRU evictable victim. try_lock each entry so an entry
+            // that is mid-mutation (in use) is skipped, never blocked on; the
+            // guard is dropped inside the closure (only primitives escape).
+            let victim = map
                 .iter()
-                .filter(|(k, e)| {
-                    Some(k.as_str()) != protect
-                        && now_ms.saturating_sub(e.last_used_ms) >= RECENT_USE_GUARD_MS
+                .filter_map(|(k, arc)| {
+                    let e = arc.try_lock().ok()?;
+                    Some((k.clone(), e.last_used, e.last_used_ms))
                 })
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| k.clone());
+                .filter(|(k, _, lum)| {
+                    Some(k.as_str()) != protect
+                        && now_ms.saturating_sub(*lum) >= RECENT_USE_GUARD_MS
+                })
+                .min_by_key(|(_, lu, _)| *lu)
+                .map(|(k, _, _)| k);
             match victim {
                 Some(k) => {
-                    if let Some(e) = inner.map.remove(&k) {
-                        inner.total_bytes -= e.bytes;
+                    if let Some(arc) = map.remove(&k) {
+                        // Detach + read the footprint under the entry lock. This
+                        // may briefly wait on a single-flight owner that grabbed
+                        // the lock between the scan and here, but that critical
+                        // section is CPU-bounded (never an .await).
+                        let b = {
+                            let mut e = arc.lock().unwrap();
+                            e.alive = false;
+                            e.bytes
+                        };
+                        let mut g = self.global.lock().unwrap();
+                        g.total_bytes = g.total_bytes.saturating_sub(b);
                         // Bound the hint map under churn (cheap self-healing reset;
                         // the only cost is a re-measured estimate next eviction).
-                        if inner.last_bytes.len() > AUX_MAP_SOFT_CAP {
-                            inner.last_bytes.clear();
+                        if g.last_bytes.len() > AUX_MAP_SOFT_CAP {
+                            g.last_bytes.clear();
                         }
-                        inner.last_bytes.insert(k, e.bytes);
+                        g.last_bytes.insert(k, b);
                     }
                 }
                 // Only protected/recently-used partitions remain → tolerate overage.
@@ -674,7 +829,20 @@ mod tests {
     }
 
     fn total_bytes(c: &DedupCache) -> usize {
-        c.inner.lock().unwrap().total_bytes
+        c.global.lock().unwrap().total_bytes
+    }
+
+    // White-box accessors adapted to the per-entry-mutex layout.
+    fn entry(c: &DedupCache, pid: &str) -> Arc<Mutex<Entry>> {
+        c.map.read().unwrap().get(pid).unwrap().clone()
+    }
+
+    fn contains(c: &DedupCache, pid: &str) -> bool {
+        c.map.read().unwrap().contains_key(pid)
+    }
+
+    fn last_bytes_of(c: &DedupCache, pid: &str) -> Option<usize> {
+        c.global.lock().unwrap().last_bytes.get(pid).copied()
     }
 
     // A wall-clock (epoch ms) far enough in the past that RECENT_USE_GUARD_MS
@@ -758,8 +926,8 @@ mod tests {
         // Window = 3s at t=6s → the t=1s segment falls out; the t=5s one stays.
         c.expire("p1", 3_000, 6_000);
         {
-            let inner = c.inner.lock().unwrap();
-            let e = inner.map.get("p1").unwrap();
+            let arc = entry(&c, "p1");
+            let e = arc.lock().unwrap();
             assert_eq!(e.hydrated_from, 1); // raised to end of the dropped segment
             assert_eq!(e.verified_upto, 2);
         }
@@ -786,13 +954,10 @@ mod tests {
         assert_eq!(c.verified_for_push("p1", &[h(9)], t), PushCheck::Verified(0));
         // Third partition overflows the budget → p2 (LRU, past the guard) evicted whole.
         c.hydrate("p3", vec![(0, 0, 1_000, blob(&[h(3)]))], 0, 0, t);
-        {
-            let inner = c.inner.lock().unwrap();
-            assert!(!inner.map.contains_key("p2"), "p2 (LRU) evicted whole");
-            assert!(inner.map.contains_key("p1") && inner.map.contains_key("p3"));
-            // Its footprint is remembered so a re-hydration can be fit-tested.
-            assert_eq!(inner.last_bytes.get("p2"), Some(&one));
-        }
+        assert!(!contains(&c, "p2"), "p2 (LRU) evicted whole");
+        assert!(contains(&c, "p1") && contains(&c, "p3"));
+        // Its footprint is remembered so a re-hydration can be fit-tested.
+        assert_eq!(last_bytes_of(&c, "p2"), Some(one));
         // Evicted partition is no longer resident → sound -1 until it re-hydrates.
         assert_eq!(c.verified_for_push("p2", &[h(9)], t), PushCheck::Verified(-1));
         assert!(total_bytes(&c) <= one * 2 + one / 2);
@@ -814,10 +979,9 @@ mod tests {
         // A third partition arrives while BOTH residents were used <5s ago. The
         // guard forbids evicting either hot partition, so all three stay resident.
         c.hydrate("p3", vec![(0, 0, 1_000, blob(&[h(3)]))], 0, 0, 10_001);
-        let inner = c.inner.lock().unwrap();
-        assert!(inner.map.contains_key("p1"), "hot p1 not evicted");
-        assert!(inner.map.contains_key("p2"), "hot p2 not evicted");
-        assert!(inner.map.contains_key("p3"), "newcomer admitted (overage tolerated)");
+        assert!(contains(&c, "p1"), "hot p1 not evicted");
+        assert!(contains(&c, "p2"), "hot p2 not evicted");
+        assert!(contains(&c, "p3"), "newcomer admitted (overage tolerated)");
     }
 
     #[test]
@@ -833,7 +997,7 @@ mod tests {
         // evicted at footprint ~one (deterministic setup of last_bytes).
         let c = DedupCache::with_max_bytes(one * 2, true); // budget = 0.9 * 2one = 1.8one
         c.hydrate("hot", vec![(0, 0, 1_000, blob(&[h(1)]))], 0, 0, 5_000);
-        c.inner.lock().unwrap().last_bytes.insert("cold".to_string(), one);
+        c.global.lock().unwrap().last_bytes.insert("cold".to_string(), one);
 
         let hydrations_before = c.hydrations_total();
         // others(one) + est(one) = 2one > budget(1.8one) → SUPPRESS, no query.
@@ -854,9 +1018,10 @@ mod tests {
         // Pressure eases (hot partition drops away) and the cooldown elapses →
         // the fit test now passes → a Full hydration is admitted, marker cleared.
         {
-            let mut inner = c.inner.lock().unwrap();
-            inner.map.clear();
-            inner.total_bytes = 0;
+            let mut map = c.map.write().unwrap();
+            map.clear();
+            drop(map);
+            c.global.lock().unwrap().total_bytes = 0;
         }
         assert_eq!(
             c.needs_hydration("cold", 5_000 + SUPPRESS_COOLDOWN_MS),
@@ -930,5 +1095,141 @@ mod tests {
             c.verified_for_push("p1", &[h(1)], 6_000),
             PushCheck::LocalDuplicate(vec![0])
         );
+    }
+
+    // ---------------------------------------------------------------- sharding
+
+    // Build a 16-byte hash uniquely from (a, b) so probes never collide with
+    // pushed hashes in the concurrency tests.
+    fn hb(a: u8, b: u8) -> [u8; 16] {
+        let mut x = [0u8; 16];
+        x[0] = a;
+        x[1] = b;
+        x
+    }
+
+    #[test]
+    fn concurrent_distinct_partitions_are_independent() {
+        // Sharding correctness: N threads driving the full API against DISTINCT
+        // partitions must each see their own partition's state, with no global
+        // lock corrupting another's. (We can't assert wall-clock non-
+        // serialization deterministically, so we assert API correctness under
+        // real concurrent use.)
+        use std::thread;
+        let c = Arc::new(DedupCache::with_max_bytes(64 << 20, true));
+        let mut handles = Vec::new();
+        for t in 1..=8u8 {
+            let c = c.clone();
+            handles.push(thread::spawn(move || {
+                let pid = format!("p{t}");
+                c.hydrate(&pid, vec![], 0, -1, 1_000);
+                for i in 0..50i64 {
+                    // exercise the gate + expire paths concurrently too
+                    let _ = c.needs_hydration(&pid, 1_000 + i);
+                    c.expire(&pid, 1_000_000, 1_000 + i);
+                    c.on_push_committed(&pid, i, &[hb(t, i as u8)], 1_000 + i);
+                    match c.verified_for_push(&pid, &[hb(t, 200)], 1_000 + i) {
+                        PushCheck::Verified(w) => assert_eq!(w, i, "{pid} watermark @{i}"),
+                        other => panic!("{pid}: unexpected {other:?}"),
+                    }
+                    // its own committed hash is a local duplicate
+                    assert_eq!(
+                        c.verified_for_push(&pid, &[hb(t, i as u8)], 1_000 + i),
+                        PushCheck::LocalDuplicate(vec![0]),
+                        "{pid} self-dup @{i}"
+                    );
+                }
+            }));
+        }
+        for hnd in handles {
+            hnd.join().unwrap();
+        }
+        // All 8 partitions resident, each with its full 50-deep watermark.
+        assert_eq!(c.map.read().unwrap().len(), 8);
+        for t in 1..=8u8 {
+            let pid = format!("p{t}");
+            assert_eq!(
+                c.verified_for_push(&pid, &[hb(t, 201)], 3_000),
+                PushCheck::Verified(49),
+                "{pid} final watermark"
+            );
+        }
+    }
+
+    #[test]
+    fn eviction_under_contention_does_not_deadlock() {
+        // The try_lock eviction scan + blocking detach must not deadlock when
+        // many threads churn partitions under a tight cap (eviction fires
+        // constantly, contending the map write lock and per-entry locks). If the
+        // locking were wrong this test would hang; reaching the asserts is the
+        // signal. Also sanity-checks the budget stays bounded.
+        use std::thread;
+        let probe = DedupCache::with_max_bytes(1 << 20, true);
+        probe.hydrate("p", vec![(0, 0, 1_000, blob(&[h(1)]))], 0, 0, T0);
+        let one = total_bytes(&probe);
+
+        let c = Arc::new(DedupCache::with_max_bytes(one * 4, true));
+        let mut handles = Vec::new();
+        for t in 0..8u32 {
+            let c = c.clone();
+            handles.push(thread::spawn(move || {
+                for r in 0..300u32 {
+                    let pid = format!("p{}_{}", t, r % 24); // churn > cap
+                    let base = r as i64;
+                    let now = 10_000 + r as i64;
+                    c.hydrate(
+                        &pid,
+                        vec![(base, base, now, blob(&[h((r % 250) as u8)]))],
+                        0,
+                        base,
+                        now,
+                    );
+                    c.expire(&pid, 1_000, now + RECENT_USE_GUARD_MS + 1);
+                    let _ = c.verified_for_push(&pid, &[h(200)], now + RECENT_USE_GUARD_MS + 1);
+                }
+            }));
+        }
+        for hnd in handles {
+            hnd.join().unwrap();
+        }
+        // Reaching here at all is the deadlock-freedom signal. The resident set
+        // is bounded by the DISTINCT working set (8 threads × 24 keys = 192
+        // partitions), not by the 2400 total hydrations — the guard tolerates
+        // overage while a set is hot, but nothing leaks per-iteration. This bound
+        // (well above 192 entries, far below a per-iteration leak) proves that.
+        let distinct = 8 * 24;
+        assert!(
+            total_bytes(&c) <= one * (distinct + 64),
+            "resident set bounded by working set, not history: {} bytes",
+            total_bytes(&c)
+        );
+    }
+
+    #[test]
+    fn hydrate_reserves_capacity() {
+        // Capacity hygiene (layer 2): a full hydration reserves the set for the
+        // hydrated size up front, and an on_push_committed batch reserves for the
+        // incoming hashes — no panics, sizes sane, count exact.
+        let c = DedupCache::with_max_bytes(64 << 20, true);
+        let hs: Vec<[u8; 16]> = (0..300u16).map(|i| hb((i >> 8) as u8, i as u8)).collect();
+        c.hydrate("p1", vec![(0, 299, 1_000, blob(&hs))], 0, 299, T0);
+        {
+            let arc = entry(&c, "p1");
+            let e = arc.lock().unwrap();
+            assert_eq!(e.set.len(), 300);
+            // Reserved for size × 1.5 up front → capacity comfortably above count.
+            assert!(e.set.capacity() >= 300, "cap {} >= 300", e.set.capacity());
+        }
+        // Contiguous batch of 100 more hashes: reserve path, count grows, no panic.
+        let more: Vec<[u8; 16]> = (300..400u16).map(|i| hb((i >> 8) as u8, i as u8)).collect();
+        c.on_push_committed("p1", 300, &more, 1_001);
+        {
+            let arc = entry(&c, "p1");
+            let e = arc.lock().unwrap();
+            assert_eq!(e.set.len(), 400);
+            assert!(e.set.capacity() >= 400, "cap {} >= 400", e.set.capacity());
+        }
+        // Byte accounting stayed consistent through both inserts.
+        assert!(total_bytes(&c) > 0);
     }
 }

@@ -390,6 +390,7 @@ func runOpenLoopMode(args []string) {
 	consumers := fs.Int("consumers", 150, "consumer goroutines (closed-loop drainers)")
 	rate := fs.Int("rate", 0, "OPEN-LOOP total offered rate in msg/s across all producers (required, >0)")
 	maxInflight := fs.Int("max-inflight", 20000, "cap on in-flight push REQUESTS; over the cap a request's messages are shed (counted, not sent)")
+	rampSec := fs.Int("ramp-sec", 0, "OPEN-LOOP: linear ramp of the offered rate from 0 to -rate over N seconds (0 = full rate from t=0). Avoids the cold-start storm: pool dial-up, first-contact seeding and dedup-cache hydration happen under partial load.")
 	pushBatch := fs.Int("push-batch", 10, "messages per push request (offered request rate = rate/push-batch)")
 	popBatch := fs.Int("pop-batch", 200, "max messages per pop request")
 	popWildcard := fs.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop instead of pinned per-partition pop")
@@ -573,7 +574,20 @@ func runOpenLoopMode(args []string) {
 					continue
 				}
 				// targetK = # of scheduled instants with schedTime <= now.
-				targetK := int64(now.Sub(base).Seconds()*perWorkerRPS) + 1
+				// With -ramp-sec R the schedule density ramps linearly 0→full:
+				// cumulative F(t) = rps·t²/(2R) for t<R, then rps·(t−R/2). The
+				// per-request sched instants (CO-correct latency baseline) are
+				// F⁻¹(k) — see schedAt below. ramp==0 ⇒ the original linear
+				// schedule, bit-identical.
+				el := now.Sub(base).Seconds()
+				ramp := float64(*rampSec)
+				var cum float64
+				if ramp <= 0 || el >= ramp {
+					cum = perWorkerRPS * (el - maxf(ramp, 0)/2)
+				} else {
+					cum = perWorkerRPS * el * el / (2 * ramp)
+				}
+				targetK := int64(cum) + 1
 				owed := targetK - k
 				if owed <= 0 {
 					continue
@@ -585,7 +599,16 @@ func runOpenLoopMode(args []string) {
 					bulk = owed - indiv
 				}
 				for n := int64(0); n < indiv; n++ {
-					sched := base.Add(time.Duration(float64(k) / perWorkerRPS * float64(time.Second)))
+					// F⁻¹(k): during the ramp k = rps·t²/(2R) ⇒ t = √(2kR/rps);
+					// after it t = k/rps + R/2.
+					var schedSec float64
+					kf := float64(k)
+					if ramp > 0 && kf < perWorkerRPS*ramp/2 {
+						schedSec = math.Sqrt(2 * kf * ramp / perWorkerRPS)
+					} else {
+						schedSec = kf/perWorkerRPS + maxf(ramp, 0)/2
+					}
+					sched := base.Add(time.Duration(schedSec * float64(time.Second)))
 					k++
 					atomic.AddInt64(&offeredReq, 1)
 					select {
@@ -725,4 +748,12 @@ func runOpenLoopMode(args []string) {
 		p, pop, p-pop,
 		atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops),
 		olPercentile(final, 0.50), olPercentile(final, 0.99), olPercentile(final, 0.999))
+}
+
+// maxf: float max without pulling in generics — used by the openloop ramp math.
+func maxf(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }

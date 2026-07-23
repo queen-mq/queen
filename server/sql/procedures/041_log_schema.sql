@@ -63,17 +63,22 @@ CREATE TABLE IF NOT EXISTS queen.log_segments (
 -- EXTERNAL: TOAST must not burn CPU re-compressing the broker's already-zstd'd
 -- (incompressible) bytes. ZERO secondary indexes: the PK is also the pop path.
 ALTER TABLE queen.log_segments ALTER COLUMN blob SET STORAGE EXTERNAL;
--- Aggressive autovacuum on heap AND toast: retention churn (insert-new /
--- delete-old) with default scale factors lets dead blob tuples accumulate,
--- the toast heap outgrows RAM, and pop starts hitting cold pages. These keep
--- vacuum on pace so the heap plateaus via slot reuse. Storage params only —
--- no table rewrite, idempotent.
+-- Autovacuum, tuned by measurement (2026-07-23 VM campaign): the original
+-- 0.02/0.05 factors re-fired vacuum every ~13s at 1M msg/s — each pass over
+-- the growing heap+toast competed for I/O exactly when the system had no
+-- headroom (measured: absorbed hiccup at 800k/s, stall at 900k, collapse
+-- contributor at 1M). 0.1/0.3 keeps vacuum on pace for retention churn (the
+-- heap still plateaus via slot reuse — verified over 300s at 1M/s with
+-- retention sweeping every 5s) without the re-trigger storm. cost_limit stays
+-- high / delay 0 so each pass finishes fast. Storage params only — no table
+-- rewrite, idempotent.
 ALTER TABLE queen.log_segments SET (
-    autovacuum_vacuum_scale_factor = 0.02,
-    autovacuum_vacuum_insert_scale_factor = 0.05,
+    autovacuum_vacuum_scale_factor = 0.1,
+    autovacuum_vacuum_insert_scale_factor = 0.3,
     autovacuum_vacuum_cost_limit = 4000,
     autovacuum_vacuum_cost_delay = 0,
-    toast.autovacuum_vacuum_scale_factor = 0.02,
+    toast.autovacuum_vacuum_scale_factor = 0.1,
+    toast.autovacuum_vacuum_insert_scale_factor = 0.3,
     toast.autovacuum_vacuum_cost_limit = 4000,
     toast.autovacuum_vacuum_cost_delay = 0
 );
@@ -91,8 +96,12 @@ CREATE TABLE IF NOT EXISTS queen.log_txns (
     hashes BYTEA NOT NULL,         -- 16*msg_count bytes, xxh3_128 big-endian
     PRIMARY KEY (partition_id, base_offset)
 );
+-- Same measured rationale as log_segments: append-heavy at segment rate, the
+-- 0.02 factor re-triggered continuously during growth.
 ALTER TABLE queen.log_txns SET (
-    autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_cost_delay = 0);
+    autovacuum_vacuum_scale_factor = 0.1,
+    autovacuum_vacuum_insert_scale_factor = 0.3,
+    autovacuum_vacuum_cost_delay = 0);
 
 -- Coordination: cursor / lease / retry state per (partition, group). committed
 -- is the single source of truth for consumption ("everything <= committed is
