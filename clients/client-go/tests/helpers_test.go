@@ -72,21 +72,49 @@ func TestMain(m *testing.M) {
 }
 
 // cleanupTestData removes test data from the database.
+//
+// Mirrors the Python (tests/conftest.py) and JS (test-v2/run.js) suites. The
+// tables live in the `queen` schema, which is NOT on the default search_path,
+// so every statement is schema-qualified. The log engine keeps its own
+// queue/partition rows plus tables with no FK by design (log_txns, log_dlq);
+// log_partitions/log_segments/log_consumers cascade from log_queues. The prior
+// implementation deleted unqualified `partitions`/`queues` with a retired
+// `queue_name` column (rows-engine leftovers) — those relations don't exist on
+// the log/segment broker, so cleanup errored on the first statement and, being
+// only warned about in TestMain, never actually ran.
 func cleanupTestData(ctx context.Context) error {
 	if dbPool == nil {
 		return nil
 	}
 
 	patterns := []string{"test-%", "edge-%", "pattern-%", "workflow-%"}
-	for _, pattern := range patterns {
-		_, err := dbPool.Exec(ctx, "DELETE FROM partitions WHERE queue_name LIKE $1", pattern)
-		if err != nil {
-			return err
+
+	// Log-engine cleanup, best-effort: a rows-only server without the log
+	// schema errors on the first statement, so we stop and fall through to the
+	// rows-engine cleanup below rather than failing the whole run.
+	logStmts := []string{
+		`WITH parts AS (
+			SELECT lp.id FROM queen.log_partitions lp
+			JOIN queen.log_queues lq ON lq.id = lp.queue_id
+			WHERE lq.name LIKE ANY($1::text[])
+		),
+		d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
+		d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
+		SELECT 1`,
+		`DELETE FROM queen.consumer_watermarks WHERE queue_name LIKE ANY($1::text[])`,
+		`DELETE FROM queen.consumer_groups_metadata WHERE queue_name LIKE ANY($1::text[])`,
+		`DELETE FROM queen.log_queues WHERE name LIKE ANY($1::text[])`,
+	}
+	for _, stmt := range logStmts {
+		if _, err := dbPool.Exec(ctx, stmt, patterns); err != nil {
+			break // log-engine schema not installed (rows-only server)
 		}
-		_, err = dbPool.Exec(ctx, "DELETE FROM queues WHERE name LIKE $1", pattern)
-		if err != nil {
-			return err
-		}
+	}
+
+	// Rows-engine cleanup. A log push also writes a config row into
+	// queen.queues, so this runs for both engines and cascades to its children.
+	if _, err := dbPool.Exec(ctx, `DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])`, patterns); err != nil {
+		return err
 	}
 
 	return nil

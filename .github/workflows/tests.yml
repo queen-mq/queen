@@ -1,0 +1,66 @@
+name: tests
+
+# Full client + broker test matrix (JS/Go/Py/CLI/C++ on single + HA stacks,
+# plus Rust broker unit tests). This is the CI counterpart of `test/run.sh`.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Compile the broker once and share it as an artifact so the matrix cells load
+  # it instead of recompiling Rust six times.
+  broker-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build queen-seg:test
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          tags: queen-seg:test
+          outputs: type=docker,dest=/tmp/queen-seg-test.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/upload-artifact@v4
+        with:
+          name: queen-seg-test-image
+          path: /tmp/queen-seg-test.tar
+          retention-days: 1
+
+  # One cell per suite; each runs its applicable topologies via test/run.sh.
+  suites:
+    needs: broker-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [js, go, py, cli, cpp, mesh]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: queen-seg-test-image
+          path: /tmp
+      - run: docker load -i /tmp/queen-seg-test.tar
+      - name: ${{ matrix.suite }}
+        run: test/run.sh --suite ${{ matrix.suite }} --no-build-broker -j 1
+
+  # 50 in-process broker unit tests — no stack needed. Native for fast caching;
+  # this is the Rust CI the repo previously lacked.
+  rust-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: cargo test
+        run: cargo test --manifest-path server/Cargo.toml --locked

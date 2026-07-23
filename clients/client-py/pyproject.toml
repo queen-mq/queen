@@ -76,6 +76,9 @@ target-version = "py38"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "session"
+# Function default; the session-scoped fixtures pin loop_scope="session"
+# explicitly (see conftest.py / pytest.ini). Kept in sync with pytest.ini, which
+# shadows this block when present.
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 

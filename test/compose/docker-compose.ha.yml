@@ -1,0 +1,85 @@
+# HA stack: one Postgres + TWO brokers (mesh pair) + one test runner.
+#
+# Both brokers share the SAME Postgres — that is the sole source of truth
+# (messages, dedup=log_txns, consumer offsets=log_consumers, queue config).
+# The framed-TCP mesh between them carries only best-effort wake/maintenance/
+# config hints. Each broker has a DISTINCT QUEEN_SERVER_ID and its OWN
+# FILE_BUFFER_DIR (node-local spool — must never be shared). Both mesh ports are
+# 6633 because the containers have distinct hostnames.
+#
+# Client suites point at queen-a (proving HA is transparent to clients); the
+# `mesh` runner asserts the mesh itself is up.
+
+services:
+  pg:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  queen-a:
+    image: queen-seg:test
+    depends_on:
+      pg:
+        condition: service_healthy
+    environment:
+      PG_HOST: pg
+      PG_PORT: "5432"
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: postgres
+      QUEEN_APPLY_SCHEMA: "1"
+      PORT: "6632"
+      DB_POOL_SIZE: "32"
+      QUEEN_SERVER_ID: queen-a
+      QUEEN_MESH_PORT: "6633"
+      QUEEN_MESH_PEERS: "queen-b:6633"
+      QUEEN_SYNC_SECRET: "queen-harness-mesh-secret"
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    tmpfs:
+      - /var/lib/queen/buffers
+
+  queen-b:
+    image: queen-seg:test
+    depends_on:
+      pg:
+        condition: service_healthy
+    environment:
+      PG_HOST: pg
+      PG_PORT: "5432"
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: postgres
+      QUEEN_APPLY_SCHEMA: "1"
+      PORT: "6632"
+      DB_POOL_SIZE: "32"
+      QUEEN_SERVER_ID: queen-b
+      QUEEN_MESH_PORT: "6633"
+      QUEEN_MESH_PEERS: "queen-a:6633"
+      QUEEN_SYNC_SECRET: "queen-harness-mesh-secret"   # byte-identical to queen-a
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    tmpfs:
+      - /var/lib/queen/buffers
+
+  runner:
+    image: ${QUEEN_RUNNER_IMAGE:?set QUEEN_RUNNER_IMAGE (e.g. queen-test-runner-mesh)}
+    depends_on:
+      - queen-a
+      - queen-b
+    environment:
+      QUEEN_HTTP_URL: http://queen-a:6632
+      QUEEN_WAIT_URLS: "http://queen-a:6632/health http://queen-b:6632/health"
+      QUEEN_A_URL: http://queen-a:6632
+      QUEEN_B_URL: http://queen-b:6632
+      QUEEN_PG_HOST: pg
+      QUEEN_PG_PORT: "5432"
+      QUEEN_PG_USER: postgres
+      QUEEN_PG_PASSWORD: postgres
+      QUEEN_PG_DB: postgres

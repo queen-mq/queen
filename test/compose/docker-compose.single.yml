@@ -1,0 +1,54 @@
+# Single-node stack: one Postgres + one broker + one test runner.
+# The project name (docker compose -p ...) makes each (suite) invocation an
+# isolated network namespace, so nothing here publishes host ports — runners
+# reach the broker/PG by service name inside the project's own network.
+#
+# Bring up via test/run.sh, which sets QUEEN_RUNNER_IMAGE. Standalone example:
+#   QUEEN_RUNNER_IMAGE=queen-test-runner-js \
+#     docker compose -p queen-test-js-single -f test/compose/docker-compose.single.yml \
+#     up --abort-on-container-exit --exit-code-from runner
+
+services:
+  pg:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    tmpfs:
+      - /var/lib/postgresql/data   # ephemeral + fast; wiped with the container
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  broker:
+    image: queen-seg:test
+    depends_on:
+      pg:
+        condition: service_healthy
+    environment:
+      PG_HOST: pg
+      PG_PORT: "5432"
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: postgres
+      QUEEN_APPLY_SCHEMA: "1"     # only the literal "0" would skip
+      PORT: "6632"
+      DB_POOL_SIZE: "32"          # small test PG — stay well under max_connections
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    tmpfs:
+      - /var/lib/queen/buffers
+
+  runner:
+    image: ${QUEEN_RUNNER_IMAGE:?set QUEEN_RUNNER_IMAGE (e.g. queen-test-runner-js)}
+    depends_on:
+      - broker
+    environment:
+      QUEEN_HTTP_URL: http://broker:6632
+      QUEEN_WAIT_URLS: http://broker:6632/health
+      QUEEN_PG_HOST: pg
+      QUEEN_PG_PORT: "5432"
+      QUEEN_PG_USER: postgres
+      QUEEN_PG_PASSWORD: postgres
+      QUEEN_PG_DB: postgres

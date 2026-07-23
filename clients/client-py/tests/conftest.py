@@ -4,6 +4,7 @@ Pytest configuration and fixtures for Queen client tests
 
 import os
 import pytest
+import pytest_asyncio
 import asyncpg
 
 from queen import Queen
@@ -22,7 +23,12 @@ TEST_CONFIG = {
 }
 
 
-@pytest.fixture(scope="session")
+# Explicit loop scopes (see pytest.ini): db_pool and cleanup_test_data are
+# session-scoped, so they must run on a session-scoped event loop. `client` is
+# per-test, so it must share the FUNCTION-scoped loop the test itself runs on —
+# otherwise httpx's aclose() at teardown does loop.call_soon() on a loop that is
+# already closed and floods the run with "Event loop is closed" RuntimeErrors.
+@pytest_asyncio.fixture(loop_scope="session", scope="session")
 async def db_pool():
     """Create database pool for tests"""
     pool = await asyncpg.create_pool(**TEST_CONFIG["db_config"])
@@ -30,7 +36,7 @@ async def db_pool():
     await pool.close()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="function")
 async def client():
     """Create Queen client for tests"""
     queen = Queen(TEST_CONFIG["base_urls"][0])
@@ -38,7 +44,7 @@ async def client():
     await queen.close()
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest_asyncio.fixture(loop_scope="session", scope="session", autouse=True)
 async def cleanup_test_data(db_pool):
     """Cleanup test data before and after test run"""
     

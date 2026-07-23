@@ -1,0 +1,12 @@
+# Sidecar ignore (buildx honors <dockerfile>.dockerignore) — keeps the repo-root
+# build context light. Runners COPY only the paths they need; this denylists the
+# heavy/irrelevant trees so `docker build .` doesn't tar 3.6 GB of server/target.
+.git
+.claude
+server/target
+**/target
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.log
+benchmark-queen
