@@ -45,6 +45,16 @@ CREATE TABLE IF NOT EXISTS queen.log_partitions (
 -- stays HOT. fillfactor headroom keeps those HOT chains on-page so the two
 -- unique indexes stay O(#partitions) instead of O(#updates).
 ALTER TABLE queen.log_partitions SET (fillfactor = 70);
+-- Churn control (2026-07-23): every push UPDATEs this row, so at high single-
+-- push rates the dead-tuple count between autovacuum passes dwarfs the live
+-- row count (measured: wildcard pop candidate scans grew to ~12ms on a
+-- 1000-row queue purely from scan bloat). Threshold-based triggering (scale
+-- factor 0) keeps vacuum re-firing every naptime under churn — a pass over a
+-- few thousand live rows costs ms.
+ALTER TABLE queen.log_partitions SET (
+    autovacuum_vacuum_scale_factor = 0,
+    autovacuum_vacuum_threshold = 500,
+    autovacuum_vacuum_cost_delay = 0);
 -- Candidate-selection index: wildcard pop range-scans only recently-written
 -- partitions of a queue instead of the full partition set (decisive at
 -- 10-20k partitions/queue). The scan already tolerates 2 minutes of slack, so
@@ -126,6 +136,12 @@ CREATE TABLE IF NOT EXISTS queen.log_consumers (
 -- Every pop/ack UPDATEs its row (no indexed columns touched → HOT); heavy
 -- headroom so the churn stays on-page.
 ALTER TABLE queen.log_consumers SET (fillfactor = 50);
+-- Same churn rationale as log_partitions above: pop/ack update rates dwarf
+-- the live row count, and the wildcard candidate LEFT JOIN scans this table.
+ALTER TABLE queen.log_consumers SET (
+    autovacuum_vacuum_scale_factor = 0,
+    autovacuum_vacuum_threshold = 500,
+    autovacuum_vacuum_cost_delay = 0);
 
 -- Helper: explode a 16B-stride hash blob into (idx, h) rows. idx is 0-based.
 -- Used by the push dedup probe (042) and ack-by-hash resolution (044); pure

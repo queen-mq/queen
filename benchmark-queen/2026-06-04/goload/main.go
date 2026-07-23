@@ -30,6 +30,14 @@
 //	                      Consumers are the same closed-loop drainers as -mode max.
 //	                      Run `goload -mode openloop -h` for its flags.
 //
+//	-mode cm              "Channel manager" realistic application workload: a
+//	                      2-flow hotel channel-manager pipeline over N properties
+//	                      with open-loop paced producers, multi-stage consumers
+//	                      (DB update -> OTA sync fan-out; price calc -> OTA price
+//	                      fan-out), per-message work sleeps, and a built-in
+//	                      total-order-per-property verifier. See cm.go.
+//	                      Run `goload -mode cm -h` for its flags.
+//
 // Build (static, for the loader VM):
 //
 //	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o goload-linux-amd64 .
@@ -61,10 +69,12 @@ func main() {
 		runAppMode(os.Args[1:])
 	case "openloop":
 		runOpenLoopMode(os.Args[1:])
+	case "cm":
+		runCMMode(os.Args[1:])
 	case "max", "":
 		runMaxMode(os.Args[1:])
 	default:
-		fmt.Printf("goload: unknown -mode %q (want: max | app | openloop)\n", mode)
+		fmt.Printf("goload: unknown -mode %q (want: max | app | openloop | cm)\n", mode)
 		os.Exit(2)
 	}
 }

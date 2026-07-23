@@ -214,6 +214,23 @@ BEGIN
         PERFORM 1 FROM queen.log_consumers
         WHERE partition_id = v_pid AND consumer_group = p_group;
         IF FOUND THEN RETURN; END IF;
+        -- Non-blocking creation guard (2026-07-23, the mass-creation livelock):
+        -- ON CONFLICT DO NOTHING on a key being inserted by ANOTHER open
+        -- transaction waits on that transaction's xid until it COMMITS — and
+        -- the caller here is often a multi-candidate wildcard pop whose txn
+        -- lives for the whole candidate loop. Under mass partition creation
+        -- (thousands of new (partition, group) pairs at once) those full-txn
+        -- waits chain: measured 200+ backends queued on Lock:transactionid
+        -- with pop txns minutes old and commit/s ~ 0. No cycle, so the
+        -- deadlock detector never fires — it's a livelock. The xact-scoped
+        -- advisory TRY-lock serializes creation per key WITHOUT waiting:
+        -- exactly one pop creates the row, every concurrent pop skips this
+        -- partition for one cycle (the backlog is retried next pop). A hash
+        -- collision only false-skips an unrelated partition for one cycle.
+        IF NOT pg_try_advisory_xact_lock(
+                   hashtextextended(v_pid::text || '/' || p_group, 42)) THEN
+            RETURN;
+        END IF;
         INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
         VALUES (v_pid, p_group, COALESCE(v_seed, -1))
         ON CONFLICT DO NOTHING;

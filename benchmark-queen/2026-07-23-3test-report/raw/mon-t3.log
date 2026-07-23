@@ -1,0 +1,49 @@
+  time  | pushReq popReq | push/s  pop/s | bCPU   pgCPU | commit/s | pgWait(active)
+  20s   |      0      0 |      0      0 |  458%  1981% |   26107 | LWLock:BufferContent=62 LWLock:WALInsert=40 CPU:run=20
+  30s   |      0      0 |      0      0 |  478%  1930% |   19889 | LWLock:BufferContent=44 CPU:run=29 Client:ClientRead=24
+  40s   |      0      0 |      0      0 |  468%  1967% |   17016 | LWLock:WALWrite=89 CPU:run=37 LWLock:BufferContent=29
+  50s   |      0      0 |      0      0 |  486%  1972% |   16207 | LWLock:WALWrite=141 CPU:run=25 LWLock:WALInsert=12
+  60s   |      0      0 |      0      0 |  518%  1943% |   17661 | LWLock:WALWrite=174 CPU:run=20 LWLock:BufferContent=6
+  70s   |      0      0 |      0      0 |  533%  1957% |   19196 | LWLock:BufferContent=36 CPU:run=32 LWLock:WALInsert=23
+  80s   |      0      0 |      0      0 |  523%  1971% |   18806 | LWLock:WALWrite=43 LWLock:BufferContent=40 LWLock:WALInsert=31
+  90s   |      0      0 |      0      0 |  541%  1935% |   19133 | LWLock:WALWrite=125 LWLock:BufferContent=25 CPU:run=24
+  100s  |      0      0 |      0      0 |  525%  1965% |   19116 | LWLock:WALWrite=36 CPU:run=25 LWLock:BufferContent=19
+  110s  |      0      0 |      0      0 |  529%  1944% |   20113 | LWLock:WALInsert=105 LWLock:BufferContent=35 CPU:run=21
+  120s  |      0      0 |      0      0 |  553%  1979% |   20167 | LWLock:WALInsert=58 LWLock:BufferContent=34 IPC:XactGroupUpdate=18
+  130s  |      0      0 |      0      0 |  548%  2059% |   20274 | Client:ClientRead=83 LWLock:BufferContent=26 LWLock:WALWrite=22
+  140s  |      0      0 |      0      0 |  559%  1989% |   20078 | LWLock:WALWrite=74 CPU:run=44 IPC:ProcarrayGroupUpdate=10
+  150s  |      0      0 |      0      0 |  559%  1965% |   20858 | Client:ClientRead=101 LWLock:WALWrite=38 IPC:ProcarrayGroupUpdate=34
+  160s  |      0      0 |      0      0 |  573%  1976% |   20644 | IPC:ProcarrayGroupUpdate=183 CPU:run=25 IPC:XactGroupUpdate=14
+  170s  |      0      0 |      0      0 |  575%  1969% |   20938 | LWLock:WALWrite=84 Lock:extend=52 CPU:run=30
+  180s  |      0      0 |      0      0 |  577%  1919% |   21082 | LWLock:WALInsert=48 Client:ClientRead=43 LWLock:BufferContent=34
+  190s  |      0      0 |      0      0 |  548%  1997% |   20106 | CPU:run=42 Client:ClientRead=29 LWLock:WALWrite=23
+  200s  |      0      0 |      0      0 |  597%  1983% |   21086 | IPC:ProcarrayGroupUpdate=99 LWLock:WALWrite=32 CPU:run=27
+  210s  |      0      0 |      0      0 |  580%  1964% |   21030 | LWLock:WALWrite=165 CPU:run=29 Client:ClientRead=17
+  220s  |      0      0 |      0      0 |  565%  1960% |   20395 | LWLock:WALWrite=182 CPU:run=32 LWLock:BufferContent=3
+  230s  |      0      0 |      0      0 |  657%  1740% |   19994 | LWLock:WALInsert=201 LWLock:BufferContent=39 CPU:run=10
+  240s  |      0      0 |      0      0 |  688%  1920% |   17701 | CPU:run=27 LWLock:BufferContent=13 LWLock:WALWrite=13
+  250s  |      0      0 |      0      0 |  661%  1835% |   17618 | Client:ClientRead=37 LWLock:WALWrite=27 CPU:run=22
+  260s  |      0      0 |      0      0 |  678%  1836% |   18243 | Lock:extend=52 CPU:run=34 LWLock:BufferContent=21
+  270s  |      0      0 |      0      0 |  597%  1895% |   18016 | LWLock:WALWrite=196 CPU:run=9 IO:WalInitSync=1
+  280s  |      0      0 |      0      0 |  667%  1860% |   18236 | LWLock:BufferContent=59 LWLock:WALWrite=45 Lock:extend=39
+  290s  |      0      0 |      0      0 |  692%  1814% |   17612 | LWLock:WALWrite=97 CPU:run=23 IPC:ProcarrayGroupUpdate=5
+  300s  |      0      0 |      0      0 |  697%  1936% |   18097 | LWLock:WALWrite=138 CPU:run=26 LWLock:BufferContent=14
+  310s  |      0      0 |      0      0 |  668%  1833% |   18565 | LWLock:WALWrite=35 CPU:run=32 IPC:ProcarrayGroupUpdate=1
+  320s  |      0      0 |      0      0 |  689%  1840% |   17570 | LWLock:WALWrite=251 CPU:run=1 IO:WalInitSync=1
+  330s  |      0      0 |      0      0 |  690%  1836% |   16925 | CPU:run=36 LWLock:WALWrite=30 Client:ClientRead=1
+  340s  |      0      0 |      0      0 |  695%  1834% |   16929 | CPU:run=44 LWLock:WALWrite=20 LWLock:BufferContent=12
+  350s  |      0      0 |      0      0 |  685%  1869% |   17126 | LWLock:WALWrite=85 CPU:run=41 Lock:extend=4
+  360s  |      0      0 |      0      0 |  668%  1862% |   17126 | CPU:run=47 Client:ClientRead=35 LWLock:WALWrite=35
+  370s  |      0      0 |      0      0 |  688%  1844% |   17912 | LWLock:WALWrite=62 CPU:run=50 IPC:ProcarrayGroupUpdate=35
+  380s  |      0      0 |      0      0 |  688%  1884% |   17716 | LWLock:WALWrite=184 CPU:run=23 LWLock:BufferContent=3
+  390s  |      0      0 |      0      0 |  675%  1892% |   17992 | LWLock:WALWrite=89 CPU:run=45 Timeout:SpinDelay=26
+  400s  |      0      0 |      0      0 |  675%  1863% |   18112 | CPU:run=47 LWLock:WALWrite=26 LWLock:BufferContent=22
+  410s  |      0      0 |      0      0 |  697%  1930% |   18192 | CPU:run=38 LWLock:WALWrite=33 LWLock:BufferContent=32
+  420s  |      0      0 |      0      0 |  688%  1858% |   18955 | LWLock:WALWrite=49 CPU:run=42 Client:ClientRead=12
+  430s  |      0      0 |      0      0 |  723%  1856% |   19027 | IPC:ProcarrayGroupUpdate=132 LWLock:WALWrite=34 CPU:run=27
+  440s  |      0      0 |      0      0 |  693%  1947% |   18124 | CPU:run=31 LWLock:WALWrite=29 LWLock:ProcArray=27
+  450s  |      0      0 |      0      0 |  678%  1797% |   17695 | LWLock:WALWrite=140 CPU:run=21 IO:WalInitWrite=1
+  460s  |      0      0 |      0      0 |    3%   104% |    9982 | CPU:run=1
+  470s  |      0      0 |      0      0 |    1%   145% |    1769 | CPU:run=2
+  480s  |      0      0 |      0      0 |    2%    15% |    2024 | 
+  490s  |      0      0 |      0      0 |    8%    15% |    1841 | 

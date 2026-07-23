@@ -273,9 +273,16 @@ BEGIN
     WHERE p.id IS NULL;
 
     IF v_missing > 0 THEN
+        -- Every provisioning INSERT is ORDERED on its unique key (2026-07-23):
+        -- ON CONFLICT DO NOTHING acquires speculative locks in ROW order, and
+        -- two bundles creating overlapping partition sets in different orders
+        -- deadlock/convoy exactly like unordered row locks would (measured
+        -- during mass creation: xid convoys wedging the whole pool). Same
+        -- canonical-order discipline as the FOR UPDATE pre-lock below.
         INSERT INTO queen.log_queues (name)
         SELECT DISTINCT queue FROM unnest(p_queues) AS u(queue)
         WHERE COALESCE(queue, '') <> ''
+        ORDER BY 1
         ON CONFLICT (name) DO NOTHING;
 
         -- RUSTFIX item 26: queen.queues config row, storage='segments' (the
@@ -288,12 +295,14 @@ BEGIN
                'segments'
         FROM unnest(p_queues) AS u(queue)
         WHERE COALESCE(queue, '') <> ''
+        ORDER BY 1
         ON CONFLICT (name) DO NOTHING;
 
         INSERT INTO queen.log_partitions (queue_id, name)
         SELECT DISTINCT q.id, u.partition
         FROM unnest(p_queues, p_partitions) AS u(queue, partition)
         JOIN queen.log_queues q ON q.name = u.queue
+        ORDER BY 1, 2
         ON CONFLICT (queue_id, name) DO NOTHING;
     END IF;
 
