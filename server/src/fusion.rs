@@ -1218,10 +1218,23 @@ fn spawn_bundle_flush(
         // suppressed_partitions stays 0 = healthy; a rising suppressed gauge =
         // cap pressure, size QUEEN_DEDUP_CACHE_MB per the warning line's formula.
         if ctx.dedup_enabled && BUNDLES_FIRED.load(Ordering::Relaxed) % 500 == 0 {
+            // resident bytes/hashes let an operator (and the storage-redesign
+            // validation) read the achieved footprint per hash directly.
+            let rbytes = ctx.dedup.resident_bytes();
+            let rhashes = ctx.dedup.resident_hashes();
+            let per_hash = if rhashes > 0 {
+                rbytes as f64 / rhashes as f64
+            } else {
+                0.0
+            };
             eprintln!(
-                "[dedup] hydrations={} suppressed_partitions={}",
+                "[dedup] hydrations={} suppressed_partitions={} resident_bytes={} \
+                 resident_hashes={} bytes_per_hash={:.1}",
                 ctx.dedup.hydrations_total(),
-                ctx.dedup.suppressed_partitions()
+                ctx.dedup.suppressed_partitions(),
+                rbytes,
+                rhashes,
+                per_hash
             );
         }
 
