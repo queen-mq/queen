@@ -944,7 +944,16 @@ func cmVerifyFile(path, flow string, produced map[int]int64, ackErr, baseSeq int
 		// seq arrived, so the missing one wasn't merely in-flight. All seen
 		// seqs are distinct and in [baseSeq,maxSeen], so the expected span is
 		// maxSeen-baseSeq+1 and the shortfall vs |seen| is the loss count.
-		res.gaps += a.maxSeen - baseSeq + 1 - int64(len(a.seen))
+		// CLAMP AT 0 per property: in clean data the shortfall is always >=0, so
+		// this is a no-op for a valid run. It only fires when a seq < baseSeq is
+		// present (e.g. -verify-only against a pre-`base=`-token meta that
+		// defaults baseSeq=1 over warmup logs containing seq 0, or cross-run
+		// contamination). A negative per-property term would otherwise be summed
+		// into res.gaps and could CANCEL a genuine +gap in another property,
+		// flipping an aggregate FAIL to PASS — a verifier soundness hole.
+		if g := a.maxSeen - baseSeq + 1 - int64(len(a.seen)); g > 0 {
+			res.gaps += g
+		}
 		// Tail in-flight: seqs produced but not yet delivered here (the highest
 		// few at cutoff). Reported, never a failure.
 		if pm, ok := produced[prop]; ok && pm > a.maxSeen {
