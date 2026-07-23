@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -70,6 +70,20 @@ pub struct AppState {
     // The mapping is immutable (a partition never changes queue), so entries
     // never go stale; the map is only size-capped.
     pub partition_queue: Mutex<HashMap<String, String>>,
+    // Phase 2 first-contact safety (targeted pop). Monotonic positive cache of
+    // (queue -> {group}) pairs whose group-first-contact BULK SEED (043
+    // log_pop_wildcard_*_v1 / log_pop_discover_wire_v1) is known committed — i.e.
+    // the single-row consumer_groups_metadata marker exists. Until a (queue,
+    // group) is seeded, a woken pop's hint-driven targeted single-partition pop
+    // (db::pop_specific -> queen.log_pop_v1) is SUPPRESSED and the pop falls
+    // through to the wildcard backstop, which CARRIES the seed. This restores the
+    // invariant the anti-convoy fix (51e50c4) relies on: no per-partition lazy
+    // first-contact INSERT storm before the set-based seed has run — the merge
+    // regression that wedged the broker on Lock:transactionid at t=0. Nested map
+    // so the steady-state hit borrows queue+group with no allocation; cleared
+    // alongside the other per-queue caches by reconcile so a delete+recreate
+    // self-heals within one interval.
+    pub seeded_groups: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
@@ -115,6 +129,41 @@ impl AppState {
         };
         self.enc_cache.lock().unwrap().insert(queue.to_string(), v);
         v
+    }
+
+    // Phase 2 first-contact safety: has this (queue, group)'s group-first-contact
+    // bulk seed committed (043)? Fast path = the monotonic positive cache (zero
+    // DB, no allocation on a hit). On a miss, ONE indexed marker lookup
+    // (db::group_seed_marker_exists); a positive result is cached so the
+    // steady-state targeted pop path never reads again. A pool/DB error, or an
+    // absent marker, returns false — the caller then uses the wildcard backstop,
+    // which is always first-contact-safe. This NEVER returns true before the seed
+    // exists, which is the whole point: it gates hint-driven targeted pops until
+    // the convoy-preventing seed is in place. Guard is dropped before every await.
+    pub(crate) async fn group_seeded(&self, queue: &str, group: &str) -> bool {
+        {
+            let g = self.seeded_groups.lock().unwrap();
+            if let Some(gs) = g.get(queue) {
+                if gs.contains(group) {
+                    return true;
+                }
+            }
+        }
+        let seeded = match self.pool.get().await {
+            Ok(c) => db::group_seed_marker_exists(&c, queue, group)
+                .await
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if seeded {
+            self.seeded_groups
+                .lock()
+                .unwrap()
+                .entry(queue.to_string())
+                .or_default()
+                .insert(group.to_string());
+        }
+        seeded
     }
 
     // Record a partition -> queue mapping learned from a pop response.

@@ -562,15 +562,28 @@ pub async fn handle_pop(
                 // every hinted partition comes back empty (another consumer won the
                 // SKIP LOCKED race, or the hint was for a different group's data),
                 // fall through to the wildcard backstop on the next iteration.
-                let hints = st.notifier.drain_hints(&queue, max_parts.max(1) as usize);
-                if !hints.is_empty() {
-                    if let Some(resp) = try_targeted_serve(
-                        &st, &queue, &hints, &group, batch, lease_seconds, &worker, auto_ack,
-                        &sub_mode, &sub_from,
-                    )
-                    .await
-                    {
-                        return resp;
+                // Phase 2 first-contact safety: only take the targeted
+                // single-partition path once this (queue, group)'s
+                // group-first-contact BULK SEED has committed (043). Before that,
+                // targeted pops would drive queen.log_pop_v1's per-partition lazy
+                // first-contact INSERT en masse and re-form the transactionid
+                // convoy the seed prevents (51e50c4) — the merge regression that
+                // wedged the broker at t=0. Until seeded we skip draining (hints
+                // stay parked, bounded by HINT_CAP) and fall through to the
+                // wildcard pop on the next iteration, which is the backstop that
+                // CARRIES the seed. group_seeded is a cache hit (zero DB) in
+                // steady state, so the phase-2 fast path is preserved once seeded.
+                if st.group_seeded(&queue, &group).await {
+                    let hints = st.notifier.drain_hints(&queue, max_parts.max(1) as usize);
+                    if !hints.is_empty() {
+                        if let Some(resp) = try_targeted_serve(
+                            &st, &queue, &hints, &group, batch, lease_seconds, &worker, auto_ack,
+                            &sub_mode, &sub_from,
+                        )
+                        .await
+                        {
+                            return resp;
+                        }
                     }
                 }
             }

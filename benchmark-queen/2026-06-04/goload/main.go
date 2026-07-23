@@ -112,15 +112,19 @@ func runMaxMode(args []string) {
 	idleConns := fs.Int("idle-conns", 512, "MaxIdleConnsPerHost for the client")
 	reportSec := fs.Int("report", 5, "report interval seconds")
 	completedRet := fs.Int("completed-retention", 300, "completed_retention_seconds for the queue")
+	dedupWindow := fs.Int("dedup-window", 0, "dedupWindowSeconds set by goload's own configure at t=0 (0 = off). Avoids the mid-run-flip artifact (external configure races the broker 30s partition-meta TTL -> synchronized rehydration storm).")
 	pendingRet := fs.Int("pending-retention", 0, "retention_seconds for pending (un-consumed) messages; 0 = keep forever")
 	timeoutMs := fs.Int("timeout", 30000, "request timeout ms")
 	emptySleepMs := fs.Int("empty-sleep", 2, "consumer sleep ms on empty pop")
 	retries := fs.Int("retries", 2, "producer/consumer client RetryAttempts (0 = disable retries; used to test the push>pop dedup gap)")
+	manualAck := fs.Bool("manual-ack", false, "consumers LEASE (pop AutoAck=false) and immediately ack the whole received batch as completed — measures TRUE production consume cost (lease + explicit full-batch offset commit) instead of server-side autoAck. On ack failure: count ackErr, NO retry (lease expires -> redeliver).")
+	ackAsync := fs.Bool("ack-async", false, "with -manual-ack: dispatch each batch's ackFullBatch on a goroutine and immediately pop the NEXT partition, instead of acking synchronously in the consumer loop. Models a real async-ack consumer that doesn't hold a partition's lease blocked on its own ack round-trip. No effect without -manual-ack.")
+	ackInflight := fs.Int("ack-inflight", 256, "with -ack-async: cap on concurrently in-flight async acks (a global buffered-channel semaphore). When full the consumer BLOCKS until a slot frees — an ack is NEVER shed; blocking is the honest backpressure. Only used with -ack-async.")
 	_ = fs.String("mode", "max", "run mode: max | app")
 	_ = fs.Parse(args)
 
-	fmt.Printf("goload -> %s queue=%s partitions=%d producers=%d consumers=%d pushBatch=%d popBatch=%d payload=%dB idleConns=%d retries=%d\n",
-		*url, *queueName, *partitions, *producers, *consumers, *pushBatch, *popBatch, *payloadBytes, *idleConns, *retries)
+	fmt.Printf("goload -> %s queue=%s partitions=%d producers=%d consumers=%d pushBatch=%d popBatch=%d payload=%dB idleConns=%d retries=%d manualAck=%v ackAsync=%v ackInflight=%d\n",
+		*url, *queueName, *partitions, *producers, *consumers, *pushBatch, *popBatch, *payloadBytes, *idleConns, *retries, *manualAck, *ackAsync, *ackInflight)
 
 	payload := map[string]interface{}{"data": strings.Repeat("x", *payloadBytes), "src": "goload"}
 
@@ -154,7 +158,7 @@ func runMaxMode(args []string) {
 			"completedRetentionSeconds": *completedRet,
 			"retentionSeconds":          *pendingRet,
 			"leaseTime":                 30,
-			"dedupWindowSeconds":        0, // dedup OFF for benchmarks (full upsert defaults it to 3600 otherwise)
+			"dedupWindowSeconds":        *dedupWindow, // 0 = off; set here at t=0 so tests never flip dedup mid-run
 			"encryptionEnabled":         os.Getenv("GOLOAD_ENCRYPT") == "1", // enables per-queue encryption (C++)
 		},
 	}); cerr != nil {
@@ -165,6 +169,21 @@ func runMaxMode(args []string) {
 	cfgCancel()
 
 	var pushed, popped, pushErr, popErr, emptyPops int64
+	// manual-ack counters (only mutated when -manual-ack): acked = msgs the
+	// server confirmed committed; ackErr = msgs that failed to commit; ackCalls
+	// + ackLatUs feed the avg ack-latency readout. See ackFullBatch.
+	var acked, ackErr, ackCalls, ackLatUs int64
+
+	// -ack-async plumbing (only exercised when -manual-ack -ack-async): a global
+	// buffered-channel semaphore bounds in-flight acks at -ack-inflight, ackWg
+	// tracks them for the shutdown drain, and ackCtx (rooted at Background, not
+	// the run ctx) lets already-dispatched acks keep landing through teardown.
+	// See the consumer loop and the shutdown drain for how they're used.
+	ackSem := make(chan struct{}, *ackInflight)
+	var ackWg sync.WaitGroup
+	ackCtx, ackCancel := context.WithCancel(context.Background())
+	defer ackCancel()
+
 	var rr uint64
 	nextPart := func() string {
 		return fmt.Sprintf("p%d", int(atomic.AddUint64(&rr, 1)%uint64(*partitions)))
@@ -220,7 +239,9 @@ func runMaxMode(args []string) {
 				} else {
 					qb = qb.Wait(false)
 				}
-				msgs, e := qb.Batch(*popBatch).AutoAck(true).Pop(ctx)
+				// -manual-ack -> lease (AutoAck=false) and commit explicitly below;
+				// otherwise server-side autoAck (original max behavior, unchanged).
+				msgs, e := qb.Batch(*popBatch).AutoAck(!*manualAck).Pop(ctx)
 				if e != nil {
 					if ctx.Err() != nil {
 						return
@@ -235,6 +256,10 @@ func runMaxMode(args []string) {
 					continue
 				}
 				atomic.AddInt64(&popped, int64(len(msgs)))
+				if *manualAck {
+					dispatchAck(ctx, ackCtx, q, msgs, *ackAsync, ackSem, &ackWg,
+						&acked, &ackErr, &ackCalls, &ackLatUs)
+				}
 			}
 		}(home)
 	}
@@ -244,7 +269,7 @@ func runMaxMode(args []string) {
 	go func() {
 		t := time.NewTicker(time.Duration(*reportSec) * time.Second)
 		defer t.Stop()
-		var lp, lo int64
+		var lp, lo, la int64
 		for {
 			select {
 			case <-stop:
@@ -252,10 +277,17 @@ func runMaxMode(args []string) {
 			case <-t.C:
 				p, o := atomic.LoadInt64(&pushed), atomic.LoadInt64(&popped)
 				secs := float64(*reportSec)
-				fmt.Printf("[%s] push=%8.0f/s pop=%8.0f/s | tot push=%d pop=%d | errs p=%d c=%d empty=%d\n",
+				line := fmt.Sprintf("[%s] push=%8.0f/s pop=%8.0f/s | tot push=%d pop=%d | errs p=%d c=%d empty=%d",
 					time.Now().UTC().Format("15:04:05"),
 					float64(p-lp)/secs, float64(o-lo)/secs, p, o,
 					atomic.LoadInt64(&pushErr), atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops))
+				if *manualAck {
+					a := atomic.LoadInt64(&acked)
+					line += fmt.Sprintf(" | ack=%8.0f/s tot=%d ackErr=%d ackAvg=%.2fms",
+						float64(a-la)/secs, a, atomic.LoadInt64(&ackErr), avgAckMs(&ackLatUs, &ackCalls))
+					la = a
+				}
+				fmt.Println(line)
 				lp, lo = p, o
 			}
 		}
@@ -280,10 +312,17 @@ func runMaxMode(args []string) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 	}
+	// Drain in-flight async acks (best effort, up to 5s) before closing the client.
+	drainAsyncAcks(*ackAsync, &ackWg, ackCancel)
 	_ = q.Close(context.Background())
-	fmt.Printf("[final] pushed=%d popped=%d pushErr=%d popErr=%d emptyPops=%d\n",
+	finalLine := fmt.Sprintf("[final] pushed=%d popped=%d pushErr=%d popErr=%d emptyPops=%d",
 		atomic.LoadInt64(&pushed), atomic.LoadInt64(&popped),
 		atomic.LoadInt64(&pushErr), atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops))
+	if *manualAck {
+		finalLine += fmt.Sprintf(" | acked=%d ackErr=%d ackAvg=%.2fms",
+			atomic.LoadInt64(&acked), atomic.LoadInt64(&ackErr), avgAckMs(&ackLatUs, &ackCalls))
+	}
+	fmt.Println(finalLine)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,9 +441,13 @@ func runOpenLoopMode(args []string) {
 	idleConns := fs.Int("idle-conns", 2048, "MaxIdleConnsPerHost for the client (keep-alive pool; size near max-inflight to avoid churn)")
 	reportSec := fs.Int("report", 5, "report interval seconds")
 	completedRet := fs.Int("completed-retention", 300, "completed_retention_seconds for the queue")
+	dedupWindow := fs.Int("dedup-window", 0, "dedupWindowSeconds set by goload's own configure at t=0 (0 = off). Avoids the mid-run-flip artifact (external configure races the broker 30s partition-meta TTL -> synchronized rehydration storm).")
 	pendingRet := fs.Int("pending-retention", 0, "retention_seconds for pending (un-consumed) messages; 0 = keep forever")
 	timeoutMs := fs.Int("timeout", 30000, "request timeout ms")
 	emptySleepMs := fs.Int("empty-sleep", 2, "consumer sleep ms on empty pop")
+	manualAck := fs.Bool("manual-ack", false, "consumers LEASE (pop AutoAck=false) and immediately ack the whole received batch as completed — measures TRUE production consume cost (lease + explicit full-batch offset commit) instead of server-side autoAck. On ack failure: count ackErr, NO retry (lease expires -> redeliver).")
+	ackAsync := fs.Bool("ack-async", false, "with -manual-ack: dispatch each batch's ackFullBatch on a goroutine and immediately pop the NEXT partition, instead of acking synchronously in the consumer loop. Models a real async-ack consumer that doesn't hold a partition's lease blocked on its own ack round-trip. No effect without -manual-ack.")
+	ackInflight := fs.Int("ack-inflight", 256, "with -ack-async: cap on concurrently in-flight async acks (a global buffered-channel semaphore). When full the consumer BLOCKS until a slot frees — an ack is NEVER shed; blocking is the honest backpressure. Only used with -ack-async.")
 	_ = fs.String("mode", "openloop", "run mode: max | app | openloop")
 	_ = fs.Parse(args)
 
@@ -435,8 +478,8 @@ func runOpenLoopMode(args []string) {
 	}
 	perWorkerRPS := reqPerSec / float64(W)
 
-	fmt.Printf("goload -mode openloop -> %s queue=%s partitions=%d consumers=%d\n",
-		*url, *queueName, *partitions, *consumers)
+	fmt.Printf("goload -mode openloop -> %s queue=%s partitions=%d consumers=%d manualAck=%v ackAsync=%v ackInflight=%d\n",
+		*url, *queueName, *partitions, *consumers, *manualAck, *ackAsync, *ackInflight)
 	fmt.Printf("  offered: rate=%d msg/s | push-batch=%d -> %.1f req/s across %d pacer workers (%.2f req/s each) | max-inflight=%d | payload=%dB\n",
 		*rate, *pushBatch, reqPerSec, W, perWorkerRPS, *maxInflight, *payloadBytes)
 
@@ -476,7 +519,7 @@ func runOpenLoopMode(args []string) {
 			"completedRetentionSeconds": *completedRet,
 			"retentionSeconds":          *pendingRet,
 			"leaseTime":                 30,
-			"dedupWindowSeconds":        0,
+			"dedupWindowSeconds":        *dedupWindow,
 			"encryptionEnabled":         os.Getenv("GOLOAD_ENCRYPT") == "1",
 		},
 	}); cerr != nil {
@@ -487,6 +530,17 @@ func runOpenLoopMode(args []string) {
 	cfgCancel()
 
 	var pushed, popped, pushErr, popErr, emptyPops int64
+	// manual-ack counters (only mutated when -manual-ack); see ackFullBatch.
+	var acked, ackErr, ackCalls, ackLatUs int64
+
+	// -ack-async plumbing (only exercised when -manual-ack -ack-async); see the
+	// consumer loop and the shutdown drain, and the max-mode note above for the
+	// rationale (bounded in-flight, honest blocking backpressure, teardown drain).
+	ackSem := make(chan struct{}, *ackInflight)
+	var ackWg sync.WaitGroup
+	ackCtx, ackCancel := context.WithCancel(context.Background())
+	defer ackCancel()
+
 	var offeredReq, sheddedReq, achievedReq int64
 	var inflight int64
 	lat := newOLHist()
@@ -649,7 +703,9 @@ func runOpenLoopMode(args []string) {
 				} else {
 					qb = qb.Wait(false)
 				}
-				msgs, e := qb.Batch(*popBatch).AutoAck(true).Pop(ctx)
+				// -manual-ack -> lease (AutoAck=false) and commit explicitly below;
+				// otherwise server-side autoAck (original openloop behavior).
+				msgs, e := qb.Batch(*popBatch).AutoAck(!*manualAck).Pop(ctx)
 				if e != nil {
 					if ctx.Err() != nil {
 						return
@@ -664,6 +720,10 @@ func runOpenLoopMode(args []string) {
 					continue
 				}
 				atomic.AddInt64(&popped, int64(len(msgs)))
+				if *manualAck {
+					dispatchAck(ctx, ackCtx, q, msgs, *ackAsync, ackSem, &ackWg,
+						&acked, &ackErr, &ackCalls, &ackLatUs)
+				}
 			}
 		}(home)
 	}
@@ -678,7 +738,7 @@ func runOpenLoopMode(args []string) {
 		prev := make([]int64, olNumBuckets)
 		cur := make([]int64, olNumBuckets)
 		diff := make([]int64, olNumBuckets)
-		var lOff, lAch, lShed, lPop int64
+		var lOff, lAch, lShed, lPop, lAck int64
 		for {
 			select {
 			case <-stop:
@@ -696,7 +756,7 @@ func runOpenLoopMode(args []string) {
 					prev[i] = cur[i]
 				}
 				b := int64(*pushBatch)
-				fmt.Printf("[%s] offered=%9.0f/s achieved=%9.0f/s shed=%9.0f/s inflight=%6d | p50=%7.2f p99=%8.2f p999=%8.2f ms | push=%d pop=%d lag=%d | errs push=%d pop=%d empty=%d gor=%d\n",
+				line := fmt.Sprintf("[%s] offered=%9.0f/s achieved=%9.0f/s shed=%9.0f/s inflight=%6d | p50=%7.2f p99=%8.2f p999=%8.2f ms | push=%d pop=%d lag=%d | errs push=%d pop=%d empty=%d gor=%d",
 					time.Now().UTC().Format("15:04:05"),
 					float64(off-lOff)*float64(b)/secs,
 					float64(ach-lAch)*float64(b)/secs,
@@ -706,6 +766,13 @@ func runOpenLoopMode(args []string) {
 					p, pop, p-pop,
 					atomic.LoadInt64(&pushErr), atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops),
 					runtime.NumGoroutine())
+				if *manualAck {
+					a := atomic.LoadInt64(&acked)
+					line += fmt.Sprintf(" | ack=%9.0f/s ackErr=%d ackAvg=%.2fms",
+						float64(a-lAck)*1.0/secs, atomic.LoadInt64(&ackErr), avgAckMs(&ackLatUs, &ackCalls))
+					lAck = a
+				}
+				fmt.Println(line)
 				lOff, lAch, lShed, lPop = off, ach, shed, pop
 				_ = lPop
 			}
@@ -731,6 +798,8 @@ func runOpenLoopMode(args []string) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 	}
+	// Drain in-flight async acks (best effort, up to 5s) before closing the client.
+	drainAsyncAcks(*ackAsync, &ackWg, ackCancel)
 	_ = q.Close(context.Background())
 
 	// Final totals + cumulative (whole-run) percentiles.
@@ -741,13 +810,21 @@ func runOpenLoopMode(args []string) {
 	shed := atomic.LoadInt64(&sheddedReq)
 	p := atomic.LoadInt64(&pushed)
 	pop := atomic.LoadInt64(&popped)
-	fmt.Printf("[final] offered=%d achieved=%d shed=%d (msgs: offered=%d achieved=%d shed=%d) pushErr=%d | pushed=%d popped=%d lag=%d | popErr=%d empty=%d | overall p50=%.2f p99=%.2f p999=%.2f ms\n",
+	finalLine := fmt.Sprintf("[final] offered=%d achieved=%d shed=%d (msgs: offered=%d achieved=%d shed=%d) pushErr=%d | pushed=%d popped=%d lag=%d | popErr=%d empty=%d | overall p50=%.2f p99=%.2f p999=%.2f ms",
 		off, atomic.LoadInt64(&achievedReq), shed,
 		off*b, p, shed*b,
 		atomic.LoadInt64(&pushErr),
 		p, pop, p-pop,
 		atomic.LoadInt64(&popErr), atomic.LoadInt64(&emptyPops),
 		olPercentile(final, 0.50), olPercentile(final, 0.99), olPercentile(final, 0.999))
+	if *manualAck {
+		// lag stays pushed-popped (delivery lag); ackLag = pushed-acked is the
+		// COMMIT lag — messages delivered+received but not yet offset-committed.
+		a := atomic.LoadInt64(&acked)
+		finalLine += fmt.Sprintf(" | acked=%d ackErr=%d ackLag=%d ackAvg=%.2fms",
+			a, atomic.LoadInt64(&ackErr), p-a, avgAckMs(&ackLatUs, &ackCalls))
+	}
+	fmt.Println(finalLine)
 }
 
 // maxf: float max without pulling in generics — used by the openloop ramp math.
@@ -756,4 +833,123 @@ func maxf(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+// ---------------------------------------------------------------------------
+// manual-ack consume path (shared by -mode max and -mode openloop)
+// ---------------------------------------------------------------------------
+
+// dispatchAck routes a leased pop batch to its ack, either SYNCHRONOUSLY (the
+// original behavior: ack in the consumer loop, which caps the system at
+// partitions×batch / full-cycle-latency because a popped partition stays lease-
+// locked until its ack lands) or ASYNCHRONOUSLY (-ack-async: fire the ack on a
+// goroutine and return immediately so the consumer pops the NEXT partition —
+// how a real consumer behaves).
+//
+// Async backpressure is a global buffered-channel semaphore of -ack-inflight
+// slots: we BLOCK for a free slot before dispatching so an ack is NEVER shed
+// (dropping an ack would leave the batch to lease-expire and redeliver, which
+// is not the behavior we're modeling). The one exception is shutdown: if the
+// run ctx is cancelled while we're blocked for a slot, we skip this batch's ack
+// and return — the lease expires, the batch redelivers, and NO counter is
+// touched. The dispatched goroutine runs under ackCtx (not the run ctx) so an
+// already-launched ack can still land during the teardown drain; ackWg tracks
+// it so that drain can wait.
+func dispatchAck(ctx, ackCtx context.Context, q *queen.Queen, msgs []*queen.Message,
+	async bool, ackSem chan struct{}, ackWg *sync.WaitGroup,
+	acked, ackErr, ackCalls, ackLatUs *int64) {
+	if !async {
+		ackFullBatch(ctx, q, msgs, acked, ackErr, ackCalls, ackLatUs)
+		return
+	}
+	// Block for an in-flight slot (honest backpressure), bailing only if the run
+	// is shutting down.
+	select {
+	case ackSem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	ackWg.Add(1)
+	go func(batch []*queen.Message) {
+		defer ackWg.Done()
+		defer func() { <-ackSem }()
+		ackFullBatch(ackCtx, q, batch, acked, ackErr, ackCalls, ackLatUs)
+	}(msgs)
+}
+
+// drainAsyncAcks gives already-dispatched async acks up to 5s to land (commit
+// their cursor) after the run ctx is cancelled, then cancels ackCtx so any
+// straggler still inside q.Ack unblocks. Best effort: ackFullBatch ignores
+// ctx-cancelled failures, so a straggler that gets cut off is simply not counted
+// — no ackErr inflation, no double count, no corruption. No-op unless -ack-async.
+func drainAsyncAcks(async bool, ackWg *sync.WaitGroup, ackCancel context.CancelFunc) {
+	if async {
+		done := make(chan struct{})
+		go func() { ackWg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	ackCancel()
+}
+
+// ackFullBatch immediately acknowledges an ENTIRE leased pop batch as
+// `completed` — the honest production consume path: a leased pop (AutoAck=false)
+// followed by an explicit full-batch offset commit. One /api/v1/ack/batch call
+// echoes each message's transactionId + partitionId + the pop's leaseId (the
+// client's Queen.Ack marshals all three straight off each *Message). Because
+// Queen's ack is an offset COMMIT, acking the whole received batch advances
+// queen.log_consumers.committed for that partition/group — this is what makes
+// the cursor move (vs. server-side autoAck, which commits inside the pop).
+//
+// On failure we COUNT it and move on — we NEVER retry. A failed call (or a
+// per-item rejection, e.g. the lease already expired) leaves the messages
+// unacked; the lease then expires server-side and the messages redeliver. That
+// is the real production behavior — a consumer that crashes or loses its lease
+// does not get a free re-ack — and retrying here would both distort the
+// measured per-message ack cost and double-commit. So: no retry, by design.
+//
+// Counting is per-message so acked+ackErr tracks popped exactly:
+//   - acked  += messages the server confirmed (AckResponse.Success == true)
+//   - ackErr += messages that did NOT commit (whole-call error -> all N in the
+//     batch; otherwise N - (confirmed count) from per-item rejections)
+//   - ackCalls/ackLatUs accumulate one sample per batch-ack call for avg latency
+func ackFullBatch(ctx context.Context, q *queen.Queen, msgs []*queen.Message,
+	acked, ackErr, ackCalls, ackLatUs *int64) {
+	n := int64(len(msgs))
+	t0 := time.Now()
+	resp, err := q.Ack(ctx, msgs, true, queen.AckOptions{}) // success=true -> status "completed"
+	atomic.AddInt64(ackLatUs, time.Since(t0).Microseconds())
+	atomic.AddInt64(ackCalls, 1)
+	if err != nil {
+		// Whole-call failure (HTTP/timeout): none of the N committed. Ignore
+		// shutdown-induced errors (ctx cancelled) so teardown isn't miscounted.
+		if ctx.Err() == nil {
+			atomic.AddInt64(ackErr, n)
+		}
+		return
+	}
+	// Per-item accounting: /api/v1/ack/batch returns one result per message in
+	// request order; a rejected item (Success=false) did not commit.
+	var ok int64
+	for _, r := range resp {
+		if r.Success {
+			ok++
+		}
+	}
+	atomic.AddInt64(acked, ok)
+	if ok < n {
+		atomic.AddInt64(ackErr, n-ok)
+	}
+}
+
+// avgAckMs returns the mean ack-call latency in ms (cumulative). Reads both
+// atomics; 0 when no ack call has completed yet.
+func avgAckMs(ackLatUs, ackCalls *int64) float64 {
+	calls := atomic.LoadInt64(ackCalls)
+	if calls == 0 {
+		return 0
+	}
+	return float64(atomic.LoadInt64(ackLatUs)) / float64(calls) / 1000.0
 }

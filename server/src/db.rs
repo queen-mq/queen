@@ -373,6 +373,30 @@ pub async fn pop_specific(
     Ok(row.get(0))
 }
 
+// Phase 2 first-contact safety: does the group-first-contact bulk-seed MARKER
+// exist for (queue, group)? The marker is the single partition_name='' row that
+// queen.log_pop_wildcard_*_v1 / log_pop_discover_wire_v1 (043) insert on a
+// (queue, group)'s FIRST wildcard contact, in the SAME transaction as the
+// set-based cursor seed of every existing partition. Its presence therefore
+// means that seed has committed, so a targeted single-partition pop
+// (queen.log_pop_v1) can no longer trigger the per-partition first-contact
+// INSERT storm the seed prevents. One indexed point lookup on the
+// (consumer_group, queue_name, partition_name, ...) unique index; non-locking.
+pub async fn group_seed_marker_exists(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM queen.consumer_groups_metadata \
+             WHERE consumer_group = $1 AND queue_name = $2 AND partition_name = '')",
+        )
+        .await?;
+    let row = client.query_one(&stmt, &[&group, &queue]).await?;
+    Ok(row.get(0))
+}
+
 // Renew every live lease held by `worker` via queen.log_renew_lease_v1
 // (044). Returns the SP result JSON as text: {"renewed":n,"expiresAt":iso|null}.
 pub async fn renew_lease(

@@ -54,6 +54,11 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
             // lazily on the next pop/push).
             state.lease_cache.lock().unwrap().clear();
             state.enc_cache.lock().unwrap().clear();
+            // Phase 2 first-contact safety: drop the positive seed cache too, so a
+            // queue delete+recreate (marker gone) re-gates targeted pops until the
+            // new seed commits. A still-seeded (queue, group) simply re-caches on
+            // its next targeted serve via one indexed marker read.
+            state.seeded_groups.lock().unwrap().clear();
             tokio::time::sleep(interval).await;
         }
     });

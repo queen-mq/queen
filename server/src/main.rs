@@ -210,6 +210,7 @@ async fn main() {
         notifier: notifier.clone(),
         file_buffer: file_buffer.clone(),
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
+        seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // RUSTFIX item 16: periodic reconcile — re-read the maintenance flags from
