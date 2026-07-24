@@ -51,10 +51,22 @@ ALTER TABLE queen.log_partitions SET (fillfactor = 70);
 -- 1000-row queue purely from scan bloat). Threshold-based triggering (scale
 -- factor 0) keeps vacuum re-firing every naptime under churn — a pass over a
 -- few thousand live rows costs ms.
+--
+-- vacuum_truncate = off (2026-07-24, caught live during the 24h soak with
+-- pg_stat_progress_vacuum in phase "truncating heap"): the heap-truncation
+-- step of vacuum takes an ACCESS EXCLUSIVE lock, and on these tiny fixed-
+-- population tables (~one row per partition/consumer-group, never shrinking)
+-- it reclaims nothing while freezing EVERY push and pop behind the lock for
+-- seconds. This was the root cause of the whole "wobble" class — the periodic
+-- lag/latency spikes seen across every high-rate run (soak waves at t≈15/55/
+-- 158min, the 6M-lag excursion of the 800k explicit-ack test, the ackErr
+-- bursts). Disabling truncation removes the exclusive lock; the fixed row
+-- count means we never wanted the truncation anyway.
 ALTER TABLE queen.log_partitions SET (
     autovacuum_vacuum_scale_factor = 0,
     autovacuum_vacuum_threshold = 500,
-    autovacuum_vacuum_cost_delay = 0);
+    autovacuum_vacuum_cost_delay = 0,
+    vacuum_truncate = off);
 -- Candidate-selection index: wildcard pop range-scans only recently-written
 -- partitions of a queue instead of the full partition set (decisive at
 -- 10-20k partitions/queue). The scan already tolerates 2 minutes of slack, so
@@ -138,10 +150,14 @@ CREATE TABLE IF NOT EXISTS queen.log_consumers (
 ALTER TABLE queen.log_consumers SET (fillfactor = 50);
 -- Same churn rationale as log_partitions above: pop/ack update rates dwarf
 -- the live row count, and the wildcard candidate LEFT JOIN scans this table.
+-- vacuum_truncate = off for the same reason as log_partitions: the ACCESS
+-- EXCLUSIVE heap-truncation lock stalls every pop/ack, and this fixed-
+-- population table (one row per partition+group) never shrinks (2026-07-24).
 ALTER TABLE queen.log_consumers SET (
     autovacuum_vacuum_scale_factor = 0,
     autovacuum_vacuum_threshold = 500,
-    autovacuum_vacuum_cost_delay = 0);
+    autovacuum_vacuum_cost_delay = 0,
+    vacuum_truncate = off);
 
 -- Helper: explode a 16B-stride hash blob into (idx, h) rows. idx is 0-based.
 -- Used by the push dedup probe (042) and ack-by-hash resolution (044); pure
