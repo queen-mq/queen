@@ -69,3 +69,55 @@ con windowBuffer 300 ms — un run da 10 minuti quando vuoi.
 - Nessun OOM, nessun collasso, RSS piatte in tutti gli scenari.
 - popErr di apertura: il client potrebbe rampare le connessioni (cosmetico).
 - Il loader regge 10k long-poll + 1000 pacer con ~33k goroutine senza sforzo.
+
+---
+
+# Addendum (critiche di Alice): asse partizioni + indagine latenza
+
+## Variante partition-heavy (forma SmartChat: poche code × molte partizioni)
+
+1000 tenant × **1 coda × 100 partizioni** = 1.000 code, **100.000 partizioni
+reali** (create e popolate: 2,51M msg, zero errori), 10 consumer wildcard per
+coda (10k parcheggiati come prima).
+
+| | queue-heavy (10k code × 1 part) | **partition-heavy (1k code × 100 part)** |
+|---|---|---|
+| **IDLE: PG** | 0,55 core | **1,16 core** |
+| **IDLE: Queen** | 0,99 core | **0,44 core** |
+| Queen RAM idle | 1,13 GB | 1,92 GB |
+| **Carico ~6k msg/s: PG** | 12,1 core | **14,5 core** |
+| **Carico: Queen** | 4,2 core | **6,2 core** |
+| e2e p50 | 238 ms (vedi sotto) | **63-76 ms** |
+
+Letture: (1) la critica era fondata — l'**idle PG scala con le partizioni**
+(2,1x per 10x partizioni; driver: stats-refresh e autovacuum su tabelle
+100k-righe), e sotto carico la forma SmartChat costa +20% PG / +47% Queen a
+parità di rate; (2) l'**idle Queen scala con le CODE** (0,99→0,44 con 10x meno
+code) — coerente col wake-tick O(#code); (3) il floor combinato resta
+gestibile: ~1,6 core per la forma SmartChat con 100k partizioni. Proiezione
+134k partizioni SmartChat: idle ~1,5-2 core PG. Il tunable STATS_INTERVAL_MS
+e lo stats incrementale sono la leva se serve di meno.
+
+## Indagine p50 334ms (critica 2) — stato
+
+Fatti stabiliti con esperimenti mirati (tutti riproducibili, raw in raw/):
+- NON è il pacer del loader (stamp al build; pushRTT misurato separatamente:
+  p50 19-34ms), NON è la CPU del loader (3/48 core), NON è il backoff cap
+  (334→243ms con cap 1000→150: non proporzionale), NON è la hot-list
+  (identico con HOTLIST=0), NON è la wake in sé (probe manuale con 10k
+  parcheggiati: push→delivery 18ms).
+- **La latenza di scoperta scala ~linearmente col NUMERO DI CODE** in
+  entrambi i path: ~5ms extra @100 code, ~35ms @1k, ~210ms @10k (~20µs/coda).
+  È il motivo per cui SMALL faceva 6ms e la forma SmartChat 71ms.
+- Bug distinto scoperto a margine (path legacy, idle): push sparso verso
+  consumer lungo-parcheggiato = scoperta a ~60s ESATTI senza redelivery
+  (attempt_count=1) — un pop fresco sulla stessa coda riceve in 18ms. Puzza
+  di macchina del watermark empty-scan.
+- Indagine con repro locale in corso (agente dedicato): sospetti principali
+  un'iterazione periodica O(#code) condivisa (parked-gauge/replica 1Hz,
+  metrics per-queue flush, o gemelli del wake-tick).
+
+Implicazione per l'enterprise: il p50 multitenant NON è strutturale — a
+parità di tutto la forma 1k-code sta a 71ms. Fixata l'iterazione O(#code),
+l'attesa è p50 <100ms anche a 10k code. Il windowBuffer proposto resta valido
+e NON si somma al bug (che va comunque fixato prima di qualunque SLO).

@@ -705,6 +705,38 @@ impl HotList {
         out
     }
 
+    /// Cheap, NON-destructive readiness peek (discovery-latency fix, 2026-07-24):
+    /// does the (queue, group) ring have anything a `take_batch` would return right
+    /// now — a ready entry, or a wheel entry already due at `now_ms`? Locks each
+    /// sub-ring briefly but touches NO partition state (no INFLIGHT mark, no wheel
+    /// drain) and NEVER creates a ring. The pop serve path calls this before
+    /// acquiring the shared pop_vegas permit / a pooled connection, so a quiet
+    /// empty re-poll (the O(#queues) long-poll storm) short-circuits without ever
+    /// contending on the serving limiter.
+    pub fn has_ready(&self, queue: &str, group: &str, now_ms: i64) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let s = match self.qstate_existing(queue) {
+            Some(s) => s,
+            None => return false,
+        };
+        let ring = {
+            let g = s.groups.lock().unwrap();
+            match g.get(group) {
+                Some(r) => r.clone(),
+                None => return false,
+            }
+        };
+        for sub in ring.subs.iter() {
+            let sg = sub.lock().unwrap();
+            if sg.len_ready > 0 || sg.wheel_peek_due(now_ms) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check the tri-state verdicts back in (§4/§6/§7). `auto_ack` / `lease_ms`
     /// shape the `Took` handling: an autoAck pop holds no lease, so a `Took`
     /// partition is immediately re-claimable (ready); a leased (manual-ack) pop
@@ -1118,6 +1150,48 @@ mod tests {
         h.mark_local("q", "p1", 1, 0);
         let c = h.take_batch("q", "g", 10, 0);
         assert_eq!(names(&c), vec!["p0", "p1"]); // FIFO order, single shard
+    }
+
+    // Discovery-latency fix (2026-07-24): has_ready is the cheap, non-destructive
+    // peek the serve path uses to short-circuit a quiet empty re-poll BEFORE it
+    // ever acquires the shared pop_vegas serving permit / a pooled connection.
+    #[test]
+    fn has_ready_reflects_ring_nondestructively() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        // Empty ring → not ready (the quiet re-poll short-circuits here).
+        assert!(!h.has_ready("q", "g", 0));
+        // A push mark makes it ready.
+        h.mark_local("q", "p0", 1, 0);
+        assert!(h.has_ready("q", "g", 0));
+        // Peeking does NOT consume it: still ready, and take_batch still returns it.
+        assert!(h.has_ready("q", "g", 0));
+        assert_eq!(names(&h.take_batch("q", "g", 10, 0)), vec!["p0"]);
+        // Once checked out (INFLIGHT) it is no longer ready.
+        assert!(!h.has_ready("q", "g", 0));
+    }
+
+    #[test]
+    fn has_ready_false_for_unknown_queue_or_group() {
+        let h = hl1();
+        assert!(!h.has_ready("never-seen", "g", 0));
+        reg(&h, "q", "g");
+        // A registered queue but an unpolled group creates no ring → not ready
+        // (and, importantly, has_ready must NOT create the group ring).
+        assert!(!h.has_ready("q", "other-group", 0));
+    }
+
+    // A windowBuffer/delayed entry sits in the wheel; has_ready must report it only
+    // once DUE, so the serve path takes the permit exactly when there is drainable
+    // work — never for a not-yet-due deferral (which would re-introduce a storm).
+    #[test]
+    fn has_ready_true_only_when_wheel_entry_is_due() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0); // window_buffer = 5s ⇒ mark parks in the wheel
+        h.mark_local("q", "p0", 1, 0); // scheduled at now(0) + 5000ms
+        assert!(!h.has_ready("q", "g", 1000), "not due yet");
+        assert!(h.has_ready("q", "g", 6000), "due ⇒ ready to drain");
     }
 
     #[test]

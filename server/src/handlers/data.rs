@@ -555,43 +555,68 @@ pub async fn handle_pop(
 
     let mut backoff_count: u32 = 0;
     loop {
-        let permit = st.pop_vegas.acquire().await;
-        let client = match st.pool.get().await {
-            Ok(c) => c,
-            Err(_) => {
-                drop(permit);
-                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
-            }
+        // ── discovery-latency fix (2026-07-24): the legacy long-poll re-checks the
+        // queue every backoff interval, so at N parked consumers the rate of EMPTY
+        // re-polls is O(#parked consumers) = O(#queues). Acquiring the SHARED
+        // pop_vegas serving permit on every such empty re-poll let that O(#queues)
+        // storm saturate the limiter (Vegas shrinks it under RTT pressure) — so a
+        // freshly-woken REAL delivery pop queued behind thousands of empty re-polls
+        // on acquire(), a priority inversion whose wait grew LINEARLY with the queue
+        // count. Gate the vegas-limited wildcard scan behind the cheap indexed
+        // has_pending SUPERSET (no permit taken): `false` means there is definitively
+        // nothing to deliver → skip the scan and park; a "maybe pending" queue takes
+        // the permit and scans. The probe borrows a pooled connection (uncontended —
+        // pool.get measured ~0µs) and never touches pop_vegas, so the quiet re-poll
+        // storm can no longer starve real deliveries.
+        let pending = match st.pool.get().await {
+            Ok(c) => db::has_pending(&c, &queue, &group).await.unwrap_or(true),
+            Err(_) => true, // probe unavailable → fall back to the full scan (safe)
         };
-        // Cancel token captured BEFORE issuing the query: on a broker-side timeout
-        // we cancel the still-running statement server-side and quarantine this
-        // connection instead of abandoning it (db::resolve_query_timeout).
-        let cancel_token = client.cancel_token();
-        let t0 = Instant::now();
-        let res = tokio::time::timeout(
-            st.stmt_timeout,
-            db::pop_wildcard_bin(
-                &client, &queue, &group, batch, lease_seconds, &worker, auto_ack, max_parts,
-                &sub_mode, &sub_from,
-            ),
-        )
-        .await;
-        let rtt = t0.elapsed();
-        st.pop_vegas.record(rtt);
-        drop(permit);
-        // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
-        // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
-        // parking below — a parked pop must never pin a PG connection. The next loop
-        // iteration re-acquires from the pool.
-        let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard") {
-            Some(t) => t,
-            None => {
-                return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
-            }
+
+        let (txt, blobs, rtt): (String, Vec<Vec<u8>>, Duration) = if pending {
+            let permit = st.pop_vegas.acquire().await;
+            let client = match st.pool.get().await {
+                Ok(c) => c,
+                Err(_) => {
+                    drop(permit);
+                    return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+                }
+            };
+            // Cancel token captured BEFORE issuing the query: on a broker-side
+            // timeout we cancel the still-running statement server-side and
+            // quarantine this connection instead of abandoning it.
+            let cancel_token = client.cancel_token();
+            let t0 = Instant::now();
+            let res = tokio::time::timeout(
+                st.stmt_timeout,
+                db::pop_wildcard_bin(
+                    &client, &queue, &group, batch, lease_seconds, &worker, auto_ack, max_parts,
+                    &sub_mode, &sub_from,
+                ),
+            )
+            .await;
+            let rtt = t0.elapsed();
+            st.pop_vegas.record(rtt);
+            drop(permit);
+            // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
+            // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE
+            // any parking below — a parked pop must never pin a PG connection.
+            let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard") {
+                Some(t) => {
+                    // Phase 2 observability: an actual wildcard candidate scan.
+                    st.metrics.pop_wildcard.fetch_add(1, Ordering::Relaxed);
+                    t
+                }
+                None => {
+                    return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
+                }
+            };
+            (txt, blobs, rtt)
+        } else {
+            // Nothing pending — synthesize an empty wildcard result and fall through
+            // to the shared park/serve logic below WITHOUT taking a serving permit.
+            ("{\"partitions\":[]}".to_string(), Vec::new(), Duration::ZERO)
         };
-        // Phase 2 observability: this was a wildcard candidate scan (the expensive
-        // seg_partitions ⋈ partition_consumers path the hint mailbox aims to replace).
-        st.metrics.pop_wildcard.fetch_add(1, Ordering::Relaxed);
 
         // On a leased (non-autoAck) pop, the worker id IS the lease id the client
         // echoes back in ack/renew. autoAck pops advance the cursor server-side and
@@ -988,6 +1013,31 @@ async fn hotlist_pop_attempt(
         return (b, c, m, rtt);
     }
 
+    // ── discovery-latency fix (2026-07-24): resolve the in-memory ring BEFORE
+    // taking the pop_vegas serving permit / a pooled connection. A parked consumer
+    // whose queue is quiet re-polls every backoff interval, so the rate of EMPTY
+    // re-polls is O(#parked consumers) = O(#queues). The old order acquired the
+    // SHARED pop_vegas limiter on every such empty re-poll, and that O(#queues)
+    // storm saturated the limiter (Vegas shrinks it under RTT pressure) — so a
+    // freshly-woken REAL delivery pop queued behind thousands of empty re-polls on
+    // acquire(), a priority inversion whose wait grew LINEARLY with the queue count
+    // (the multitenant discovery-latency regression). An empty ring is zero DB
+    // work, so it must cost zero limiter/pool traffic. Only three things need the
+    // DB: a candidate to serve (a push marked the ring), a due keyset reseed (§8
+    // floor), or a stale deferral-config refresh (§6) — each gated by a cheap
+    // in-memory predicate here. The quiet re-poll short-circuits WITHOUT ever
+    // touching pop_vegas / the pool.
+    let need_reseed = st.hotlist.reseed_due(queue, group, now_ms, st.hotlist_reseed_ms);
+    let need_cfg = !st.hotlist.cfg_fresh(queue, now_ms, HOTLIST_CFG_TTL_MS);
+    if !need_reseed && !need_cfg && !st.hotlist.has_ready(queue, group, now_ms) {
+        let (b, c, m) = empty();
+        return (b, c, m, Duration::ZERO);
+    }
+
+    // Real DB work ahead: NOW take the serving permit + a pooled connection. The
+    // limiter thus only ever gates genuine serving + the periodic per-(queue,group)
+    // reseed/cfg floor (O(served + #queues / reseed_interval)), never the
+    // O(#queues) quiet re-poll storm.
     let permit = st.pop_vegas.acquire().await;
     let client = match st.pool.get().await {
         Ok(c) => c,
@@ -999,7 +1049,7 @@ async fn hotlist_pop_attempt(
     };
 
     // Lazy deferral-config refresh (§6), TTL-throttled.
-    if !st.hotlist.cfg_fresh(queue, now_ms, HOTLIST_CFG_TTL_MS) {
+    if need_cfg {
         if let Ok((d, w)) = db::queue_defer_cfg(&client, queue).await {
             st.hotlist.set_queue_cfg(queue, d, w, now_ms);
         }
@@ -1008,7 +1058,7 @@ async fn hotlist_pop_attempt(
     // Take candidates; reseed (bounded, throttled) if the ring is cold.
     let k = ((max_parts.max(1) as usize) * 8).clamp(16, 256);
     let mut cands = st.hotlist.take_batch(queue, group, k, now_ms);
-    if cands.is_empty() && st.hotlist.reseed_due(queue, group, now_ms, st.hotlist_reseed_ms) {
+    if cands.is_empty() && need_reseed {
         hotlist_reseed_scan(&st.hotlist, &client, queue, group, now_ms).await;
         cands = st.hotlist.take_batch(queue, group, k, now_ms);
     }

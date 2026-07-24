@@ -510,6 +510,27 @@ pub async fn queue_defer_cfg(
     }
 }
 
+// Cheap pending probe (discovery-latency fix, 2026-07-24): does any partition of
+// `queue` hold frames `group` has not consumed? `queen.log_has_pending_v1` is one
+// indexed EXISTS (last_offset > committed) — no lease/retention refinement, so it
+// is a CORRECT SUPERSET: a `false` means there is definitively nothing to deliver,
+// a `true` means "maybe" (the pop resolves the truth under the row lock). The
+// legacy (hotlist-off) long-poll uses it to gate the pop_vegas-limited wildcard
+// scan: a quiet re-poll (has_pending=false) returns empty WITHOUT taking the
+// serving permit, so the O(#queues) empty re-poll storm never saturates the pop
+// limiter (the multitenant discovery-latency regression).
+pub async fn has_pending(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT queen.log_has_pending_v1($1, $2)")
+        .await?;
+    let row = client.query_one(&stmt, &[&queue, &group]).await?;
+    Ok(row.get(0))
+}
+
 // Phase 2 first-contact safety: does the group-first-contact bulk-seed MARKER
 // exist for (queue, group)? The marker is the single partition_name='' row that
 // queen.log_pop_wildcard_*_v1 / log_pop_discover_wire_v1 (043) insert on a

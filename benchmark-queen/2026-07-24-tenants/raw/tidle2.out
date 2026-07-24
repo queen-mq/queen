@@ -1,0 +1,28 @@
+goload -mode tenants -> http://10.114.0.4:6682 tenants=1000 queues=10000 consumers=10000 idleOnly=true
+[provision] 10000 queues configured in 2.4s
+[09:26:59] push=      0/s pop=   2918/s ack=   2916/s empty=      0/s | e2e p50= 234.50 p99=  675.84 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-29183 | errs push=0 pop=0 ack=0 gor=33040
+[09:27:09] push=      0/s pop=    241/s ack=    243/s empty=      0/s | e2e p50= 544.77 p99=  913.41 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31593 | errs push=0 pop=0 ack=0 gor=33040
+[09:27:19] push=      0/s pop=      0/s ack=      0/s empty=    289/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31593 | errs push=0 pop=0 ack=0 gor=33040
+[09:27:29] push=      0/s pop=      0/s ack=      0/s empty=    711/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31594 | errs push=0 pop=0 ack=0 gor=32434
+[09:27:39] push=      0/s pop=      0/s ack=      0/s empty=     34/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31594 | errs push=0 pop=0 ack=0 gor=32434
+[09:27:49] push=      0/s pop=      0/s ack=      0/s empty=    732/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31594 | errs push=0 pop=0 ack=0 gor=32434
+[09:27:59] push=      0/s pop=      0/s ack=      0/s empty=    233/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31594 | errs push=0 pop=0 ack=0 gor=32434
+[09:28:09] push=      0/s pop=      3/s ack=      3/s empty=    287/s | e2e p50=60030.98 p99=60555.26 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=32434
+[09:28:19] push=      0/s pop=      0/s ack=      0/s empty=    711/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=32434
+[09:28:29] push=      0/s pop=      0/s ack=      0/s empty=     30/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:28:39] push=      0/s pop=      0/s ack=      0/s empty=    729/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:28:49] push=      0/s pop=      0/s ack=      0/s empty=    240/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:28:59] push=      0/s pop=      0/s ack=      0/s empty=    287/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:29:09] push=      0/s pop=      0/s ack=      0/s empty=    713/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:29:19] push=      0/s pop=      0/s ack=      0/s empty=     30/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:29:29] push=      0/s pop=      0/s ack=      0/s empty=    719/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:29:39] push=      0/s pop=      0/s ack=      0/s empty=    252/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:29:49] push=      0/s pop=      0/s ack=      0/s empty=    284/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:29:59] push=      0/s pop=      0/s ack=      0/s empty=    716/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:30:09] push=      0/s pop=      0/s ack=      0/s empty=     24/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:30:19] push=      0/s pop=      0/s ack=      0/s empty=    717/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:30:29] push=      0/s pop=      0/s ack=      0/s empty=    259/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:30:39] push=      0/s pop=      0/s ack=      0/s empty=    276/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+[09:30:49] push=      0/s pop=      0/s ack=      0/s empty=    724/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-31622 | errs push=0 pop=0 ack=0 gor=30004
+
+[final] pushed=0 popped=31622 acked=31622 empty=89979 | tail: 0 msgs across 0 queues | errs push=0 pop=0 ack=0

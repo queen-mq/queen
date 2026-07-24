@@ -43,7 +43,8 @@ func runTenantsMode(args []string) {
 	fs := flag.NewFlagSet("goload-tenants", flag.ExitOnError)
 	url := fs.String("url", "http://127.0.0.1:6632", "broker base URL")
 	tenants := fs.Int("tenants", 1000, "number of tenants")
-	queuesPer := fs.Int("queues-per-tenant", 10, "queues per tenant (1 partition each)")
+	queuesPer := fs.Int("queues-per-tenant", 10, "queues per tenant")
+	partsPer := fs.Int("partitions-per-queue", 1, "partitions per queue — the SmartChat axis: per-conversation ordering means FEW queues × MANY partitions; candidate handling, log_consumers size and stats-refresh scale with partitions, not queues")
 	consPer := fs.Int("consumers-per-queue", 1, "long-poll consumers per queue")
 	phaseHigh := fs.Int("phase-high", 10, "per-tenant msg/s in the HIGH phase")
 	phaseLow := fs.Int("phase-low", 2, "per-tenant msg/s in the LOW phase")
@@ -131,6 +132,7 @@ func runTenantsMode(args []string) {
 	pushedPer := make([]int64, nq)
 	poppedPer := make([]int64, nq)
 	lat := newOLHist()
+	pushLat := newOLHist()
 	var wg sync.WaitGroup
 
 	// ---------------------------------------------------------------- consumers
@@ -241,7 +243,15 @@ func runTenantsMode(args []string) {
 						"ts":  time.Now().UnixMicro(),
 						"pad": padStr,
 					}
-					_, e := q.Queue(tenantQueue(tid, qi)).Push(payload).Execute(ctx)
+					qb := q.Queue(tenantQueue(tid, qi))
+					if *partsPer > 1 {
+						// SmartChat shape: ordering per conversation ⇒ message
+						// lands on a random one of the queue's many partitions.
+						qb = qb.Partition("p" + strconv.Itoa(rng.Intn(*partsPer)))
+					}
+					pt0 := time.Now()
+					_, e := qb.Push(payload).Execute(ctx)
+					pushLat.record(time.Since(pt0).Microseconds())
 					if e != nil {
 						if ctx.Err() == nil {
 							atomic.AddInt64(&pushErr, 1)
@@ -261,6 +271,9 @@ func runTenantsMode(args []string) {
 		tick := time.NewTicker(time.Duration(*reportSec) * time.Second)
 		defer tick.Stop()
 		prev := make([]int64, olNumBuckets)
+		pprev := make([]int64, olNumBuckets)
+		pcur := make([]int64, olNumBuckets)
+		pdiff := make([]int64, olNumBuckets)
 		cur := make([]int64, olNumBuckets)
 		diff := make([]int64, olNumBuckets)
 		var lp, lo, la, le int64
@@ -277,10 +290,16 @@ func runTenantsMode(args []string) {
 					diff[i] = cur[i] - prev[i]
 					prev[i] = cur[i]
 				}
-				fmt.Printf("[%s] push=%7.0f/s pop=%7.0f/s ack=%7.0f/s empty=%7.0f/s | e2e p50=%7.2f p99=%8.2f ms | lag=%d | errs push=%d pop=%d ack=%d gor=%d\n",
+				pushLat.snapshot(pcur)
+				for i := range pdiff {
+					pdiff[i] = pcur[i] - pprev[i]
+					pprev[i] = pcur[i]
+				}
+				fmt.Printf("[%s] push=%7.0f/s pop=%7.0f/s ack=%7.0f/s empty=%7.0f/s | e2e p50=%7.2f p99=%8.2f ms | pushRTT p50=%6.2f p99=%7.2f ms | lag=%d | errs push=%d pop=%d ack=%d gor=%d\n",
 					time.Now().UTC().Format("15:04:05"),
 					float64(p-lp)/secs, float64(o-lo)/secs, float64(a-la)/secs, float64(em-le)/secs,
 					olPercentile(diff, 0.50), olPercentile(diff, 0.99),
+					olPercentile(pdiff, 0.50), olPercentile(pdiff, 0.99),
 					p-o,
 					atomic.LoadInt64(&pushErr), atomic.LoadInt64(&popErr), atomic.LoadInt64(&ackErr),
 					runtime.NumGoroutine())
@@ -317,5 +336,5 @@ func runTenantsMode(args []string) {
 		atomic.LoadInt64(&pushed), atomic.LoadInt64(&popped), atomic.LoadInt64(&acked),
 		atomic.LoadInt64(&emptyPops), lag, lagQueues,
 		atomic.LoadInt64(&pushErr), atomic.LoadInt64(&popErr), atomic.LoadInt64(&ackErr))
-	_ = strconv.Itoa
+	
 }
