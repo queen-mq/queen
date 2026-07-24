@@ -121,3 +121,26 @@ Implicazione per l'enterprise: il p50 multitenant NON è strutturale — a
 parità di tutto la forma 1k-code sta a 71ms. Fixata l'iterazione O(#code),
 l'attesa è p50 <100ms anche a 10k code. Il windowBuffer proposto resta valido
 e NON si somma al bug (che va comunque fixato prima di qualunque SLO).
+
+---
+
+# Batteria FINALE (hl10: clear-su-ack drained-scoped + hook seek/delete + priority-inversion + NACK fix)
+
+| | mattina (pre-fix) | **finale hl10** |
+|---|---|---|
+| SMALL e2e p50/p99 | 6-7 / 9-11 ms | **7,5 / 10 ms** (pushRTT 3,3) |
+| IDLE 10k: PG / Queen | 0,55 / 0,99 core | 0,58 / 0,98 core (wake-tick clone = follow-up) |
+| **BIG 10k code ~6k msg/s: e2e** | **334 / ~650 ms** | **59,6 / 148 ms** |
+| BIG: lag ingresso | 1-2k | **0** |
+| BIG: PG / Queen | 12,1 / 4,2 core | **9,3 / 4,25 core** (−23% PG) |
+| **PARTS 100k partizioni: e2e** | 63-76 / 224 ms | **34,6 / 108 ms** |
+| PARTS: PG / Queen | 14,5 / 6,2 core | **11,0 / 5,4 core** |
+| PARTS-IDLE: PG / Queen | 1,16 / 0,44 core | 1,17 / 0,42 core |
+| Errori (2 run carichi, 3,25M msg) | 0 | **0** |
+
+Sizing enterprise aggiornato: 1000 tenant attivi ≈ **13,5 core totali** (~640 msg/s
+per core PG, era ~500); latenze multitenant da ~1/3 di secondo a <150ms p99.
+Catena dei fix di oggi: priority-inversion sui poll vuoti → NACK promote +
+reseed wheel-reclaim → clear-su-ack (covered + batch_count + drained
+claim-scoped) → hook seek/delete. Restano: wake-tick O(#code) clone (idle ~1
+core a 10k code), windowBuffer come moltiplicatore ×3-4 del regime sparso.
