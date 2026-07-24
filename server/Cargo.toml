@@ -47,6 +47,13 @@ libc = "0.2"
 # Embed the built Vue dashboard (webapp/dist) into the binary so the broker
 # serves the SPA with zero external files — single self-contained binary.
 rust-embed = "8"
+# Structured logging (LOGGING_PLAN.md). `tracing` macros + a `tracing-subscriber`
+# fmt layer with an EnvFilter that honours LOG_LEVEL/RUST_LOG (previously the
+# Helm-injected LOG_LEVEL was dead). `time` feature = RFC3339 UTC timestamps
+# without pulling chrono; `json` = the QUEEN_LOG_JSON=1 structured formatter.
+# Pure-Rust, no C deps (consistent with the ring/no-cmake build).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "std", "time", "json"] }
 
 [profile.release]
 opt-level = 3

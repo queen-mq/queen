@@ -21,7 +21,7 @@ use crate::handlers::AppState;
 /// Launch the reconcile loop. Non-blocking; spawns a detached tokio task.
 pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
     let interval = Duration::from_millis(interval_ms.max(1));
-    println!("reconcile: state reconcile loop started (interval={interval_ms}ms)");
+    tracing::info!(target: "reconcile", interval_ms, "state reconcile loop started");
     tokio::spawn(async move {
         // Small initial delay so boot-time seeding settles first (C++ sleeps 5s).
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -31,7 +31,7 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
                 if let Ok(m) = db::get_system_flag(&c, "maintenance_mode").await {
                     let prev = state.maintenance.swap(m, Ordering::Relaxed);
                     if prev != m {
-                        println!("reconcile: maintenance_mode {prev} -> {m} (from DB)");
+                        tracing::info!(target: "reconcile", flag = "maintenance_mode", from = %prev, to = %m, "flag changed");
                         // Keep the file-buffer drain lifecycle in sync when the flag
                         // is flipped remotely (item 17), same as the HTTP handler.
                         if m {
@@ -45,7 +45,7 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
                 if let Ok(pm) = db::get_system_flag(&c, "pop_maintenance_mode").await {
                     let prev = state.pop_maintenance.swap(pm, Ordering::Relaxed);
                     if prev != pm {
-                        println!("reconcile: pop_maintenance_mode {prev} -> {pm} (from DB)");
+                        tracing::info!(target: "reconcile", flag = "pop_maintenance_mode", from = %prev, to = %pm, "flag changed");
                     }
                 }
             }

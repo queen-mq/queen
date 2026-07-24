@@ -198,7 +198,12 @@ pub async fn handle_push(
             match st.encryption.encrypt(raw) {
                 Some(env) => (Bytes::from(env), true),
                 None => {
-                    eprintln!("PUSH: encryption failed for queue '{queue}', storing plaintext");
+                    // LOGGING_PLAN.md Phase 2: this fired one eprintln PER MESSAGE
+                    // with no gate — a broken cipher floods stderr at ingest rate.
+                    static ENC_FAIL: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = ENC_FAIL.tick_now() {
+                        tracing::warn!(target: "push", queue = %queue, suppressed, "encryption failed; stored plaintext");
+                    }
                     (body.slice_ref(raw), false)
                 }
             }
@@ -2956,10 +2961,12 @@ pub async fn handle_transaction(
                         f.payload = env;
                         f.encrypted = true;
                     }
-                    None => eprintln!(
-                        "TXN: encryption failed for queue '{}', storing plaintext",
-                        g.queue
-                    ),
+                    None => {
+                        static ENC_FAIL_TXN: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        if let Some(suppressed) = ENC_FAIL_TXN.tick_now() {
+                            tracing::warn!(target: "txn", queue = %g.queue, suppressed, "encryption failed; stored plaintext");
+                        }
+                    }
                 }
             }
         }

@@ -805,10 +805,14 @@ impl DedupCache {
         let resident_mb = self.global.lock().unwrap().total_bytes / (1024 * 1024);
         let cap_mb = self.max_bytes / (1024 * 1024);
         let suppressed = self.suppressed_gauge.load(Ordering::Relaxed).max(0);
-        eprintln!(
-            "[dedup] cap pressure: resident={resident_mb}MB cap={cap_mb}MB \
-             suppressed={suppressed} partitions using SQL probes (sound, slower); \
-             raise QUEEN_DEDUP_CACHE_MB — needed_mb ≈ 16 × msg_rate × window_seconds / 1e6"
+        tracing::warn!(
+            target: "dedup",
+            resident_mb,
+            cap_mb,
+            suppressed,
+            knob = "QUEEN_DEDUP_CACHE_MB",
+            sizing = "needed_mb ≈ 16 × msg_rate × window_seconds / 1e6",
+            "cap pressure — degraded to SQL probes (sound, slower); raise QUEEN_DEDUP_CACHE_MB"
         );
     }
 

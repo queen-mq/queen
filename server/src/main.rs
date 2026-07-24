@@ -19,6 +19,7 @@ mod mesh;
 mod metrics;
 mod migrate;
 mod notify;
+mod obs;
 mod pgtls;
 mod reconcile;
 mod retention;
@@ -42,6 +43,10 @@ use handlers::AppState;
 
 #[tokio::main]
 async fn main() {
+    // LOGGING_PLAN.md Phase 0: install the tracing subscriber (honours
+    // LOG_LEVEL/RUST_LOG) and the panic hook BEFORE anything can log or panic.
+    obs::init();
+    obs::install_panic_hook();
     let cfg = config::load();
 
     // Subcommand dispatch: `queen-seg migrate ...` runs the offline rows→segments
@@ -58,8 +63,7 @@ async fn main() {
     // Apply schema.sql + procedures/*.sql at boot (advisory-locked). Fail fast if
     // the DB can't be brought to the expected shape.
     if let Err(e) = schema::apply(&pool).await {
-        eprintln!("FATAL: schema apply failed: {e}");
-        std::process::exit(1);
+        obs::fatal(format!("schema apply failed: {e}"));
     }
 
     let push_vegas = vegas::Vegas::new(
@@ -85,14 +89,15 @@ async fn main() {
     // RUSTFIX item 7: validate the auth config at startup and FAIL FAST (like the
     // C++ acceptor_server.cpp:719-726) when enabled with no usable key material.
     if let Err(e) = cfg.auth.validate() {
-        eprintln!("FATAL: invalid JWT auth configuration: {e}");
-        std::process::exit(1);
+        obs::fatal(format!("invalid JWT auth configuration: {e}"));
     }
     let authenticator = auth::Authenticator::new(cfg.auth.clone());
     if cfg.auth.enabled {
-        println!(
-            "queen-seg-rust: JWT auth ENABLED (algorithm={}, skip_paths={:?})",
-            cfg.auth.algorithm, cfg.auth.skip_paths
+        tracing::info!(
+            target: "auth",
+            algorithm = %cfg.auth.algorithm,
+            skip_paths = ?cfg.auth.skip_paths,
+            "JWT auth ENABLED"
         );
         // RUSTFIX item 7: for RS256/EdDSA/auto with a JWKS URL, pre-fetch on boot
         // and refresh on the configured interval (jwt_validator.cpp:64-73,540-545).
@@ -102,27 +107,50 @@ async fn main() {
             // (localhost/in-cluster JWKS-over-http is a legitimate setup) but warn
             // loudly — matching the warn-on-security-downgrade posture elsewhere.
             if cfg.auth.jwks_url.to_ascii_lowercase().starts_with("http://") {
-                eprintln!(
-                    "WARNING: JWT_JWKS_URL is plaintext http:// ({}) — signing keys are fetched over cleartext and are MITM-forgeable; use https://",
-                    cfg.auth.jwks_url
+                tracing::warn!(
+                    target: "auth",
+                    jwks_url = %cfg.auth.jwks_url,
+                    "JWT_JWKS_URL is plaintext http:// — signing keys fetched over cleartext are MITM-forgeable; use https://"
                 );
             }
             match authenticator.fetch_jwks().await {
-                Ok(n) => println!("queen-seg-rust: JWKS pre-fetch OK ({n} keys)"),
-                Err(e) => eprintln!("queen-seg-rust: JWKS pre-fetch failed: {e} (will retry on demand)"),
+                Ok(n) => tracing::info!(target: "auth", keys = n, "JWKS pre-fetch OK"),
+                Err(e) => tracing::warn!(target: "auth", error = %e, "JWKS pre-fetch failed (will retry on demand)"),
             }
             let a = authenticator.clone();
             let interval = authenticator.jwks_refresh_interval();
             tokio::spawn(async move {
+                // A dead JWKS endpoint must not spam one WARN per refresh interval.
+                static JWKS_FAIL: obs::Sampler = obs::Sampler::new(60_000);
                 loop {
                     tokio::time::sleep(interval).await;
                     if let Err(e) = a.fetch_jwks().await {
-                        eprintln!("queen-seg-rust: JWKS refresh failed: {e}");
+                        if let Some(suppressed) = JWKS_FAIL.tick_now() {
+                            tracing::warn!(target: "auth", error = %e, suppressed, "JWKS refresh failed");
+                        }
                     }
                 }
             });
         }
     }
+
+    // LOGGING_PLAN.md Phase 3/4: one consolidated "config resolved" line instead
+    // of banners scattered across boot — the effective knobs an operator needs.
+    tracing::info!(
+        target: "boot",
+        version = VERSION,
+        port = cfg.port,
+        pool = cfg.pool_size,
+        fusion_shards = cfg.fusion_shards,
+        stmt_timeout_ms = cfg.stmt_timeout.as_millis() as u64,
+        retention_ms = cfg.retention_interval_ms,
+        stats_ms = cfg.stats_interval_ms,
+        dedup_cache_mb = cfg.dedup_cache_mb,
+        ack_registry = cfg.ack_registry_enabled,
+        hotlist = cfg.hotlist_enabled,
+        log_rates_ms = cfg.log_rates_ms,
+        "config resolved"
+    );
 
     // Background retention + eviction sweep (segments-targeted). Spawned before
     // the HTTP server so the RETENTION_INTERVAL cadence is live as soon as the
@@ -212,9 +240,11 @@ async fn main() {
         cfg.ack_fusion_enabled,
     );
     if cfg.ack_fusion_enabled {
-        println!(
-            "queen-seg-rust: QUEEN_ACK_FUSION on (shards={}, hold_ms={})",
-            cfg.ack_fusion_shards, cfg.ack_fusion_hold_ms
+        tracing::info!(
+            target: "boot",
+            shards = cfg.ack_fusion_shards,
+            hold_ms = cfg.ack_fusion_hold_ms,
+            "QUEEN_ACK_FUSION on"
         );
     }
 
@@ -231,9 +261,11 @@ async fn main() {
     );
     hotlist.attach_notifier(notifier.clone());
     if cfg.hotlist_enabled {
-        println!(
-            "queen-seg-rust: QUEEN_HOTLIST on (shards={}, window_batch={})",
-            cfg.hotlist_shards, cfg.hotlist_window_batch
+        tracing::info!(
+            target: "boot",
+            shards = cfg.hotlist_shards,
+            window_batch = cfg.hotlist_window_batch,
+            "QUEEN_HOTLIST on"
         );
     }
 
@@ -263,6 +295,23 @@ async fn main() {
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
+    });
+
+    // LOGGING_PLAN.md Phase 1: periodic `rates` + `sizes` aggregate blocks —
+    // throughput/latency/hit-rate/cache-sizes in the log (sampled ~1 line/10s),
+    // alongside Prometheus. Sourced from already-collected process state.
+    obs::spawn_reporter(obs::ReporterHandles {
+        metrics: state.metrics.clone(),
+        pool: state.pool.clone(),
+        ack_registry: state.ack_registry.clone(),
+        file_buffer: state.file_buffer.clone(),
+        hotlist: state.hotlist.clone(),
+        dedup: state.fusion.dedup_cache(),
+        dedup_cap_mb: cfg.dedup_cache_mb,
+        push_vegas: state.push_vegas.clone(),
+        pop_vegas: state.pop_vegas.clone(),
+        interval_ms: cfg.log_rates_ms,
+        top_n: cfg.log_top_n_queues,
     });
 
     // Hot-list background wheel tick (§6): promote due deferred/leased entries to
@@ -312,6 +361,7 @@ async fn main() {
         let hl = hotlist.clone();
         let pool_r = pool.clone();
         let interval_ms = cfg.hotlist_reseed_ms;
+        let dump_top_n = cfg.log_top_n_queues;
         tokio::spawn(async move {
             use std::sync::atomic::Ordering::Relaxed;
             let mut iv = tokio::time::interval(std::time::Duration::from_millis(2000));
@@ -335,19 +385,36 @@ async fn main() {
                     let reseeds = hl.reseeds.load(Relaxed);
                     let delta = reseeds.saturating_sub(last_reseeds);
                     let secs = ((now - last_report) as f64 / 1000.0).max(1.0);
-                    let sizes = hl.ring_sizes();
+                    let mut sizes = hl.ring_sizes();
                     let rings = sizes.len();
                     let ready: usize = sizes.iter().map(|x| x.2).sum();
                     let wheel: usize = sizes.iter().map(|x| x.3).sum();
-                    println!(
-                        "[hotlist] reseeds=+{delta} ({:.2}/s) rings={rings} ready={ready} \
-                         wheel={wheel} marks_local={} marks_remote={}",
-                        delta as f64 / secs,
-                        hl.marks_local.load(Relaxed),
-                        hl.marks_remote.load(Relaxed),
+                    tracing::info!(
+                        target: "hotlist",
+                        reseeds_delta = delta,
+                        per_s = format!("{:.2}", delta as f64 / secs),
+                        rings,
+                        ready,
+                        wheel,
+                        marks_local = hl.marks_local.load(Relaxed),
+                        marks_remote = hl.marks_remote.load(Relaxed),
+                        "reseed floor"
                     );
-                    for (q, g, r, w) in sizes.iter().take(24) {
-                        println!("[hotlist]   {q}/{g} ready={r} wheel={w}");
+                    // Rank by (ready+wheel) desc and show only the busiest non-empty
+                    // rings — the old `.take(24)` over a HashMap surfaced an arbitrary,
+                    // unstable subset (the "a caso" the operator complained about).
+                    sizes.sort_by(|a, b| (b.2 + b.3).cmp(&(a.2 + a.3)));
+                    let nonempty = sizes.iter().filter(|x| x.2 + x.3 > 0).count();
+                    for (q, g, r, w) in sizes.iter().filter(|x| x.2 + x.3 > 0).take(dump_top_n) {
+                        tracing::info!(
+                            target: "hotlist",
+                            queue = %q,
+                            group = %g,
+                            ready = *r,
+                            wheel = *w,
+                            shown = format!("{}/{}", dump_top_n.min(nonempty), nonempty),
+                            "ring"
+                        );
                     }
                     last_reseeds = reseeds;
                     last_report = now;
@@ -448,13 +515,15 @@ async fn main() {
                     });
                 }
             }
-            Err(e) => eprintln!(
-                "WARN: TCP mesh bind failed on :{} ({e}) — continuing with local waker only",
-                cfg.sync.mesh_port
+            Err(e) => tracing::warn!(
+                target: "mesh",
+                port = cfg.sync.mesh_port,
+                error = %e,
+                "TCP mesh bind failed — continuing with local waker only"
             ),
         }
     } else if cfg.sync.enabled {
-        println!("queen-seg-rust: mesh sync enabled but no peers configured — local waker only");
+        tracing::info!(target: "mesh", "mesh sync enabled but no peers configured — local waker only");
     }
 
     let app = Router::new()
@@ -643,14 +712,37 @@ async fn main() {
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", cfg.port);
-    println!(
-        "queen-seg-rust v{} listening on {addr} (fusion shards={} frames={} hold={}ms, zstd={}, pool={})",
-        VERSION, cfg.fusion_shards, cfg.fusion_frames, cfg.fusion_hold_ms, cfg.zstd_level, cfg.pool_size
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => obs::fatal(format!("cannot bind {addr}: {e}")),
+    };
+    tracing::info!(
+        target: "boot",
+        version = VERSION,
+        addr = %addr,
+        fusion_shards = cfg.fusion_shards,
+        fusion_frames = cfg.fusion_frames,
+        hold_ms = cfg.fusion_hold_ms,
+        zstd = cfg.zstd_level,
+        pool = cfg.pool_size,
+        "listening"
     );
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     // TCP_NODELAY on every accepted connection (doc 18 §10): the broker's
     // responses are small latency-sensitive JSON frames; Nagle would add up to
     // one delayed-ACK RTT per response. axum 0.7.9's Serve builder exposes this
     // directly (serve.rs sets it right after accept), so no custom accept loop.
-    axum::serve(listener, app).tcp_nodelay(true).await.unwrap();
+    // Graceful shutdown (LOGGING_PLAN.md Phase 4): SIGTERM drains in-flight
+    // requests, then we report any undrained spool depth before exit.
+    if let Err(e) = axum::serve(listener, app)
+        .tcp_nodelay(true)
+        .with_graceful_shutdown(obs::shutdown_signal())
+        .await
+    {
+        tracing::error!(target: "boot", error = %e, "serve loop ended with error");
+    }
+    let pending = file_buffer.pending_count();
+    if pending > 0 {
+        tracing::warn!(target: "shutdown", pending, "spool has undrained events at shutdown");
+    }
+    tracing::info!(target: "shutdown", "shutdown complete");
 }

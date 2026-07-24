@@ -30,9 +30,11 @@ pub fn spawn(pool: Pool, metrics: Arc<Metrics>, cfg: &Config) {
     let interval = Duration::from_millis(cfg.metrics_flush_ms);
     let hostname = cfg.sync.server_id.clone();
     let port: i32 = cfg.port.parse().unwrap_or(6632);
-    println!(
-        "syscollect: metrics collector started (flush={}ms, replica={})",
-        cfg.metrics_flush_ms, hostname
+    tracing::info!(
+        target: "metrics",
+        flush_ms = cfg.metrics_flush_ms,
+        replica = %hostname,
+        "collector started"
     );
     tokio::spawn(async move { run_loop(pool, metrics, interval, hostname, port).await });
 }
@@ -61,7 +63,10 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         let client = match pool.get().await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("syscollect: pool error: {e}");
+                static POOL_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+                if let Some(suppressed) = POOL_ERR.tick_now() {
+                    tracing::warn!(target: "metrics", error = %e, suppressed, "pool error");
+                }
                 continue;
             }
         };
@@ -123,7 +128,10 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         )
         .await
         {
-            eprintln!("syscollect: worker_metrics insert error: {e}");
+            static WORKER_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+            if let Some(suppressed) = WORKER_ERR.tick_now() {
+                tracing::warn!(target: "metrics", error = %e, suppressed, "worker_metrics insert error");
+            }
         }
 
         // --- system gauges ------------------------------------------------
@@ -150,7 +158,10 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         )
         .await
         {
-            eprintln!("syscollect: system_metrics insert error: {e}");
+            static SYSTEM_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+            if let Some(suppressed) = SYSTEM_ERR.tick_now() {
+                tracing::warn!(target: "metrics", error = %e, suppressed, "system_metrics insert error");
+            }
         }
 
         // --- per-queue throughput -> queue_lag_metrics --------------------
@@ -204,13 +215,19 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             )
             .await
             {
-                eprintln!("syscollect: queue_lag_metrics upsert error ({queue}): {e}");
+                static LAG_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+                if let Some(suppressed) = LAG_ERR.tick_now() {
+                    tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_lag_metrics upsert error");
+                }
             }
             if parked_avg > 0 {
                 if let Err(e) =
                     db::upsert_queue_parked_replica(&client, queue, &hostname, 0, parked_avg).await
                 {
-                    eprintln!("syscollect: queue_parked_replica upsert error ({queue}): {e}");
+                    static PARKED_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+                    if let Some(suppressed) = PARKED_ERR.tick_now() {
+                        tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_parked_replica upsert error");
+                    }
                 }
             }
         }
@@ -225,12 +242,18 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             )
             .await
             {
-                eprintln!("syscollect: queue_lag_metrics upsert error ({queue}): {e}");
+                static LAG_ERR_PARKED: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+                if let Some(suppressed) = LAG_ERR_PARKED.tick_now() {
+                    tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_lag_metrics upsert error");
+                }
             }
             if let Err(e) =
                 db::upsert_queue_parked_replica(&client, &queue, &hostname, 0, parked_avg).await
             {
-                eprintln!("syscollect: queue_parked_replica upsert error ({queue}): {e}");
+                static PARKED_ERR_ONLY: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+                if let Some(suppressed) = PARKED_ERR_ONLY.tick_now() {
+                    tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_parked_replica upsert error");
+                }
             }
         }
         last_pq = now_pq;

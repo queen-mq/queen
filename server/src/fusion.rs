@@ -35,14 +35,18 @@ fn record_bundle(parts: usize) {
     let log_each =
         *LOG_EACH.get_or_init(|| std::env::var("QUEEN_V2_BUNDLE_LOG").ok().as_deref() == Some("1"));
     if log_each && parts >= 2 {
-        eprintln!("[bundle] committed {parts} partitions in 1 txn");
+        tracing::debug!(target: "fusion", parts, "bundle committed partitions in 1 txn");
     }
     // Periodic running summary so the coalescing ratio is visible without
     // per-bundle spam (commits vs segments — segments/commits is the fusion gain).
-    if commits % 500 == 0 {
-        eprintln!(
-            "[bundle] commits={commits} segments={segments} segments_per_commit={:.2}",
-            segments as f64 / commits as f64
+    static BUNDLE_SUMMARY: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+    if BUNDLE_SUMMARY.tick_now().is_some() {
+        tracing::info!(
+            target: "fusion",
+            commits,
+            segments,
+            segments_per_commit = segments as f64 / commits as f64,
+            "bundle summary"
         );
     }
 }
@@ -181,6 +185,10 @@ pub struct AddMsg {
 
 pub struct Fusion {
     senders: Vec<mpsc::UnboundedSender<AddMsg>>,
+    // A handle to the broker-global dedup cache (the authoritative copy lives in
+    // each shard's FlushCtx). Kept here so the `sizes` reporter (obs.rs) can read
+    // its resident/suppressed footprint without reaching into a shard.
+    dedup: Arc<DedupCache>,
 }
 
 // Per-partition metadata for the dedup path, TTL-cached per shard (partitions
@@ -258,6 +266,11 @@ struct FlushCtx {
 }
 
 impl Fusion {
+    /// Shared broker-global dedup cache, for the `sizes` aggregate reporter (obs.rs).
+    pub fn dedup_cache(&self) -> Arc<DedupCache> {
+        self.dedup.clone()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         shards: usize,
@@ -322,10 +335,11 @@ impl Fusion {
             ),
         };
         if floor.enabled() {
-            eprintln!(
-                "[fusion] fat-batch floor ON: MIN_FRAMES={} MIN_WAIT_MS={} (experiment flag)",
-                floor.min_frames,
-                floor.min_wait.as_millis()
+            tracing::info!(
+                target: "fusion",
+                min_frames = floor.min_frames,
+                min_wait_ms = floor.min_wait.as_millis() as u64,
+                "fat-batch floor ON (experiment flag)"
             );
         }
         // fusion_frames (QUEEN_V2_FUSION_FRAMES) is retained for API/env compat but
@@ -356,7 +370,7 @@ impl Fusion {
             });
             tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max, floor));
         }
-        Arc::new(Fusion { senders })
+        Arc::new(Fusion { senders, dedup })
     }
 
     pub fn submit(&self, msg: AddMsg) {
@@ -749,7 +763,7 @@ fn spawn_query_cancel(ctx: &Arc<FlushCtx>, token: tokio_postgres::CancelToken, w
             .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
     {
-        eprintln!("[bundle] {what} timed out — cancelling server-side query (best-effort)");
+        tracing::warn!(target: "fusion", what, "bundle timed out; cancelling server-side query (best-effort)");
     }
     let use_ssl = ctx.pg_use_ssl;
     let reject = ctx.pg_ssl_reject_unauthorized;
@@ -924,7 +938,17 @@ async fn resolve_dup_mids(
         None => match client.query(PART_PID_SQL, &[&queue, &partition]).await {
             Ok(rows) => rows.first().map(|r| r.get(0)),
             Err(e) => {
-                eprintln!("[bundle] dup pid lookup error {}/{}: {}", queue, partition, e);
+                static DUP_PID_ERR: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
+                if let Some(suppressed) = DUP_PID_ERR.tick_now() {
+                    tracing::warn!(
+                        target: "fusion",
+                        queue = %queue,
+                        partition = %partition,
+                        error = %e,
+                        suppressed,
+                        "bundle dup pid lookup error"
+                    );
+                }
                 None
             }
         },
@@ -954,7 +978,16 @@ async fn resolve_dup_mids(
                     }
                 }
                 Err(e) => {
-                    eprintln!("[bundle] log_segment_at error off={}: {}", off, e);
+                    static SEG_AT_ERR: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
+                    if let Some(suppressed) = SEG_AT_ERR.tick_now() {
+                        tracing::warn!(
+                            target: "fusion",
+                            off = *off,
+                            error = %e,
+                            suppressed,
+                            "bundle log_segment_at error"
+                        );
+                    }
                 }
             }
         }
@@ -1032,7 +1065,10 @@ fn spawn_bundle_flush(
             let client = match ctx.pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[bundle] pool.get error: {}", e);
+                    static POOL_GET_ERR: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = POOL_GET_ERR.tick_now() {
+                        tracing::error!(target: "fusion", error = %e, suppressed, "bundle pool.get error");
+                    }
                     for &gi in &participants {
                         gs[gi].db_ok = false;
                         gs[gi].pending.clear();
@@ -1070,7 +1106,15 @@ fn spawn_bundle_flush(
                 match vres {
                     Ok(v) => verified = v,
                     Err(_) => {
-                        eprintln!("[bundle] dedup hydration timeout parts={}", participants.len());
+                        static DEDUP_HYDR_TIMEOUT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        if let Some(suppressed) = DEDUP_HYDR_TIMEOUT.tick_now() {
+                            tracing::warn!(
+                                target: "fusion",
+                                parts = participants.len(),
+                                suppressed,
+                                "bundle dedup hydration timeout"
+                            );
+                        }
                         // The vres future (and its borrow of `client`) is dropped
                         // by the `let vres = ...;` above, so cancelling the wedged
                         // meta/hydration query on this connection is safe here.
@@ -1109,11 +1153,28 @@ fn spawn_bundle_flush(
             let outcome = match push_res {
                 Ok(Ok(txt)) => parse_multi_outcome(&txt, participants.len()),
                 Ok(Err(e)) => {
-                    eprintln!("[bundle] log_push_multi error parts={}: {}", participants.len(), e);
+                    static PUSH_MULTI_ERR: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = PUSH_MULTI_ERR.tick_now() {
+                        tracing::error!(
+                            target: "fusion",
+                            parts = participants.len(),
+                            error = %e,
+                            suppressed,
+                            "bundle log_push_multi error"
+                        );
+                    }
                     None
                 }
                 Err(_) => {
-                    eprintln!("[bundle] log_push_multi timeout parts={}", participants.len());
+                    static PUSH_MULTI_TIMEOUT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = PUSH_MULTI_TIMEOUT.tick_now() {
+                        tracing::error!(
+                            target: "fusion",
+                            parts = participants.len(),
+                            suppressed,
+                            "bundle log_push_multi timeout"
+                        );
+                    }
                     // Cancel the still-running INSERT/allocator query so it stops
                     // holding the log_partitions row lock (which would otherwise
                     // wedge this partition's next flush until stmt_timeout on PG).
@@ -1217,7 +1278,8 @@ fn spawn_bundle_flush(
         // alongside the periodic bundle summary. hydrations_total exploding while
         // suppressed_partitions stays 0 = healthy; a rising suppressed gauge =
         // cap pressure, size QUEEN_DEDUP_CACHE_MB per the warning line's formula.
-        if ctx.dedup_enabled && BUNDLES_FIRED.load(Ordering::Relaxed) % 500 == 0 {
+        static DEDUP_SUMMARY: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+        if ctx.dedup_enabled && DEDUP_SUMMARY.tick_now().is_some() {
             // resident bytes/hashes let an operator (and the storage-redesign
             // validation) read the achieved footprint per hash directly.
             let rbytes = ctx.dedup.resident_bytes();
@@ -1227,14 +1289,14 @@ fn spawn_bundle_flush(
             } else {
                 0.0
             };
-            eprintln!(
-                "[dedup] hydrations={} suppressed_partitions={} resident_bytes={} \
-                 resident_hashes={} bytes_per_hash={:.1}",
-                ctx.dedup.hydrations_total(),
-                ctx.dedup.suppressed_partitions(),
-                rbytes,
-                rhashes,
-                per_hash
+            tracing::debug!(
+                target: "dedup",
+                hydrations = ctx.dedup.hydrations_total(),
+                suppressed_partitions = ctx.dedup.suppressed_partitions(),
+                resident_bytes = rbytes,
+                resident_hashes = rhashes,
+                bytes_per_hash = per_hash,
+                "dedup summary"
             );
         }
 

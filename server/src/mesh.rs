@@ -201,12 +201,13 @@ impl MeshTransport {
         }
         let mon = self.clone();
         tokio::spawn(async move { mon.liveness_monitor().await });
-        println!(
-            "queen-seg-rust: TCP mesh started on :{} server_id={} peers={} secret={}",
-            self.mesh_port,
-            self.server_id,
-            self.peers.len(),
-            if self.secret.is_empty() { "off" } else { "hmac" }
+        tracing::info!(
+            target: "mesh",
+            server_id = %self.server_id,
+            port = self.mesh_port,
+            peers = self.peers.len(),
+            auth = if self.secret.is_empty() { "off" } else { "hmac" },
+            "started"
         );
     }
 
@@ -446,13 +447,15 @@ impl MeshTransport {
             for (id, is_dead) in snapshot {
                 if is_dead {
                     if dead.insert(id.clone()) {
-                        eprintln!(
-                            "queen-seg-rust: mesh peer {id} is DOWN (no traffic for >{}ms)",
-                            self.dead_threshold.as_millis()
+                        tracing::warn!(
+                            target: "mesh",
+                            peer = %id,
+                            threshold_ms = self.dead_threshold.as_millis() as u64,
+                            "peer down"
                         );
                     }
                 } else if dead.remove(&id) {
-                    eprintln!("queen-seg-rust: mesh peer {id} recovered");
+                    tracing::info!(target: "mesh", peer = %id, "peer recovered");
                 }
             }
         }

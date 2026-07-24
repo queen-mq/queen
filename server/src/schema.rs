@@ -72,7 +72,7 @@ const PROCEDURES: &[(&str, &str)] = &[
 /// is managed externally). Fails the process on any DDL error (fail-fast boot).
 pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var("QUEEN_APPLY_SCHEMA").ok().as_deref() == Some("0") {
-        println!("schema: apply skipped (QUEEN_APPLY_SCHEMA=0)");
+        tracing::info!(target: "schema", "apply skipped (QUEEN_APPLY_SCHEMA=0)");
         return Ok(());
     }
 
@@ -92,9 +92,10 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     result?;
-    println!(
-        "schema: applied schema.sql + {} procedures",
-        PROCEDURES.len()
+    tracing::info!(
+        target: "schema",
+        procedures = PROCEDURES.len(),
+        "applied schema.sql + procedures"
     );
     Ok(())
 }

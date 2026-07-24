@@ -358,10 +358,31 @@ impl AckRegistry {
             let st = self.state.lock().unwrap();
             (st.map.len(), st.total_bytes as f64 / (1024.0 * 1024.0))
         };
-        eprintln!(
-            "[ack-reg] hits={hits} misses={misses} hit_rate={rate:.1}% \
-             entries={entries} resident={mb:.1}MB"
+        let hit_rate = format!("{rate:.1}%");
+        let resident_mb = format!("{mb:.1}MB");
+        tracing::info!(
+            target: "ack-reg",
+            hits,
+            misses,
+            hit_rate = %hit_rate,
+            entries,
+            resident_mb = %resident_mb,
+            "hit rate"
         );
+    }
+
+    /// Live (entries, resident_bytes) for the `sizes` aggregate reporter (obs.rs).
+    pub fn footprint(&self) -> (usize, usize) {
+        let st = self.state.lock().unwrap();
+        (st.map.len(), st.total_bytes)
+    }
+
+    /// Cumulative (hits, misses) for the `rates` reporter's windowed hit-rate.
+    pub fn hit_stats(&self) -> (u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+        )
     }
 
     #[cfg(test)]

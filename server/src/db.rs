@@ -82,7 +82,7 @@ fn log_cancel_once(what: &'static str, msg: &str) {
     if fire {
         g.insert(what, now);
         drop(g);
-        eprintln!("{msg}");
+        tracing::warn!(target: "db", op = %what, detail = %msg, "statement-timeout cancel");
     }
 }
 

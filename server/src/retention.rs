@@ -82,9 +82,13 @@ pub fn spawn(pool: Pool, cfg: &Config) {
         metrics_retention_days: cfg.metrics_retention_days,
         batch_size: cfg.retention_batch_size,
     };
-    println!(
-        "retention: service started (interval={}ms, advisory_lock={}, batch_size={}, metrics_retention_days={})",
-        cfg.retention_interval_ms, CLEANUP_LOCK_ID, knobs.batch_size, knobs.metrics_retention_days
+    tracing::info!(
+        target: "retention",
+        interval_ms = cfg.retention_interval_ms,
+        advisory_lock = CLEANUP_LOCK_ID,
+        batch_size = knobs.batch_size,
+        metrics_retention_days = knobs.metrics_retention_days,
+        "service started"
     );
     tokio::spawn(async move { run_loop(pool, interval, knobs).await });
 }
@@ -112,15 +116,40 @@ async fn run_loop(pool: Pool, interval: Duration, knobs: Knobs) {
             Ok(Outcome::Skipped) => {
                 // Another replica holds the cleanup lock this cycle — nothing to do.
             }
-            Ok(Outcome::Ran { sweep, max_wait, metrics }) => {
-                println!(
-                    "retention: cycle sweep={} max_wait_segments_deleted={} metrics_purge={}",
-                    sweep,
-                    max_wait,
-                    metrics.trim()
-                );
+            Ok(Outcome::Ran {
+                queues,
+                segments_deleted,
+                txns_purged,
+                max_wait,
+                metrics,
+            }) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                // LOGGING_PLAN.md Phase 2: only speak when the cycle actually
+                // deleted something — an idle cluster used to emit this at INFO
+                // every RETENTION_INTERVAL (5s) with all-zero counters. The metrics
+                // purge (90-day window) rarely fires, so it stays out of the gate;
+                // a working cycle names the counts + elapsed, an idle one is DEBUG.
+                if segments_deleted > 0 || txns_purged > 0 || max_wait > 0 {
+                    tracing::info!(
+                        target: "retention",
+                        queues,
+                        segments_deleted,
+                        txns_purged,
+                        max_wait_evicted = max_wait,
+                        metrics_purge = %metrics.trim(),
+                        elapsed_ms,
+                        "swept"
+                    );
+                } else {
+                    tracing::debug!(target: "retention", queues, elapsed_ms, "idle cycle");
+                }
             }
-            Err(e) => eprintln!("retention: cycle error: {e}"),
+            Err(e) => {
+                // A sustained DB outage must not emit one ERROR every 5s.
+                if let Some(suppressed) = CYCLE_ERR.tick_now() {
+                    tracing::error!(target: "retention", error = %e, suppressed, "cycle error");
+                }
+            }
         }
         // Fixed cadence measured from cycle start (matches the C++ services:
         // sleep = interval - elapsed, clamped at 0).
@@ -132,14 +161,21 @@ async fn run_loop(pool: Pool, interval: Duration, knobs: Knobs) {
 enum Outcome {
     /// Advisory lock was held by another replica; cycle skipped.
     Skipped,
-    /// Cycle ran; carries a sweep-equivalent summary JSON + max_wait delete
-    /// count + a short metrics-purge summary.
+    /// Cycle ran; carries the numeric work counts (so the loop can suppress
+    /// idle no-op cycles) + a short metrics-purge summary.
     Ran {
-        sweep: String,
+        queues: usize,
+        segments_deleted: i64,
+        txns_purged: i64,
         max_wait: i64,
         metrics: String,
     },
 }
+
+/// Rate-limit the cycle-error ERROR so a sustained DB outage doesn't emit one
+/// line per RETENTION_INTERVAL (LOGGING_PLAN.md WARN/ERROR doctrine).
+static CYCLE_ERR: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
+static PURGE_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
 
 /// One maintenance cycle on a dedicated connection: try the SESSION advisory
 /// lock, run the phases (each an autocommitting SP call — no wrapping
@@ -165,11 +201,17 @@ async fn run_cycle(pool: &Pool, knobs: Knobs) -> Result<Outcome, Box<dyn std::er
         Ok(row) => {
             let released: bool = row.get(0);
             if !released {
-                eprintln!("retention: pg_advisory_unlock({CLEANUP_LOCK_ID}) reported not-held");
+                tracing::warn!(
+                    target: "retention",
+                    advisory_lock = CLEANUP_LOCK_ID,
+                    "pg_advisory_unlock reported not-held (lock-protocol invariant broken)"
+                );
             }
         }
-        Err(e) => eprintln!(
-            "retention: advisory unlock failed ({e}); lock releases with the session if the connection is recycled"
+        Err(e) => tracing::warn!(
+            target: "retention",
+            error = %e,
+            "advisory unlock failed; lock releases with the session if the connection is recycled"
         ),
     }
     res
@@ -283,19 +325,20 @@ async fn cycle_body(
     let metrics = match purge_metrics(client, knobs).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("retention: metrics purge error: {e}");
+            if let Some(suppressed) = PURGE_ERR.tick_now() {
+                tracing::error!(target: "retention", error = %e, suppressed, "metrics purge error");
+            }
             "error".to_string()
         }
     };
 
-    // Sweep-equivalent summary (the old seg_retention_sweep_v1 return shape).
-    let sweep = format!(
-        "{{\"queues\":{},\"segments_deleted\":{},\"txns_purged\":{}}}",
-        retention_queues.len(),
+    Ok(Outcome::Ran {
+        queues: retention_queues.len(),
         segments_deleted,
-        txns_purged
-    );
-    Ok(Outcome::Ran { sweep, max_wait, metrics })
+        txns_purged,
+        max_wait,
+        metrics,
+    })
 }
 
 /// One partition's row in the cycle work list. Cutoffs are prerendered

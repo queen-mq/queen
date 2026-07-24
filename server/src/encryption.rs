@@ -33,9 +33,10 @@ impl Encryption {
             return Arc::new(Encryption { key: None });
         }
         if hex.len() != 64 {
-            eprintln!(
-                "encryption: QUEEN_ENCRYPTION_KEY must be 64 hex chars (got {}); encryption DISABLED",
-                hex.len()
+            tracing::warn!(
+                target: "encryption",
+                len = hex.len(),
+                "QUEEN_ENCRYPTION_KEY must be 64 hex chars; encryption DISABLED"
             );
             return Arc::new(Encryption { key: None });
         }
@@ -44,12 +45,15 @@ impl Encryption {
             match u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
                 Ok(b) => key[i] = b,
                 Err(_) => {
-                    eprintln!("encryption: QUEEN_ENCRYPTION_KEY is not valid hex; encryption DISABLED");
+                    tracing::warn!(
+                        target: "encryption",
+                        "QUEEN_ENCRYPTION_KEY is not valid hex; encryption DISABLED"
+                    );
                     return Arc::new(Encryption { key: None });
                 }
             }
         }
-        println!("encryption: service initialized (AES-256-GCM)");
+        tracing::info!(target: "encryption", "encryption service initialized (AES-256-GCM)");
         Arc::new(Encryption { key: Some(key) })
     }
 

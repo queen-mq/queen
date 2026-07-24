@@ -66,10 +66,17 @@ static ACK_ROWS: AtomicU64 = AtomicU64::new(0);
 fn record_flush(rows: usize) {
     let commits = ACK_COMMITS.fetch_add(1, Ordering::Relaxed) + 1;
     let total_rows = ACK_ROWS.fetch_add(rows as u64, Ordering::Relaxed) + rows as u64;
-    if commits % 500 == 0 {
-        eprintln!(
-            "[ack-fusion] commits={commits} rows={total_rows} rows_per_commit={:.2}",
-            total_rows as f64 / commits as f64
+    // LOGGING_PLAN.md Phase 2: was `commits % 500 == 0`, which gets NOISIER as
+    // throughput rises (>500 commits/s ⇒ multiple lines/s on the hot path). A
+    // time-window sampler caps it at ~1 line / 10s regardless of load.
+    static SUMMARY: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+    if SUMMARY.tick_now().is_some() {
+        tracing::info!(
+            target: "ack-fusion",
+            commits,
+            rows = total_rows,
+            rows_per_commit = format!("{:.2}", total_rows as f64 / commits as f64),
+            "coalesce summary"
         );
     }
 }
@@ -338,17 +345,26 @@ fn spawn_flush(ctx: Arc<FlushCtx>, rows: Vec<Folded>, done: mpsc::UnboundedSende
                 {
                     Ok(Ok(txt)) => parse_multi(&txt, n),
                     Ok(Err(e)) => {
-                        eprintln!("[ack-fusion] log_ack_multi error rows={n}: {e}");
+                        static ACK_MULTI_ERR: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        if let Some(suppressed) = ACK_MULTI_ERR.tick_now() {
+                            tracing::error!(target: "ack-fusion", rows = n, error = %e, suppressed, "log_ack_multi error");
+                        }
                         None
                     }
                     Err(_) => {
-                        eprintln!("[ack-fusion] log_ack_multi timeout rows={n}");
+                        static ACK_MULTI_TIMEOUT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        if let Some(suppressed) = ACK_MULTI_TIMEOUT.tick_now() {
+                            tracing::error!(target: "ack-fusion", rows = n, suppressed, "log_ack_multi timeout");
+                        }
                         None
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[ack-fusion] pool.get error rows={n}: {e}");
+                static POOL_GET_ERR: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                if let Some(suppressed) = POOL_GET_ERR.tick_now() {
+                    tracing::error!(target: "ack-fusion", rows = n, error = %e, suppressed, "pool.get error");
+                }
                 None
             }
         };

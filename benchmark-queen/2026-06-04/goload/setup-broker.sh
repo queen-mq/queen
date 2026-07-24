@@ -14,9 +14,11 @@ COMMIT_DELAY="${COMMIT_DELAY:-500}"; COMMIT_SIBLINGS="${COMMIT_SIBLINGS:-8}"
 
 log(){ echo "[$(date -u +%FT%TZ)] $*"; }
 
-log "recreate Postgres (max_connections=600, shared_buffers=${SHBUF:-16GB})"
+PGCPU_OPT=""
+[ -n "${PGCPUS:-}" ] && PGCPU_OPT="--cpus=${PGCPUS}"
+log "recreate Postgres (max_connections=600, shared_buffers=${SHBUF:-16GB} cpus=${PGCPUS:-all})"
 docker rm -fv "$PG" >/dev/null 2>&1 || true
-docker run -d --name "$PG" --network "$NET" --ulimit nofile=65535:65535 --shm-size=2g \
+docker run -d --name "$PG" --network "$NET" --ulimit nofile=65535:65535 --shm-size=2g $PGCPU_OPT \
   -e POSTGRES_PASSWORD=postgres postgres:18 \
   -c max_connections=600 -c shared_buffers="${SHBUF:-16GB}" -c effective_cache_size=48GB \
   -c maintenance_work_mem="${MAINTMEM:-512MB}" -c work_mem="${WORKMEM:-12MB}" -c temp_buffers=64MB \

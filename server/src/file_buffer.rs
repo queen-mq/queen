@@ -164,17 +164,19 @@ impl FileBufferManager {
             // silently disabling durability; production should still set
             // FILE_BUFFER_DIR explicitly.
             let fallback = std::env::temp_dir().join("queen-buffers");
-            eprintln!(
-                "file_buffer: could not create spool dir {}: {} — falling back to {}",
-                dir.display(),
-                e,
-                fallback.display()
+            tracing::warn!(
+                target: "spool",
+                dir = %dir.display(),
+                error = %e,
+                fallback = %fallback.display(),
+                "could not create spool dir; falling back"
             );
             if let Err(e2) = std::fs::create_dir_all(&fallback) {
-                eprintln!(
-                    "file_buffer: fallback spool dir {} also failed: {} (buffering WILL fail)",
-                    fallback.display(),
-                    e2
+                tracing::error!(
+                    target: "spool",
+                    fallback = %fallback.display(),
+                    error = %e2,
+                    "fallback spool dir also failed; buffering WILL fail"
                 );
             } else {
                 dir = fallback;
@@ -185,10 +187,11 @@ impl FileBufferManager {
         // the startup .tmp scan all filter by .buf/.tmp extension, non-recursively).
         let failed_dir = dir.join("failed");
         if let Err(e) = std::fs::create_dir_all(&failed_dir) {
-            eprintln!(
-                "file_buffer: could not create quarantine dir {}: {} (poison files can't be quarantined)",
-                failed_dir.display(),
-                e
+            tracing::warn!(
+                target: "spool",
+                quarantine_dir = %failed_dir.display(),
+                error = %e,
+                "could not create quarantine dir; poison files can't be quarantined"
             );
         }
         FileBufferManager {
@@ -237,16 +240,18 @@ impl FileBufferManager {
             None => return,
         };
         match std::fs::rename(path, &dest) {
-            Ok(_) => eprintln!(
-                "file_buffer: quarantined poison spool file {} -> {}",
-                path.display(),
-                dest.display()
+            Ok(_) => tracing::warn!(
+                target: "spool",
+                spool_file = %path.display(),
+                dest = %dest.display(),
+                "quarantined poison spool file"
             ),
             Err(e) => {
-                eprintln!(
-                    "file_buffer: could not quarantine {} ({}); deleting it to unblock the FIFO",
-                    path.display(),
-                    e
+                tracing::warn!(
+                    target: "spool",
+                    spool_file = %path.display(),
+                    error = %e,
+                    "could not quarantine poison file; deleting it to unblock the FIFO"
                 );
                 let _ = std::fs::remove_file(path);
             }
@@ -329,7 +334,16 @@ impl FileBufferManager {
                     })
                 }
                 Err(e) => {
-                    eprintln!("file_buffer: open {} failed: {}", path.display(), e);
+                    static OPEN_FAIL: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = OPEN_FAIL.tick_now() {
+                        tracing::error!(
+                            target: "spool",
+                            spool_file = %path.display(),
+                            error = %e,
+                            suppressed,
+                            "open spool file failed"
+                        );
+                    }
                     self.failed.fetch_add(1, Ordering::Relaxed);
                     return false;
                 }
@@ -429,11 +443,15 @@ impl FileBufferManager {
         if files.is_empty() {
             return;
         }
-        println!("file_buffer: startup recovery draining {} spool file(s)", files.len());
+        tracing::info!(target: "spool", count = files.len(), "startup recovery draining spool files");
         let start = Instant::now();
         for f in files {
             if start.elapsed() >= MAX_STARTUP_RECOVERY {
-                eprintln!("file_buffer: startup recovery hit {}s cap; leaving remaining spool for the drain loop", MAX_STARTUP_RECOVERY.as_secs());
+                tracing::warn!(
+                    target: "spool",
+                    cap_secs = MAX_STARTUP_RECOVERY.as_secs(),
+                    "startup recovery hit cap; leaving remaining spool for the drain loop"
+                );
                 break;
             }
             match self.drain_file(pool, &f).await {
@@ -442,7 +460,12 @@ impl FileBufferManager {
                     self.pending.fetch_sub(n.min(self.pending.load(Ordering::Relaxed)), Ordering::Relaxed);
                 }
                 Err(e) => {
-                    eprintln!("file_buffer: startup recovery of {} failed: {} (will retry in drain loop)", f.display(), e);
+                    tracing::warn!(
+                        target: "spool",
+                        spool_file = %f.display(),
+                        error = %e,
+                        "startup recovery of file failed; will retry in drain loop"
+                    );
                     self.db_healthy.store(false, Ordering::Relaxed);
                     break;
                 }
@@ -489,7 +512,16 @@ impl FileBufferManager {
                 Err(DrainErr::Transient(e)) => {
                     // DB (probably) down: leave the file, trip the circuit breaker,
                     // retry next cycle. Never quarantines — good spool survives an outage.
-                    eprintln!("file_buffer: drain {} failed (transient): {}", f.display(), e);
+                    static DRAIN_TRANSIENT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = DRAIN_TRANSIENT.tick_now() {
+                        tracing::warn!(
+                            target: "spool",
+                            spool_file = %f.display(),
+                            error = %e,
+                            suppressed,
+                            "drain failed (transient)"
+                        );
+                    }
                     self.db_healthy.store(false, Ordering::Relaxed);
                     let fails = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
                     if fails >= MAX_CONSECUTIVE_FAILURES {
@@ -504,13 +536,18 @@ impl FileBufferManager {
                     // transient breaker is untouched); quarantine after
                     // MAX_FILE_ATTEMPTS so a poison file stops blocking newer ones.
                     let attempts = self.note_poison(&f);
-                    eprintln!(
-                        "file_buffer: drain {} failed (permanent, attempt {}/{}): {}",
-                        f.display(),
-                        attempts,
-                        MAX_FILE_ATTEMPTS,
-                        e
-                    );
+                    static DRAIN_PERMANENT: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = DRAIN_PERMANENT.tick_now() {
+                        tracing::error!(
+                            target: "spool",
+                            spool_file = %f.display(),
+                            attempt = attempts,
+                            max_attempts = MAX_FILE_ATTEMPTS,
+                            error = %e,
+                            suppressed,
+                            "drain failed (permanent)"
+                        );
+                    }
                     if attempts >= MAX_FILE_ATTEMPTS {
                         self.quarantine(&f);
                         self.clear_poison();
@@ -646,7 +683,12 @@ fn finalize_path(tmp: &Path) {
     }
     let buf = tmp.with_extension("buf");
     if let Err(e) = std::fs::rename(tmp, &buf) {
-        eprintln!("file_buffer: finalize {} failed: {}", tmp.display(), e);
+        tracing::error!(
+            target: "spool",
+            spool_file = %tmp.display(),
+            error = %e,
+            "finalize rename failed"
+        );
     }
 }
 
@@ -676,10 +718,11 @@ fn read_events(path: &Path) -> std::io::Result<Vec<StoredEvent>> {
 /// `flush_interval_ms` it runs one drain cycle (skipped while paused / in cooldown).
 pub fn spawn_drain(manager: std::sync::Arc<FileBufferManager>, pool: Pool) {
     let interval = Duration::from_millis(manager.cfg.flush_interval_ms);
-    println!(
-        "file_buffer: drain loop started (dir={}, flush={}ms)",
-        manager.dir.display(),
-        manager.cfg.flush_interval_ms
+    tracing::info!(
+        target: "spool",
+        dir = %manager.dir.display(),
+        flush_ms = manager.cfg.flush_interval_ms,
+        "drain loop started"
     );
     tokio::spawn(async move {
         loop {

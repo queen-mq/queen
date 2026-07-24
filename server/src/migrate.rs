@@ -20,10 +20,10 @@ pub const MIGRATION_UNSUPPORTED: &str = "migration is not supported on the log e
 /// Entry point for `queen-seg migrate ...` (main.rs subcommand dispatch).
 /// Reports the retirement and exits non-zero. Never opens a DB connection.
 pub async fn run(_cfg: Config, _args: Vec<String>) {
-    eprintln!("migrate: {MIGRATION_UNSUPPORTED}");
-    eprintln!(
-        "migrate: the seg-era rows->segments migration was retired with the seg engine \
-         (developer/18-log-engine.md); the log engine is greenfield and boots its own schema"
+    tracing::error!(target: "migrate", reason = %MIGRATION_UNSUPPORTED, "migrate subcommand unsupported on log engine");
+    tracing::error!(
+        target: "migrate",
+        "seg-era rows->segments migration was retired with the seg engine (developer/18-log-engine.md); the log engine is greenfield and boots its own schema"
     );
     std::process::exit(1);
 }

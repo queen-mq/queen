@@ -316,6 +316,10 @@ pub struct Config {
     // Reseed / cold-start interval (ms) — §8 correctness floor for missed marks /
     // dropped mesh hints. Default 30s; lower for tests / tighter cross-broker floor.
     pub hotlist_reseed_ms: i64,
+    // LOGGING_PLAN.md Phase 1: cadence of the periodic `rates`/`sizes` aggregate
+    // log blocks (ms), and how many hot queues the per-queue lines rank & show.
+    pub log_rates_ms: u64,
+    pub log_top_n_queues: usize,
 }
 
 /// File-buffer configuration, mirroring the C++ `FileBufferConfig`
@@ -458,5 +462,7 @@ pub fn load() -> Config {
             .max(1) as usize,
         hotlist_window_batch: env_int("QUEEN_HOTLIST_WINDOW_BATCH", 100).max(1) as u32,
         hotlist_reseed_ms: env_int("QUEEN_HOTLIST_RESEED_MS", 30000).max(1),
+        log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
+        log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
     }
 }

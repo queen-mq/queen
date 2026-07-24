@@ -29,6 +29,10 @@ use crate::db;
 /// retention lock (737_001) so stats and retention never block each other.
 const STATS_LOCK_ID: i64 = 737_002;
 
+/// Rate-limit the cycle-error ERROR (LOGGING_PLAN.md doctrine): a persistently
+/// failing DB must not emit one line per STATS_INTERVAL_MS.
+static CYCLE_ERR: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
+
 // NOTE (RUSTFIX item 20): the metrics purge used to live here on a hardcoded
 // 7-day window. It moved to retention.rs (C++ parity — the RetentionService owned
 // it, at 90 days) so it also purges queen.system_metrics and honors
@@ -39,9 +43,11 @@ const STATS_LOCK_ID: i64 = 737_002;
 /// Call once at boot, before `axum::serve`.
 pub fn spawn(pool: Pool, cfg: &Config) {
     let interval = Duration::from_millis(cfg.stats_interval_ms);
-    println!(
-        "stats: reconciler started (interval={}ms, advisory_lock={})",
-        cfg.stats_interval_ms, STATS_LOCK_ID
+    tracing::info!(
+        target: "stats",
+        interval_ms = cfg.stats_interval_ms,
+        advisory_lock = STATS_LOCK_ID,
+        "reconciler started"
     );
     tokio::spawn(async move { run_loop(pool, interval).await });
 }
@@ -52,10 +58,22 @@ async fn run_loop(pool: Pool, interval: Duration) {
         match run_cycle(&pool).await {
             Ok(Outcome::Skipped) => {}
             Ok(Outcome::Ran { summary }) => {
-                // Compact: the SP already reports queuesUpdated/segPartitions.
-                eprintln!("stats: refresh {}", summary.trim());
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let s = summary.trim();
+                // LOGGING_PLAN.md: add elapsed_ms (the refresh is O(partitions) —
+                // the CPU signal the old line dropped) and demote idle reconciles
+                // (nothing updated) to DEBUG so a quiet leader stops emitting INFO.
+                if s.contains("\"queuesUpdated\": 0,") || s.contains("\"queuesUpdated\":0,") {
+                    tracing::debug!(target: "stats", elapsed_ms, summary = %s, "refresh (idle)");
+                } else {
+                    tracing::info!(target: "stats", elapsed_ms, summary = %s, "refresh");
+                }
             }
-            Err(e) => eprintln!("stats: cycle error: {e}"),
+            Err(e) => {
+                if let Some(suppressed) = CYCLE_ERR.tick_now() {
+                    tracing::error!(target: "stats", error = %e, suppressed, "cycle error");
+                }
+            }
         }
         let sleep = interval.checked_sub(start.elapsed()).unwrap_or(Duration::ZERO);
         tokio::time::sleep(sleep).await;

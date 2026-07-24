@@ -245,9 +245,12 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                         f.payload = env;
                         f.encrypted = true;
                     }
-                    None => eprintln!(
-                        "STREAMS: encryption failed for queue '{queue}', storing plaintext"
-                    ),
+                    None => {
+                        static ENC_FAIL_STREAMS: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                        if let Some(suppressed) = ENC_FAIL_STREAMS.tick_now() {
+                            tracing::warn!(target: "streams", queue = %queue, suppressed, "encryption failed; stored plaintext");
+                        }
+                    }
                 }
             }
         }
