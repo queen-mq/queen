@@ -1,0 +1,65 @@
+goload -mode tenants -> http://10.114.0.4:6682 tenants=1000 queues=10000 consumers=10000 idleOnly=false
+  traffic: per-tenant 10 msg/s <-> 2 msg/s every 120s (stagger=true) | aggregate 10000 <-> 2000 msg/s
+[provision] 10000 queues configured in 0.9s
+[08:41:21] push=   5338/s pop=   5230/s ack=   5221/s empty=      0/s | e2e p50= 187.39 p99= 1220.61 ms | lag=1081 | errs push=0 pop=0 ack=0 gor=41190
+[08:41:31] push=   5843/s pop=   5765/s ack=   5762/s empty=      0/s | e2e p50= 309.25 p99=  577.54 ms | lag=1862 | errs push=0 pop=0 ack=0 gor=41190
+[08:41:41] push=   5897/s pop=   5914/s ack=   5914/s empty=      3/s | e2e p50= 321.54 p99=  585.73 ms | lag=1698 | errs push=0 pop=0 ack=0 gor=41190
+[08:41:51] push=   5967/s pop=   5939/s ack=   5937/s empty=      3/s | e2e p50= 370.69 p99=  782.34 ms | lag=1981 | errs push=0 pop=0 ack=0 gor=36314
+[08:42:01] push=   5960/s pop=   5986/s ack=   5984/s empty=      5/s | e2e p50= 325.63 p99=  593.92 ms | lag=1727 | errs push=0 pop=0 ack=0 gor=36314
+[08:42:11] push=   5965/s pop=   5940/s ack=   5939/s empty=      3/s | e2e p50= 342.02 p99=  643.07 ms | lag=1981 | errs push=0 pop=0 ack=0 gor=36314
+[08:42:21] push=   5950/s pop=   5960/s ack=   5964/s empty=      3/s | e2e p50= 370.69 p99=  724.99 ms | lag=1883 | errs push=0 pop=0 ack=0 gor=36314
+[08:42:31] push=   5937/s pop=   5930/s ack=   5929/s empty=      5/s | e2e p50= 358.40 p99=  643.07 ms | lag=1953 | errs push=0 pop=0 ack=0 gor=36314
+[08:42:41] push=   6005/s pop=   5984/s ack=   5984/s empty=      3/s | e2e p50= 346.11 p99=  626.69 ms | lag=2161 | errs push=0 pop=0 ack=0 gor=36314
+[08:42:51] push=   6064/s pop=   6070/s ack=   6069/s empty=      5/s | e2e p50= 399.36 p99=  806.91 ms | lag=2098 | errs push=0 pop=0 ack=0 gor=32782
+[08:43:01] push=   6234/s pop=   6248/s ack=   6247/s empty=      4/s | e2e p50= 362.50 p99=  684.03 ms | lag=1960 | errs push=0 pop=0 ack=0 gor=32782
+[08:43:11] push=   6216/s pop=   6241/s ack=   6244/s empty=      4/s | e2e p50= 358.40 p99=  774.14 ms | lag=1712 | errs push=0 pop=0 ack=0 gor=32782
+[08:43:21] push=   6201/s pop=   6177/s ack=   6169/s empty=      4/s | e2e p50= 366.59 p99=  749.57 ms | lag=1948 | errs push=0 pop=0 ack=0 gor=32800
+[08:43:31] push=   6182/s pop=   6211/s ack=   6220/s empty=      4/s | e2e p50= 337.92 p99=  626.69 ms | lag=1664 | errs push=0 pop=0 ack=0 gor=32826
+[08:43:41] push=   6100/s pop=   6103/s ack=   6101/s empty=      4/s | e2e p50= 317.44 p99=  577.54 ms | lag=1634 | errs push=0 pop=0 ack=0 gor=32826
+[08:43:51] push=   6019/s pop=   6001/s ack=   5996/s empty=      4/s | e2e p50= 350.21 p99=  626.69 ms | lag=1813 | errs push=0 pop=0 ack=0 gor=32826
+[08:44:01] push=   6046/s pop=   6019/s ack=   6024/s empty=      3/s | e2e p50= 358.40 p99=  651.26 ms | lag=2079 | errs push=0 pop=0 ack=0 gor=32826
+[08:44:11] push=   6054/s pop=   6098/s ack=   6098/s empty=      3/s | e2e p50= 370.69 p99=  741.38 ms | lag=1639 | errs push=0 pop=0 ack=0 gor=32826
+[08:44:21] push=   6032/s pop=   5984/s ack=   5984/s empty=      4/s | e2e p50= 374.78 p99=  724.99 ms | lag=2119 | errs push=0 pop=0 ack=0 gor=32826
+[08:44:31] push=   6070/s pop=   6069/s ack=   6067/s empty=      3/s | e2e p50= 391.17 p99=  724.99 ms | lag=2126 | errs push=0 pop=0 ack=0 gor=32826
+[08:44:41] push=   5996/s pop=   6024/s ack=   6029/s empty=      4/s | e2e p50= 378.88 p99=  774.14 ms | lag=1841 | errs push=0 pop=0 ack=0 gor=32826
+[08:44:51] push=   5928/s pop=   5900/s ack=   5900/s empty=      2/s | e2e p50= 370.69 p99=  700.42 ms | lag=2117 | errs push=0 pop=0 ack=0 gor=32826
+[08:45:01] push=   5768/s pop=   5796/s ack=   5794/s empty=      4/s | e2e p50= 366.59 p99=  684.03 ms | lag=1842 | errs push=0 pop=0 ack=0 gor=32726
+[08:45:11] push=   5787/s pop=   5788/s ack=   5783/s empty=      4/s | e2e p50= 378.88 p99=  749.57 ms | lag=1828 | errs push=0 pop=0 ack=0 gor=32726
+[08:45:21] push=   5790/s pop=   5812/s ack=   5815/s empty=      4/s | e2e p50= 366.59 p99=  667.65 ms | lag=1614 | errs push=0 pop=0 ack=0 gor=32726
+[08:45:31] push=   5802/s pop=   5762/s ack=   5763/s empty=      3/s | e2e p50= 358.40 p99=  651.26 ms | lag=2009 | errs push=0 pop=0 ack=0 gor=32714
+[08:45:41] push=   5909/s pop=   5903/s ack=   5903/s empty=      4/s | e2e p50= 378.88 p99=  692.22 ms | lag=2065 | errs push=0 pop=0 ack=0 gor=32778
+[08:45:51] push=   5970/s pop=   5991/s ack=   5995/s empty=      3/s | e2e p50= 387.07 p99=  757.76 ms | lag=1851 | errs push=0 pop=0 ack=0 gor=32778
+[08:46:01] push=   5968/s pop=   5946/s ack=   5942/s empty=      4/s | e2e p50= 366.59 p99=  684.03 ms | lag=2072 | errs push=0 pop=0 ack=0 gor=32778
+[08:46:11] push=   5945/s pop=   5946/s ack=   5944/s empty=      4/s | e2e p50= 391.17 p99=  815.10 ms | lag=2061 | errs push=0 pop=0 ack=0 gor=32778
+[08:46:21] push=   5963/s pop=   5972/s ack=   5973/s empty=      4/s | e2e p50= 403.46 p99=  765.95 ms | lag=1968 | errs push=0 pop=0 ack=0 gor=32778
+[08:46:31] push=   5952/s pop=   5965/s ack=   5968/s empty=      4/s | e2e p50= 370.69 p99=  675.84 ms | lag=1836 | errs push=0 pop=0 ack=0 gor=32778
+[08:46:41] push=   5996/s pop=   5990/s ack=   5988/s empty=      3/s | e2e p50= 362.50 p99=  667.65 ms | lag=1898 | errs push=0 pop=0 ack=0 gor=32778
+[08:46:51] push=   6060/s pop=   6040/s ack=   6042/s empty=      3/s | e2e p50= 387.07 p99=  765.95 ms | lag=2091 | errs push=0 pop=0 ack=0 gor=32778
+[08:47:01] push=   6248/s pop=   6221/s ack=   6216/s empty=      4/s | e2e p50= 382.98 p99=  733.18 ms | lag=2355 | errs push=0 pop=0 ack=0 gor=32778
+[08:47:11] push=   6201/s pop=   6235/s ack=   6239/s empty=      4/s | e2e p50= 419.84 p99=  864.26 ms | lag=2009 | errs push=0 pop=0 ack=0 gor=32666
+[08:47:21] push=   6224/s pop=   6196/s ack=   6192/s empty=      3/s | e2e p50= 399.36 p99=  741.38 ms | lag=2291 | errs push=0 pop=0 ack=0 gor=32782
+[08:47:31] push=   6165/s pop=   6186/s ack=   6189/s empty=      4/s | e2e p50= 378.88 p99=  724.99 ms | lag=2077 | errs push=0 pop=0 ack=0 gor=32782
+[08:47:41] push=   6109/s pop=   6132/s ack=   6130/s empty=      4/s | e2e p50= 362.50 p99=  716.80 ms | lag=1852 | errs push=0 pop=0 ack=0 gor=32782
+[08:47:51] push=   6026/s pop=   6054/s ack=   6053/s empty=      4/s | e2e p50= 366.59 p99=  675.84 ms | lag=1578 | errs push=0 pop=0 ack=0 gor=32782
+[08:48:01] push=   6051/s pop=   5994/s ack=   5996/s empty=      4/s | e2e p50= 354.30 p99=  659.46 ms | lag=2153 | errs push=0 pop=0 ack=0 gor=32782
+[08:48:11] push=   6040/s pop=   6045/s ack=   6044/s empty=      4/s | e2e p50= 391.17 p99=  790.53 ms | lag=2096 | errs push=0 pop=0 ack=0 gor=32782
+[08:48:21] push=   6034/s pop=   6006/s ack=   6010/s empty=      3/s | e2e p50= 395.26 p99=  733.18 ms | lag=2381 | errs push=0 pop=0 ack=0 gor=32782
+[08:48:31] push=   6061/s pop=   6114/s ack=   6113/s empty=      4/s | e2e p50= 366.59 p99=  741.38 ms | lag=1851 | errs push=0 pop=0 ack=0 gor=32908
+[08:48:41] push=   6003/s pop=   5995/s ack=   5994/s empty=      5/s | e2e p50= 370.69 p99=  675.84 ms | lag=1927 | errs push=0 pop=0 ack=0 gor=32908
+[08:48:51] push=   5916/s pop=   5922/s ack=   5925/s empty=      3/s | e2e p50= 370.69 p99=  700.42 ms | lag=1865 | errs push=0 pop=0 ack=0 gor=32908
+[08:49:01] push=   5763/s pop=   5824/s ack=   5818/s empty=      4/s | e2e p50= 337.92 p99=  643.07 ms | lag=1260 | errs push=0 pop=0 ack=0 gor=32908
+[08:49:11] push=   5808/s pop=   5780/s ack=   5784/s empty=      5/s | e2e p50= 337.92 p99=  667.65 ms | lag=1538 | errs push=0 pop=0 ack=0 gor=32908
+[08:49:21] push=   5790/s pop=   5754/s ack=   5756/s empty=      4/s | e2e p50= 333.82 p99=  626.69 ms | lag=1897 | errs push=0 pop=0 ack=0 gor=32908
+[08:49:31] push=   5814/s pop=   5802/s ack=   5802/s empty=      5/s | e2e p50= 354.30 p99=  675.84 ms | lag=2025 | errs push=0 pop=0 ack=0 gor=32908
+[08:49:41] push=   5892/s pop=   5898/s ack=   5894/s empty=      3/s | e2e p50= 362.50 p99=  667.65 ms | lag=1969 | errs push=0 pop=0 ack=0 gor=32908
+[08:49:51] push=   5971/s pop=   5904/s ack=   5908/s empty=      3/s | e2e p50= 423.94 p99=  782.34 ms | lag=2645 | errs push=0 pop=0 ack=0 gor=32908
+[08:50:01] push=   5961/s pop=   6028/s ack=   6023/s empty=      4/s | e2e p50= 382.98 p99=  839.68 ms | lag=1975 | errs push=0 pop=0 ack=0 gor=32772
+[08:50:11] push=   5956/s pop=   5931/s ack=   5936/s empty=      4/s | e2e p50= 382.98 p99=  790.53 ms | lag=2221 | errs push=0 pop=0 ack=0 gor=32772
+[08:50:21] push=   5955/s pop=   5978/s ack=   5977/s empty=      3/s | e2e p50= 350.21 p99=  692.22 ms | lag=1993 | errs push=0 pop=0 ack=0 gor=32772
+[08:50:31] push=   5962/s pop=   5972/s ack=   5975/s empty=      4/s | e2e p50= 346.11 p99=  741.38 ms | lag=1887 | errs push=0 pop=0 ack=0 gor=32772
+[08:50:41] push=   5980/s pop=   5994/s ack=   5990/s empty=      4/s | e2e p50= 325.63 p99=  593.92 ms | lag=1738 | errs push=0 pop=0 ack=0 gor=32736
+[08:50:51] push=   6070/s pop=   6019/s ack=   6020/s empty=      3/s | e2e p50= 354.30 p99=  724.99 ms | lag=2254 | errs push=0 pop=0 ack=0 gor=32736
+[08:51:01] push=   6245/s pop=   6280/s ack=   6276/s empty=      3/s | e2e p50= 366.59 p99=  798.72 ms | lag=1901 | errs push=0 pop=0 ack=0 gor=32736
+[08:51:11] push=   6202/s pop=   6214/s ack=   6218/s empty=      4/s | e2e p50= 346.11 p99=  692.22 ms | lag=1776 | errs push=0 pop=0 ack=0 gor=32736
+
+[final] pushed=3593624 popped=3591839 acked=3591712 empty=2139 | tail: 1785 msgs across 1596 queues | errs push=0 pop=0 ack=0

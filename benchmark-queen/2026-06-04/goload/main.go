@@ -69,6 +69,8 @@ func main() {
 		runAppMode(os.Args[1:])
 	case "openloop":
 		runOpenLoopMode(os.Args[1:])
+	case "tenants":
+		runTenantsMode(os.Args[1:])
 	case "cm":
 		runCMMode(os.Args[1:])
 	case "max", "":
