@@ -883,15 +883,34 @@ impl HotList {
         // resort. Re-adding an entry that is still genuinely in flight is a harmless
         // false positive: the concurrent pop's checkin finds state != INFLIGHT and
         // skips, and the redundant candidate costs at most one empty SKIP LOCKED
-        // claim (§1/§7 "stale in eccesso"). READY / WHEEL are already tracked —
-        // leave them (and their live deadlines) untouched.
+        // claim (§1/§7 "stale in eccesso").
+        //
+        // A WHEEL entry on a NON-DEFERRAL queue is ALSO reclaimed here (2026-07-24,
+        // the retries-stall floor): on such a queue a wheel entry can ONLY be a
+        // lease-expiry parking (a leased Took, or a Leased verdict), never a
+        // visibility deferral. The reseed SQL returns this partition solely because
+        // it is PENDING (last_offset > committed), so its lease was released EARLY
+        // (e.g. a NACK whose promote-on-ack hook did not run) yet the entry is
+        // stranded in the wheel until the ORIGINAL lease expiry — up to leaseTime,
+        // 300s by default. Promote it to ready: a still-live foreign lease yields
+        // one empty SKIP-LOCKED probe → Leased verdict → re-wheeled at the correct
+        // expiry; a released lease redelivers now. On a DEFERRAL queue the wheel
+        // deadline IS the visibility cut (delayed/window), so it is left untouched.
+        // READY is already claimable.
         let s = sub.state[local as usize];
-        if s == IDLE || s == INFLIGHT {
-            if cfg.delayed > 0 {
-                sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + PAD_MS);
-            } else {
+        match s {
+            IDLE | INFLIGHT => {
+                if cfg.delayed > 0 {
+                    sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + PAD_MS);
+                } else {
+                    sub.ready_push_tail(local);
+                }
+            }
+            WHEEL if !cfg.is_deferral() => {
+                sub.revisit_at[local as usize] = 0;
                 sub.ready_push_tail(local);
             }
+            _ => { /* READY, or a deferral-queue WHEEL: keep the live deadline. */ }
         }
     }
 
@@ -1731,6 +1750,60 @@ mod tests {
         // Whatever the interleaving, p0 appears at most once (no duplicate links).
         let got = names(&h.take_batch("q", "g", 5, 0));
         assert!(got == vec!["p0"] || got.is_empty(), "no duplicate ring entry: {got:?}");
+    }
+
+    // Retries-stall floor (2026-07-24): a manual-ack (leased) pop parks the entry in
+    // the WHEEL at lease-expiry. If the lease is released EARLY (a NACK whose
+    // promote-on-ack hook did not run), the entry is stranded until the ORIGINAL
+    // expiry (up to leaseTime — 300s default). The reseed floor, which reports the
+    // partition PENDING, must reclaim the stale wheel entry on a NON-deferral queue.
+    #[test]
+    fn reseed_recovers_stale_wheel_entry_on_nondeferral_queue() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.note_partition_id("q", "p0", "id0");
+        h.mark_local("q", "p0", 1, 0);
+        let c = h.take_batch("q", "g", 1, 0);
+        assert_eq!(names(&c), vec!["p0"]);
+        // Leased Took → WHEEL at now + lease (300s) — the retries lease.
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            0,
+            false,
+            300_000,
+        );
+        // Not claimable: parked in the wheel until the 300s lease expiry.
+        assert!(h.take_batch("q", "g", 1, 1_000).is_empty());
+        // The reseed floor reports p0 pending (last_offset > committed) → it MUST
+        // reclaim the stale wheel entry instead of waiting 300s.
+        h.reseed_row("q", "g", "id0", "p0", 1_000);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 1_000)),
+            vec!["p0"],
+            "reseed floor must reclaim a stale lease-parked wheel entry"
+        );
+    }
+
+    // The converse: on a DEFERRAL queue a wheel entry is a visibility cut
+    // (delayed/window), NOT a lease parking — the reseed must NOT promote it early.
+    #[test]
+    fn reseed_leaves_deferral_wheel_entry_until_due() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0); // window_buffer = 5s ⇒ deferral queue
+        h.note_partition_id("q", "p0", "id0");
+        h.mark_local("q", "p0", 1, 0); // parked in the wheel at 5000ms (window)
+        assert!(h.take_batch("q", "g", 1, 1_000).is_empty());
+        // Reseed must leave the deferral deadline intact.
+        h.reseed_row("q", "g", "id0", "p0", 1_000);
+        assert!(
+            h.take_batch("q", "g", 1, 1_000).is_empty(),
+            "deferral wheel entry must stay parked until its window is due"
+        );
+        // Still delivered once the window elapses.
+        assert_eq!(names(&h.take_batch("q", "g", 1, 6_000)), vec!["p0"]);
     }
 
     #[test]

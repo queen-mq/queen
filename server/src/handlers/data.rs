@@ -2249,9 +2249,24 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                 .count() as u64;
             let failed = idxs.len() as u64 - ok;
             st.metrics.per_queue.add_ack(&q, ok, failed);
-            // 19-wildcard-hotlist §7 promote-on-ack (SQL path): a completed ack
-            // released the lease — promote the entry if pushes landed during it.
-            if ok > 0 && st.hotlist.enabled() {
+            // 19-wildcard-hotlist §7 promote-on-ack (SQL path): ANY ack that
+            // RELEASED the lease makes the partition claimable again and must
+            // promote the ring entry — not just a COMPLETED one. A NACK
+            // (failed/retry) releases the lease and REDELIVERS the un-acked tail;
+            // a budget-exhausted drop/DLQ releases it and exposes the backlog
+            // behind the poison. The old `ok > 0` gate fired only on a completed
+            // item, so a pure NACK (the retries test: handler throws → whole batch
+            // failed, ok=0) left the ring's leased-Took entry stranded in the WHEEL
+            // until lease expiry — up to leaseTime, 300s by default (the 300s
+            // multitenant-retries stall; HOTLIST=0 was instant because the SQL
+            // fallback re-discovers the released batch on the next scan).
+            // promote_ack moves a WHEEL entry to ready + wakes, so the redelivery
+            // is immediate (matching the legacy path). Over-firing is harmless: a
+            // still-live lease (a partial completion that kept the lease) just
+            // yields one empty SKIP-LOCKED probe → Leased verdict → re-wheeled at
+            // the correct expiry ("stale in eccesso", §1/§7).
+            let released = idxs.iter().any(|&i| lease_released[i]);
+            if released && st.hotlist.enabled() {
                 st.hotlist.promote_ack(&q, group, &pid, crate::util::now_epoch_ms());
             }
         }

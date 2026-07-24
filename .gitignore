@@ -34,3 +34,5 @@ start.sh
 server-rust/target
 server/target
 **/target/
+
+server/webapp/dist
