@@ -1865,6 +1865,18 @@ pub async fn handle_ack_batch(State(st): State<Arc<AppState>>, body: Bytes) -> R
     json(StatusCode::OK, body)
 }
 
+// Outcome of the ack-registry fast path for one (partition, worker) group: the
+// cursor advance either committed durably (render success), needs the SQL
+// fall-back (a stale/rejected lease — resolve the true outcome), or the whole ack
+// flush failed (error the client, lease expiry redelivers). Committed/FallBack
+// map 1:1 to the pre-fusion synchronous path's ok/ok:false; FlushErr is the new
+// ack-fusion whole-flush-failure branch.
+enum FastAck {
+    Committed,
+    FallBack,
+    FlushErr,
+}
+
 // Resolve acks per (partition, worker) via queen.log_ack_by_hash_v1, then emit
 // the per-item result array in the original order. The broker computes the
 // xxh3_128 txn hashes (spec §3 — SQL never sees txn strings) and maps the SP's
@@ -1886,21 +1898,50 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
             .push(i);
     }
 
-    let client = match st.pool.get().await {
-        Ok(c) => c,
+    // ACK FUSION: with the flag ON, a registry HIT enqueues into the fusion
+    // pipeline (server/src/ack_fusion.rs) and the response resolves on the flush
+    // commit, so N positional cursor advances collapse to one
+    // queen.log_ack_multi_v1 transaction. With it OFF the fast path is the
+    // unchanged synchronous log_ack_at_v1 call (byte-identical).
+    let fusion_on = st.ack_fusion.enabled();
+
+    // Shared pooled client for the SQL ack paths (queue-name DB miss, the flag-off
+    // ack_at fast path, ack_by_hash, dlq). With fusion OFF it is acquired ONCE up
+    // front and held across the loop exactly as before (a pool failure fails every
+    // item). With fusion ON it is acquired lazily and NEVER held across a fusion
+    // commit-wait: parking on the flush while pinning a pool connection would
+    // deadlock the flush task (which needs its own connection from the same pool)
+    // once more acks park than the pool is deep.
+    let mut client: Option<deadpool_postgres::Client> = None;
+    if !fusion_on {
+        match st.pool.get().await {
+            Ok(c) => client = Some(c),
             Err(_) => {
-            for e in errors.iter_mut() {
-                *e = Some("pool".to_string());
+                for e in errors.iter_mut() {
+                    *e = Some("pool".to_string());
+                }
+                return render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags);
             }
-            return render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags);
         }
-    };
+    }
 
     for ((pid, worker), idxs) in groups {
         // Per-queue ack attribution (queue_lag_metrics ack_* columns): the ack wire
-        // is partitionId-keyed, so resolve the queue via the pop-fed memo (DB lookup
-        // on a miss). None (unknown/deleted partition) leaves the ack unattributed.
-        let queue_name = st.queue_for_partition(&client, &pid).await;
+        // is partitionId-keyed, so resolve the queue via the pop-fed memo. On the
+        // fusion path use the memo-only lookup (no client) so nothing is held
+        // across the flush-wait; a rare ack-first miss takes a short-lived client
+        // dropped right here. With fusion OFF the shared client is already held.
+        let queue_name = if fusion_on {
+            match st.partition_queue_memo(&pid) {
+                Some(q) => Some(q),
+                None => match st.pool.get().await {
+                    Ok(c) => st.queue_for_partition(&c, &pid).await,
+                    Err(_) => None,
+                },
+            }
+        } else {
+            st.queue_for_partition(client.as_ref().unwrap(), &pid).await
+        };
 
         // ---- ACK REGISTRY fast path ----
         // Fire ONLY when every item in this (partition, worker) group is
@@ -1923,39 +1964,110 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
             if let Some(batch_end) =
                 st.ack_registry.take_if_full_batch(&pid, group, &worker, &acked)
             {
-                let hit_ok = match db::ack_at(
-                    &client, &pid, group, &worker, batch_end, true, idxs.len() as i32,
-                )
-                .await
-                {
-                    Ok(txt) => serde_json::from_str::<serde_json::Value>(&txt)
-                        .ok()
-                        .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
-                        .unwrap_or(false),
-                    Err(_) => false,
+                // A HIT proved (worker matches, whole batch completed, upto ==
+                // batch_end). ACK FUSION coalesces the positional advance into one
+                // multi-cursor commit; the synchronous path (flag off) does the
+                // single log_ack_at_v1 call. Either way the effects below run ONLY
+                // on committed evidence.
+                let outcome: FastAck = if fusion_on {
+                    // Enqueue + PARK on the flush commit (no pooled client held).
+                    match st
+                        .ack_fusion
+                        .ack(
+                            pid.clone(),
+                            group.to_string(),
+                            worker.clone(),
+                            batch_end,
+                            idxs.len() as i32,
+                        )
+                        .await
+                    {
+                        crate::ack_fusion::AckVerdict::Committed => FastAck::Committed,
+                        crate::ack_fusion::AckVerdict::Rejected => FastAck::FallBack,
+                        crate::ack_fusion::AckVerdict::FlushErr => FastAck::FlushErr,
+                    }
+                } else {
+                    // Unchanged synchronous fast path (byte-identical to before).
+                    let hit_ok = match db::ack_at(
+                        client.as_ref().unwrap(),
+                        &pid,
+                        group,
+                        &worker,
+                        batch_end,
+                        true,
+                        idxs.len() as i32,
+                    )
+                    .await
+                    {
+                        Ok(txt) => serde_json::from_str::<serde_json::Value>(&txt)
+                            .ok()
+                            .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
+                            .unwrap_or(false),
+                        Err(_) => false,
+                    };
+                    if hit_ok {
+                        FastAck::Committed
+                    } else {
+                        FastAck::FallBack
+                    }
                 };
-                if hit_ok {
-                    // Same per-item result shape as the SQL happy path.
-                    for &i in &idxs {
-                        success[i] = true;
-                        lease_released[i] = true;
-                    }
-                    // Per-queue ack attribution (identical to the SQL-path tail).
-                    if let Some(q) = queue_name.as_ref() {
-                        let okc = idxs.len() as u64; // all completed on the fast path
-                        st.metrics.per_queue.add_ack(q, okc, 0);
-                        // 19-wildcard-hotlist §7: ack = lease released. If pushes
-                        // arrived during the lease the entry is still pending —
-                        // promote it to ready NOW + wake, so it is claimable
-                        // immediately instead of at lease expiry. No-op if unknown.
-                        if st.hotlist.enabled() {
-                            st.hotlist.promote_ack(q, group, &pid, crate::util::now_epoch_ms());
+
+                match outcome {
+                    FastAck::Committed => {
+                        // Same per-item result shape as the SQL happy path.
+                        for &i in &idxs {
+                            success[i] = true;
+                            lease_released[i] = true;
                         }
+                        // Per-queue ack attribution (identical to the SQL-path tail).
+                        if let Some(q) = queue_name.as_ref() {
+                            let okc = idxs.len() as u64; // all completed on the fast path
+                            st.metrics.per_queue.add_ack(q, okc, 0);
+                            // 19-wildcard-hotlist §7: ack = lease released. If pushes
+                            // arrived during the lease the entry is still pending —
+                            // promote it to ready NOW + wake, so it is claimable
+                            // immediately instead of at lease expiry. No-op if unknown.
+                            if st.hotlist.enabled() {
+                                st.hotlist.promote_ack(q, group, &pid, crate::util::now_epoch_ms());
+                            }
+                        }
+                        continue; // whole group handled — skip the SQL path
                     }
-                    continue; // whole group handled — skip the SQL path
+                    FastAck::FlushErr => {
+                        // Whole ack flush failed (pool/infra/timeout/parse). Error
+                        // the client; the lease expires and the batch redelivers
+                        // (at-least-once, contract unchanged). The registry entry
+                        // was already consumed, so do NOT retry via SQL here.
+                        for &i in &idxs {
+                            errors[i] = Some(
+                                "ack flush failed; lease will expire and redeliver".to_string(),
+                            );
+                        }
+                        continue;
+                    }
+                    FastAck::FallBack => {
+                        // ok:false (e.g. expired/reassigned lease) → fall through to
+                        // the SQL path, which resolves the true outcome. The entry
+                        // was already consumed.
+                    }
                 }
-                // ack_at said ok:false (e.g. expired lease) → fall through to SQL,
-                // which resolves the true outcome. The entry was already consumed.
+            }
+        }
+
+        // SQL ack path (registry miss / partial / nack / DLQ / fusion fall-back).
+        // It needs a pooled client; on the fusion path acquire one now (it was NOT
+        // held across the enqueue) and release it at the end of this iteration so
+        // the next group's fusion wait never pins it. With fusion OFF the shared
+        // client is already held.
+        if fusion_on && client.is_none() {
+            match st.pool.get().await {
+                Ok(c) => client = Some(c),
+                Err(_) => {
+                    for &i in &idxs {
+                        errors[i] = Some("pool".to_string());
+                    }
+                    continue;
+                }
             }
         }
 
@@ -1978,7 +2090,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
             statuses.push(acks[i].status.to_string());
         }
 
-        match db::ack_by_hash(&client, &pid, group, &worker, &hashes, &statuses).await {
+        match db::ack_by_hash(client.as_ref().unwrap(), &pid, group, &worker, &hashes, &statuses).await {
             Ok(txt) => {
                 // {"ok":bool,"error":?,...}
                 let v: serde_json::Value =
@@ -1995,7 +2107,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                     // not the cursor (044 contract).
                     if v.get("dlq").and_then(|x| x.as_bool()).unwrap_or(false) {
                         let off = v.get("off").and_then(|x| x.as_i64()).unwrap_or(0);
-                        match dlq_file_head(&client, &pid, group, &worker, off, &acks, &idxs)
+                        match dlq_file_head(client.as_ref().unwrap(), &pid, group, &worker, off, &acks, &idxs)
                             .await
                         {
                             Ok(true) => {
@@ -2092,6 +2204,13 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
             if ok > 0 && st.hotlist.enabled() {
                 st.hotlist.promote_ack(&q, group, &pid, crate::util::now_epoch_ms());
             }
+        }
+
+        // Fusion path: release the pooled client so the NEXT group's fusion
+        // commit-wait never pins it (the pool-deadlock guard). No-op if already
+        // None; with fusion OFF the shared client is kept for the whole loop.
+        if fusion_on {
+            client = None;
         }
     }
 

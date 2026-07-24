@@ -33,7 +33,7 @@ for i in $(seq 1 60); do docker exec "$PG" pg_isready -U postgres >/dev/null 2>&
 
 rn="r$RPORT"; docker rm -fv "$rn" >/dev/null 2>&1
 DASH_PORT="${DASH_PORT:-6632}"
-log "start tuned Rust broker :$RPORT (dedup cache ${DEDUPMB:-20480}MB, hotlist=${HOTLIST:-0})"
+log "start tuned Rust broker :$RPORT (dedup cache ${DEDUPMB:-20480}MB, hotlist=${HOTLIST:-1} ackfusion=${ACKFUSION:-1})"
 docker run -d --name "$rn" --network "$NET" --ulimit nofile=65535:65535 -p "$RPORT":6632 -p "$DASH_PORT":6632 \
   -e PG_HOST="$PG" -e PG_PASSWORD=postgres -e PG_USER=postgres -e PG_DATABASE=postgres \
   -e QUEEN_DEDUP_CACHE_MB="${DEDUPMB:-20480}" -e DB_POOL_SIZE="${POOL:-300}" -e QUEEN_V2_ZSTD_LEVEL="${ZSTD:-3}" \
@@ -43,7 +43,8 @@ docker run -d --name "$rn" --network "$NET" --ulimit nofile=65535:65535 -p "$RPO
   -e QUEEN_SEG_PUSH_INIT="${PINIT:-64}" -e QUEEN_SEG_PUSH_MIN="${PMIN:-16}" -e QUEEN_SEG_PUSH_MAX="${PMAX:-256}" \
   -e QUEEN_SEG_POP_INIT="${OINIT:-96}" -e QUEEN_SEG_POP_MIN="${OMIN:-64}" -e QUEEN_SEG_POP_MAX="${OMAX:-256}" \
   -e QUEEN_VEGAS_ALPHA="${VA:-6}" -e QUEEN_VEGAS_BETA="${VB:-12}" \
-  -e QUEEN_HOTLIST="${HOTLIST:-0}" \
+  -e QUEEN_HOTLIST="${HOTLIST:-1}" \
+  -e QUEEN_ACK_FUSION="${ACKFUSION:-1}" -e QUEEN_ACK_FUSION_SHARDS="${ACKSHARDS:-4}" \
   "$RIMG" >/dev/null
 for i in $(seq 1 90); do curl -sf "http://localhost:$RPORT/status" >/dev/null 2>&1 && break; sleep 1; done
 docker logs "$rn" 2>&1 | tail -2

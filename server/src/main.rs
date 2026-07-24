@@ -1,3 +1,4 @@
+mod ack_fusion;
 mod ack_registry;
 mod auth;
 mod config;
@@ -200,6 +201,23 @@ async fn main() {
         cfg.ack_registry_enabled,
     ));
 
+    // ACK FUSION (server/src/ack_fusion.rs): coalesces registry-fast-path acks
+    // into one queen.log_ack_multi_v1 commit per flush (one fsync for N cursors),
+    // fire-on-idle. Default OFF ⇒ inert (no shard tasks), the ack path unchanged.
+    let ack_fusion = ack_fusion::AckFusion::new(
+        cfg.ack_fusion_shards,
+        pool.clone(),
+        cfg.stmt_timeout,
+        cfg.ack_fusion_hold_ms,
+        cfg.ack_fusion_enabled,
+    );
+    if cfg.ack_fusion_enabled {
+        println!(
+            "queen-seg-rust: QUEEN_ACK_FUSION on (shards={}, hold_ms={})",
+            cfg.ack_fusion_shards, cfg.ack_fusion_hold_ms
+        );
+    }
+
     // Wildcard candidate hot-list (19-wildcard-hotlist.md). Wakes parked pops
     // through the same notifier the long-poll parks on.
     let hotlist = hotlist::HotList::new(
@@ -223,6 +241,7 @@ async fn main() {
         pool: pool.clone(),
         fusion,
         ack_registry,
+        ack_fusion,
         push_vegas: push_vegas.clone(),
         pop_vegas: pop_vegas.clone(),
         metrics: metrics.clone(),

@@ -31,6 +31,12 @@ pub struct AppState {
     // per-ack log_ack_by_hash_v1 hash resolution. Any miss falls through to the
     // unchanged SQL ack path — the registry is an optimization, never authority.
     pub ack_registry: Arc<crate::ack_registry::AckRegistry>,
+    // ACK FUSION (server/src/ack_fusion.rs): coalesces registry-fast-path
+    // full-batch acks into ONE queen.log_ack_multi_v1 transaction per flush (one
+    // commit / one fsync for N cursor advances), fire-on-idle. Disabled
+    // (QUEEN_ACK_FUSION unset) ⇒ enabled() is false and the ack handler never
+    // enqueues — the synchronous log_ack_at_v1 fast path is byte-identical.
+    pub ack_fusion: Arc<crate::ack_fusion::AckFusion>,
     pub push_vegas: Arc<Vegas>,
     pub pop_vegas: Arc<Vegas>,
     pub metrics: Arc<Metrics>,
@@ -188,6 +194,16 @@ impl AppState {
             m.clear(); // rare, cheap reset; repopulates from live traffic
         }
         m.entry(partition_id.to_string()).or_insert_with(|| queue.to_string());
+    }
+
+    // Memo-only partition→queue resolution (no DB). The ack-fusion fast path uses
+    // this so it never holds a pooled client across the async flush-wait: on the
+    // steady-state hot path the memo is always populated by the pop that created
+    // the lease, so this hits; the rare miss (ack-first) falls back to the
+    // client-carrying queue_for_partition, whose short-lived client is dropped
+    // before the fusion enqueue.
+    pub(crate) fn partition_queue_memo(&self, partition_id: &str) -> Option<String> {
+        self.partition_queue.lock().unwrap().get(partition_id).cloned()
     }
 
     // Resolve a partition id to its queue name for ack attribution: memo first,

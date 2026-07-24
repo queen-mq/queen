@@ -1,6 +1,6 @@
 # 19 — Wildcard candidate hot-list (broker-side discovery)
 
-Stato: SPEC approvata (Alice, 2026-07-23). Flag `QUEEN_HOTLIST` (default off).
+Stato: IMPLEMENTATA e validata su VM (2026-07-24). Flag `QUEEN_HOTLIST` default ON (kill switch =0).
 Obiettivo: eliminare la candidate scan SQL per-pop del wildcard, sostituendola
 con una selezione in memoria nel broker. L'SQL resta l'unica autorità su claim,
 lease, cursori e visibilità: la hot-list può solo essere *stale in eccesso*

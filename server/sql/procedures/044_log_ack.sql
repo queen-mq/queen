@@ -232,6 +232,127 @@ END;
 $$;
 
 -- ============================================================================
+-- log_ack_multi_v1 — set-based twin of log_ack_at_v1 for the broker's ACK
+-- FUSION path (server/src/ack_fusion.rs). N positional full-batch cursor
+-- advances committed in ONE transaction (one commit / one fsync) instead of N
+-- separate log_ack_at_v1 calls. This is the ack-side analogue of
+-- log_push_multi_v1 (042): the whole point is to collapse the ack commit rate
+-- so the push+lease commit pipeline stops queueing behind a flood of tiny ack
+-- fsyncs.
+--
+-- Each input row (p_pids[i], p_groups[i], p_ends[i], p_workers[i], p_counts[i])
+-- runs the IDENTICAL per-row decision procedure as log_ack_at_v1 with p_ok=true:
+-- lock the (partition, group) consumer row, validate the worker/lease exactly as
+-- RUSTFIX item 11 (only when the worker is non-empty — the fusion path always
+-- supplies the pop's worker), clamp p_end to the leased batch_end, and on success
+-- advance committed = p_end, release the lease, bump total_consumed. The fusion
+-- path only ever enqueues FULL-BATCH COMPLETED acks (p_ok is implicitly true and
+-- p_end == the leased batch_end), so this function has no nack/dlq/retry branch —
+-- a stale/rejected row simply reports ok:false and the broker falls back to the
+-- unchanged log_ack_by_hash_v1 path for that ONE client (redelivery contract
+-- unchanged). PG re-validating the lease under the consumer lock means a stale
+-- fusion enqueue (lease expired/reassigned between pop and ack) is rejected here
+-- exactly as log_ack_at_v1 / log_ack_by_hash_v1 would reject it.
+--
+-- INVARIANT — deterministic lock order. The rows are processed ORDER BY
+-- (partition_id, consumer_group), so every multi-ack flush takes the
+-- log_consumers row locks in ONE total order — the SAME discipline as the push
+-- pre-lock (042) and the transaction wire's ack loop (log_transaction_wire_v1
+-- step 4). Ack flushes are sharded by partition broker-side so two flushes never
+-- share a consumer row, but this ORDER BY also keeps a flush from deadlocking
+-- against the transaction wire or a pop that touches the same rows. The ack path
+-- takes ONLY the consumer row lock (never a log_partitions row lock), so it can
+-- never form a cross-space cycle with the push serializer.
+--
+-- INVARIANT — result realignment. The result array is emitted BY INPUT ORDINAL
+-- (v_out[u.ord]) even though rows execute in (pid, group) order, so the caller
+-- realigns each verdict to its enqueue slot: results[i] belongs to input row i.
+-- Per-row verdict: {"ok":bool, "acked":bigint, "error":text|null}.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.log_ack_multi_v1(
+    p_pids TEXT[],       -- partition uuids as text ($::uuid inside — broker binds &str)
+    p_groups TEXT[],
+    p_ends BIGINT[],
+    p_workers TEXT[],
+    p_counts INT[]
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_n INT := COALESCE(array_length(p_pids, 1), 0);
+    v_rec RECORD;
+    v_c RECORD;
+    v_pid UUID;
+    v_out JSONB[];
+    v_ok BOOLEAN;
+    v_err TEXT;
+    v_acked BIGINT;
+BEGIN
+    -- Array-length agreement guard: a silent misalignment would advance the
+    -- WRONG cursor. Fail loudly (mirrors log_ack_by_hash_v1's misalign RAISE).
+    IF COALESCE(array_length(p_groups, 1), 0) <> v_n
+       OR COALESCE(array_length(p_ends, 1), 0) <> v_n
+       OR COALESCE(array_length(p_workers, 1), 0) <> v_n
+       OR COALESCE(array_length(p_counts, 1), 0) <> v_n THEN
+        RAISE EXCEPTION 'QACKM misaligned arrays: pids=% groups=% ends=% workers=% counts=%',
+            v_n, COALESCE(array_length(p_groups, 1), 0), COALESCE(array_length(p_ends, 1), 0),
+            COALESCE(array_length(p_workers, 1), 0), COALESCE(array_length(p_counts, 1), 0);
+    END IF;
+
+    IF v_n = 0 THEN
+        RETURN jsonb_build_object('ok', true, 'results', '[]'::jsonb);
+    END IF;
+
+    -- Preallocate so verdicts can be written by ORIGINAL ordinal, out of the
+    -- (pid, group) execution order.
+    v_out := array_fill('null'::jsonb, ARRAY[v_n]);
+
+    FOR v_rec IN
+        SELECT u.pid, u.grp, u.end_off, u.worker, u.cnt, u.ord
+        FROM unnest(p_pids, p_groups, p_ends, p_workers, p_counts)
+             WITH ORDINALITY AS u(pid, grp, end_off, worker, cnt, ord)
+        ORDER BY u.pid::uuid, u.grp    -- deterministic lock order (see header)
+    LOOP
+        v_pid := v_rec.pid::uuid;
+        v_ok := false; v_err := NULL; v_acked := 0;
+
+        -- Per-row: identical to log_ack_at_v1 (p_ok=true branch). The consumer
+        -- row lock is the ONLY lock taken; re-entrant if two rows in THIS call
+        -- share (pid, group) with different workers (the stale worker is then
+        -- rejected by the lease check below — one holder per consumer row).
+        SELECT * INTO v_c FROM queen.log_consumers c
+        WHERE c.partition_id = v_pid AND c.consumer_group = v_rec.grp
+        FOR UPDATE;
+        IF NOT FOUND THEN
+            v_err := 'consumer not found';
+        ELSIF v_rec.worker IS NOT NULL AND v_rec.worker <> ''
+              AND (v_c.worker_id IS DISTINCT FROM v_rec.worker
+                   OR v_c.lease_expires_at IS NULL
+                   OR v_c.lease_expires_at < clock_timestamp()) THEN
+            v_err := 'invalid or expired lease';
+        ELSIF v_c.batch_end IS NULL THEN
+            v_err := 'no leased batch';
+        ELSIF v_rec.end_off > v_c.batch_end THEN
+            v_err := 'position beyond leased batch';
+        ELSE
+            UPDATE queen.log_consumers SET
+                committed = v_rec.end_off,
+                worker_id = NULL, lease_expires_at = NULL,
+                batch_end = NULL,
+                total_consumed = total_consumed + GREATEST(v_rec.cnt, 0)
+            WHERE partition_id = v_pid AND consumer_group = v_rec.grp;
+            v_ok := true;
+            v_acked := GREATEST(v_rec.cnt, 0);
+        END IF;
+
+        v_out[v_rec.ord] := jsonb_build_object('ok', v_ok, 'acked', v_acked, 'error', v_err);
+    END LOOP;
+
+    RETURN jsonb_build_object('ok', true, 'results', to_jsonb(v_out));
+END;
+$$;
+
+-- ============================================================================
 -- log_ack_by_hash_v1 — RUSTFIX items 10 & 11: the v0.16.0 ack semantics,
 -- ported verbatim from seg_ack_by_txn_v1 (024:474-773) with scalar offsets.
 -- The broker maps wire txn strings → xxh3_128 hashes (§3; SQL never hashes)

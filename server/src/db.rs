@@ -209,6 +209,33 @@ pub async fn ack_at(
     Ok(row.get(0))
 }
 
+// ACK FUSION (server/src/ack_fusion.rs): N positional full-batch cursor advances
+// in ONE transaction via queen.log_ack_multi_v1 (044) — the ack-side twin of
+// log_push_multi_v1. Each row is the pid-keyed log_ack_at_v1 decision (p_ok=true,
+// upto=batch_end); one commit / one fsync collapses the ack commit rate under
+// load. All five arrays are index-aligned; the SP returns
+// {"ok":true,"results":[{"ok":bool,"acked":i64,"error":?}, ...]} in INPUT order
+// (the SP writes by ordinal). The pids travel as text[] ($1::text[] so the &str
+// slice binds); the SP casts each u.pid::uuid internally.
+pub async fn ack_multi(
+    client: &deadpool_postgres::Client,
+    pids: &[String],
+    groups: &[String],
+    ends: &[i64],
+    workers: &[String],
+    counts: &[i32],
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_ack_multi_v1($1::text[], $2::text[], $3::int8[], $4::text[], $5::int4[]))::text",
+        )
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&pids, &groups, &ends, &workers, &counts])
+        .await?;
+    Ok(row.get(0))
+}
+
 // NEW (log engine): hash-addressed ack for ONE (partition, group, worker) via
 // queen.log_ack_by_hash_v1 (044). `hashes` are the 16-byte xxh3_128 txn hashes
 // (crate::util::txn_hash128), index-aligned with `statuses`

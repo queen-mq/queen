@@ -267,6 +267,18 @@ pub struct Config {
     // Kill switch (QUEEN_ACK_REGISTRY=0 disables). Disabled ⇒ every ack takes the
     // unchanged log_ack_by_hash_v1 path — exactly the pre-registry behaviour.
     pub ack_registry_enabled: bool,
+    // Broker-side ACK FUSION (server/src/ack_fusion.rs). Coalesces registry-fast-
+    // path full-batch acks into ONE queen.log_ack_multi_v1 transaction per flush
+    // (one commit / one fsync for N cursor advances), fire-on-idle like the push
+    // fusion. `ack_fusion_enabled` is the flag (QUEEN_ACK_FUSION, default ON;
+    // "0"/"false" reverts to the synchronous log_ack_at_v1 fast path, byte-
+    // identical to the pre-fusion behavior);
+    // `ack_fusion_shards` buffers acks by hash(partition) (defaults to
+    // fusion_shards); `ack_fusion_hold_ms` is the liveness backstop tick, NOT a
+    // latency floor (fire-on-idle commits a lone ack in one RTT).
+    pub ack_fusion_enabled: bool,
+    pub ack_fusion_shards: usize,
+    pub ack_fusion_hold_ms: u64,
     // Retention/metrics background-job knobs (RUSTFIX item 20 — C++ JobsConfig,
     // config.hpp:286-329). `retention_batch_size` bounds each metrics-purge DELETE;
     // `metrics_retention_days` is the worker/system-metrics purge window (default
@@ -293,9 +305,9 @@ pub struct Config {
     // Disk spool for DB-outage / maintenance push durability (RUSTFIX items 1, 17).
     pub file_buffer: FileBufferConfig,
     // Wildcard candidate hot-list (19-wildcard-hotlist.md, server/src/hotlist.rs).
-    // QUEEN_HOTLIST=1 (or =true) activates broker-side candidate selection for
-    // wildcard pops. Default OFF ⇒ the current per-pop candidate scan is
-    // byte-identical (every hook is a no-op / one branch). `hotlist_shards` sub-
+    // Broker-side candidate selection for wildcard pops. Default ON;
+    // QUEEN_HOTLIST=0 (or =false) reverts to the legacy per-pop SQL candidate
+    // scan, byte-identical (every hook is a no-op / one branch). `hotlist_shards` sub-
     // shards each (queue,group) ring (defaults to fusion_shards); `hotlist_window_batch`
     // is the windowBuffer early-promotion threshold (§6).
     pub hotlist_enabled: bool,
@@ -416,6 +428,15 @@ pub fn load() -> Config {
         ack_registry_enabled: std::env::var("QUEEN_ACK_REGISTRY")
             .map(|v| v != "0")
             .unwrap_or(true),
+        // ACK FUSION default ON (operator decision 2026-07-24 after the VM A/B:
+        // rows_per_commit 104-107 under fsync backpressure, push_multi 38→21ms).
+        // "0"/"false" disables — the kill switch mirrors the QUEEN_HOTLIST parse.
+        ack_fusion_enabled: std::env::var("QUEEN_ACK_FUSION")
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true),
+        ack_fusion_shards: env_int("QUEEN_ACK_FUSION_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
+            .max(1) as usize,
+        ack_fusion_hold_ms: env_int("QUEEN_ACK_FUSION_HOLD_MS", 3).max(1) as u64,
         retention_batch_size: env_int("RETENTION_BATCH_SIZE", 1000).max(1) as usize,
         retention_parallelism: env_int("RETENTION_PARALLELISM", 1).max(1) as usize,
         metrics_retention_days: env_int("METRICS_RETENTION_DAYS", 90).max(1) as i32,
@@ -425,11 +446,14 @@ pub fn load() -> Config {
         auth: AuthConfig::from_env(),
         sync: SyncConfig::from_env(),
         file_buffer: FileBufferConfig::from_env(),
-        // QUEEN_HOTLIST accepts "1" or "true" (env_bool is strict-"true" only, so
-        // spell it out here — the spec/operator use QUEEN_HOTLIST=1).
+        // HOT-LIST default ON (operator decision 2026-07-24 after the VM A/B:
+        // candidate scans gone from the profile, ingress lag flat, combo with
+        // ack fusion beats the scan path on total delivered even on a slow
+        // disk). "0"/"false" disables — the legacy SQL candidate-scan path
+        // stays intact behind the kill switch.
         hotlist_enabled: std::env::var("QUEEN_HOTLIST")
-            .map(|v| v == "1" || v == "true")
-            .unwrap_or(false),
+            .map(|v| v != "0" && v != "false")
+            .unwrap_or(true),
         hotlist_shards: env_int("QUEEN_HOTLIST_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
             .max(1) as usize,
         hotlist_window_batch: env_int("QUEEN_HOTLIST_WINDOW_BATCH", 100).max(1) as u32,
