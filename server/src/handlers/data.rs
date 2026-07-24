@@ -269,20 +269,26 @@ pub async fn handle_push(
             st.metrics.per_queue.add_push(q, msgs);
         }
     }
-    // The segment is committed — wake any parked long-poll pops on these queues
-    // (local) and notify peer replicas so cross-replica consume is immediate. One
-    // batched MESSAGE_AVAILABLE frame covers every partition this bundle touched.
-    st.notifier.notify_pushed_batch(&notify_keys);
-    // 19-wildcard-hotlist §2 (mark, caso base): the fusion flush committed, so
-    // set each pushed (queue, partition) pending on every group ring + queue a
-    // coalesced mesh dirty hint. Incondizionato; a mark on a partition whose push
-    // actually failed is the usual harmless false positive (one empty claim). No-op
-    // when the flag is off.
-    if !hotlist_marks.is_empty() {
+    // The segment is committed — make it discoverable. Two paths:
+    if st.hotlist.enabled() {
+        // 19-wildcard-hotlist §2 + C1: mark each pushed (queue, partition) pending on
+        // every group ring (QUIET — no per-push local wake). The local wake is
+        // COALESCED into main's ~5ms wake tick (mark_local_quiet flags the queue), so
+        // a hot queue at 25k push/s costs ~200 notify_waiters/s, not 25k×O(parked).
+        // Peers still get an IMMEDIATE batched MESSAGE_AVAILABLE (fan_out_pushed_batch)
+        // so cross-broker discovery stays prompt even in a mixed on/off cluster; the
+        // coalesced HOTLIST_DIRTY hints are additive. Incondizionato; a mark on a
+        // partition whose push actually failed is the usual harmless false positive.
         let now_ms = crate::util::now_epoch_ms();
         for (q, p, n) in &hotlist_marks {
-            st.hotlist.mark_local(q, p, *n, now_ms);
+            st.hotlist.mark_local_quiet(q, p, *n, now_ms);
         }
+        st.notifier.fan_out_pushed_batch(&notify_keys);
+    } else {
+        // Flag off ⇒ byte-identical: wake any parked long-poll pops on these queues
+        // (local, with partition hints) and notify peer replicas so cross-replica
+        // consume is immediate. One batched MESSAGE_AVAILABLE covers the whole bundle.
+        st.notifier.notify_pushed_batch(&notify_keys);
     }
 
     // RUSTFIX item 1: an "error" status means the whole DB transaction failed
@@ -860,6 +866,46 @@ async fn serve_pop_hotlist(
     }
 }
 
+// Cancellation-safety guard for the hot-list serve path (§4/§7). take_batch
+// marks the checked-out candidates INFLIGHT; if the pop future is dropped between
+// checkout and checkin, this re-appends them (Requeue) so they are never stranded
+// out of the ring (a mark/promote/reseed on an INFLIGHT entry cannot re-add it).
+// The normal paths set `armed = false` and run the real checkin.
+struct InflightGuard {
+    hl: Arc<crate::hotlist::HotList>,
+    queue: String,
+    group: String,
+    cands: Vec<crate::hotlist::Candidate>,
+    now_ms: i64,
+    auto_ack: bool,
+    lease_ms: i64,
+    armed: bool,
+}
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if !self.armed || self.cands.is_empty() {
+            return;
+        }
+        let back: Vec<crate::hotlist::CheckinResult> = self
+            .cands
+            .iter()
+            .map(|c| crate::hotlist::CheckinResult {
+                name: c.name.clone(),
+                epoch: c.epoch,
+                verdict: crate::hotlist::Verdict::Requeue,
+            })
+            .collect();
+        self.hl.checkin(
+            &self.queue,
+            &self.group,
+            back,
+            self.now_ms,
+            self.auto_ack,
+            self.lease_ms,
+        );
+    }
+}
+
 // One ring-serve attempt: (lazily) refresh the queue deferral config, take K
 // candidates from the (queue, group) ring, call queen.log_pop_list_v1 on them,
 // check the tri-state verdicts back into the ring (§4/§6/§7), and render. An
@@ -963,7 +1009,7 @@ async fn hotlist_pop_attempt(
     let k = ((max_parts.max(1) as usize) * 8).clamp(16, 256);
     let mut cands = st.hotlist.take_batch(queue, group, k, now_ms);
     if cands.is_empty() && st.hotlist.reseed_due(queue, group, now_ms, st.hotlist_reseed_ms) {
-        hotlist_reseed_scan(st, &client, queue, group, now_ms).await;
+        hotlist_reseed_scan(&st.hotlist, &client, queue, group, now_ms).await;
         cands = st.hotlist.take_batch(queue, group, k, now_ms);
     }
     if cands.is_empty() {
@@ -975,6 +1021,25 @@ async fn hotlist_pop_attempt(
 
     let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
     let skip_window = st.hotlist.skip_window(queue);
+    let lease_ms = lease_seconds.max(1) as i64 * 1000;
+    // Cancellation-safety: take_batch marked these candidates INFLIGHT. If this
+    // pop future is DROPPED between here and checkin (a client disconnect mid
+    // pop_list — axum drops the handler future at the next await), nothing would
+    // ever re-append them: a mark / promote_ack / reseed on an INFLIGHT entry is a
+    // no-op (reseed only re-adds IDLE/INFLIGHT via the floor, but the floor is
+    // gated on an empty ring), so the partitions would be stranded out of the ring
+    // permanently. This guard re-appends them (Requeue) on an un-disarmed drop; the
+    // normal completion / DB-error paths disarm it and run the real checkin.
+    let mut guard = InflightGuard {
+        hl: st.hotlist.clone(),
+        queue: queue.to_string(),
+        group: group.to_string(),
+        cands,
+        now_ms,
+        auto_ack,
+        lease_ms,
+        armed: true,
+    };
     let cancel_token = client.cancel_token();
     let t0 = Instant::now();
     let res = tokio::time::timeout(
@@ -988,6 +1053,10 @@ async fn hotlist_pop_attempt(
     let rtt = t0.elapsed();
     st.pop_vegas.record(rtt);
     drop(permit);
+    // The await returned (not dropped) — take ownership of the candidates back and
+    // disarm the guard; every path below runs an explicit checkin.
+    guard.armed = false;
+    let cands = std::mem::take(&mut guard.cands);
 
     let (meta_txt, blobs, states_txt) =
         match db::resolve_query_timeout(res, client, cancel_token, "pop_list") {
@@ -1004,7 +1073,7 @@ async fn hotlist_pop_attempt(
                     })
                     .collect();
                 st.hotlist
-                    .checkin(queue, group, back, now_ms, auto_ack, lease_seconds.max(1) as i64 * 1000);
+                    .checkin(queue, group, back, now_ms, auto_ack, lease_ms);
                 let (b, c, m) = empty();
                 return (b, c, m, rtt);
             }
@@ -1043,7 +1112,7 @@ async fn hotlist_pop_attempt(
         })
         .collect();
     st.hotlist
-        .checkin(queue, group, results, now_ms, auto_ack, lease_seconds.max(1) as i64 * 1000);
+        .checkin(queue, group, results, now_ms, auto_ack, lease_ms);
 
     // Parse the served partitions, learn their ids (ack bridge), and render.
     let parsed: PopResult = match serde_json::from_str(&meta_txt) {
@@ -1068,8 +1137,8 @@ async fn hotlist_pop_attempt(
 // clock. This is the cold-start populator AND the correctness floor for any
 // missed mark / dropped mesh hint. Errors abandon the walk (the next attempt
 // retries) — the ring simply stays as-is, never wrong.
-async fn hotlist_reseed_scan(
-    st: &Arc<AppState>,
+pub(crate) async fn hotlist_reseed_scan(
+    hl: &crate::hotlist::HotList,
     client: &deadpool_postgres::Client,
     queue: &str,
     group: &str,
@@ -1086,14 +1155,14 @@ async fn hotlist_reseed_scan(
             break;
         }
         for (id, name) in &rows {
-            st.hotlist.reseed_row(queue, group, id, name, now_ms);
+            hl.reseed_row(queue, group, id, name, now_ms);
         }
         after = rows.last().map(|(id, _)| id.clone()).unwrap_or(after);
         if rows.len() < HOTLIST_RESEED_PAGE as usize {
             break;
         }
     }
-    st.hotlist.reseed_done(queue, group, now_ms);
+    hl.reseed_done(queue, group, now_ms);
 }
 
 // GET /api/v1/pop/queue/:queue/partition/:partition — pop from ONE named

@@ -188,6 +188,18 @@ impl Notifier {
         }
     }
 
+    /// C1 (hot-list wake coalescing): fan a committed push bundle out to peers ONLY
+    /// (the batched MESSAGE_AVAILABLE), WITHOUT the per-push local `wake_local_hint`.
+    /// With the hot-list on, the pushing broker coalesces its LOCAL wake into a ~5ms
+    /// tick (removing the O(parked consumers) notify_waiters storm), while peers still
+    /// get an immediate wake — so a mixed hot-list-on/off cluster keeps prompt
+    /// cross-broker discovery. No-op with no transport (single broker).
+    pub fn fan_out_pushed_batch(&self, keys: &[(String, String)]) {
+        if let Some(t) = self.transport.get() {
+            t.send_messages_available_batch(keys);
+        }
+    }
+
     // ---- config/maintenance change broadcasts (local state is mutated by the
     // ---- caller; these only fan the change out to peers) --------------------
 

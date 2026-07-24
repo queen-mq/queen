@@ -206,6 +206,10 @@ async fn main() {
         cfg.hotlist_enabled,
         cfg.hotlist_shards,
         cfg.hotlist_window_batch,
+        // §5: only wire the coalesced dirty-hint set when peers are configured — with
+        // no mesh the flusher never runs, so the local mark skips it (no per-push
+        // lock/alloc for a hint nobody drains).
+        cfg.sync.mesh_active(),
     );
     hotlist.attach_notifier(notifier.clone());
     if cfg.hotlist_enabled {
@@ -252,6 +256,83 @@ async fn main() {
             loop {
                 iv.tick().await;
                 hl.tick(crate::util::now_epoch_ms());
+            }
+        });
+    }
+
+    // Hot-list COALESCED local-wake tick (C1). With the flag on, the push path no
+    // longer wakes parked pops per-push (that was one notify_waiters — O(parked
+    // consumers) — per push, the residual producer-RTT gap on the VM A/B). Instead a
+    // push-path mark just flags its queue (one atomic store), and this tick issues
+    // ONE notify_waiters per marked queue every ~5ms ⇒ from ~18k wake/s down to
+    // ~100-200/s, added discovery latency ≤ one tick. It is a pure latency
+    // optimization: a parked hot-list pop re-polls on its own backoff
+    // (≤ pop_wait_max_interval_ms) regardless, so a late/stopped tick can never
+    // strand a consumer (clean by construction; aborted with the runtime on
+    // shutdown like its sibling tasks). Off ⇒ never spawned (byte-identical).
+    if cfg.hotlist_enabled {
+        let hl = hotlist.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(5));
+            loop {
+                iv.tick().await;
+                hl.wake_tick();
+            }
+        });
+    }
+
+    // Hot-list PERIODIC reseed floor (§8) — the correctness floor the spec promised.
+    // Unlike the pop-path empty-ring reseed (a fast path), this runs even when the
+    // ring is NON-empty, staggered per (queue,group) by a fixed jitter so groups that
+    // registered together (cold start) never scan in one synchronized storm. It is
+    // what recovers a partition erroneously dropped from a BUSY ring (a cross-broker
+    // uncommitted-lease false-clear, a stale-config hard-clear, a missed mark / dropped
+    // mesh hint) within one interval. The same loop emits the observability line
+    // (reseeds/s + per-(queue,group) ring sizes) for the VM A/B. Off ⇒ never spawned.
+    if cfg.hotlist_enabled {
+        let hl = hotlist.clone();
+        let pool_r = pool.clone();
+        let interval_ms = cfg.hotlist_reseed_ms;
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(2000));
+            let mut last_reseeds = 0u64;
+            let mut last_report = crate::util::now_epoch_ms();
+            loop {
+                iv.tick().await;
+                let now = crate::util::now_epoch_ms();
+                // Reseed every due (queue,group). One pooled client at a time (the
+                // floor is background — it must never storm the pool the pops need).
+                for (q, g) in hl.periodic_reseed_due(now, interval_ms) {
+                    match pool_r.get().await {
+                        Ok(client) => {
+                            crate::handlers::hotlist_reseed_scan(&hl, &client, &q, &g, now).await
+                        }
+                        Err(_) => break, // pool busy — retry next tick
+                    }
+                }
+                // Observability (~30s cadence): reseeds/s + ring sizes per (queue,group).
+                if now - last_report >= 30_000 {
+                    let reseeds = hl.reseeds.load(Relaxed);
+                    let delta = reseeds.saturating_sub(last_reseeds);
+                    let secs = ((now - last_report) as f64 / 1000.0).max(1.0);
+                    let sizes = hl.ring_sizes();
+                    let rings = sizes.len();
+                    let ready: usize = sizes.iter().map(|x| x.2).sum();
+                    let wheel: usize = sizes.iter().map(|x| x.3).sum();
+                    println!(
+                        "[hotlist] reseeds=+{delta} ({:.2}/s) rings={rings} ready={ready} \
+                         wheel={wheel} marks_local={} marks_remote={}",
+                        delta as f64 / secs,
+                        hl.marks_local.load(Relaxed),
+                        hl.marks_remote.load(Relaxed),
+                    );
+                    for (q, g, r, w) in sizes.iter().take(24) {
+                        println!("[hotlist]   {q}/{g} ready={r} wheel={w}");
+                    }
+                    last_reseeds = reseeds;
+                    last_report = now;
+                }
             }
         });
     }

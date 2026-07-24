@@ -62,6 +62,11 @@ const PAD_MS: i64 = 300;
 // §6: bounded backoff for a revisit on a deferral queue that popped empty.
 const REVISIT_MIN_MS: i64 = 50;
 const REVISIT_MAX_MS: i64 = 1000;
+// §8: max per-group phase offset for the periodic reseed floor. A fixed random
+// offset in [0, this) per (queue,group) de-synchronizes the reseed of many groups
+// that registered together (cold start), so the background floor never fires as
+// one synchronized keyset-scan storm.
+pub const RESEED_JITTER_MS: i64 = 15_000;
 
 /// A candidate handed to the handler for one SQL `log_pop_list_v1` call.
 #[derive(Clone, Debug)]
@@ -291,6 +296,9 @@ struct GroupRing {
     // reseed bookkeeping (§8): last full reseed, and a coarse round-robin cursor
     // for take() fairness across sub-rings.
     reseed_ms: Mutex<i64>,
+    // §8: fixed per-group phase offset [0, RESEED_JITTER_MS) so the periodic reseed
+    // floor of co-registered groups lands at staggered instants (never one storm).
+    reseed_jitter_ms: i64,
     take_cursor: Mutex<usize>,
 }
 
@@ -303,6 +311,7 @@ impl GroupRing {
         GroupRing {
             subs,
             reseed_ms: Mutex::new(0),
+            reseed_jitter_ms: (rand::random::<u32>() as i64) % RESEED_JITTER_MS,
             take_cursor: Mutex::new(0),
         }
     }
@@ -312,6 +321,13 @@ struct QueueState {
     intern: Mutex<QueueIntern>,
     cfg: Mutex<DeferCfg>,
     groups: Mutex<HashMap<String, Arc<GroupRing>>>,
+    // C1 wake coalescing: a push-path (quiet) mark that made a partition newly ready
+    // sets this flag (O(1), no lock/alloc — the QueueState is already in hand). The
+    // wake tick (main.rs, ~5ms) then issues ONE notify_waiters per marked queue per
+    // tick instead of one per push — the O(parked consumers) storm that was the
+    // residual producer-RTT gap. Immediate wakes (transaction / mesh-remote /
+    // wheel / promote-on-ack) bypass this and wake at once, unchanged.
+    wake_pending: std::sync::atomic::AtomicBool,
 }
 
 impl QueueState {
@@ -320,6 +336,7 @@ impl QueueState {
             intern: Mutex::new(QueueIntern::new()),
             cfg: Mutex::new(DeferCfg::default()),
             groups: Mutex::new(HashMap::new()),
+            wake_pending: std::sync::atomic::AtomicBool::new(false),
         }
     }
     fn group(&self, group: &str, shards: usize) -> Arc<GroupRing> {
@@ -341,6 +358,11 @@ pub struct HotList {
     // windowBuffer early-promotion threshold (§6): batch_count >= this ⇒ promote
     // the entry even before the window expires.
     window_batch: u32,
+    // §5: does this broker have mesh peers configured? When false the coalesced
+    // dirty(queue, partition) set is a dead end (no flusher drains it), so a local
+    // mark skips it entirely — no global-lock traffic and no per-push (Box<str>,
+    // Box<str>) allocation on a single-broker deployment.
+    mesh_active: bool,
     queues: Mutex<HashMap<String, Arc<QueueState>>>,
     notifier: OnceLock<Arc<Notifier>>,
     // Coalesced local vuoto→pending transitions, drained by main's mesh flusher
@@ -353,11 +375,12 @@ pub struct HotList {
 }
 
 impl HotList {
-    pub fn new(enabled: bool, shards: usize, window_batch: u32) -> Arc<HotList> {
+    pub fn new(enabled: bool, shards: usize, window_batch: u32, mesh_active: bool) -> Arc<HotList> {
         Arc::new(HotList {
             enabled,
             shards: shards.max(1),
             window_batch: window_batch.max(1),
+            mesh_active,
             queues: Mutex::new(HashMap::new()),
             notifier: OnceLock::new(),
             dirty: Mutex::new(HashSet::new()),
@@ -444,12 +467,15 @@ impl HotList {
         count: u32,
         now_ms: i64,
         broadcast: bool,
+        wake: bool,
     ) {
         if !self.enabled || partition.is_empty() {
             return;
         }
-        let cfg = self.cfg_of(queue);
+        // One global `queues` lookup for the whole mark (was two: a separate
+        // cfg_of + qstate each locked it — hot under the push rate).
         let s = self.qstate(queue);
+        let cfg = *s.cfg.lock().unwrap();
         let idx = s.intern.lock().unwrap().intern(partition);
         // A mark is incondizionato across every EXISTING group ring of the queue:
         // a push makes the partition pending for every consumer group already
@@ -516,32 +542,57 @@ impl HotList {
             // transition), yet the peers are exactly who need the hint. The set
             // dedups, so a partition pushed 1000× in one 20ms flush window costs one
             // hint (~tens of hints/s on a hot partition, §5). Received (remote) marks
-            // never enqueue (no re-broadcast).
-            let mut d = self.dirty.lock().unwrap();
-            // Bounded: drop the hint if the coalescing set is huge (loss is healed
-            // by the reseed floor — §5/§8).
-            if d.len() < 200_000 {
-                d.insert((queue.into(), partition.into()));
+            // never enqueue (no re-broadcast). Skipped wholesale with no peers: the
+            // flusher never runs, so the set would only cost lock traffic + a per-push
+            // allocation for nothing (single-broker fast path).
+            if self.mesh_active {
+                let mut d = self.dirty.lock().unwrap();
+                // Bounded: drop the hint if the coalescing set is huge (loss is healed
+                // by the reseed floor — §5/§8).
+                if d.len() < 200_000 {
+                    d.insert((queue.into(), partition.into()));
+                }
             }
         } else {
             self.marks_remote
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        // Wake routing. `wake=true` (transaction / mesh-remote) wakes at once — low
+        // frequency, unchanged. `wake=false` (the per-push quiet path) does NOT wake
+        // inline; it flags the queue (O(1) atomic) for the coalescing wake tick, which
+        // issues ONE notify_waiters per marked queue per ~5ms instead of one per push
+        // (the O(parked consumers) storm — C1). The parked pop's own backoff re-poll
+        // is the floor, so a late/missed tick only adds bounded latency, never a hang.
         if woke {
-            self.wake(queue);
+            if wake {
+                self.wake(queue);
+            } else {
+                s.wake_pending
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
-    /// Local mark (push / transaction commit / DLQ move): sets the partition
-    /// pending for every group ring of the queue, wakes parked pops, and (on a
-    /// vuoto→pending transition) queues a coalesced mesh dirty hint (§5).
+    /// Local mark that ALSO wakes parked pops (transaction commit / DLQ move / any
+    /// path that does not separately notify): sets the partition pending on every
+    /// group ring, wakes on a vuoto→pending transition, and (with peers) queues a
+    /// coalesced mesh dirty hint (§5).
     pub fn mark_local(&self, queue: &str, partition: &str, count: u32, now_ms: i64) {
-        self.mark_inner(queue, partition, count, now_ms, true);
+        self.mark_inner(queue, partition, count, now_ms, true, true);
     }
 
-    /// Remote mark (a peer's mesh dirty hint): same effect, no re-broadcast (§5).
+    /// Local mark WITHOUT the internal wake — for the push handler, which already
+    /// calls notify_pushed_batch (one wake per push, issued AFTER the ring is
+    /// marked). Still queues the mesh dirty hint (with peers). Avoids the redundant
+    /// second notify_waiters per push (the flag-on push-RTT regression).
+    pub fn mark_local_quiet(&self, queue: &str, partition: &str, count: u32, now_ms: i64) {
+        self.mark_inner(queue, partition, count, now_ms, true, false);
+    }
+
+    /// Remote mark (a peer's mesh dirty hint): same effect, wakes parked pops (the
+    /// receiving broker has no other wake for this), no re-broadcast (§5).
     pub fn mark_remote(&self, queue: &str, partition: &str, now_ms: i64) {
-        self.mark_inner(queue, partition, 1, now_ms, false);
+        self.mark_inner(queue, partition, 1, now_ms, false, true);
     }
 
     /// Learn a partition's id↔name (from a pop response / reseed) for the ack
@@ -704,7 +755,28 @@ impl HotList {
                     sub.batch_count[local as usize] = 0;
                     sub.wheel_schedule(local, now_ms + lease_ms.max(1) + PAD_MS);
                 }
-                Verdict::Took | Verdict::Requeue => {
+                Verdict::Took => {
+                    // auto-ack Took. §6/P3: on a pure windowBuffer queue, RE-ARM the
+                    // debounce instead of going READY — a fresh delivery means the
+                    // partition just fired, so hold it for another window before the
+                    // next probe. Going straight to READY would re-probe immediately
+                    // and deliver each subsequent message un-batched under continuous
+                    // writes (diverging from the SQL quiet-period debounce). The
+                    // batch-full early promotion (mark WHEEL branch) still fires if the
+                    // window fattens past the threshold, preserving min(window, full).
+                    // NB: a large backlog past the window is drained one budget-chunk
+                    // per window rather than promptly — acceptable for a smoothing
+                    // queue; if that latency matters, thread the delivered count and
+                    // keep READY when the batch came back full.
+                    sub.batch_count[local as usize] = 0;
+                    if cfg.window > 0 && cfg.delayed == 0 {
+                        sub.wheel_schedule(local, now_ms + cfg.window as i64 * 1000);
+                    } else {
+                        sub.ready_push_tail(local);
+                    }
+                }
+                Verdict::Requeue => {
+                    // Budget/cap-skipped, un-leased: re-append promptly (never window).
                     sub.batch_count[local as usize] = 0;
                     sub.ready_push_tail(local);
                 }
@@ -772,14 +844,99 @@ impl HotList {
         let local = idx / self.shards as u32;
         let mut sub = ring.subs[sh].lock().unwrap();
         sub.ensure(local);
-        // Only insert if currently IDLE (don't disturb a live INFLIGHT/leased entry).
-        if sub.state[local as usize] == IDLE {
+        // Re-add an untracked (IDLE) partition, OR reclaim a stray INFLIGHT one:
+        // an INFLIGHT entry whose pop was dropped between take_batch and checkin
+        // (client disconnect) is otherwise stranded forever — a mark/promote can
+        // only bump its epoch, never re-link it — so the reseed floor is its last
+        // resort. Re-adding an entry that is still genuinely in flight is a harmless
+        // false positive: the concurrent pop's checkin finds state != INFLIGHT and
+        // skips, and the redundant candidate costs at most one empty SKIP LOCKED
+        // claim (§1/§7 "stale in eccesso"). READY / WHEEL are already tracked —
+        // leave them (and their live deadlines) untouched.
+        let s = sub.state[local as usize];
+        if s == IDLE || s == INFLIGHT {
             if cfg.delayed > 0 {
                 sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + PAD_MS);
             } else {
                 sub.ready_push_tail(local);
             }
         }
+    }
+
+    /// §8 periodic floor: enumerate registered (queue, group) pairs whose reseed is
+    /// due — last reseed older than `interval_ms + per-group jitter`. Runs even when
+    /// the ring is NON-empty (the pop-path empty-ring reseed stays a fast path but is
+    /// no longer the only trigger), so a partition erroneously dropped from a busy
+    /// ring (a cross-broker uncommitted-lease false-clear, a stale-config hard-clear,
+    /// a missed mark) is recovered within one interval. Skips never-reseeded groups
+    /// (`last == 0`): those are the pop-path cold-start bootstrap's job, and firing
+    /// them here would be the cold-start scan storm the jitter exists to avoid.
+    pub fn periodic_reseed_due(&self, now_ms: i64, interval_ms: i64) -> Vec<(String, String)> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let queues: Vec<(String, Arc<QueueState>)> = {
+            self.queues
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (qname, s) in queues {
+            let groups: Vec<(String, Arc<GroupRing>)> = {
+                s.groups
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            };
+            for (gname, ring) in groups {
+                let last = *ring.reseed_ms.lock().unwrap();
+                if last != 0 && now_ms - last >= interval_ms + ring.reseed_jitter_ms {
+                    out.push((qname.clone(), gname));
+                }
+            }
+        }
+        out
+    }
+
+    /// Observability (§10 / VM plan): per (queue, group) ring sizes —
+    /// (queue, group, ready_len, wheel_len). `ready_len` is exact; `wheel_len` is the
+    /// heap length (an upper bound — it includes not-yet-drained stale entries).
+    pub fn ring_sizes(&self) -> Vec<(String, String, usize, usize)> {
+        let queues: Vec<(String, Arc<QueueState>)> = {
+            self.queues
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (qname, s) in queues {
+            let groups: Vec<(String, Arc<GroupRing>)> = {
+                s.groups
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            };
+            for (gname, ring) in groups {
+                let mut ready = 0usize;
+                let mut wheel = 0usize;
+                for sub in ring.subs.iter() {
+                    let sg = sub.lock().unwrap();
+                    ready += sg.len_ready;
+                    wheel += sg.wheel.len();
+                }
+                out.push((qname.clone(), gname, ready, wheel));
+            }
+        }
+        out
     }
 
     /// Mark this (queue, group) reseeded at `now_ms` (resets the interval clock)
@@ -826,6 +983,35 @@ impl HotList {
         }
     }
 
+    /// Coalesced local wake (C1): wake the queue gate of every queue that received a
+    /// push-path (quiet) mark since the last tick — ONE notify_waiters per marked
+    /// queue, vs one per push. Run every ~5ms by main. Returns the number of queues
+    /// woken (for tests/observability). Immediate wakes (transaction / mesh-remote /
+    /// wheel / promote-on-ack) do not flow through here. The parked pop's own backoff
+    /// re-poll (≤ pop_wait_max_interval_ms) is the correctness floor, so this is a
+    /// latency optimization only — a stalled/late tick can never strand a consumer.
+    pub fn wake_tick(&self) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+        let queues: Vec<(String, Arc<QueueState>)> = {
+            self.queues
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let mut woke = 0;
+        for (qname, s) in queues {
+            if s.wake_pending.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.wake(&qname);
+                woke += 1;
+            }
+        }
+        woke
+    }
+
     /// Register a (queue, group) so subsequent marks reach it. A consumer's first
     /// wildcard poll implicitly does this via [`take_batch`]; a mark for a group
     /// with no ring is a no-op (the group discovers via reseed on first poll, §8),
@@ -869,12 +1055,13 @@ impl HotList {
 mod tests {
     use super::*;
 
+    // mesh_active=true so the dirty-hint tests exercise the coalescing set.
     fn hl() -> Arc<HotList> {
-        HotList::new(true, 4, 100)
+        HotList::new(true, 4, 100, true)
     }
     // single-shard variant makes ring order deterministic for the ordering tests.
     fn hl1() -> Arc<HotList> {
-        HotList::new(true, 1, 100)
+        HotList::new(true, 1, 100, true)
     }
 
     fn names(c: &[Candidate]) -> Vec<String> {
@@ -890,7 +1077,7 @@ mod tests {
 
     #[test]
     fn disabled_is_all_noop() {
-        let h = HotList::new(false, 4, 100);
+        let h = HotList::new(false, 4, 100, true);
         h.ensure_group("q", "g");
         h.mark_local("q", "p0", 1, 0);
         assert!(h.take_batch("q", "g", 10, 0).is_empty());
@@ -1210,12 +1397,181 @@ mod tests {
         assert!(h.drain_dirty(100).is_empty()); // drained
     }
 
+    // The push-path quiet mark still populates the ring (a woken pop finds the
+    // candidate) but does NOT itself wake — the push handler's notify_pushed_batch
+    // is the single wake. It still queues the mesh dirty hint (with peers). This is
+    // the flag-on push-RTT fix: no redundant second per-push notify_waiters storm.
+    #[test]
+    fn quiet_mark_populates_ring_and_dirty_without_waking() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.mark_local_quiet("q", "p0", 1, 0);
+        // ring is populated — a subsequent take (as a woken pop would do) sees it.
+        assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p0"]);
+        // the mesh dirty hint is still enqueued (peers, if any, get it).
+        assert_eq!(h.drain_dirty(10), vec![("q".to_string(), "p0".to_string())]);
+    }
+
+    // C1 wake coalescing: a push-path (quiet) mark flags its queue for the wake tick
+    // instead of waking inline; the tick issues ONE wake per marked queue no matter
+    // how many marks landed. mark→wake within a tick; no wake without a mark; a burst
+    // of 10k marks coalesces to a single wake; the flag is consumed each tick.
+    #[test]
+    fn wake_tick_coalesces_marks_into_one_wake() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        // No mark since the last tick ⇒ nothing to wake.
+        assert_eq!(h.wake_tick(), 0, "no mark ⇒ no wake");
+        // A single quiet mark (new partition ⇒ IDLE→READY) flags the queue.
+        h.mark_local_quiet("q", "p0", 1, 0);
+        assert_eq!(h.wake_tick(), 1, "mark ⇒ exactly one wake within a tick");
+        // The flag is consumed: a second tick with no new mark wakes nobody.
+        assert_eq!(h.wake_tick(), 0, "flag consumed ⇒ no repeat wake");
+        // A burst of 10k marks across distinct partitions still coalesces to ONE wake.
+        for i in 0..10_000 {
+            h.mark_local_quiet("q", &format!("b{i}"), 1, 0);
+        }
+        assert_eq!(h.wake_tick(), 1, "10k marks ⇒ one coalesced wake");
+        assert_eq!(h.wake_tick(), 0);
+    }
+
+    // The immediate-wake marks (transaction commit via mark_local, mesh-remote via
+    // mark_remote) wake AT ONCE and must NOT also flag the coalescing tick — the tick
+    // is exclusively the per-push quiet path. (Wheel promotions and promote-on-ack
+    // likewise wake immediately and never touch wake_pending.)
+    #[test]
+    fn immediate_wake_marks_do_not_flag_the_tick() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.mark_local("q", "p0", 1, 0); // wake=true ⇒ immediate, no tick flag
+        h.mark_remote("q", "p1", 0); // wake=true ⇒ immediate, no tick flag
+        assert_eq!(h.wake_tick(), 0, "immediate-wake marks must not flag the tick");
+    }
+
+    // With no peers configured, a local mark skips the dirty-hint set entirely (no
+    // flusher would ever drain it) — no per-push lock/alloc on a single broker.
+    #[test]
+    fn no_peers_skips_dirty_set() {
+        let h = HotList::new(true, 1, 100, false); // mesh_active = false
+        reg(&h, "q", "g");
+        h.mark_local("q", "p0", 1, 0);
+        // still marks the ring (discovery works locally)…
+        assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p0"]);
+        // …but nothing was queued for a mesh that isn't there.
+        assert!(h.drain_dirty(10).is_empty());
+    }
+
     #[test]
     fn remote_mark_makes_candidate_discoverable() {
         let h = hl1();
         reg(&h, "q", "g");
         h.mark_remote("q", "p9", 0);
         assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p9"]);
+    }
+
+    // Regression (P1 — periodic floor under load). A partition IDLE-cleared while it
+    // still had backlog — the HA race: a peer leased it with an UNcommitted txn, so
+    // our tri-state leased-probe read the pre-lease committed row (worker NULL) →
+    // verdict `empty` → the epoch-CAS cleared it (no mark raced) — must be recovered
+    // by the PERIODIC reseed, which fires even though the ring is NON-empty (other
+    // partitions keep it busy, so the pop-path empty-ring reseed would never run).
+    #[test]
+    fn periodic_reseed_recovers_idle_cleared_partition_under_load() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        // Steady state: the group has completed at least one reseed at t=100
+        // (last != 0; a t=0 stamp would read as "never reseeded" and be excluded).
+        let base = 100i64;
+        h.reseed_done("q", "g", base);
+        h.mark_local("q", "p_keep", 1, base); // a continuously-written partition
+        h.mark_local("q", "p_lost", 1, base); // has backlog, about to be falsely cleared
+        let c = h.take_batch("q", "g", 2, base);
+        assert_eq!(names(&c), vec!["p_keep", "p_lost"]);
+        // p_keep took (→ ready), p_lost false-empty (→ IDLE-cleared). No mark raced,
+        // so the epoch-CAS clears p_lost.
+        h.checkin(
+            "q",
+            "g",
+            vec![
+                CheckinResult { name: "p_keep".into(), epoch: c[0].epoch, verdict: Verdict::Took },
+                CheckinResult { name: "p_lost".into(), epoch: c[1].epoch, verdict: Verdict::Empty },
+            ],
+            base,
+            true,
+            60_000,
+        );
+        // The ring is NON-empty (p_keep is ready) ⇒ the pop-path empty-ring reseed
+        // can NEVER trigger. ring_sizes confirms it (and exercises the observability
+        // snapshot the VM log line uses).
+        assert_eq!(h.ring_sizes()[0].2, 1, "ring must be non-empty (p_keep ready)");
+        // Not due before the interval; due after interval + the max per-group jitter,
+        // regardless of the busy ring.
+        assert!(h.periodic_reseed_due(base + 1_000, 30_000).is_empty());
+        let due_at = base + 30_000 + RESEED_JITTER_MS + 1;
+        assert_eq!(
+            h.periodic_reseed_due(due_at, 30_000),
+            vec![("q".to_string(), "g".to_string())],
+            "periodic floor must be due even with a non-empty ring"
+        );
+        // The background task runs the keyset scan: reseed_row for the still-pending
+        // p_lost (exactly what log_hotlist_reseed_v1 returns: last_offset>committed).
+        h.reseed_row("q", "g", "id_lost", "p_lost", due_at);
+        h.reseed_done("q", "g", due_at);
+        let got: HashSet<String> = names(&h.take_batch("q", "g", 5, due_at)).into_iter().collect();
+        assert!(
+            got.contains("p_lost"),
+            "periodic reseed must recover the cleared partition; got {got:?}"
+        );
+    }
+
+    // Regression (P3 — windowBuffer re-arm). On a pure windowBuffer queue, an
+    // auto-ack Took must RE-ARM the debounce (re-enter the wheel at now+window), not
+    // go straight to READY — otherwise every subsequent message is delivered
+    // un-batched under continuous writes.
+    #[test]
+    fn window_took_rearms_the_wheel_not_ready() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0); // windowBuffer 5s, no delayed
+        h.mark_local("q", "p0", 10, 0); // small batch → wheel
+        h.tick(5100); // window fires → ready
+        let c = h.take_batch("q", "g", 1, 5100);
+        assert_eq!(names(&c), vec!["p0"]);
+        // auto-ack Took: must re-arm the window (wheel at 5100+5000), NOT go READY.
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            5100,
+            true,
+            60_000,
+        );
+        assert!(
+            h.take_batch("q", "g", 1, 5200).is_empty(),
+            "windowBuffer must re-arm, not re-probe immediately"
+        );
+        // Claimable again only after the next window.
+        h.tick(10_300);
+        assert_eq!(names(&h.take_batch("q", "g", 1, 10_300)), vec!["p0"]);
+    }
+
+    // Guard: a NON-window queue's auto-ack Took still re-appends to READY at once
+    // (the P3 re-arm is scoped to windowBuffer — no behavioural change elsewhere).
+    #[test]
+    fn non_window_took_still_goes_ready() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.mark_local("q", "p0", 1, 0);
+        let c = h.take_batch("q", "g", 1, 0);
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            0,
+            true,
+            60_000,
+        );
+        assert_eq!(names(&h.take_batch("q", "g", 1, 0)), vec!["p0"], "no window ⇒ immediate READY");
     }
 
     #[test]
@@ -1243,6 +1599,64 @@ mod tests {
         // all distinct
         let set: HashSet<String> = names(&c).into_iter().collect();
         assert_eq!(set.len(), 40);
+    }
+
+    // Regression (cancellation strand): a candidate taken from the ring but never
+    // checked back in (the pop future was dropped mid-dispatch) is stuck INFLIGHT.
+    // A mark on it only bumps the epoch (no re-link), so it is invisible to every
+    // pop — until the reseed floor RECLAIMS it. Without the reseed INFLIGHT-reclaim
+    // this partition would be stranded permanently.
+    #[test]
+    fn leaked_inflight_is_reclaimed_by_reseed() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.mark_local("q", "p0", 1, 0);
+        // take_batch marks p0 INFLIGHT; we deliberately never checkin (leak).
+        let c = h.take_batch("q", "g", 1, 0);
+        assert_eq!(names(&c), vec!["p0"]);
+        // Stuck: not claimable, and a fresh mark cannot re-link an INFLIGHT entry.
+        assert!(h.take_batch("q", "g", 1, 0).is_empty());
+        h.mark_local("q", "p0", 1, 0); // epoch bump only — still not in the ring
+        assert!(h.take_batch("q", "g", 1, 0).is_empty(), "mark cannot re-add INFLIGHT");
+        // The reseed floor re-adds the still-pending partition (last_offset>committed).
+        h.reseed_row("q", "g", "id0", "p0", 0);
+        h.reseed_done("q", "g", 0);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 0)),
+            vec!["p0"],
+            "reseed floor must reclaim a leaked INFLIGHT partition"
+        );
+    }
+
+    // A reseed that re-adds a genuinely in-flight entry (concurrent real pop) is a
+    // safe false positive: the entry is re-served (redundant), and the ORIGINAL
+    // pop's checkin becomes a no-op because the state is no longer the INFLIGHT it
+    // checked out — no double-link / no ring corruption.
+    #[test]
+    fn reseed_reclaim_then_original_checkin_is_noop() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.mark_local("q", "p0", 1, 0);
+        let c = h.take_batch("q", "g", 1, 0); // p0 INFLIGHT, epoch snapshot
+        // reseed reclaims it back to READY while the "pop" is still in flight.
+        h.reseed_row("q", "g", "id0", "p0", 0);
+        h.reseed_done("q", "g", 0);
+        // A second pop can now take it (redundant probe — allowed).
+        assert_eq!(names(&h.take_batch("q", "g", 1, 0)), vec!["p0"]);
+        // The original pop finally checks in Took: state is INFLIGHT (the 2nd pop's),
+        // NOT the one it checked out — checkin acts on it once, no corruption. Then
+        // the ring is consistent: exactly one entry, takeable after re-append.
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            0,
+            true,
+            60_000,
+        );
+        // Whatever the interleaving, p0 appears at most once (no duplicate links).
+        let got = names(&h.take_batch("q", "g", 5, 0));
+        assert!(got == vec!["p0"] || got.is_empty(), "no duplicate ring entry: {got:?}");
     }
 
     #[test]
