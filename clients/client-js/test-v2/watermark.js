@@ -1,25 +1,36 @@
 /**
- * Watermark Bug Tests
+ * Seek / delete re-consumption tests (behaviour, not bookkeeping)
  *
- * These tests verify that consumer_watermarks are properly reset when:
- * 1. Seeking a consumer group backwards to a timestamp
- * 2. Deleting a consumer group (watermark should be cleaned up)
+ * These tests verify the BEHAVIOUR a user cares about:
+ *   1. Seeking a consumer group backwards re-exposes the old messages, and the
+ *      group re-consumes them from the start within a short bound.
+ *   2. Deleting a consumer group (all queues, or for one queue) lets a group of
+ *      the same name consume every message again from the start.
  *
- * The consumer_watermarks table optimizes POP by tracking when a consumer
- * last found the queue empty. However, if the watermark isn't reset when
- * the cursor moves backwards, old messages become invisible.
+ * WHY THIS WAS REWRITTEN (2026-07-24)
+ * -----------------------------------
+ * The consumer_watermarks table is a LEGACY-path optimisation: it records when a
+ * consumer last found a queue empty so an indexed empty-scan can be skipped. The
+ * original tests asserted the *row* was created after an empty poll and then aged
+ * it to exercise the 2-minute buffer:
+ *     pl.updated_at >= (v_watermark - interval '2 minutes')
  *
- * BUG: Currently, seek and delete operations don't touch consumer_watermarks,
- * causing re-consumption to fail silently.
+ * With the wildcard hot-list ON (QUEEN_HOTLIST=1, the default) empty polls are
+ * answered from the in-memory candidate ring and that bookkeeping row is NEVER
+ * written — by design, not a bug: the ring, not the watermark, is the discovery
+ * source. So asserting the row exists fails on the hot-list path even though
+ * re-consumption works perfectly.
  *
- * IMPORTANT: The watermark filter has a 2-minute buffer:
- *   pl.updated_at >= (v_watermark - interval '2 minutes')
- *
- * So the bug only manifests after 2+ minutes have passed. To test this without
- * waiting, we directly manipulate the watermark timestamp in the database.
+ * The behaviour is identical on both engines, so these tests now assert the
+ * behaviour directly and only exercise the watermark-age scenario on the LEGACY
+ * path — detected at runtime by whether the empty poll actually wrote the row
+ * (no env flag needed). On the hot-list path the broker's seek/delete handlers
+ * re-seed / invalidate the ring so the reconsume is immediate; the idle-bounded
+ * consume below (idleMillis 3000) is what proves "within a short bound".
  *
  * Run: node run.js seekBackwardsAllowsReconsume
  *      node run.js deleteConsumerGroupAllowsReconsume
+ *      node run.js deleteConsumerGroupForQueueAllowsReconsume
  */
 
 import { dbPool } from './run.js'
@@ -151,20 +162,20 @@ export async function seekBackwardsAllowsReconsume(client) {
 
     console.log(`  Verified queue is empty (watermark should be set)`)
 
-    // 6. Check watermark was created
+    // 6. Detect which discovery path we are on. On the LEGACY path the empty poll
+    //    wrote a consumer_watermarks row; on the hot-list path it did not (empty
+    //    polls are served from the ring — by design). We do NOT assert the row: it
+    //    is a path-specific bookkeeping detail, not the behaviour under test.
     const watermarkBefore = await getWatermark(QUEUE_NAME_SEEK, consumerGroup)
-    if (!watermarkBefore) {
-        return {
-            success: false,
-            message: 'Watermark was not created after empty queue check'
-        }
+    if (watermarkBefore) {
+        // Legacy path: age the watermark 10 minutes into the future so the old
+        // partitions fall outside the 2-minute buffer — the original repro that
+        // proves seek must reset the watermark.
+        const advancedWatermark = await advanceWatermark(QUEUE_NAME_SEEK, consumerGroup, 10)
+        console.log(`  [legacy] Watermark row exists; advanced to ${advancedWatermark.last_empty_scan_at} (10m future)`)
+    } else {
+        console.log(`  [hotlist] No watermark row (empty polls served from the ring) — skipping the watermark-age step`)
     }
-    console.log(`  Watermark exists: last_empty_scan_at = ${watermarkBefore.last_empty_scan_at}`)
-
-    // 7. CRITICAL: Advance the watermark forward to simulate that partitions are "old"
-    //    relative to the watermark. This triggers the bug where old partitions are filtered out.
-    const advancedWatermark = await advanceWatermark(QUEUE_NAME_SEEK, consumerGroup, 10)
-    console.log(`  Advanced watermark to: ${advancedWatermark.last_empty_scan_at} (10 minutes in future)`)
 
     // 8. Seek backwards to BEFORE the messages were pushed
     console.log(`  Seeking to timestamp: ${timestampBeforeMessages}`)
@@ -203,12 +214,17 @@ export async function seekBackwardsAllowsReconsume(client) {
 
     console.log(`  Second consume (after seek): ${secondConsumeCount} messages`)
 
-    // 11. Verify we got all messages back
+    // 11. Verify we got all messages back within the idle-bounded consume above.
+    //     A shortfall means the backward seek did not re-expose the messages
+    //     promptly: on the legacy path the consumer_watermarks row was not reset
+    //     (still at ${watermarkAfterSeek?.last_empty_scan_at}); on the hot-list path
+    //     the ring was not re-seeded, so reconsume would only resume at the ≤30s
+    //     periodic floor instead of immediately.
     if (secondConsumeCount !== messageCount) {
         return {
             success: false,
-            message: `After seek backwards, should re-consume ${messageCount} messages, but got ${secondConsumeCount}. ` +
-                     `This is because consumer_watermarks was not reset on seek (watermark still at ${watermarkAfterSeek?.last_empty_scan_at}).`
+            message: `After seek backwards, should re-consume ${messageCount} messages within the idle window, but got ${secondConsumeCount}. ` +
+                     `(legacy watermark after seek: ${watermarkAfterSeek?.last_empty_scan_at})`
         }
     }
 
@@ -304,19 +320,17 @@ export async function deleteConsumerGroupAllowsReconsume(client) {
 
     console.log(`  Verified queue is empty (watermark should be set)`)
 
-    // 5. Check watermark was created
+    // 5. Detect the discovery path (see seekBackwardsAllowsReconsume). The
+    //    watermark row is a legacy-path artefact, not the behaviour under test, so
+    //    we do not assert it — we only exercise the watermark-age scenario when the
+    //    row was actually written (legacy path).
     const watermarkBefore = await getWatermark(QUEUE_NAME_DELETE, consumerGroup)
-    if (!watermarkBefore) {
-        return {
-            success: false,
-            message: 'Watermark was not created after empty queue check'
-        }
+    if (watermarkBefore) {
+        const advancedWatermark = await advanceWatermark(QUEUE_NAME_DELETE, consumerGroup, 10)
+        console.log(`  [legacy] Watermark row exists; advanced to ${advancedWatermark.last_empty_scan_at} (10m future)`)
+    } else {
+        console.log(`  [hotlist] No watermark row (empty polls served from the ring) — skipping the watermark-age step`)
     }
-    console.log(`  Watermark exists: last_empty_scan_at = ${watermarkBefore.last_empty_scan_at}`)
-
-    // 6. CRITICAL: Advance the watermark forward to simulate that partitions are "old"
-    const advancedWatermark = await advanceWatermark(QUEUE_NAME_DELETE, consumerGroup, 10)
-    console.log(`  Advanced watermark to: ${advancedWatermark.last_empty_scan_at} (10 minutes in future)`)
 
     // 7. Delete the consumer group
     console.log(`  Deleting consumer group: ${consumerGroup}`)
@@ -353,12 +367,16 @@ export async function deleteConsumerGroupAllowsReconsume(client) {
 
     console.log(`  Second consume (after delete + recreate): ${secondConsumeCount} messages`)
 
-    // 10. Verify we got all messages
+    // 10. Verify we got all messages within the idle-bounded consume above. A
+    //     shortfall means the delete left stale discovery state: a legacy orphaned
+    //     watermark (at ${watermarkAfterDelete?.last_empty_scan_at}), or, on the
+    //     hot-list path, a surviving group ring / stale seeded-groups cache that
+    //     suppressed the from-the-start reconsume.
     if (secondConsumeCount !== messageCount) {
         return {
             success: false,
-            message: `After deleting CG, new CG with same name should consume ${messageCount} messages, ` +
-                     `but got ${secondConsumeCount}. Orphaned watermark at ${watermarkAfterDelete?.last_empty_scan_at}.`
+            message: `After deleting CG, new CG with same name should consume ${messageCount} messages within the idle window, ` +
+                     `but got ${secondConsumeCount}. (legacy watermark after delete: ${watermarkAfterDelete?.last_empty_scan_at})`
         }
     }
 
@@ -446,19 +464,15 @@ export async function deleteConsumerGroupForQueueAllowsReconsume(client) {
 
     console.log(`  Verified queue is empty (watermark should be set)`)
 
-    // 5. Check watermark was created
+    // 5. Detect the discovery path (see seekBackwardsAllowsReconsume). The
+    //    watermark row is a legacy-path artefact, not the behaviour under test.
     const watermarkBefore = await getWatermark(queueName, consumerGroup)
-    if (!watermarkBefore) {
-        return {
-            success: false,
-            message: 'Watermark was not created after empty queue check'
-        }
+    if (watermarkBefore) {
+        const advancedWatermark = await advanceWatermark(queueName, consumerGroup, 10)
+        console.log(`  [legacy] Watermark row exists; advanced to ${advancedWatermark.last_empty_scan_at} (10m future)`)
+    } else {
+        console.log(`  [hotlist] No watermark row (empty polls served from the ring) — skipping the watermark-age step`)
     }
-    console.log(`  Watermark exists: last_empty_scan_at = ${watermarkBefore.last_empty_scan_at}`)
-
-    // 6. CRITICAL: Advance the watermark forward
-    const advancedWatermark = await advanceWatermark(queueName, consumerGroup, 10)
-    console.log(`  Advanced watermark to: ${advancedWatermark.last_empty_scan_at} (10 minutes in future)`)
 
     // 7. Delete consumer group for this specific queue
     console.log(`  Deleting consumer group for queue: ${consumerGroup} / ${queueName}`)
@@ -495,8 +509,8 @@ export async function deleteConsumerGroupForQueueAllowsReconsume(client) {
     if (secondConsumeCount !== messageCount) {
         return {
             success: false,
-            message: `After deleting CG for queue, should consume ${messageCount} messages, ` +
-                     `but got ${secondConsumeCount}. Orphaned watermark at ${watermarkAfterDelete?.last_empty_scan_at}.`
+            message: `After deleting CG for queue, should consume ${messageCount} messages within the idle window, ` +
+                     `but got ${secondConsumeCount}. (legacy watermark after delete: ${watermarkAfterDelete?.last_empty_scan_at})`
         }
     }
 

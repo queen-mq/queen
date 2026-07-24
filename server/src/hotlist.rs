@@ -94,6 +94,11 @@ pub struct CheckinResult {
     pub name: String,
     pub epoch: u32,
     pub verdict: Verdict,
+    /// Took only (spec §2): the claim exhausted the partition's visible backlog
+    /// (served batch_end reached the claim-time allocator watermark). Gates the
+    /// covered-ack clear: a non-drained Took must PROMOTE on ack — batch_count
+    /// alone misses pre-existing backlog (the 2026-07-24 manualAck stall).
+    pub drained: bool,
 }
 
 /// A queue's deferral config, cached broker-side with a TTL (§6). `delayed` and
@@ -175,6 +180,7 @@ struct SubRing {
     state: Vec<u8>,
     revisit_at: Vec<i64>,
     batch_count: Vec<u32>,
+    drained: Vec<bool>,
     ready_head: u32, // shard-local pos, NIL if empty
     ready_tail: u32,
     // (revisit_at snapshot, local pos). Stale entries (state changed or
@@ -189,6 +195,7 @@ impl SubRing {
             next: Vec::new(),
             prev: Vec::new(),
             epoch: Vec::new(),
+            drained: Vec::new(),
             state: Vec::new(),
             revisit_at: Vec::new(),
             batch_count: Vec::new(),
@@ -209,6 +216,7 @@ impl SubRing {
             self.state.resize(need, IDLE);
             self.revisit_at.resize(need, 0);
             self.batch_count.resize(need, 0);
+            self.drained.resize(need, false);
         }
     }
 
@@ -365,6 +373,7 @@ pub struct HotList {
     mesh_active: bool,
     queues: Mutex<HashMap<String, Arc<QueueState>>>,
     notifier: OnceLock<Arc<Notifier>>,
+    trace_prefix: Option<String>,
     // Coalesced local vuoto→pending transitions, drained by main's mesh flusher
     // (§5). Received (remote) marks never enqueue here (no re-broadcast).
     dirty: Mutex<HashSet<(Box<str>, Box<str>)>>,
@@ -383,6 +392,7 @@ impl HotList {
             mesh_active,
             queues: Mutex::new(HashMap::new()),
             notifier: OnceLock::new(),
+            trace_prefix: std::env::var("QUEEN_HOTLIST_TRACE").ok().filter(|v| !v.is_empty()),
             dirty: Mutex::new(HashSet::new()),
             reseeds: std::sync::atomic::AtomicU64::new(0),
             marks_local: std::sync::atomic::AtomicU64::new(0),
@@ -400,6 +410,16 @@ impl HotList {
     }
 
     #[inline]
+    /// Env-gated chain trace (QUEEN_HOTLIST_TRACE=<queue-prefix>): bounded-volume
+    /// mark/wake/serve breadcrumbs for latency debugging. Default: off, zero cost
+    /// beyond one Option check.
+    pub fn traced(&self, queue: &str) -> bool {
+        match &self.trace_prefix {
+            Some(p) => queue.starts_with(p.as_str()),
+            None => false,
+        }
+    }
+
     fn wake(&self, queue: &str) {
         if let Some(n) = self.notifier.get() {
             // Empty partition hint = wake the queue gate only (no targeted hint).
@@ -488,6 +508,10 @@ impl HotList {
             let local = idx / self.shards as u32;
             let mut sub = ring.subs[sh].lock().unwrap();
             sub.ensure(local);
+            if self.trace_prefix.is_some() && self.traced(queue) {
+                eprintln!("[hlt] mark q={} p={} st={} t={}", queue, partition,
+                    sub.state[local as usize], crate::hotlist::trace_now_ms());
+            }
             sub.epoch[local as usize] = sub.epoch[local as usize].wrapping_add(1);
             sub.batch_count[local as usize] =
                 sub.batch_count[local as usize].saturating_add(count);
@@ -610,7 +634,14 @@ impl HotList {
     /// promote it to ready NOW + wake, so the batch is claimable immediately
     /// instead of at lease expiry. No-op when the id/queue/entry is unknown
     /// (the empty-path CAS / reseed floor still covers it).
-    pub fn promote_ack(&self, queue: &str, group: &str, partition_id: &str, now_ms: i64) {
+    pub fn promote_ack(
+        &self,
+        queue: &str,
+        group: &str,
+        partition_id: &str,
+        now_ms: i64,
+        covered: bool,
+    ) {
         if !self.enabled {
             return;
         }
@@ -638,10 +669,28 @@ impl HotList {
         let _ = now_ms;
         match sub.state[local as usize] {
             WHEEL => {
-                sub.revisit_at[local as usize] = 0;
-                sub.ready_push_tail(local);
-                drop(sub);
-                self.wake(queue);
+                // Spec §2 clear-su-ack: a COVERED ack (whole leased batch completed)
+                // with NO marks since the Took parking (batch_count==0; the Took
+                // reset is epoch-guarded, so an in-lease mark always survives here)
+                // means the partition is caught up — clear to IDLE instead of
+                // promoting. The unconditional promote was measured (2026-07-24 VM
+                // trace) to induce one guaranteed-empty probe per delivery: 2x
+                // attempts per message = the vegas admission queue at 10k queues
+                // (~250ms of woken→served wait). A NACK/partial release
+                // (covered=false) always promotes: the batch itself is
+                // redeliverable content.
+                if covered
+                    && sub.batch_count[local as usize] == 0
+                    && sub.drained[local as usize]
+                {
+                    sub.revisit_at[local as usize] = 0;
+                    sub.state[local as usize] = IDLE; // stale heap entry skips lazily
+                } else {
+                    sub.revisit_at[local as usize] = 0;
+                    sub.ready_push_tail(local);
+                    drop(sub);
+                    self.wake(queue);
+                }
             }
             INFLIGHT => {
                 // ack during an in-flight pop of the same partition: bump epoch so
@@ -686,6 +735,14 @@ impl HotList {
                 Some(local) => {
                     empty_streak = 0;
                     sub.state[local as usize] = INFLIGHT;
+                    // drained is a claim-scoped fact: reset here so only THIS
+                    // claim's Took checkin can re-assert it. Without the reset a
+                    // racing Leased checkin (10 concurrent poppers, one winner)
+                    // can park the entry while a STALE drained=true from an older
+                    // cycle survives — the next covered ack would then clear a
+                    // backlogged partition (measured 2026-07-24: the intermittent
+                    // testConsumerOrderingConcurrency stall).
+                    sub.drained[local as usize] = false;
                     let ep = sub.epoch[local as usize];
                     let global = local * self.shards as u32 + sh as u32;
                     if let Some(name) = intern.name_of(global) {
@@ -784,11 +841,20 @@ impl HotList {
                 Verdict::Took if !auto_ack => {
                     // Leased by us: hold it out of the ready ring until our ack's
                     // promote (or, on a missed ack, the lease-expiry revisit, §7).
-                    sub.batch_count[local as usize] = 0;
+                    // batch_count reset is EPOCH-GUARDED: a mark that raced in
+                    // between our claim and this checkin bumped the epoch and its
+                    // count must survive — it is the clear-su-ack signal that new
+                    // content arrived during the lease (promote, don't clear).
+                    if sub.epoch[local as usize] == r.epoch {
+                        sub.batch_count[local as usize] = 0;
+                    }
+                    // Claim-time fact, stored unconditionally: the covered-ack
+                    // clear may only fire on a drained claim (spec §2).
+                    sub.drained[local as usize] = r.drained;
                     sub.wheel_schedule(local, now_ms + lease_ms.max(1) + PAD_MS);
                 }
                 Verdict::Took => {
-                    // auto-ack Took. §6/P3: on a pure windowBuffer queue, RE-ARM the
+                    // auto-ack Took (same epoch guard as the leased arm above).
                     // debounce instead of going READY — a fresh delivery means the
                     // partition just fired, so hold it for another window before the
                     // next probe. Going straight to READY would re-probe immediately
@@ -800,7 +866,9 @@ impl HotList {
                     // per window rather than promptly — acceptable for a smoothing
                     // queue; if that latency matters, thread the delivered count and
                     // keep READY when the batch came back full.
-                    sub.batch_count[local as usize] = 0;
+                    if sub.epoch[local as usize] == r.epoch {
+                        sub.batch_count[local as usize] = 0;
+                    }
                     if cfg.window > 0 && cfg.delayed == 0 {
                         sub.wheel_schedule(local, now_ms + cfg.window as i64 * 1000);
                     } else {
@@ -1056,6 +1124,9 @@ impl HotList {
         let mut woke = 0;
         for (qname, s) in queues {
             if s.wake_pending.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                if self.traced(&qname) {
+                    eprintln!("[hlt] tickwake q={} t={}", qname, trace_now_ms());
+                }
                 self.wake(&qname);
                 woke += 1;
             }
@@ -1074,6 +1145,54 @@ impl HotList {
         }
         let s = self.qstate(queue);
         let _ = s.group(group, self.shards);
+    }
+
+    /// Invalidate the hot-list ring of a deleted consumer group FOR ONE QUEUE
+    /// (the delete-consumer-group-for-queue admin op). Drops the group's per-queue
+    /// ring wholesale — its ready list, wheel, reseed clock and every stale
+    /// IDLE/READY/WHEEL/INFLIGHT entry — so no pre-delete state survives to mask
+    /// the post-delete reconsume; the group re-registers and reseeds from committed
+    /// PG state on first contact (§8), which is the whole point of the delete. The
+    /// per-queue interning is shared with the queue's OTHER groups, so it is left
+    /// intact (an id↔name memo is never wrong, only unused). Wakes the queue so a
+    /// parked pop of this group re-polls at once (routing through first-contact).
+    /// Over-forgetting is a harmless cold-start; the danger the caller guards
+    /// against is a SURVIVING stale ring that hides the reconsume until the
+    /// periodic floor.
+    pub fn forget_group(&self, queue: &str, group: &str) {
+        if !self.enabled {
+            return;
+        }
+        if let Some(s) = self.qstate_existing(queue) {
+            let removed = s.groups.lock().unwrap().remove(group).is_some();
+            if removed {
+                self.wake(queue);
+            }
+        }
+    }
+
+    /// Invalidate the hot-list ring of a deleted consumer group ACROSS EVERY QUEUE
+    /// (the delete-consumer-group admin op, all queues). Same rationale as
+    /// [`forget_group`], applied to every queue that currently holds a ring for the
+    /// group; each such queue is woken.
+    pub fn forget_group_all_queues(&self, group: &str) {
+        if !self.enabled {
+            return;
+        }
+        let queues: Vec<(String, Arc<QueueState>)> = {
+            self.queues
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        for (qname, s) in queues {
+            let removed = s.groups.lock().unwrap().remove(group).is_some();
+            if removed {
+                self.wake(&qname);
+            }
+        }
     }
 
     /// Drain up to `max` coalesced local dirty transitions for the mesh flusher
@@ -1239,6 +1358,7 @@ mod tests {
                 name: x.name.clone(),
                 epoch: x.epoch,
                 verdict: Verdict::Took,
+                drained: false,
             })
             .collect();
         h.checkin("q", "g", res, 0, true, 60_000);
@@ -1266,6 +1386,7 @@ mod tests {
                 name: "p0".into(),
                 epoch: c[0].epoch,
                 verdict: Verdict::Took,
+                drained: false,
             }],
             100,
             false,
@@ -1274,8 +1395,149 @@ mod tests {
         // not immediately re-claimable (we hold the lease)
         assert!(h.take_batch("q", "g", 1, 200).is_empty());
         // our ack releases the lease → promote pulls it back at once
-        h.promote_ack("q", "g", "id0", 300);
+        h.promote_ack("q", "g", "id0", 300, false);
         assert_eq!(names(&h.take_batch("q", "g", 1, 300)), vec!["p0"]);
+    }
+
+    // Spec §2 clear-su-ack: covered ack + nothing arrived during the lease ⇒
+    // IDLE, not READY — no guaranteed-empty probe (the 2026-07-24 2x-attempts
+    // vegas-queue amplifier).
+    #[test]
+    fn covered_ack_with_no_marks_clears_to_idle() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.note_partition_id("q", "p0", "id0");
+        h.mark_local("q", "p0", 1, 0);
+        let c = h.take_batch("q", "g", 1, 0);
+        assert_eq!(names(&c), vec!["p0"]);
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            100,
+            false,
+            60_000,
+        );
+        h.promote_ack("q", "g", "id0", 300, true);
+        assert!(
+            h.take_batch("q", "g", 1, 400).is_empty(),
+            "caught-up partition must not be re-probed after a covered ack"
+        );
+    }
+
+    // The intermittent concurrency race (2026-07-24): with N concurrent
+    // poppers on one partition, a racing Leased checkin can win over the
+    // Took (the INFLIGHT-ownership gate skips the loser) and park the entry
+    // while a STALE drained=true from an older cycle survives — the covered
+    // ack would then clear a backlogged partition. take_batch resets drained
+    // at claim time, so only the current claim's Took can re-assert it.
+    #[test]
+    fn stale_drained_does_not_survive_a_new_claim() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.note_partition_id("q", "p0", "id0");
+        // Cycle 1: single message, clean drain — entry ends IDLE with
+        // drained=true persisted at its Took.
+        h.mark_local("q", "p0", 1, 0);
+        let c1 = h.take_batch("q", "g", 1, 0);
+        h.checkin("q", "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c1[0].epoch, verdict: Verdict::Took, drained: true }],
+            10, false, 60_000);
+        h.promote_ack("q", "g", "id0", 20, true); // covered+drained ⇒ IDLE
+        // Cycle 2: a 100-message backlog lands; OUR claim's Took checkin loses
+        // the race to a concurrent popper's Leased verdict (ownership gate has
+        // already been passed by the Leased one in this simulation).
+        h.mark_local("q", "p0", 100, 30);
+        let c2 = h.take_batch("q", "g", 1, 30);
+        h.checkin("q", "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c2[0].epoch, verdict: Verdict::Leased(60_030), drained: false }],
+            40, false, 60_000);
+        // The winner's ack arrives (covered): the stale drained=true from cycle
+        // 1 must NOT cause a clear — the entry must come back claimable.
+        h.promote_ack("q", "g", "id0", 50, true);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 60)),
+            vec!["p0"],
+            "stale drained from a previous cycle must not clear a backlogged partition"
+        );
+    }
+
+    // The manualAck regression (2026-07-24): a backlog consumed in batches has
+    // no in-lease marks, but the claim did NOT drain the partition — the
+    // covered ack must PROMOTE, not clear, or every next batch stalls on the
+    // reseed floor.
+    #[test]
+    fn covered_ack_undrained_backlog_promotes() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.note_partition_id("q", "p0", "id0");
+        h.mark_local("q", "p0", 1000, 0);
+        let c = h.take_batch("q", "g", 1, 0);
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
+            100,
+            false,
+            60_000,
+        );
+        h.promote_ack("q", "g", "id0", 300, true);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 400)),
+            vec!["p0"],
+            "undrained backlog must be claimable immediately after the covered ack"
+        );
+    }
+
+    #[test]
+    fn covered_ack_with_in_lease_mark_promotes() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.note_partition_id("q", "p0", "id0");
+        h.mark_local("q", "p0", 1, 0);
+        let c = h.take_batch("q", "g", 1, 0);
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            100,
+            false,
+            60_000,
+        );
+        h.mark_local("q", "p0", 1, 150); // push lands during the lease
+        h.promote_ack("q", "g", "id0", 300, true);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 400)),
+            vec!["p0"],
+            "in-lease content must be claimable immediately after the covered ack"
+        );
+    }
+
+    // The epoch guard on the Took reset: a mark racing between claim and checkin
+    // must survive the batch_count reset, else the covered ack would clear a
+    // partition that has fresh content.
+    #[test]
+    fn in_flight_mark_survives_took_reset() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.note_partition_id("q", "p0", "id0");
+        h.mark_local("q", "p0", 1, 0);
+        let c = h.take_batch("q", "g", 1, 0);
+        h.mark_local("q", "p0", 1, 50); // races the in-flight pop
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            100,
+            false,
+            60_000,
+        );
+        h.promote_ack("q", "g", "id0", 300, true);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 400)),
+            vec!["p0"],
+            "raced mark must survive the Took batch_count reset"
+        );
     }
 
     // §4 interleaving 1: mark BETWEEN snapshot and clear ⇒ CAS fails ⇒ stays.
@@ -1296,6 +1558,7 @@ mod tests {
                 name: "p0".into(),
                 epoch: c[0].epoch,
                 verdict: Verdict::Empty,
+                drained: false,
             }],
             0,
             true,
@@ -1319,6 +1582,7 @@ mod tests {
                 name: "p0".into(),
                 epoch: c[0].epoch,
                 verdict: Verdict::Empty,
+                drained: false,
             }],
             0,
             true,
@@ -1341,6 +1605,7 @@ mod tests {
                 name: "p0".into(),
                 epoch: c[0].epoch,
                 verdict: Verdict::Empty,
+                drained: false,
             }],
             0,
             true,
@@ -1365,6 +1630,7 @@ mod tests {
                 name: "p0".into(),
                 epoch: c[0].epoch,
                 verdict: Verdict::Leased(5000), // leased until t=5000ms
+                drained: false,
             }],
             1000,
             true,
@@ -1390,6 +1656,7 @@ mod tests {
                 name: "p0".into(),
                 epoch: c[0].epoch,
                 verdict: Verdict::Leased(10_000),
+                drained: false,
             }],
             0,
             true,
@@ -1397,7 +1664,7 @@ mod tests {
         );
         assert!(h.take_batch("q", "g", 1, 100).is_empty());
         // ack releases the lease early → promote by id
-        h.promote_ack("q", "g", "id0", 100);
+        h.promote_ack("q", "g", "id0", 100, false);
         assert_eq!(names(&h.take_batch("q", "g", 1, 100)), vec!["p0"]);
     }
 
@@ -1463,6 +1730,7 @@ mod tests {
                 name: "p0".into(),
                 epoch: c[0].epoch,
                 verdict: Verdict::Empty,
+                drained: false,
             }],
             2400,
             true,
@@ -1586,8 +1854,8 @@ mod tests {
             "q",
             "g",
             vec![
-                CheckinResult { name: "p_keep".into(), epoch: c[0].epoch, verdict: Verdict::Took },
-                CheckinResult { name: "p_lost".into(), epoch: c[1].epoch, verdict: Verdict::Empty },
+                CheckinResult { name: "p_keep".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false },
+                CheckinResult { name: "p_lost".into(), epoch: c[1].epoch, verdict: Verdict::Empty, drained: false },
             ],
             base,
             true,
@@ -1634,7 +1902,7 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
             5100,
             true,
             60_000,
@@ -1659,7 +1927,7 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
             0,
             true,
             60_000,
@@ -1742,7 +2010,7 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
             0,
             true,
             60_000,
@@ -1769,7 +2037,7 @@ mod tests {
         h.checkin(
             "q",
             "g",
-            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took }],
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: false }],
             0,
             false,
             300_000,
@@ -1819,4 +2087,80 @@ mod tests {
         let c = h.take_batch("q", "g1", 5, 0); // empty (already taken above)
         assert!(c.is_empty());
     }
+
+    // Delete-consumer-group-for-queue invalidation: forget_group drops the group's
+    // ring so a stale post-delete entry can never mask the reconsume. After forget,
+    // the ring is cold — reseed_due reports it due again (clock reset), and marks to
+    // OTHER groups of the same queue are untouched.
+    #[test]
+    fn forget_group_drops_ring_and_resets_reseed_clock() {
+        let h = hl1();
+        reg(&h, "q", "g1");
+        reg(&h, "q", "g2");
+        h.reseed_done("q", "g1", 1000);
+        h.reseed_done("q", "g2", 1000);
+        // A stale ready entry that survived (a consumed partition the delete removes).
+        h.mark_local("q", "p0", 1, 1000);
+        assert!(h.has_ready("q", "g1", 1000));
+        assert!(!h.reseed_due("q", "g1", 1500, 30_000), "recently reseeded");
+
+        // Delete the group for this queue: the ring is forgotten wholesale.
+        h.forget_group("q", "g1");
+        // g1 is now cold: no stale ready entry, and a fresh reseed is due.
+        assert!(!h.has_ready("q", "g1", 1500), "stale ring must not survive");
+        assert!(h.reseed_due("q", "g1", 1500, 30_000), "forgotten ring reseeds cold");
+        // g2 is untouched — the delete was scoped to g1.
+        assert!(h.has_ready("q", "g2", 1500), "sibling group ring untouched");
+        assert!(!h.reseed_due("q", "g2", 1500, 30_000));
+    }
+
+    // Delete-consumer-group (all queues) invalidation: forget_group_all_queues drops
+    // the group's ring on EVERY queue it touched, leaving other groups alone.
+    #[test]
+    fn forget_group_all_queues_drops_every_queue_ring() {
+        let h = hl1();
+        reg(&h, "qa", "g");
+        reg(&h, "qb", "g");
+        reg(&h, "qa", "other");
+        h.mark_local("qa", "p0", 1, 0);
+        h.mark_local("qb", "p0", 1, 0);
+        assert!(h.has_ready("qa", "g", 0));
+        assert!(h.has_ready("qb", "g", 0));
+        assert!(h.has_ready("qa", "other", 0));
+
+        h.forget_group_all_queues("g");
+        // The deleted group is cold on every queue…
+        assert!(!h.has_ready("qa", "g", 0));
+        assert!(!h.has_ready("qb", "g", 0));
+        assert!(h.reseed_due("qa", "g", 0, 30_000));
+        assert!(h.reseed_due("qb", "g", 0, 30_000));
+        // …but a co-resident group on one of those queues is untouched.
+        assert!(h.has_ready("qa", "other", 0), "co-resident group ring untouched");
+    }
+
+    // forget_* on a disabled hot-list, an unknown queue, or an unregistered group is
+    // a safe no-op (never panics, never creates a ring).
+    #[test]
+    fn forget_group_is_safe_when_absent_or_disabled() {
+        let off = HotList::new(false, 1, 100, true);
+        off.forget_group("q", "g");
+        off.forget_group_all_queues("g");
+
+        let h = hl1();
+        h.forget_group("never-seen", "g"); // unknown queue
+        reg(&h, "q", "g");
+        h.forget_group("q", "other"); // unregistered group in a known queue
+        h.forget_group_all_queues("still-unknown");
+        // The registered ring is still intact and usable.
+        h.mark_local("q", "p0", 1, 0);
+        assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p0"]);
+    }
+}
+
+
+pub(crate) fn trace_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

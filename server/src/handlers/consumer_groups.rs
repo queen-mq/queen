@@ -117,6 +117,26 @@ pub async fn handle_delete_consumer_group(
     let seg_n = seg_v.get("deletedPartitions").and_then(|x| x.as_i64()).unwrap_or(0);
     let rows_n = rows_v.get("deletedPartitions").and_then(|x| x.as_i64()).unwrap_or(0);
 
+    // Hot-list invalidation (2026-07-24) — symmetry with the DB cursor/watermark
+    // delete above. The delete removed the group's committed cursors, so it must
+    // reconsume from the start; but with QUEEN_HOTLIST on, the in-memory ring is
+    // the discovery source and a pre-delete ring (stale IDLE/wheel entries + a
+    // recent reseed clock) would suppress the reconsume until the ≤30s periodic
+    // floor. Drop the group's ring on every queue so first contact reseeds cold.
+    st.hotlist.forget_group_all_queues(&group);
+    // The group-first-contact seed marker (consumer_groups_metadata) was removed
+    // when delete_metadata, but the monotonic positive `seeded_groups` cache still
+    // says "seeded" and would route the next pop down the ring path, skipping the
+    // first-contact BULK SEED that safely re-creates the cursors. Drop the group
+    // from every queue's cached set so the next pop re-checks the (now-absent)
+    // marker and re-seeds via the first-contact wildcard path.
+    if delete_metadata {
+        let mut sg = st.seeded_groups.lock().unwrap();
+        for set in sg.values_mut() {
+            set.remove(&group);
+        }
+    }
+
     let out = serde_json::json!({
         "success": true,
         "consumerGroup": group,
@@ -162,6 +182,18 @@ pub async fn handle_delete_consumer_group_for_queue(
         .unwrap_or_else(|_| "{}".to_string());
     let rows_v: serde_json::Value = serde_json::from_str(&rows).unwrap_or(serde_json::Value::Null);
     let rows_n = rows_v.get("deletedPartitions").and_then(|x| x.as_i64()).unwrap_or(0);
+
+    // Hot-list invalidation (2026-07-24), scoped to this queue — see the all-queues
+    // sibling for the rationale. Drop the group's ring for `queue` so a stale
+    // pre-delete ring cannot mask the from-the-start reconsume, and (when the
+    // per-(queue, group) seed marker was removed) drop the stale positive
+    // `seeded_groups` entry so the next pop re-seeds via first contact.
+    st.hotlist.forget_group(&queue, &group);
+    if delete_metadata {
+        if let Some(set) = st.seeded_groups.lock().unwrap().get_mut(&queue) {
+            set.remove(&group);
+        }
+    }
 
     let out = serde_json::json!({
         "success": true,
@@ -232,6 +264,39 @@ fn parse_seek(body: &Bytes) -> Result<(bool, Option<String>), &'static str> {
     }
 }
 
+// A seek SP returns {"success":false,...} for a no-op request (partition not
+// found). Only re-seed the ring on a real cursor move; a parse miss defaults to
+// true (re-seeding is evidence-based and harmless either way).
+fn seek_succeeded(txt: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(txt)
+        .ok()
+        .and_then(|v| v.get("success").and_then(|s| s.as_bool()))
+        .unwrap_or(true)
+}
+
+// Hot-list re-discovery after a successful seek (2026-07-24). A BACKWARD seek moves
+// the group's committed cursor behind messages the ring already cleared as
+// consumed; with QUEEN_HOTLIST on the ring is the discovery source, so without an
+// explicit re-seed the reconsume only resumes at the ≤30s periodic reseed floor
+// (the legacy path was immediate). Re-seed the (queue, group) ring from committed
+// PG state NOW and wake parked pops. Evidence-based by construction:
+// log_hotlist_reseed_v1 returns only partitions with last_offset > committed, so a
+// seek-to-end (cursor moved FORWARD) re-adds nothing — no false positive — while a
+// backward/timestamp seek re-adds exactly the re-pending partitions. Over-marking
+// would be a harmless ~0.2ms empty probe; under-marking is the bug we are closing.
+async fn reseed_after_seek(
+    st: &Arc<AppState>,
+    client: &deadpool_postgres::Client,
+    group: &str,
+    queue: &str,
+    txt: &str,
+) {
+    if st.hotlist.enabled() && seek_succeeded(txt) {
+        let now_ms = crate::util::now_epoch_ms();
+        super::data::hotlist_reseed_scan(&st.hotlist, client, queue, group, now_ms).await;
+    }
+}
+
 // POST /api/v1/consumer-groups/:group/queues/:queue/seek — move the group's
 // segment cursor for every partition of the queue.
 pub async fn handle_seek_consumer_group(
@@ -248,7 +313,10 @@ pub async fn handle_seek_consumer_group(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::seg_seek_consumer_group(&client, &group, &queue, to_end, ts.as_deref()).await {
-        Ok(txt) => sp_result_to_response(txt),
+        Ok(txt) => {
+            reseed_after_seek(&st, &client, &group, &queue, &txt).await;
+            sp_result_to_response(txt)
+        }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("seek failed: ", &e),
@@ -279,7 +347,10 @@ pub async fn handle_seek_partition(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::seg_seek_partition(&client, &group, &queue, &partition, to_end, ts.as_deref()).await {
-        Ok(txt) => sp_result_to_response(txt),
+        Ok(txt) => {
+            reseed_after_seek(&st, &client, &group, &queue, &txt).await;
+            sp_result_to_response(txt)
+        }
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("seek failed: ", &e),

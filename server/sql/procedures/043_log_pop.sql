@@ -1195,6 +1195,7 @@ DECLARE
     v_taken INTEGER;
     v_now TIMESTAMPTZ := clock_timestamp();
     v_pid UUID;
+    v_last_off BIGINT;
     v_lease TIMESTAMPTZ;
 BEGIN
     SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue;
@@ -1227,14 +1228,25 @@ BEGIN
                               p_sub_mode, p_sub_from, p_skip_window);
 
         IF v_taken > 0 THEN
-            SELECT p.id INTO v_pid FROM queen.log_partitions p
+            -- lastOff: the partition's allocator watermark AT (or just after) the
+            -- claim. The broker compares it with the served batch_end to learn
+            -- whether the claim EXHAUSTED the visible backlog ('drained'): the
+            -- clear-su-ack (§2) may clear only a drained entry — batch_count==0
+            -- alone proved wrong (2026-07-24: a 1000-msg backlog consumed in
+            -- 100-msg batches has no in-lease marks, yet 900 remain; clearing
+            -- stalled every next batch on the 30s reseed floor). A push that
+            -- commits AFTER this read makes lastOff stale-low, but that push's
+            -- own mark bumps batch_count, so the compose of the two signals
+            -- stays safe in both directions.
+            SELECT p.id, p.last_offset INTO v_pid, v_last_off FROM queen.log_partitions p
               WHERE p.queue_id = v_qid AND p.name = v_name;
             v_out := v_out || jsonb_build_object(
                 'partition', v_name, 'partitionId', v_pid, 'segments', v_segments);
             v_all_blobs := v_all_blobs || v_part_blobs;
             v_remaining := v_remaining - v_taken;
             v_claimed := v_claimed + 1;
-            v_states := v_states || jsonb_build_object('p', v_name, 's', 'took');
+            v_states := v_states || jsonb_build_object('p', v_name, 's', 'took',
+                'lastOff', v_last_off);
         ELSE
             -- 0 frames: distinguish a live FOREIGN lease from genuinely empty.
             -- One indexed point lookup on the consumer row the claim already

@@ -498,6 +498,11 @@ struct ListState {
     s: String,
     #[serde(default)]
     until: Option<String>,
+    /// took only: the partition's allocator watermark read at the claim —
+    /// compared with the served batch_end to derive `drained` (spec §2
+    /// clear-su-ack; see 043 log_pop_list_v1).
+    #[serde(rename = "lastOff", default)]
+    last_off: Option<i64>,
 }
 
 // Single-partition pop result (db::pop_specific assembles the queen.log_pop_v1
@@ -858,6 +863,10 @@ async fn serve_pop_hotlist(
                 .min(interval);
             let _parked = st.metrics.parked.enter(queue);
             if st.notifier.wait_queue(queue, waitd).await {
+                if st.hotlist.traced(queue) {
+                    eprintln!("[hlt] woken q={} g={} t={}", queue, group,
+                        crate::hotlist::trace_now_ms());
+                }
                 backoff_count = 0;
             }
             continue;
@@ -866,6 +875,10 @@ async fn serve_pop_hotlist(
         register_leases(st, group, worker, lease_seconds, &meta);
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
+        if count > 0 && st.hotlist.traced(queue) {
+            eprintln!("[hlt] served q={} g={} n={} t={}", queue, group, count,
+                crate::hotlist::trace_now_ms());
+        }
         if count > 0 {
             st.metrics.per_queue.add_pop(queue, count as u64);
             st.metrics
@@ -918,6 +931,7 @@ impl Drop for InflightGuard {
                 name: c.name.clone(),
                 epoch: c.epoch,
                 verdict: crate::hotlist::Verdict::Requeue,
+                drained: false,
             })
             .collect();
         self.hl.checkin(
@@ -1038,7 +1052,10 @@ async fn hotlist_pop_attempt(
     // limiter thus only ever gates genuine serving + the periodic per-(queue,group)
     // reseed/cfg floor (O(served + #queues / reseed_interval)), never the
     // O(#queues) quiet re-poll storm.
+    let tr = st.hotlist.traced(queue);
+    let t_start = if tr { crate::hotlist::trace_now_ms() } else { 0 };
     let permit = st.pop_vegas.acquire().await;
+    let t_vegas = if tr { crate::hotlist::trace_now_ms() } else { 0 };
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => {
@@ -1047,6 +1064,10 @@ async fn hotlist_pop_attempt(
             return (b, c, m, Duration::ZERO);
         }
     };
+    if tr {
+        eprintln!("[hlt] attempt q={} start={} vegas_wait={} pool_wait={}",
+            queue, t_start, t_vegas - t_start, crate::hotlist::trace_now_ms() - t_vegas);
+    }
 
     // Lazy deferral-config refresh (§6), TTL-throttled.
     if need_cfg {
@@ -1101,6 +1122,9 @@ async fn hotlist_pop_attempt(
     )
     .await;
     let rtt = t0.elapsed();
+    if tr {
+        eprintln!("[hlt] sqldone q={} cands={} sql_ms={}", queue, names.len(), rtt.as_millis());
+    }
     st.pop_vegas.record(rtt);
     drop(permit);
     // The await returned (not dropped) — take ownership of the candidates back and
@@ -1120,6 +1144,7 @@ async fn hotlist_pop_attempt(
                         name: c.name.clone(),
                         epoch: c.epoch,
                         verdict: crate::hotlist::Verdict::Requeue,
+                        drained: false,
                     })
                     .collect();
                 st.hotlist
@@ -1130,6 +1155,28 @@ async fn hotlist_pop_attempt(
         };
 
     // Map the tri-state verdicts back to the candidates we sent (§7).
+    // Parse the served partitions FIRST: the checkin needs per-partition
+    // batch_end (last served offset) to pair with the claim-time lastOff.
+    let parsed: PopResult = match serde_json::from_str(&meta_txt) {
+        Ok(p) => p,
+        Err(_) => {
+            let (b, c, m) = empty();
+            return (b, c, m, rtt);
+        }
+    };
+    let mut batch_ends: HashMap<&str, i64> = HashMap::with_capacity(parsed.partitions.len());
+    for part in &parsed.partitions {
+        let mut end: i64 = -1;
+        for seg in &part.segments {
+            let e = seg.seq + seg.start_off.max(0) as i64 + seg.take.max(0) as i64 - 1;
+            if e > end {
+                end = e;
+            }
+        }
+        if end >= 0 {
+            batch_ends.insert(part.partition.as_str(), end);
+        }
+    }
     let states: Vec<ListState> = serde_json::from_str(&states_txt).unwrap_or_default();
     let mut vmap: HashMap<&str, &ListState> = HashMap::with_capacity(states.len());
     for s in &states {
@@ -1154,24 +1201,28 @@ async fn hotlist_pop_attempt(
                 // Not evaluated by the SQL (budget / partition-cap) — re-append.
                 None => crate::hotlist::Verdict::Requeue,
             };
+            // drained (spec §2): the claim exhausted the visible backlog when the
+            // last served offset reached the claim-time allocator watermark. A
+            // push committing after the SQL read keeps batch_count>0 via its own
+            // mark, so a stale-low lastOff can never cause a wrong clear.
+            let drained = match (&verdict, vmap.get(c.name.as_str())) {
+                (crate::hotlist::Verdict::Took, Some(s)) => match (s.last_off, batch_ends.get(c.name.as_str())) {
+                    (Some(lo), Some(&be)) => be >= lo,
+                    _ => false,
+                },
+                _ => false,
+            };
             crate::hotlist::CheckinResult {
                 name: c.name.clone(),
                 epoch: c.epoch,
                 verdict,
+                drained,
             }
         })
         .collect();
     st.hotlist
         .checkin(queue, group, results, now_ms, auto_ack, lease_ms);
 
-    // Parse the served partitions, learn their ids (ack bridge), and render.
-    let parsed: PopResult = match serde_json::from_str(&meta_txt) {
-        Ok(p) => p,
-        Err(_) => {
-            let (b, c, m) = empty();
-            return (b, c, m, rtt);
-        }
-    };
     for part in &parsed.partitions {
         st.hotlist
             .note_partition_id(queue, &part.partition, &part.partition_id);
@@ -2078,7 +2129,13 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
                             // promote it to ready NOW + wake, so it is claimable
                             // immediately instead of at lease expiry. No-op if unknown.
                             if st.hotlist.enabled() {
-                                st.hotlist.promote_ack(q, group, &pid, crate::util::now_epoch_ms());
+                                if st.hotlist.traced(q) {
+                                    eprintln!("[hlt] promote q={} g={} t={}", q, group, crate::hotlist::trace_now_ms());
+                                }
+                                // covered=true: the registry cover test proved this
+                                // ack completes the WHOLE leased batch — eligible for
+                                // clear-su-ack when nothing arrived during the lease.
+                                st.hotlist.promote_ack(q, group, &pid, crate::util::now_epoch_ms(), true);
                             }
                         }
                         continue; // whole group handled — skip the SQL path
@@ -2267,7 +2324,13 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
             // the correct expiry ("stale in eccesso", §1/§7).
             let released = idxs.iter().any(|&i| lease_released[i]);
             if released && st.hotlist.enabled() {
-                st.hotlist.promote_ack(&q, group, &pid, crate::util::now_epoch_ms());
+                if st.hotlist.traced(&q) {
+                    eprintln!("[hlt] promote2 q={} g={} t={}", q, group, crate::hotlist::trace_now_ms());
+                }
+                // covered=false: this is the SQL-fallback release path (NACK,
+                // partial, mixed) — coverage is unproven, so always promote; the
+                // worst case is one spurious ~0.2ms probe on a rare path.
+                st.hotlist.promote_ack(&q, group, &pid, crate::util::now_epoch_ms(), false);
             }
         }
 
@@ -3042,7 +3105,9 @@ pub async fn handle_transaction(
                     }
                     for ag in &ack_groups {
                         if let Some(q) = st.queue_for_partition(&client, &ag.partition_id).await {
-                            st.hotlist.promote_ack(&q, &ag.group, &ag.partition_id, now_ms);
+                            // covered=false: txn acks may cover only part of a
+                            // leased batch; promote unconditionally (rare path).
+                            st.hotlist.promote_ack(&q, &ag.group, &ag.partition_id, now_ms, false);
                         }
                     }
                 }
