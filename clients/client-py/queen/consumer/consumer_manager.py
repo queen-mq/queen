@@ -173,10 +173,14 @@ class ConsumerManager:
                     break
 
             try:
-                # Pop messages with affinity key for consistent routing
+                # Pop messages with affinity key for consistent routing.
+                # wait=True is a long-poll: mark it "pop" so a 429 backs off
+                # and keeps waiting instead of giving up after the bounded
+                # push-like attempt budget.
                 client_timeout = timeout_millis + 5000 if wait else timeout_millis
                 result = await self._http_client.get(
-                    f"{path}?{base_params}", client_timeout, affinity_key
+                    f"{path}?{base_params}", client_timeout, affinity_key,
+                    retry_kind="pop" if wait else None,
                 )
 
                 # Handle empty response
@@ -276,6 +280,29 @@ class ConsumerManager:
                 if is_timeout_error and wait:
                     continue  # Retry on timeout
 
+                status_code = getattr(getattr(error, "response", None), "status_code", None)
+
+                # 429 (rate limited): HttpClient already retries this
+                # internally with backoff (unbounded for wait=True pop, per
+                # the retry_429 policy) -- this branch is a defensive
+                # fallback for the case where an explicit
+                # retry_429["max_attempts"] override got exhausted. Back off
+                # and keep polling instead of hot-looping.
+                if status_code == 429:
+                    retry_after = getattr(error, "retry_after_seconds", None)
+                    delay = retry_after if isinstance(retry_after, (int, float)) and retry_after >= 0 else 1.0
+                    logger.warn(
+                        "ConsumerManager.worker",
+                        {
+                            "worker_id": worker_id,
+                            "status": "rate-limited",
+                            "code": getattr(error, "code", None),
+                            "retry_delay_s": delay,
+                        },
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
                 # Check if network error
                 is_network_error = (
                     "fetch failed" in error_str
@@ -292,6 +319,19 @@ class ConsumerManager:
                     # Wait before retry
                     await asyncio.sleep(1)
                     continue
+
+                # 403 (forbidden): terminal. cluster_suspended in particular
+                # can never resolve itself, and none of the other proxy
+                # codes (storage_quota_exceeded / feature_gated / forbidden)
+                # are worth hot-looping either -- stop this worker and
+                # surface the error (with .code) to the caller instead of
+                # retrying.
+                if status_code == 403:
+                    logger.error(
+                        "ConsumerManager.worker",
+                        {"worker_id": worker_id, "status": "forbidden", "code": getattr(error, "code", None)},
+                    )
+                    raise
 
                 # Other errors - rethrow
                 logger.error("ConsumerManager.worker", {"worker_id": worker_id, "error": str(error)})

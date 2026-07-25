@@ -86,3 +86,27 @@ class MessageWithTrace(Message):
 
     trace: TraceMethod
 
+
+class Retry429Config(TypedDict, total=False):
+    """Backoff policy for HTTP 429 (rate limited) responses from a
+    queen_proxy deployment, separate from ``retry_attempts``/
+    ``retry_delay_millis`` (which cover 5xx/network failures). Pass a plain
+    dict with any subset of these keys as ``retry_429=`` -- omitted keys fall
+    back to the defaults below.
+
+    max_attempts: bounded retry cap. Defaults to 10 for ordinary requests
+        (push, admin calls, non-waiting pop); a long-poll pop (wait=True)
+        retries unboundedly (paced by backoff) unless max_attempts is set
+        here, in which case it applies uniformly to both.
+    base_ms: initial backoff (ms) used when the response has no Retry-After
+        header. Default 500.
+    cap_ms: ceiling (ms) for the exponential backoff delay. Default 30000.
+
+    When the server does send a Retry-After header (seconds), it is honored
+    (with +-20% jitter) instead of the computed exponential delay.
+    """
+
+    max_attempts: int
+    base_ms: int
+    cap_ms: int
+

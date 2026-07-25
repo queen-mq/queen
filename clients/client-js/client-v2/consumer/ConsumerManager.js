@@ -144,9 +144,11 @@ export class ConsumerManager {
       }
 
       try {
-        // Pop messages with affinity key for consistent routing
+        // Pop messages with affinity key for consistent routing. wait=true is
+        // a long-poll: mark it 'pop' so a 429 backs off and keeps waiting
+        // instead of giving up after the bounded push-like attempt budget.
         const clientTimeout = wait ? timeoutMillis + 5000 : timeoutMillis
-        const result = await this.#httpClient.get(`${path}?${baseParams}`, clientTimeout, affinityKey)
+        const result = await this.#httpClient.get(`${path}?${baseParams}`, clientTimeout, affinityKey, wait ? 'pop' : null)
 
         // Handle empty response
         if (!result || !result.messages || result.messages.length === 0) {
@@ -225,6 +227,20 @@ export class ConsumerManager {
           continue // Retry on timeout
         }
 
+        // 429 (rate limited): HttpClient already retries this internally
+        // with backoff (unbounded for wait=true pop, per retry429 policy) --
+        // this branch is a defensive fallback for the case where an explicit
+        // retry429.maxAttempts override got exhausted. Back off and keep
+        // polling instead of hot-looping or rethrowing/dying.
+        if (error.status === 429) {
+          const retryAfterMs = typeof error.retryAfterSeconds === 'number' && error.retryAfterSeconds >= 0
+            ? error.retryAfterSeconds * 1000
+            : 1000
+          logger.warn('ConsumerManager.worker', { workerId, status: 'rate-limited', code: error.code, retryAfterMs })
+          await new Promise(resolve => setTimeout(resolve, retryAfterMs))
+          continue
+        }
+
         // Check if network error
         const isNetworkError = error.message?.includes('fetch failed') ||
                               error.message?.includes('ECONNREFUSED') ||
@@ -237,8 +253,18 @@ export class ConsumerManager {
           continue
         }
 
+        // 403 (forbidden): terminal. cluster_suspended in particular can
+        // never resolve itself, and none of the other proxy codes
+        // (storage_quota_exceeded / feature_gated / forbidden) are worth
+        // hot-looping either -- stop this worker and surface the error
+        // (with .code) to the caller instead of retrying.
+        if (error.status === 403) {
+          logger.error('ConsumerManager.worker', { workerId, status: 'forbidden', code: error.code, error: error.message })
+          throw error
+        }
+
         // Other errors - rethrow
-        logger.error('ConsumerManager.worker', { workerId, error: error.message })
+        logger.error('ConsumerManager.worker', { workerId, error: error.message, code: error.code })
         throw error
       }
     }

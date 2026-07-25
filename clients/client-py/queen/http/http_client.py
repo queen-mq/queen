@@ -3,7 +3,8 @@ HTTP client with retry, load balancing, and failover support
 """
 
 import asyncio
-from typing import Any, Dict, Optional, Union
+import random
+from typing import Any, Dict, Optional, Tuple, Union
 import httpx
 
 from ..utils import logger
@@ -24,6 +25,8 @@ class HttpClient:
         enable_failover: bool = True,
         bearer_token: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
+        retry_429: Optional[Dict[str, Any]] = None,
+        transport: Optional[httpx.BaseTransport] = None,
     ):
         """
         Initialize HTTP client
@@ -37,6 +40,16 @@ class HttpClient:
             enable_failover: Enable automatic failover
             bearer_token: Bearer token for proxy authentication
             headers: Custom headers to include in every request
+            retry_429: Backoff policy for HTTP 429 (rate limited) responses,
+                separate from retry_attempts/retry_delay_millis above. See
+                queen.types.Retry429Config for the shape and defaults.
+                max_attempts defaults to 10 for ordinary requests; a
+                long-poll pop (retry_kind="pop") retries unboundedly unless
+                max_attempts is set here, in which case it applies to both.
+                PLAN_QUEEN_PROXY_CLOUD.md §4/§9 (client 429 backoff, B4).
+            transport: Optional httpx transport override (e.g.
+                httpx.MockTransport) for tests -- no broker/network required.
+                None uses httpx's normal transport.
         """
         self._base_url = base_url
         self._load_balancer = load_balancer
@@ -45,6 +58,7 @@ class HttpClient:
         self._retry_delay_millis = retry_delay_millis
         self._enable_failover = enable_failover
         self._bearer_token = bearer_token
+        self._retry_429: Dict[str, Any] = dict(retry_429) if retry_429 else {}
 
         # Build headers with optional auth
         merged_headers: Dict[str, str] = {}
@@ -58,6 +72,7 @@ class HttpClient:
             timeout=httpx.Timeout(timeout_millis / 1000.0),
             limits=httpx.Limits(max_keepalive_connections=10, max_connections=100),
             headers=merged_headers,
+            transport=transport,
         )
 
         logger.log(
@@ -70,18 +85,126 @@ class HttpClient:
                 "enable_failover": enable_failover,
                 "has_auth": bearer_token is not None,
                 "custom_headers": len(headers) if headers else 0,
+                "retry_429": self._retry_429,
             },
         )
+
+    def _retry429_policy_for(self, retry_kind: Optional[str]) -> Tuple[Optional[int], int, int]:
+        """Resolve the effective 429 retry policy for a request kind.
+
+        - "pop": long-poll pop (wait=True). Unbounded attempts (None) by
+          default -- the long-poll loop is meant to keep waiting through
+          transient rate limiting -- unless retry_429["max_attempts"] was
+          explicitly configured.
+        - anything else (push, admin calls, non-waiting pop, ...): bounded,
+          defaults to 10 attempts.
+
+        base_ms/cap_ms always default to 500/30000 and apply to both kinds.
+        Returns (max_attempts_or_None, base_ms, cap_ms).
+        """
+        cfg = self._retry_429 or {}
+        base_ms = cfg.get("base_ms", 500)
+        cap_ms = cfg.get("cap_ms", 30000)
+        configured_max = cfg.get("max_attempts")
+        if configured_max is not None:
+            max_attempts = configured_max
+        else:
+            max_attempts = None if retry_kind == "pop" else 10
+        return max_attempts, base_ms, cap_ms
+
+    @staticmethod
+    def _compute_retry429_delay(
+        attempt_index: int,
+        retry_after_seconds: Optional[float],
+        base_ms: int,
+        cap_ms: int,
+    ) -> float:
+        """Delay (seconds, for asyncio.sleep) before the next 429 retry.
+
+        Honors Retry-After (seconds) when the server sent one, with +-20%
+        jitter to avoid a synchronized thundering herd; otherwise falls back
+        to exponential backoff (base_ms * 2^attempt, capped at cap_ms), also
+        jittered +-20%.
+        """
+        if retry_after_seconds is not None and retry_after_seconds >= 0:
+            delay_ms = retry_after_seconds * 1000.0
+        else:
+            delay_ms = min(cap_ms, base_ms * (2 ** attempt_index))
+        jitter_multiplier = 1 + random.uniform(-0.2, 0.2)
+        return max(0.0, (delay_ms * jitter_multiplier) / 1000.0)
+
+    async def _execute_with_retry429(
+        self,
+        url: str,
+        method: str,
+        body: Optional[Dict[str, Any]],
+        request_timeout_millis: Optional[int],
+        retry_kind: Optional[str],
+    ) -> Any:
+        """Run a single logical request against one URL, transparently
+        retrying HTTP 429 responses with backoff until the policy for
+        `retry_kind` is exhausted (or never, for an unbounded pop policy).
+        Any other exception is raised straight through -- 429 is the only
+        status this layer treats as retryable; 5xx/network retry and
+        cross-backend failover are the caller's job.
+        """
+        max_attempts, base_ms, cap_ms = self._retry429_policy_for(retry_kind)
+        tries = 0
+        while True:
+            tries += 1
+            try:
+                return await self._execute_request(url, method, body, request_timeout_millis)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code != 429:
+                    raise
+
+                if max_attempts is not None and tries >= max_attempts:
+                    logger.error(
+                        "HttpClient.retry429",
+                        {
+                            "method": method,
+                            "url": url,
+                            "error": "max 429 attempts exhausted",
+                            "attempts": tries,
+                            "code": getattr(error, "code", None),
+                        },
+                    )
+                    raise
+
+                delay = self._compute_retry429_delay(
+                    tries - 1, getattr(error, "retry_after_seconds", None), base_ms, cap_ms
+                )
+                logger.warn(
+                    "HttpClient.retry429",
+                    {
+                        "method": method,
+                        "url": url,
+                        "attempt": tries,
+                        "retry_kind": retry_kind or "default",
+                        "next_delay_s": delay,
+                        "retry_after_seconds": getattr(error, "retry_after_seconds", None),
+                        "code": getattr(error, "code", None),
+                    },
+                )
+                await asyncio.sleep(delay)
 
     async def get(
         self,
         path: str,
         request_timeout_millis: Optional[int] = None,
         affinity_key: Optional[str] = None,
+        *,
+        retry_kind: Optional[str] = None,
     ) -> Any:
-        """GET request"""
+        """GET request.
+
+        retry_kind: pass "pop" for long-poll (wait=True) pop requests to get
+        the unbounded-with-backoff 429 policy; omit for everything else
+        (push, admin calls, non-waiting pop), which get the bounded default
+        (10 attempts).
+        """
         return await self._request_with_failover(
-            "GET", path, None, request_timeout_millis, affinity_key
+            "GET", path, None, request_timeout_millis, affinity_key, retry_kind
         )
 
     async def post(
@@ -90,10 +213,12 @@ class HttpClient:
         body: Optional[Dict[str, Any]] = None,
         request_timeout_millis: Optional[int] = None,
         affinity_key: Optional[str] = None,
+        *,
+        retry_kind: Optional[str] = None,
     ) -> Any:
         """POST request"""
         return await self._request_with_failover(
-            "POST", path, body, request_timeout_millis, affinity_key
+            "POST", path, body, request_timeout_millis, affinity_key, retry_kind
         )
 
     async def put(
@@ -102,10 +227,12 @@ class HttpClient:
         body: Optional[Dict[str, Any]] = None,
         request_timeout_millis: Optional[int] = None,
         affinity_key: Optional[str] = None,
+        *,
+        retry_kind: Optional[str] = None,
     ) -> Any:
         """PUT request"""
         return await self._request_with_failover(
-            "PUT", path, body, request_timeout_millis, affinity_key
+            "PUT", path, body, request_timeout_millis, affinity_key, retry_kind
         )
 
     async def delete(
@@ -113,10 +240,12 @@ class HttpClient:
         path: str,
         request_timeout_millis: Optional[int] = None,
         affinity_key: Optional[str] = None,
+        *,
+        retry_kind: Optional[str] = None,
     ) -> Any:
         """DELETE request"""
         return await self._request_with_failover(
-            "DELETE", path, None, request_timeout_millis, affinity_key
+            "DELETE", path, None, request_timeout_millis, affinity_key, retry_kind
         )
 
     async def _execute_request(
@@ -158,19 +287,36 @@ class HttpClient:
             # Handle errors
             if not response.is_success:
                 error_msg = f"HTTP {response.status_code}: {response.reason_phrase}"
+                code: Optional[str] = None
                 try:
                     text = response.text
                     if text:
                         body_data = response.json()
                         error_msg = body_data.get("error", error_msg)
+                        code = body_data.get("code")
                 except Exception:
                     pass
 
                 logger.error(
                     "HttpClient.request",
-                    {"method": method, "url": url, "status": response.status_code, "error": error_msg},
+                    {"method": method, "url": url, "status": response.status_code, "error": error_msg, "code": code},
                 )
                 error = httpx.HTTPStatusError(error_msg, request=response.request, response=response)
+                # Proxy error contract: 429 {"error", "code": "rate_limited" |
+                # "quota_exceeded"} with Retry-After (seconds); 403 {"error",
+                # "code": "cluster_suspended" | "storage_quota_exceeded" |
+                # "feature_gated" | "forbidden"}. These attributes are always
+                # set (code may be None) so callers can branch without
+                # string-matching the message.
+                error.code = code  # type: ignore[attr-defined]
+                error.retry_after_seconds = None  # type: ignore[attr-defined]
+                if response.status_code == 429:
+                    retry_after = response.headers.get("retry-after")
+                    if retry_after is not None:
+                        try:
+                            error.retry_after_seconds = float(retry_after)  # type: ignore[attr-defined]
+                        except (TypeError, ValueError):
+                            error.retry_after_seconds = None  # type: ignore[attr-defined]
                 raise error
 
             # Parse successful response
@@ -208,6 +354,7 @@ class HttpClient:
         path: str,
         body: Optional[Dict[str, Any]],
         request_timeout_millis: Optional[int],
+        retry_kind: Optional[str] = None,
     ) -> Any:
         """Execute request with retry logic"""
         last_error: Optional[Exception] = None
@@ -215,7 +362,7 @@ class HttpClient:
         for attempt in range(self._retry_attempts):
             try:
                 url = self._get_url() + path
-                return await self._execute_request(url, method, body, request_timeout_millis)
+                return await self._execute_with_retry429(url, method, body, request_timeout_millis, retry_kind)
             except Exception as error:
                 last_error = error
 
@@ -255,10 +402,11 @@ class HttpClient:
         body: Optional[Dict[str, Any]],
         request_timeout_millis: Optional[int],
         affinity_key: Optional[str],
+        retry_kind: Optional[str] = None,
     ) -> Any:
         """Execute request with failover logic"""
         if not self._load_balancer or not self._enable_failover:
-            return await self._request_with_retry(method, path, body, request_timeout_millis)
+            return await self._request_with_retry(method, path, body, request_timeout_millis, retry_kind)
 
         urls = self._load_balancer.get_all_urls()
         attempted_urls = set()
@@ -279,7 +427,13 @@ class HttpClient:
             attempted_urls.add(url)
 
             try:
-                result = await self._execute_request(url + path, method, body, request_timeout_millis)
+                # 429s are retried in place (same backend, backoff-paced)
+                # inside _execute_with_retry429 -- they are not a
+                # backend-health signal, so they must not trigger failover
+                # to a different server.
+                result = await self._execute_with_retry429(
+                    url + path, method, body, request_timeout_millis, retry_kind
+                )
 
                 # Mark backend as healthy on success
                 self._load_balancer.mark_healthy(url)

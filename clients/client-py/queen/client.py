@@ -38,6 +38,8 @@ class Queen:
         health_retry_after_millis: Optional[int] = None,
         bearer_token: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
+        retry_429: Optional[Dict[str, Any]] = None,
+        transport: Optional[Any] = None,
     ):
         """
         Initialize Queen client
@@ -55,6 +57,15 @@ class Queen:
             health_retry_after_millis: Retry unhealthy backends after N ms
             bearer_token: Bearer token for proxy authentication
             headers: Custom headers to include in every request
+            retry_429: Backoff policy for HTTP 429 (rate limited) responses
+                from a queen_proxy deployment, e.g.
+                {"max_attempts": 10, "base_ms": 500, "cap_ms": 30000}. See
+                queen.types.Retry429Config. Omit for the defaults (bounded
+                10 attempts for push/admin calls; unbounded backoff for a
+                long-poll pop).
+            transport: Optional httpx transport override (e.g.
+                httpx.MockTransport) for tests -- no broker/network
+                required.
         """
         logger.log(
             "Queen.constructor",
@@ -80,6 +91,8 @@ class Queen:
             enable_failover=enable_failover,
             health_retry_after_millis=health_retry_after_millis,
             bearer_token=bearer_token,
+            retry_429=retry_429,
+            transport=transport,
             headers=headers,
         )
 
@@ -104,19 +117,18 @@ class Queen:
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Normalize configuration"""
-        # Handle different input formats
-        if isinstance(config, str):
-            # Single URL string
-            return {**CLIENT_DEFAULTS, "urls": [validate_url(config)]}
-
-        if isinstance(config, list):
-            # Array of URLs
-            return {**CLIENT_DEFAULTS, "urls": validate_urls(config)}
-
-        # Object config
         normalized = {**CLIENT_DEFAULTS}
 
-        if isinstance(config, dict):
+        # Handle different input formats; every form falls through to the
+        # shared kwargs merge below (kwargs override the positional config).
+        if isinstance(config, str):
+            # Single URL string
+            normalized["urls"] = [validate_url(config)]
+        elif isinstance(config, list):
+            # Array of URLs
+            normalized["urls"] = validate_urls(config)
+        elif isinstance(config, dict):
+            # Object config
             normalized.update(config)
 
         # Override with keyword arguments
@@ -146,6 +158,8 @@ class Queen:
         enable_failover = self._config["enable_failover"]
         bearer_token = self._config.get("bearer_token")
         custom_headers = self._config.get("headers") or {}
+        retry_429 = self._config.get("retry_429")
+        transport = self._config.get("transport")
 
         if len(urls) == 1:
             # Single server
@@ -156,6 +170,8 @@ class Queen:
                 retry_delay_millis=retry_delay_millis,
                 bearer_token=bearer_token,
                 headers=custom_headers,
+                retry_429=retry_429,
+                transport=transport,
             )
 
         # Multiple servers with load balancing
@@ -173,6 +189,8 @@ class Queen:
             enable_failover=enable_failover,
             bearer_token=bearer_token,
             headers=custom_headers,
+            retry_429=retry_429,
+            transport=transport,
         )
 
     def _setup_graceful_shutdown(self) -> None:

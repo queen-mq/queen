@@ -167,7 +167,14 @@ func (cm *ConsumerManager) worker(
 			fullPath += "?" + baseParams
 		}
 
-		result, err := cm.httpClient.Get(ctx, fullPath, clientTimeout, affinityKey)
+		// wait=true is a long-poll: mark it so a 429 backs off and keeps
+		// waiting instead of giving up after the bounded push-like budget.
+		var getOpts []RequestOption
+		if opts.Wait {
+			getOpts = append(getOpts, WithLongPollRetry())
+		}
+
+		result, err := cm.httpClient.Get(ctx, fullPath, clientTimeout, affinityKey, getOpts...)
 		if err != nil {
 			// Check if context was cancelled
 			if ctx.Err() != nil {
@@ -177,6 +184,30 @@ func (cm *ConsumerManager) worker(
 			// Check if this is a timeout error (expected for long polling)
 			if isTimeoutError(err) && opts.Wait {
 				continue // Retry on timeout
+			}
+
+			// 429 (rate limited): HttpClient already retries this internally
+			// with backoff (unbounded for wait=true pop, per the retry429
+			// policy) -- this branch is a defensive fallback for the case
+			// where an explicit Retry429Config.MaxAttempts override got
+			// exhausted. Back off and keep polling instead of hot-looping.
+			if httpErr, ok := err.(*HTTPError); ok && httpErr.StatusCode == 429 {
+				delay := time.Second
+				if httpErr.RetryAfterSeconds != nil {
+					delay = time.Duration(*httpErr.RetryAfterSeconds * float64(time.Second))
+				}
+				logWarn("ConsumerManager.worker", map[string]interface{}{
+					"workerId":   workerID,
+					"status":     "rate-limited",
+					"code":       httpErr.Code,
+					"retryDelay": delay.Milliseconds(),
+				})
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+					continue
+				}
 			}
 
 			// Network error - wait and retry
@@ -192,6 +223,20 @@ func (cm *ConsumerManager) worker(
 				case <-time.After(time.Second):
 					continue
 				}
+			}
+
+			// 403 (forbidden): terminal. cluster_suspended in particular can
+			// never resolve itself, and none of the other proxy codes
+			// (storage_quota_exceeded / feature_gated / forbidden) are worth
+			// hot-looping either -- stop this worker and surface the error
+			// (with .Code) to the caller instead of retrying.
+			if httpErr, ok := err.(*HTTPError); ok && httpErr.StatusCode == 403 {
+				logError("ConsumerManager.worker", map[string]interface{}{
+					"workerId": workerID,
+					"status":   "forbidden",
+					"code":     httpErr.Code,
+				})
+				return err
 			}
 
 			// Other errors - log and continue

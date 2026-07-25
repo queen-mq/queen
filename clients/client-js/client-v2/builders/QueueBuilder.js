@@ -335,8 +335,10 @@ export class QueueBuilder {
 
       // Generate affinity key for consistent routing to same backend
       const affinityKey = this.#getAffinityKey()
-      
-      const result = await this.#httpClient.get(`${path}?${params}`, this.#timeoutMillis + 5000, affinityKey)
+
+      // wait=true is a long-poll: on 429 it should back off and keep waiting
+      // rather than give up after a handful of tries (retryKind: 'pop').
+      const result = await this.#httpClient.get(`${path}?${params}`, this.#timeoutMillis + 5000, affinityKey, this.#wait ? 'pop' : null)
 
       if (!result || !result.messages) {
         logger.log('QueueBuilder.pop', { status: 'no-messages' })
@@ -347,8 +349,12 @@ export class QueueBuilder {
       logger.log('QueueBuilder.pop', { status: 'success', count: messages.length })
       return messages
     } catch (error) {
-      // Return empty array on error instead of throwing
-      logger.error('QueueBuilder.pop', { error: error.message })
+      // Return empty array on error instead of throwing. This also covers a
+      // 429 whose retry429 policy was exhausted (bounded pop, or an explicit
+      // maxAttempts override) and a terminal 403 (e.g. cluster_suspended) --
+      // both are logged with their `.code` rather than raising, matching this
+      // method's existing swallow-to-[] contract.
+      logger.error('QueueBuilder.pop', { error: error.message, status: error.status, code: error.code })
       return []
     }
   }

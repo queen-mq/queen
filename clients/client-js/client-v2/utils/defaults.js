@@ -17,7 +17,15 @@ export const CLIENT_DEFAULTS = {
   bearerToken: null,                   // Bearer token for proxy authentication
   headers: {},                         // Custom headers to include in every request
   handleSignals: true,                 // Register SIGINT/SIGTERM handlers (disable when used as a library)
-  logger: null                         // Custom logger instance (must implement info/warn/error)
+  logger: null,                        // Custom logger instance (must implement info/warn/error)
+  // Backoff policy for HTTP 429 (rate limited) responses from a queen_proxy
+  // deployment. Optional -- omit for the defaults below. Shape:
+  //   { maxAttempts?: number, baseMs?: number, capMs?: number }
+  // maxAttempts defaults to 10 for push/admin calls; long-poll pop (wait=true)
+  // retries unboundedly (paced by backoff) unless maxAttempts is set here, in
+  // which case it applies to both. baseMs (500) / capMs (30000) size the
+  // exponential backoff used when the server doesn't send Retry-After.
+  retry429: undefined
 }
 
 export const QUEUE_DEFAULTS = {

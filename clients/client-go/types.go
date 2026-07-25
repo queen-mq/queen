@@ -91,6 +91,36 @@ type ClientConfig struct {
 	MaxIdleConnsPerHost int
 	// MaxConnsPerHost optionally caps total connections per host (0 = unlimited).
 	MaxConnsPerHost int
+	// Retry429 controls client-side backoff when the server returns HTTP 429
+	// (rate limited), separate from the 5xx/network RetryAttempts above. nil
+	// (or a zero-value field within it) falls back to kind-based defaults; see
+	// Retry429Config. PLAN_QUEEN_PROXY_CLOUD.md §4/§9 (client 429 backoff, B4).
+	Retry429 *Retry429Config
+}
+
+// Retry429Config is the backoff policy applied when a request is rate
+// limited (HTTP 429). Zero-value fields fall back to kind-based defaults:
+//   - MaxAttempts: bounded (10 total attempts) for ordinary requests (push,
+//     admin calls, non-waiting pop); unbounded for a long-poll pop
+//     (wait=true, requested via WithLongPollRetry()) -- the outer poll is
+//     already an indefinite loop, so a 429 there should back off and keep
+//     waiting rather than give up. Explicitly setting MaxAttempts applies it
+//     uniformly to both kinds.
+//   - BaseMs: initial backoff (ms) used when the response has no Retry-After
+//     header. Default 500.
+//   - CapMs: ceiling (ms) for the exponential backoff. Default 30000.
+//
+// When the server does send a Retry-After header (seconds), it is honored
+// (with +-20% jitter) instead of the computed exponential delay.
+type Retry429Config struct {
+	// MaxAttempts is the maximum number of attempts (including the first)
+	// before giving up on repeated 429s. 0 = use the kind-based default.
+	MaxAttempts int
+	// BaseMs is the initial backoff in milliseconds absent a Retry-After
+	// header. 0 = default (500ms).
+	BaseMs int
+	// CapMs is the backoff ceiling in milliseconds. 0 = default (30000ms).
+	CapMs int
 }
 
 // QueueConfig contains configuration for queue creation.

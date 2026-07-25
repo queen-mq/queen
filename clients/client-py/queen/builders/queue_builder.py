@@ -372,9 +372,12 @@ class QueueBuilder:
             # Generate affinity key for consistent routing to same backend
             affinity_key = self._get_affinity_key()
 
+            # wait=True is a long-poll: on 429 it should back off and keep
+            # waiting rather than give up after a handful of tries.
             query_string = urlencode(params)
             result = await self._http_client.get(
-                f"{path}?{query_string}", self._timeout_millis + 5000, affinity_key
+                f"{path}?{query_string}", self._timeout_millis + 5000, affinity_key,
+                retry_kind="pop" if self._wait else None,
             )
 
             if not result or not result.get("messages"):
@@ -385,8 +388,17 @@ class QueueBuilder:
             logger.log("QueueBuilder.pop", {"status": "success", "count": len(messages)})
             return messages
         except Exception as error:
-            # Return empty array on error instead of throwing
-            logger.error("QueueBuilder.pop", {"error": str(error)})
+            # Return empty array on error instead of throwing. This also
+            # covers a 429 whose retry_429 policy was exhausted (bounded
+            # pop, or an explicit max_attempts override) and a terminal 403
+            # (e.g. cluster_suspended) -- both are logged with their status
+            # code/`.code` rather than raising, matching this method's
+            # existing swallow-to-[] contract.
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            logger.error(
+                "QueueBuilder.pop",
+                {"error": str(error), "status_code": status_code, "code": getattr(error, "code", None)},
+            )
             print(f"Pop failed: {error}")
             return []
 

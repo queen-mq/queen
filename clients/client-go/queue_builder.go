@@ -223,12 +223,16 @@ func (qb *QueueBuilder) Pop(ctx context.Context) ([]*Message, error) {
 		w := PopDefaults.Wait
 		wait = &w
 	}
+	// wait=true is a long-poll: on a 429 it should back off and keep waiting
+	// rather than give up after the bounded push-like attempt budget.
+	var opts []RequestOption
 	if *wait {
 		timeout += 5000 // Add 5s buffer for long polling
+		opts = append(opts, WithLongPollRetry())
 	}
 
 	// Make request
-	result, err := qb.queen.httpClient.Get(ctx, path, timeout, "")
+	result, err := qb.queen.httpClient.Get(ctx, path, timeout, "", opts...)
 	if err != nil {
 		return nil, fmt.Errorf("pop request failed: %w", err)
 	}
