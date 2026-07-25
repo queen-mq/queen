@@ -38,6 +38,9 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 webpki-roots = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# Embeds the built console SPA (console/dist) into the binary — same crate,
+# same pattern as server/Cargo.toml + server/src/handlers/static_files.rs.
+rust-embed = "8"
 
 [profile.release]
 lto = "thin"

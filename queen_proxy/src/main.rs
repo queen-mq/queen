@@ -4,6 +4,7 @@
 mod auth;
 mod cache;
 mod config;
+mod console;
 mod db;
 mod errors;
 mod gateway;
@@ -86,6 +87,12 @@ async fn main() {
         .route("/healthz", get(healthz))
         .route("/.well-known/jwks.json", get(jwks))
         .nest("/auth", oauth::router())
+        .nest("/api/console", console::router())
+        // three routes, not a bare wildcard: /console/*path alone does not
+        // match "/console/" (empty remainder) under axum 0.7's matchit
+        .route("/console", get(console::spa))
+        .route("/console/", get(console::spa))
+        .route("/console/*path", get(console::spa))
         .fallback(gateway::handle)
         .with_state(st.clone());
 

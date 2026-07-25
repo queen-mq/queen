@@ -1,0 +1,76 @@
+// Minimal fetch helpers for the console SPA. Deliberately dependency-free
+// (no axios) — the console carries zero UI/HTTP libraries beyond Vue itself,
+// see ../README.md.
+//
+// Auth model (matches src/console.rs + src/oauth.rs):
+//   1. On load, exchange the httpOnly `queen_session` cookie for a
+//      short-lived Bearer session token via GET /auth/session-token.
+//   2. Send that Bearer on every /api/console/* and /api/v1/* call (both are
+//      same-origin — the console is served by the same queen-proxy instance
+//      that serves the data-plane gateway and /auth).
+//   3. A 401 at any point (missing/expired cookie, expired session token)
+//      redirects to /auth/login?next=/console/, per the task spec.
+
+let sessionToken = null;
+let bootstrapping = null;
+
+export function redirectToLogin() {
+  window.location.href = `/auth/login?next=${encodeURIComponent('/console/')}`;
+}
+
+/** Resolves once a session Bearer token is held in memory. Concurrent
+ * callers share one in-flight request (bootstrapping). A 401 redirects the
+ * page and never resolves (navigation is already underway). */
+export function bootstrapSession() {
+  if (sessionToken) return Promise.resolve(sessionToken);
+  if (bootstrapping) return bootstrapping;
+  bootstrapping = fetch('/auth/session-token', { credentials: 'include' })
+    .then((res) => {
+      if (res.status === 401) {
+        redirectToLogin();
+        return new Promise(() => {}); // navigating away; never settles
+      }
+      if (!res.ok) {
+        throw new Error(`could not start a session (HTTP ${res.status})`);
+      }
+      return res.json();
+    })
+    .then((body) => {
+      sessionToken = body.token;
+      bootstrapping = null;
+      return sessionToken;
+    });
+  return bootstrapping;
+}
+
+/** Authenticated fetch: attaches the Bearer session token, parses the JSON
+ * response (console.rs and the broker gateway both always return JSON, error
+ * or not), and throws Error(message) with `.status`/`.body` attached on any
+ * non-2xx. A 401 mid-session (token outlived its 900s TTL) also redirects to
+ * login rather than surfacing a confusing error in the UI. */
+export async function apiFetch(path, options = {}) {
+  const token = await bootstrapSession();
+  const headers = { ...(options.headers || {}), Authorization: `Bearer ${token}` };
+  const res = await fetch(path, { ...options, headers });
+  if (res.status === 401) {
+    redirectToLogin();
+    return new Promise(() => {});
+  }
+  const text = await res.text();
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+  if (!res.ok) {
+    const message = (body && (body.error || body.code)) || `HTTP ${res.status}`;
+    const err = new Error(message);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
