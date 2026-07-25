@@ -916,6 +916,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "rand 0.8.7",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

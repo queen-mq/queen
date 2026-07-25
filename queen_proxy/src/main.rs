@@ -63,7 +63,8 @@ async fn main() {
 
     let cache = cache::ClusterCache::new(&cfg, db.clone());
     let limits = limits::Limits::new(&cfg);
-    let meter = meter::Meter::new(&cfg);
+    let meter = Arc::new(meter::Meter::new(&cfg));
+    meter.spawn_flush(db.clone());
     let registry = registry::Registry::new(db.clone());
     let keys = auth::Keys::from_config(&cfg);
 
@@ -77,6 +78,9 @@ async fn main() {
         registry,
         keys,
     });
+
+    st.cache.spawn_listener();
+    st.registry.spawn_reconciler();
 
     let app = Router::new()
         .route("/healthz", get(healthz))

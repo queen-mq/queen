@@ -115,7 +115,7 @@ pub struct AppState {
         hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, axum::body::Body>,
     pub cache: crate::cache::ClusterCache,
     pub limits: crate::limits::Limits,
-    pub meter: crate::meter::Meter,
+    pub meter: std::sync::Arc<crate::meter::Meter>,
     pub registry: crate::registry::Registry,
     pub keys: crate::auth::Keys,
 }

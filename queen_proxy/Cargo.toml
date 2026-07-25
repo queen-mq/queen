@@ -22,6 +22,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 bytes = "1"
 rand = "0.8"
+# Ed25519 public-key derivation from the private PKCS#8 PEM (auth.rs). ring is
+# already in the tree (jsonwebtoken 9 + rustls both depend on ring 0.17), so
+# surfacing it as a direct dep pulls zero new crates and stays cmake-free.
+ring = "0.17"
 base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"

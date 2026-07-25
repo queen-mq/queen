@@ -1,0 +1,107 @@
+-- queen_proxy dev seed data -- NOT a migration (not in migrations/, not
+-- registered in db::migrations(), not applied automatically at boot).
+-- Run by hand against a dev pxdb that has already had 001_init.sql and
+-- 002_functions.sql applied, e.g.:
+--   psql "$PXDB_URL" -f queen_proxy/scripts/seed-dev.sql
+--
+-- Creates the local dev fixture referenced by CONTRACTS.md's dev cell ports
+-- (pxdb :5465, cell PG :5466, broker :6710, proxy :6711):
+--   * tenant 'dev', user dev@localhost (no password_hash -- see note below)
+--   * cell 'local', base_url http://127.0.0.1:6710, cell_secret NULL (dev
+--     broker runs without JWT_ENABLED), class shared
+--   * cluster slug 'dev' on cell 'local', plan 'free'
+--   * one API key with FULL scopes (produce/consume/admin/read), for local
+--     end-to-end testing against QUEEN_PROXY_DEV_INSECURE=false setups.
+--
+-- THE PLAINTEXT DEV KEY (for local testing only -- never use in anything
+-- that isn't a throwaway local pxdb):
+--
+--   qk_dev_devdevdevdevdevdevdevdevdevdevdevdevdev
+--
+-- sha256 hex of the string above (verified with both `shasum -a 256` and
+-- Python's hashlib -- see the report):
+--
+--   a492a78dbb0a44288f1ff363823b58f4e6fad1367018104e07f7dc118eee781b
+--
+-- Note this literal key does NOT match the CONTRACTS.md production format
+-- (`qk_<env>_<43 base64url chars>`) -- it's a memorable, deliberately
+-- fake/short fixture string, hashed exactly as given. auth::key_hash_hex
+-- only cares about the hash of whatever bearer token arrives; it doesn't
+-- validate the qk_ literal's shape.
+--
+-- `users.password_hash` is left NULL: nothing in this crate's mandated
+-- function list (create_user) takes a plaintext password to hash, and
+-- inventing/bcrypt-hashing one wasn't asked for -- the point of this seed is
+-- the API-key data-plane flow. Set one via whatever local-login tooling
+-- lands later if you need to exercise the password login UI.
+--
+-- Idempotent: safe to re-run against a pxdb this script already seeded
+-- (every step is guarded by a "does it already exist" check).
+
+DO $$
+DECLARE
+    v_tenant  UUID;
+    v_user    UUID;
+    v_cell    UUID;
+    v_cluster UUID;
+    v_key     UUID;
+BEGIN
+    -- tenant 'dev' ---------------------------------------------------------
+    SELECT id INTO v_tenant FROM queen_proxy.tenants WHERE slug = 'dev';
+    IF v_tenant IS NULL THEN
+        v_tenant := queen_proxy.create_tenant('dev', 'Dev Tenant');
+        RAISE NOTICE 'created tenant % (dev)', v_tenant;
+    ELSE
+        RAISE NOTICE 'tenant dev already exists (%)', v_tenant;
+    END IF;
+
+    -- user dev@localhost -----------------------------------------------
+    SELECT id INTO v_user FROM queen_proxy.users WHERE email = 'dev@localhost';
+    IF v_user IS NULL THEN
+        v_user := queen_proxy.create_user(v_tenant, 'dev@localhost', NULL, 'local');
+        RAISE NOTICE 'created user % (dev@localhost)', v_user;
+    ELSE
+        RAISE NOTICE 'user dev@localhost already exists (%)', v_user;
+    END IF;
+
+    -- cell 'local' -----------------------------------------------------
+    -- Infrastructure row, not tenant business data -- no queen_proxy.*
+    -- function creates cells (see 001_init.sql's comment on the cells
+    -- table), so this is a direct INSERT, exactly as ops tooling would do
+    -- it against a real pxdb.
+    SELECT id INTO v_cell FROM queen_proxy.cells WHERE slug = 'local';
+    IF v_cell IS NULL THEN
+        INSERT INTO queen_proxy.cells (slug, region, base_url, class, cell_secret)
+        VALUES ('local', 'local', 'http://127.0.0.1:6710', 'shared', NULL)
+        RETURNING id INTO v_cell;
+        RAISE NOTICE 'created cell % (local)', v_cell;
+    ELSE
+        RAISE NOTICE 'cell local already exists (%)', v_cell;
+    END IF;
+
+    -- cluster 'dev' on cell 'local', plan 'free' ------------------------
+    SELECT id INTO v_cluster FROM queen_proxy.clusters WHERE slug = 'dev';
+    IF v_cluster IS NULL THEN
+        v_cluster := queen_proxy.create_cluster(v_tenant, 'dev', 'free', v_cell);
+        RAISE NOTICE 'created cluster % (dev)', v_cluster;
+    ELSE
+        RAISE NOTICE 'cluster dev already exists (%)', v_cluster;
+    END IF;
+
+    -- dev API key, full scopes -------------------------------------------
+    IF NOT EXISTS (
+        SELECT 1 FROM queen_proxy.api_keys
+        WHERE key_hash = 'a492a78dbb0a44288f1ff363823b58f4e6fad1367018104e07f7dc118eee781b'
+    ) THEN
+        v_key := queen_proxy.issue_api_key(
+            v_cluster,
+            'dev key (full scopes)',
+            'a492a78dbb0a44288f1ff363823b58f4e6fad1367018104e07f7dc118eee781b',
+            ARRAY['produce', 'consume', 'admin', 'read']
+        );
+        RAISE NOTICE 'issued api key % for cluster dev -- plaintext: qk_dev_devdevdevdevdevdevdevdevdevdevdevdevdev', v_key;
+    ELSE
+        RAISE NOTICE 'dev api key already exists';
+    END IF;
+END;
+$$;
