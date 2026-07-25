@@ -59,6 +59,14 @@ curl localhost:6632/health
 All configuration is via environment variables. Only the Postgres ones are
 typically needed; everything else has a working default.
 
+**Boolean values** (`JWT_ENABLED`, `PG_USE_SSL`, the `QUEEN_*` kill switches, …)
+accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, case-insensitively. An
+unset or empty value uses the documented default; **any other value fails the
+boot** with a message naming the variable — a typo is never silently resolved to
+a default (a `JWT_ENABLED=maybe` must not mean "authentication off"). At startup
+the broker logs the effective resolved configuration under the `boot` target,
+with secrets masked, so you can see exactly what it understood.
+
 ### Postgres
 
 | Var | Default | |

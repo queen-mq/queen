@@ -27,12 +27,15 @@ use crate::vegas::Vegas;
 
 // GET /api/v1/consumer-groups — every group across both engines. Returns the
 // get_consumer_groups_v4 JSON array verbatim (the Admin client reads it as-is).
-pub async fn handle_consumer_groups(State(st): State<Arc<AppState>>) -> Response {
+pub async fn handle_consumer_groups(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_consumer_groups(&client).await {
+    match db::get_consumer_groups(&client, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -46,6 +49,7 @@ pub async fn handle_consumer_groups(State(st): State<Arc<AppState>>) -> Response
 // segment wins over the param match.
 pub async fn handle_lagging_consumers(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     // RUSTFIX item 22: default 3600s, matching C++ consumer_groups.cpp:99.
@@ -54,7 +58,7 @@ pub async fn handle_lagging_consumers(
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_lagging_partitions(&client, min_lag).await {
+    match db::get_lagging_partitions(&client, min_lag, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -66,13 +70,14 @@ pub async fn handle_lagging_consumers(
 // GET /api/v1/consumer-groups/:group — per-queue/partition detail for one group.
 pub async fn handle_consumer_group_details(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(group): Path<String>,
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_consumer_group_details(&client, &group).await {
+    match db::get_consumer_group_details(&client, &group, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -89,6 +94,7 @@ pub async fn handle_consumer_group_details(
 // return null).
 pub async fn handle_delete_consumer_group(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(group): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -98,7 +104,7 @@ pub async fn handle_delete_consumer_group(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    let seg = match db::delete_consumer_group_seg(&client, &group, delete_metadata).await {
+    let seg = match db::delete_consumer_group_seg(&client, &group, delete_metadata, tenant.as_str()).await {
         Ok(t) => t,
         Err(e) => {
             return json(
@@ -108,7 +114,7 @@ pub async fn handle_delete_consumer_group(
         }
     };
     // Best-effort rows-side cleanup (empty for a pure-segments deployment).
-    let rows = db::delete_consumer_group_rows(&client, &group, delete_metadata)
+    let rows = db::delete_consumer_group_rows(&client, &group, delete_metadata, tenant.as_str())
         .await
         .unwrap_or_else(|_| "{}".to_string());
 
@@ -131,9 +137,14 @@ pub async fn handle_delete_consumer_group(
     // from every queue's cached set so the next pop re-checks the (now-absent)
     // marker and re-seeds via the first-contact wildcard path.
     if delete_metadata {
+        // Track B (§5): seeded_groups is keyed by (tenant, queue); drop the group
+        // only from THIS tenant's queue sets (prefix "<tenant>\x1f…").
+        let prefix = crate::handlers::tenant_queue_key(tenant.as_str(), "");
         let mut sg = st.seeded_groups.lock().unwrap();
-        for set in sg.values_mut() {
-            set.remove(&group);
+        for (k, set) in sg.iter_mut() {
+            if k.starts_with(&prefix) {
+                set.remove(&group);
+            }
         }
     }
 
@@ -158,6 +169,7 @@ pub async fn handle_delete_consumer_group(
 // return null).
 pub async fn handle_delete_consumer_group_for_queue(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((group, queue)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -167,7 +179,7 @@ pub async fn handle_delete_consumer_group_for_queue(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    let seg_n = match db::delete_consumer_group_for_queue_seg(&client, &group, &queue).await {
+    let seg_n = match db::delete_consumer_group_for_queue_seg(&client, &group, &queue, tenant.as_str()).await {
         Ok(n) => n as i64,
         Err(e) => {
             return json(
@@ -177,7 +189,7 @@ pub async fn handle_delete_consumer_group_for_queue(
         }
     };
     // Best-effort rows-side cleanup (empty for a pure-segments deployment).
-    let rows = db::delete_consumer_group_for_queue_rows(&client, &group, &queue, delete_metadata)
+    let rows = db::delete_consumer_group_for_queue_rows(&client, &group, &queue, delete_metadata, tenant.as_str())
         .await
         .unwrap_or_else(|_| "{}".to_string());
     let rows_v: serde_json::Value = serde_json::from_str(&rows).unwrap_or(serde_json::Value::Null);
@@ -190,7 +202,9 @@ pub async fn handle_delete_consumer_group_for_queue(
     // `seeded_groups` entry so the next pop re-seeds via first contact.
     st.hotlist.forget_group(&queue, &group);
     if delete_metadata {
-        if let Some(set) = st.seeded_groups.lock().unwrap().get_mut(&queue) {
+        // Track B (§5): seeded_groups is keyed by (tenant, queue).
+        let key = crate::handlers::tenant_queue_key(tenant.as_str(), &queue);
+        if let Some(set) = st.seeded_groups.lock().unwrap().get_mut(&key) {
             set.remove(&group);
         }
     }
@@ -216,6 +230,7 @@ struct SubscriptionBody {
 
 pub async fn handle_update_subscription(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(group): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -236,7 +251,7 @@ pub async fn handle_update_subscription(
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::update_consumer_group_subscription(&client, &group, &ts).await {
+    match db::update_consumer_group_subscription(&client, &group, &ts, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -289,11 +304,12 @@ async fn reseed_after_seek(
     client: &deadpool_postgres::Client,
     group: &str,
     queue: &str,
+    tenant: &str,
     txt: &str,
 ) {
     if st.hotlist.enabled() && seek_succeeded(txt) {
         let now_ms = crate::util::now_epoch_ms();
-        super::data::hotlist_reseed_scan(&st.hotlist, client, queue, group, now_ms).await;
+        super::data::hotlist_reseed_scan(&st.hotlist, client, queue, group, tenant, now_ms).await;
     }
 }
 
@@ -301,6 +317,7 @@ async fn reseed_after_seek(
 // segment cursor for every partition of the queue.
 pub async fn handle_seek_consumer_group(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((group, queue)): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
@@ -312,9 +329,9 @@ pub async fn handle_seek_consumer_group(
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::seg_seek_consumer_group(&client, &group, &queue, to_end, ts.as_deref()).await {
+    match db::seg_seek_consumer_group(&client, &group, &queue, to_end, ts.as_deref(), tenant.as_str()).await {
         Ok(txt) => {
-            reseed_after_seek(&st, &client, &group, &queue, &txt).await;
+            reseed_after_seek(&st, &client, &group, &queue, tenant.as_str(), &txt).await;
             sp_result_to_response(txt)
         }
         Err(e) => json(
@@ -328,6 +345,7 @@ pub async fn handle_seek_consumer_group(
 // move the group's segment cursor for ONE partition.
 pub async fn handle_seek_partition(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((group, queue, partition)): Path<(String, String, String)>,
     body: Bytes,
 ) -> Response {
@@ -346,9 +364,9 @@ pub async fn handle_seek_partition(
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::seg_seek_partition(&client, &group, &queue, &partition, to_end, ts.as_deref()).await {
+    match db::seg_seek_partition(&client, &group, &queue, &partition, to_end, ts.as_deref(), tenant.as_str()).await {
         Ok(txt) => {
-            reseed_after_seek(&st, &client, &group, &queue, &txt).await;
+            reseed_after_seek(&st, &client, &group, &queue, tenant.as_str(), &txt).await;
             sp_result_to_response(txt)
         }
         Err(e) => json(

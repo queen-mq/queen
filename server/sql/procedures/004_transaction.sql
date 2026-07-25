@@ -50,7 +50,7 @@ BEGIN
                  THEN split_part(op->>'queue', '.', 2) ELSE '' END)
     FROM jsonb_array_elements(p_operations) AS op
     WHERE op->>'type' = 'push' AND COALESCE(op->>'queue', '') <> ''
-    ON CONFLICT (name) DO NOTHING;
+    ON CONFLICT (tenant_id, name) DO NOTHING;
 
     INSERT INTO queen.partitions (queue_id, name)
     SELECT DISTINCT qq.id, COALESCE(op->>'partition', 'Default')
@@ -98,7 +98,7 @@ BEGIN
                 
                 INSERT INTO queen.queues (name, namespace, task)
                 VALUES (v_queue_name, v_namespace, v_task)
-                ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+                ON CONFLICT (tenant_id, name) DO UPDATE SET name = EXCLUDED.name
                 RETURNING id INTO v_queue_id;
                 
                 INSERT INTO queen.partitions (queue_id, name)

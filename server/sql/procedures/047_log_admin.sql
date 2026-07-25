@@ -47,22 +47,30 @@
 -- queen.log_consumers holds log-engine cursors ONLY, so the plain group
 -- predicate is already exact and the two engines' deletes stay disjoint.
 -- ============================================================================
+-- Track B (§5): p_tenant scopes the cross-queue group delete to ONE tenant's
+-- cursors/watermarks — the old body deleted every tenant's rows for the name.
+DROP FUNCTION IF EXISTS queen.log_delete_consumer_group_v1(TEXT, BOOLEAN);
 CREATE OR REPLACE FUNCTION queen.log_delete_consumer_group_v1(
     p_group TEXT,
-    p_delete_metadata BOOLEAN DEFAULT TRUE
+    p_delete_metadata BOOLEAN DEFAULT TRUE,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_deleted INTEGER;
 BEGIN
-    DELETE FROM queen.log_consumers WHERE consumer_group = p_group;
+    DELETE FROM queen.log_consumers c
+    USING queen.log_partitions p
+    JOIN queen.log_queues q ON q.id = p.queue_id
+    WHERE c.partition_id = p.id AND c.consumer_group = p_group
+      AND q.tenant_id = p_tenant;
     GET DIAGNOSTICS v_deleted = ROW_COUNT;
 
     -- Drop the empty-scan watermark so a later group of the same name does not
     -- inherit a stale "queue is empty since T" floor and silently skip cold
     -- partitions (symmetric with the watermark cleanup in log_seek_* below).
-    DELETE FROM queen.consumer_watermarks WHERE consumer_group = p_group;
+    DELETE FROM queen.consumer_watermarks WHERE consumer_group = p_group AND tenant_id = p_tenant;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -136,11 +144,14 @@ $$;
 -- queen.log_seek_consumer_group_v1: seek the log cursor for EVERY partition
 -- of a queue. Body of the POST .../seek route (per-queue variant).
 -- ============================================================================
+-- Track B (§5): p_tenant scopes the per-queue seek + watermark clear.
+DROP FUNCTION IF EXISTS queen.log_seek_consumer_group_v1(TEXT, TEXT, BOOLEAN, TIMESTAMPTZ);
 CREATE OR REPLACE FUNCTION queen.log_seek_consumer_group_v1(
     p_group TEXT,
     p_queue TEXT,
     p_to_end BOOLEAN DEFAULT FALSE,
-    p_timestamp TIMESTAMPTZ DEFAULT NULL
+    p_timestamp TIMESTAMPTZ DEFAULT NULL,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -158,7 +169,7 @@ BEGIN
         SELECT p.id, p.last_offset, p.log_start
         FROM queen.log_partitions p
         JOIN queen.log_queues q ON q.id = p.queue_id
-        WHERE q.name = p_queue
+        WHERE q.name = p_queue AND q.tenant_id = p_tenant
     LOOP
         PERFORM queen.log_seek_one_v1(v_p.id, v_p.last_offset, v_p.log_start,
                                       p_group, p_to_end, p_timestamp);
@@ -168,7 +179,7 @@ BEGIN
     -- Clear the empty-scan watermark so a backward seek re-exposes cold
     -- partitions to the wildcard candidate filter on the next pop.
     DELETE FROM queen.consumer_watermarks
-    WHERE queue_name = p_queue AND consumer_group = p_group;
+    WHERE queue_name = p_queue AND consumer_group = p_group AND tenant_id = p_tenant;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -186,12 +197,15 @@ $$;
 -- queen.log_seek_partition_v1: seek the log cursor for ONE named partition.
 -- Body of the POST .../partitions/:partition/seek route.
 -- ============================================================================
+-- Track B (§5): p_tenant scopes the partition resolution + watermark clear.
+DROP FUNCTION IF EXISTS queen.log_seek_partition_v1(TEXT, TEXT, TEXT, BOOLEAN, TIMESTAMPTZ);
 CREATE OR REPLACE FUNCTION queen.log_seek_partition_v1(
     p_group TEXT,
     p_queue TEXT,
     p_partition TEXT,
     p_to_end BOOLEAN DEFAULT FALSE,
-    p_timestamp TIMESTAMPTZ DEFAULT NULL
+    p_timestamp TIMESTAMPTZ DEFAULT NULL,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -210,7 +224,7 @@ BEGIN
     INTO v_id, v_last_offset, v_log_start
     FROM queen.log_partitions p
     JOIN queen.log_queues q ON q.id = p.queue_id
-    WHERE q.name = p_queue AND p.name = p_partition;
+    WHERE q.name = p_queue AND p.name = p_partition AND q.tenant_id = p_tenant;
 
     IF v_id IS NULL THEN
         RETURN jsonb_build_object('success', false, 'error', 'Partition not found');
@@ -220,7 +234,7 @@ BEGIN
                                   p_group, p_to_end, p_timestamp);
 
     DELETE FROM queen.consumer_watermarks
-    WHERE queue_name = p_queue AND consumer_group = p_group;
+    WHERE queue_name = p_queue AND consumer_group = p_group AND tenant_id = p_tenant;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -250,7 +264,11 @@ $$;
 -- log_segments, the only segment touch here). Subscription metadata does not
 -- exist per-partition in the log engine -> nulls, as before.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION queen.get_consumer_groups_v4()
+-- Track B (§5): p_tenant scopes the (global, cross-queue) group listing to one
+-- tenant's queues — two tenants can run the same group name on their own queues.
+DROP FUNCTION IF EXISTS queen.get_consumer_groups_v4();
+CREATE OR REPLACE FUNCTION queen.get_consumer_groups_v4(
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -394,8 +412,9 @@ BEGIN
         JOIN queen.log_partitions p ON p.id = c.partition_id
         JOIN queen.log_queues q ON q.id = p.queue_id
         -- Strict guard: only queues currently routed to the log engine
-        -- (storage value 'segments' on the wire, §11).
+        -- (storage value 'segments' on the wire, §11). Track B: scoped to p_tenant.
         JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
+                             AND quv.tenant_id = q.tenant_id AND q.tenant_id = p_tenant
         LEFT JOIN lag l ON l.partition_id = c.partition_id
                        AND l.consumer_group = c.consumer_group
     ),
@@ -479,6 +498,9 @@ DECLARE
     v_has_queue_mode BOOLEAN;
     v_total_bus_groups INTEGER;
     v_v2 JSONB;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`), so the (JSONB)
+    -- signature is unchanged. Absent ⇒ default tenant.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     -- Parse filters
     -- from: inclusive of the exact timestamp
@@ -681,7 +703,9 @@ BEGIN
             JOIN queen.log_partitions p ON p.id = t.partition_id
             JOIN queen.log_queues q ON q.id = p.queue_id
             -- Strict guard: only queues currently routed to the log engine.
+            -- Track B: scoped to v_tenant (from the `_tenant` filter key).
             JOIN queen.queues quv ON quv.name = q.name AND quv.storage = 'segments'
+                                 AND quv.tenant_id = q.tenant_id AND q.tenant_id = v_tenant
             LEFT JOIN queen.log_consumers c
                 ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
             CROSS JOIN LATERAL queen.log_unnest_hashes(t.hashes) th
@@ -732,6 +756,8 @@ DECLARE
     v_consumer_group TEXT;
     v_limit INTEGER;
     v_offset INTEGER;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_queue := p_filters->>'queue';
     v_consumer_group := p_filters->>'consumerGroup';
@@ -789,8 +815,9 @@ BEGIN
             FROM queen.log_dlq d2
             JOIN queen.log_partitions p2 ON p2.id = d2.partition_id
             JOIN queen.log_queues q2q ON q2q.id = p2.queue_id
-            LEFT JOIN queen.queues qq ON qq.name = q2q.name
-            WHERE (v_queue IS NULL OR q2q.name = v_queue)
+            LEFT JOIN queen.queues qq ON qq.name = q2q.name AND qq.tenant_id = q2q.tenant_id
+            WHERE q2q.tenant_id = v_tenant
+              AND (v_queue IS NULL OR q2q.name = v_queue)
               AND (v_consumer_group IS NULL OR d2.consumer_group = v_consumer_group)
         ) t
         LIMIT v_limit OFFSET v_offset
@@ -904,7 +931,11 @@ $$;
 -- PK range (the only segment touch). last_consumed_at does not exist in the
 -- log consumer row -> NULL, same key shape.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION queen.get_lagging_partitions_v1(p_min_lag_seconds INTEGER DEFAULT 0)
+-- Track B (§5): p_tenant scopes the (global) lagging-partitions listing.
+DROP FUNCTION IF EXISTS queen.get_lagging_partitions_v1(INTEGER);
+CREATE OR REPLACE FUNCTION queen.get_lagging_partitions_v1(
+    p_min_lag_seconds INTEGER DEFAULT 0,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -979,6 +1010,7 @@ BEGIN
         FROM queen.log_consumers c
         JOIN queen.log_partitions p ON p.id = c.partition_id
         JOIN queen.log_queues q ON q.id = p.queue_id
+        WHERE q.tenant_id = p_tenant
     )
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
@@ -1015,7 +1047,11 @@ $$;
 -- lastConsumedAt is NULL for log partitions (no such column on log_consumers);
 -- totalConsumed maps to log_consumers.total_consumed.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION queen.get_consumer_group_details_v1(p_consumer_group TEXT)
+-- Track B (§5): p_tenant scopes the group-details listing to one tenant's queues.
+DROP FUNCTION IF EXISTS queen.get_consumer_group_details_v1(TEXT);
+CREATE OR REPLACE FUNCTION queen.get_consumer_group_details_v1(
+    p_consumer_group TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -1108,7 +1144,7 @@ BEGIN
         FROM queen.log_consumers c
         JOIN queen.log_partitions p ON p.id = c.partition_id
         JOIN queen.log_queues q ON q.id = p.queue_id
-        WHERE c.consumer_group = p_consumer_group
+        WHERE c.consumer_group = p_consumer_group AND q.tenant_id = p_tenant
     )
     SELECT jsonb_object_agg(
         queue_name,
@@ -1132,13 +1168,15 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION queen.get_lagging_partitions_v1(INTEGER) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_consumer_group_details_v1(TEXT) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.log_delete_consumer_group_v1(TEXT, BOOLEAN) TO PUBLIC;
+-- Track B: GRANTs updated to the tenant-scoped signatures (the old ones were
+-- DROPped above, so granting them would error the schema apply).
+GRANT EXECUTE ON FUNCTION queen.get_lagging_partitions_v1(INTEGER, UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_consumer_group_details_v1(TEXT, UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_delete_consumer_group_v1(TEXT, BOOLEAN, UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.log_seek_one_v1(UUID, BIGINT, BIGINT, TEXT, BOOLEAN, TIMESTAMPTZ) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.log_seek_consumer_group_v1(TEXT, TEXT, BOOLEAN, TIMESTAMPTZ) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.log_seek_partition_v1(TEXT, TEXT, TEXT, BOOLEAN, TIMESTAMPTZ) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v4() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_seek_consumer_group_v1(TEXT, TEXT, BOOLEAN, TIMESTAMPTZ, UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_seek_partition_v1(TEXT, TEXT, TEXT, BOOLEAN, TIMESTAMPTZ, UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v4(UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.list_messages_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_dlq_messages_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.record_trace_v1(JSONB) TO PUBLIC;

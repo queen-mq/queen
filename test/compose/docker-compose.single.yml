@@ -33,7 +33,7 @@ services:
       PG_USER: postgres
       PG_PASSWORD: postgres
       PG_DATABASE: postgres
-      QUEEN_APPLY_SCHEMA: "1"     # only the literal "0" would skip
+      QUEEN_APPLY_SCHEMA: "1"     # 0/false/no/off would skip
       PORT: "6632"
       DB_POOL_SIZE: "32"          # small test PG — stay well under max_connections
       FILE_BUFFER_DIR: /var/lib/queen/buffers

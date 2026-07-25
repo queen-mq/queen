@@ -32,8 +32,7 @@ fn record_bundle(parts: usize) {
     // Read the env flag once — env::var takes a process-wide lock and allocates,
     // and this runs on every bundle commit (thousands/s under load).
     static LOG_EACH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let log_each =
-        *LOG_EACH.get_or_init(|| std::env::var("QUEEN_V2_BUNDLE_LOG").ok().as_deref() == Some("1"));
+    let log_each = *LOG_EACH.get_or_init(|| crate::config::env_bool("QUEEN_V2_BUNDLE_LOG", false));
     if log_each && parts >= 2 {
         tracing::debug!(target: "fusion", parts, "bundle committed partitions in 1 txn");
     }
@@ -103,6 +102,9 @@ pub struct OwnedFrame {
 struct FusionGroup {
     queue: String,
     partition: String,
+    // Track B (§5): the tenant this group's segment belongs to (all frames in a
+    // group share it — the group key includes it).
+    tenant: String,
     frames: Vec<OwnedFrame>,
     // Monotonic arrival stamp of this group's FIRST frame (set when the group is
     // created and reused for its whole accumulation). Only consulted by the
@@ -180,6 +182,11 @@ impl Floor {
 pub struct AddMsg {
     pub queue: String,
     pub partition: String,
+    // Track B (§5): the request's resolved tenant. Part of the fusion group key so
+    // two tenants' same-named (queue, partition) never fuse into one segment; also
+    // travels in the log_push_multi_v1 tenants array so provisioning/resolution is
+    // scoped. Default tenant when the feature is off ⇒ grouping is byte-identical.
+    pub tenant: String,
     pub frames: Vec<OwnedFrame>,
 }
 
@@ -220,9 +227,12 @@ const DEDUP_SKEW_SLACK_MS: i64 = 5_000;
 
 // Hydration statement (a): resolve pid + dedup window + allocator watermark.
 // Doubles as the TTL meta refresh. prepare_cached: runs every ~30s/partition.
+// Track B (§5): scoped by tenant ($3) so two tenants' same-named (queue, partition)
+// resolve to their OWN pid + dedup window (else the dedup cache would hydrate/vouch
+// across tenants).
 const PART_META_SQL: &str = "SELECT q.dedup_window_seconds, p.id::text, p.last_offset \
      FROM queen.log_queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
-     WHERE q.name = $1 AND p.name = $2";
+     WHERE q.name = $1 AND p.name = $2 AND q.tenant_id = $3::text::uuid";
 
 // Hydration statement (b): the partition's in-window log_txns rows (epoch ms so
 // dedup.rs stays clock-format-free). $2 = window + skew slack, seconds.
@@ -237,7 +247,7 @@ const HYDRATE_SQL: &str = "SELECT t.base_offset, t.end_offset, \
 // has no entry (cache disabled, or the meta fetch degraded this flush).
 const PART_PID_SQL: &str = "SELECT p.id::text \
      FROM queen.log_queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
-     WHERE q.name = $1 AND p.name = $2";
+     WHERE q.name = $1 AND p.name = $2 AND q.tenant_id = $3::text::uuid";
 
 // Rare-path covering-segment fetch for duplicate-mid resolution (§4).
 const SEGMENT_AT_SQL: &str =
@@ -449,7 +459,9 @@ async fn shard_loop(
         tokio::select! {
             maybe = rx.recv() => {
                 let Some(msg) = maybe else { break; };
-                let key = format!("{}\x1f{}", msg.queue, msg.partition);
+                // Track B (§5): tenant is part of the group key, so tenant A's and
+                // tenant B's "orders"/"Default" accumulate as DISTINCT segments.
+                let key = format!("{}\x1f{}\x1f{}", msg.tenant, msg.queue, msg.partition);
                 // Stamp the group's first-frame arrival at (re)creation — the clock
                 // the floor ages a held segment against. Cheap monotonic read;
                 // reused for the group's whole accumulation, ignored when OFF.
@@ -457,6 +469,7 @@ async fn shard_loop(
                 let g = groups.entry(key.clone()).or_insert_with(|| FusionGroup {
                     queue: msg.queue.clone(),
                     partition: msg.partition.clone(),
+                    tenant: msg.tenant.clone(),
                     frames: Vec::new(),
                     first_frame: arrival,
                 });
@@ -728,6 +741,7 @@ fn build_hashes_and_blob(
 // text[], int4[], bytea[], int8[], bytea[]) with zero jsonb parsed on the PG
 // hot path, prepared once per connection (prepare_cached). Returns the
 // per-segment result array JSON as text, index-aligned with the input.
+#[allow(clippy::too_many_arguments)]
 async fn push_log_multi(
     client: &deadpool_postgres::Client,
     queues: &[String],
@@ -736,12 +750,21 @@ async fn push_log_multi(
     hashes: &[Vec<u8>],
     verified: &[i64],
     blobs: Vec<Vec<u8>>,
+    // Track B (§5): per-segment tenant, index-aligned with the other arrays. Bound
+    // as text[] and cast to uuid[] (no uuid crate). All the default tenant when the
+    // feature is off ⇒ provisioning/resolution land byte-identically.
+    tenants: &[String],
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
-        .prepare_cached("SELECT (queen.log_push_multi_v1($1, $2, $3, $4, $5, $6))::text")
+        .prepare_cached(
+            "SELECT (queen.log_push_multi_v1($1, $2, $3, $4, $5, $6, $7::text[]::uuid[]))::text",
+        )
         .await?;
     let row = client
-        .query_one(&stmt, &[&queues, &partitions, &msg_counts, &hashes, &verified, &blobs])
+        .query_one(
+            &stmt,
+            &[&queues, &partitions, &msg_counts, &hashes, &verified, &blobs, &tenants],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -795,6 +818,7 @@ async fn get_meta(
     key: &str,
     queue: &str,
     partition: &str,
+    tenant: &str,
 ) -> Option<PartMeta> {
     let now = now_epoch_ms();
     {
@@ -806,7 +830,7 @@ async fn get_meta(
         }
     }
     let stmt = client.prepare_cached(PART_META_SQL).await.ok()?;
-    let rows = client.query(&stmt, &[&queue, &partition]).await.ok()?;
+    let rows = client.query(&stmt, &[&queue, &partition, &tenant]).await.ok()?;
     let mut map = ctx.part_meta.lock().unwrap();
     let Some(row) = rows.first() else {
         // Not provisioned (or deleted): drop any stale meta so we never hand
@@ -873,15 +897,17 @@ async fn hydrate_partition(
 // original offsets the wire response needs anyway. The cache still pays off on
 // the hot path: clean segments push with a vouched watermark that skips the
 // probe entirely.
+#[allow(clippy::too_many_arguments)]
 async fn segment_verified(
     ctx: &FlushCtx,
     client: &deadpool_postgres::Client,
     key: &str,
     queue: &str,
     partition: &str,
+    tenant: &str,
     pending_hashes: &[[u8; 16]],
 ) -> i64 {
-    let meta = match get_meta(ctx, client, key, queue, partition).await {
+    let meta = match get_meta(ctx, client, key, queue, partition, tenant).await {
         Some(m) => m,
         None => return -1,
     };
@@ -921,12 +947,14 @@ fn zero_uuid() -> String {
 // (non-cached) queries. Every failure mode (segment already retained away,
 // retention gap, malformed blob, SQL error) resolves to the zero uuid, the
 // spec's "original unknown" sentinel. Returns mids aligned with `dups`.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_dup_mids(
     ctx: &FlushCtx,
     client: &deadpool_postgres::Client,
     key: &str,
     queue: &str,
     partition: &str,
+    tenant: &str,
     dups: &[(usize, i64)],
 ) -> Vec<String> {
     let mut out = vec![zero_uuid(); dups.len()];
@@ -935,7 +963,7 @@ async fn resolve_dup_mids(
     let cached: Option<String> = ctx.part_meta.lock().unwrap().get(key).map(|m| m.pid.clone());
     let pid: Option<String> = match cached {
         Some(p) => Some(p),
-        None => match client.query(PART_PID_SQL, &[&queue, &partition]).await {
+        None => match client.query(PART_PID_SQL, &[&queue, &partition, &tenant]).await {
             Ok(rows) => rows.first().map(|r| r.get(0)),
             Err(e) => {
                 static DUP_PID_ERR: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
@@ -1095,6 +1123,7 @@ fn spawn_bundle_flush(
                                 &keys[gi],
                                 &g.group.queue,
                                 &g.group.partition,
+                                &g.group.tenant,
                                 &pending_hashes,
                             )
                             .await,
@@ -1128,6 +1157,7 @@ fn spawn_bundle_flush(
             // blobs as the packed zstd bytea.
             let mut queues: Vec<String> = Vec::with_capacity(participants.len());
             let mut partitions: Vec<String> = Vec::with_capacity(participants.len());
+            let mut tenants: Vec<String> = Vec::with_capacity(participants.len());
             let mut counts: Vec<i32> = Vec::with_capacity(participants.len());
             let mut hash_blobs: Vec<Vec<u8>> = Vec::with_capacity(participants.len());
             let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(participants.len());
@@ -1137,6 +1167,7 @@ fn spawn_bundle_flush(
                     build_hashes_and_blob(&g.group, &g.hashes, &g.pending, ctx.zstd_level);
                 queues.push(g.group.queue.clone());
                 partitions.push(g.group.partition.clone());
+                tenants.push(g.group.tenant.clone());
                 counts.push(g.pending.len() as i32);
                 hash_blobs.push(hblob);
                 blobs.push(blob);
@@ -1147,7 +1178,9 @@ fn spawn_bundle_flush(
             // branch then re-borrows `client` to cancel the wedged query.
             let push_res = tokio::time::timeout(
                 ctx.stmt_timeout,
-                push_log_multi(&client, &queues, &partitions, &counts, &hash_blobs, &verified, blobs),
+                push_log_multi(
+                    &client, &queues, &partitions, &counts, &hash_blobs, &verified, blobs, &tenants,
+                ),
             )
             .await;
             let outcome = match push_res {
@@ -1226,6 +1259,7 @@ fn spawn_bundle_flush(
                                 &keys[gi],
                                 &gs[gi].group.queue,
                                 &gs[gi].group.partition,
+                                &gs[gi].group.tenant,
                                 dups,
                             ),
                         )

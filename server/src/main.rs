@@ -26,6 +26,7 @@ mod retention;
 mod schema;
 mod stats;
 mod syscollect;
+mod tenant;
 mod util;
 mod vegas;
 
@@ -134,23 +135,11 @@ async fn main() {
         }
     }
 
-    // LOGGING_PLAN.md Phase 3/4: one consolidated "config resolved" line instead
-    // of banners scattered across boot — the effective knobs an operator needs.
-    tracing::info!(
-        target: "boot",
-        version = VERSION,
-        port = cfg.port,
-        pool = cfg.pool_size,
-        fusion_shards = cfg.fusion_shards,
-        stmt_timeout_ms = cfg.stmt_timeout.as_millis() as u64,
-        retention_ms = cfg.retention_interval_ms,
-        stats_ms = cfg.stats_interval_ms,
-        dedup_cache_mb = cfg.dedup_cache_mb,
-        ack_registry = cfg.ack_registry_enabled,
-        hotlist = cfg.hotlist_enabled,
-        log_rates_ms = cfg.log_rates_ms,
-        "config resolved"
-    );
+    // LOGGING_PLAN.md Phase 3/4: one consolidated config block instead of banners
+    // scattered across boot — the EFFECTIVE value of every knob the broker
+    // resolved (secrets masked), so an operator can see what was actually
+    // understood rather than inferring it from behaviour.
+    config::log_effective(&cfg);
 
     // Background retention + eviction sweep (segments-targeted). Spawned before
     // the HTTP server so the RETENTION_INTERVAL cadence is live as soon as the
@@ -295,6 +284,7 @@ async fn main() {
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
+        tenancy_enabled: cfg.tenancy_header,
     });
 
     // LOGGING_PLAN.md Phase 1: periodic `rates` + `sizes` aggregate blocks —
@@ -375,7 +365,17 @@ async fn main() {
                 for (q, g) in hl.periodic_reseed_due(now, interval_ms) {
                     match pool_r.get().await {
                         Ok(client) => {
-                            crate::handlers::hotlist_reseed_scan(&hl, &client, &q, &g, now).await
+                            // Track B (§5): the hotlist ring is keyed by (queue, group)
+                            // only, so this background floor has no tenant in scope. It
+                            // reseeds the DEFAULT tenant — correct whenever tenancy is
+                            // OFF (everything is the default tenant, the only v1-supported
+                            // hotlist config). Under tenancy ON, non-default tenants rely
+                            // on the pop-triggered reseed (hotlist_pop_attempt), which IS
+                            // tenant-scoped; see the module note on the ring limitation.
+                            crate::handlers::hotlist_reseed_scan(
+                                &hl, &client, &q, &g, config::DEFAULT_TENANT, now,
+                            )
+                            .await
                         }
                         Err(_) => break, // pool busy — retry next tick
                     }
@@ -477,16 +477,22 @@ async fn main() {
             on_queue_config_set: {
                 let s = state.clone();
                 Box::new(move |q: &str| {
-                    s.lease_cache.lock().unwrap().remove(q);
+                    // Track B (§5): the lease/enc caches are keyed by (tenant, name)
+                    // but the mesh config frame carries only the name (mesh is
+                    // tenant-inert in v1, §5 point 8). Drop every tenant's entry for
+                    // this name; over-invalidation only forces a lazy re-fetch.
+                    let suffix = format!("\u{1f}{q}");
+                    s.lease_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
                     // RUSTFIX item 8: a peer's config change may flip encryption_enabled.
-                    s.enc_cache.lock().unwrap().remove(q);
+                    s.enc_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
                 })
             },
             on_queue_config_delete: {
                 let s = state.clone();
                 Box::new(move |q: &str| {
-                    s.lease_cache.lock().unwrap().remove(q);
-                    s.enc_cache.lock().unwrap().remove(q);
+                    let suffix = format!("\u{1f}{q}");
+                    s.lease_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
+                    s.enc_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
                 })
             },
         };
@@ -703,6 +709,14 @@ async fn main() {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(64 * 1024 * 1024),
         ))
+        // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): resolve the per-request tenant
+        // (default when off/absent, `x-queen-tenant` when on) and stamp it into
+        // request extensions. Inner to auth so a 401 short-circuits before this,
+        // but otherwise independent — it only reads a header + stamps an extension.
+        .layer(axum::middleware::from_fn_with_state(
+            tenant::TenancyConfig { enabled: cfg.tenancy_header },
+            tenant::tenant_middleware,
+        ))
         // Auth runs outermost: it validates the token + route level before any
         // handler, and stamps AuthedSub into request extensions for producer_sub.
         .layer(axum::middleware::from_fn_with_state(
@@ -710,6 +724,10 @@ async fn main() {
             auth::auth_middleware,
         ))
         .with_state(state);
+
+    if cfg.tenancy_header {
+        tracing::info!(target: "boot", header = config::TENANT_HEADER, "QUEEN_TENANCY_HEADER on — native tenant scoping ENABLED");
+    }
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {

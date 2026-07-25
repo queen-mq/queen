@@ -274,9 +274,15 @@ $$;
 -- ============================================================================
 -- queen.delete_consumer_group_v1: Delete consumer group and optionally metadata
 -- ============================================================================
+-- Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): p_tenant scopes the deletes of the
+-- SHARED (tenant_id-keyed) tables consumer_groups_metadata + consumer_watermarks —
+-- else this rows-side cleanup would nuke EVERY tenant's rows for a group name. Old
+-- 2-arg form dropped so the new defaulted arg is unambiguous.
+DROP FUNCTION IF EXISTS queen.delete_consumer_group_v1(TEXT, BOOLEAN);
 CREATE OR REPLACE FUNCTION queen.delete_consumer_group_v1(
     p_consumer_group TEXT,
-    p_delete_metadata BOOLEAN DEFAULT TRUE
+    p_delete_metadata BOOLEAN DEFAULT TRUE,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -284,22 +290,25 @@ AS $$
 DECLARE
     v_deleted_count INTEGER;
 BEGIN
-    -- Delete partition consumers
+    -- Delete partition consumers (rows engine; no tenant_id column — empty in a
+    -- segments-only deployment, so this is a no-op there).
     DELETE FROM queen.partition_consumers
     WHERE consumer_group = p_consumer_group;
 
     GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
 
-    -- Delete metadata if requested
+    -- Delete metadata if requested (scoped to the tenant's rows only)
     IF p_delete_metadata THEN
         DELETE FROM queen.consumer_groups_metadata
-        WHERE consumer_group = p_consumer_group;
+        WHERE consumer_group = p_consumer_group
+          AND tenant_id = p_tenant;
     END IF;
 
     -- Delete watermarks to prevent stale watermark from blocking re-consumption
-    -- if a new consumer group with the same name is created later
+    -- if a new consumer group with the same name is created later (tenant-scoped).
     DELETE FROM queen.consumer_watermarks
-    WHERE consumer_group = p_consumer_group;
+    WHERE consumer_group = p_consumer_group
+      AND tenant_id = p_tenant;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -313,9 +322,13 @@ $$;
 -- ============================================================================
 -- queen.update_consumer_group_subscription_v1: Update subscription timestamp
 -- ============================================================================
+-- Track B (§5): p_tenant scopes the subscription update + watermark reset to ONE
+-- tenant's (queue_name, consumer_group) rows. Old 2-arg form dropped.
+DROP FUNCTION IF EXISTS queen.update_consumer_group_subscription_v1(TEXT, TEXT);
 CREATE OR REPLACE FUNCTION queen.update_consumer_group_subscription_v1(
     p_consumer_group TEXT,
-    p_new_timestamp TEXT
+    p_new_timestamp TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -325,7 +338,8 @@ DECLARE
 BEGIN
     UPDATE queen.consumer_groups_metadata
     SET subscription_timestamp = p_new_timestamp::timestamptz
-    WHERE consumer_group = p_consumer_group;
+    WHERE consumer_group = p_consumer_group
+      AND tenant_id = p_tenant;
 
     GET DIAGNOSTICS v_updated_count = ROW_COUNT;
 
@@ -347,8 +361,10 @@ BEGIN
     -- Scope mirrors the UPDATE above (no queue_name filter): all
     -- (queue_name, consumer_group) entries for this CG. See
     -- cdocs/WATERMARK_AND_TRANSACTION_FIXES.md §2 (Fix B).
+    -- Track B (§5): also tenant-scoped, mirroring the UPDATE.
     DELETE FROM queen.consumer_watermarks
-    WHERE consumer_group = p_consumer_group;
+    WHERE consumer_group = p_consumer_group
+      AND tenant_id = p_tenant;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -362,10 +378,14 @@ $$;
 -- ============================================================================
 -- queen.delete_consumer_group_for_queue_v1: Delete consumer group for specific queue only
 -- ============================================================================
+-- Track B (§5): p_tenant scopes the shared-table deletes + the queue-name join to
+-- ONE tenant. Old 3-arg form dropped so the new defaulted arg is unambiguous.
+DROP FUNCTION IF EXISTS queen.delete_consumer_group_for_queue_v1(TEXT, TEXT, BOOLEAN);
 CREATE OR REPLACE FUNCTION queen.delete_consumer_group_for_queue_v1(
     p_consumer_group TEXT,
     p_queue_name TEXT,
-    p_delete_metadata BOOLEAN DEFAULT TRUE
+    p_delete_metadata BOOLEAN DEFAULT TRUE,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -373,28 +393,32 @@ AS $$
 DECLARE
     v_deleted_count INTEGER;
 BEGIN
-    -- Delete partition consumers only for this specific queue
+    -- Delete partition consumers only for this specific queue (rows engine; the
+    -- queue identity is (tenant_id, name), so scope the queues join by tenant).
     DELETE FROM queen.partition_consumers pc
     USING queen.partitions p
     JOIN queen.queues q ON q.id = p.queue_id
     WHERE pc.partition_id = p.id
       AND pc.consumer_group = p_consumer_group
-      AND q.name = p_queue_name;
+      AND q.name = p_queue_name
+      AND q.tenant_id = p_tenant;
 
     GET DIAGNOSTICS v_deleted_count = ROW_COUNT;
 
-    -- Delete metadata if requested (only for this queue)
+    -- Delete metadata if requested (only for this queue, tenant-scoped)
     IF p_delete_metadata THEN
         DELETE FROM queen.consumer_groups_metadata
         WHERE consumer_group = p_consumer_group
-          AND queue_name = p_queue_name;
+          AND queue_name = p_queue_name
+          AND tenant_id = p_tenant;
     END IF;
 
     -- Delete watermark for this specific (queue, consumer_group) to prevent
-    -- stale watermark from blocking re-consumption if CG is recreated
+    -- stale watermark from blocking re-consumption if CG is recreated (tenant-scoped).
     DELETE FROM queen.consumer_watermarks
     WHERE queue_name = p_queue_name
-      AND consumer_group = p_consumer_group;
+      AND consumer_group = p_consumer_group
+      AND tenant_id = p_tenant;
 
     RETURN jsonb_build_object(
         'success', true,
@@ -966,9 +990,9 @@ GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v3() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v4() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_consumer_group_details_v1(TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_lagging_partitions_v1(INTEGER) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.delete_consumer_group_v1(TEXT, BOOLEAN) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.update_consumer_group_subscription_v1(TEXT, TEXT) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.delete_consumer_group_for_queue_v1(TEXT, TEXT, BOOLEAN) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.delete_consumer_group_v1(TEXT, BOOLEAN, UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.update_consumer_group_subscription_v1(TEXT, TEXT, UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.delete_consumer_group_for_queue_v1(TEXT, TEXT, BOOLEAN, UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.seek_consumer_group_v1(TEXT, TEXT, TIMESTAMPTZ, BOOLEAN) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.seek_partition_v1(TEXT, TEXT, TEXT) TO PUBLIC;
 

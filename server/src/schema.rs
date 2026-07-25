@@ -71,7 +71,7 @@ const PROCEDURES: &[(&str, &str)] = &[
 /// Apply the schema at boot. Set `QUEEN_APPLY_SCHEMA=0` to skip (e.g. when the DB
 /// is managed externally). Fails the process on any DDL error (fail-fast boot).
 pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::var("QUEEN_APPLY_SCHEMA").ok().as_deref() == Some("0") {
+    if !crate::config::env_bool("QUEEN_APPLY_SCHEMA", true) {
         tracing::info!(target: "schema", "apply skipped (QUEEN_APPLY_SCHEMA=0)");
         return Ok(());
     }

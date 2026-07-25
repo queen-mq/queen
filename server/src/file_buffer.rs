@@ -55,6 +55,12 @@ const MAX_FILE_ATTEMPTS: u32 = 5;
 struct WriteEvent<'a> {
     queue: &'a str,
     partition: &'a str,
+    // Track B (§5): the resolved tenant, persisted so the drain re-applies it on
+    // replay — else a buffered push would replay as the default tenant, a
+    // quota/scope evasion. Skipped for the default tenant so OFF spool files are
+    // byte-identical to pre-Track-B ones.
+    #[serde(skip_serializing_if = "is_default_tenant")]
+    tenant: &'a str,
     #[serde(rename = "transactionId")]
     transaction_id: &'a str,
     #[serde(rename = "producerSub", skip_serializing_if = "Option::is_none")]
@@ -66,10 +72,20 @@ struct WriteEvent<'a> {
     payload: &'a RawValue,
 }
 
+fn is_default_tenant(t: &&str) -> bool {
+    *t == crate::config::DEFAULT_TENANT
+}
+fn default_tenant_string() -> String {
+    crate::config::DEFAULT_TENANT.to_string()
+}
+
 #[derive(Deserialize)]
 struct StoredEvent {
     queue: String,
     partition: String,
+    // Track B: absent (old spool file, or default-tenant push) ⇒ the default tenant.
+    #[serde(default = "default_tenant_string")]
+    tenant: String,
     #[serde(rename = "transactionId")]
     transaction_id: String,
     #[serde(rename = "producerSub")]
@@ -289,10 +305,12 @@ impl FileBufferManager {
     /// Append one push event to the active spool file, rotating at
     /// `max_events_per_file`. Returns true on success; on any I/O error the event
     /// is counted as failed and false is returned (the caller reports "failed").
+    #[allow(clippy::too_many_arguments)]
     pub fn write_event(
         &self,
         queue: &str,
         partition: &str,
+        tenant: &str,
         transaction_id: &str,
         producer_sub: Option<&str>,
         encrypted: bool,
@@ -301,6 +319,7 @@ impl FileBufferManager {
         let ev = WriteEvent {
             queue,
             partition,
+            tenant,
             transaction_id,
             producer_sub,
             encrypted,
@@ -604,11 +623,14 @@ impl FileBufferManager {
     /// and writes nothing, which is exactly the idempotent-replay contract. An
     /// Err means the DB is (probably) down — leave the file for retry.
     async fn replay_batch(&self, pool: &Pool, events: &[StoredEvent]) -> Result<(), DrainErr> {
-        let mut order: Vec<(String, String)> = Vec::new();
-        let mut groups: std::collections::HashMap<(String, String), Vec<&StoredEvent>> =
+        // Track B (§5): group by (tenant, queue, partition) so two tenants' same-
+        // named partition never merge into one replayed segment, and the resolved
+        // tenant is re-applied on push (the buffered path must not evade scope).
+        let mut order: Vec<(String, String, String)> = Vec::new();
+        let mut groups: std::collections::HashMap<(String, String, String), Vec<&StoredEvent>> =
             std::collections::HashMap::new();
         for ev in events {
-            let key = (ev.queue.clone(), ev.partition.clone());
+            let key = (ev.tenant.clone(), ev.queue.clone(), ev.partition.clone());
             if !groups.contains_key(&key) {
                 order.push(key.clone());
             }
@@ -617,6 +639,7 @@ impl FileBufferManager {
 
         let mut queues: Vec<String> = Vec::with_capacity(order.len());
         let mut partitions: Vec<String> = Vec::with_capacity(order.len());
+        let mut tenants: Vec<String> = Vec::with_capacity(order.len());
         let mut counts: Vec<i32> = Vec::with_capacity(order.len());
         let mut hashes: Vec<Vec<u8>> = Vec::with_capacity(order.len());
         let mut verified: Vec<i64> = Vec::with_capacity(order.len());
@@ -624,8 +647,9 @@ impl FileBufferManager {
         for key in &order {
             let evs = &groups[key];
             let (seg_hashes, blob) = build_segment(evs, self.zstd_level);
-            queues.push(key.0.clone());
-            partitions.push(key.1.clone());
+            tenants.push(key.0.clone());
+            queues.push(key.1.clone());
+            partitions.push(key.2.clone());
             counts.push(evs.len() as i32);
             hashes.push(seg_hashes);
             verified.push(-1); // no broker vouching on replay — full-window probe
@@ -637,7 +661,7 @@ impl FileBufferManager {
             .get()
             .await
             .map_err(|e| DrainErr::Transient(format!("pool: {e}")))?;
-        db::log_push_multi(&client, &queues, &partitions, &counts, &hashes, &verified, &blobs)
+        db::log_push_multi(&client, &queues, &partitions, &counts, &hashes, &verified, &blobs, &tenants)
             .await
             .map_err(|e| classify_push_error(&e))?;
         Ok(())

@@ -234,9 +234,14 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
 
     // RUSTFIX item 8: encrypt sink-push payloads for encryption-enabled queues
     // (warn + plaintext on failure — never fail the cycle).
+    // Track B (§5): streams stay plan-gated / dedicated-only in v1 (their name
+    // surfaces are scoped in a later pass), so the encryption flag is resolved on
+    // the default tenant here — the only tenant a dedicated streams cell serves.
     if st.encryption.is_enabled() {
         for (queue, _partition, frames) in groups.iter_mut() {
-            if frames.is_empty() || !st.encryption_enabled_for(queue).await {
+            if frames.is_empty()
+                || !st.encryption_enabled_for(queue, crate::config::DEFAULT_TENANT).await
+            {
                 continue;
             }
             for f in frames.iter_mut() {

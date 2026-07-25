@@ -34,12 +34,21 @@ use crate::vegas::Vegas;
 // than the txns purge window) or the segment/frame no longer exists.
 pub async fn handle_get_message(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
+
+    // Track B (§5) OWNERSHIP GATE: this endpoint is addressed by raw partition uuid
+    // and the resolver SPs carry no tenant. Verify the pid belongs to the request
+    // tenant BEFORE reading any payload; a foreign pid returns the SAME 404 as a
+    // genuinely-missing message (no cross-tenant existence leak). No-op when off.
+    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+        return json(StatusCode::NOT_FOUND, "{\"error\":\"Message not found\"}".to_string());
+    }
 
     // Resolve (base_offset, frame_idx): hash the txn (xxh3_128 BE, §3) and probe
     // queen.log_txns, then find the covering segment (frameIdx = offset - base,
@@ -207,12 +216,24 @@ pub async fn handle_get_message(
 // DLQ row). Always 200 with {success,...}; success:false when nothing matched.
 pub async fn handle_delete_message(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
+    // Track B (§5) OWNERSHIP GATE (pid-addressed delete): a foreign pid must not
+    // delete another tenant's DLQ row — treat it as "not found" (no-op when off).
+    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+        let out = serde_json::json!({
+            "success": false,
+            "partitionId": partition_id,
+            "transactionId": transaction_id,
+            "message": "Message not found",
+        });
+        return json(StatusCode::OK, out.to_string());
+    }
     match db::delete_message(&client, &partition_id, &transaction_id).await {
         Ok(deleted) => {
             let out = serde_json::json!({
@@ -315,6 +336,7 @@ async fn enrich_segment_payloads(
 // ---------------------------------------------------------- GET /api/v1/messages
 pub async fn handle_list_messages(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let mut filters =
@@ -325,6 +347,9 @@ pub async fn handle_list_messages(
     }
     filters.insert("limit".to_string(), serde_json::json!(qint(&params, "limit", 200)));
     filters.insert("offset".to_string(), serde_json::json!(qint(&params, "offset", 0)));
+    // Track B (§5): queen.list_messages_v1 reads `_tenant` from the filters JSON and
+    // scopes the listing to that tenant's queues (default tenant when off).
+    filters.insert("_tenant".to_string(), serde_json::json!(tenant.as_str()));
     let filters_json = serde_json::Value::Object(filters).to_string();
 
     let client = match st.pool.get().await {
@@ -359,11 +384,14 @@ pub async fn handle_list_messages(
 // (the DLQBuilder reads result.total) alongside the SP's {messages, pagination}.
 pub async fn handle_dlq(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let mut filters = filters_from_query(&params, &["queue", "consumerGroup"]);
     filters.insert("limit".to_string(), serde_json::json!(qint(&params, "limit", 100)));
     filters.insert("offset".to_string(), serde_json::json!(qint(&params, "offset", 0)));
+    // Track B (§5): queen.get_dlq_messages_v1 reads `_tenant` from the filters JSON.
+    filters.insert("_tenant".to_string(), serde_json::json!(tenant.as_str()));
     let filters_json = serde_json::Value::Object(filters).to_string();
 
     let client = match st.pool.get().await {

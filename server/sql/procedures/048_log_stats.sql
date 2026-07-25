@@ -287,7 +287,12 @@ GRANT EXECUTE ON FUNCTION queen.log_refresh_all_stats_v1() TO PUBLIC;
 --   * lastActivity = MAX(lease_acquired_at) — the closest activity signal
 --     the log schema keeps (former last_consumed_at is gone).
 -- ============================================================================
-CREATE OR REPLACE FUNCTION queen.get_queue_detail_v2(p_queue_name TEXT)
+-- Track B (§5): p_tenant scopes the single-queue detail. DROP the pre-tenant
+-- (TEXT) form (013 also defines it) so the scoped (TEXT, UUID) is what callers hit.
+DROP FUNCTION IF EXISTS queen.get_queue_detail_v2(TEXT);
+CREATE OR REPLACE FUNCTION queen.get_queue_detail_v2(
+    p_queue_name TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -299,7 +304,7 @@ DECLARE
     v_is_seg BOOLEAN;
 BEGIN
     SELECT (q.storage = 'segments') INTO v_is_seg
-    FROM queen.queues q WHERE q.name = p_queue_name;
+    FROM queen.queues q WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
 
     IF v_is_seg IS NULL THEN
         RETURN jsonb_build_object('error', 'Queue not found');
@@ -317,7 +322,7 @@ BEGIN
                     'retryDelay', q.retry_delay, 'ttl', q.ttl,
                     'maxQueueSize', q.max_queue_size, 'deadLetterQueue', q.dead_letter_queue)))
         INTO v_queue_id, v_queue_info
-        FROM queen.queues q WHERE q.name = p_queue_name;
+        FROM queen.queues q WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
 
         WITH partition_stats AS (
             SELECT p.id, p.name, p.created_at,
@@ -370,13 +375,13 @@ BEGIN
                 'retryDelay', q.retry_delay, 'ttl', q.ttl,
                 'maxQueueSize', q.max_queue_size, 'deadLetterQueue', q.dead_letter_queue)))
     INTO v_queue_info
-    FROM queen.queues q WHERE q.name = p_queue_name;
+    FROM queen.queues q WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
 
     WITH parts AS (
         SELECT lp.id, lp.name, lp.created_at, lp.last_offset, lp.log_start
         FROM queen.log_partitions lp
         JOIN queen.log_queues lq ON lq.id = lp.queue_id
-        WHERE lq.name = p_queue_name
+        WHERE lq.name = p_queue_name AND lq.tenant_id = p_tenant
     ),
     worst AS (
         SELECT c.partition_id, MIN(c.committed) AS committed
@@ -460,7 +465,7 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION queen.get_queue_detail_v2(TEXT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_queue_detail_v2(TEXT, UUID) TO PUBLIC;
 
 -- ============================================================================
 -- queen.get_analytics_v1 — log-native redefinition.
@@ -486,6 +491,8 @@ DECLARE
     v_task TEXT;
     v_bw INTERVAL;
     v_result JSONB;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_from := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '24 hours');
     v_to := COALESCE((p_filters->>'to')::timestamptz, NOW());
@@ -510,8 +517,9 @@ BEGIN
         FROM queen.log_segments s
         JOIN queen.log_partitions p ON p.id = s.partition_id
         JOIN queen.log_queues q     ON q.id = p.queue_id
-        JOIN queen.queues qq        ON qq.name = q.name
+        JOIN queen.queues qq        ON qq.name = q.name AND qq.tenant_id = q.tenant_id
         WHERE s.created_at >= v_from AND s.created_at <= v_to
+          AND q.tenant_id = v_tenant
           AND (v_queue IS NULL OR q.name = v_queue)
           AND (v_namespace IS NULL OR qq.namespace = v_namespace)
           AND (v_task IS NULL OR qq.task = v_task)
@@ -547,7 +555,11 @@ GRANT EXECUTE ON FUNCTION queen.get_analytics_v1(JSONB) TO PUBLIC;
 -- field reports and dev partitions are small; size estimates would change
 -- the meaning of an existing field.
 -- ----------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION queen.log_queue_message_stats_v1(p_queue TEXT)
+-- Track B (§5): p_tenant scopes the per-queue counters. DROP the (TEXT) form.
+DROP FUNCTION IF EXISTS queen.log_queue_message_stats_v1(TEXT);
+CREATE OR REPLACE FUNCTION queen.log_queue_message_stats_v1(
+    p_queue TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS TABLE (segments BIGINT, messages BIGINT)
 LANGUAGE sql STABLE
 AS $$
@@ -556,24 +568,27 @@ AS $$
                FROM queen.log_segments s
                JOIN queen.log_partitions p ON p.id = s.partition_id
                JOIN queen.log_queues q     ON q.id = p.queue_id
-               WHERE q.name = p_queue
+               WHERE q.name = p_queue AND q.tenant_id = p_tenant
            ), 0)::bigint,
            COALESCE((
                SELECT SUM(GREATEST(p.last_offset - p.log_start + 1, 0))
                FROM queen.log_partitions p
                JOIN queen.log_queues q ON q.id = p.queue_id
-               WHERE q.name = p_queue
+               WHERE q.name = p_queue AND q.tenant_id = p_tenant
            ), 0)::bigint
 $$;
 
-GRANT EXECUTE ON FUNCTION queen.log_queue_message_stats_v1(TEXT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_queue_message_stats_v1(TEXT, UUID) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
 -- log_queue_stats_all_v1: broker-wide per-queue counters — the SQL home for
 -- db.rs::seg_queue_stats_all (queue LIST enrichment; queen.stats can lag a
 -- refresh cadence, this is the live view). Same accounting as above.
 -- ----------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION queen.log_queue_stats_all_v1()
+-- Track B (§5): p_tenant scopes the broker-wide per-queue counters to one tenant.
+DROP FUNCTION IF EXISTS queen.log_queue_stats_all_v1();
+CREATE OR REPLACE FUNCTION queen.log_queue_stats_all_v1(
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS TABLE (queue_name TEXT, partitions BIGINT, segments BIGINT, messages BIGINT)
 LANGUAGE sql STABLE
 AS $$
@@ -592,7 +607,8 @@ AS $$
     FROM queen.log_queues q
     LEFT JOIN queen.log_partitions p ON p.queue_id = q.id
     LEFT JOIN seg_counts sc ON sc.partition_id = p.id
+    WHERE q.tenant_id = p_tenant
     GROUP BY q.name
 $$;
 
-GRANT EXECUTE ON FUNCTION queen.log_queue_stats_all_v1() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_queue_stats_all_v1(UUID) TO PUBLIC;

@@ -51,6 +51,10 @@
 -- commit new rows into the probed span while we hold the lock. (Dedup OFF: the
 -- allocator UPDATE itself takes the same lock; nothing to probe.)
 -- ----------------------------------------------------------------------------
+-- Track B (§5): p_tenant scopes queue resolution + auto-create. Added last with a
+-- DEFAULT so any caller that omits it lands on the default tenant (OSS behaviour);
+-- the old 8-arg signature is dropped so no stale, unscoped overload survives.
+DROP FUNCTION IF EXISTS queen.log_push_one_v1(TEXT, TEXT, INT, BYTEA, BIGINT, BYTEA, UUID, INT);
 CREATE OR REPLACE FUNCTION queen.log_push_one_v1(
     p_queue     TEXT,
     p_partition TEXT,
@@ -59,7 +63,8 @@ CREATE OR REPLACE FUNCTION queen.log_push_one_v1(
     p_verified  BIGINT,
     p_blob      BYTEA,
     p_pid       UUID DEFAULT NULL,
-    p_window    INT  DEFAULT NULL
+    p_window    INT  DEFAULT NULL,
+    p_tenant    UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -85,15 +90,16 @@ BEGIN
         SELECT COALESCE(v_pid, p.id), COALESCE(v_window, q.dedup_window_seconds)
         INTO v_pid, v_window
         FROM queen.log_partitions p JOIN queen.log_queues q ON q.id = p.queue_id
-        WHERE q.name = p_queue AND p.name = p_partition;
+        WHERE q.name = p_queue AND p.name = p_partition AND q.tenant_id = p_tenant;
 
         IF v_pid IS NULL THEN
             -- First contact: provision queue + partition. Kept inside the
             -- missing branch only — an unconditional per-push ON CONFLICT
             -- would reintroduce the ShareLock convoy on queen.queues the seg
-            -- engine's header warned about.
-            INSERT INTO queen.log_queues (name) VALUES (p_queue)
-            ON CONFLICT (name) DO NOTHING;
+            -- engine's header warned about. Track B: the queue rows carry the
+            -- resolved tenant, and the ON CONFLICT targets (tenant_id, name).
+            INSERT INTO queen.log_queues (tenant_id, name) VALUES (p_tenant, p_queue)
+            ON CONFLICT (tenant_id, name) DO NOTHING;
             -- RUSTFIX item 26 (ported from seg 023/032): create the
             -- queen.queues config row on queue creation, deriving
             -- namespace/task from the dotted name exactly like 001_push.sql,
@@ -101,19 +107,19 @@ BEGIN
             -- and pick up retry/DLQ/retention config. storage stays 'segments'
             -- — the public /configure contract keeps that value (§11).
             -- ON CONFLICT preserves a /configure-created row.
-            INSERT INTO queen.queues (name, namespace, task, storage)
-            VALUES (p_queue,
+            INSERT INTO queen.queues (tenant_id, name, namespace, task, storage)
+            VALUES (p_tenant, p_queue,
                     split_part(p_queue, '.', 1),
                     CASE WHEN position('.' in p_queue) > 0 THEN split_part(p_queue, '.', 2) ELSE '' END,
                     'segments')
-            ON CONFLICT (name) DO NOTHING;
+            ON CONFLICT (tenant_id, name) DO NOTHING;
             INSERT INTO queen.log_partitions (queue_id, name)
-            SELECT q.id, p_partition FROM queen.log_queues q WHERE q.name = p_queue
+            SELECT q.id, p_partition FROM queen.log_queues q WHERE q.name = p_queue AND q.tenant_id = p_tenant
             ON CONFLICT (queue_id, name) DO NOTHING;
 
             SELECT p.id, q.dedup_window_seconds INTO v_pid, v_window
             FROM queen.log_partitions p JOIN queen.log_queues q ON q.id = p.queue_id
-            WHERE q.name = p_queue AND p.name = p_partition;
+            WHERE q.name = p_queue AND p.name = p_partition AND q.tenant_id = p_tenant;
         END IF;
 
         IF v_pid IS NULL THEN
@@ -231,13 +237,21 @@ $$;
 -- acks (044's transaction wire) and retention (045) — before any write. The
 -- LockRows node sits above the Sort, so rows are locked in ORDER BY order.
 -- ----------------------------------------------------------------------------
+-- Track B (§5): p_tenants is index-aligned with the other arrays — ONE tenant per
+-- segment, so a single fused bundle can span tenants (the broker fusion groups by
+-- (tenant, queue, partition), so in practice a bundle is single-tenant, but the
+-- array form keeps the SP correct if it ever isn't). Added last with a DEFAULT so
+-- a NULL/short caller degrades every segment to the default tenant; the old 6-arg
+-- signature is dropped so no stale unscoped overload survives.
+DROP FUNCTION IF EXISTS queen.log_push_multi_v1(TEXT[], TEXT[], INT[], BYTEA[], INT8[], BYTEA[]);
 CREATE OR REPLACE FUNCTION queen.log_push_multi_v1(
     p_queues     TEXT[],
     p_partitions TEXT[],
     p_msg_counts INT[],
     p_hashes     BYTEA[],
     p_verified   INT8[],
-    p_blobs      BYTEA[]
+    p_blobs      BYTEA[],
+    p_tenants    UUID[] DEFAULT NULL
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -248,6 +262,7 @@ DECLARE
     v_now      TIMESTAMPTZ;
     v_rec      RECORD;
     v_results  JSONB[];
+    v_tenants  UUID[];
 BEGIN
     v_n := COALESCE(array_length(p_queues, 1), 0);
     IF v_n = 0 THEN
@@ -260,6 +275,16 @@ BEGIN
        OR array_length(p_blobs, 1)      IS DISTINCT FROM v_n THEN
         RAISE EXCEPTION 'QMULTI misaligned arrays (% queues)', v_n;
     END IF;
+    -- A NULL/short p_tenants (legacy caller) means "all default tenant"; a present
+    -- one must be exactly aligned. Materialize a per-index tenant array either way.
+    IF p_tenants IS NULL THEN
+        v_tenants := array_fill('00000000-0000-0000-0000-000000000001'::uuid, ARRAY[v_n]);
+    ELSIF array_length(p_tenants, 1) IS DISTINCT FROM v_n THEN
+        RAISE EXCEPTION 'QMULTI misaligned tenants (% vs % queues)',
+            COALESCE(array_length(p_tenants, 1), 0), v_n;
+    ELSE
+        v_tenants := p_tenants;
+    END IF;
 
     -- Steady-state provisioning skip: one cheap array-vs-index existence
     -- count; only when something is missing run the three ON CONFLICT
@@ -267,8 +292,8 @@ BEGIN
     -- Malformed (empty) queue names are skipped, exactly as the seg engine;
     -- they then fail the alignment guard below, loudly.
     SELECT count(*) INTO v_missing
-    FROM unnest(p_queues, p_partitions) AS u(queue, partition)
-    LEFT JOIN queen.log_queues q ON q.name = u.queue
+    FROM unnest(p_queues, p_partitions, v_tenants) AS u(queue, partition, tenant)
+    LEFT JOIN queen.log_queues q ON q.name = u.queue AND q.tenant_id = u.tenant
     LEFT JOIN queen.log_partitions p ON p.queue_id = q.id AND p.name = u.partition
     WHERE p.id IS NULL;
 
@@ -279,29 +304,30 @@ BEGIN
         -- deadlock/convoy exactly like unordered row locks would (measured
         -- during mass creation: xid convoys wedging the whole pool). Same
         -- canonical-order discipline as the FOR UPDATE pre-lock below.
-        INSERT INTO queen.log_queues (name)
-        SELECT DISTINCT queue FROM unnest(p_queues) AS u(queue)
-        WHERE COALESCE(queue, '') <> ''
-        ORDER BY 1
-        ON CONFLICT (name) DO NOTHING;
+        INSERT INTO queen.log_queues (tenant_id, name)
+        SELECT DISTINCT u.tenant, u.queue
+        FROM unnest(p_queues, v_tenants) AS u(queue, tenant)
+        WHERE COALESCE(u.queue, '') <> ''
+        ORDER BY 1, 2
+        ON CONFLICT (tenant_id, name) DO NOTHING;
 
         -- RUSTFIX item 26: queen.queues config row, storage='segments' (the
         -- public configure contract keeps that value — §11). See
         -- log_push_one_v1's provisioning branch for the full rationale.
-        INSERT INTO queen.queues (name, namespace, task, storage)
-        SELECT DISTINCT queue,
-               split_part(queue, '.', 1),
-               CASE WHEN position('.' in queue) > 0 THEN split_part(queue, '.', 2) ELSE '' END,
+        INSERT INTO queen.queues (tenant_id, name, namespace, task, storage)
+        SELECT DISTINCT u.tenant, u.queue,
+               split_part(u.queue, '.', 1),
+               CASE WHEN position('.' in u.queue) > 0 THEN split_part(u.queue, '.', 2) ELSE '' END,
                'segments'
-        FROM unnest(p_queues) AS u(queue)
-        WHERE COALESCE(queue, '') <> ''
-        ORDER BY 1
-        ON CONFLICT (name) DO NOTHING;
+        FROM unnest(p_queues, v_tenants) AS u(queue, tenant)
+        WHERE COALESCE(u.queue, '') <> ''
+        ORDER BY 1, 2
+        ON CONFLICT (tenant_id, name) DO NOTHING;
 
         INSERT INTO queen.log_partitions (queue_id, name)
         SELECT DISTINCT q.id, u.partition
-        FROM unnest(p_queues, p_partitions) AS u(queue, partition)
-        JOIN queen.log_queues q ON q.name = u.queue
+        FROM unnest(p_queues, p_partitions, v_tenants) AS u(queue, partition, tenant)
+        JOIN queen.log_queues q ON q.name = u.queue AND q.tenant_id = u.tenant
         ORDER BY 1, 2
         ON CONFLICT (queue_id, name) DO NOTHING;
     END IF;
@@ -309,8 +335,8 @@ BEGIN
     -- Deadlock-safe pre-lock (see header). Set-based: one statement, not a
     -- per-partition loop.
     PERFORM 1
-    FROM unnest(p_queues, p_partitions) AS u(queue, partition)
-    JOIN queen.log_queues q ON q.name = u.queue
+    FROM unnest(p_queues, p_partitions, v_tenants) AS u(queue, partition, tenant)
+    JOIN queen.log_queues q ON q.name = u.queue AND q.tenant_id = u.tenant
     JOIN queen.log_partitions p ON p.queue_id = q.id AND p.name = u.partition
     ORDER BY p.id
     FOR UPDATE OF p;
@@ -331,11 +357,11 @@ BEGIN
     -- so it coexists with the other segments' commits — NO savepoints.
     v_results := array_fill(NULL::jsonb, ARRAY[v_n]);
     FOR v_rec IN
-        SELECT u.ord, u.queue, u.partition,
+        SELECT u.ord, u.queue, u.partition, u.tenant,
                p.id AS pid, q.dedup_window_seconds AS window
-        FROM unnest(p_queues, p_partitions)
-             WITH ORDINALITY AS u(queue, partition, ord)
-        JOIN queen.log_queues q ON q.name = u.queue
+        FROM unnest(p_queues, p_partitions, v_tenants)
+             WITH ORDINALITY AS u(queue, partition, tenant, ord)
+        JOIN queen.log_queues q ON q.name = u.queue AND q.tenant_id = u.tenant
         JOIN queen.log_partitions p ON p.queue_id = q.id AND p.name = u.partition
         ORDER BY p.id
     LOOP
@@ -347,7 +373,8 @@ BEGIN
             COALESCE(p_verified[v_rec.ord], -1),
             p_blobs[v_rec.ord],
             v_rec.pid,
-            v_rec.window);
+            v_rec.window,
+            v_rec.tenant);
         v_resolved := v_resolved + 1;
     END LOOP;
 

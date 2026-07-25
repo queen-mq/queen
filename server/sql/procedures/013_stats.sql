@@ -1780,7 +1780,11 @@ $$;
 -- NOTE: get_system_overview_v2 REMOVED - replaced by get_system_overview_v3 in 014_worker_metrics.sql
 
 -- queen.get_queues_v2: O(queues) queue list with stats
-CREATE OR REPLACE FUNCTION queen.get_queues_v2()
+-- Track B (§5): p_tenant scopes the queue list (resources/queues). DROP the ()
+-- form so the scoped (UUID) one is unambiguous on re-apply.
+DROP FUNCTION IF EXISTS queen.get_queues_v2();
+CREATE OR REPLACE FUNCTION queen.get_queues_v2(
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -1806,13 +1810,18 @@ BEGIN
         )
         FROM queen.queues q
         LEFT JOIN queen.stats s ON s.stat_type = 'queue' AND s.queue_id = q.id
+        WHERE q.tenant_id = p_tenant
     );
 END;
 $$;
 
 -- queen.get_queue_v2: O(partitions) single queue detail
 -- Aggregates stats across ALL consumer groups (not just __QUEUE_MODE__)
-CREATE OR REPLACE FUNCTION queen.get_queue_v2(p_queue_name TEXT)
+-- Track B (§5): p_tenant scopes the single-queue detail. DROP the (TEXT) form.
+DROP FUNCTION IF EXISTS queen.get_queue_v2(TEXT);
+CREATE OR REPLACE FUNCTION queen.get_queue_v2(
+    p_queue_name TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -1832,7 +1841,7 @@ BEGIN
     )
     INTO v_queue_id, v_queue_info
     FROM queen.queues q
-    WHERE q.name = p_queue_name;
+    WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
     
     IF v_queue_id IS NULL THEN
         RETURN jsonb_build_object('error', 'Queue not found');
@@ -2108,10 +2117,12 @@ AS $$
 DECLARE
     v_namespace TEXT;
     v_task TEXT;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_namespace := p_filters->>'namespace';
     v_task := p_filters->>'task';
-    
+
     RETURN (
         SELECT jsonb_build_object(
             'queues', COALESCE(jsonb_agg(queue_data), '[]'::jsonb),
@@ -2136,7 +2147,8 @@ BEGIN
             ) as queue_data
             FROM queen.queues q
             LEFT JOIN queen.stats s ON s.stat_type = 'queue' AND s.queue_id = q.id
-            WHERE (v_namespace IS NULL OR q.namespace = v_namespace)
+            WHERE q.tenant_id = v_tenant
+              AND (v_namespace IS NULL OR q.namespace = v_namespace)
               AND (v_task IS NULL OR q.task = v_task)
             ORDER BY q.created_at DESC
             LIMIT p_limit OFFSET p_offset
@@ -2268,8 +2280,8 @@ GRANT EXECUTE ON FUNCTION queen.cleanup_orphaned_stats_v2() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.refresh_all_stats_v1(BOOLEAN) TO PUBLIC;
 
 -- NOTE: get_system_overview_v2 and get_status_v2 REMOVED (replaced by v3 in 014_worker_metrics.sql)
-GRANT EXECUTE ON FUNCTION queen.get_queues_v2() TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_queue_v2(TEXT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_queues_v2(UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_queue_v2(TEXT, UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_namespaces_v2() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_tasks_v2() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_queue_detail_v2(TEXT) TO PUBLIC;

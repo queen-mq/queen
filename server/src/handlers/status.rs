@@ -88,9 +88,13 @@ pub async fn handle_api_status(
 // ----------------------------------------------------- GET /api/v1/status/queues
 pub async fn handle_status_queues(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let filters = filters_from_query(&params, &["from", "to", "namespace", "task"]);
+    let mut filters = filters_from_query(&params, &["from", "to", "namespace", "task"]);
+    // Track B (§5): queen.get_status_queues_v2 reads `_tenant` from the filter JSON
+    // and scopes the per-queue status listing to it (default tenant when off).
+    filters.insert("_tenant".to_string(), serde_json::json!(tenant.as_str()));
     let filters_json = serde_json::Value::Object(filters).to_string();
     let limit = qint(&params, "limit", 100);
     let offset = qint(&params, "offset", 0);

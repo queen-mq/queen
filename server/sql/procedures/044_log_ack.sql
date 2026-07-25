@@ -78,6 +78,9 @@ CREATE INDEX IF NOT EXISTS idx_log_dlq_partition_failed_at
 -- reached batch_end — the caller (broker LeaseRegistry / transaction wire)
 -- acks a whole delivered batch in one call.
 -- ============================================================================
+-- Track B (§5): p_tenant scopes the (queue,partition) resolution. Added last with
+-- a DEFAULT; the pre-tenant 7-arg form is dropped so re-apply is unambiguous.
+DROP FUNCTION IF EXISTS queen.log_ack_v1(TEXT, TEXT, TEXT, TEXT, BIGINT, BOOLEAN, INTEGER);
 CREATE OR REPLACE FUNCTION queen.log_ack_v1(
     p_queue TEXT,
     p_partition TEXT,
@@ -85,7 +88,8 @@ CREATE OR REPLACE FUNCTION queen.log_ack_v1(
     p_worker TEXT,
     p_upto BIGINT,
     p_ok BOOLEAN DEFAULT TRUE,
-    p_acked_count INTEGER DEFAULT 0
+    p_acked_count INTEGER DEFAULT 0,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -96,7 +100,7 @@ DECLARE
 BEGIN
     SELECT p.id INTO v_pid
     FROM queen.log_partitions p JOIN queen.log_queues q ON q.id = p.queue_id
-    WHERE q.name = p_queue AND p.name = p_partition;
+    WHERE q.name = p_queue AND p.name = p_partition AND q.tenant_id = p_tenant;
     IF v_pid IS NULL THEN
         RETURN jsonb_build_object('ok', false, 'error', 'partition not found');
     END IF;
@@ -609,7 +613,9 @@ BEGIN
         INTO v_retry_limit, v_dlq_enabled
         FROM queen.log_partitions lp
         JOIN queen.log_queues lq ON lq.id = lp.queue_id
-        LEFT JOIN queen.queues qq ON qq.name = lq.name
+        -- Track B: the config row is (tenant_id, name)-scoped; match the partition's
+        -- OWN tenant so a same-named queue of another tenant can't supply config.
+        LEFT JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
         WHERE lp.id = p_partition_id;
         v_retry_limit := COALESCE(v_retry_limit, 3);
         v_dlq_enabled := COALESCE(v_dlq_enabled, true);
@@ -943,15 +949,31 @@ DECLARE
     v_partition TEXT;
     v_hashes BYTEA[];
     v_statuses TEXT[];
+    -- Track B (§5): the tenant travels inside the wire payload (`_tenant` key), so
+    -- the (JSONB) signature is unchanged and 047's get_dlq redefinition still
+    -- supersedes 044's. Absent ⇒ default tenant (byte-identical to pre-Track-B).
+    v_tenant UUID := COALESCE((p->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
-    -- Guard: no push may target a rows-engine queue.
+    -- Guard: no push may target a rows-engine queue (of THIS tenant).
     SELECT qq.name INTO v_bad
     FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
-    JOIN queen.queues qq ON qq.name = op->>'queue'
+    JOIN queen.queues qq ON qq.name = op->>'queue' AND qq.tenant_id = v_tenant
     WHERE qq.storage <> 'segments'
     LIMIT 1;
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'QTXN queue "%" has storage != ''segments''; mixed-engine transactions are not supported', v_bad;
+    END IF;
+
+    -- Track B: every ack's partition must belong to this tenant (the ack path is
+    -- pid-keyed, so without this a forged/leaked pid could ack across tenants).
+    SELECT (op->>'partitionId') INTO v_bad
+    FROM jsonb_array_elements(COALESCE(p->'acks', '[]'::jsonb)) op
+    LEFT JOIN queen.log_partitions lp ON lp.id = (op->>'partitionId')::uuid
+    LEFT JOIN queen.log_queues lq ON lq.id = lp.queue_id AND lq.tenant_id = v_tenant
+    WHERE lq.id IS NULL
+    LIMIT 1;
+    IF v_bad IS NOT NULL THEN
+        RAISE EXCEPTION 'QTXN ack references partition % not owned by this tenant', v_bad;
     END IF;
 
     -- Guard: no ack may target a partition whose queue is rows-engine.
@@ -959,7 +981,7 @@ BEGIN
     FROM jsonb_array_elements(COALESCE(p->'acks', '[]'::jsonb)) op
     JOIN queen.log_partitions lp ON lp.id = (op->>'partitionId')::uuid
     JOIN queen.log_queues lq ON lq.id = lp.queue_id
-    JOIN queen.queues qq ON qq.name = lq.name
+    JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
     WHERE qq.storage <> 'segments'
     LIMIT 1;
     IF v_bad IS NOT NULL THEN
@@ -973,30 +995,30 @@ BEGIN
     -- contract — and log_partitions).
     SELECT count(*) INTO v_missing
     FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
-    LEFT JOIN queen.log_queues q ON q.name = op->>'queue'
+    LEFT JOIN queen.log_queues q ON q.name = op->>'queue' AND q.tenant_id = v_tenant
     LEFT JOIN queen.log_partitions pt ON pt.queue_id = q.id AND pt.name = op->>'partition'
     WHERE pt.id IS NULL;
 
     IF v_missing > 0 THEN
-        INSERT INTO queen.log_queues (name)
-        SELECT DISTINCT op->>'queue'
+        INSERT INTO queen.log_queues (tenant_id, name)
+        SELECT DISTINCT v_tenant, op->>'queue'
         FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
         WHERE COALESCE(op->>'queue', '') <> ''
-        ON CONFLICT (name) DO NOTHING;
+        ON CONFLICT (tenant_id, name) DO NOTHING;
 
-        INSERT INTO queen.queues (name, namespace, task, storage)
-        SELECT DISTINCT op->>'queue',
+        INSERT INTO queen.queues (tenant_id, name, namespace, task, storage)
+        SELECT DISTINCT v_tenant, op->>'queue',
                split_part(op->>'queue', '.', 1),
                CASE WHEN position('.' in op->>'queue') > 0 THEN split_part(op->>'queue', '.', 2) ELSE '' END,
                'segments'
         FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
         WHERE COALESCE(op->>'queue', '') <> ''
-        ON CONFLICT (name) DO NOTHING;
+        ON CONFLICT (tenant_id, name) DO NOTHING;
 
         INSERT INTO queen.log_partitions (queue_id, name)
         SELECT DISTINCT q.id, op->>'partition'
         FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
-        JOIN queen.log_queues q ON q.name = op->>'queue'
+        JOIN queen.log_queues q ON q.name = op->>'queue' AND q.tenant_id = v_tenant
         ON CONFLICT (queue_id, name) DO NOTHING;
     END IF;
 
@@ -1006,7 +1028,7 @@ BEGIN
     FROM (
         SELECT DISTINCT pt.id
         FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb)) op
-        JOIN queen.log_queues q ON q.name = op->>'queue'
+        JOIN queen.log_queues q ON q.name = op->>'queue' AND q.tenant_id = v_tenant
         JOIN queen.log_partitions pt ON pt.queue_id = q.id AND pt.name = op->>'partition'
     ) ids
     JOIN queen.log_partitions pl ON pl.id = ids.id
@@ -1021,7 +1043,7 @@ BEGIN
         SELECT op.value AS op, pt.id AS pid, q.dedup_window_seconds AS window
         FROM jsonb_array_elements(COALESCE(p->'pushes', '[]'::jsonb))
              WITH ORDINALITY AS op(value, ord)
-        JOIN queen.log_queues q ON q.name = op.value->>'queue'
+        JOIN queen.log_queues q ON q.name = op.value->>'queue' AND q.tenant_id = v_tenant
         JOIN queen.log_partitions pt ON pt.queue_id = q.id AND pt.name = op.value->>'partition'
         ORDER BY op.ord
     LOOP
@@ -1033,7 +1055,8 @@ BEGIN
             COALESCE((v_rec.op->>'verified')::bigint, -1),
             decode(v_rec.op->>'blobB64', 'base64'),
             v_rec.pid,
-            v_rec.window);
+            v_rec.window,
+            v_tenant);
 
         -- A duplicate is a SOFT verdict for plain pushes but a HARD error
         -- inside a transaction: all-or-nothing means the whole batch rolls
@@ -1089,7 +1112,7 @@ BEGIN
             -- log_ack_v1 (which validates lease + batch_end clamp itself).
             SELECT lq.name, lp.name INTO v_queue, v_partition
             FROM queen.log_partitions lp
-            JOIN queen.log_queues lq ON lq.id = lp.queue_id
+            JOIN queen.log_queues lq ON lq.id = lp.queue_id AND lq.tenant_id = v_tenant
             WHERE lp.id = (v_op->>'partitionId')::uuid;
             IF v_queue IS NULL THEN
                 RAISE EXCEPTION 'QTXN ack references unknown partition %', v_op->>'partitionId';
@@ -1102,7 +1125,8 @@ BEGIN
                 v_op->>'worker',
                 (v_op->>'uptoOff')::bigint,
                 COALESCE((v_op->>'ok')::boolean, true),
-                COALESCE((v_op->>'count')::integer, 0));
+                COALESCE((v_op->>'count')::integer, 0),
+                v_tenant);
         END IF;
 
         IF NOT COALESCE((v_res->>'ok')::boolean, false) THEN

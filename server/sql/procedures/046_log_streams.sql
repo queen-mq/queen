@@ -252,7 +252,7 @@ BEGIN
                     SELECT DISTINCT s->>'queue'
                     FROM jsonb_array_elements(v_sink_segments) s
                     WHERE COALESCE(s->>'queue', '') <> ''
-                    ON CONFLICT (name) DO NOTHING;
+                    ON CONFLICT (tenant_id, name) DO NOTHING;
 
                     -- RUSTFIX item 26 (same rationale as 042's provisioning):
                     -- create the queen.queues config row so sink-created
@@ -268,7 +268,7 @@ BEGIN
                            'segments'
                     FROM jsonb_array_elements(v_sink_segments) s
                     WHERE COALESCE(s->>'queue', '') <> ''
-                    ON CONFLICT (name) DO NOTHING;
+                    ON CONFLICT (tenant_id, name) DO NOTHING;
 
                     INSERT INTO queen.log_partitions (queue_id, name)
                     SELECT DISTINCT q2.id, s->>'partition'

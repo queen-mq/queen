@@ -20,12 +20,23 @@
 
 CREATE TABLE IF NOT EXISTS queen.log_queues (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    -- Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): opaque tenant scoping key. Queue
+    -- identity is (tenant_id, name), so two tenants can hold the same queue name
+    -- on one broker, fully isolated. NOT NULL DEFAULT the fixed default tenant =
+    -- a catalog-only change (no backfill); UNIQUE(tenant_id, name) is established
+    -- by the migration block below (idempotent for existing DBs).
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     lease_time INTEGER NOT NULL DEFAULT 60,
     retention_seconds INTEGER NOT NULL DEFAULT 3600,
     dedup_window_seconds INTEGER NOT NULL DEFAULT 3600,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Track B migration for existing DBs: add the column, drop the old UNIQUE(name),
+-- establish UNIQUE(tenant_id, name). Catalog-only; idempotent on re-apply.
+ALTER TABLE queen.log_queues ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+ALTER TABLE queen.log_queues DROP CONSTRAINT IF EXISTS log_queues_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS log_queues_tenant_name_uk ON queen.log_queues(tenant_id, name);
 
 CREATE TABLE IF NOT EXISTS queen.log_partitions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

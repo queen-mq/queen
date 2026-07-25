@@ -99,6 +99,7 @@ fn render_push_results(results: &[ItemResult]) -> String {
 pub async fn handle_push(
     State(st): State<Arc<AppState>>,
     Extension(authed): Extension<crate::auth::AuthedSub>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
     let parsed: PushBody = match serde_json::from_slice(&body) {
@@ -119,7 +120,7 @@ pub async fn handle_push(
     // background drain replays on disable. Return 201 with per-item
     // status:"buffered" (or "failed" on a spool write error).
     if st.maintenance.load(Ordering::Relaxed) {
-        return buffer_all(&st, &parsed, producer_sub.as_deref()).await;
+        return buffer_all(&st, &parsed, producer_sub.as_deref(), tenant.as_str()).await;
     }
 
     let mut results: Vec<ItemResult> = Vec::with_capacity(n);
@@ -186,7 +187,7 @@ pub async fn handle_push(
             match enc_flags.get(&queue) {
                 Some(&b) => b,
                 None => {
-                    let b = st.encryption_enabled_for(&queue).await;
+                    let b = st.encryption_enabled_for(&queue, tenant.as_str()).await;
                     enc_flags.insert(queue.clone(), b);
                     b
                 }
@@ -259,7 +260,12 @@ pub async fn handle_push(
                 item: p.item,
             })
             .collect();
-        st.fusion.submit(AddMsg { queue, partition, frames });
+        st.fusion.submit(AddMsg {
+            queue,
+            partition,
+            tenant: tenant.0.clone(),
+            frames,
+        });
     }
     let _ = rx.await;
     st.metrics.push.record_request(n);
@@ -320,10 +326,11 @@ pub async fn handle_push(
     for i in error_leaders {
         let it = &parsed.items[i];
         let txn = state.results.lock().unwrap()[i].txn.clone();
-        let (payload, encrypted) = spool_payload(&st, it.queue, it.payload, &mut enc_flags).await;
+        let (payload, encrypted) = spool_payload(&st, it.queue, tenant.as_str(), it.payload, &mut enc_flags).await;
         let ok = st.file_buffer.write_event(
             it.queue,
             it.partition.unwrap_or("Default"),
+            tenant.as_str(),
             &txn,
             producer_sub.as_deref(),
             encrypted,
@@ -366,6 +373,7 @@ pub async fn handle_push(
 async fn spool_payload(
     st: &Arc<AppState>,
     queue: &str,
+    tenant: &str,
     raw: &RawValue,
     enc_flags: &mut HashMap<String, bool>,
 ) -> (Box<RawValue>, bool) {
@@ -373,7 +381,7 @@ async fn spool_payload(
         let on = match enc_flags.get(queue) {
             Some(&b) => b,
             None => {
-                let b = st.encryption_enabled_for(queue).await;
+                let b = st.encryption_enabled_for(queue, tenant).await;
                 enc_flags.insert(queue.to_string(), b);
                 b
             }
@@ -397,7 +405,12 @@ async fn spool_payload(
 // mode), returning per-item status:"buffered". A fresh transactionId is minted
 // when the client omitted one (push.cpp:322-326) so the buffered result and the
 // replay dedup key are well-defined. 201 if all spooled, 500 if any write failed.
-async fn buffer_all(st: &Arc<AppState>, parsed: &PushBody<'_>, producer_sub: Option<&str>) -> Response {
+async fn buffer_all(
+    st: &Arc<AppState>,
+    parsed: &PushBody<'_>,
+    producer_sub: Option<&str>,
+    tenant: &str,
+) -> Response {
     let mut results: Vec<ItemResult> = Vec::with_capacity(parsed.items.len());
     let mut all_ok = true;
     let mut enc_flags: HashMap<String, bool> = HashMap::new();
@@ -409,10 +422,10 @@ async fn buffer_all(st: &Arc<AppState>, parsed: &PushBody<'_>, producer_sub: Opt
             .unwrap_or_else(|| mid_str.clone());
         let partition = it.partition.unwrap_or("Default");
         // RUSTFIX item 8: spool the encrypted envelope for an encrypted queue.
-        let (payload, encrypted) = spool_payload(st, it.queue, it.payload, &mut enc_flags).await;
+        let (payload, encrypted) = spool_payload(st, it.queue, tenant, it.payload, &mut enc_flags).await;
         let ok = st
             .file_buffer
-            .write_event(it.queue, partition, &txn, producer_sub, encrypted, &payload);
+            .write_event(it.queue, partition, tenant, &txn, producer_sub, encrypted, &payload);
         if !ok {
             all_ok = false;
         }
@@ -527,6 +540,7 @@ struct PopSpecificResult {
 
 pub async fn handle_pop(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(queue): Path<String>,
     Query(p): Query<PopParams>,
 ) -> Response {
@@ -549,7 +563,7 @@ pub async fn handle_pop(
     // RUSTFIX item 18: COALESCE(request.leaseSeconds, queue.lease_time, 60).
     let lease_seconds = match p.lease_seconds {
         Some(v) if v > 0 => v,
-        _ => st.lease_time_for(&queue).await,
+        _ => st.lease_time_for(&queue, tenant.as_str()).await,
     };
 
     // 19-wildcard-hotlist: with QUEEN_HOTLIST on, serve the wildcard pop from the
@@ -558,7 +572,7 @@ pub async fn handle_pop(
     if st.hotlist.enabled() {
         return serve_pop_hotlist(
             &st, &queue, &group, batch, max_parts, auto_ack, wait, deadline, lease_seconds,
-            &sub_mode, &sub_from, &worker,
+            &sub_mode, &sub_from, &worker, tenant.as_str(),
         )
         .await;
     }
@@ -579,7 +593,7 @@ pub async fn handle_pop(
         // pool.get measured ~0µs) and never touches pop_vegas, so the quiet re-poll
         // storm can no longer starve real deliveries.
         let pending = match st.pool.get().await {
-            Ok(c) => db::has_pending(&c, &queue, &group).await.unwrap_or(true),
+            Ok(c) => db::has_pending(&c, &queue, &group, tenant.as_str()).await.unwrap_or(true),
             Err(_) => true, // probe unavailable → fall back to the full scan (safe)
         };
 
@@ -601,7 +615,7 @@ pub async fn handle_pop(
                 st.stmt_timeout,
                 db::pop_wildcard_bin(
                     &client, &queue, &group, batch, lease_seconds, &worker, auto_ack, max_parts,
-                    &sub_mode, &sub_from,
+                    &sub_mode, &sub_from, tenant.as_str(),
                 ),
             )
             .await;
@@ -666,12 +680,12 @@ pub async fn handle_pop(
                 // wildcard pop on the next iteration, which is the backstop that
                 // CARRIES the seed. group_seeded is a cache hit (zero DB) in
                 // steady state, so the phase-2 fast path is preserved once seeded.
-                if st.group_seeded(&queue, &group).await {
+                if st.group_seeded(&queue, &group, tenant.as_str()).await {
                     let hints = st.notifier.drain_hints(&queue, max_parts.max(1) as usize);
                     if !hints.is_empty() {
                         if let Some(resp) = try_targeted_serve(
                             &st, &queue, &hints, &group, batch, lease_seconds, &worker, auto_ack,
-                            &sub_mode, &sub_from,
+                            &sub_mode, &sub_from, tenant.as_str(),
                         )
                         .await
                         {
@@ -733,6 +747,7 @@ async fn try_targeted_serve(
     auto_ack: bool,
     sub_mode: &str,
     sub_from: &str,
+    tenant: &str,
 ) -> Option<Response> {
     let lease_id: &str = if auto_ack { "" } else { worker };
     let mut parts: Vec<PopPart> = Vec::new();
@@ -756,7 +771,7 @@ async fn try_targeted_serve(
             st.stmt_timeout,
             db::pop_specific(
                 &client, queue, hint, group, remaining, lease_seconds, worker, auto_ack, sub_mode,
-                sub_from,
+                sub_from, tenant,
             ),
         )
         .await;
@@ -850,13 +865,14 @@ async fn serve_pop_hotlist(
     sub_mode: &str,
     sub_from: &str,
     worker: &str,
+    tenant: &str,
 ) -> Response {
     let lease_id: &str = if auto_ack { "" } else { worker };
     let mut backoff_count: u32 = 0;
     loop {
         let (body, count, meta, rtt) = hotlist_pop_attempt(
             st, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
-            worker, lease_id,
+            worker, lease_id, tenant,
         )
         .await;
 
@@ -968,6 +984,7 @@ async fn hotlist_pop_attempt(
     sub_from: &str,
     worker: &str,
     lease_id: &str,
+    tenant: &str,
 ) -> (String, usize, PopMeta, Duration) {
     let now_ms = crate::util::now_epoch_ms();
     let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption);
@@ -985,7 +1002,7 @@ async fn hotlist_pop_attempt(
     // (which carries the seed and serves) — flipping group_seeded true; every
     // subsequent pop takes the ring path. group_seeded is a cache hit (zero DB,
     // zero pool.get) once seeded, so steady state is pure ring.
-    if !st.group_seeded(queue, group).await {
+    if !st.group_seeded(queue, group, tenant).await {
         let permit = st.pop_vegas.acquire().await;
         let client = match st.pool.get().await {
             Ok(c) => c,
@@ -1001,7 +1018,7 @@ async fn hotlist_pop_attempt(
             st.stmt_timeout,
             db::pop_wildcard_bin(
                 &client, queue, group, batch, lease_seconds, worker, auto_ack, max_parts,
-                sub_mode, sub_from,
+                sub_mode, sub_from, tenant,
             ),
         )
         .await;
@@ -1076,7 +1093,7 @@ async fn hotlist_pop_attempt(
 
     // Lazy deferral-config refresh (§6), TTL-throttled.
     if need_cfg {
-        if let Ok((d, w)) = db::queue_defer_cfg(&client, queue).await {
+        if let Ok((d, w)) = db::queue_defer_cfg(&client, queue, tenant).await {
             st.hotlist.set_queue_cfg(queue, d, w, now_ms);
         }
     }
@@ -1085,7 +1102,7 @@ async fn hotlist_pop_attempt(
     let k = ((max_parts.max(1) as usize) * 8).clamp(16, 256);
     let mut cands = st.hotlist.take_batch(queue, group, k, now_ms);
     if cands.is_empty() && need_reseed {
-        hotlist_reseed_scan(&st.hotlist, &client, queue, group, now_ms).await;
+        hotlist_reseed_scan(&st.hotlist, &client, queue, group, tenant, now_ms).await;
         cands = st.hotlist.take_batch(queue, group, k, now_ms);
     }
     if cands.is_empty() {
@@ -1122,7 +1139,7 @@ async fn hotlist_pop_attempt(
         st.stmt_timeout,
         db::pop_list(
             &client, queue, group, &names, batch, lease_seconds, worker, auto_ack, max_parts,
-            sub_mode, sub_from, skip_window,
+            sub_mode, sub_from, skip_window, tenant,
         ),
     )
     .await;
@@ -1248,11 +1265,17 @@ pub(crate) async fn hotlist_reseed_scan(
     client: &deadpool_postgres::Client,
     queue: &str,
     group: &str,
+    // Track B (§5): the reseed keyset scan is scoped to this tenant's queue so the
+    // ring is never seeded with another tenant's partitions. NB the hotlist ring
+    // itself is keyed by (queue, group) only — see the module note; two tenants
+    // sharing a (queue, group) name under QUEEN_HOTLIST is a documented v1 limit,
+    // never a leak (every pop_list claim is still tenant-scoped in SQL).
+    tenant: &str,
     now_ms: i64,
 ) {
     let mut after = NIL_UUID.to_string();
     for _ in 0..HOTLIST_RESEED_MAX_PAGES {
-        let rows = match db::hotlist_reseed(client, queue, group, &after, HOTLIST_RESEED_PAGE).await
+        let rows = match db::hotlist_reseed(client, queue, group, &after, HOTLIST_RESEED_PAGE, tenant).await
         {
             Ok(r) => r,
             Err(_) => break,
@@ -1277,6 +1300,7 @@ pub(crate) async fn hotlist_reseed_scan(
 // shape). `partitions` is ignored here (a specific pop is one partition).
 pub async fn handle_pop_partition(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((queue, partition)): Path<(String, String)>,
     Query(p): Query<PopParams>,
 ) -> Response {
@@ -1295,7 +1319,7 @@ pub async fn handle_pop_partition(
     // RUSTFIX item 18: COALESCE(request.leaseSeconds, queue.lease_time, 60).
     let lease_seconds = match p.lease_seconds {
         Some(v) if v > 0 => v,
-        _ => st.lease_time_for(&queue).await,
+        _ => st.lease_time_for(&queue, tenant.as_str()).await,
     };
 
     let mut backoff_count: u32 = 0;
@@ -1317,7 +1341,7 @@ pub async fn handle_pop_partition(
             st.stmt_timeout,
             db::pop_specific(
                 &client, &queue, &partition, &group, batch, lease_seconds, &worker,
-                auto_ack, &sub_mode, &sub_from,
+                auto_ack, &sub_mode, &sub_from, tenant.as_str(),
             ),
         )
         .await;
@@ -1417,6 +1441,7 @@ pub struct PopDiscoverParams {
 // a 400 rather than an unbounded scan of every queue).
 pub async fn handle_pop_discover(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(p): Query<PopDiscoverParams>,
 ) -> Response {
     if st.pop_maintenance.load(Ordering::Relaxed) {
@@ -1466,7 +1491,7 @@ pub async fn handle_pop_discover(
             st.stmt_timeout,
             db::pop_discover(
                 &client, &namespace, &task, &group, batch, lease_seconds, &worker,
-                auto_ack, max_parts, &sub_mode, &sub_from,
+                auto_ack, max_parts, &sub_mode, &sub_from, tenant.as_str(),
             ),
         )
         .await;
@@ -1933,7 +1958,11 @@ fn hex16(b: &[u8; 16]) -> String {
     s
 }
 
-pub async fn handle_ack(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+pub async fn handle_ack(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let a: AckSingle = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
@@ -1946,11 +1975,15 @@ pub async fn handle_ack(State(st): State<Arc<AppState>>, body: Bytes) -> Respons
         status: normalize_ack_status(a.status.as_deref()),
         error: a.error.filter(|s| !s.is_empty()),
     }];
-    let body = process_acks(&st, &group, acks).await;
+    let body = process_acks(&st, &group, acks, tenant.as_str()).await;
     json(StatusCode::OK, body)
 }
 
-pub async fn handle_ack_batch(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+pub async fn handle_ack_batch(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let b: AckBatch = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
@@ -1967,7 +2000,7 @@ pub async fn handle_ack_batch(State(st): State<Arc<AppState>>, body: Bytes) -> R
             error: it.error.filter(|s| !s.is_empty()),
         })
         .collect();
-    let body = process_acks(&st, &group, acks).await;
+    let body = process_acks(&st, &group, acks, tenant.as_str()).await;
     json(StatusCode::OK, body)
 }
 
@@ -1987,7 +2020,7 @@ enum FastAck {
 // the per-item result array in the original order. The broker computes the
 // xxh3_128 txn hashes (spec §3 — SQL never sees txn strings) and maps the SP's
 // noopHashes/staleHashes hex tokens back to the request's txns.
-async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String {
+async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &str) -> String {
     let n = acks.len();
     let mut success = vec![false; n];
     let mut errors: Vec<Option<String>> = vec![None; n];
@@ -2032,6 +2065,25 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>) -> String
     }
 
     for ((pid, worker), idxs) in groups {
+        // Track B (§5) OWNERSHIP GATE: the ack wire is partitionId-keyed and the
+        // pid-addressed ack SPs (log_ack_at_v1/log_ack_by_hash_v1) carry no tenant,
+        // so a forged/leaked pid could otherwise advance ANOTHER tenant's cursor.
+        // Verify the pid belongs to the request tenant first; a foreign pid is
+        // rejected (every item in the group fails, cursor untouched). Vacuous +
+        // zero-cost when tenancy is off (no pool.get, byte-identical OSS path).
+        if st.tenancy_enabled {
+            let owned = match st.pool.get().await {
+                Ok(c) => st.tenant_owns_partition(&c, &pid, tenant).await,
+                Err(_) => false, // deny-by-default: never open a hole on a pool error
+            };
+            if !owned {
+                for &i in &idxs {
+                    errors[i] = Some("partition not owned by tenant".to_string());
+                }
+                continue;
+            }
+        }
+
         // Per-queue ack attribution (queue_lag_metrics ack_* columns): the ack wire
         // is partitionId-keyed, so resolve the queue via the pop-fed memo. On the
         // fusion path use the memo-only lookup (no client) so nothing is held
@@ -2688,6 +2740,7 @@ fn txn_fail_body(txn_id: &str, err: &str, status: StatusCode) -> Response {
 pub async fn handle_transaction(
     State(st): State<Arc<AppState>>,
     Extension(authed): Extension<crate::auth::AuthedSub>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
@@ -2952,7 +3005,7 @@ pub async fn handle_transaction(
     // on failure — never fail the transaction.
     if st.encryption.is_enabled() {
         for g in &mut groups {
-            if g.frames.is_empty() || !st.encryption_enabled_for(&g.queue).await {
+            if g.frames.is_empty() || !st.encryption_enabled_for(&g.queue, tenant.as_str()).await {
                 continue;
             }
             for f in &mut g.frames {
@@ -3036,7 +3089,18 @@ pub async fn handle_transaction(
         })
         .collect();
 
-    let payload = serde_json::json!({"pushes": pushes_json, "acks": acks_json}).to_string();
+    // Track B (§5): carry the request tenant into the wire SP as `_tenant`.
+    // queen.log_transaction_wire_v1 reads COALESCE((p->>'_tenant')::uuid, default)
+    // and enforces it on BOTH sides of the transaction — push queue resolution/
+    // auto-create is (tenant, name)-scoped, and the positional/hash acks are guarded
+    // pid→queue→tenant (a pid not owned by this tenant aborts the whole txn). So the
+    // atomic push+ack path is scoped/owned by construction, no separate Rust gate.
+    let payload = serde_json::json!({
+        "pushes": pushes_json,
+        "acks": acks_json,
+        "_tenant": tenant.as_str(),
+    })
+    .to_string();
 
     match db::transaction(&client, &payload).await {
         Ok(txt) => {

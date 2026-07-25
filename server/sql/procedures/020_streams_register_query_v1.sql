@@ -100,7 +100,7 @@ BEGIN
             IF NOT FOUND THEN
                 INSERT INTO queen_streams.queries (name, source_queue, sink_queue, config_hash)
                 VALUES (v_name, v_source_queue, v_sink_queue, v_config_hash)
-                ON CONFLICT (name) DO UPDATE SET
+                ON CONFLICT (tenant_id, name) DO UPDATE SET
                     source_queue = EXCLUDED.source_queue,
                     sink_queue   = EXCLUDED.sink_queue,
                     config_hash  = EXCLUDED.config_hash,

@@ -8,7 +8,7 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 
@@ -36,9 +36,18 @@ fn filters_json(params: &HashMap<String, String>, keys: &[&str]) -> String {
     serde_json::Value::Object(filters_from_query(params, keys)).to_string()
 }
 
+// Track B (§5): like filters_json, but stamps `_tenant` so the SP scopes to it.
+// queen.get_analytics_v1 reads COALESCE((p_filters->>'_tenant')::uuid, default).
+fn filters_json_tenant(params: &HashMap<String, String>, keys: &[&str], tenant: &str) -> String {
+    let mut m = filters_from_query(params, keys);
+    m.insert("_tenant".to_string(), serde_json::json!(tenant));
+    serde_json::Value::Object(m).to_string()
+}
+
 // ------------------------------------------- GET /api/v1/status/queues/:queue
 pub async fn handle_queue_detail(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(queue): Path<String>,
 ) -> Response {
     let client = client_or_500!(st);
@@ -46,15 +55,17 @@ pub async fn handle_queue_detail(
     // helper every sibling handler in this file uses) so an embedded {"error":..}
     // body maps to 404 ("not found") / 500 instead of being served at HTTP 200. A
     // valid queue detail has no top-level "error" key, so success is still 200.
-    serve("queue detail failed: ", db::get_queue_detail(&client, &queue).await)
+    // Track B (§5): scoped to the request tenant's queue.
+    serve("queue detail failed: ", db::get_queue_detail(&client, &queue, tenant.as_str()).await)
 }
 
 // ---------------------------------------------- GET /api/v1/status/analytics
 pub async fn handle_status_analytics(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let f = filters_json(&params, &["from", "to", "interval", "queue", "namespace", "task"]);
+    let f = filters_json_tenant(&params, &["from", "to", "interval", "queue", "namespace", "task"], tenant.as_str());
     let client = client_or_500!(st);
     serve("analytics failed: ", db::get_analytics(&client, &f).await)
 }

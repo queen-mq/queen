@@ -102,6 +102,11 @@ pub struct AppState {
     pub hotlist: Arc<crate::hotlist::HotList>,
     // §8 reseed/cold-start interval (ms). QUEEN_HOTLIST_RESEED_MS (default 30s).
     pub hotlist_reseed_ms: i64,
+    // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): native tenant scoping flag
+    // (QUEEN_TENANCY_HEADER). Off ⇒ every request is the default tenant and the
+    // pid-ownership gate is skipped (vacuously true — no non-default queues exist),
+    // so the OSS path is byte-identical. On ⇒ pid-addressed ops verify ownership.
+    pub tenancy_enabled: bool,
 }
 
 const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
@@ -110,42 +115,60 @@ const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
 // unreachable — the "60" floor of COALESCE(request, queue.lease_time, 60).
 const DEFAULT_LEASE_SECONDS: i32 = 60;
 
+// Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): per-queue scalar caches (lease time,
+// encryption flag, group-seed markers) are keyed by queue NAME, which collides
+// when two tenants hold the same queue name. Key them by (tenant, name) instead
+// so a same-named queue of another tenant can never poison the cache (encryption
+// especially — a wrong flag would down/upgrade a tenant's at-rest handling). The
+// default tenant when the feature is off ⇒ the key is a stable "<default>\x1f<q>"
+// so behaviour is byte-identical to a bare-name key.
+#[inline]
+pub(crate) fn tenant_queue_key(tenant: &str, queue: &str) -> String {
+    let mut k = String::with_capacity(tenant.len() + 1 + queue.len());
+    k.push_str(tenant);
+    k.push('\u{1f}');
+    k.push_str(queue);
+    k
+}
+
 impl AppState {
     // Resolve the queue's lease time, caching the lookup. Falls back to
     // DEFAULT_LEASE_SECONDS when the queue has no seg_queues row yet or the DB
     // is unreachable. The std Mutex guard is always dropped before the .await.
-    async fn lease_time_for(&self, queue: &str) -> i32 {
-        if let Some(v) = self.lease_cache.lock().unwrap().get(queue).copied() {
+    async fn lease_time_for(&self, queue: &str, tenant: &str) -> i32 {
+        let key = tenant_queue_key(tenant, queue);
+        if let Some(v) = self.lease_cache.lock().unwrap().get(&key).copied() {
             return v;
         }
         let v = match self.pool.get().await {
-            Ok(c) => db::queue_lease_time(&c, queue)
+            Ok(c) => db::queue_lease_time(&c, queue, tenant)
                 .await
                 .ok()
                 .flatten()
                 .unwrap_or(DEFAULT_LEASE_SECONDS),
             Err(_) => DEFAULT_LEASE_SECONDS,
         };
-        self.lease_cache.lock().unwrap().insert(queue.to_string(), v);
+        self.lease_cache.lock().unwrap().insert(key, v);
         v
     }
 
     // RUSTFIX item 8: resolve the queue's encryption_enabled flag, caching the
     // lookup (same shape as lease_time_for). False when the queue has no
     // queen.queues row yet or the DB is unreachable. Guard dropped before .await.
-    pub(crate) async fn encryption_enabled_for(&self, queue: &str) -> bool {
-        if let Some(v) = self.enc_cache.lock().unwrap().get(queue).copied() {
+    pub(crate) async fn encryption_enabled_for(&self, queue: &str, tenant: &str) -> bool {
+        let key = tenant_queue_key(tenant, queue);
+        if let Some(v) = self.enc_cache.lock().unwrap().get(&key).copied() {
             return v;
         }
         let v = match self.pool.get().await {
-            Ok(c) => db::queue_encryption_enabled(&c, queue)
+            Ok(c) => db::queue_encryption_enabled(&c, queue, tenant)
                 .await
                 .ok()
                 .flatten()
                 .unwrap_or(false),
             Err(_) => false,
         };
-        self.enc_cache.lock().unwrap().insert(queue.to_string(), v);
+        self.enc_cache.lock().unwrap().insert(key, v);
         v
     }
 
@@ -158,17 +181,22 @@ impl AppState {
     // which is always first-contact-safe. This NEVER returns true before the seed
     // exists, which is the whole point: it gates hint-driven targeted pops until
     // the convoy-preventing seed is in place. Guard is dropped before every await.
-    pub(crate) async fn group_seeded(&self, queue: &str, group: &str) -> bool {
+    pub(crate) async fn group_seeded(&self, queue: &str, group: &str, tenant: &str) -> bool {
+        // Track B (§5): the seed marker lives in the (tenant_id, …)-keyed
+        // consumer_groups_metadata, so the in-memory positive cache is keyed by
+        // (tenant, queue) too — tenant A's seed must not gate tenant B's fast path
+        // on a same-named (queue, group).
+        let key = tenant_queue_key(tenant, queue);
         {
             let g = self.seeded_groups.lock().unwrap();
-            if let Some(gs) = g.get(queue) {
+            if let Some(gs) = g.get(&key) {
                 if gs.contains(group) {
                     return true;
                 }
             }
         }
         let seeded = match self.pool.get().await {
-            Ok(c) => db::group_seed_marker_exists(&c, queue, group)
+            Ok(c) => db::group_seed_marker_exists(&c, queue, group, tenant)
                 .await
                 .unwrap_or(false),
             Err(_) => false,
@@ -177,7 +205,7 @@ impl AppState {
             self.seeded_groups
                 .lock()
                 .unwrap()
-                .entry(queue.to_string())
+                .entry(key)
                 .or_default()
                 .insert(group.to_string());
         }
@@ -224,6 +252,31 @@ impl AppState {
             }
             _ => None,
         }
+    }
+
+    // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): pid→queue→tenant OWNERSHIP gate for
+    // the pid-addressed operations (ack, messages/:pid, delete, traces). Returns
+    // true when the partition belongs to `tenant`. Tenancy OFF ⇒ always true with
+    // NO DB round-trip (an OSS broker has only default-tenant queues, so the OSS
+    // ack/messages paths are byte-identical). Tenancy ON ⇒ one indexed EXISTS; a
+    // pool/DB error is treated as NOT owned (deny-by-default — a transient DB
+    // failure must never open a cross-tenant hole). Never consults the pid→queue
+    // memo: ownership must not trust a cache that pop traffic can populate.
+    pub(crate) async fn tenant_owns_partition(
+        &self,
+        client: &deadpool_postgres::Client,
+        partition_id: &str,
+        tenant: &str,
+    ) -> bool {
+        if !self.tenancy_enabled {
+            return true;
+        }
+        if partition_id.is_empty() {
+            return false;
+        }
+        db::partition_belongs_to_tenant(client, partition_id, tenant)
+            .await
+            .unwrap_or(false)
     }
 
     // RUSTFIX item 19: the next long-poll re-query interval for a given consecutive

@@ -146,10 +146,8 @@ fn source() -> Source {
         password: ev("PG_PASSWORD", "postgres"),
         // RUSTFIX item 4: PG_DATABASE → PG_DB → postgres, identical to the pool.
         database: crate::config::resolve_db_name(),
-        use_ssl: std::env::var("PG_USE_SSL").map(|v| v == "true").unwrap_or(false),
-        reject_unauthorized: std::env::var("PG_SSL_REJECT_UNAUTHORIZED")
-            .map(|v| v == "true")
-            .unwrap_or(true),
+        use_ssl: crate::config::env_bool("PG_USE_SSL", false),
+        reject_unauthorized: crate::config::env_bool("PG_SSL_REJECT_UNAUTHORIZED", true),
     }
 }
 impl Source {

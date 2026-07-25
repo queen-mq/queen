@@ -35,7 +35,11 @@ use crate::vegas::Vegas;
 // reads the configured leaseTime. The configure_queue_v1 JSON is returned verbatim;
 // the JS `configureQueue` test asserts res.configured===true and round-trips every
 // options[key], so we MUST NOT reshape it.
-pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+pub async fn handle_configure(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
@@ -88,7 +92,7 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    let cfg_txt = match db::configure_queue(&client, &queue, &opts_json).await {
+    let cfg_txt = match db::configure_queue(&client, &queue, tenant.as_str(), &opts_json).await {
         Ok(t) => t,
         Err(e) => {
             return json(
@@ -122,14 +126,21 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
         .unwrap_or(0) as i32;
 
     // Segments engine: be explicit about storage, and ensure the seg_queues row.
-    if let Err(e) = db::mark_queue_segments(&client, &queue).await {
+    if let Err(e) = db::mark_queue_segments(&client, &queue, tenant.as_str()).await {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("configure(storage) failed: ", &e),
         );
     }
-    if let Err(e) =
-        db::upsert_seg_queue(&client, &queue, lease_time, retention_seconds, dedup_window).await
+    if let Err(e) = db::upsert_seg_queue(
+        &client,
+        &queue,
+        tenant.as_str(),
+        lease_time,
+        retention_seconds,
+        dedup_window,
+    )
+    .await
     {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -138,7 +149,8 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
     }
 
     // Invalidate the cached lease so a leaseTime change is reflected on next pop.
-    st.lease_cache.lock().unwrap().remove(&queue);
+    // Track B (§5): the cache is keyed by (tenant, name) — invalidate this tenant's.
+    st.lease_cache.lock().unwrap().remove(&crate::handlers::tenant_queue_key(tenant.as_str(), &queue));
     // Invalidate the same queue's config cache on peer replicas.
     st.notifier.broadcast_queue_config_set(&queue);
 
@@ -152,6 +164,7 @@ pub async fn handle_configure(State(st): State<Arc<AppState>>, body: Bytes) -> R
 // make the JS client return null and fail res.deleted===true).
 pub async fn handle_delete_queue(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(queue): Path<String>,
 ) -> Response {
     let client = match st.pool.get().await {
@@ -159,7 +172,7 @@ pub async fn handle_delete_queue(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    let del_txt = match db::delete_queue(&client, &queue).await {
+    let del_txt = match db::delete_queue(&client, &queue, tenant.as_str()).await {
         Ok(t) => t,
         Err(e) => {
             return json(
@@ -169,14 +182,14 @@ pub async fn handle_delete_queue(
         }
     };
     // Best-effort segment-data drop (independent of the rows-side delete).
-    if let Err(e) = db::delete_seg_queue(&client, &queue).await {
+    if let Err(e) = db::delete_seg_queue(&client, &queue, tenant.as_str()).await {
         return json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("delete(seg) failed: ", &e),
         );
     }
 
-    st.lease_cache.lock().unwrap().remove(&queue);
+    st.lease_cache.lock().unwrap().remove(&crate::handlers::tenant_queue_key(tenant.as_str(), &queue));
     // Invalidate the deleted queue's config cache on peer replicas.
     st.notifier.broadcast_queue_config_delete(&queue);
     json(StatusCode::OK, del_txt)
@@ -189,6 +202,7 @@ pub async fn handle_delete_queue(
 // is gone.
 pub async fn handle_get_queue(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(queue): Path<String>,
 ) -> Response {
     let client = match st.pool.get().await {
@@ -196,7 +210,7 @@ pub async fn handle_get_queue(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    let txt = match db::get_queue(&client, &queue).await {
+    let txt = match db::get_queue(&client, &queue, tenant.as_str()).await {
         Ok(t) => t,
         Err(e) => {
             return json(
@@ -211,7 +225,7 @@ pub async fn handle_get_queue(
     }
 
     // Enrich with segment counts (best-effort; leave the base detail intact on error).
-    if let Ok((segs, msgs)) = db::seg_queue_message_stats(&client, &queue).await {
+    if let Ok((segs, msgs)) = db::seg_queue_message_stats(&client, &queue, tenant.as_str()).await {
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
                 "segments".to_string(),
@@ -230,13 +244,16 @@ pub async fn handle_get_queue(
 // live seg_partitions/seg_segments counts (mirrors handle_get_queue's segments
 // enrichment). Namespace/task query filters are accepted but not applied — the
 // full list is a valid superset for the CLI list view.
-pub async fn handle_list_queues(State(st): State<Arc<AppState>>) -> Response {
+pub async fn handle_list_queues(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    let txt = match db::get_queues(&client).await {
+    let txt = match db::get_queues(&client, tenant.as_str()).await {
         Ok(t) => t,
         Err(e) => {
             return json(
@@ -256,7 +273,7 @@ pub async fn handle_list_queues(State(st): State<Arc<AppState>>) -> Response {
 
     // Enrich each queue with segment-derived counts (best-effort; leave the base
     // list intact on error).
-    if let Ok(stats) = db::seg_queue_stats_all(&client).await {
+    if let Ok(stats) = db::seg_queue_stats_all(&client, tenant.as_str()).await {
         let map: HashMap<String, (i64, i64, i64)> = stats
             .into_iter()
             .map(|(name, parts, segs, msgs)| (name, (parts, segs, msgs)))

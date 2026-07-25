@@ -4,9 +4,14 @@
 -- Creates or updates queue configuration with all options
 -- ============================================================================
 
+-- Track B (§5): p_tenant scopes the config row's identity. DROP the (TEXT, JSONB)
+-- form so the scoped (TEXT, JSONB, UUID) is unambiguous; the broker passes the
+-- resolved tenant (default when the feature is off ⇒ byte-identical).
+DROP FUNCTION IF EXISTS queen.configure_queue_v1(TEXT, JSONB);
 CREATE OR REPLACE FUNCTION queen.configure_queue_v1(
     p_queue_name TEXT,
-    p_options JSONB DEFAULT '{}'::jsonb
+    p_options JSONB DEFAULT '{}'::jsonb,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -54,19 +59,19 @@ BEGIN
     v_encryption_enabled := COALESCE((p_options->>'encryptionEnabled')::boolean, false);
     v_max_wait_time_seconds := COALESCE((p_options->>'maxWaitTimeSeconds')::integer, 0);
     
-    -- Insert or update queue
+    -- Insert or update queue (Track B: identity is (tenant_id, name)).
     INSERT INTO queen.queues (
-        name, namespace, task, priority, lease_time, retry_limit, retry_delay,
+        tenant_id, name, namespace, task, priority, lease_time, retry_limit, retry_delay,
         max_queue_size, ttl, dead_letter_queue, dlq_after_max_retries, delayed_processing,
-        window_buffer, retention_seconds, completed_retention_seconds, 
+        window_buffer, retention_seconds, completed_retention_seconds,
         retention_enabled, encryption_enabled, max_wait_time_seconds
     ) VALUES (
-        p_queue_name, v_namespace, v_task, v_priority, v_lease_time, v_retry_limit, v_retry_delay,
+        p_tenant, p_queue_name, v_namespace, v_task, v_priority, v_lease_time, v_retry_limit, v_retry_delay,
         v_max_size, v_ttl, v_dead_letter_queue, v_dlq_after_max_retries, v_delayed_processing,
         v_window_buffer, v_retention_seconds, v_completed_retention_seconds,
         v_retention_enabled, v_encryption_enabled, v_max_wait_time_seconds
     )
-    ON CONFLICT (name) DO UPDATE SET
+    ON CONFLICT (tenant_id, name) DO UPDATE SET
         namespace = EXCLUDED.namespace,
         task = EXCLUDED.task,
         priority = EXCLUDED.priority,
@@ -128,5 +133,5 @@ END;
 $$;
 
 -- Grant execute permissions
-GRANT EXECUTE ON FUNCTION queen.configure_queue_v1(TEXT, JSONB) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.configure_queue_v1(TEXT, JSONB, UUID) TO PUBLIC;
 

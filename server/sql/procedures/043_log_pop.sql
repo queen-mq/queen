@@ -69,6 +69,10 @@
 -- over a DB carrying the old 9-arg function leaves no ambiguous overload.
 DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
 DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN);
+-- Track B (§5): p_tenant scopes the (queue,partition) resolution + the durable
+-- subscription lookup. Added last with a DEFAULT; the pre-tenant 11-arg form is
+-- dropped so a re-apply over a DB carrying it leaves no ambiguous overload.
+DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN, UUID);
 CREATE FUNCTION queen.log_pop_v1(
     p_queue TEXT,
     p_partition TEXT,
@@ -79,7 +83,8 @@ CREATE FUNCTION queen.log_pop_v1(
     p_auto_ack BOOLEAN DEFAULT FALSE,
     p_sub_mode TEXT DEFAULT 'all',
     p_sub_from TEXT DEFAULT '',
-    p_skip_window_debounce BOOLEAN DEFAULT FALSE
+    p_skip_window_debounce BOOLEAN DEFAULT FALSE,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS TABLE (
     r_base BIGINT,
     r_start_idx INTEGER,
@@ -116,14 +121,15 @@ BEGIN
     SELECT p.id, p.last_offset, p.log_start
     INTO v_pid, v_last_offset, v_log_start
     FROM queen.log_partitions p JOIN queen.log_queues q ON q.id = p.queue_id
-    WHERE q.name = p_queue AND p.name = p_partition;
+    WHERE q.name = p_queue AND p.name = p_partition AND q.tenant_id = p_tenant;
     IF v_pid IS NULL THEN RETURN; END IF;
 
     -- Visibility knobs live on the v1 config row (created by the configure
-    -- path for both engines). Absent row = both disabled.
+    -- path for both engines). Absent row = both disabled. Track B: the config
+    -- row is (tenant_id, name)-scoped like the queue itself.
     SELECT COALESCE(qq.delayed_processing, 0), COALESCE(qq.window_buffer, 0)
     INTO v_delayed, v_win_buf
-    FROM queen.queues qq WHERE qq.name = p_queue;
+    FROM queen.queues qq WHERE qq.name = p_queue AND qq.tenant_id = p_tenant;
     IF NOT FOUND THEN
         v_delayed := 0; v_win_buf := 0;
     END IF;
@@ -157,7 +163,7 @@ BEGIN
         SELECT cgm.subscription_timestamp INTO v_from_ts
         FROM queen.consumer_groups_metadata cgm
         WHERE cgm.consumer_group = p_group AND cgm.queue_name = p_queue
-          AND cgm.partition_name = ''
+          AND cgm.partition_name = '' AND cgm.tenant_id = p_tenant
         LIMIT 1;
 
         IF v_from_ts IS NOT NULL THEN
@@ -379,6 +385,9 @@ $$;
 -- values so callers of a historical shorter form keep working.
 -- ============================================================================
 DROP FUNCTION IF EXISTS queen.log_pop_wildcard_wire_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT);
+-- Track B (§5): p_tenant scopes the queue resolution + the per-(queue,group)
+-- watermark/metadata rows. Added last with a DEFAULT; old signatures dropped.
+DROP FUNCTION IF EXISTS queen.log_pop_wildcard_wire_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID);
 CREATE FUNCTION queen.log_pop_wildcard_wire_v1(
     p_queue TEXT,
     p_group TEXT,
@@ -388,7 +397,8 @@ CREATE FUNCTION queen.log_pop_wildcard_wire_v1(
     p_auto_ack BOOLEAN,
     p_max_partitions INTEGER,
     p_sub_mode TEXT DEFAULT 'all',
-    p_sub_from TEXT DEFAULT ''
+    p_sub_from TEXT DEFAULT '',
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -414,7 +424,7 @@ DECLARE
     -- RUSTFIX item 13: durable subscription mode written to consumer_groups_metadata.
     v_sub_mode_stored TEXT;
 BEGIN
-    SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue;
+    SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue AND tenant_id = p_tenant;
     IF v_qid IS NULL THEN
         RETURN jsonb_build_object('partitions', '[]'::jsonb);
     END IF;
@@ -480,9 +490,9 @@ BEGIN
     END IF;
 
     INSERT INTO queen.consumer_groups_metadata
-        (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
-    VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
-    ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+        (tenant_id, consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+    VALUES (p_tenant, p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
+    ON CONFLICT (tenant_id, consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
     GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
     IF v_first_seen > 0 THEN
@@ -529,7 +539,7 @@ BEGIN
     -- re-check throttle floor.
     SELECT last_empty_scan_at, updated_at INTO v_watermark, v_verified_at
     FROM queen.consumer_watermarks
-    WHERE queue_name = p_queue AND consumer_group = p_group;
+    WHERE queue_name = p_queue AND consumer_group = p_group AND tenant_id = p_tenant;
     IF v_watermark IS NULL THEN
         v_watermark := '1970-01-01 00:00:00+00'::timestamptz;
         v_verified_at := NULL;
@@ -574,7 +584,7 @@ BEGIN
         INTO v_segments, v_taken
         FROM queen.log_pop_v1(p_queue, v_p.name, p_group,
                               v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -606,9 +616,9 @@ BEGIN
             ) INTO v_has_pending;
             IF NOT v_has_pending THEN
                 INSERT INTO queen.consumer_watermarks
-                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
-                VALUES (p_queue, p_group, v_now, v_now)
-                ON CONFLICT (queue_name, consumer_group)
+                    (tenant_id, queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_tenant, p_queue, p_group, v_now, v_now)
+                ON CONFLICT (tenant_id, queue_name, consumer_group)
                 DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
                               updated_at = EXCLUDED.updated_at;
             ELSE
@@ -616,9 +626,9 @@ BEGIN
                 -- check time only, keep the floor so the partition stays a
                 -- candidate.
                 INSERT INTO queen.consumer_watermarks
-                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
-                VALUES (p_queue, p_group, '1970-01-01 00:00:00+00'::timestamptz, v_now)
-                ON CONFLICT (queue_name, consumer_group)
+                    (tenant_id, queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_tenant, p_queue, p_group, '1970-01-01 00:00:00+00'::timestamptz, v_now)
+                ON CONFLICT (tenant_id, queue_name, consumer_group)
                 DO UPDATE SET updated_at = EXCLUDED.updated_at;
             END IF;
         END IF;
@@ -641,6 +651,8 @@ $$;
 -- KEEP THE CLAIM LOGIC IN SYNC with log_pop_wildcard_wire_v1.
 -- ============================================================================
 DROP FUNCTION IF EXISTS queen.log_pop_wildcard_bin_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT);
+-- Track B (§5): p_tenant, as in log_pop_wildcard_wire_v1.
+DROP FUNCTION IF EXISTS queen.log_pop_wildcard_bin_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID);
 CREATE FUNCTION queen.log_pop_wildcard_bin_v1(
     p_queue TEXT,
     p_group TEXT,
@@ -650,7 +662,8 @@ CREATE FUNCTION queen.log_pop_wildcard_bin_v1(
     p_auto_ack BOOLEAN,
     p_max_partitions INTEGER,
     p_sub_mode TEXT DEFAULT 'all',
-    p_sub_from TEXT DEFAULT ''
+    p_sub_from TEXT DEFAULT '',
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS TABLE(meta JSONB, blobs BYTEA[])
 LANGUAGE plpgsql
 AS $$
@@ -675,7 +688,7 @@ DECLARE
     v_has_pending BOOLEAN;
     v_sub_mode_stored TEXT;
 BEGIN
-    SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue;
+    SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue AND tenant_id = p_tenant;
     IF v_qid IS NULL THEN
         meta := jsonb_build_object('partitions', '[]'::jsonb);
         blobs := '{}'::bytea[];
@@ -705,9 +718,9 @@ BEGIN
     END IF;
 
     INSERT INTO queen.consumer_groups_metadata
-        (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
-    VALUES (p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
-    ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+        (tenant_id, consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+    VALUES (p_tenant, p_group, p_queue, '', v_sub_mode_stored, v_from_ts)
+    ON CONFLICT (tenant_id, consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
     GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
     IF v_first_seen > 0 THEN
@@ -743,7 +756,7 @@ BEGIN
 
     SELECT last_empty_scan_at, updated_at INTO v_watermark, v_verified_at
     FROM queen.consumer_watermarks
-    WHERE queue_name = p_queue AND consumer_group = p_group;
+    WHERE queue_name = p_queue AND consumer_group = p_group AND tenant_id = p_tenant;
     IF v_watermark IS NULL THEN
         v_watermark := '1970-01-01 00:00:00+00'::timestamptz;
         v_verified_at := NULL;
@@ -786,7 +799,7 @@ BEGIN
         INTO v_segments, v_taken, v_part_blobs
         FROM queen.log_pop_v1(p_queue, v_p.name, p_group,
                               v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -814,16 +827,16 @@ BEGIN
             ) INTO v_has_pending;
             IF NOT v_has_pending THEN
                 INSERT INTO queen.consumer_watermarks
-                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
-                VALUES (p_queue, p_group, v_now, v_now)
-                ON CONFLICT (queue_name, consumer_group)
+                    (tenant_id, queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_tenant, p_queue, p_group, v_now, v_now)
+                ON CONFLICT (tenant_id, queue_name, consumer_group)
                 DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
                               updated_at = EXCLUDED.updated_at;
             ELSE
                 INSERT INTO queen.consumer_watermarks
-                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
-                VALUES (p_queue, p_group, '1970-01-01 00:00:00+00'::timestamptz, v_now)
-                ON CONFLICT (queue_name, consumer_group)
+                    (tenant_id, queue_name, consumer_group, last_empty_scan_at, updated_at)
+                VALUES (p_tenant, p_queue, p_group, '1970-01-01 00:00:00+00'::timestamptz, v_now)
+                ON CONFLICT (tenant_id, queue_name, consumer_group)
                 DO UPDATE SET updated_at = EXCLUDED.updated_at;
             END IF;
         END IF;
@@ -868,6 +881,8 @@ $$;
 -- yields nothing, all matching queues' watermarks advance to now.
 -- ============================================================================
 DROP FUNCTION IF EXISTS queen.log_pop_discover_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT);
+-- Track B (§5): p_tenant scopes the namespace/task queue set + watermarks/metadata.
+DROP FUNCTION IF EXISTS queen.log_pop_discover_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID);
 CREATE FUNCTION queen.log_pop_discover_wire_v1(
     p_namespace TEXT,
     p_task TEXT,
@@ -878,7 +893,8 @@ CREATE FUNCTION queen.log_pop_discover_wire_v1(
     p_auto_ack BOOLEAN,
     p_max_partitions INTEGER,
     p_sub_mode TEXT DEFAULT 'all',
-    p_sub_from TEXT DEFAULT ''
+    p_sub_from TEXT DEFAULT '',
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -934,14 +950,15 @@ BEGIN
     FOR v_q IN
         SELECT lq.id AS qid, lq.name AS qname
         FROM queen.log_queues lq
-        JOIN queen.queues qq ON qq.name = lq.name
-        WHERE (v_ns = '' OR qq.namespace = v_ns)
+        JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
+        WHERE lq.tenant_id = p_tenant
+          AND (v_ns = '' OR qq.namespace = v_ns)
           AND (v_task = '' OR qq.task = v_task)
     LOOP
         INSERT INTO queen.consumer_groups_metadata
-            (consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
-        VALUES (p_group, v_q.qname, '', v_sub_mode_stored, v_from_ts)
-        ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+            (tenant_id, consumer_group, queue_name, partition_name, subscription_mode, subscription_timestamp)
+        VALUES (p_tenant, p_group, v_q.qname, '', v_sub_mode_stored, v_from_ts)
+        ON CONFLICT (tenant_id, consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
         GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
         IF v_first_seen > 0 THEN
@@ -991,10 +1008,11 @@ BEGIN
            MIN(COALESCE(cw.updated_at, '1970-01-01 00:00:00+00'::timestamptz))
     INTO v_watermark, v_verified_at
     FROM queen.log_queues lq
-    JOIN queen.queues qq ON qq.name = lq.name
+    JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
     LEFT JOIN queen.consumer_watermarks cw
-      ON cw.queue_name = lq.name AND cw.consumer_group = p_group
-    WHERE (v_ns = '' OR qq.namespace = v_ns)
+      ON cw.queue_name = lq.name AND cw.consumer_group = p_group AND cw.tenant_id = lq.tenant_id
+    WHERE lq.tenant_id = p_tenant
+      AND (v_ns = '' OR qq.namespace = v_ns)
       AND (v_task = '' OR qq.task = v_task);
     IF v_watermark IS NULL THEN
         v_watermark := '1970-01-01 00:00:00+00'::timestamptz;
@@ -1022,10 +1040,11 @@ BEGIN
                COALESCE(NULLIF(p_lease_seconds, 0), lq.lease_time, 60) AS lease_time
         FROM queen.log_partitions p
         JOIN queen.log_queues lq ON lq.id = p.queue_id
-        JOIN queen.queues qq ON qq.name = lq.name
+        JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
         LEFT JOIN queen.log_consumers c
           ON c.partition_id = p.id AND c.consumer_group = p_group
-        WHERE (v_ns = '' OR qq.namespace = v_ns)
+        WHERE lq.tenant_id = p_tenant
+          AND (v_ns = '' OR qq.namespace = v_ns)
           AND (v_task = '' OR qq.task = v_task)
           AND p.last_write_at >= v_watermark - interval '2 minutes'
           AND (c.partition_id IS NULL OR p.last_offset > c.committed)
@@ -1047,7 +1066,7 @@ BEGIN
         INTO v_segments, v_taken
         FROM queen.log_pop_v1(v_p.qname, v_p.pname, p_group,
                               v_remaining, v_p.lease_time, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -1070,23 +1089,25 @@ BEGIN
             SELECT EXISTS (
                 SELECT 1 FROM queen.log_partitions p
                 JOIN queen.log_queues lq ON lq.id = p.queue_id
-                JOIN queen.queues qq ON qq.name = lq.name
+                JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
                 LEFT JOIN queen.log_consumers c
                   ON c.partition_id = p.id AND c.consumer_group = p_group
-                WHERE (v_ns = '' OR qq.namespace = v_ns)
+                WHERE lq.tenant_id = p_tenant
+                  AND (v_ns = '' OR qq.namespace = v_ns)
                   AND (v_task = '' OR qq.task = v_task)
                   AND p.last_write_at >= v_watermark - interval '2 minutes'
                   AND (c.partition_id IS NULL OR p.last_offset > c.committed)
             ) INTO v_has_pending;
             IF NOT v_has_pending THEN
                 INSERT INTO queen.consumer_watermarks
-                    (queue_name, consumer_group, last_empty_scan_at, updated_at)
-                SELECT lq.name, p_group, v_now, v_now
+                    (tenant_id, queue_name, consumer_group, last_empty_scan_at, updated_at)
+                SELECT lq.tenant_id, lq.name, p_group, v_now, v_now
                 FROM queen.log_queues lq
-                JOIN queen.queues qq ON qq.name = lq.name
-                WHERE (v_ns = '' OR qq.namespace = v_ns)
+                JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
+                WHERE lq.tenant_id = p_tenant
+                  AND (v_ns = '' OR qq.namespace = v_ns)
                   AND (v_task = '' OR qq.task = v_task)
-                ON CONFLICT (queue_name, consumer_group)
+                ON CONFLICT (tenant_id, queue_name, consumer_group)
                 DO UPDATE SET last_empty_scan_at = EXCLUDED.last_empty_scan_at,
                               updated_at = EXCLUDED.updated_at;
             ELSE
@@ -1095,8 +1116,9 @@ BEGIN
                 -- candidates.
                 UPDATE queen.consumer_watermarks cw SET updated_at = v_now
                 FROM queen.log_queues lq
-                JOIN queen.queues qq ON qq.name = lq.name
+                JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id
                 WHERE cw.queue_name = lq.name AND cw.consumer_group = p_group
+                  AND cw.tenant_id = lq.tenant_id AND lq.tenant_id = p_tenant
                   AND (v_ns = '' OR qq.namespace = v_ns)
                   AND (v_task = '' OR qq.task = v_task);
             END IF;
@@ -1118,14 +1140,19 @@ $$;
 -- (may report true when retention already ate the backlog) — same contract as
 -- seg_has_pending_v1: the pop resolves the truth under the row lock.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION queen.log_has_pending_v1(p_queue TEXT, p_group TEXT)
+-- Track B (§5): p_tenant scopes the queue resolution. DROP the 2-arg form so the
+-- 3-arg (default-tenant) one is unambiguous on re-apply.
+DROP FUNCTION IF EXISTS queen.log_has_pending_v1(TEXT, TEXT);
+CREATE OR REPLACE FUNCTION queen.log_has_pending_v1(
+    p_queue TEXT, p_group TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
 AS $$
     SELECT EXISTS (
         SELECT 1
         FROM queen.log_partitions p
-        JOIN queen.log_queues q ON q.id = p.queue_id AND q.name = p_queue
+        JOIN queen.log_queues q ON q.id = p.queue_id AND q.name = p_queue AND q.tenant_id = p_tenant
         LEFT JOIN queen.log_consumers c
           ON c.partition_id = p.id AND c.consumer_group = p_group
         WHERE p.last_offset > COALESCE(c.committed, -1)
@@ -1165,6 +1192,8 @@ $$;
 -- log_pop_v1 never storms (the 51e50c4 anti-convoy invariant is preserved).
 -- ============================================================================
 DROP FUNCTION IF EXISTS queen.log_pop_list_v1(TEXT, TEXT, TEXT[], INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, BOOLEAN);
+-- Track B (§5): p_tenant scopes the queue resolution + the per-candidate pops.
+DROP FUNCTION IF EXISTS queen.log_pop_list_v1(TEXT, TEXT, TEXT[], INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, BOOLEAN, UUID);
 CREATE FUNCTION queen.log_pop_list_v1(
     p_queue TEXT,
     p_group TEXT,
@@ -1176,7 +1205,8 @@ CREATE FUNCTION queen.log_pop_list_v1(
     p_max_partitions INTEGER,
     p_sub_mode TEXT DEFAULT 'all',
     p_sub_from TEXT DEFAULT '',
-    p_skip_window BOOLEAN DEFAULT FALSE
+    p_skip_window BOOLEAN DEFAULT FALSE,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS TABLE(meta JSONB, blobs BYTEA[], states JSONB)
 LANGUAGE plpgsql
 AS $$
@@ -1198,7 +1228,7 @@ DECLARE
     v_last_off BIGINT;
     v_lease TIMESTAMPTZ;
 BEGIN
-    SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue;
+    SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue AND tenant_id = p_tenant;
     IF v_qid IS NULL THEN
         meta := jsonb_build_object('partitions', '[]'::jsonb);
         blobs := '{}'::bytea[];
@@ -1225,7 +1255,7 @@ BEGIN
         INTO v_segments, v_taken, v_part_blobs
         FROM queen.log_pop_v1(p_queue, v_name, p_group,
                               v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from, p_skip_window);
+                              p_sub_mode, p_sub_from, p_skip_window, p_tenant);
 
         IF v_taken > 0 THEN
             -- lastOff: the partition's allocator watermark AT (or just after) the
@@ -1291,17 +1321,21 @@ $$;
 -- so the broker interns the name and remembers the id for the ack bridge.
 -- p_after_id is the keyset cursor; pass the NIL uuid to start a fresh walk.
 -- ============================================================================
+-- Track B (§5): p_tenant scopes the queue resolution. DROP the 4-arg form so the
+-- 5-arg (default-tenant) one is unambiguous on re-apply.
+DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_v1(TEXT, TEXT, UUID, INTEGER);
 CREATE OR REPLACE FUNCTION queen.log_hotlist_reseed_v1(
     p_queue TEXT,
     p_group TEXT,
     p_after_id UUID,
-    p_limit INTEGER
+    p_limit INTEGER,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 ) RETURNS TABLE(r_id UUID, r_name TEXT)
 LANGUAGE sql STABLE
 AS $$
     SELECT p.id, p.name
     FROM queen.log_partitions p
-    JOIN queen.log_queues q ON q.id = p.queue_id AND q.name = p_queue
+    JOIN queen.log_queues q ON q.id = p.queue_id AND q.name = p_queue AND q.tenant_id = p_tenant
     LEFT JOIN queen.log_consumers c
       ON c.partition_id = p.id AND c.consumer_group = p_group
     WHERE p.id > p_after_id

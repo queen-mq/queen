@@ -55,13 +55,12 @@ fn cancel_tls() -> CancelTls {
     static CANCEL_TLS: OnceLock<CancelTls> = OnceLock::new();
     CANCEL_TLS
         .get_or_init(|| {
-            // Mirror config::load(): PG_USE_SSL / PG_SSL_REJECT_UNAUTHORIZED, with
-            // the C++ get_env_bool parity (only the exact literal "true" is truthy).
-            let use_ssl = std::env::var("PG_USE_SSL").map(|v| v == "true").unwrap_or(false);
+            // Mirror config::load(): PG_USE_SSL / PG_SSL_REJECT_UNAUTHORIZED read
+            // through the SAME boolean parser, so the cancel connector can never
+            // disagree with the pool about what `PG_USE_SSL=on` means.
+            let use_ssl = crate::config::env_bool("PG_USE_SSL", false);
             if use_ssl {
-                let reject = std::env::var("PG_SSL_REJECT_UNAUTHORIZED")
-                    .map(|v| v == "true")
-                    .unwrap_or(true);
+                let reject = crate::config::env_bool("PG_SSL_REJECT_UNAUTHORIZED", true);
                 CancelTls::Rustls(crate::pgtls::make_connector(reject))
             } else {
                 CancelTls::NoTls
@@ -399,11 +398,14 @@ pub async fn pop_specific(
     auto_ack: bool,
     sub_mode: &str,
     sub_from: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
+    // Track B (§5): $10 = tenant, threaded into log_pop_v1 (as its p_tenant, after
+    // the FALSE p_skip_window_debounce) AND the partition-id resolution.
     let stmt = client
         .prepare_cached(
             "WITH seg AS ( \
-                 SELECT * FROM queen.log_pop_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9) \
+                 SELECT * FROM queen.log_pop_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9, FALSE, $10::text::uuid) \
              ) \
              SELECT (jsonb_build_object( \
                  'segments', COALESCE((SELECT jsonb_agg(jsonb_build_object( \
@@ -416,7 +418,7 @@ pub async fn pop_specific(
                  ) ORDER BY s.r_base) FROM seg s), '[]'::jsonb), \
                  'partitionId', COALESCE((SELECT p.id::text FROM queen.log_partitions p \
                      JOIN queen.log_queues q ON q.id = p.queue_id \
-                     WHERE q.name = $1 AND p.name = $2), ''), \
+                     WHERE q.name = $1 AND p.name = $2 AND q.tenant_id = $10::text::uuid), ''), \
                  'attempt', 0))::text",
         )
         .await?;
@@ -424,7 +426,7 @@ pub async fn pop_specific(
         .query_one(
             &stmt,
             &[&queue, &partition, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &sub_mode, &sub_from],
+              &sub_mode, &sub_from, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -451,18 +453,19 @@ pub async fn pop_list(
     sub_mode: &str,
     sub_from: &str,
     skip_window: bool,
+    tenant: &str,
 ) -> Result<(String, Vec<Vec<u8>>, String), tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
             "SELECT (t.meta)::text, t.blobs, (t.states)::text \
-             FROM queen.log_pop_list_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) t",
+             FROM queen.log_pop_list_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::text::uuid) t",
         )
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &skip_window],
+              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant],
         )
         .await?;
     Ok((row.get(0), row.get(1), row.get(2)))
@@ -478,15 +481,16 @@ pub async fn hotlist_reseed(
     group: &str,
     after_id: &str,
     limit: i32,
+    tenant: &str,
 ) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
             "SELECT r_id::text, r_name \
-             FROM queen.log_hotlist_reseed_v1($1,$2,$3::text::uuid,$4)",
+             FROM queen.log_hotlist_reseed_v1($1,$2,$3::text::uuid,$4,$5::text::uuid)",
         )
         .await?;
     let rows = client
-        .query(&stmt, &[&queue, &group, &after_id, &limit])
+        .query(&stmt, &[&queue, &group, &after_id, &limit, &tenant])
         .await?;
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
@@ -497,14 +501,15 @@ pub async fn hotlist_reseed(
 pub async fn queue_defer_cfg(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<(i32, i32), tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
             "SELECT COALESCE(delayed_processing,0), COALESCE(window_buffer,0) \
-             FROM queen.queues WHERE name = $1",
+             FROM queen.queues WHERE name = $1 AND tenant_id = $2::text::uuid",
         )
         .await?;
-    match client.query_opt(&stmt, &[&queue]).await? {
+    match client.query_opt(&stmt, &[&queue, &tenant]).await? {
         Some(r) => Ok((r.get(0), r.get(1))),
         None => Ok((0, 0)),
     }
@@ -523,11 +528,12 @@ pub async fn has_pending(
     client: &deadpool_postgres::Client,
     queue: &str,
     group: &str,
+    tenant: &str,
 ) -> Result<bool, tokio_postgres::Error> {
     let stmt = client
-        .prepare_cached("SELECT queen.log_has_pending_v1($1, $2)")
+        .prepare_cached("SELECT queen.log_has_pending_v1($1, $2, $3::text::uuid)")
         .await?;
-    let row = client.query_one(&stmt, &[&queue, &group]).await?;
+    let row = client.query_one(&stmt, &[&queue, &group, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -544,14 +550,19 @@ pub async fn group_seed_marker_exists(
     client: &deadpool_postgres::Client,
     queue: &str,
     group: &str,
+    tenant: &str,
 ) -> Result<bool, tokio_postgres::Error> {
+    // Track B (§5): consumer_groups_metadata is now (tenant_id, …)-keyed, so the
+    // seed marker probe must scope by tenant — else tenant A's seed would gate
+    // tenant B's targeted-pop fast path on a same-named (queue, group).
     let stmt = client
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM queen.consumer_groups_metadata \
-             WHERE consumer_group = $1 AND queue_name = $2 AND partition_name = '')",
+             WHERE consumer_group = $1 AND queue_name = $2 AND partition_name = '' \
+               AND tenant_id = $3::text::uuid)",
         )
         .await?;
-    let row = client.query_one(&stmt, &[&group, &queue]).await?;
+    let row = client.query_one(&stmt, &[&group, &queue, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -594,24 +605,29 @@ pub async fn transaction(
 pub async fn configure_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
     opts_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     // $2::text::jsonb pins $2 to TEXT so a &str binds (a bare $2::jsonb would make
-    // tokio-postgres expect a Json param).
-    let stmt = "SELECT (queen.configure_queue_v1($1, $2::text::jsonb))::text";
-    let row = client.query_one(stmt, &[&queue, &opts_json]).await?;
+    // tokio-postgres expect a Json param). Track B: $3 = tenant (default when off).
+    let stmt = "SELECT (queen.configure_queue_v1($1, $2::text::jsonb, $3::text::uuid))::text";
+    let row = client.query_one(stmt, &[&queue, &opts_json, &tenant]).await?;
     Ok(row.get(0))
 }
 
 // Pin this queue to the log engine. The public /configure contract keeps the
 // storage value 'segments' (§11 wire compat), which is what routes queues to
-// the log push/pop paths.
+// the log push/pop paths. Track B: scoped to the tenant's queue.
 pub async fn mark_queue_segments(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<(), tokio_postgres::Error> {
     client
-        .execute("UPDATE queen.queues SET storage='segments' WHERE name=$1", &[&queue])
+        .execute(
+            "UPDATE queen.queues SET storage='segments' WHERE name=$1 AND tenant_id=$2::text::uuid",
+            &[&queue, &tenant],
+        )
         .await?;
     Ok(())
 }
@@ -622,18 +638,24 @@ pub async fn mark_queue_segments(
 pub async fn upsert_seg_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
     lease_time: i32,
     retention_seconds: i32,
     dedup_window_seconds: i32,
 ) -> Result<(), tokio_postgres::Error> {
-    let stmt = "INSERT INTO queen.log_queues(name, lease_time, retention_seconds, dedup_window_seconds) \
-                VALUES($1, $2, $3, $4) \
-                ON CONFLICT(name) DO UPDATE SET \
+    // Track B (§5): queue identity is (tenant_id, name); the conflict target is the
+    // composite unique index (default tenant when the feature is off).
+    let stmt = "INSERT INTO queen.log_queues(tenant_id, name, lease_time, retention_seconds, dedup_window_seconds) \
+                VALUES($5::text::uuid, $1, $2, $3, $4) \
+                ON CONFLICT(tenant_id, name) DO UPDATE SET \
                     lease_time = EXCLUDED.lease_time, \
                     retention_seconds = EXCLUDED.retention_seconds, \
                     dedup_window_seconds = EXCLUDED.dedup_window_seconds";
     client
-        .execute(stmt, &[&queue, &lease_time, &retention_seconds, &dedup_window_seconds])
+        .execute(
+            stmt,
+            &[&queue, &lease_time, &retention_seconds, &dedup_window_seconds, &tenant],
+        )
         .await?;
     Ok(())
 }
@@ -644,9 +666,10 @@ pub async fn upsert_seg_queue(
 pub async fn delete_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.delete_queue_v1($1))::text";
-    let row = client.query_one(stmt, &[&queue]).await?;
+    let stmt = "SELECT (queen.delete_queue_v1($1, $2::text::uuid))::text";
+    let row = client.query_one(stmt, &[&queue, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -658,14 +681,17 @@ pub async fn delete_queue(
 pub async fn delete_seg_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<(), tokio_postgres::Error> {
+    // Track B: scope every delete to the tenant's queue so a same-named queue of
+    // another tenant is untouched.
     client
         .execute(
             "DELETE FROM queen.log_txns t \
              USING queen.log_partitions p \
              JOIN queen.log_queues q ON q.id = p.queue_id \
-             WHERE t.partition_id = p.id AND q.name = $1",
-            &[&queue],
+             WHERE t.partition_id = p.id AND q.name = $1 AND q.tenant_id = $2::text::uuid",
+            &[&queue, &tenant],
         )
         .await?;
     client
@@ -673,12 +699,15 @@ pub async fn delete_seg_queue(
             "DELETE FROM queen.log_dlq d \
              USING queen.log_partitions p \
              JOIN queen.log_queues q ON q.id = p.queue_id \
-             WHERE d.partition_id = p.id AND q.name = $1",
-            &[&queue],
+             WHERE d.partition_id = p.id AND q.name = $1 AND q.tenant_id = $2::text::uuid",
+            &[&queue, &tenant],
         )
         .await?;
     client
-        .execute("DELETE FROM queen.log_queues WHERE name=$1", &[&queue])
+        .execute(
+            "DELETE FROM queen.log_queues WHERE name=$1 AND tenant_id=$2::text::uuid",
+            &[&queue, &tenant],
+        )
         .await?;
     Ok(())
 }
@@ -690,9 +719,10 @@ pub async fn delete_seg_queue(
 pub async fn get_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.get_queue_v2($1))::text";
-    let row = client.query_one(stmt, &[&queue]).await?;
+    let stmt = "SELECT (queen.get_queue_v2($1, $2::text::uuid))::text";
+    let row = client.query_one(stmt, &[&queue, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -702,9 +732,10 @@ pub async fn get_queue(
 pub async fn seg_queue_message_stats(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<(i64, i64), tokio_postgres::Error> {
-    let stmt = "SELECT segments, messages FROM queen.log_queue_message_stats_v1($1)";
-    let row = client.query_one(stmt, &[&queue]).await?;
+    let stmt = "SELECT segments, messages FROM queen.log_queue_message_stats_v1($1, $2::text::uuid)";
+    let row = client.query_one(stmt, &[&queue, &tenant]).await?;
     Ok((row.get(0), row.get(1)))
 }
 
@@ -716,8 +747,11 @@ pub async fn seg_queue_message_stats(
 // Each returns the SP result JSON as text.
 pub async fn get_queues(
     client: &deadpool_postgres::Client,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let row = client.query_one("SELECT (queen.get_queues_v2())::text", &[]).await?;
+    let row = client
+        .query_one("SELECT (queen.get_queues_v2($1::text::uuid))::text", &[&tenant])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -749,10 +783,11 @@ pub async fn get_tasks(
 // LIST endpoint between queen.stats refreshes.
 pub async fn seg_queue_stats_all(
     client: &deadpool_postgres::Client,
+    tenant: &str,
 ) -> Result<Vec<(String, i64, i64, i64)>, tokio_postgres::Error> {
     let stmt = "SELECT queue_name, partitions, segments, messages \
-                FROM queen.log_queue_stats_all_v1()";
-    let rows = client.query(stmt, &[]).await?;
+                FROM queen.log_queue_stats_all_v1($1::text::uuid)";
+    let rows = client.query(stmt, &[&tenant]).await?;
     Ok(rows
         .iter()
         .map(|r| {
@@ -771,11 +806,15 @@ pub async fn seg_queue_stats_all(
 pub async fn queue_lease_time(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<Option<i32>, tokio_postgres::Error> {
+    // Track B (§5): the lease time is a per-queue scalar, so it MUST be resolved
+    // for the requesting tenant's queue (else the cache would hand tenant B the
+    // lease time tenant A configured on a same-named queue).
     let stmt = client
-        .prepare_cached("SELECT lease_time FROM queen.log_queues WHERE name = $1")
+        .prepare_cached("SELECT lease_time FROM queen.log_queues WHERE name = $1 AND tenant_id = $2::text::uuid")
         .await?;
-    let rows = client.query(&stmt, &[&queue]).await?;
+    let rows = client.query(&stmt, &[&queue, &tenant]).await?;
     Ok(rows.first().map(|r| r.get::<_, i32>(0)))
 }
 
@@ -785,9 +824,12 @@ pub async fn queue_lease_time(
 pub async fn queue_encryption_enabled(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<Option<bool>, tokio_postgres::Error> {
-    let stmt = "SELECT encryption_enabled FROM queen.queues WHERE name = $1";
-    let rows = client.query(stmt, &[&queue]).await?;
+    // Track B (§5): encryption is a per-queue flag — scope it to the tenant so the
+    // enc cache is never poisoned by a same-named queue of another tenant.
+    let stmt = "SELECT encryption_enabled FROM queen.queues WHERE name = $1 AND tenant_id = $2::text::uuid";
+    let rows = client.query(stmt, &[&queue, &tenant]).await?;
     Ok(rows.first().map(|r| r.get::<_, bool>(0)))
 }
 
@@ -1101,9 +1143,11 @@ pub async fn ping(client: &deadpool_postgres::Client) -> Result<(), tokio_postgr
 pub async fn get_queue_detail(
     client: &deadpool_postgres::Client,
     queue: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
+    // Track B (§5): $2 = tenant, scopes the single-queue detail to the tenant's queue.
     let row = client
-        .query_one("SELECT (queen.get_queue_detail_v2($1))::text", &[&queue])
+        .query_one("SELECT (queen.get_queue_detail_v2($1, $2::text::uuid))::text", &[&queue, &tenant])
         .await?;
     Ok(row.get(0))
 }
@@ -1294,6 +1338,7 @@ pub async fn insert_worker_metrics(
 // `blobs[i]` = the packed+zstd frame blob. Returns the SP JSONB (input-order
 // array of {"status":"queued",...} | {"status":"duplicate","dups":[...]}) as
 // text. Used by fusion.rs (hot path) and file_buffer.rs (spool replay).
+#[allow(clippy::too_many_arguments)]
 pub async fn log_push_multi(
     client: &deadpool_postgres::Client,
     queues: &[String],
@@ -1302,15 +1347,20 @@ pub async fn log_push_multi(
     hashes: &[Vec<u8>],
     verified: &[i64],
     blobs: &[Vec<u8>],
+    // Track B (§5): per-segment tenant, index-aligned. Bound as text[] → uuid[].
+    tenants: &[String],
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
             "SELECT (queen.log_push_multi_v1($1::text[], $2::text[], $3::int4[], \
-             $4::bytea[], $5::int8[], $6::bytea[]))::text",
+             $4::bytea[], $5::int8[], $6::bytea[], $7::text[]::uuid[]))::text",
         )
         .await?;
     let row = client
-        .query_one(&stmt, &[&queues, &partitions, &counts, &hashes, &verified, &blobs])
+        .query_one(
+            &stmt,
+            &[&queues, &partitions, &counts, &hashes, &verified, &blobs, &tenants],
+        )
         .await?;
     Ok(row.get(0))
 }
@@ -1427,6 +1477,31 @@ pub async fn upsert_queue_parked_replica(
     Ok(())
 }
 
+// Track B (PLAN_QUEEN_PROXY_CLOUD.md §5) — pid→queue→tenant OWNERSHIP probe. True
+// iff `partition_id` resolves to a queue owned by `tenant`. This is the airtight
+// gate for the pid-addressed operations (ack/ack-batch, messages/:pid, delete,
+// traces): the underlying pid-keyed SPs mutate/read by partition uuid alone and
+// carry no tenant, so the handler MUST verify ownership here first and reject a
+// foreign pid (404/rejected). Callers only invoke it when tenancy is ON (an OFF
+// broker never has non-default queues, so the check is vacuously true) — see
+// AppState::tenant_owns_partition, which short-circuits it. One indexed lookup on
+// log_partitions(id) PK, no memo (ownership must never trust a poisonable cache).
+pub async fn partition_belongs_to_tenant(
+    client: &deadpool_postgres::Client,
+    partition_id: &str,
+    tenant: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM queen.log_partitions p \
+             JOIN queen.log_queues q ON q.id = p.queue_id \
+             WHERE p.id = $1::text::uuid AND q.tenant_id = $2::text::uuid)",
+        )
+        .await?;
+    let row = client.query_one(&stmt, &[&partition_id, &tenant]).await?;
+    Ok(row.get(0))
+}
+
 // Partition-id -> queue-name lookup backing the AppState ack-attribution memo.
 pub async fn partition_queue_name(
     client: &deadpool_postgres::Client,
@@ -1500,17 +1575,20 @@ pub async fn pop_wildcard(
     max_partitions: i32,
     sub_mode: &str,
     sub_from: &str,
+    // Track B (§5): $10 = tenant, scopes the wildcard candidate scan + per-queue
+    // resolution (default tenant when the feature is off).
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
-            "SELECT (queen.log_pop_wildcard_wire_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9))::text",
+            "SELECT (queen.log_pop_wildcard_wire_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9, $10::text::uuid))::text",
         )
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&queue, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from],
+              &max_partitions, &sub_mode, &sub_from, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1531,17 +1609,20 @@ pub async fn pop_wildcard_bin(
     max_partitions: i32,
     sub_mode: &str,
     sub_from: &str,
+    // Track B (§5): $10 = tenant, scopes the wildcard candidate scan (default
+    // tenant when the feature is off ⇒ byte-identical claim set).
+    tenant: &str,
 ) -> Result<(String, Vec<Vec<u8>>), tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
-            "SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9) t",
+            "SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::text::uuid) t",
         )
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&queue, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from],
+              &max_partitions, &sub_mode, &sub_from, &tenant],
         )
         .await?;
     Ok((row.get(0), row.get(1)))
@@ -1567,17 +1648,20 @@ pub async fn pop_discover(
     max_partitions: i32,
     sub_mode: &str,
     sub_from: &str,
+    // Track B (§5): $11 = tenant, scopes the namespace/task queue set the discovery
+    // pop wildcard-scans (default tenant when off).
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
-            "SELECT (queen.log_pop_discover_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8::int, $9, $10))::text",
+            "SELECT (queen.log_pop_discover_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8::int, $9, $10, $11::text::uuid))::text",
         )
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&namespace, &task, &group, &budget, &lease_seconds, &worker,
-              &auto_ack, &max_partitions, &sub_mode, &sub_from],
+              &auto_ack, &max_partitions, &sub_mode, &sub_from, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1589,9 +1673,11 @@ pub async fn pop_discover(
 // result JSON array as text.
 pub async fn get_consumer_groups(
     client: &deadpool_postgres::Client,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
+    // Track B (§5): $1 = tenant, scopes the (cross-queue) group listing.
     let row = client
-        .query_one("SELECT (queen.get_consumer_groups_v4())::text", &[])
+        .query_one("SELECT (queen.get_consumer_groups_v4($1::text::uuid))::text", &[&tenant])
         .await?;
     Ok(row.get(0))
 }
@@ -1601,11 +1687,12 @@ pub async fn get_consumer_groups(
 pub async fn get_lagging_partitions(
     client: &deadpool_postgres::Client,
     min_lag_seconds: i32,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one(
-            "SELECT (queen.get_lagging_partitions_v1($1::int))::text",
-            &[&min_lag_seconds],
+            "SELECT (queen.get_lagging_partitions_v1($1::int, $2::text::uuid))::text",
+            &[&min_lag_seconds, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1616,11 +1703,12 @@ pub async fn get_lagging_partitions(
 pub async fn get_consumer_group_details(
     client: &deadpool_postgres::Client,
     group: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one(
-            "SELECT (queen.get_consumer_group_details_v1($1))::text",
-            &[&group],
+            "SELECT (queen.get_consumer_group_details_v1($1, $2::text::uuid))::text",
+            &[&group, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1632,11 +1720,12 @@ pub async fn delete_consumer_group_rows(
     client: &deadpool_postgres::Client,
     group: &str,
     delete_metadata: bool,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one(
-            "SELECT (queen.delete_consumer_group_v1($1, $2::boolean))::text",
-            &[&group, &delete_metadata],
+            "SELECT (queen.delete_consumer_group_v1($1, $2::boolean, $3::text::uuid))::text",
+            &[&group, &delete_metadata, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1648,11 +1737,12 @@ pub async fn delete_consumer_group_seg(
     client: &deadpool_postgres::Client,
     group: &str,
     delete_metadata: bool,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one(
-            "SELECT (queen.log_delete_consumer_group_v1($1, $2::boolean))::text",
-            &[&group, &delete_metadata],
+            "SELECT (queen.log_delete_consumer_group_v1($1, $2::boolean, $3::text::uuid))::text",
+            &[&group, &delete_metadata, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1667,7 +1757,11 @@ pub async fn delete_consumer_group_for_queue_seg(
     client: &deadpool_postgres::Client,
     group: &str,
     queue: &str,
+    tenant: &str,
 ) -> Result<u64, tokio_postgres::Error> {
+    // Track B (§5): scope both DELETEs to the tenant's queue — the log_consumers
+    // clear via the (tenant, name)-scoped log_queues join, and the shared
+    // consumer_watermarks row by tenant_id.
     let n = client
         .execute(
             "DELETE FROM queen.log_consumers c \
@@ -1675,15 +1769,16 @@ pub async fn delete_consumer_group_for_queue_seg(
              JOIN queen.log_queues q ON q.id = p.queue_id \
              WHERE c.partition_id = p.id \
                AND c.consumer_group = $1 \
-               AND q.name = $2",
-            &[&group, &queue],
+               AND q.name = $2 \
+               AND q.tenant_id = $3::text::uuid",
+            &[&group, &queue, &tenant],
         )
         .await?;
     client
         .execute(
             "DELETE FROM queen.consumer_watermarks \
-             WHERE queue_name = $1 AND consumer_group = $2",
-            &[&queue, &group],
+             WHERE queue_name = $1 AND consumer_group = $2 AND tenant_id = $3::text::uuid",
+            &[&queue, &group, &tenant],
         )
         .await?;
     Ok(n)
@@ -1697,11 +1792,12 @@ pub async fn delete_consumer_group_for_queue_rows(
     group: &str,
     queue: &str,
     delete_metadata: bool,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one(
-            "SELECT (queen.delete_consumer_group_for_queue_v1($1, $2, $3::boolean))::text",
-            &[&group, &queue, &delete_metadata],
+            "SELECT (queen.delete_consumer_group_for_queue_v1($1, $2, $3::boolean, $4::text::uuid))::text",
+            &[&group, &queue, &delete_metadata, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1714,11 +1810,12 @@ pub async fn update_consumer_group_subscription(
     client: &deadpool_postgres::Client,
     group: &str,
     timestamp: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one(
-            "SELECT (queen.update_consumer_group_subscription_v1($1, $2))::text",
-            &[&group, &timestamp],
+            "SELECT (queen.update_consumer_group_subscription_v1($1, $2, $3::text::uuid))::text",
+            &[&group, &timestamp, &tenant],
         )
         .await?;
     Ok(row.get(0))
@@ -1733,10 +1830,11 @@ pub async fn seg_seek_consumer_group(
     queue: &str,
     to_end: bool,
     timestamp: Option<&str>,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.log_seek_consumer_group_v1($1, $2, $3::bool, $4::text::timestamptz))::text";
+    let stmt = "SELECT (queen.log_seek_consumer_group_v1($1, $2, $3::bool, $4::text::timestamptz, $5::text::uuid))::text";
     let row = client
-        .query_one(stmt, &[&group, &queue, &to_end, &timestamp])
+        .query_one(stmt, &[&group, &queue, &to_end, &timestamp, &tenant])
         .await?;
     Ok(row.get(0))
 }
@@ -1749,10 +1847,11 @@ pub async fn seg_seek_partition(
     partition: &str,
     to_end: bool,
     timestamp: Option<&str>,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.log_seek_partition_v1($1, $2, $3, $4::bool, $5::text::timestamptz))::text";
+    let stmt = "SELECT (queen.log_seek_partition_v1($1, $2, $3, $4::bool, $5::text::timestamptz, $6::text::uuid))::text";
     let row = client
-        .query_one(stmt, &[&group, &queue, &partition, &to_end, &timestamp])
+        .query_one(stmt, &[&group, &queue, &partition, &to_end, &timestamp, &tenant])
         .await?;
     Ok(row.get(0))
 }

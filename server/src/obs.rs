@@ -51,7 +51,14 @@ pub fn init() {
         .unwrap_or_else(|| "info".to_string());
     let env_filter = EnvFilter::try_new(&directive).unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let json = std::env::var("QUEEN_LOG_JSON").ok().as_deref() == Some("1");
+    // Same boolean spellings as every other knob. This runs BEFORE the subscriber
+    // exists, so an unparseable value cannot be reported here — it falls back to
+    // text and `config::load()` (which validates QUEEN_LOG_JSON eagerly, moments
+    // later) fails the boot with the real message.
+    let json = std::env::var("QUEEN_LOG_JSON")
+        .ok()
+        .and_then(|v| crate::config::parse_bool(&v))
+        .unwrap_or(false);
     let builder = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_timer(UtcTime::rfc_3339())

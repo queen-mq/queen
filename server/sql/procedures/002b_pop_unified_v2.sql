@@ -253,7 +253,7 @@ BEGIN
                     IF NOT v_has_pending_data THEN
                         INSERT INTO queen.consumer_watermarks (queue_name, consumer_group, last_empty_scan_at, updated_at)
                         VALUES (v_req.queue_name, v_req.consumer_group, v_now, v_now)
-                        ON CONFLICT (queue_name, consumer_group)
+                        ON CONFLICT (tenant_id, queue_name, consumer_group)
                         DO UPDATE SET last_empty_scan_at = v_now, updated_at = v_now;
                     ELSE
                         UPDATE queen.consumer_watermarks
@@ -381,7 +381,7 @@ BEGIN
                         CASE WHEN v_is_wildcard THEN '' ELSE COALESCE(v_partition_name, '') END,
                         'timestamp', v_cursor_ts
                     )
-                    ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+                    ON CONFLICT (tenant_id, consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
 
                     GET DIAGNOSTICS v_seeded = ROW_COUNT;
                     IF v_seeded > 0 THEN
@@ -405,7 +405,7 @@ BEGIN
                     CASE WHEN v_is_wildcard THEN '' ELSE COALESCE(v_partition_name, '') END,
                     'new', v_now
                 )
-                ON CONFLICT (consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
+                ON CONFLICT (tenant_id, consumer_group, queue_name, partition_name, namespace, task) DO NOTHING;
 
                 GET DIAGNOSTICS v_seeded = ROW_COUNT;
                 IF v_seeded > 0 THEN

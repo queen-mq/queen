@@ -1,5 +1,17 @@
 use std::time::Duration;
 
+/// Track B (native tenant scoping, PLAN_QUEEN_PROXY_CLOUD.md §5). The broker gains
+/// ONE opaque concept: a `tenant_id` scoping key on queue identity, taken from a
+/// trusted header the colocated proxy sets. These constants are the fixed contract.
+///
+/// The default tenant — used for EVERY request when the feature is off, and when
+/// the header is absent while it is on — so OSS/self-host behaviour is byte-identical
+/// (the DDL column defaults to this same value, so no backfill is ever needed).
+pub const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
+/// The trusted header the proxy injects. The broker never validates the tenant
+/// against anything (it is opaque; the trust is network — the cell boundary).
+pub const TENANT_HEADER: &str = "x-queen-tenant";
+
 /// JWT auth configuration, mirroring the C++ `AuthConfig` (server/include/queen/config.hpp).
 /// When `enabled` is false (the default) the auth middleware passes every request
 /// through untouched — this is how the whole existing test-suite runs.
@@ -320,6 +332,13 @@ pub struct Config {
     // log blocks (ms), and how many hot queues the per-queue lines rank & show.
     pub log_rates_ms: u64,
     pub log_top_n_queues: usize,
+    // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): native tenant scoping on queue
+    // identity. Default OFF ⇒ every request uses config::DEFAULT_TENANT and the
+    // broker behaves byte-identically to today. ON ⇒ the tenant is read from the
+    // `x-queen-tenant` header (absent ⇒ default tenant; malformed ⇒ 400). The
+    // broker never validates the value — it is opaque; the trust is the cell
+    // network (the proxy is the only thing that can set the header).
+    pub tenancy_header: bool,
 }
 
 /// File-buffer configuration, mirroring the C++ `FileBufferConfig`
@@ -369,17 +388,217 @@ pub fn resolve_db_name() -> String {
 fn env_f64(k: &str, def: f64) -> f64 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
 }
-// C++ `get_env_bool` parity (config.hpp:11-15): only the exact literal "true" is
-// truthy (case-sensitive). "1"/"yes"/"on"/"TRUE" are all false. (RUSTFIX item 6 —
-// the old permissive parser turned JWT_ENABLED=1 into an accidental auth-enable.)
-fn env_bool(k: &str, def: bool) -> bool {
-    match std::env::var(k) {
-        Ok(v) => v == "true",
-        Err(_) => def,
+// ---------------------------------------------------------------------------
+// Boolean env parsing — ONE parser for every boolean knob in the broker.
+//
+// History: the C++ `get_env_bool` (config.hpp:11-15) accepted only the exact
+// literal "true", and RUSTFIX item 6 kept that parity to stop a permissive parser
+// from turning `JWT_ENABLED=1` into an accidental auth-ENABLE. But strictness with
+// a silent fallback fails in the OTHER direction just as badly: `JWT_ENABLED=1`
+// resolved to the `false` default, i.e. a broker running with authentication OFF
+// and not a word in the log.
+//
+// The fix keeps the intent (no value is ever guessed into a security-relevant
+// direction) while removing the silence:
+//   * the common spellings are accepted, case-insensitively — true/false, 1/0,
+//     yes/no, on/off (surrounding whitespace trimmed);
+//   * anything else non-empty is a FATAL config error naming the variable and the
+//     bad value — the default is never used to paper over a typo;
+//   * unset (or present-but-empty, e.g. `JWT_ENABLED=` in a compose file) uses the
+//     documented default.
+// Every boolean env read in the broker routes through here, so `=on` and `=0` mean
+// the same thing everywhere.
+// ---------------------------------------------------------------------------
+
+/// The accepted spellings, listed in the error message so an operator who gets it
+/// wrong is told exactly what is legal.
+const BOOL_SPELLINGS: &str = "true/false, 1/0, yes/no, on/off";
+
+/// Pure parser: `Some(bool)` for a recognised spelling, `None` otherwise.
+/// Case-insensitive, whitespace-trimmed. An empty/whitespace-only string is NOT
+/// recognised here — callers treat that as "unset" (see `resolve_bool`).
+pub(crate) fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
+/// Resolution rules, factored out of the env lookup so they are unit-testable
+/// without mutating process-global state.
+fn resolve_bool(key: &str, raw: Option<&str>, def: bool) -> Result<bool, String> {
+    match raw {
+        // Unset, or set to the empty string (a very common way to "leave it
+        // alone" in compose/Helm) ⇒ the documented default.
+        None => Ok(def),
+        Some(v) if v.trim().is_empty() => Ok(def),
+        Some(v) => parse_bool(v).ok_or_else(|| {
+            format!("{key}=\"{v}\" is not a boolean (expected {BOOL_SPELLINGS})")
+        }),
+    }
+}
+
+/// Env-reading form that reports a bad value instead of aborting — used by
+/// `validate_bools` to collect every mistake in one pass.
+pub(crate) fn env_bool_checked(k: &str, def: bool) -> Result<bool, String> {
+    resolve_bool(k, std::env::var(k).ok().as_deref(), def)
+}
+
+/// The call-site form: an unparseable value kills the process with a clear message
+/// rather than silently resolving to `def`.
+pub(crate) fn env_bool(k: &str, def: bool) -> bool {
+    match env_bool_checked(k, def) {
+        Ok(v) => v,
+        Err(e) => crate::obs::fatal(e),
+    }
+}
+
+/// Render a secret for the startup config block: never the value, only whether it
+/// is set and how long it is (enough to tell "I forgot to mount the secret" from
+/// "I mounted the wrong one" without putting key material in a log shipper).
+fn mask(secret: &str) -> String {
+    if secret.is_empty() {
+        "<unset>".to_string()
+    } else {
+        format!("<set:{} chars>", secret.chars().count())
+    }
+}
+
+/// One startup block printing the configuration the broker ACTUALLY resolved —
+/// the counterpart to the strict boolean parser above. A knob that was misspelled,
+/// defaulted, or read from a legacy alias is visible here instead of having to be
+/// inferred from behaviour. Secrets (JWT_SECRET, PG_PASSWORD,
+/// QUEEN_ENCRYPTION_KEY, QUEEN_SYNC_SECRET) are masked by `mask`, never printed.
+pub fn log_effective(cfg: &Config) {
+    tracing::info!(
+        target: "boot",
+        version = crate::VERSION,
+        port = %cfg.port,
+        pool = cfg.pool_size,
+        stmt_timeout_ms = cfg.stmt_timeout.as_millis() as u64,
+        max_body_bytes = %env_str("QUEEN_MAX_BODY_BYTES", "<default>"),
+        "config: server"
+    );
+    tracing::info!(
+        target: "boot",
+        host = %cfg.pg.host.clone().unwrap_or_default(),
+        port = cfg.pg.port.unwrap_or_default(),
+        user = %cfg.pg.user.clone().unwrap_or_default(),
+        password = %mask(cfg.pg.password.as_deref().unwrap_or("")),
+        database = %cfg.pg.dbname.clone().unwrap_or_default(),
+        use_ssl = cfg.pg_use_ssl,
+        ssl_reject_unauthorized = cfg.pg_ssl_reject_unauthorized,
+        "config: postgres"
+    );
+    tracing::info!(
+        target: "boot",
+        enabled = cfg.auth.enabled,
+        algorithm = %cfg.auth.algorithm,
+        secret = %mask(&cfg.auth.secret),
+        public_key = %mask(&cfg.auth.public_key),
+        jwks_url = %cfg.auth.jwks_url,
+        issuer = %cfg.auth.issuer,
+        audience = %cfg.auth.audience,
+        clock_skew_s = cfg.auth.clock_skew_seconds,
+        skip_paths = ?cfg.auth.skip_paths,
+        "config: auth"
+    );
+    tracing::info!(
+        target: "boot",
+        enabled = cfg.sync.enabled,
+        mesh_active = cfg.sync.mesh_active(),
+        server_id = %cfg.sync.server_id,
+        mesh_port = cfg.sync.mesh_port,
+        peers = ?cfg.sync.peers,
+        secret = %mask(&cfg.sync.secret),
+        heartbeat_ms = cfg.sync.heartbeat_ms,
+        dead_threshold_ms = cfg.sync.dead_threshold_ms,
+        cache_refresh_ms = cfg.sync.cache_refresh_ms,
+        "config: sync"
+    );
+    tracing::info!(
+        target: "boot",
+        fusion_shards = cfg.fusion_shards,
+        fusion_frames = cfg.fusion_frames,
+        fusion_hold_ms = cfg.fusion_hold_ms,
+        dedup_cache = cfg.dedup_cache_enabled,
+        dedup_cache_mb = cfg.dedup_cache_mb,
+        ack_registry = cfg.ack_registry_enabled,
+        ack_registry_mb = cfg.ack_registry_mb,
+        ack_fusion = cfg.ack_fusion_enabled,
+        ack_fusion_shards = cfg.ack_fusion_shards,
+        ack_fusion_hold_ms = cfg.ack_fusion_hold_ms,
+        hotlist = cfg.hotlist_enabled,
+        hotlist_shards = cfg.hotlist_shards,
+        hotlist_window_batch = cfg.hotlist_window_batch,
+        hotlist_reseed_ms = cfg.hotlist_reseed_ms,
+        zstd_level = cfg.zstd_level,
+        "config: engine"
+    );
+    tracing::info!(
+        target: "boot",
+        pop_default_timeout_ms = cfg.pop_default_timeout_ms,
+        pop_wait_initial_ms = cfg.pop_wait_initial_interval_ms,
+        pop_wait_backoff_threshold = cfg.pop_wait_backoff_threshold,
+        pop_wait_backoff_multiplier = cfg.pop_wait_backoff_multiplier,
+        pop_wait_max_ms = cfg.pop_wait_max_interval_ms,
+        push_vegas = %format!("{}/{}/{}", cfg.push_min, cfg.push_init, cfg.push_max),
+        pop_vegas = %format!("{}/{}/{}", cfg.pop_min, cfg.pop_init, cfg.pop_max),
+        vegas_alpha = cfg.vegas_alpha,
+        vegas_beta = cfg.vegas_beta,
+        "config: flow"
+    );
+    tracing::info!(
+        target: "boot",
+        retention_interval_ms = cfg.retention_interval_ms,
+        retention_batch_size = cfg.retention_batch_size,
+        metrics_retention_days = cfg.metrics_retention_days,
+        stats_interval_ms = cfg.stats_interval_ms,
+        metrics_flush_ms = cfg.metrics_flush_ms,
+        apply_schema = env_bool("QUEEN_APPLY_SCHEMA", true),
+        "config: jobs"
+    );
+    tracing::info!(
+        target: "boot",
+        dir = %cfg.file_buffer.dir,
+        flush_interval_ms = cfg.file_buffer.flush_interval_ms,
+        max_batch_size = cfg.file_buffer.max_batch_size,
+        max_events_per_file = cfg.file_buffer.max_events_per_file,
+        "config: file_buffer"
+    );
+    tracing::info!(
+        target: "boot",
+        encryption_key = %mask(&env_str("QUEEN_ENCRYPTION_KEY", "")),
+        tenancy_header = cfg.tenancy_header,
+        "config: security"
+    );
+    tracing::info!(
+        target: "boot",
+        level = %env_str("RUST_LOG", &env_str("LOG_LEVEL", "info")),
+        json = env_bool("QUEEN_LOG_JSON", false),
+        rates_ms = cfg.log_rates_ms,
+        top_n_queues = cfg.log_top_n_queues,
+        "config: logging"
+    );
+}
+
+/// Boolean knobs read OUTSIDE this module (obs.rs, schema.rs, fusion.rs) — they
+/// use `parse_bool`/`env_bool` at their own call sites, but several of them are
+/// consulted lazily (or, for `QUEEN_LOG_JSON`, before the subscriber exists), so a
+/// typo would surface late or not at all. `load()` validates them eagerly here so
+/// EVERY boolean in the broker fails at the same moment, with the same message.
+const EXTERNAL_BOOL_KEYS: &[(&str, bool)] = &[
+    ("QUEEN_LOG_JSON", false),
+    ("QUEEN_APPLY_SCHEMA", true),
+    ("QUEEN_V2_BUNDLE_LOG", false),
+];
+
 pub fn load() -> Config {
+    for (k, def) in EXTERNAL_BOOL_KEYS {
+        let _ = env_bool(k, *def);
+    }
+
     let mut pg = deadpool_postgres::Config::new();
     pg.host = Some(env_str("PG_HOST", "localhost"));
     pg.port = Some(env_int("PG_PORT", 5432) as u16);
@@ -423,21 +642,15 @@ pub fn load() -> Config {
         // each step tiny so sweeps never stall pushes with long row locks.
         retention_interval_ms: env_int("RETENTION_INTERVAL", 5000).max(1) as u64,
         dedup_cache_mb: env_int("QUEEN_DEDUP_CACHE_MB", 512).max(1) as usize,
-        // Kill switch semantics (doc 18 §5): QUEEN_DEDUP_CACHE=0 disables; any
-        // other value (or unset) enables. Correctness never depends on the cache.
-        dedup_cache_enabled: std::env::var("QUEEN_DEDUP_CACHE")
-            .map(|v| v != "0")
-            .unwrap_or(true),
+        // Kill switch semantics (doc 18 §5): QUEEN_DEDUP_CACHE=0/false/no/off
+        // disables, unset enables. Correctness never depends on the cache.
+        dedup_cache_enabled: env_bool("QUEEN_DEDUP_CACHE", true),
         ack_registry_mb: env_int("QUEEN_ACK_REGISTRY_MB", 64).max(1) as usize,
-        ack_registry_enabled: std::env::var("QUEEN_ACK_REGISTRY")
-            .map(|v| v != "0")
-            .unwrap_or(true),
+        ack_registry_enabled: env_bool("QUEEN_ACK_REGISTRY", true),
         // ACK FUSION default ON (operator decision 2026-07-24 after the VM A/B:
         // rows_per_commit 104-107 under fsync backpressure, push_multi 38→21ms).
         // "0"/"false" disables — the kill switch mirrors the QUEEN_HOTLIST parse.
-        ack_fusion_enabled: std::env::var("QUEEN_ACK_FUSION")
-            .map(|v| v != "0" && v != "false")
-            .unwrap_or(true),
+        ack_fusion_enabled: env_bool("QUEEN_ACK_FUSION", true),
         ack_fusion_shards: env_int("QUEEN_ACK_FUSION_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
             .max(1) as usize,
         ack_fusion_hold_ms: env_int("QUEEN_ACK_FUSION_HOLD_MS", 3).max(1) as u64,
@@ -455,14 +668,89 @@ pub fn load() -> Config {
         // ack fusion beats the scan path on total delivered even on a slow
         // disk). "0"/"false" disables — the legacy SQL candidate-scan path
         // stays intact behind the kill switch.
-        hotlist_enabled: std::env::var("QUEEN_HOTLIST")
-            .map(|v| v != "0" && v != "false")
-            .unwrap_or(true),
+        hotlist_enabled: env_bool("QUEEN_HOTLIST", true),
         hotlist_shards: env_int("QUEEN_HOTLIST_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
             .max(1) as usize,
         hotlist_window_batch: env_int("QUEEN_HOTLIST_WINDOW_BATCH", 100).max(1) as u32,
         hotlist_reseed_ms: env_int("QUEEN_HOTLIST_RESEED_MS", 30000).max(1),
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
+        tenancy_header: env_bool("QUEEN_TENANCY_HEADER", false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_every_accepted_spelling_case_insensitively() {
+        for t in ["true", "TRUE", "True", "1", "yes", "YES", "on", "ON", " true ", "\tOn\n"] {
+            assert_eq!(parse_bool(t), Some(true), "{t:?} should parse as true");
+        }
+        for f in ["false", "FALSE", "False", "0", "no", "NO", "off", "OFF", " false ", "\tOff\n"] {
+            assert_eq!(parse_bool(f), Some(false), "{f:?} should parse as false");
+        }
+    }
+
+    #[test]
+    fn rejects_unrecognised_values() {
+        // Including the near-misses that a permissive parser would guess at.
+        for bad in ["maybe", "y", "n", "t", "f", "2", "-1", "enabled", "disabled", "truthy", "0.0"] {
+            assert_eq!(parse_bool(bad), None, "{bad:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn unrecognised_value_is_an_error_not_the_default() {
+        // The regression this whole change exists for: a bad value must NOT
+        // silently resolve to the default in either direction.
+        let err = resolve_bool("JWT_ENABLED", Some("maybe"), false).unwrap_err();
+        assert_eq!(
+            err,
+            "JWT_ENABLED=\"maybe\" is not a boolean (expected true/false, 1/0, yes/no, on/off)"
+        );
+        // A default of `true` is just as unusable a fallback.
+        assert!(resolve_bool("PG_SSL_REJECT_UNAUTHORIZED", Some("sure"), true).is_err());
+        // The message names the variable and quotes the offending value verbatim.
+        let err = resolve_bool("QUEEN_HOTLIST", Some(" Yep "), true).unwrap_err();
+        assert!(err.starts_with("QUEEN_HOTLIST=\" Yep \""), "got: {err}");
+    }
+
+    #[test]
+    fn unset_and_empty_use_the_default() {
+        assert_eq!(resolve_bool("JWT_ENABLED", None, false), Ok(false));
+        assert_eq!(resolve_bool("QUEEN_HOTLIST", None, true), Ok(true));
+        // Present-but-empty (`JWT_ENABLED=` in a compose/Helm file) means "leave
+        // it alone", NOT false — the old parser resolved "" to false, which for a
+        // default-true knob like PG_SSL_REJECT_UNAUTHORIZED was a silent downgrade.
+        assert_eq!(resolve_bool("JWT_ENABLED", Some(""), false), Ok(false));
+        assert_eq!(resolve_bool("PG_SSL_REJECT_UNAUTHORIZED", Some("   "), true), Ok(true));
+    }
+
+    #[test]
+    fn set_values_win_over_the_default() {
+        assert_eq!(resolve_bool("JWT_ENABLED", Some("1"), false), Ok(true));
+        assert_eq!(resolve_bool("QUEEN_HOTLIST", Some("off"), true), Ok(false));
+    }
+
+    #[test]
+    fn env_lookup_round_trips_through_the_same_rules() {
+        // Uniquely named so parallel tests can't observe each other's env.
+        const K: &str = "QUEEN_TEST_ENV_BOOL_ROUNDTRIP";
+        assert_eq!(env_bool_checked(K, true), Ok(true)); // unset -> default
+        std::env::set_var(K, "YES");
+        assert_eq!(env_bool_checked(K, false), Ok(true));
+        std::env::set_var(K, "banana");
+        assert!(env_bool_checked(K, false).is_err());
+        std::env::remove_var(K);
+    }
+
+    #[test]
+    fn secrets_are_masked_never_printed() {
+        assert_eq!(mask(""), "<unset>");
+        let m = mask("hunter2-super-secret");
+        assert!(!m.contains("hunter2"), "mask leaked the secret: {m}");
+        assert_eq!(m, "<set:20 chars>");
     }
 }

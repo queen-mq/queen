@@ -21,7 +21,12 @@ CREATE SCHEMA IF NOT EXISTS queen;
 
 CREATE TABLE IF NOT EXISTS queen.queues (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    -- Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): opaque tenant scoping key on queue
+    -- identity. NOT NULL DEFAULT the fixed default tenant = a catalog-only change
+    -- on existing tables (no backfill/rewrite). Uniqueness is (tenant_id, name),
+    -- established by the migration block below (idempotent for existing DBs).
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     namespace VARCHAR(255),
     task VARCHAR(255),
     priority INTEGER DEFAULT 0,
@@ -137,6 +142,11 @@ CREATE TABLE IF NOT EXISTS queen.partition_consumers (
 
 CREATE TABLE IF NOT EXISTS queen.consumer_groups_metadata (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Track B: subscription metadata is per-queue (queue_name), so it collides
+    -- across tenants sharing a name — scope it. Uniqueness becomes
+    -- (tenant_id, consumer_group, queue_name, partition_name, namespace, task),
+    -- established by the migration block below (the old 5-col UNIQUE is dropped).
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     consumer_group TEXT NOT NULL,
     queue_name TEXT NOT NULL DEFAULT '',
     partition_name TEXT NOT NULL DEFAULT '',
@@ -144,8 +154,7 @@ CREATE TABLE IF NOT EXISTS queen.consumer_groups_metadata (
     task TEXT NOT NULL DEFAULT '',
     subscription_mode TEXT NOT NULL,
     subscription_timestamp TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (consumer_group, queue_name, partition_name, namespace, task)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_consumer_groups_metadata_lookup 
@@ -157,11 +166,15 @@ ON queen.consumer_groups_metadata(consumer_group, queue_name, namespace, task);
 -- On next POP, we only scan partitions updated since the watermark
 -- This avoids expensive full scans for up-to-date consumers
 CREATE TABLE IF NOT EXISTS queen.consumer_watermarks (
+    -- Track B: the empty-scan floor is per (queue_name, group) — colliding across
+    -- tenants sharing a name would let one tenant's "queue is empty since T" floor
+    -- hide another tenant's fresh partitions. Scope by tenant_id (part of the PK).
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     queue_name VARCHAR(255) NOT NULL,
     consumer_group VARCHAR(255) NOT NULL DEFAULT '__QUEUE_MODE__',
     last_empty_scan_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01 00:00:00+00',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (queue_name, consumer_group)
+    PRIMARY KEY (tenant_id, queue_name, consumer_group)
 );
 
 CREATE TABLE IF NOT EXISTS queen.messages_consumed (
@@ -231,13 +244,66 @@ CREATE TABLE IF NOT EXISTS queen.system_state (
 
 CREATE TABLE IF NOT EXISTS queen.partition_lookup (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    queue_name VARCHAR(255) NOT NULL REFERENCES queen.queues(name) ON DELETE CASCADE,
+    -- Track B: the FK to queen.queues(name) is dropped — queue identity is now
+    -- (tenant_id, name), so name alone is no longer a unique key to reference.
+    -- partition_lookup is a rows-engine artifact (the log engine keeps its own
+    -- per-partition last_write_at); nothing in the segments path populates it, so
+    -- losing the cascade is inert. The migration block drops the constraint on
+    -- existing DBs.
+    queue_name VARCHAR(255) NOT NULL,
     partition_id UUID NOT NULL REFERENCES queen.partitions(id) ON DELETE CASCADE,
     last_message_id UUID NOT NULL,
     last_message_created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(queue_name, partition_id)
 );
+
+-- ============================================================================
+-- Track B (PLAN_QUEEN_PROXY_CLOUD.md §5) — native tenant scoping migration.
+-- ============================================================================
+-- Brings EXISTING databases to the (tenant_id, name) queue-identity shape the
+-- CREATE TABLEs above already have on fresh installs. Every step is catalog-only
+-- (NOT NULL DEFAULT constant column, index/constraint swap) — no table rewrite,
+-- so it is safe on tables with millions of rows and idempotent on re-apply.
+-- log_queues is migrated in 041 (its own file); the two shared coordination
+-- tables + queen.queues are handled here.
+
+-- queen.queues: add the column, drop the rows-engine name FK that pinned name
+-- unique (partition_lookup no longer references it), drop the old UNIQUE(name),
+-- establish UNIQUE(tenant_id, name) so two tenants can hold the same queue name.
+ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+ALTER TABLE queen.partition_lookup DROP CONSTRAINT IF EXISTS partition_lookup_queue_name_fkey;
+ALTER TABLE queen.queues DROP CONSTRAINT IF EXISTS queues_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS queues_tenant_name_uk ON queen.queues(tenant_id, name);
+
+-- queen.consumer_watermarks: add tenant_id, re-key the PK to include it (a shared
+-- empty-scan floor across tenants would strand a tenant's fresh partitions).
+ALTER TABLE queen.consumer_watermarks ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint
+               WHERE conrelid = 'queen.consumer_watermarks'::regclass AND contype = 'p'
+                 AND array_length(conkey, 1) = 2) THEN
+        ALTER TABLE queen.consumer_watermarks DROP CONSTRAINT consumer_watermarks_pkey;
+        ALTER TABLE queen.consumer_watermarks ADD PRIMARY KEY (tenant_id, queue_name, consumer_group);
+    END IF;
+END $$;
+
+-- queen.consumer_groups_metadata: add tenant_id, swap the 5-col UNIQUE for the
+-- 6-col one. The old constraint is auto-named, so drop every unique constraint
+-- on the table (there is only ever the one) and re-establish the scoped index.
+ALTER TABLE queen.consumer_groups_metadata ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT conname FROM pg_constraint
+             WHERE conrelid = 'queen.consumer_groups_metadata'::regclass AND contype = 'u'
+    LOOP
+        EXECUTE format('ALTER TABLE queen.consumer_groups_metadata DROP CONSTRAINT %I', r.conname);
+    END LOOP;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS cgm_tenant_uk
+    ON queen.consumer_groups_metadata(tenant_id, consumer_group, queue_name, partition_name, namespace, task);
 
 
 -- ============================================================================

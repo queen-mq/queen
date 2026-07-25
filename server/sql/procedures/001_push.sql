@@ -63,7 +63,7 @@ BEGIN
     -- Ensure queues exist (batch upsert)
     INSERT INTO queen.queues (name, namespace, task)
     SELECT DISTINCT queue_name, namespace, task FROM tmp_items
-    ON CONFLICT (name) DO NOTHING;
+    ON CONFLICT (tenant_id, name) DO NOTHING;
 
     -- Ensure partitions exist (batch upsert)
     INSERT INTO queen.partitions (queue_id, name)
@@ -199,7 +199,7 @@ BEGIN
                  THEN split_part(item->>'queue', '.', 2)
                  ELSE '' END)
     FROM jsonb_array_elements(p_items) AS item
-    ON CONFLICT (name) DO NOTHING;
+    ON CONFLICT (tenant_id, name) DO NOTHING;
 
     -- Statement B: ensure partitions exist.
     INSERT INTO queen.partitions (queue_id, name)

@@ -99,12 +99,18 @@ pub async fn handle_record_trace(State(st): State<Arc<AppState>>, body: Bytes) -
 // -------------------------------- GET /api/v1/traces/:partitionId/:transactionId
 pub async fn handle_message_traces(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
+    // Track B (§5) OWNERSHIP GATE (pid-addressed): a foreign pid's traces must not
+    // leak — return the same empty set as a message with no traces (no-op when off).
+    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+        return json(StatusCode::OK, "{\"traces\":[]}".to_string());
+    }
     match db::get_message_traces(&client, &partition_id, &transaction_id).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
