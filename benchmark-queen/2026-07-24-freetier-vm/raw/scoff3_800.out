@@ -1,0 +1,7 @@
+goload -mode tenants -> http://127.0.0.1:6682 tenants=10 queues=100 consumers=100 idleOnly=false
+  traffic: per-tenant 800 msg/s <-> 800 msg/s every 999s (stagger=true) | aggregate 8000 <-> 8000 msg/s
+[provision] 100 queues configured in 0.2s
+[20:00:34] push=    507/s pop=    585/s ack=    584/s empty=      0/s | e2e p50=  50.94 p99=54788.10 ms | pushRTT p50= 17.02 p99=  63.74 ms | lag=-1950 | errs push=0 pop=0 ack=0 gor=334
+[20:00:59] push=    499/s pop=    442/s ack=    443/s empty=      0/s | e2e p50=  42.24 p99=  110.08 ms | pushRTT p50= 17.54 p99=  63.74 ms | lag=-528 | errs push=0 pop=0 ack=0 gor=334
+
+[final] pushed=25163 popped=25691 acked=25684 empty=18 | tail: 2832 msgs across 21 queues | errs push=0 pop=0 ack=0

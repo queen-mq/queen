@@ -1,0 +1,6 @@
+goload -mode tenants -> http://127.0.0.1:6682 tenants=10 queues=100 consumers=100 idleOnly=true
+[provision] 100 queues configured in 0.9s
+[20:02:40] push=      0/s pop=    143/s ack=    143/s empty=      0/s | e2e p50=106430.46 p99=131596.29 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-2857 | errs push=0 pop=0 ack=0 gor=304
+[20:03:00] push=      0/s pop=      0/s ack=      0/s empty=      5/s | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-2857 | errs push=0 pop=0 ack=0 gor=304
+
+[final] pushed=0 popped=2857 acked=2857 empty=100 | tail: 0 msgs across 0 queues | errs push=0 pop=0 ack=0
