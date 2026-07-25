@@ -23,6 +23,15 @@ wait_pg() { # container
 }
 
 up() {
+  # kill stale processes from a previous run (pid files can drift after
+  # manual restarts — kill by binary path too, belt and braces)
+  for f in broker proxy; do
+    [ -f "$RUN_DIR/$f.pid" ] && kill "$(cat "$RUN_DIR/$f.pid")" 2>/dev/null || true
+    rm -f "$RUN_DIR/$f.pid"
+  done
+  pkill -f "server/target/debug/queen-seg" 2>/dev/null || true
+  pkill -f "queen_proxy/target/debug/queen-proxy" 2>/dev/null || true
+  sleep 0.5
   docker rm -f $PXPG $CELLPG >/dev/null 2>&1 || true
   docker run -d --name $PXPG  -p 5465:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=queen_proxy postgres:16 >/dev/null
   docker run -d --name $CELLPG -p 5466:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=queen postgres:16 >/dev/null
@@ -41,6 +50,7 @@ up() {
   ( QUEEN_PROXY_PORT=$PROXY_PORT PXDB_HOST=127.0.0.1 PXDB_PORT=5465 PXDB_USER=postgres \
     PXDB_PASSWORD=postgres PXDB_DB=queen_proxy \
     QUEEN_PROXY_SPOOL_DIR="$RUN_DIR/spool" \
+    QUEEN_PROXY_JWT_SECRET="${QUEEN_PROXY_JWT_SECRET:-dev-only-hs256-secret}" \
     "$PROXY_DIR/target/debug/queen-proxy" >"$RUN_DIR/proxy.log" 2>&1 & echo $! >"$RUN_DIR/proxy.pid" )
 
   sleep 1.5
