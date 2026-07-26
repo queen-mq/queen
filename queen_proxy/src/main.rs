@@ -83,6 +83,29 @@ async fn main() {
     st.cache.spawn_listener();
     st.registry.spawn_reconciler();
 
+    // Storage-quota pump: over_storage (registry reconciler, from the broker's
+    // retainedBytes) -> limits.set_push_blocked, with release when back under.
+    {
+        let st2 = st.clone();
+        tokio::spawn(async move {
+            let mut blocked: std::collections::HashSet<uuid::Uuid> = Default::default();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let now: std::collections::HashSet<uuid::Uuid> =
+                    st2.registry.over_storage().into_iter().collect();
+                for id in now.difference(&blocked) {
+                    tracing::warn!(target: "limits", cluster = %id, "storage quota exceeded; pushes blocked");
+                    st2.limits.set_push_blocked(*id, true);
+                }
+                for id in blocked.difference(&now) {
+                    tracing::info!(target: "limits", cluster = %id, "storage back under quota; pushes unblocked");
+                    st2.limits.set_push_blocked(*id, false);
+                }
+                blocked = now;
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/.well-known/jwks.json", get(jwks))

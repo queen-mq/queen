@@ -60,10 +60,12 @@ pub async fn create_pool(cfg: &PxdbConfig) -> Result<Pool, String> {
 /// queen_proxy.schema_migrations (apply_migrations below skips ones already
 /// applied). SQL is include_str!-embedded, so `cargo build` after editing a
 /// migration file before runtime-testing it (same gotcha as server/).
+#[rustfmt::skip]
 pub fn migrations() -> Vec<(&'static str, &'static str)> {
     vec![
         ("001_init", include_str!("../migrations/001_init.sql")),
         ("002_functions", include_str!("../migrations/002_functions.sql")),
+        ("003_limit_override", include_str!("../migrations/003_limit_override.sql")),
     ]
 }
 

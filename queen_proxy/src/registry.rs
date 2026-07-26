@@ -217,7 +217,12 @@ impl Registry {
         let known = self.known.clone();
         let over_storage = self.over_storage.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
+            // env-tunable so e2e smokes don't wait a full minute per cycle
+            let interval = std::time::Duration::from_millis(crate::config::env_u64(
+                "QUEEN_PROXY_RECONCILE_MS",
+                RECONCILE_INTERVAL.as_millis() as u64,
+            ));
+            let mut tick = tokio::time::interval(interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;

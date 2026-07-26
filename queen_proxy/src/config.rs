@@ -59,6 +59,9 @@ pub struct Config {
     /// Dev only: skip authentication entirely (never set in cloud).
     pub dev_insecure: bool,
     pub dev_static: Option<DevStaticCluster>,
+    /// Dev/demo only: slug to fall back to when Host resolves to no cluster
+    /// (browsers on localhost). Never set in cloud.
+    pub default_cluster: Option<String>,
     /// Send the Track B tenant header upstream.
     pub send_tenant_header: bool,
     pub max_body_bytes: usize,
@@ -108,6 +111,7 @@ impl Config {
             enforce: env_bool("QUEEN_PROXY_ENFORCE", false),
             dev_insecure: env_bool("QUEEN_PROXY_DEV_INSECURE", false),
             dev_static,
+            default_cluster: env_opt("QUEEN_PROXY_DEFAULT_CLUSTER"),
             send_tenant_header: env_bool("QUEEN_PROXY_TENANT_HEADER", true),
             max_body_bytes: env_u64("QUEEN_PROXY_MAX_BODY_BYTES", 16 * 1024 * 1024) as usize,
             default_max_batch_items: env_u64("QUEEN_PROXY_MAX_BATCH_ITEMS", 10_000),

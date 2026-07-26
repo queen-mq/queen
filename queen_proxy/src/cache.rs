@@ -49,6 +49,10 @@ type KeyMap = RwLock<HashMap<String, KeyEntry>>;
 
 pub struct ClusterCache {
     dev_static: Option<ClusterCtx>,
+    /// Dev/demo fallback (QUEEN_PROXY_DEFAULT_CLUSTER): slug tried when the
+    /// Host header resolves to no cluster — browsers on localhost send
+    /// `Host: localhost:6711`, which is no cluster's slug. Never set in cloud.
+    default_cluster: Option<String>,
     db: Option<deadpool_postgres::Pool>,
     /// Cloned at construction so `spawn_listener` can open its own dedicated
     /// LISTEN connection later. The pool can't be reused for this: deadpool
@@ -77,6 +81,7 @@ impl ClusterCache {
         });
         ClusterCache {
             dev_static,
+            default_cluster: cfg.default_cluster.clone(),
             db,
             pxdb_cfg: cfg.pxdb.clone(),
             host_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -91,8 +96,18 @@ impl ClusterCache {
         if let Some(ctx) = &self.dev_static {
             return Some(Arc::new(ctx.clone()));
         }
+        if let Some(slug) = slug_from_host(host) {
+            if let Some(ctx) = self.resolve_slug(slug).await {
+                return Some(ctx);
+            }
+        }
+        // fallback for dev/demo hosts (localhost etc.); None in cloud
+        let d = self.default_cluster.clone()?;
+        self.resolve_slug(d).await
+    }
+
+    async fn resolve_slug(&self, slug: String) -> Option<Arc<ClusterCtx>> {
         let pool = self.db.as_ref()?;
-        let slug = slug_from_host(host)?;
 
         {
             let cache = self.host_cache.read().unwrap();

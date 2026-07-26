@@ -228,6 +228,7 @@ mod tests {
             enforce: false,
             dev_insecure: true,
             dev_static: None,
+            default_cluster: None,
             send_tenant_header: true,
             max_body_bytes: 1024,
             default_max_batch_items: 100,
