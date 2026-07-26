@@ -1,0 +1,21 @@
+[2026-07-25T19:27:00Z] watchdog (broker-only) start pid 3490327
+[2026-07-25T19:32:01Z] health: broker_restarts=0
+[2026-07-25T19:37:01Z] health: broker_restarts=0
+[2026-07-25T19:42:01Z] health: broker_restarts=0
+[2026-07-25T19:47:02Z] health: broker_restarts=0
+[2026-07-25T19:52:02Z] health: broker_restarts=0
+[2026-07-25T19:57:02Z] health: broker_restarts=0
+[2026-07-25T20:02:03Z] health: broker_restarts=0
+[2026-07-25T20:07:03Z] health: broker_restarts=0
+[2026-07-25T20:12:03Z] health: broker_restarts=0
+[2026-07-25T20:17:04Z] health: broker_restarts=0
+[2026-07-25T20:22:04Z] health: broker_restarts=0
+[2026-07-25T20:27:04Z] health: broker_restarts=0
+[2026-07-25T20:32:05Z] health: broker_restarts=0
+[2026-07-25T20:37:05Z] health: broker_restarts=0
+[2026-07-25T20:42:05Z] health: broker_restarts=0
+[2026-07-25T20:47:06Z] health: broker_restarts=0
+[2026-07-25T20:52:06Z] health: broker_restarts=0
+[2026-07-25T21:07:19Z] watchdog (broker + PG safety-net) start pid 444284
+[2026-07-25T21:09:19Z] INCIDENT #1 broker wedged -> restart
+r6682

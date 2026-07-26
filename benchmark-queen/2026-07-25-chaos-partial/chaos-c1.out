@@ -1,0 +1,12 @@
+goload -mode openloop -> http://10.114.0.4:6682 queue=chaosq partitions=200 consumers=250 manualAck=true ackAsync=true ackInflight=256
+  offered: rate=30 msg/s | push-batch=1 -> 30.0 req/s across 1 pacer workers (30.00 req/s each) | max-inflight=20000 | payload=256B
+[configure] queue=chaosq completedRetentionSeconds=300
+[21:11:36] offered=       30/s achieved=       30/s shed=        0/s inflight=     1 | p50=  22.91 p99=   95.74 p999=  132.10 ms | push=900 pop=6094015 lag=-6093115 | errs push=0 pop=0 empty=520437 gor=820 | ack=   203057/s ackErr=0 ackAvg=33.29ms
+[21:12:06] offered=       30/s achieved=       30/s shed=        0/s inflight=     2 | p50=  28.54 p99=  150.53 p999=  261.12 ms | push=1799 pop=9887100 lag=-9885301 | errs push=0 pop=0 empty=1158354 gor=862 | ack=   126310/s ackErr=0 ackAvg=26.33ms
+[21:12:36] offered=       30/s achieved=       30/s shed=        0/s inflight=     6 | p50=  65.28 p99=  321.54 p999=  593.92 ms | push=2695 pop=14812160 lag=-14809465 | errs push=0 pop=0 empty=1664032 gor=869 | ack=   164145/s ackErr=0 ackAvg=27.32ms
+[21:13:06] offered=       30/s achieved=       30/s shed=        0/s inflight=     3 | p50=  90.62 p99=  292.86 p999=  411.65 ms | push=3598 pop=20171634 lag=-20168036 | errs push=0 pop=0 empty=2131064 gor=905 | ack=   178629/s ackErr=0 ackAvg=28.66ms
+[21:13:36] offered=       30/s achieved=       30/s shed=        0/s inflight=     5 | p50=  94.72 p99=  313.34 p999=  659.46 ms | push=4496 pop=24805498 lag=-24801002 | errs push=0 pop=0 empty=2666396 gor=894 | ack=   154536/s ackErr=0 ackAvg=28.74ms
+[21:14:06] offered=       30/s achieved=       30/s shed=        0/s inflight=     5 | p50= 127.49 p99=  378.88 p999=  544.77 ms | push=5396 pop=29604754 lag=-29599358 | errs push=0 pop=0 empty=3181239 gor=909 | ack=   159742/s ackErr=0 ackAvg=29.03ms
+
+[signal] stopping...
+[final] offered=5461 achieved=5456 shed=0 (msgs: offered=5461 achieved=5456 shed=0) pushErr=0 | pushed=5456 popped=29993097 lag=-29987641 | popErr=0 empty=3209265 | overall p50=67.07 p99=325.63 p999=493.57 ms | acked=29992297 ackErr=0 ackLag=-29986841 ackAvg=29.11ms
