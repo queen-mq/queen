@@ -328,7 +328,16 @@ CREATE TABLE IF NOT EXISTS queen.stats (
     processing_messages BIGINT NOT NULL DEFAULT 0,
     completed_messages BIGINT NOT NULL DEFAULT 0,
     dead_letter_messages BIGINT NOT NULL DEFAULT 0,
-    
+
+    -- Retained payload bytes for this stat row (segments engine, 'queue' rows).
+    -- Track B / storage quota (PLAN_QUEEN_PROXY_CLOUD.md §6.1): the sum of
+    -- octet_length(log_segments.blob) over the queue's LIVE (retained) segments,
+    -- i.e. the compressed (zstd) on-the-wire payload bytes as stored — TOAST
+    -- bookkeeping, indexes, WAL and the log_txns hash sidecar are NOT counted.
+    -- Populated at the stats-refresh cadence by log_refresh_all_stats_v1 (048),
+    -- so it lags one refresh interval (the proxy storage quota is hysteretic).
+    retained_bytes BIGINT NOT NULL DEFAULT 0,
+
     -- Time bounds (for lag calculations)
     oldest_pending_at TIMESTAMPTZ,
     newest_message_at TIMESTAMPTZ,
@@ -364,6 +373,9 @@ CREATE INDEX IF NOT EXISTS idx_stats_type ON queen.stats(stat_type);
 CREATE INDEX IF NOT EXISTS idx_stats_queue_id ON queen.stats(queue_id) WHERE queue_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_partition_id ON queen.stats(partition_id) WHERE partition_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_computed ON queen.stats(last_computed_at);
+-- Track B / storage quota (§6.1): retained payload bytes per stat row. Catalog-
+-- only migration for existing DBs (no backfill; the next refresh cycle populates it).
+ALTER TABLE queen.stats ADD COLUMN IF NOT EXISTS retained_bytes BIGINT NOT NULL DEFAULT 0;
 
 -- Time-series history for throughput charts
 CREATE TABLE IF NOT EXISTS queen.stats_history (

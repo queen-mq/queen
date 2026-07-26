@@ -277,7 +277,7 @@ pub async fn handle_push(
             *per_q.entry(it.queue).or_insert(0) += 1;
         }
         for (q, msgs) in per_q {
-            st.metrics.per_queue.add_push(q, msgs);
+            st.metrics.per_queue.add_push(tenant.as_str(), q, msgs);
         }
     }
     // The segment is committed — make it discoverable. Two paths:
@@ -658,7 +658,7 @@ pub async fn handle_pop(
                 .min(interval);
             // Parked gauge: held for exactly the awaited window (dashboard
             // Parked row / queue_parked_replica, sampled at 1 Hz).
-            let parked = st.metrics.parked.enter(&queue);
+            let parked = st.metrics.parked.enter(tenant.as_str(), &queue);
             if st.notifier.wait_queue(&queue, waitd).await {
                 backoff_count = 0;
                 // No longer parked — we're actively serving now.
@@ -702,21 +702,21 @@ pub async fn handle_pop(
         st.metrics.pop.record_batch(count, true, rtt);
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
         if count > 0 {
-            st.metrics.per_queue.add_pop(&queue, count as u64);
+            st.metrics.per_queue.add_pop(tenant.as_str(), &queue, count as u64);
             st.metrics
                 .per_queue
-                .add_pop_lag(&queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+                .add_pop_lag(tenant.as_str(), &queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
             for pid in &meta.partition_ids {
                 st.remember_partition_queue(pid, &queue);
             }
         } else {
-            st.metrics.per_queue.add_pop_empty(&queue);
+            st.metrics.per_queue.add_pop_empty(tenant.as_str(), &queue);
         }
         // autoAck advances the cursor server-side (no client ack round-trip), but it
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
         if auto_ack && count > 0 {
-            st.metrics.per_queue.add_ack(&queue, count as u64, 0);
+            st.metrics.per_queue.add_ack(tenant.as_str(), &queue, count as u64, 0);
             st.metrics.ack.record_request(count);
             st.metrics
                 .ack_success
@@ -817,15 +817,15 @@ async fn try_targeted_serve(
     register_leases(st, group, worker, lease_seconds, &meta);
     st.metrics.pop.record_request(count);
     st.metrics.pop.record_batch(count, true, total_rtt);
-    st.metrics.per_queue.add_pop(queue, count as u64);
+    st.metrics.per_queue.add_pop(tenant, queue, count as u64);
     st.metrics
         .per_queue
-        .add_pop_lag(queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+        .add_pop_lag(tenant, queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
     for pid in &meta.partition_ids {
         st.remember_partition_queue(pid, queue);
     }
     if auto_ack {
-        st.metrics.per_queue.add_ack(queue, count as u64, 0);
+        st.metrics.per_queue.add_ack(tenant, queue, count as u64, 0);
         st.metrics.ack.record_request(count);
         st.metrics
             .ack_success
@@ -882,7 +882,7 @@ async fn serve_pop_hotlist(
             let waitd = deadline
                 .saturating_duration_since(Instant::now())
                 .min(interval);
-            let _parked = st.metrics.parked.enter(queue);
+            let _parked = st.metrics.parked.enter(tenant, queue);
             if st.notifier.wait_queue(queue, waitd).await {
                 if st.hotlist.traced(queue) {
                     eprintln!("[hlt] woken q={} g={} t={}", queue, group,
@@ -901,18 +901,18 @@ async fn serve_pop_hotlist(
                 crate::hotlist::trace_now_ms());
         }
         if count > 0 {
-            st.metrics.per_queue.add_pop(queue, count as u64);
+            st.metrics.per_queue.add_pop(tenant, queue, count as u64);
             st.metrics
                 .per_queue
-                .add_pop_lag(queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+                .add_pop_lag(tenant, queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
             for pid in &meta.partition_ids {
                 st.remember_partition_queue(pid, queue);
             }
         } else {
-            st.metrics.per_queue.add_pop_empty(queue);
+            st.metrics.per_queue.add_pop_empty(tenant, queue);
         }
         if auto_ack && count > 0 {
-            st.metrics.per_queue.add_ack(queue, count as u64, 0);
+            st.metrics.per_queue.add_ack(tenant, queue, count as u64, 0);
             st.metrics.ack.record_request(count);
             st.metrics
                 .ack_success
@@ -1369,7 +1369,7 @@ pub async fn handle_pop_partition(
                 .saturating_duration_since(Instant::now())
                 .min(interval);
             // Parked gauge: held for exactly the awaited window.
-            let _parked = st.metrics.parked.enter(&queue);
+            let _parked = st.metrics.parked.enter(tenant.as_str(), &queue);
             if st.notifier.wait_queue(&queue, waitd).await {
                 backoff_count = 0;
             }
@@ -1381,21 +1381,21 @@ pub async fn handle_pop_partition(
         st.metrics.pop.record_batch(count, true, rtt);
         // RUSTFIX item 24: per-queue pop throughput for queue_lag_metrics.
         if count > 0 {
-            st.metrics.per_queue.add_pop(&queue, count as u64);
+            st.metrics.per_queue.add_pop(tenant.as_str(), &queue, count as u64);
             st.metrics
                 .per_queue
-                .add_pop_lag(&queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
+                .add_pop_lag(tenant.as_str(), &queue, meta.lag_sum_ms, meta.lag_max_ms, meta.lag_n);
             for pid in &meta.partition_ids {
                 st.remember_partition_queue(pid, &queue);
             }
         } else {
-            st.metrics.per_queue.add_pop_empty(&queue);
+            st.metrics.per_queue.add_pop_empty(tenant.as_str(), &queue);
         }
         // autoAck advances the cursor server-side (no client ack round-trip), but it
         // IS an acknowledgement — count it so the ack throughput / completed totals
         // on the dashboard reflect auto-acked consumption too.
         if auto_ack && count > 0 {
-            st.metrics.per_queue.add_ack(&queue, count as u64, 0);
+            st.metrics.per_queue.add_ack(tenant.as_str(), &queue, count as u64, 0);
             st.metrics.ack.record_request(count);
             st.metrics
                 .ack_success
@@ -2180,7 +2180,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                         // Per-queue ack attribution (identical to the SQL-path tail).
                         if let Some(q) = queue_name.as_ref() {
                             let okc = idxs.len() as u64; // all completed on the fast path
-                            st.metrics.per_queue.add_ack(q, okc, 0);
+                            st.metrics.per_queue.add_ack(tenant, q, okc, 0);
                             // 19-wildcard-hotlist §7: ack = lease released. If pushes
                             // arrived during the lease the entry is still pending —
                             // promote it to ready NOW + wake, so it is claimable
@@ -2362,7 +2362,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                 .filter(|&&i| success[i] && acks[i].status == "completed")
                 .count() as u64;
             let failed = idxs.len() as u64 - ok;
-            st.metrics.per_queue.add_ack(&q, ok, failed);
+            st.metrics.per_queue.add_ack(tenant, &q, ok, failed);
             // 19-wildcard-hotlist §7 promote-on-ack (SQL path): ANY ack that
             // RELEASED the lease makes the partition claimable again and must
             // promote the ring entry — not just a COMPLETED one. A NACK
@@ -2866,7 +2866,7 @@ pub async fn handle_transaction(
         let mut seen_q: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for g in &groups {
             if seen_q.insert(g.queue.as_str()) {
-                st.metrics.per_queue.add_transaction(&g.queue);
+                st.metrics.per_queue.add_transaction(tenant.as_str(), &g.queue);
             }
         }
     }

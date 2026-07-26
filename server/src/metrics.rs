@@ -171,41 +171,51 @@ pub struct PerQueue {
 }
 
 impl PerQueue {
-    /// Fast path: a read lock + Arc clone for an already-seen queue; the write lock
-    /// is taken only the first time a queue is observed (bounded by #queues).
-    fn counters(&self, queue: &str) -> Arc<QueueCounters> {
-        if let Some(c) = self.map.read().unwrap().get(queue) {
+    /// Fast path: a read lock + Arc clone for an already-seen key; the write lock
+    /// is taken only the first time a key is observed (bounded by #(tenant,queue)).
+    /// Track B (§5): the map is keyed by `tenant_queue_key(tenant, queue)` so two
+    /// tenants sharing a queue NAME accumulate separate counters (else their
+    /// per-minute lag/ops rows would merge in-process, before the DB ever sees
+    /// them). Flag OFF ⇒ every key is `<default>\x1f<queue>` ⇒ byte-identical.
+    fn counters(&self, key: &str) -> Arc<QueueCounters> {
+        if let Some(c) = self.map.read().unwrap().get(key) {
             return c.clone();
         }
-        self.map.write().unwrap().entry(queue.to_string()).or_default().clone()
+        self.map.write().unwrap().entry(key.to_string()).or_default().clone()
     }
-    pub fn add_push(&self, queue: &str, msgs: u64) {
-        let c = self.counters(queue);
+    pub fn add_push(&self, tenant: &str, queue: &str, msgs: u64) {
+        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
         c.push_requests.fetch_add(1, Ordering::Relaxed);
         c.push_messages.fetch_add(msgs, Ordering::Relaxed);
     }
-    pub fn add_pop(&self, queue: &str, msgs: u64) {
-        self.counters(queue).pop_count.fetch_add(msgs, Ordering::Relaxed);
+    pub fn add_pop(&self, tenant: &str, queue: &str, msgs: u64) {
+        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+            .pop_count
+            .fetch_add(msgs, Ordering::Relaxed);
     }
-    pub fn add_pop_empty(&self, queue: &str) {
-        self.counters(queue).pop_empty.fetch_add(1, Ordering::Relaxed);
+    pub fn add_pop_empty(&self, tenant: &str, queue: &str) {
+        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+            .pop_empty
+            .fetch_add(1, Ordering::Relaxed);
     }
-    pub fn add_transaction(&self, queue: &str) {
-        self.counters(queue).transactions.fetch_add(1, Ordering::Relaxed);
+    pub fn add_transaction(&self, tenant: &str, queue: &str) {
+        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+            .transactions
+            .fetch_add(1, Ordering::Relaxed);
     }
     /// Ack outcome counts for one ack call touching `queue` (ok/failed item counts).
-    pub fn add_ack(&self, queue: &str, ok: u64, failed: u64) {
-        let c = self.counters(queue);
+    pub fn add_ack(&self, tenant: &str, queue: &str, ok: u64, failed: u64) {
+        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
         c.ack_requests.fetch_add(1, Ordering::Relaxed);
         c.ack_success.fetch_add(ok, Ordering::Relaxed);
         c.ack_failed.fetch_add(failed, Ordering::Relaxed);
     }
     /// Pop lag observed on one delivery: `sum_ms` across `n` messages + batch max.
-    pub fn add_pop_lag(&self, queue: &str, sum_ms: u64, max_ms: u64, n: u64) {
+    pub fn add_pop_lag(&self, tenant: &str, queue: &str, sum_ms: u64, max_ms: u64, n: u64) {
         if n == 0 {
             return;
         }
-        let c = self.counters(queue);
+        let c = self.counters(&crate::handlers::tenant_queue_key(tenant, queue));
         c.lag_sum_ms.fetch_add(sum_ms, Ordering::Relaxed);
         c.lag_count.fetch_add(n, Ordering::Relaxed);
         c.lag_max_ms.fetch_max(max_ms, Ordering::Relaxed);
@@ -283,8 +293,10 @@ impl Drop for ParkedGuard {
 
 impl Parked {
     /// Mark one pop as parked on `queue` until the returned guard drops.
-    pub fn enter(&self, queue: &str) -> ParkedGuard {
-        let gauge = self.gauge(queue);
+    /// Track B (§5): keyed by (tenant, queue) so the per-tenant parked gauge and
+    /// queue_parked_replica series don't merge two tenants sharing a queue name.
+    pub fn enter(&self, tenant: &str, queue: &str) -> ParkedGuard {
+        let gauge = self.gauge(&crate::handlers::tenant_queue_key(tenant, queue));
         gauge.fetch_add(1, Ordering::Relaxed);
         ParkedGuard { gauge }
     }
@@ -293,14 +305,14 @@ impl Parked {
     // scrutinee temporary (the read guard) lives across the else branch, so
     // taking the write lock there self-deadlocks the thread. Returning out of
     // the `if let` drops the read guard before the write() below.
-    fn gauge(&self, queue: &str) -> Arc<std::sync::atomic::AtomicI64> {
-        if let Some(g) = self.current.read().unwrap().get(queue) {
+    fn gauge(&self, key: &str) -> Arc<std::sync::atomic::AtomicI64> {
+        if let Some(g) = self.current.read().unwrap().get(key) {
             return g.clone();
         }
         self.current
             .write()
             .unwrap()
-            .entry(queue.to_string())
+            .entry(key.to_string())
             .or_default()
             .clone()
     }
@@ -331,15 +343,20 @@ impl Parked {
         std::mem::take(&mut *self.acc.lock().unwrap())
     }
 
-    /// Live instantaneous total (for the in-process Prometheus block).
+    /// Live instantaneous total per QUEUE (for the in-process Prometheus block).
+    /// The map is keyed by (tenant, queue) composites; the operator gauge sums
+    /// across tenants so the exposition keeps one line per queue name (flag OFF ⇒
+    /// a single tenant ⇒ byte-identical, and never a duplicate `{queue=...}` set).
     pub fn live(&self) -> Vec<(String, i64)> {
-        self.current
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(k, g)| (k.clone(), g.load(Ordering::Relaxed).max(0)))
-            .filter(|(_, v)| *v > 0)
-            .collect()
+        let mut agg: HashMap<String, i64> = HashMap::new();
+        for (k, g) in self.current.read().unwrap().iter() {
+            let v = g.load(Ordering::Relaxed).max(0);
+            if v > 0 {
+                let (_t, q) = crate::handlers::split_tenant_queue(k);
+                *agg.entry(q.to_string()).or_insert(0) += v;
+            }
+        }
+        agg.into_iter().collect()
     }
 }
 

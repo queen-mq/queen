@@ -92,43 +92,51 @@ pub async fn handle_worker_metrics(
 
 // -------------------------------------------- GET /api/v1/analytics/queue-lag
 // Positional (from,to,queue) args; returns a BARE JSON array.
+// Track B (§5): scoped to the request tenant.
 pub async fn handle_queue_lag(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let from = params.get("from").filter(|s| !s.is_empty()).map(|s| s.as_str());
     let to = params.get("to").filter(|s| !s.is_empty()).map(|s| s.as_str());
     let queue = params.get("queue").filter(|s| !s.is_empty()).map(|s| s.as_str());
     let client = client_or_500!(st);
-    serve("queue lag failed: ", db::get_queue_lag(&client, from, to, queue).await)
+    serve("queue lag failed: ", db::get_queue_lag(&client, from, to, queue, tenant.as_str()).await)
 }
 
 // -------------------------------------------- GET /api/v1/analytics/queue-ops
+// Track B (§5): tenant injected into the filters JSON (get_queue_ops_v1 reads `_tenant`).
 pub async fn handle_queue_ops(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let f = filters_json(&params, &["from", "to", "queue"]);
+    let f = filters_json_tenant(&params, &["from", "to", "queue"], tenant.as_str());
     let client = client_or_500!(st);
     serve("queue ops failed: ", db::get_queue_ops(&client, &f).await)
 }
 
 // -------------------------------- GET /api/v1/analytics/queue-parked-replicas
+// Track B (§5): tenant injected into the filters JSON.
 pub async fn handle_queue_parked_replicas(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let f = filters_json(&params, &["from", "to", "queue"]);
+    let f = filters_json_tenant(&params, &["from", "to", "queue"], tenant.as_str());
     let client = client_or_500!(st);
     serve("parked replicas failed: ", db::get_queue_parked_replicas(&client, &f).await)
 }
 
 // -------------------------------------------- GET /api/v1/analytics/retention
+// Track B (§5): tenant injected into the filters JSON (dead table today; see 017).
 pub async fn handle_retention(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let f = filters_json(&params, &["from", "to", "queue"]);
+    let f = filters_json_tenant(&params, &["from", "to", "queue"], tenant.as_str());
     let client = client_or_500!(st);
     serve("retention failed: ", db::get_retention_ts(&client, &f).await)
 }

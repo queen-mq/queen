@@ -755,26 +755,35 @@ pub async fn get_queues(
     Ok(row.get(0))
 }
 
+// Track B (§5): $1 = tenant. Default-tenant call is byte-identical to the old
+// no-arg form (the SP's default branch reproduces the pre-Track-B body).
 pub async fn get_system_overview(
     client: &deadpool_postgres::Client,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
-        .query_one("SELECT (queen.get_system_overview_v3())::text", &[])
+        .query_one("SELECT (queen.get_system_overview_v3($1::text::uuid))::text", &[&tenant])
         .await?;
     Ok(row.get(0))
 }
 
 pub async fn get_namespaces(
     client: &deadpool_postgres::Client,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let row = client.query_one("SELECT (queen.get_namespaces_v2())::text", &[]).await?;
+    let row = client
+        .query_one("SELECT (queen.get_namespaces_v2($1::text::uuid))::text", &[&tenant])
+        .await?;
     Ok(row.get(0))
 }
 
 pub async fn get_tasks(
     client: &deadpool_postgres::Client,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let row = client.query_one("SELECT (queen.get_tasks_v2())::text", &[]).await?;
+    let row = client
+        .query_one("SELECT (queen.get_tasks_v2($1::text::uuid))::text", &[&tenant])
+        .await?;
     Ok(row.get(0))
 }
 
@@ -1190,16 +1199,18 @@ pub async fn get_worker_metrics_ts(
 
 // get_queue_lag_v1 — /api/v1/analytics/queue-lag. Positional (from,to,queue) args;
 // NULLs fall back to the SP defaults (last hour). Returns a BARE JSON array.
+// Track B (§5): $4 = tenant, scopes the lag series to the tenant's rows.
 pub async fn get_queue_lag(
     client: &deadpool_postgres::Client,
     from: Option<&str>,
     to: Option<&str>,
     queue: Option<&str>,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = "SELECT (queen.get_queue_lag_v1(\
                 COALESCE($1::text::timestamptz, NOW() - INTERVAL '1 hour'), \
-                COALESCE($2::text::timestamptz, NOW()), $3::text))::text";
-    let row = client.query_one(stmt, &[&from, &to, &queue]).await?;
+                COALESCE($2::text::timestamptz, NOW()), $3::text, $4::text::uuid))::text";
+    let row = client.query_one(stmt, &[&from, &to, &queue, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -1393,9 +1404,12 @@ pub async fn insert_system_metrics(
 // Lag merges as a weighted average (SUM(avg*count)/SUM(count), the same identity
 // the read-side SPs use across buckets), max as GREATEST, parked additively (a
 // gauge SUMmed across workers — 014_worker_metrics.sql:104-111).
+// Track B (§5): $14 = tenant. Two tenants sharing a queue NAME write separate
+// rows (UNIQUE(bucket_time, queue_name, tenant_id)); the readers filter by tenant.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_queue_lag_metrics(
     client: &deadpool_postgres::Client,
+    tenant: &str,
     queue: &str,
     pop_count: i64,
     push_request_count: i64,
@@ -1411,11 +1425,11 @@ pub async fn upsert_queue_lag_metrics(
     parked_count: i32,
 ) -> Result<(), tokio_postgres::Error> {
     let stmt = "INSERT INTO queen.queue_lag_metrics \
-        (bucket_time, queue_name, pop_count, push_request_count, push_message_count, \
+        (bucket_time, queue_name, tenant_id, pop_count, push_request_count, push_message_count, \
          pop_empty_count, transaction_count, ack_request_count, ack_success_count, \
          ack_failed_count, avg_lag_ms, max_lag_ms, lag_count, parked_count) \
-        VALUES (date_trunc('minute', NOW()), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
-        ON CONFLICT (bucket_time, queue_name) DO UPDATE SET \
+        VALUES (date_trunc('minute', NOW()), $1, $14::text::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+        ON CONFLICT (bucket_time, queue_name, tenant_id) DO UPDATE SET \
             pop_count = queen.queue_lag_metrics.pop_count + EXCLUDED.pop_count, \
             push_request_count = queen.queue_lag_metrics.push_request_count + EXCLUDED.push_request_count, \
             push_message_count = queen.queue_lag_metrics.push_message_count + EXCLUDED.push_message_count, \
@@ -1450,6 +1464,7 @@ pub async fn upsert_queue_lag_metrics(
                 &max_lag_ms,
                 &lag_count,
                 &parked_count,
+                &tenant,
             ],
         )
         .await?;
@@ -1459,20 +1474,22 @@ pub async fn upsert_queue_lag_metrics(
 // Per-replica parked-count breakdown (queen.queue_parked_replica): each worker
 // writes its own minute-averaged gauge; the System view charts the per-replica
 // series while queue_lag_metrics.parked_count stays the cluster aggregate.
+// Track B (§5): $5 = tenant (PK includes tenant_id).
 pub async fn upsert_queue_parked_replica(
     client: &deadpool_postgres::Client,
+    tenant: &str,
     queue: &str,
     hostname: &str,
     worker_id: i32,
     parked_count: i32,
 ) -> Result<(), tokio_postgres::Error> {
     let stmt = "INSERT INTO queen.queue_parked_replica \
-        (bucket_time, queue_name, hostname, worker_id, parked_count) \
-        VALUES (date_trunc('minute', NOW()), $1, $2, $3, $4) \
-        ON CONFLICT (bucket_time, queue_name, hostname, worker_id) DO UPDATE SET \
+        (bucket_time, queue_name, hostname, worker_id, parked_count, tenant_id) \
+        VALUES (date_trunc('minute', NOW()), $1, $2, $3, $4, $5::text::uuid) \
+        ON CONFLICT (bucket_time, queue_name, hostname, worker_id, tenant_id) DO UPDATE SET \
             parked_count = EXCLUDED.parked_count";
     client
-        .execute(stmt, &[&queue, &hostname, &worker_id, &parked_count])
+        .execute(stmt, &[&queue, &hostname, &worker_id, &parked_count, &tenant])
         .await?;
     Ok(())
 }

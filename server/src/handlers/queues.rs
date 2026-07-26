@@ -310,12 +310,16 @@ pub async fn handle_list_queues(
 }
 
 // GET /api/v1/resources/overview — system overview via get_system_overview_v3.
-pub async fn handle_system_overview(State(st): State<Arc<AppState>>) -> Response {
+// Track B (§5): scoped to the request tenant (default tenant ⇒ global, as before).
+pub async fn handle_system_overview(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_system_overview(&client).await {
+    match db::get_system_overview(&client, tenant.as_str()).await {
         Ok(t) => sp_result_to_response(t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -325,12 +329,16 @@ pub async fn handle_system_overview(State(st): State<Arc<AppState>>) -> Response
 }
 
 // GET /api/v1/resources/namespaces — namespace list via get_namespaces_v2.
-pub async fn handle_list_namespaces(State(st): State<Arc<AppState>>) -> Response {
+// Track B (§5): scoped to the request tenant.
+pub async fn handle_list_namespaces(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_namespaces(&client).await {
+    match db::get_namespaces(&client, tenant.as_str()).await {
         Ok(t) => sp_result_to_response(t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -340,12 +348,16 @@ pub async fn handle_list_namespaces(State(st): State<Arc<AppState>>) -> Response
 }
 
 // GET /api/v1/resources/tasks — task list via get_tasks_v2.
-pub async fn handle_list_tasks(State(st): State<Arc<AppState>>) -> Response {
+// Track B (§5): scoped to the request tenant.
+pub async fn handle_list_tasks(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_tasks(&client).await {
+    match db::get_tasks(&client, tenant.as_str()).await {
         Ok(t) => sp_result_to_response(t),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,

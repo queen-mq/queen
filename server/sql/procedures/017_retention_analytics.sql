@@ -31,6 +31,11 @@ DECLARE
     v_bucket_minutes INTEGER;
     v_series JSONB;
     v_totals JSONB;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`). NOTE:
+    -- queen.retention_history is not written by the log engine (dead table under
+    -- segments), so this endpoint returns an empty series for every tenant; the
+    -- scoping below is future-proofing for when the rows engine populates it.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_from_ts := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '1 hour');
     v_to_ts := COALESCE((p_filters->>'to')::timestamptz, NOW());
@@ -62,7 +67,10 @@ BEGIN
         SELECT b.*
         FROM bucketed b
         LEFT JOIN queen.queues q ON q.id = b.queue_id
-        WHERE v_queue IS NULL OR q.name = v_queue
+        WHERE (v_queue IS NULL OR q.name = v_queue)
+          -- Track B (§5): a resolvable queue must belong to the tenant; rows with
+          -- no resolvable queue (orphaned partition) stay in, as before OFF.
+          AND (q.id IS NULL OR q.tenant_id = v_tenant)
     ),
     grouped AS (
         SELECT

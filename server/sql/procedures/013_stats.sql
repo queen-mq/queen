@@ -1800,6 +1800,9 @@ BEGIN
                     'task', q.task,
                     'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                     'partitions', COALESCE(s.child_count, 0),
+                    -- Storage quota (§6.1): retained payload bytes for this queue,
+                    -- refreshed at the stats cadence (log_refresh_all_stats_v1).
+                    'retainedBytes', COALESCE(s.retained_bytes, 0),
                     'messages', jsonb_build_object(
                         'total', COALESCE(s.total_messages, 0),
                         'pending', GREATEST(0, COALESCE(s.pending_messages, 0) - COALESCE(s.processing_messages, 0)),
@@ -1903,72 +1906,110 @@ BEGIN
     
     RETURN v_queue_info || jsonb_build_object(
         'partitions', v_partitions,
-        'totals', v_totals
+        'totals', v_totals,
+        -- Storage quota (§6.1): retained payload bytes for this queue, from the
+        -- queue's stat row (refreshed at the stats cadence). Scoped implicitly:
+        -- v_queue_id was resolved WHERE tenant_id = p_tenant above.
+        'retainedBytes', COALESCE((SELECT retained_bytes FROM queen.stats
+                                   WHERE stat_type = 'queue' AND queue_id = v_queue_id), 0)
     );
 END;
 $$;
 
--- queen.get_namespaces_v2: O(namespaces) namespace list
-CREATE OR REPLACE FUNCTION queen.get_namespaces_v2()
+-- queen.get_namespaces_v2: O(namespaces) namespace list.
+-- Track B (§5): p_tenant scopes the rollup. Re-derived from THIS tenant's
+-- 'queue' stat rows (each queue belongs to exactly one tenant) rather than the
+-- shared pre-aggregated 'namespace' rows (which merge namespaces across
+-- tenants). The math is aggregate_namespace_stats_v1's formula filtered by
+-- tenant, so flag OFF (every queue = default tenant) reproduces the previous
+-- output. DROP the old () form so the scoped (UUID) form is what callers hit.
+DROP FUNCTION IF EXISTS queen.get_namespaces_v2();
+CREATE OR REPLACE FUNCTION queen.get_namespaces_v2(
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Return same format as get_namespaces_v1
     RETURN (
         SELECT jsonb_build_object(
             'namespaces', COALESCE(jsonb_agg(
                 jsonb_build_object(
-                    'namespace', s.stat_key,
-                    'queues', s.child_count,
+                    'namespace', t.ns,
+                    'queues', t.qcount,
                     'partitions', (
-                        SELECT COUNT(*) FROM queen.partitions p 
-                        JOIN queen.queues q ON q.id = p.queue_id 
-                        WHERE q.namespace = s.stat_key
+                        SELECT COUNT(*) FROM queen.partitions p
+                        JOIN queen.queues q2 ON q2.id = p.queue_id
+                        WHERE q2.namespace = t.ns AND q2.tenant_id = p_tenant
                     ),
                     'messages', jsonb_build_object(
-                        'total', s.total_messages,
-                        'pending', GREATEST(0, s.pending_messages - s.processing_messages)
+                        'total', t.total_m,
+                        'pending', GREATEST(0, t.pending_m - t.processing_m)
                     )
-                ) ORDER BY s.stat_key
+                ) ORDER BY t.ns
             ), '[]'::jsonb)
         )
-        FROM queen.stats s
-        WHERE s.stat_type = 'namespace'
+        FROM (
+            SELECT q.namespace AS ns,
+                   COUNT(DISTINCT q.id) AS qcount,
+                   COALESCE(SUM(s.total_messages), 0) AS total_m,
+                   COALESCE(SUM(s.pending_messages), 0) AS pending_m,
+                   COALESCE(SUM(s.processing_messages), 0) AS processing_m
+            FROM queen.queues q
+            LEFT JOIN queen.stats s ON s.stat_type = 'queue' AND s.queue_id = q.id
+            WHERE q.namespace IS NOT NULL AND q.namespace != ''
+              AND q.tenant_id = p_tenant
+            GROUP BY q.namespace
+        ) t
     );
 END;
 $$;
 
--- queen.get_tasks_v2: O(tasks) task list
-CREATE OR REPLACE FUNCTION queen.get_tasks_v2()
+GRANT EXECUTE ON FUNCTION queen.get_namespaces_v2(UUID) TO PUBLIC;
+
+-- queen.get_tasks_v2: O(tasks) task list. Track B (§5): p_tenant scopes the
+-- rollup, re-derived per tenant exactly like get_namespaces_v2 above.
+DROP FUNCTION IF EXISTS queen.get_tasks_v2();
+CREATE OR REPLACE FUNCTION queen.get_tasks_v2(
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Return same format as get_tasks_v1
     RETURN (
         SELECT jsonb_build_object(
             'tasks', COALESCE(jsonb_agg(
                 jsonb_build_object(
-                    'task', s.stat_key,
-                    'queues', s.child_count,
+                    'task', t.tk,
+                    'queues', t.qcount,
                     'partitions', (
-                        SELECT COUNT(*) FROM queen.partitions p 
-                        JOIN queen.queues q ON q.id = p.queue_id 
-                        WHERE q.task = s.stat_key
+                        SELECT COUNT(*) FROM queen.partitions p
+                        JOIN queen.queues q2 ON q2.id = p.queue_id
+                        WHERE q2.task = t.tk AND q2.tenant_id = p_tenant
                     ),
                     'messages', jsonb_build_object(
-                        'total', s.total_messages,
-                        'pending', GREATEST(0, s.pending_messages - s.processing_messages)
+                        'total', t.total_m,
+                        'pending', GREATEST(0, t.pending_m - t.processing_m)
                     )
-                ) ORDER BY s.stat_key
+                ) ORDER BY t.tk
             ), '[]'::jsonb)
         )
-        FROM queen.stats s
-        WHERE s.stat_type = 'task'
+        FROM (
+            SELECT q.task AS tk,
+                   COUNT(DISTINCT q.id) AS qcount,
+                   COALESCE(SUM(s.total_messages), 0) AS total_m,
+                   COALESCE(SUM(s.pending_messages), 0) AS pending_m,
+                   COALESCE(SUM(s.processing_messages), 0) AS processing_m
+            FROM queen.queues q
+            LEFT JOIN queen.stats s ON s.stat_type = 'queue' AND s.queue_id = q.id
+            WHERE q.task IS NOT NULL AND q.task != ''
+              AND q.tenant_id = p_tenant
+            GROUP BY q.task
+        ) t
     );
 END;
 $$;
+
+GRANT EXECUTE ON FUNCTION queen.get_tasks_v2(UUID) TO PUBLIC;
 
 -- NOTE: get_status_v2 REMOVED - replaced by get_status_v3 in 014_worker_metrics.sql
 
@@ -2282,7 +2323,7 @@ GRANT EXECUTE ON FUNCTION queen.refresh_all_stats_v1(BOOLEAN) TO PUBLIC;
 -- NOTE: get_system_overview_v2 and get_status_v2 REMOVED (replaced by v3 in 014_worker_metrics.sql)
 GRANT EXECUTE ON FUNCTION queen.get_queues_v2(UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_queue_v2(TEXT, UUID) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_namespaces_v2() TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_tasks_v2() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_namespaces_v2(UUID) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_tasks_v2(UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_queue_detail_v2(TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_status_queues_v2(JSONB, INTEGER, INTEGER) TO PUBLIC;

@@ -131,6 +131,19 @@ pub(crate) fn tenant_queue_key(tenant: &str, queue: &str) -> String {
     k
 }
 
+/// Inverse of `tenant_queue_key`: split a composite key back into (tenant, queue).
+/// Used by the metrics collector (syscollect.rs) to attribute per-queue counters
+/// to the right tenant at flush time, and by the Prometheus parked gauge. A key
+/// without the separator (never produced by `tenant_queue_key`) yields the
+/// default tenant + the whole string as the queue, so callers are always safe.
+#[inline]
+pub(crate) fn split_tenant_queue(key: &str) -> (&str, &str) {
+    match key.split_once('\u{1f}') {
+        Some((t, q)) => (t, q),
+        None => (crate::config::DEFAULT_TENANT, key),
+    }
+}
+
 impl AppState {
     // Resolve the queue's lease time, caching the lookup. Falls back to
     // DEFAULT_LEASE_SECONDS when the queue has no seg_queues row yet or the DB

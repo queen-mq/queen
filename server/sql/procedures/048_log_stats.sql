@@ -144,16 +144,33 @@ BEGIN
         WHERE c.lease_expires_at IS NOT NULL AND c.lease_expires_at > v_now
         GROUP BY c.partition_id
     ),
-    -- dead-letter frames per queue (log DLQ, 044).
+    -- dead-letter frames per queue (log DLQ, 044). Track B (§5): keyed by
+    -- (name, tenant) so two tenants sharing a queue name don't merge.
     dlq_agg AS (
-        SELECT q.name AS queue_name, COUNT(*)::bigint AS dlq
+        SELECT q.name AS queue_name, q.tenant_id, COUNT(*)::bigint AS dlq
         FROM queen.log_dlq d
         JOIN queen.log_partitions p ON p.id = d.partition_id
         JOIN queen.log_queues q     ON q.id = p.queue_id
-        GROUP BY q.name
+        GROUP BY q.name, q.tenant_id
+    ),
+    -- Storage quota (§6.1): retained payload bytes per (queue, tenant) =
+    -- SUM(octet_length(blob)) over live segments. octet_length on STORAGE
+    -- EXTERNAL blobs reads the length from the TOAST pointer (no chunk
+    -- detoast), so this is a bounded heap scan of the LIVE segments at refresh
+    -- cadence — the one O(segments) touch this reader makes, for the bytes
+    -- gauge only (the §9 no-scan contract governs the hot watermark counters).
+    -- Measures the compressed (zstd) on-the-wire bytes AS STORED; TOAST/index/
+    -- WAL overhead and the log_txns hash sidecar are excluded.
+    seg_bytes AS (
+        SELECT lq.name AS queue_name, lq.tenant_id,
+               COALESCE(SUM(octet_length(s.blob)), 0)::bigint AS retained_bytes
+        FROM queen.log_segments s
+        JOIN queen.log_partitions lp ON lp.id = s.partition_id
+        JOIN queen.log_queues lq     ON lq.id = lp.queue_id
+        GROUP BY lq.name, lq.tenant_id
     ),
     per_queue AS (
-        SELECT lq.name AS queue_name,
+        SELECT lq.name AS queue_name, lq.tenant_id,
                COUNT(DISTINCT lp.id)::bigint                    AS child_count,
                COALESCE(SUM(pa.total_frames), 0)::bigint        AS total_messages,
                COALESCE(SUM(pa.pending), 0)::bigint             AS pending_messages,
@@ -164,12 +181,12 @@ BEGIN
         JOIN queen.log_partitions lp ON lp.queue_id = lq.id
         LEFT JOIN part_agg  pa ON pa.partition_id = lp.id
         LEFT JOIN lease_agg la ON la.partition_id = lp.id
-        GROUP BY lq.name
+        GROUP BY lq.name, lq.tenant_id
     )
     INSERT INTO queen.stats (
         stat_type, stat_key, queue_id, partition_id, consumer_group,
         child_count, total_messages, pending_messages, processing_messages,
-        completed_messages, dead_letter_messages,
+        completed_messages, dead_letter_messages, retained_bytes,
         oldest_pending_at, newest_message_at,
         avg_lag_seconds, max_lag_seconds, avg_offset_lag, max_offset_lag,
         ingested_per_second, processed_per_second,
@@ -189,6 +206,7 @@ BEGIN
                     - COALESCE(pq.pending_messages, 0)
                     - COALESCE(da.dlq, 0)),
         COALESCE(da.dlq, 0),
+        COALESCE(sb.retained_bytes, 0),
         pq.oldest_pending_at,
         pq.newest_message_at,
         COALESCE(EXTRACT(EPOCH FROM (v_now - pq.oldest_pending_at))::integer, 0),
@@ -198,8 +216,12 @@ BEGIN
         0, 0,
         v_now
     FROM queen.queues q
-    LEFT JOIN per_queue pq ON pq.queue_name = q.name
-    LEFT JOIN dlq_agg   da ON da.queue_name = q.name
+    -- Track B (§5): join the log-derived aggregates by (name, tenant) — the
+    -- (tenant_id, name) queue identity — so two tenants that share a queue name
+    -- get SEPARATE stat rows (retained bytes, totals) instead of merging.
+    LEFT JOIN per_queue pq ON pq.queue_name = q.name AND pq.tenant_id = q.tenant_id
+    LEFT JOIN dlq_agg   da ON da.queue_name = q.name AND da.tenant_id = q.tenant_id
+    LEFT JOIN seg_bytes sb ON sb.queue_name = q.name AND sb.tenant_id = q.tenant_id
     WHERE q.storage = 'segments'
     ON CONFLICT (stat_type, stat_key) DO UPDATE SET
         queue_id             = EXCLUDED.queue_id,
@@ -209,6 +231,7 @@ BEGIN
         processing_messages  = EXCLUDED.processing_messages,
         completed_messages   = EXCLUDED.completed_messages,
         dead_letter_messages = EXCLUDED.dead_letter_messages,
+        retained_bytes       = EXCLUDED.retained_bytes,
         oldest_pending_at    = EXCLUDED.oldest_pending_at,
         newest_message_at    = EXCLUDED.newest_message_at,
         avg_lag_seconds      = EXCLUDED.avg_lag_seconds,

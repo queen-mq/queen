@@ -113,6 +113,15 @@ ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS parked_count       
 -- cross-replica upsert merge avg_lag_ms as a weighted average (the same
 -- SUM(avg*count)/SUM(count) identity the worker_metrics readers use).
 ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS lag_count          BIGINT DEFAULT 0;
+-- Track B (§5): tenant scoping key. Two tenants that share a queue NAME must not
+-- merge their per-minute metrics, so the uniqueness key gains tenant_id and the
+-- collector/trigger upserts key per (bucket, name, tenant). Catalog-only
+-- (NOT NULL DEFAULT the default tenant); flag OFF ⇒ every row is the default
+-- tenant ⇒ byte-identical to the pre-Track-B single-key table.
+ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+ALTER TABLE queen.queue_lag_metrics DROP CONSTRAINT IF EXISTS queue_lag_metrics_bucket_time_queue_name_key;
+CREATE UNIQUE INDEX IF NOT EXISTS queue_lag_metrics_tenant_uk
+    ON queen.queue_lag_metrics(bucket_time, queue_name, tenant_id);
 
 CREATE INDEX IF NOT EXISTS idx_queue_lag_bucket ON queen.queue_lag_metrics(bucket_time DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_lag_queue ON queen.queue_lag_metrics(queue_name);
@@ -145,6 +154,26 @@ CREATE TABLE IF NOT EXISTS queen.queue_parked_replica (
     parked_count INTEGER DEFAULT 0,
     PRIMARY KEY (bucket_time, queue_name, hostname, worker_id)
 );
+-- Track B (§5): tenant scoping key (same rationale as queue_lag_metrics). The PK
+-- gains tenant_id so a shared queue name on one replica keeps per-tenant rows.
+-- Guarded so the PK is rebuilt exactly once (first boot after upgrade), never
+-- churned on every boot.
+ALTER TABLE queen.queue_parked_replica ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
+DO $$
+DECLARE v_has_tenant_pk BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = 'queen.queue_parked_replica'::regclass AND i.indisprimary
+          AND a.attname = 'tenant_id'
+    ) INTO v_has_tenant_pk;
+    IF NOT v_has_tenant_pk THEN
+        ALTER TABLE queen.queue_parked_replica DROP CONSTRAINT IF EXISTS queue_parked_replica_pkey;
+        ALTER TABLE queen.queue_parked_replica
+            ADD PRIMARY KEY (bucket_time, queue_name, hostname, worker_id, tenant_id);
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_queue_parked_replica_bucket
     ON queen.queue_parked_replica(bucket_time DESC);
 CREATE INDEX IF NOT EXISTS idx_queue_parked_replica_queue
@@ -217,10 +246,14 @@ END;
 $$;
 
 -- Get per-queue lag metrics
+-- Track B (§5): p_tenant scopes the lag series to one tenant's rows. DROP the
+-- pre-tenant 3-arg form so the scoped (…, UUID) is what callers hit.
+DROP FUNCTION IF EXISTS queen.get_queue_lag_v1(TIMESTAMPTZ, TIMESTAMPTZ, TEXT);
 CREATE OR REPLACE FUNCTION queen.get_queue_lag_v1(
     p_from TIMESTAMPTZ DEFAULT NOW() - INTERVAL '1 hour',
     p_to TIMESTAMPTZ DEFAULT NOW(),
-    p_queue_name TEXT DEFAULT NULL
+    p_queue_name TEXT DEFAULT NULL,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -237,8 +270,9 @@ BEGIN
             ) ORDER BY bucket_time DESC, queue_name
         ), '[]'::jsonb)
         FROM queen.queue_lag_metrics
-        WHERE bucket_time >= p_from 
+        WHERE bucket_time >= p_from
           AND bucket_time <= p_to
+          AND tenant_id = p_tenant
           AND (p_queue_name IS NULL OR queue_name = p_queue_name)
     );
 END;
@@ -414,7 +448,16 @@ $$;
 -- ============================================================================
 
 -- queen.get_system_overview_v3: Same format as v2, but with real-time throughput from worker_metrics
-CREATE OR REPLACE FUNCTION queen.get_system_overview_v3()
+-- Track B (§5): p_tenant scopes the overview. The DEFAULT-tenant path is the
+-- pre-Track-B body VERBATIM (byte-identical when the flag is OFF — every request
+-- is the default tenant), because it blends cluster-wide worker_metrics_summary
+-- lifetime counters that are NOT per-tenant. A SPECIFIC tenant gets a view
+-- re-derived purely from that tenant's queen.stats 'queue' rows (per-queue →
+-- per-tenant after the 048 refresh fix) + tenant-scoped queue/partition/
+-- namespace/task counts, so those global counters never leak across tenants.
+DROP FUNCTION IF EXISTS queen.get_system_overview_v3();
+CREATE OR REPLACE FUNCTION queen.get_system_overview_v3(
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -426,10 +469,14 @@ DECLARE
     v_task_count INTEGER;
     v_recent_throughput RECORD;
     v_recent_lag RECORD;
+    v_default UUID := '00000000-0000-0000-0000-000000000001';
+    v_agg RECORD;
+    v_part_count INTEGER;
 BEGIN
+  IF p_tenant = v_default THEN
     -- Get existing system stats (for pending/processing counts)
-    SELECT * INTO v_stats 
-    FROM queen.stats 
+    SELECT * INTO v_stats
+    FROM queen.stats
     WHERE stat_type = 'system' AND stat_key = 'global';
     
     -- Get worker metrics summary (for totals)
@@ -499,14 +546,86 @@ BEGIN
             'processedPerSecond', ROUND(COALESCE(v_recent_throughput.ack_per_min, 0)::numeric / 300, 2)
         ),
         'timestamp', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-        'statsAge', CASE 
-            WHEN v_summary.last_updated_at IS NOT NULL 
-            THEN EXTRACT(EPOCH FROM (NOW() - v_summary.last_updated_at))::integer 
-            ELSE -1 
+        'statsAge', CASE
+            WHEN v_summary.last_updated_at IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (NOW() - v_summary.last_updated_at))::integer
+            ELSE -1
+        END
+    );
+  END IF;
+
+    -- ------------------------------------------------------- per-tenant view
+    -- Counts scoped to the tenant's queues; the partition count is the live
+    -- log-partition count for this tenant (queen.partitions is empty under the
+    -- log engine, so we count queen.log_partitions like the 048 refresh does).
+    SELECT COUNT(*) INTO v_queue_count
+    FROM queen.queues WHERE tenant_id = p_tenant AND storage = 'segments';
+    SELECT COUNT(DISTINCT namespace) INTO v_namespace_count
+    FROM queen.queues WHERE tenant_id = p_tenant AND namespace IS NOT NULL AND namespace != '';
+    SELECT COUNT(DISTINCT task) INTO v_task_count
+    FROM queen.queues WHERE tenant_id = p_tenant AND task IS NOT NULL AND task != '';
+    SELECT COUNT(*) INTO v_part_count
+    FROM queen.log_partitions lp
+    JOIN queen.log_queues lq ON lq.id = lp.queue_id
+    WHERE lq.tenant_id = p_tenant;
+
+    -- Message / lag / throughput totals re-derived from the tenant's 'queue'
+    -- stat rows (same axes aggregate_system_stats_v2 uses, scoped by tenant).
+    SELECT
+        COALESCE(SUM(s.total_messages), 0)              AS total_m,
+        COALESCE(SUM(s.pending_messages), 0)            AS pending_m,
+        COALESCE(SUM(s.processing_messages), 0)         AS processing_m,
+        COALESCE(SUM(s.completed_messages), 0)          AS completed_m,
+        COALESCE(SUM(s.dead_letter_messages), 0)        AS dlq_m,
+        COALESCE(AVG(s.avg_lag_seconds)::integer, 0)    AS avg_lag,
+        COALESCE(MAX(s.max_lag_seconds), 0)             AS max_lag,
+        COALESCE(MAX(s.median_lag_seconds), 0)          AS median_lag,
+        COALESCE(MAX(s.avg_offset_lag), 0)              AS avg_off,
+        COALESCE(MAX(s.max_offset_lag), 0)              AS max_off,
+        COALESCE(SUM(s.ingested_per_second), 0)         AS ips,
+        COALESCE(SUM(s.processed_per_second), 0)        AS pps,
+        MAX(s.last_computed_at)                         AS last_at
+    INTO v_agg
+    FROM queen.stats s
+    JOIN queen.queues q ON q.id = s.queue_id
+    WHERE s.stat_type = 'queue' AND q.tenant_id = p_tenant;
+
+    RETURN jsonb_build_object(
+        'queues', COALESCE(v_queue_count, 0),
+        'partitions', COALESCE(v_part_count, 0),
+        'namespaces', COALESCE(v_namespace_count, 0),
+        'tasks', COALESCE(v_task_count, 0),
+        'messages', jsonb_build_object(
+            'total', v_agg.total_m,
+            'pending', GREATEST(0, v_agg.pending_m - v_agg.processing_m),
+            'processing', v_agg.processing_m,
+            'completed', v_agg.completed_m,
+            'failed', 0,
+            'deadLetter', v_agg.dlq_m
+        ),
+        'lag', jsonb_build_object(
+            'time', jsonb_build_object(
+                'avg', v_agg.avg_lag, 'median', v_agg.median_lag, 'min', 0, 'max', v_agg.max_lag
+            ),
+            'offset', jsonb_build_object(
+                'avg', v_agg.avg_off, 'median', 0, 'min', 0, 'max', v_agg.max_off
+            )
+        ),
+        'throughput', jsonb_build_object(
+            'ingestedPerSecond', ROUND(v_agg.ips, 2),
+            'processedPerSecond', ROUND(v_agg.pps, 2)
+        ),
+        'timestamp', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'statsAge', CASE
+            WHEN v_agg.last_at IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (NOW() - v_agg.last_at))::integer
+            ELSE -1
         END
     );
 END;
 $$;
+
+GRANT EXECUTE ON FUNCTION queen.get_system_overview_v3(UUID) TO PUBLIC;
 
 -- queen.get_status_v3: Same format as v2, but throughput from worker_metrics
 -- Enhanced with worker health and error tracking
@@ -1060,15 +1179,20 @@ $$;
 CREATE OR REPLACE FUNCTION queen.bump_partitions_created_trigger()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO queen.queue_lag_metrics (bucket_time, queue_name, partitions_created)
+    -- Track B (§5): carry the queue's tenant_id into the metric row so the
+    -- upsert key matches the (bucket, name, tenant) unique index. (Inert under
+    -- the log engine — queen.partitions is never inserted there — but kept valid
+    -- for the rows engine.)
+    INSERT INTO queen.queue_lag_metrics (bucket_time, queue_name, tenant_id, partitions_created)
     SELECT
         date_trunc('minute', NOW()),
         q.name,
+        q.tenant_id,
         COUNT(*)
     FROM new_partitions np
     JOIN queen.queues q ON q.id = np.queue_id
-    GROUP BY q.name
-    ON CONFLICT (bucket_time, queue_name) DO UPDATE
+    GROUP BY q.name, q.tenant_id
+    ON CONFLICT (bucket_time, queue_name, tenant_id) DO UPDATE
     SET partitions_created = queen.queue_lag_metrics.partitions_created + EXCLUDED.partitions_created;
     RETURN NULL;
 END;
@@ -1082,15 +1206,18 @@ BEGIN
     -- queen.queues; partitions deleted because their queue was removed fall
     -- through to a conservative '__orphaned__' bucket so the count still
     -- shows up somewhere.
-    INSERT INTO queen.queue_lag_metrics (bucket_time, queue_name, partitions_deleted)
+    -- Track B (§5): tenant_id from the (possibly-cascaded) queue; orphaned
+    -- deletes fall to the default tenant's '__orphaned__' bucket.
+    INSERT INTO queen.queue_lag_metrics (bucket_time, queue_name, tenant_id, partitions_deleted)
     SELECT
         date_trunc('minute', NOW()),
         COALESCE(q.name, '__orphaned__'),
+        COALESCE(q.tenant_id, '00000000-0000-0000-0000-000000000001'),
         COUNT(*)
     FROM old_partitions op
     LEFT JOIN queen.queues q ON q.id = op.queue_id
-    GROUP BY COALESCE(q.name, '__orphaned__')
-    ON CONFLICT (bucket_time, queue_name) DO UPDATE
+    GROUP BY COALESCE(q.name, '__orphaned__'), COALESCE(q.tenant_id, '00000000-0000-0000-0000-000000000001')
+    ON CONFLICT (bucket_time, queue_name, tenant_id) DO UPDATE
     SET partitions_deleted = queen.queue_lag_metrics.partitions_deleted + EXCLUDED.partitions_deleted;
     RETURN NULL;
 END;
@@ -1132,6 +1259,8 @@ DECLARE
     v_bucket_minutes INTEGER;
     v_series JSONB;
     v_queues JSONB;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_from_ts := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '1 hour');
     v_to_ts := COALESCE((p_filters->>'to')::timestamptz, NOW());
@@ -1173,6 +1302,7 @@ BEGIN
         FROM queen.queue_lag_metrics
         WHERE bucket_time >= v_from_ts
           AND bucket_time <= v_to_ts
+          AND tenant_id = v_tenant
           AND (v_queue IS NULL OR queue_name = v_queue)
         GROUP BY 1, 2
     )
@@ -1214,6 +1344,7 @@ BEGIN
         SELECT DISTINCT queue_name AS qn
         FROM queen.queue_lag_metrics
         WHERE bucket_time >= v_from_ts AND bucket_time <= v_to_ts
+          AND tenant_id = v_tenant
           AND (v_queue IS NULL OR queue_name = v_queue)
     ) q;
 
@@ -1254,6 +1385,8 @@ DECLARE
     v_bucket_minutes INTEGER;
     v_series JSONB;
     v_replicas JSONB;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_from_ts := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '1 hour');
     v_to_ts   := COALESCE((p_filters->>'to')::timestamptz,   NOW());
@@ -1279,6 +1412,7 @@ BEGIN
         FROM queen.queue_parked_replica
         WHERE bucket_time >= v_from_ts
           AND bucket_time <= v_to_ts
+          AND tenant_id = v_tenant
           AND (v_queue IS NULL OR queue_name = v_queue)
         GROUP BY 1, 2, 3, 4
     )
@@ -1307,6 +1441,7 @@ BEGIN
         FROM queen.queue_parked_replica
         WHERE bucket_time >= v_from_ts
           AND bucket_time <= v_to_ts
+          AND tenant_id = v_tenant
           AND (v_queue IS NULL OR queue_name = v_queue)
     ) q;
 
@@ -1324,10 +1459,10 @@ $$;
 
 -- Grant permissions
 GRANT EXECUTE ON FUNCTION queen.get_worker_throughput_v1(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_queue_lag_v1(TIMESTAMPTZ, TIMESTAMPTZ, TEXT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_queue_lag_v1(TIMESTAMPTZ, TIMESTAMPTZ, TEXT, UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_worker_health_v1(TIMESTAMPTZ, TIMESTAMPTZ) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_system_totals_v1() TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_system_overview_v3() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_system_overview_v3(UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_status_v3(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_worker_metrics_timeseries_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.cleanup_worker_metrics_v1(INTEGER) TO PUBLIC;

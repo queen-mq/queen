@@ -172,6 +172,10 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         // (now_pq / lag_max were captured above for the worker-level fold.)
         let mut parked = drain_parked_avg(&metrics, interval);
         for (queue, cur) in &now_pq {
+            // Track B (§5): now_pq/parked are keyed by tenant_queue_key(tenant,
+            // queue). Split back to (tenant, name) so each metric row is written
+            // under its own tenant. Flag OFF ⇒ tenant is always the default.
+            let (q_tenant, q_name) = crate::handlers::split_tenant_queue(queue);
             let prev = last_pq.get(queue).copied().unwrap_or_default();
             let d = QueueSnap {
                 push_requests: cur.push_requests.saturating_sub(prev.push_requests),
@@ -199,7 +203,8 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             let avg_lag = if d.lag_count > 0 { (d.lag_sum_ms / d.lag_count) as i64 } else { 0 };
             if let Err(e) = db::upsert_queue_lag_metrics(
                 &client,
-                queue,
+                q_tenant,
+                q_name,
                 d.pop_count as i64,
                 d.push_requests as i64,
                 d.push_messages as i64,
@@ -217,16 +222,16 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             {
                 static LAG_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
                 if let Some(suppressed) = LAG_ERR.tick_now() {
-                    tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_lag_metrics upsert error");
+                    tracing::warn!(target: "metrics", queue = %q_name, error = %e, suppressed, "queue_lag_metrics upsert error");
                 }
             }
             if parked_avg > 0 {
                 if let Err(e) =
-                    db::upsert_queue_parked_replica(&client, queue, &hostname, 0, parked_avg).await
+                    db::upsert_queue_parked_replica(&client, q_tenant, q_name, &hostname, 0, parked_avg).await
                 {
                     static PARKED_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
                     if let Some(suppressed) = PARKED_ERR.tick_now() {
-                        tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_parked_replica upsert error");
+                        tracing::warn!(target: "metrics", queue = %q_name, error = %e, suppressed, "queue_parked_replica upsert error");
                     }
                 }
             }
@@ -237,22 +242,23 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             if parked_avg == 0 {
                 continue;
             }
+            let (q_tenant, q_name) = crate::handlers::split_tenant_queue(&queue);
             if let Err(e) = db::upsert_queue_lag_metrics(
-                &client, &queue, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, parked_avg,
+                &client, q_tenant, q_name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, parked_avg,
             )
             .await
             {
                 static LAG_ERR_PARKED: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
                 if let Some(suppressed) = LAG_ERR_PARKED.tick_now() {
-                    tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_lag_metrics upsert error");
+                    tracing::warn!(target: "metrics", queue = %q_name, error = %e, suppressed, "queue_lag_metrics upsert error");
                 }
             }
             if let Err(e) =
-                db::upsert_queue_parked_replica(&client, &queue, &hostname, 0, parked_avg).await
+                db::upsert_queue_parked_replica(&client, q_tenant, q_name, &hostname, 0, parked_avg).await
             {
                 static PARKED_ERR_ONLY: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
                 if let Some(suppressed) = PARKED_ERR_ONLY.tick_now() {
-                    tracing::warn!(target: "metrics", queue = %queue, error = %e, suppressed, "queue_parked_replica upsert error");
+                    tracing::warn!(target: "metrics", queue = %q_name, error = %e, suppressed, "queue_parked_replica upsert error");
                 }
             }
         }
