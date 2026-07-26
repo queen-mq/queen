@@ -49,17 +49,16 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     if p == "/api/v1/pop" || p == "/api/v1/pop/" {
         return RouteClass::Blocked;
     }
-    // Aggregate endpoints the broker does NOT tenant-scope yet (Track B leftover:
-    // stats/syscollect pipeline and queue_lag/parked tables carry no tenant_id).
-    // Fail closed until they do; the scoped listings (resources/queues,
-    // status/queues*, consumer-groups, dlq, messages) stay open below.
+    // Operator-only system aggregates — not tenant-scopable by nature (host
+    // CPU, PG internals, worker lifetime counters). Everything queue-shaped
+    // (namespaces/tasks/overview, queue-lag/ops/parked, retention, status/
+    // analytics) is tenant-scoped broker-side since Track B2 and falls
+    // through to Read below.
     if p == "/api/v1/status"
-        || p == "/api/v1/status/analytics"
         || p == "/api/v1/status/buffers"
-        || p.starts_with("/api/v1/analytics")
-        || p == "/api/v1/resources/namespaces"
-        || p == "/api/v1/resources/tasks"
-        || p == "/api/v1/resources/overview"
+        || p == "/api/v1/analytics/system-metrics"
+        || p == "/api/v1/analytics/worker-metrics"
+        || p == "/api/v1/analytics/postgres-stats"
     {
         return RouteClass::Blocked;
     }
@@ -169,14 +168,19 @@ mod tests {
         );
         assert_eq!(classify(&Method::GET, "/metrics/prometheus"), RouteClass::Blocked);
         assert_eq!(classify(&Method::POST, "/api/v1/unknown"), RouteClass::Blocked);
-        // unscoped aggregates fail closed until the broker scopes them
+        // operator-only system aggregates stay closed
         assert_eq!(classify(&Method::GET, "/api/v1/status"), RouteClass::Blocked);
-        assert_eq!(classify(&Method::GET, "/api/v1/analytics/queue-lag"), RouteClass::Blocked);
         assert_eq!(
-            classify(&Method::GET, "/api/v1/resources/namespaces"),
+            classify(&Method::GET, "/api/v1/analytics/system-metrics"),
             RouteClass::Blocked
         );
-        // while the scoped listings stay open
+        // tenant-scoped aggregates (Track B2) are open reads
+        assert_eq!(classify(&Method::GET, "/api/v1/analytics/queue-lag"), RouteClass::Read);
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/resources/namespaces"),
+            RouteClass::Read
+        );
+        // and the scoped listings stay open
         assert_eq!(classify(&Method::GET, "/api/v1/status/queues"), RouteClass::Read);
         assert_eq!(
             classify(&Method::GET, "/api/v1/status/queues/orders"),

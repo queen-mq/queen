@@ -86,8 +86,9 @@ AN=$(echo "${LA#*|}" | grep -c '"orders"'); BN=$(echo "${LB#*|}" | grep -c '"ord
 KB=$(req GET dev "$KEY_B" /api/v1/resources/queues)
 check "B key on dev host -> 403" 403 "${KB%%|*}"
 
-# 6. blocked aggregates and discovery pop
-for path in /api/v1/pop /api/v1/analytics/queue-lag /api/v1/resources/namespaces /metrics/prometheus; do
+# 6. blocked operator surfaces and discovery pop (queue-shaped aggregates are
+#    scoped since Track B2 and asserted as 200 in section 8b)
+for path in /api/v1/pop /api/v1/status /api/v1/analytics/postgres-stats /metrics/prometheus; do
   R=$(req GET dev "$KEY_A" "$path")
   check "blocked $path" 404 "${R%%|*}"
 done
@@ -97,6 +98,45 @@ D1=$(req POST dev "$KEY_A" /api/v1/push '{"items":[{"queue":"orders","payload":{
 D2=$(req POST two "$KEY_B" /api/v1/push '{"items":[{"queue":"orders","payload":{"n":1},"transactionId":"ISO-DUP-1"}]}')
 echo "${D1#*|}" | grep -q '"status":"queued"' && echo "${D2#*|}" | grep -q '"status":"queued"' \
   && ok "same transactionId, no cross-tenant dedup" || bad "cross-tenant dedup collision: $D1 / $D2"
+
+# 8b. scoped aggregates (Track B2) through the proxy
+QA=$(req GET dev "$KEY_A" /api/v1/resources/queues)
+echo "${QA#*|}" | grep -q '"retainedBytes"' && ok "retainedBytes present in resources/queues" \
+  || bad "retainedBytes missing: ${QA#*|}"
+for path in /api/v1/analytics/queue-lag /api/v1/resources/overview /api/v1/resources/namespaces; do
+  R=$(req GET dev "$KEY_A" "$path")
+  check "scoped read $path" 200 "${R%%|*}"
+done
+SYS=$(req GET dev "$KEY_A" /api/v1/analytics/system-metrics)
+check "system-metrics stays blocked" 404 "${SYS%%|*}"
+
+# 8c. storage quota e2e: tiny override -> push_blocked -> clear -> unblocked.
+# Cadence: broker stats refresh (~10s) + proxy reconcile (10s in dev cell) +
+# pump (10s) => allow up to ~90s per transition.
+CID=$(docker exec qpx-pg psql -qtA -U postgres -d queen_proxy -c "SELECT id FROM queen_proxy.clusters WHERE slug='dev'")
+docker exec qpx-pg psql -qtA -U postgres -d queen_proxy \
+  -c "SELECT queen_proxy.set_limit_override('$CID'::uuid, '{\"max_retained_bytes\": 64}'::jsonb)" >/dev/null
+say "  ...  waiting for storage quota to trip (override 64 bytes)"
+DEADLINE=$((SECONDS+90)); TRIPPED=no
+while [ $SECONDS -lt $DEADLINE ]; do
+  R=$(req POST dev "$KEY_A" /api/v1/push '{"items":[{"queue":"orders","payload":{"fill":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}]}')
+  if [ "${R%%|*}" = "403" ] && echo "${R#*|}" | grep -q push_blocked; then TRIPPED=yes; break; fi
+  sleep 3
+done
+[ "$TRIPPED" = "yes" ] && ok "storage quota trips push_blocked (403)" || bad "storage quota never tripped"
+PR=$(req GET dev "$KEY_A" '/api/v1/pop/queue/orders?batch=1')
+[ "${PR%%|*}" = "200" ] || [ "${PR%%|*}" = "204" ] && ok "consume still allowed while push_blocked" \
+  || bad "consume blocked too: ${PR%%|*}"
+docker exec qpx-pg psql -qtA -U postgres -d queen_proxy \
+  -c "SELECT queen_proxy.set_limit_override('$CID'::uuid, NULL)" >/dev/null
+say "  ...  waiting for release after clearing the override"
+DEADLINE=$((SECONDS+90)); RELEASED=no
+while [ $SECONDS -lt $DEADLINE ]; do
+  R=$(req POST dev "$KEY_A" /api/v1/push '{"items":[{"queue":"orders","payload":{"ok":1}}]}')
+  if [ "${R%%|*}" = "201" ]; then RELEASED=yes; break; fi
+  sleep 3
+done
+[ "$RELEASED" = "yes" ] && ok "push unblocked after clearing override" || bad "release never happened"
 
 # 8. meters: wait one flush and check usage rows for both clusters
 sleep 20
