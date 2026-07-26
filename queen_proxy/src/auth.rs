@@ -124,6 +124,14 @@ pub async fn authenticate(
         ClusterBinding::Lookup => match st.keys.cluster_role(&st.db, claims.user_id, cluster_id).await {
             Some(role) => role,
             None => {
+                // Distinguish "user exists but has no role here" (a real 403)
+                // from "the session's user no longer exists" — a stale JWT
+                // after user deletion (or a dev pxdb reset): that session is
+                // dead, and 401 lets the SPA bounce to login instead of
+                // leaving a 403 dead-end.
+                if !st.keys.user_exists(&st.db, claims.user_id).await {
+                    return Err(errors::err_401("session no longer valid"));
+                }
                 return Err(errors::err_403(errors::CODE_FORBIDDEN, "no role on this cluster"));
             }
         },
@@ -524,6 +532,30 @@ impl Keys {
     /// (positive memberships only). `db == None` or no row => None (fail-closed:
     /// membership cannot be proven => caller returns 403). UUIDs are bound as
     /// text and cast in SQL to avoid a tokio-postgres uuid feature dependency.
+    /// Does the session's user still exist? Only consulted on the rare
+    /// role-miss path, so deliberately uncached: a deleted user must lose
+    /// access immediately, and dev pxdb resets must not leave stale-but-
+    /// validly-signed sessions stuck on a 403 dead-end. On transient DB
+    /// errors we assume the user exists (prefer the softer 403 over killing
+    /// a possibly-good session).
+    pub async fn user_exists(&self, db: &Option<deadpool_postgres::Pool>, user_id: Uuid) -> bool {
+        let Some(pool) = db.as_ref() else { return false };
+        let Ok(client) = pool.get().await else { return true };
+        match client
+            .query_opt(
+                "SELECT 1 FROM queen_proxy.users WHERE id = $1::text::uuid",
+                &[&user_id.to_string()],
+            )
+            .await
+        {
+            Ok(row) => row.is_some(),
+            Err(e) => {
+                tracing::warn!(target: "auth", err = %e, "user_exists query failed; assuming exists");
+                true
+            }
+        }
+    }
+
     pub async fn cluster_role(
         &self,
         db: &Option<deadpool_postgres::Pool>,
