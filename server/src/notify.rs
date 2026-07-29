@@ -67,9 +67,20 @@ pub struct Notifier {
     /// exactly the two places `gates` is (`gate` create branch, `evict_idle`), so it is
     /// bounded by `gates` and is not a second leak.
     by_queue: Mutex<HashMap<String, std::collections::HashSet<String>>>,
-    /// Woken by every push, for discovery (namespace/task) pops that span queues
-    /// and so have no single gate to park on.
-    any: Arc<Notify>,
+    /// Discovery (namespace/task) pops span queues, so they have no single queue
+    /// gate to park on — but they ARE scoped to one tenant. A single shared gate
+    /// therefore woke EVERY tenant's parked discovery pop on every push: each one
+    /// then takes a Vegas permit and a pooled connection to run a query that is
+    /// tenant-scoped in SQL and returns nothing, so on a shared cell one push cost
+    /// an O(#tenants) wake storm. Keyed by tenant alone, so the cardinality is the
+    /// cell's tenant count (bounded — the value comes from the proxy-set header),
+    /// not its queue count, and an entry is a bare Notify.
+    ///
+    /// RwLock, not Mutex: the wake side runs on every push (`wake_local_hint`),
+    /// where the old shared `Notify` took no lock at all, while the write side
+    /// only fires the first time a tenant parks a discovery pop. A Mutex here
+    /// would put a new global exclusive section on the push path.
+    any: std::sync::RwLock<HashMap<String, Arc<Notify>>>,
     /// QUEEN_TENANCY_HEADER. OFF ⇒ only the default tenant exists, so a tenant-less
     /// peer frame resolves to it with one hash lookup instead of the fan-out.
     tenancy: bool,
@@ -82,7 +93,7 @@ impl Notifier {
         Arc::new(Notifier {
             gates: Mutex::new(HashMap::new()),
             by_queue: Mutex::new(HashMap::new()),
-            any: Arc::new(Notify::new()),
+            any: std::sync::RwLock::new(HashMap::new()),
             tenancy,
             transport: OnceLock::new(),
         })
@@ -196,14 +207,45 @@ impl Notifier {
         tokio::time::timeout(dur, notified).await.is_ok()
     }
 
-    /// Park a discovery (namespace/task) long-poll on the shared gate — woken by any
-    /// push, since these pops span queues and have no single gate. Returns true on a
-    /// push-wake, false on timeout (RUSTFIX item 19).
-    pub async fn wait_any(&self, dur: Duration) -> bool {
-        let notified = self.any.notified();
+    /// Park a discovery (namespace/task) long-poll on its tenant's gate — woken by
+    /// any push of that tenant, since these pops span queues and have no single
+    /// gate. Returns true on a push-wake, false on timeout (RUSTFIX item 19).
+    pub async fn wait_any(&self, tenant: &str, dur: Duration) -> bool {
+        let gate = self.any_gate(tenant);
+        let notified = gate.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         tokio::time::timeout(dur, notified).await.is_ok()
+    }
+
+    /// The parking side: create the tenant's discovery gate if this is its first
+    /// waiter. The wake side never creates one — a tenant with nothing parked has
+    /// nothing to wake.
+    fn any_gate(&self, tenant: &str) -> Arc<Notify> {
+        if let Some(g) = self.any.read().unwrap().get(tenant) {
+            return g.clone();
+        }
+        let mut m = self.any.write().unwrap();
+        m.entry(tenant.to_string())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
+    }
+
+    /// Wake one tenant's parked discovery pops. Shared lock: this is on the push
+    /// path. A tenant with nothing ever parked has no entry and costs one miss.
+    fn wake_any(&self, tenant: &str) {
+        if let Some(g) = self.any.read().unwrap().get(tenant) {
+            g.notify_waiters();
+        }
+    }
+
+    /// Wake every tenant's discovery pops. Only for a peer frame that carries no
+    /// tenant: the queue name alone cannot say whose data arrived, and waking one
+    /// tenant would stall all the others.
+    fn wake_any_all(&self) {
+        for g in self.any.read().unwrap().values() {
+            g.notify_waiters();
+        }
     }
 
     /// Wake locally-parked pops for `queue` (and all discovery pops), recording a
@@ -225,7 +267,12 @@ impl Notifier {
                 gate.notify.notify_waiters();
             }
         }
-        self.any.notify_waiters();
+        // Only the owning tenant's discovery pops: this wake says "THIS tenant's
+        // queue got data", and every other tenant's discovery query is scoped away
+        // from it in SQL, so waking them buys nothing and costs a permit each.
+        if !qkey.is_empty() {
+            self.wake_any(crate::handlers::split_tenant_queue(qkey).0);
+        }
     }
 
     /// The receive path for a peer frame that carries NO tenant (a pre-Track-B build,
@@ -250,14 +297,17 @@ impl Notifier {
         let keys: Vec<String> = match self.by_queue.lock().unwrap().get(queue) {
             Some(set) => set.iter().cloned().collect(),
             None => {
-                self.any.notify_waiters();
+                // Nobody is parked on that name, but a discovery pop parks on no
+                // queue at all — and a tenant-less frame cannot say whose data
+                // arrived, so every tenant's discovery gate has to be woken.
+                self.wake_any_all();
                 return;
             }
         };
         for k in keys {
             self.wake_local_hint(&k, partition);
         }
-        self.any.notify_waiters();
+        self.wake_any_all();
     }
 
     /// Drain up to `max` distinct partition hints for `qkey` (FIFO, deduped),
@@ -550,5 +600,49 @@ mod tests {
         n.evict_idle();
         assert_eq!(n.evict_idle(), 2);
         assert!(n.by_queue.lock().unwrap().is_empty(), "the emptied name-set is removed");
+    }
+
+    // A discovery pop parks on no queue at all, so before the per-tenant gate every
+    // push on the cell woke every tenant's parked discovery pop — each then burning
+    // a Vegas permit and a pooled connection on a query scoped away from that data.
+    // Fails on a single shared `any` gate: B wakes on A's push.
+    #[tokio::test]
+    async fn a_discovery_pop_is_not_woken_by_another_tenants_push() {
+        let n = Notifier::new(true);
+        n.gate(&k(TA, "orders")); // A has a parked queue pop, so the wake finds a gate
+        let n2 = n.clone();
+        let waiter =
+            tokio::spawn(async move { n2.wait_any(TB, Duration::from_millis(300)).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        n.wake_local_hint(&k(TA, "orders"), "p1");
+        assert!(
+            !waiter.await.unwrap(),
+            "tenant B's discovery pop must sleep through tenant A's push"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_discovery_pop_is_woken_by_its_own_tenants_push() {
+        let n = Notifier::new(true);
+        n.gate(&k(TB, "orders"));
+        let n2 = n.clone();
+        let waiter =
+            tokio::spawn(async move { n2.wait_any(TB, Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        n.wake_local_hint(&k(TB, "orders"), "p1");
+        assert!(waiter.await.unwrap(), "its own tenant's push must wake it");
+    }
+
+    // A pre-Track-B peer's frame names a queue but no tenant, so it cannot say whose
+    // data arrived: waking one tenant would stall every other one holding the name.
+    #[tokio::test]
+    async fn a_tenantless_frame_wakes_every_tenants_discovery_gate() {
+        let n = Notifier::new(true);
+        let (na, nb) = (n.clone(), n.clone());
+        let wa = tokio::spawn(async move { na.wait_any(TA, Duration::from_secs(5)).await });
+        let wb = tokio::spawn(async move { nb.wait_any(TB, Duration::from_secs(5)).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        n.wake_local_hint_all_tenants("orders", "p1");
+        assert!(wa.await.unwrap() && wb.await.unwrap(), "both tenants must wake");
     }
 }

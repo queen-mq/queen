@@ -186,6 +186,32 @@ flag-sensitive. The count gate is sensitive enough to catch it, which is the
 point — but re-run before calling a one-test delta a tenancy regression, and
 note the direction (a flag-OFF-only failure cannot be caused by the flag).
 
+### Update, later the same day: the streams bucket is the noise floor
+
+Once `queen.streams_register_query_v1` was fixed (it named `tenant_id` in an
+`ON CONFLICT` against a table that has no such column, so every register had
+failed since Track B landed) the `js` suite went `120/147` → `147/147` on both
+lanes. What is left is **flaky, and it is all in the streams window tests**.
+Three consecutive parity pairs:
+
+| run | `single` | `tenanted` | parity verdict |
+|-----|----------|------------|----------------|
+| 1 | 146/147 (`testLoadConsumerGroup`) | 146/147 (same test) | OK |
+| 2 | 145/147 (`slidingEventsAppearInOverlappingWindows`, `tumblingBasicWindowSum`) | — | — |
+| 3 | **147/147** | 146/147 (`tumblingBasicWindowSum`, sum 36 vs 37) | **FAILED** |
+
+The failing set moves between runs *and* between lanes, and the arithmetic is a
+window **over-emit** (`expected 36, got 37`) — the same class as the
+cross-language sliding-window finding recorded in the 2026-07-23 baseline below.
+So run 3's `TENANCY PARITY: FAILED` is the gate working correctly and reporting
+a divergence that tenancy did not cause.
+
+Practical consequence: **the parity gate is only as stable as the suite it
+compares.** Until the streams window failures are fixed, a one-test delta in the
+streams bucket is noise — re-run it, check whether the failing test is a
+windowing assertion, and only treat it as a tenancy regression if the same test
+fails on the flag-ON lane repeatedly while passing on flag-OFF.
+
 ## Baseline on branch `rustserverandstorage` (2026-07-23)
 
 First full run against the current working tree. The harness itself is green —

@@ -338,9 +338,14 @@ pub fn spawn_reporter(h: ReporterHandles) {
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let total_hot = ranked.len();
             for (q, _act, push_s, pop_s, ack_s, lag_ms) in ranked.into_iter().take(h.top_n) {
+                // The counters are keyed by the (tenant, queue) composite, whose
+                // separator is invisible — logging it raw renders as the tenant uuid
+                // glued to the queue name.
+                let (tenant, queue) = crate::handlers::split_tenant_queue(&q);
                 tracing::info!(
                     target: "rates",
-                    queue = %q,
+                    tenant = %tenant,
+                    queue = %queue,
                     push_s = format!("{:.0}", push_s),
                     pop_s = format!("{:.0}", pop_s),
                     ack_s = format!("{:.0}", ack_s),

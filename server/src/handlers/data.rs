@@ -1544,14 +1544,16 @@ pub async fn handle_pop_discover(
         let (body, count, meta) =
             build_pop_response(&txt, None, "", &group, lease_id, &st.encryption);
         if count == 0 && wait && Instant::now() < deadline {
-            // Discovery pops span queues -> shared gate, woken by any push.
+            // Discovery pops span queues -> this tenant's discovery gate, woken by
+            // any push of ITS OWN (another tenant's push cannot satisfy this query,
+            // which is tenant-scoped in SQL).
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
             backoff_count += 1;
             let interval = st.pop_backoff_interval(backoff_count);
             let waitd = deadline
                 .saturating_duration_since(Instant::now())
                 .min(interval);
-            if st.notifier.wait_any(waitd).await {
+            if st.notifier.wait_any(tenant.as_str(), waitd).await {
                 backoff_count = 0;
             }
             continue;
