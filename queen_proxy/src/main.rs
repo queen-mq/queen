@@ -34,9 +34,86 @@ use crate::state::{AppState, St};
 /// equivalent from `axum::serve`'s own graceful shutdown.
 const TLS_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-#[tokio::main]
-async fn main() {
+/// Tokio worker-thread count. `#[tokio::main]` defaults to the HOST core count,
+/// but a shared free cell runs the proxy inside a CPU-capped cgroup (e.g. 2
+/// cores of an 8-core box): spawning 8 workers onto 2 cores oversubscribes them
+/// 4×, and the scheduler contention showed up as a very low IPC (0.41) and a
+/// scheduler-heavy profile on the bench VM. Size the pool to the cell's actual
+/// CPU budget: the cgroup-v2 `cpu.max` quota if one is set, an explicit
+/// `QUEEN_PROXY_WORKER_THREADS` override if given, else the host core count (the
+/// old behaviour, correct for an uncapped/dedicated cell).
+fn chosen_worker_threads() -> usize {
+    let env = std::env::var("QUEEN_PROXY_WORKER_THREADS").ok();
+    let cpu_max = std::fs::read_to_string("/sys/fs/cgroup/cpu.max").ok();
+    let hostn = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    resolve_worker_threads(env.as_deref(), cpu_max.as_deref(), hostn)
+}
+
+/// Pure worker-count policy (testable): explicit env override wins; else the
+/// cgroup-v2 `cpu.max` quota ("<quota> <period>" µs, or "max <period>") rounded
+/// up and clamped to [1, host]; else the host core count.
+fn resolve_worker_threads(env: Option<&str>, cpu_max: Option<&str>, host: usize) -> usize {
+    if let Some(v) = env {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            if n >= 1 {
+                return n;
+            }
+        }
+    }
+    if let Some(s) = cpu_max {
+        let mut it = s.split_whitespace();
+        if let (Some(q), Some(p)) = (it.next(), it.next()) {
+            if q != "max" {
+                if let (Ok(q), Ok(p)) = (q.parse::<u64>(), p.parse::<u64>()) {
+                    if p > 0 {
+                        return (((q + p - 1) / p) as usize).clamp(1, host.max(1));
+                    }
+                }
+            }
+        }
+    }
+    host.max(1)
+}
+
+#[cfg(test)]
+mod worker_thread_tests {
+    use super::resolve_worker_threads;
+    #[test]
+    fn env_override_wins() {
+        assert_eq!(resolve_worker_threads(Some("3"), Some("200000 100000"), 8), 3);
+        assert_eq!(resolve_worker_threads(Some(" 1 "), None, 8), 1);
+        // junk / zero env falls through to the next source
+        assert_eq!(resolve_worker_threads(Some("0"), Some("200000 100000"), 8), 2);
+        assert_eq!(resolve_worker_threads(Some("x"), None, 8), 8);
+    }
+    #[test]
+    fn cgroup_quota_rounds_up_and_clamps() {
+        assert_eq!(resolve_worker_threads(None, Some("200000 100000"), 8), 2); // 2 cores
+        assert_eq!(resolve_worker_threads(None, Some("250000 100000"), 8), 3); // 2.5 -> 3
+        assert_eq!(resolve_worker_threads(None, Some("50000 100000"), 8), 1); // 0.5 -> 1
+        assert_eq!(resolve_worker_threads(None, Some("max 100000"), 8), 8); // uncapped -> host
+        assert_eq!(resolve_worker_threads(None, Some("1600000 100000"), 8), 8); // clamp to host
+    }
+    #[test]
+    fn no_signal_uses_host() {
+        assert_eq!(resolve_worker_threads(None, None, 4), 4);
+        assert_eq!(resolve_worker_threads(None, None, 0), 1);
+    }
+}
+
+fn main() {
+    let workers = chosen_worker_threads();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    rt.block_on(async_main(workers));
+}
+
+async fn async_main(worker_threads: usize) {
     obs::init();
+    tracing::info!(worker_threads, "queen-proxy starting");
     let cfg = config::Config::load();
 
     let db = match &cfg.pxdb {
@@ -65,10 +142,20 @@ async fn main() {
         }
     };
 
+    // Upstream connector to the cell broker. TCP_NODELAY on: the proxy relays
+    // small request/response bodies (a push item, a pop batch) and Nagle would
+    // otherwise sit on them for up to ~40ms waiting to coalesce, adding tail
+    // latency for zero benefit on a keep-alive, one-request-in-flight pool.
+    let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
+    connector.set_nodelay(true);
     let upstream = hyper_util::client::legacy::Client::builder(
         hyper_util::rt::TokioExecutor::new(),
     )
-    .build_http::<axum::body::Body>();
+    // Cap idle connections retained per host: the pool is reused across requests
+    // (verified ~0 new-connections/s under load), so a modest ceiling keeps the
+    // idle set bounded without churning live traffic.
+    .pool_max_idle_per_host(64)
+    .build::<_, axum::body::Body>(connector);
 
     let cache = cache::ClusterCache::new(&cfg, db.clone());
     let limits = limits::Limits::new(&cfg);
