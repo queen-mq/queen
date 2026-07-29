@@ -107,9 +107,23 @@ pub struct AppState {
     // pid-ownership gate is skipped (vacuously true — no non-default queues exist),
     // so the OSS path is byte-identical. On ⇒ pid-addressed ops verify ownership.
     pub tenancy_enabled: bool,
+    // Track B (§5): CONFIRMED-ownership cache for the pid→tenant gate. Keyed
+    // "pid\x1ftenant", it holds ONLY positives written by `tenant_owns_partition`
+    // after the authoritative DB check returned true — never by pop traffic, so
+    // (unlike `partition_queue`) it cannot be poisoned into granting ownership. A
+    // partition's tenant is immutable (UUIDs are never reused; a deleted
+    // partition's ack simply no-ops in SQL), so a positive is valid forever. This
+    // removes the per-ack read-only ownership round trip the bench measured at
+    // ~0.784 commits/delivered-msg (~23% of transactions) on the cloud path,
+    // after the first ack of each partition. NEGATIVES are never cached: a forged
+    // or foreign pid re-checks every time, so an attacker cannot grow the map,
+    // and legitimate acks (pids from a real pop) are always positive.
+    pub ownership_ok: Mutex<HashSet<String>>,
 }
 
 const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
+// Cap on the confirmed-ownership positive cache (see `ownership_ok`).
+const OWNERSHIP_CACHE_CAP: usize = 500_000;
 
 // RUSTFIX item 18: fallback lease when a queue has no seg_queues row / DB is
 // unreachable — the "60" floor of COALESCE(request, queue.lease_time, 60).
@@ -275,6 +289,25 @@ impl AppState {
     // pool/DB error is treated as NOT owned (deny-by-default — a transient DB
     // failure must never open a cross-tenant hole). Never consults the pid→queue
     // memo: ownership must not trust a cache that pop traffic can populate.
+    // Cache-only ownership probe (no DB, no pooled connection): lets the hot ack
+    // path skip acquiring a connection entirely on a confirmed-ownership hit.
+    // A miss returns false and the caller falls back to the authoritative
+    // `tenant_owns_partition` (which acquires a connection and populates the
+    // cache). Vacuously true when tenancy is off.
+    #[inline]
+    pub(crate) fn tenant_owns_partition_cached(&self, partition_id: &str, tenant: &str) -> bool {
+        if !self.tenancy_enabled {
+            return true;
+        }
+        if partition_id.is_empty() {
+            return false;
+        }
+        self.ownership_ok
+            .lock()
+            .unwrap()
+            .contains(&tenant_queue_key(tenant, partition_id))
+    }
+
     pub(crate) async fn tenant_owns_partition(
         &self,
         client: &deadpool_postgres::Client,
@@ -287,9 +320,27 @@ impl AppState {
         if partition_id.is_empty() {
             return false;
         }
-        db::partition_belongs_to_tenant(client, partition_id, tenant)
+        // Confirmed-ownership cache (positives only): a hit skips the DB round
+        // trip entirely. The key is the same "\x1f" composite used elsewhere.
+        let key = tenant_queue_key(tenant, partition_id);
+        if self.ownership_ok.lock().unwrap().contains(&key) {
+            return true;
+        }
+        let owned = db::partition_belongs_to_tenant(client, partition_id, tenant)
             .await
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if owned {
+            let mut c = self.ownership_ok.lock().unwrap();
+            // Bounded (positives are capped by real partitions × tenants, itself
+            // plan-capped, but guard against pathological growth). On overflow
+            // clear and let it re-warm — correctness is unaffected, ownership is
+            // re-derived from the DB.
+            if c.len() >= OWNERSHIP_CACHE_CAP {
+                c.clear();
+            }
+            c.insert(key);
+        }
+        owned
     }
 
     // RUSTFIX item 19: the next long-poll re-query interval for a given consecutive

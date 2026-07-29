@@ -2211,9 +2211,18 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
         // rejected (every item in the group fails, cursor untouched). Vacuous +
         // zero-cost when tenancy is off (no pool.get, byte-identical OSS path).
         if st.tenancy_enabled {
-            let owned = match st.pool.get().await {
-                Ok(c) => st.tenant_owns_partition(&c, &pid, tenant).await,
-                Err(_) => false, // deny-by-default: never open a hole on a pool error
+            // Confirmed-ownership cache hit ⇒ no pooled connection, no query (the
+            // common case: a consumer acks the same partitions repeatedly). Only a
+            // miss (first ack of a partition, or a forged/foreign pid) pays the DB
+            // round trip — which was ~0.784 commits per delivered message before
+            // this cache, ~23% of the cloud path's transactions.
+            let owned = if st.tenant_owns_partition_cached(&pid, tenant) {
+                true
+            } else {
+                match st.pool.get().await {
+                    Ok(c) => st.tenant_owns_partition(&c, &pid, tenant).await,
+                    Err(_) => false, // deny-by-default: never open a hole on a pool error
+                }
             };
             if !owned {
                 for &i in &idxs {

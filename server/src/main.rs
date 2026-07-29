@@ -310,6 +310,7 @@ async fn main() {
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         tenancy_enabled: cfg.tenancy_header,
+        ownership_ok: std::sync::Mutex::new(std::collections::HashSet::new()),
     });
 
     // LOGGING_PLAN.md Phase 1: periodic `rates` + `sizes` aggregate blocks —
