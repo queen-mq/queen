@@ -66,6 +66,8 @@ pub fn migrations() -> Vec<(&'static str, &'static str)> {
         ("001_init", include_str!("../migrations/001_init.sql")),
         ("002_functions", include_str!("../migrations/002_functions.sql")),
         ("003_limit_override", include_str!("../migrations/003_limit_override.sql")),
+        ("004_lifecycle", include_str!("../migrations/004_lifecycle.sql")),
+        ("005_usage_prune", include_str!("../migrations/005_usage_prune.sql")),
     ]
 }
 

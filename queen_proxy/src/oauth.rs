@@ -181,7 +181,17 @@ async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &s
     redirect(StatusCode::SEE_OTHER, next, Some(&cookie))
 }
 
+/// Log out: deny-list the presented session, then clear the cookie.
+///
+/// Revocation is what actually ends the session. Clearing the cookie only stops
+/// *this browser* from sending a token that stays valid for the rest of its TTL
+/// (`jwt_ttl_s`, a day by default) — anything that copied it keeps working.
+///
+/// Scope: only the cookie's own jti is deny-listed. The short bearers handed to
+/// the SPA by `/auth/session-token` carry their own jti and are not tracked, so
+/// they run out their `SESSION_TOKEN_TTL_S` (15 min).
 async fn logout(State(st): State<St>, headers: HeaderMap) -> Response {
+    revoke_presented_session(&st, &headers).await;
     let cookie = clear_cookie(&st, &headers);
     let mut resp = json_response(StatusCode::OK, json!({ "ok": true }));
     if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -190,19 +200,62 @@ async fn logout(State(st): State<St>, headers: HeaderMap) -> Response {
     resp
 }
 
+/// Best-effort `queen_proxy.revoke_session(jti, exp, 'user', sub)` for whatever
+/// session the request presents. Every miss is silent by design — no cookie, a
+/// malformed or already-expired one, no pxdb: there is nothing left to revoke
+/// and the logout still has to succeed (a logout that 500s leaves the user
+/// looking logged in). A failed DB call is warned, not surfaced: the cookie is
+/// cleared either way.
+async fn revoke_presented_session(st: &St, headers: &HeaderMap) {
+    let Some(tok) = read_cookie(headers, &st.cfg.cookie_name) else { return };
+    let Ok(claims) = st.keys.verify_jwt_claims(&tok) else { return };
+    let Some(pool) = st.db.as_ref() else { return };
+    let Ok(client) = pool.get().await else {
+        tracing::warn!(target: "oauth", "pxdb unavailable; session cookie cleared but token stays valid until exp");
+        return;
+    };
+    // revoke_session(p_jti TEXT, p_expires_at TIMESTAMPTZ, p_actor TEXT,
+    // p_actor_id UUID) — exp is the token's own, so the sweep can drop the row
+    // once it expires. `$3::text::uuid` for the same reason as record_op above.
+    match client
+        .execute(
+            "SELECT queen_proxy.revoke_session($1, to_timestamp($2), 'user', $3::text::uuid)",
+            &[&claims.jti, &(claims.exp as f64), &claims.user_id.to_string()],
+        )
+        .await
+    {
+        Ok(_) => {
+            st.keys.note_revoked(&claims.jti);
+            tracing::info!(target: "oauth", user_id = %claims.user_id, "session revoked on logout");
+        }
+        Err(e) => {
+            tracing::warn!(target: "oauth", err = %e, "revoke_session failed; cookie cleared but token stays valid until exp");
+        }
+    }
+}
+
 async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
     let Some(tok) = read_cookie(&headers, &st.cfg.cookie_name) else {
         return errors::err_401("no session");
     };
     match st.keys.verify_jwt_claims(&tok) {
-        Ok(c) => json_response(
-            StatusCode::OK,
-            json!({
-                "user_id": c.user_id.to_string(),
-                "role": role_str(c.role),
-                "cluster": c.cluster.map(|u| u.to_string()),
-            }),
-        ),
+        Ok(c) => {
+            // A signature-valid session is not necessarily a live one: logout
+            // deny-lists the jti, so the deny-list has to be consulted here too
+            // or a copied cookie keeps reporting a healthy session after its
+            // owner signed out.
+            if st.keys.is_revoked(&st.db, &c.jti).await {
+                return errors::err_401("invalid session");
+            }
+            json_response(
+                StatusCode::OK,
+                json!({
+                    "user_id": c.user_id.to_string(),
+                    "role": role_str(c.role),
+                    "cluster": c.cluster.map(|u| u.to_string()),
+                }),
+            )
+        }
         Err(_) => errors::err_401("invalid session"),
     }
 }
@@ -215,6 +268,12 @@ async fn session_token(State(st): State<St>, headers: HeaderMap) -> Response {
         Ok(c) => c,
         Err(_) => return errors::err_401("invalid session"),
     };
+    // Minting from a revoked session would hand out a NEW jti that the
+    // deny-list has never seen — a logout could then be outlived by a bearer
+    // derived from the dead cookie. The check has to happen before the mint.
+    if st.keys.is_revoked(&st.db, &claims.jti).await {
+        return errors::err_401("invalid session");
+    }
     match st
         .keys
         .mint_user_jwt(claims.user_id, SESSION_ROLE, claims.cluster, SESSION_TOKEN_TTL_S)

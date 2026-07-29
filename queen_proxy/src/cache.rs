@@ -32,6 +32,74 @@ const LISTENER_MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// backoff-reset purposes -- see `listen_forever`.
 const LISTENER_HEALTHY_SESSION_MIN: Duration = Duration::from_secs(10);
 
+/// Sampling interval for the stale-serve warning -- one line per window while
+/// pxdb is down, not one per request (every request takes that path during an
+/// outage). Same shape as gateway.rs::maint_log_due.
+const STALE_LOG_INTERVAL: Duration = Duration::from_secs(10);
+static STALE_LOG_NEXT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// Is a stale-serve line due? Non-blocking try_lock so a concurrent resolver
+/// skips its line rather than waiting on the request path.
+fn stale_log_due(now: Instant) -> bool {
+    let Ok(mut next) = STALE_LOG_NEXT.try_lock() else { return false };
+    match *next {
+        Some(at) if now < at => false,
+        _ => {
+            *next = Some(now + STALE_LOG_INTERVAL);
+            true
+        }
+    }
+}
+
+/// What one pxdb lookup told us. `Absent` (the query ran and matched no row)
+/// and `Unavailable` (pxdb never produced an answer) are deliberately
+/// distinct: the fail-open below is only sound as long as "the DB said no"
+/// can never be confused with "the DB did not answer".
+enum Lookup<T> {
+    Found(T),
+    Absent,
+    Unavailable,
+}
+
+/// Why the fresh-cache fast path was missed, as far as the fail-open rule
+/// cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Miss {
+    /// pxdb ran the query and matched nothing: the row genuinely isn't there.
+    NoSuchRow,
+    /// pxdb never answered -- pool checkout, query, or row decode failed.
+    NoAnswer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fallback {
+    /// Serve the expired entry: last known-good, still inside the grace
+    /// window, and pxdb couldn't contradict it.
+    ServeStale,
+    /// pxdb answered "no such row" -- deny, and forget any expired entry so a
+    /// later outage can't resurrect a deleted cluster/revoked key through the
+    /// grace window.
+    FailClosed,
+    /// Nothing safe to serve (no cached entry, or its grace window is gone).
+    Deny,
+}
+
+/// The PLAN §2 degradation rule, kept free of I/O so it can be tested:
+/// fail-open for known good, fail-closed for unknowns and for anything pxdb
+/// positively denied.
+fn fallback(miss: Miss, stale_expires_at: Option<Instant>, now: Instant, grace: Duration) -> Fallback {
+    if miss == Miss::NoSuchRow {
+        return Fallback::FailClosed;
+    }
+    // checked_add: an absurd QUEEN_PROXY_STALE_GRACE_MS overflows the Instant,
+    // and a config typo must neither panic on the request path nor silently
+    // become an unbounded fail-open.
+    match stale_expires_at.and_then(|expires_at| expires_at.checked_add(grace)) {
+        Some(deadline) if now <= deadline => Fallback::ServeStale,
+        _ => Fallback::Deny,
+    }
+}
+
 struct HostEntry {
     ctx: Arc<ClusterCtx>,
     expires_at: Instant,
@@ -61,6 +129,9 @@ pub struct ClusterCache {
     /// LISTEN/NOTIFY docs -- a dedicated `Connection` object, polled by
     /// hand, is the documented pattern).
     pxdb_cfg: Option<PxdbConfig>,
+    /// How far past its TTL an entry may still be served when pxdb fails to
+    /// answer (config::stale_grace).
+    stale_grace: Duration,
     host_cache: Arc<HostMap>,
     key_cache: Arc<KeyMap>,
 }
@@ -84,6 +155,7 @@ impl ClusterCache {
             default_cluster: cfg.default_cluster.clone(),
             db,
             pxdb_cfg: cfg.pxdb.clone(),
+            stale_grace: crate::config::stale_grace(),
             host_cache: Arc::new(RwLock::new(HashMap::new())),
             key_cache: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -109,109 +181,110 @@ impl ClusterCache {
     async fn resolve_slug(&self, slug: String) -> Option<Arc<ClusterCtx>> {
         let pool = self.db.as_ref()?;
 
-        {
+        // An expired entry is kept in hand, not dropped: should pxdb turn out
+        // to be unreachable it is the last known-good answer for this slug,
+        // and PLAN §2 wants that served rather than letting a control-plane
+        // outage 421 every cluster in the cell.
+        let stale = {
             let cache = self.host_cache.read().unwrap();
-            if let Some(entry) = cache.get(&slug) {
-                if entry.expires_at > Instant::now() {
-                    return Some(entry.ctx.clone());
+            match cache.get(&slug) {
+                Some(entry) if entry.expires_at > Instant::now() => return Some(entry.ctx.clone()),
+                Some(entry) => Some((entry.ctx.clone(), entry.expires_at)),
+                None => None,
+            }
+        };
+
+        let miss = match lookup_host(pool, &slug).await {
+            Lookup::Found(ctx) => {
+                let mut cache = self.host_cache.write().unwrap();
+                cache.insert(slug, HostEntry { ctx: ctx.clone(), expires_at: Instant::now() + HOST_TTL });
+                drop(cache);
+                return Some(ctx);
+            }
+            Lookup::Absent => Miss::NoSuchRow,
+            Lookup::Unavailable => Miss::NoAnswer,
+        };
+
+        match fallback(miss, stale.as_ref().map(|(_, at)| *at), Instant::now(), self.stale_grace) {
+            Fallback::ServeStale => stale.map(|(ctx, _)| {
+                if stale_log_due(Instant::now()) {
+                    tracing::warn!(
+                        slug = %slug, grace_s = self.stale_grace.as_secs(),
+                        "pxdb unreachable: serving cluster from expired cache (fail-open, PLAN §2)"
+                    );
                 }
+                ctx
+            }),
+            Fallback::FailClosed => {
+                // Only when there is something to forget: a flood of garbage
+                // Host headers (the common 421 case) must not take the write
+                // lock, and never inserted an entry to begin with.
+                if stale.is_some() {
+                    self.host_cache.write().unwrap().remove(&slug);
+                }
+                None
             }
+            Fallback::Deny => None,
         }
-
-        let client = match pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "resolve_host: pxdb pool.get failed");
-                return None;
-            }
-        };
-        let row_opt = match client.query_opt(RESOLVE_HOST_SQL, &[&slug]).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, slug = %slug, "resolve_host: query failed");
-                return None;
-            }
-        };
-        let row = row_opt?;
-        let ctx = match ctx_from_row(&row) {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                tracing::error!(error = %e, slug = %slug, "resolve_host: malformed row");
-                return None;
-            }
-        };
-
-        let mut cache = self.host_cache.write().unwrap();
-        cache.insert(slug, HostEntry { ctx: ctx.clone(), expires_at: Instant::now() + HOST_TTL });
-        drop(cache);
-
-        Some(ctx)
     }
 
     /// Look up an API key by sha256 hash (hex). Returns the cluster and scopes.
     pub async fn by_key_hash(&self, hash_hex: &str) -> Option<(Arc<ClusterCtx>, Uuid, Scopes)> {
         let pool = self.db.as_ref()?;
 
-        {
+        // Same fail-open rule as resolve_slug, and needed for it to be worth
+        // anything: a cluster resolved from a stale host entry is still 401
+        // for every API-key request if the key lookup can't degrade too.
+        let stale = {
             let cache = self.key_cache.read().unwrap();
-            if let Some(entry) = cache.get(hash_hex) {
-                if entry.expires_at > Instant::now() {
-                    return entry.value.clone();
+            match cache.get(hash_hex) {
+                Some(entry) if entry.expires_at > Instant::now() => return entry.value.clone(),
+                Some(entry) => Some(entry.clone()),
+                None => None,
+            }
+        };
+
+        let miss = match lookup_key(pool, hash_hex).await {
+            Lookup::Found(result) => {
+                let mut cache = self.key_cache.write().unwrap();
+                cache.insert(
+                    hash_hex.to_string(),
+                    KeyEntry { value: Some(result.clone()), expires_at: Instant::now() + KEY_POSITIVE_TTL },
+                );
+                drop(cache);
+                return Some(result);
+            }
+            Lookup::Absent => Miss::NoSuchRow,
+            Lookup::Unavailable => Miss::NoAnswer,
+        };
+
+        match fallback(miss, stale.as_ref().map(|e| e.expires_at), Instant::now(), self.stale_grace) {
+            Fallback::ServeStale => {
+                let served = stale.and_then(|e| e.value);
+                // Only a positive entry is a fail-open worth reporting; a
+                // stale negative just keeps denying.
+                if served.is_some() && stale_log_due(Instant::now()) {
+                    tracing::warn!(
+                        grace_s = self.stale_grace.as_secs(),
+                        "pxdb unreachable: serving api key from expired cache (fail-open, PLAN §2)"
+                    );
                 }
+                served
             }
+            Fallback::FailClosed => {
+                // pxdb answered: this hash is unknown or revoked. The negative
+                // entry both denies and replaces any expired positive, so the
+                // grace window can never resurrect a revoked key.
+                let mut cache = self.key_cache.write().unwrap();
+                cache.insert(
+                    hash_hex.to_string(),
+                    KeyEntry { value: None, expires_at: Instant::now() + KEY_NEGATIVE_TTL },
+                );
+                drop(cache);
+                None
+            }
+            Fallback::Deny => None,
         }
-
-        let client = match pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "by_key_hash: pxdb pool.get failed");
-                return None;
-            }
-        };
-        let row_opt = match client.query_opt(BY_KEY_HASH_SQL, &[&hash_hex]).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "by_key_hash: query failed");
-                return None;
-            }
-        };
-
-        let result = match row_opt {
-            None => None,
-            Some(row) => match build_key_result(&row) {
-                Ok(r) => Some(r),
-                Err(e) => {
-                    tracing::error!(error = %e, "by_key_hash: malformed row");
-                    None
-                }
-            },
-        };
-
-        if let Some((_, key_id, _)) = &result {
-            // Best-effort last_used_at bump -- never fail the auth call over
-            // it. Only runs on a cache MISS (once per positive-TTL window
-            // per key), not per request.
-            let key_id_str = key_id.to_string();
-            if let Err(e) = client
-                .execute(
-                    "UPDATE queen_proxy.api_keys SET last_used_at = now() WHERE id = $1::text::uuid",
-                    &[&key_id_str],
-                )
-                .await
-            {
-                tracing::debug!(error = %e, "by_key_hash: last_used_at update failed (non-fatal)");
-            }
-        }
-
-        let ttl = if result.is_some() { KEY_POSITIVE_TTL } else { KEY_NEGATIVE_TTL };
-        let mut cache = self.key_cache.write().unwrap();
-        cache.insert(
-            hash_hex.to_string(),
-            KeyEntry { value: result.clone(), expires_at: Instant::now() + ttl },
-        );
-        drop(cache);
-
-        result
     }
 
     /// Invalidate a cluster (NOTIFY payload or admin action).
@@ -219,13 +292,13 @@ impl ClusterCache {
         invalidate_caches(&self.host_cache, &self.key_cache, cluster_id);
     }
 
-    /// Spawn the LISTEN task. No-op in dev-static mode (matches the doc
-    /// comment on the skeleton) and also when there's simply no pxdb
+    /// Spawn the LISTEN task. Called from main.rs at startup, next to
+    /// `registry.spawn_reconciler()`. No-op in dev-static mode (matches the
+    /// doc comment on the skeleton) and also when there's simply no pxdb
     /// configured. Note this takes `&self`, not `self: &Arc<Self>` -- the
     /// skeleton declared the latter, but `AppState` stores `cache` as a
     /// plain field (not `Arc<ClusterCache>`), so nothing could ever have
-    /// called it that way. See the report for the main.rs wiring this
-    /// still needs (nothing calls spawn_listener/spawn_reconciler today).
+    /// called it that way.
     pub fn spawn_listener(&self) {
         let Some(pxcfg) = self.pxdb_cfg.clone() else {
             tracing::info!("queen_proxy_inval listener: no pxdb configured, skipping (dev-static mode)");
@@ -237,6 +310,81 @@ impl ClusterCache {
             listen_forever(pxcfg, host_cache, key_cache).await;
         });
     }
+}
+
+// --------------------------------------------------------- pxdb lookups
+//
+// Both return `Unavailable` for a malformed row on purpose: the row EXISTS,
+// so pxdb has not said "no such cluster/key" -- we merely failed to decode
+// its answer (schema drift, a column that went NULL). Classifying that as
+// `Absent` would let one bad row deny a live cluster.
+
+async fn lookup_host(pool: &deadpool_postgres::Pool, slug: &str) -> Lookup<Arc<ClusterCtx>> {
+    let client = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "resolve_host: pxdb pool.get failed");
+            return Lookup::Unavailable;
+        }
+    };
+    let row_opt = match client.query_opt(RESOLVE_HOST_SQL, &[&slug]).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, slug = %slug, "resolve_host: query failed");
+            return Lookup::Unavailable;
+        }
+    };
+    let Some(row) = row_opt else { return Lookup::Absent };
+    match ctx_from_row(&row) {
+        Ok(c) => Lookup::Found(Arc::new(c)),
+        Err(e) => {
+            tracing::error!(error = %e, slug = %slug, "resolve_host: malformed row");
+            Lookup::Unavailable
+        }
+    }
+}
+
+async fn lookup_key(
+    pool: &deadpool_postgres::Pool,
+    hash_hex: &str,
+) -> Lookup<(Arc<ClusterCtx>, Uuid, Scopes)> {
+    let client = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "by_key_hash: pxdb pool.get failed");
+            return Lookup::Unavailable;
+        }
+    };
+    let row_opt = match client.query_opt(BY_KEY_HASH_SQL, &[&hash_hex]).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "by_key_hash: query failed");
+            return Lookup::Unavailable;
+        }
+    };
+    let Some(row) = row_opt else { return Lookup::Absent };
+    let result = match build_key_result(&row) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "by_key_hash: malformed row");
+            return Lookup::Unavailable;
+        }
+    };
+
+    // Best-effort last_used_at bump -- never fail the auth call over it. Only
+    // runs on a cache MISS (once per positive-TTL window per key), not per
+    // request.
+    let key_id_str = result.1.to_string();
+    if let Err(e) = client
+        .execute(
+            "UPDATE queen_proxy.api_keys SET last_used_at = now() WHERE id = $1::text::uuid",
+            &[&key_id_str],
+        )
+        .await
+    {
+        tracing::debug!(error = %e, "by_key_hash: last_used_at update failed (non-fatal)");
+    }
+    Lookup::Found(result)
 }
 
 fn invalidate_caches(host_cache: &HostMap, key_cache: &KeyMap, cluster_id: Uuid) {
@@ -291,32 +439,56 @@ async fn listen_once(pxcfg: &PxdbConfig, host_cache: &Arc<HostMap>, key_cache: &
 
     if pxcfg.use_ssl {
         let connector = crate::pgtls::make_connector(pxcfg.ssl_reject_unauthorized);
-        let (client, mut connection) = pg.connect(connector).await.map_err(|e| format!("connect: {e}"))?;
-        client.batch_execute(&listen_stmt).await.map_err(|e| format!("LISTEN: {e}"))?;
-        tracing::info!(channel = INVAL_CHANNEL, tls = true, "queen_proxy_inval listener connected");
-        loop {
-            match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
-                Some(Ok(tokio_postgres::AsyncMessage::Notification(n))) => {
-                    handle_notification(&n, host_cache, key_cache);
-                }
-                Some(Ok(_)) => {} // notices etc., nothing to do
-                Some(Err(e)) => return Err(format!("connection error: {e}")),
-                None => return Err("connection closed".to_string()),
-            }
-        }
+        let (client, connection) = pg.connect(connector).await.map_err(|e| format!("connect: {e}"))?;
+        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, true).await
     } else {
-        let (client, mut connection) =
+        let (client, connection) =
             pg.connect(tokio_postgres::NoTls).await.map_err(|e| format!("connect: {e}"))?;
-        client.batch_execute(&listen_stmt).await.map_err(|e| format!("LISTEN: {e}"))?;
-        tracing::info!(channel = INVAL_CHANNEL, tls = false, "queen_proxy_inval listener connected");
-        loop {
-            match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
-                Some(Ok(tokio_postgres::AsyncMessage::Notification(n))) => {
-                    handle_notification(&n, host_cache, key_cache);
+        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, false).await
+    }
+}
+
+/// Drive the LISTEN statement and the notification stream from ONE loop.
+///
+/// This ordering is load-bearing. `Client` only queues a request; the
+/// `Connection` is what drives the socket, so awaiting `batch_execute` BEFORE
+/// entering the poll loop parks forever — the LISTEN never reaches the server,
+/// no notification ever arrives, and the failure is silent because the
+/// "connected" log line sits on the far side of that await. Every cache
+/// invalidation then silently degrades to TTL expiry (30s), which is how a
+/// revoked API key kept working. Poll both, or neither works.
+async fn run_listen_session<S, T>(
+    client: tokio_postgres::Client,
+    mut connection: tokio_postgres::Connection<S, T>,
+    listen_stmt: &str,
+    host_cache: &Arc<HostMap>,
+    key_cache: &Arc<KeyMap>,
+    tls: bool,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    T: tokio_postgres::tls::TlsStream + Unpin,
+{
+    let listen = client.batch_execute(listen_stmt);
+    tokio::pin!(listen);
+    let mut listening = false;
+
+    loop {
+        tokio::select! {
+            res = &mut listen, if !listening => {
+                res.map_err(|e| format!("LISTEN: {e}"))?;
+                listening = true;
+                tracing::info!(channel = INVAL_CHANNEL, tls, "queen_proxy_inval listener connected");
+            }
+            msg = std::future::poll_fn(|cx| connection.poll_message(cx)) => {
+                match msg {
+                    Some(Ok(tokio_postgres::AsyncMessage::Notification(n))) => {
+                        handle_notification(&n, host_cache, key_cache);
+                    }
+                    Some(Ok(_)) => {} // notices etc., nothing to do
+                    Some(Err(e)) => return Err(format!("connection error: {e}")),
+                    None => return Err("connection closed".to_string()),
                 }
-                Some(Ok(_)) => {}
-                Some(Err(e)) => return Err(format!("connection error: {e}")),
-                None => return Err("connection closed".to_string()),
             }
         }
     }
@@ -629,6 +801,64 @@ mod tests {
     #[test]
     fn merge_status_unknown_fails_closed() {
         assert_eq!(merge_status("something_new", "active"), ClusterStatus::Suspended);
+    }
+
+    // ---- fail-open on pxdb outage (PLAN §2) ----
+
+    const GRACE: Duration = Duration::from_secs(600);
+
+    #[test]
+    fn fallback_serves_stale_only_while_inside_the_grace_window() {
+        let now = Instant::now();
+        // TTL blew 1s ago: pxdb didn't answer, entry is last known-good.
+        let expired = now - Duration::from_secs(1);
+        assert_eq!(fallback(Miss::NoAnswer, Some(expired), now, GRACE), Fallback::ServeStale);
+        // Exactly at the edge of the window still counts as good.
+        assert_eq!(fallback(Miss::NoAnswer, Some(now - GRACE), now, GRACE), Fallback::ServeStale);
+        // One tick past it: the entry is too old to vouch for anything.
+        assert_eq!(
+            fallback(Miss::NoAnswer, Some(now - GRACE - Duration::from_millis(1)), now, GRACE),
+            Fallback::Deny
+        );
+    }
+
+    #[test]
+    fn fallback_never_serves_stale_when_pxdb_answered_no() {
+        let now = Instant::now();
+        // The whole correctness of the change: a clean "no such row" fails
+        // closed even with a perfectly fresh-looking cached entry behind it.
+        assert_eq!(
+            fallback(Miss::NoSuchRow, Some(now + Duration::from_secs(30)), now, GRACE),
+            Fallback::FailClosed
+        );
+        assert_eq!(fallback(Miss::NoSuchRow, None, now, GRACE), Fallback::FailClosed);
+    }
+
+    #[test]
+    fn fallback_denies_unknown_with_nothing_cached() {
+        // pxdb down + never seen this slug/key -> still a 421/401, never a
+        // guess (PLAN §2: "deny unknowns").
+        let now = Instant::now();
+        assert_eq!(fallback(Miss::NoAnswer, None, now, GRACE), Fallback::Deny);
+    }
+
+    #[test]
+    fn fallback_zero_grace_disables_stale_serving() {
+        // QUEEN_PROXY_STALE_GRACE_MS=0 is the opt-out: an expired entry is
+        // then only servable in the same instant it expired.
+        let now = Instant::now();
+        assert_eq!(
+            fallback(Miss::NoAnswer, Some(now - Duration::from_millis(1)), now, Duration::ZERO),
+            Fallback::Deny
+        );
+    }
+
+    #[test]
+    fn stale_log_is_sampled() {
+        let t0 = Instant::now();
+        assert!(stale_log_due(t0), "first line is always due");
+        assert!(!stale_log_due(t0), "a second stale serve in the same instant is sampled out");
+        assert!(stale_log_due(t0 + STALE_LOG_INTERVAL), "due again once the interval elapses");
     }
 
     #[test]

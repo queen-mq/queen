@@ -240,6 +240,10 @@ pub struct VerifiedClaims {
     pub role: Role,
     pub jti: String,
     pub cluster: Option<Uuid>,
+    /// Unix seconds. Carried out of verification because revoking a session
+    /// needs the token's OWN expiry: `queen_proxy.revoke_session` stores it so
+    /// the sweep can drop the deny-list row once the token is dead anyway.
+    pub exp: i64,
 }
 
 /// Why a token was rejected — a distinct, non-client-facing reason for logs.
@@ -319,12 +323,46 @@ pub struct Keys {
     revoked_cache: Mutex<HashMap<String, (bool, Instant)>>,
     /// (user, cluster) -> (role, checked_at). 30s TTL; positive memberships only.
     role_cache: Mutex<HashMap<(Uuid, Uuid), (Role, Instant)>>,
+    /// Deny-list policy when the lookup is UNAVAILABLE — see `is_revoked`.
+    /// false (default) = fail open, true = fail closed.
+    revocation_strict: bool,
+    /// Rate limiter for the "deny-list unavailable" line, so a pxdb outage
+    /// costs one log line per window instead of one per request.
+    revoked_warn: Mutex<WarnSampler>,
 }
 
 const REVOKED_TTL: Duration = Duration::from_secs(60);
 const ROLE_TTL: Duration = Duration::from_secs(30);
 /// Soft cap after which a cache is pruned of stale entries on the next insert.
 const AUTH_CACHE_CAP: usize = 100_000;
+/// At most one deny-list-unavailable warn per this window.
+const REVOKED_WARN_EVERY: Duration = Duration::from_secs(30);
+
+/// One log line per window, carrying how many events it stands for. Pure state
+/// machine (no clock of its own) so both the window and the suppression count
+/// are unit-testable.
+#[derive(Default)]
+struct WarnSampler {
+    last: Option<Instant>,
+    suppressed: u64,
+}
+
+impl WarnSampler {
+    /// `Some(suppressed_since_the_last_line)` when the caller should log now.
+    fn tick(&mut self, now: Instant, every: Duration) -> Option<u64> {
+        match self.last {
+            Some(last) if now.duration_since(last) < every => {
+                self.suppressed += 1;
+                None
+            }
+            _ => {
+                let suppressed = std::mem::take(&mut self.suppressed);
+                self.last = Some(now);
+                Some(suppressed)
+            }
+        }
+    }
+}
 
 impl Keys {
     pub fn from_config(cfg: &crate::config::Config) -> Keys {
@@ -393,6 +431,8 @@ impl Keys {
             issuer,
             revoked_cache: Mutex::new(HashMap::new()),
             role_cache: Mutex::new(HashMap::new()),
+            revocation_strict: crate::config::revocation_strict(),
+            revoked_warn: Mutex::new(WarnSampler::default()),
         }
     }
 
@@ -478,14 +518,25 @@ impl Keys {
             None => None,
         };
 
-        Ok(VerifiedClaims { user_id, role, jti: c.jti, cluster })
+        Ok(VerifiedClaims { user_id, role, jti: c.jti, cluster, exp: c.exp })
     }
 
     /// Is this jti on the deny-list? Cached 60s. `db == None` (dev) => not
-    /// revoked. A transient pxdb failure fails OPEN (logs a warning, does not
-    /// cache) — availability over a brief revocation-propagation gap; the token
-    /// still had to pass signature + exp, and the whole data plane already
-    /// degrades if pxdb is down.
+    /// revoked.
+    ///
+    /// When the lookup is UNAVAILABLE (pool or query error — not a clean "no
+    /// such row") the answer is a deliberate policy, not an accident:
+    ///   * default (`QUEEN_PROXY_REVOCATION_STRICT` unset/false) — fail OPEN.
+    ///     A pxdb blip must not 401 every session; the token still had to pass
+    ///     signature + exp, and the data plane already degrades without pxdb.
+    ///     The cost is bounded and explicit: for as long as pxdb is unreachable
+    ///     the deny-list is not enforced on this proxy.
+    ///   * strict (`QUEEN_PROXY_REVOCATION_STRICT=true`) — fail CLOSED, for
+    ///     deployments that prefer rejecting sessions to honouring one that may
+    ///     have been revoked.
+    /// Either way the outcome is logged (sampled — an outage is one line per
+    /// `REVOKED_WARN_EVERY`, not one per request) and never cached: only an
+    /// answer the DB actually gave is worth remembering for 60s.
     pub async fn is_revoked(&self, db: &Option<deadpool_postgres::Pool>, jti: &str) -> bool {
         let Some(pool) = db else { return false };
 
@@ -495,10 +546,7 @@ impl Keys {
             }
         }
 
-        let revoked = match pool.get().await {
-            // jti is a UUID (minted as uuid-v4); bound as text + cast so the
-            // column can be `uuid` (Agent B schema) without a tokio-postgres
-            // uuid feature dependency here.
+        let looked_up = match pool.get().await {
             Ok(client) => match client
                 .query_opt(
                     // jti column is TEXT by design (001_init.sql): the deny-list
@@ -508,16 +556,20 @@ impl Keys {
                 )
                 .await
             {
-                Ok(row) => row.is_some(),
+                Ok(row) => Some(row.is_some()),
                 Err(e) => {
-                    tracing::warn!(target: "auth", err = %e, "revoked_tokens query failed; fail-open");
-                    return false;
+                    self.warn_deny_list_unavailable(&e.to_string(), "revoked_tokens query failed");
+                    None
                 }
             },
             Err(e) => {
-                tracing::warn!(target: "auth", err = %e, "pxdb unavailable for revoked check; fail-open");
-                return false;
+                self.warn_deny_list_unavailable(&e.to_string(), "pxdb unavailable");
+                None
             }
+        };
+
+        let Some(revoked) = looked_up else {
+            return self.revocation_strict;
         };
 
         let mut cache = self.revoked_cache.lock().unwrap();
@@ -526,6 +578,40 @@ impl Keys {
         }
         cache.insert(jti.to_string(), (revoked, Instant::now()));
         revoked
+    }
+
+    /// The sampled counterpart of the policy above: the line names which way
+    /// the proxy is failing and the knob that flips it, so the behaviour is
+    /// visible in the log of a deployment that never read this file.
+    fn warn_deny_list_unavailable(&self, err: &str, what: &str) {
+        let sample = self.revoked_warn.lock().unwrap().tick(Instant::now(), REVOKED_WARN_EVERY);
+        let Some(suppressed) = sample else { return };
+        if self.revocation_strict {
+            tracing::warn!(
+                target: "auth", err = %err, cause = what, suppressed,
+                "deny-list unavailable; failing CLOSED (QUEEN_PROXY_REVOCATION_STRICT=true): \
+                 user sessions rejected until pxdb recovers"
+            );
+        } else {
+            tracing::warn!(
+                target: "auth", err = %err, cause = what, suppressed,
+                "deny-list unavailable; failing OPEN: revocations are NOT enforced until pxdb \
+                 recovers (set QUEEN_PROXY_REVOCATION_STRICT=true to reject instead)"
+            );
+        }
+    }
+
+    /// Pin a jti as revoked in this process's deny-list cache. Called right
+    /// after a successful `queen_proxy.revoke_session` so the proxy that served
+    /// the logout stops honouring the token immediately, instead of waiting out
+    /// a cached negative answer (other cells converge within their own
+    /// `REVOKED_TTL`). Best-effort local shortcut — the DB row is the truth.
+    pub fn note_revoked(&self, jti: &str) {
+        let mut cache = self.revoked_cache.lock().unwrap();
+        if cache.len() >= AUTH_CACHE_CAP {
+            cache.retain(|_, (_, at)| at.elapsed() < REVOKED_TTL);
+        }
+        cache.insert(jti.to_string(), (true, Instant::now()));
     }
 
     /// Resolve a user's role on a cluster from `cluster_roles`. Cached 30s
@@ -624,6 +710,57 @@ impl Keys {
             .to_string(),
             _ => "{\"keys\":[]}".to_string(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deny-list sweep
+// ---------------------------------------------------------------------------
+
+/// Detached loop dropping `revoked_tokens` rows whose own `exp` has passed
+/// (`queen_proxy.sweep_revoked_tokens`, migration 004). Without it the
+/// deny-list only ever grows, since a logout inserts a row per session.
+///
+/// Maintenance, so it is deliberately unexcited about failure: a pxdb outage
+/// warns and the next tick tries again — nothing here can affect a verify's
+/// outcome (an expired row is already inert). Skipped entirely without a pxdb
+/// (dev-static) and disabled by `QUEEN_PROXY_REVOCATION_SWEEP_MS=0`.
+pub fn spawn_revocation_sweep(st: St) {
+    let Some(pool) = st.db.clone() else {
+        tracing::info!(target: "auth", "revocation sweep: no pxdb configured, skipping (dev-static mode)");
+        return;
+    };
+    let interval = crate::config::revocation_sweep_interval();
+    if interval.is_zero() {
+        tracing::info!(target: "auth", "revocation sweep disabled (QUEEN_PROXY_REVOCATION_SWEEP_MS=0)");
+        return;
+    }
+    tokio::spawn(async move {
+        // First tick fires immediately: a restart is a good moment to clear
+        // whatever expired while the process was down.
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            sweep_revoked_once(&pool).await;
+        }
+    });
+}
+
+async fn sweep_revoked_once(pool: &deadpool_postgres::Pool) {
+    let client = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(target: "auth", err = %e, "revocation sweep: pxdb unavailable");
+            return;
+        }
+    };
+    match client.query_one("SELECT queen_proxy.sweep_revoked_tokens()", &[]).await {
+        Ok(row) => {
+            let deleted: i32 = row.get(0);
+            tracing::debug!(target: "auth", deleted, "revoked_tokens swept");
+        }
+        Err(e) => tracing::warn!(target: "auth", err = %e, "revocation sweep failed"),
     }
 }
 
@@ -918,6 +1055,109 @@ mod tests {
             assert_eq!(role_from_str(role_as_str(r)), Some(r));
         }
         assert!(role_from_str("nope").is_none());
+    }
+
+    /// A pool that can never connect: `pool.get()` fails on a refused TCP
+    /// connect, which is exactly the "deny-list lookup unavailable" branch of
+    /// `is_revoked` — no live Postgres needed to pin the policy.
+    fn unreachable_pool() -> deadpool_postgres::Pool {
+        let mut pg = tokio_postgres::Config::new();
+        // :1 is never listening; connect_timeout bounds the test if some
+        // environment blackholes it instead of refusing.
+        pg.host("127.0.0.1")
+            .port(1)
+            .user("nobody")
+            .dbname("nope")
+            .connect_timeout(Duration::from_secs(2));
+        let mgr = deadpool_postgres::Manager::from_config(
+            pg,
+            tokio_postgres::NoTls,
+            deadpool_postgres::ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        );
+        deadpool_postgres::Pool::builder(mgr).max_size(1).build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn revocation_fails_open_by_default() {
+        let keys = hs_keys("queen-proxy");
+        assert!(!keys.revocation_strict, "default policy is fail-open");
+        let db = Some(unreachable_pool());
+        assert!(
+            !keys.is_revoked(&db, "some-jti").await,
+            "an unreachable pxdb must not revoke every session by default"
+        );
+        assert!(
+            keys.revoked_cache.lock().unwrap().is_empty(),
+            "a non-answer must not be cached for 60s"
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_fails_closed_when_strict() {
+        let mut keys = hs_keys("queen-proxy");
+        keys.revocation_strict = true;
+        let db = Some(unreachable_pool());
+        assert!(
+            keys.is_revoked(&db, "some-jti").await,
+            "strict mode must treat an unavailable deny-list as revoked"
+        );
+        assert!(
+            keys.revoked_cache.lock().unwrap().is_empty(),
+            "a non-answer must not be cached, so recovery is immediate"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_pxdb_means_not_revoked_in_either_policy() {
+        for strict in [false, true] {
+            let mut keys = hs_keys("queen-proxy");
+            keys.revocation_strict = strict;
+            assert!(
+                !keys.is_revoked(&None, "some-jti").await,
+                "dev-static mode has no deny-list at all (strict={strict})"
+            );
+        }
+    }
+
+    #[test]
+    fn note_revoked_is_honoured_by_the_cache() {
+        let keys = hs_keys("queen-proxy");
+        keys.note_revoked("jti-1");
+        // Cached positive answers are returned without touching the pool, so an
+        // unreachable pxdb cannot resurrect a token this proxy just revoked.
+        let db = Some(unreachable_pool());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert!(rt.block_on(keys.is_revoked(&db, "jti-1")));
+        assert!(!rt.block_on(keys.is_revoked(&db, "jti-2")), "unrelated jti unaffected (fail-open)");
+    }
+
+    #[test]
+    fn warn_sampler_emits_once_per_window_with_the_suppressed_count() {
+        let mut s = WarnSampler::default();
+        let t0 = Instant::now();
+        let every = Duration::from_secs(30);
+        assert_eq!(s.tick(t0, every), Some(0), "first event always logs");
+        assert_eq!(s.tick(t0 + Duration::from_secs(1), every), None);
+        assert_eq!(s.tick(t0 + Duration::from_secs(29), every), None);
+        // window elapsed: log again, reporting the two it stood in for
+        assert_eq!(s.tick(t0 + Duration::from_secs(31), every), Some(2));
+        // counter resets after each emitted line
+        assert_eq!(s.tick(t0 + Duration::from_secs(32), every), None);
+        assert_eq!(s.tick(t0 + Duration::from_secs(62), every), Some(1));
+    }
+
+    #[test]
+    fn verified_claims_carry_exp_for_revocation() {
+        // logout deny-lists (jti, exp): both must survive verification, or the
+        // revoked_tokens row cannot be swept when the token dies on its own.
+        let keys = ed_keys("queen-proxy");
+        let before = now_secs();
+        let token = keys.mint_user_jwt(Uuid::new_v4(), "viewer", None, 3600).unwrap();
+        let vc = keys.verify_jwt_claims(&token).unwrap();
+        assert!(vc.exp >= before + 3600 && vc.exp <= now_secs() + 3600);
+        assert!(!vc.jti.is_empty());
     }
 
     #[test]

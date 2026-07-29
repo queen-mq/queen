@@ -13,8 +13,12 @@ axum = "0.7"
 # Upstream client: pure hyper (pooled, streaming). No reqwest by design — the repo
 # is deliberately cmake-free/rustls-only (see server/src/httpget.rs header); the
 # broker upstream is plaintext HTTP inside the cell network, so no client TLS at all.
-hyper = { version = "1", features = ["http1", "client"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+# `server` + hyper-util `service` are the OPTIONAL TLS listener (main.rs): axum
+# 0.7's `axum::serve` takes a plain TcpListener, so an HTTPS leg has to drive a
+# hyper connection per accepted stream with the Router as the service. Features
+# on crates already in the tree — no new dependency, still cmake-free.
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "service"] }
 http-body-util = "0.1"
 tokio-postgres = "0.7"
 deadpool-postgres = "0.14"

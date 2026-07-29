@@ -34,6 +34,29 @@ const RECONCILE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// misbehaving broker.
 const MAX_RECONCILE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Storage-quota hysteresis (PLAN §6.1): a cluster blocks at `> max` but is
+/// only released once retained bytes fall back to this percentage of the cap.
+/// Without the asymmetry a tenant parked on the boundary flips blocked <->
+/// unblocked on every reconcile pass and sees 403 and 201 alternating on
+/// identical pushes. 90% is one reconcile pass' worth of headroom at any
+/// realistic ingest rate, so a release means the tenant actually deleted or
+/// aged out data, not that a rounding wobble crossed the line.
+const STORAGE_RELEASE_PERCENT: i64 = 90;
+
+/// How many consecutive empty inventories it takes before the deleted-queue
+/// sweep runs -- see the call site in `reconcile_cluster`.
+const EMPTY_INVENTORY_SWEEPS: u32 = 2;
+
+/// queen_proxy.queues.partitions_count is INTEGER (001_init.sql), while
+/// partition counts are carried as i64 throughout this module. Binding the i64
+/// straight into the statement makes tokio-postgres reject EVERY upsert with
+/// "error serializing parameter 2", which is how the table stayed permanently
+/// empty — silently, since both write paths only warn. Narrow at the bind sites
+/// and keep the in-process arithmetic in i64.
+fn clamp_partitions(n: i64) -> i32 {
+    n.clamp(0, i32::MAX as i64) as i32
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Admit {
     Allowed,
@@ -51,6 +74,9 @@ struct ClusterRegistry {
     /// Queue names known to exist (DB lazy-load, reconciler, or this
     /// process's own admits) -- backs the max_queues check.
     queue_names: HashSet<String>,
+    /// Consecutive reconcile passes that returned an empty queue inventory.
+    /// Gates the deleted-queue sweep (`note_inventory`).
+    empty_inventory_streak: u32,
 }
 
 pub struct Registry {
@@ -61,8 +87,8 @@ pub struct Registry {
     /// gets created on a cache MISS too (see `admit`), before any DB load.
     loaded: Arc<RwLock<HashSet<Uuid>>>,
     /// Clusters currently believed to be over their storage quota, per the
-    /// reconciler's last successful byte count. See `over_storage` and the
-    /// report for the (currently unwired) consumer.
+    /// reconciler's last successful byte count. Read by the storage-quota
+    /// pump in main.rs -- see `over_storage`.
     over_storage: Arc<RwLock<HashSet<Uuid>>>,
 }
 
@@ -184,11 +210,12 @@ impl Registry {
             }
         };
         let cluster_id_str = cluster_id.to_string();
+        let count = clamp_partitions(partitions_count);
         let stmt = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
                     VALUES ($1::text::uuid, $2, $3) \
                     ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
                     DO UPDATE SET partitions_count = GREATEST(queen_proxy.queues.partitions_count, EXCLUDED.partitions_count)";
-        if let Err(e) = client.execute(stmt, &[&cluster_id_str, &queue, &partitions_count]).await {
+        if let Err(e) = client.execute(stmt, &[&cluster_id_str, &queue, &count]).await {
             tracing::warn!(cluster = %cluster_id, queue, error = %e, "registry: admit upsert failed");
         }
     }
@@ -196,15 +223,14 @@ impl Registry {
     /// Clusters currently believed over their plan's max_retained_bytes, per
     /// the reconciler's last successful byte count for that cluster.
     ///
-    /// WIRING GAP (see report): nothing calls this yet. The intended
-    /// consumer is a periodic task that reads this list and calls
-    /// `st.limits.set_push_blocked(id, true)` for members (and false for
-    /// clusters that dropped out of it) -- Registry can't do that itself,
-    /// it has no reference to `Limits` (nor should it grow one without
-    /// orchestrator sign-off, since AppState's shape is frozen). Also note:
-    /// as of this writing this set is ALWAYS EMPTY in practice, because the
-    /// broker's resources/queues response has no bytes field yet to sum --
-    /// see reconcile_cluster's doc comment.
+    /// Consumed by the storage-quota pump in main.rs, which diffs this list
+    /// every 10s and calls `st.limits.set_push_blocked(id, ..)` on the
+    /// transitions; gateway.rs then answers 403 `storage_quota_exceeded` on
+    /// Produce for a blocked cluster (consumes stay allowed). Registry does
+    /// not call `Limits` itself -- it holds no reference to it, and AppState's
+    /// shape is frozen. Membership is asymmetric on purpose (`decide_over_storage`):
+    /// entering the set needs usage over the cap, leaving it needs usage back
+    /// under the release band.
     pub fn over_storage(&self) -> Vec<Uuid> {
         self.over_storage.read().unwrap().iter().copied().collect()
     }
@@ -268,8 +294,8 @@ async fn reconcile_once(
 async fn load_targets(pool: &deadpool_postgres::Pool) -> Result<Vec<ReconcileTarget>, String> {
     let client = pool.get().await.map_err(|e| format!("pool.get: {e}"))?;
     // Reconcile everything not being torn down -- push_blocked clusters
-    // especially still need this loop (it's how their byte count, and thus
-    // push_blocked itself once §wiring lands, gets re-evaluated).
+    // especially still need this loop: it's the only thing that re-evaluates
+    // their byte count, so skipping them would make the block permanent.
     let stmt = "SELECT c.id::text, c.broker_tenant_uuid::text, ce.base_url, ce.cell_secret, \
                        p.max_retained_bytes, (c.limit_overrides)::text \
                 FROM queen_proxy.clusters c \
@@ -342,29 +368,25 @@ async fn reconcile_cluster(
         seen_names.push(name.clone());
         let partitions = q.get("partitions").and_then(|p| p.as_i64()).unwrap_or(0);
 
-        // Best-effort retained-bytes: as of this writing (2026-07-25) the
-        // broker's get_queues_v2 (+ segment-stats enrichment) response has
-        // NO bytes/size field at all -- checked server/src/handlers/queues.rs
-        // handle_list_queues and the SQL behind it (queen.get_queues_v2,
-        // queen.log_queue_stats_all_v1). These key names are speculative so
-        // storage-quota tracking activates automatically the day the broker
-        // adds one of them, without another proxy code change; today none
-        // will match and bytes_found stays false for every cluster. See the
-        // report's storage-quota gap.
-        for key in ["retainedBytes", "bytes", "sizeBytes", "diskBytes"] {
-            if let Some(b) = q.get(key).and_then(|v| v.as_i64()) {
-                total_bytes += b;
-                bytes_found = true;
-                break;
-            }
+        // Retained bytes for this queue, as emitted per (tenant, queue) by
+        // the broker since Track B2 (server/sql/procedures/013_stats.sql,
+        // `'retainedBytes', COALESCE(s.retained_bytes, 0)`), refreshed at the
+        // broker's stats cadence. A cell that predates B2 sends no such field:
+        // bytes_found then stays false and the quota is simply not evaluated
+        // this cycle, which leaves any existing decision alone rather than
+        // releasing or blocking on a phantom zero.
+        if let Some(b) = q.get("retainedBytes").and_then(|v| v.as_i64()) {
+            total_bytes += b;
+            bytes_found = true;
         }
 
         let cluster_id_str = target.cluster_id.to_string();
+        let count = clamp_partitions(partitions);
         let stmt = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
                     VALUES ($1::text::uuid, $2, $3) \
                     ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
                     DO UPDATE SET partitions_count = EXCLUDED.partitions_count";
-        if let Err(e) = client.execute(stmt, &[&cluster_id_str, &name, &partitions]).await {
+        if let Err(e) = client.execute(stmt, &[&cluster_id_str, &name, &count]).await {
             tracing::warn!(cluster = %target.cluster_id, queue = %name, error = %e, "registry reconciler: queue upsert failed");
         }
 
@@ -375,29 +397,67 @@ async fn reconcile_cluster(
     }
 
     // Queues that disappeared from the broker's own listing: soft-delete.
-    // queen_proxy.queues is a CACHE (ownership is broker-side, PLAN §5), so
-    // a false sweep here (e.g. a transient empty response) just makes the
-    // proxy briefly re-learn a queue on its next push -- it never touches
-    // broker data. Known rough edge, see report: a genuinely empty `queues`
-    // array (new cluster, or a flaky-but-200 response) marks every existing
-    // row deleted; self-heals on the next real reconcile or next push.
-    let cluster_id_str = target.cluster_id.to_string();
-    let sweep_stmt = "UPDATE queen_proxy.queues SET deleted_at = now() \
-                       WHERE cluster_id = $1::text::uuid AND deleted_at IS NULL AND NOT (name = ANY($2))";
-    if let Err(e) = client.execute(sweep_stmt, &[&cluster_id_str, &seen_names]).await {
-        tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: deleted-queue sweep failed");
+    // queen_proxy.queues is a CACHE (ownership is broker-side, PLAN §5), so a
+    // false sweep never touches broker data. It isn't free either: the swept
+    // rows are what re-seeds `db_partition_floor` after a proxy restart
+    // (module doc), so losing them loses the partition-cap floor. A 200 with
+    // an empty array is ambiguous -- a genuinely empty cluster looks exactly
+    // like a broker that answered before its stats were readable -- so an
+    // empty inventory has to repeat before it counts as real.
+    let sweep_due = {
+        let mut map = known.write().unwrap();
+        let cr = map.entry(target.cluster_id).or_default();
+        note_inventory(cr, seen_names.is_empty())
+    };
+    if sweep_due {
+        let cluster_id_str = target.cluster_id.to_string();
+        let sweep_stmt = "UPDATE queen_proxy.queues SET deleted_at = now() \
+                           WHERE cluster_id = $1::text::uuid AND deleted_at IS NULL AND NOT (name = ANY($2))";
+        if let Err(e) = client.execute(sweep_stmt, &[&cluster_id_str, &seen_names]).await {
+            tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: deleted-queue sweep failed");
+        }
+    } else {
+        tracing::warn!(cluster = %target.cluster_id, cell = %target.base_url, "registry reconciler: empty queue inventory, deferring sweep one cycle");
     }
 
     if bytes_found {
         if let Some(max) = target.max_retained_bytes {
             let mut over = over_storage.write().unwrap();
-            if total_bytes > max {
+            let blocked = over.contains(&target.cluster_id);
+            if decide_over_storage(blocked, total_bytes, max) {
                 over.insert(target.cluster_id);
             } else {
                 over.remove(&target.cluster_id);
             }
         }
     }
+}
+
+/// Storage-quota decision with hysteresis: block at `> max`, release only
+/// once retained bytes are back at or under STORAGE_RELEASE_PERCENT of the
+/// cap. A cluster already over on the very first pass (`blocked == false`,
+/// nothing remembered across a restart) blocks immediately -- the band only
+/// ever delays the *release* side.
+fn decide_over_storage(blocked: bool, total_bytes: i64, max: i64) -> bool {
+    if !blocked {
+        return total_bytes > max;
+    }
+    // i128 so the percentage is exact for any i64 cap, with no overflow and
+    // no float rounding near the boundary this exists to stabilise.
+    let release_at = (max as i128 * STORAGE_RELEASE_PERCENT as i128 / 100) as i64;
+    total_bytes > release_at
+}
+
+/// Records this cycle's inventory shape and answers whether the deleted-queue
+/// sweep may run. A non-empty inventory always sweeps and clears the streak;
+/// an empty one only sweeps once it has repeated EMPTY_INVENTORY_SWEEPS times.
+fn note_inventory(cr: &mut ClusterRegistry, empty: bool) -> bool {
+    if !empty {
+        cr.empty_inventory_streak = 0;
+        return true;
+    }
+    cr.empty_inventory_streak = cr.empty_inventory_streak.saturating_add(1);
+    cr.empty_inventory_streak >= EMPTY_INVENTORY_SWEEPS
 }
 
 // --------------------------------------------------- minimal headered GET
@@ -537,6 +597,70 @@ mod tests {
         // max_queues.
         assert_eq!(reg.admit(&ctx, "orders", "p1").await, Admit::Allowed);
         assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::OverQueues { max: 1 });
+    }
+
+    // ---- storage-quota hysteresis (PLAN §6.1) ----
+
+    #[test]
+    fn storage_blocks_over_cap_on_the_first_pass() {
+        // Nothing is remembered across a restart, so "already over" must
+        // block immediately rather than waiting for a transition.
+        assert!(decide_over_storage(false, 1_001, 1_000));
+        assert!(!decide_over_storage(false, 1_000, 1_000), "at the cap is not over it");
+    }
+
+    #[test]
+    fn storage_holds_the_block_inside_the_release_band() {
+        // The flapping case: usage sits just under the cap. Before the band,
+        // this released and the next tick blocked again -- 403/201/403/201.
+        assert!(decide_over_storage(true, 1_000, 1_000));
+        assert!(decide_over_storage(true, 999, 1_000));
+        assert!(decide_over_storage(true, 901, 1_000), "still inside the 90% band");
+    }
+
+    #[test]
+    fn storage_releases_only_below_the_band() {
+        assert!(!decide_over_storage(true, 900, 1_000), "at 90% of the cap: released");
+        assert!(!decide_over_storage(true, 500, 1_000));
+    }
+
+    #[test]
+    fn storage_band_is_exact_for_large_caps() {
+        // 8 EiB-scale caps must not lose precision (no f64, no overflow).
+        let max = i64::MAX;
+        let release_at = (max as i128 * STORAGE_RELEASE_PERCENT as i128 / 100) as i64;
+        assert!(decide_over_storage(true, release_at + 1, max));
+        assert!(!decide_over_storage(true, release_at, max));
+    }
+
+    #[test]
+    fn storage_zero_cap_blocks_and_never_releases_while_holding_bytes() {
+        // max = 0 (a cluster with no storage allowance): release band is 0
+        // too, so any retained byte keeps it blocked, and an empty cluster
+        // clears.
+        assert!(decide_over_storage(false, 1, 0));
+        assert!(decide_over_storage(true, 1, 0));
+        assert!(!decide_over_storage(true, 0, 0));
+    }
+
+    // ---- empty-inventory sweep guard ----
+
+    #[test]
+    fn empty_inventory_defers_one_sweep_then_proceeds() {
+        let mut cr = ClusterRegistry::default();
+        assert!(!note_inventory(&mut cr, true), "first empty inventory is treated as a blip");
+        assert!(note_inventory(&mut cr, true), "a second one in a row is real");
+        assert!(note_inventory(&mut cr, true), "and it stays real");
+    }
+
+    #[test]
+    fn non_empty_inventory_always_sweeps_and_clears_the_streak() {
+        let mut cr = ClusterRegistry::default();
+        assert!(!note_inventory(&mut cr, true));
+        assert!(note_inventory(&mut cr, false), "a real listing sweeps immediately");
+        assert_eq!(cr.empty_inventory_streak, 0);
+        // Streak reset means the next blip is deferred again, not swept.
+        assert!(!note_inventory(&mut cr, true));
     }
 
     #[test]

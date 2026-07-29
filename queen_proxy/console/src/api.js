@@ -10,6 +10,9 @@
 //      that serves the data-plane gateway and /auth).
 //   3. A 401 at any point (missing/expired cookie, expired session token)
 //      redirects to /auth/login?next=/console/, per the task spec.
+//   4. Signing out is POST /auth/logout, which clears the cookie server-side
+//      and deny-lists the session — without it the httpOnly cookie stays
+//      valid until its own exp, which on a shared machine is the whole point.
 
 let sessionToken = null;
 let bootstrapping = null;
@@ -73,4 +76,21 @@ export async function apiFetch(path, options = {}) {
     throw err;
   }
   return body;
+}
+
+/** Ends the session: POST /auth/logout (cookie-authenticated — it reads the
+ * httpOnly `queen_session` cookie, not the Bearer, so no Authorization header
+ * is sent), drop the in-memory Bearer, then back to the login page. The
+ * redirect happens even if the call fails: a client that keeps showing the
+ * console because logout 502'd is worse than one that sends the user to a
+ * login screen they may have to use twice. */
+export async function logout() {
+  try {
+    await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
+  } catch {
+    // network error — fall through to the redirect below
+  }
+  sessionToken = null;
+  bootstrapping = null;
+  redirectToLogin();
 }

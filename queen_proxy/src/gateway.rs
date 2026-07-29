@@ -2,18 +2,22 @@
 //!
 //! Pipeline per request (spec §4/§14 — the order is load-bearing):
 //!   1. resolve ClusterCtx from Host (miss -> 421)
-//!   2. cluster status gate (Suspended -> 403 suspended; PushBlocked + Produce -> 403 push_blocked)
+//!   2. cluster status gate (Suspended -> 403 suspended; Produce while blocked
+//!      -> 403 storage_quota_exceeded (live quota flag) or push_blocked (DB
+//!      lifecycle status) — two causes, two codes)
 //!   3. authenticate (auth::authenticate) + authorize (auth::authorize vs classify)
 //!   4. limits: check_req; Produce -> buffer body (cap = min(plan, cfg)), count
 //!      items + per-item payload caps, registry.admit each (queue,partition),
-//!      check_msgs(n); Consume wait=true -> parked_slot RAII guard held across
-//!      the upstream await
+//!      check_msgs(n); POST /configure -> buffer body, retention ceiling +
+//!      registry.admit the created (queue, Default); Consume wait=true ->
+//!      parked_slot RAII guard held across the upstream await
 //!   5. forward: rebuild URI on ctx.cell_base_url, strip hop-by-hop headers,
 //!      inject Authorization (ctx.cell_token), X-Queen-Tenant (cfg.send_tenant_header),
 //!      X-Queen-Request-Id; long-poll timeout = min(client timeout|30s, cfg max) + margin
 //!   6. meter post-response (M1–M6): push -> parse per-item statuses (exclude
 //!      error, dedupe duplicate, buffered counts), pop -> delivered count +
-//!      debit_deliveries, bytes in/out always
+//!      debit_deliveries, bytes in/out always; the same push parse feeds the
+//!      sampled §6.10 maintenance signal
 //!   7. shadow mode: when !limits.enforcing(), Deny decisions are logged (target
 //!      `limits`, field `would_block`) but the request proceeds
 //!
@@ -28,7 +32,7 @@ use std::collections::HashSet;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::response::Parts;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
 use serde::Deserialize;
@@ -93,13 +97,40 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             return errors::err_403(errors::CODE_FEATURE_GATED, "not in your plan");
         }
     }
-    if (ctx.status == ClusterStatus::PushBlocked || st.limits.is_push_blocked(ctx.cluster_id))
-        && class == RouteClass::Produce
-    {
-        return errors::err_403(
-            errors::CODE_PUSH_BLOCKED,
-            "pushes blocked (storage quota or billing)",
-        );
+    if class == RouteClass::Produce {
+        // Three causes, three codes — Track C clients switch on the code and
+        // treat `storage_quota_exceeded` as terminal. Each live flag is written
+        // by exactly one thing (storage: the pump in main.rs off registry
+        // over_storage; monthly: the rollup task off plans.monthly_msgs_quota),
+        // so when one is set the cause is unambiguous; ctx.status is the DB
+        // lifecycle one (tenant `grace` or cluster `push_blocked` —
+        // cache.rs::merge_status) and never says *why* it was set, so it keeps
+        // the generic code. Live flags first: they are the more specific claim.
+        //
+        // Both live flags are HARD gates — checked and enforced regardless of
+        // `limits.enforcing()`, unlike every rate decision below. That is
+        // deliberate (a quota that only warns protects neither the cell's disk
+        // nor the bill) and it is the surprising part: a misconfigured
+        // monthly_msgs_quota blocks production pushes even on a cell deployed
+        // in shadow mode.
+        match st.limits.push_block_reason(ctx.cluster_id) {
+            Some(crate::limits::PushBlock::Storage) => {
+                return errors::err_403(
+                    errors::CODE_STORAGE_QUOTA,
+                    "storage quota exceeded; pushes blocked",
+                );
+            }
+            Some(crate::limits::PushBlock::MonthlyQuota) => {
+                return errors::err_403(
+                    errors::CODE_QUOTA_EXCEEDED,
+                    "monthly message quota (monthly_msgs_quota) exhausted; pushes blocked until the next calendar month",
+                );
+            }
+            None => {}
+        }
+        if ctx.status == ClusterStatus::PushBlocked {
+            return errors::err_403(errors::CODE_PUSH_BLOCKED, "pushes blocked (billing hold)");
+        }
     }
 
     let principal = match crate::auth::authenticate(&st, req.headers(), ctx.cluster_id).await {
@@ -160,6 +191,23 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         match enforce_produce(&st, &ctx, &path_only, &buffered, per_item_cap, &rid).await {
             Ok(n) => produce_n = n,
             Err(resp) => return resp,
+        }
+        Body::from(buffered)
+    } else if is_configure(&parts.method, &path_only) {
+        // 4b'. QueueAdmin: /configure is the EXPLICIT creation path (push only
+        // auto-creates), so the registry caps apply here identically (§4/§14),
+        // plus the per-plan retention ceiling (§6.1). Same hard body-buffer
+        // ceiling as produce — we must bound what we buffer.
+        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
+            Ok(b) => b,
+            Err(_) => return errors::err_413("request body exceeds cap"),
+        };
+        // This route is now buffered, so its true ingress size is known: meter
+        // it like every other buffered route (STEP 6, "bytes in/out always")
+        // instead of the 0 that not-buffering used to imply.
+        bytes_in = buffered.len() as u64;
+        if let Err(resp) = enforce_configure(&st, &ctx, &buffered, &rid).await {
+            return resp;
         }
         Body::from(buffered)
     } else {
@@ -278,35 +326,81 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
                 return errors::err_502("push response too large");
             }
         };
-        let msgs = count_push_statuses(&buffered).unwrap_or_else(|| {
+        let counts = count_push_statuses(&buffered).unwrap_or_else(|| {
             tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "push response parse failed; msgs=0");
-            0
+            PushCounts::default()
         });
+        // §6.10 maintenance signal, off the same parse (never a second pass).
+        // Short-circuits before the clock read when nothing was buffered.
+        if predominantly_buffered(&counts) && maint_log_due(std::time::Instant::now()) {
+            tracing::info!(
+                target: "gateway", cluster = %ctx.slug, buffered = counts.buffered,
+                items = counts.total, rid,
+                "cell is spooling pushes to disk (maintenance mode or DB outage)"
+            );
+        }
         st.meter.record(Sample {
             cluster_id: ctx.cluster_id,
             op: OpClass::Push,
             reqs: 1,
-            msgs,
+            msgs: counts.accepted,
             bytes_in,
             bytes_out: buffered.len() as u64,
         });
         return finalize(rparts, Body::from(buffered), &rid);
     }
 
-    // Transaction 2xx: charge the ingress-counted push ops (msgs = n). The broker
-    // returns 200 even on rollback (success:false); see report — flagged.
+    // Transaction: charge the ingress-counted push ops, but only for a
+    // transaction that actually committed. The broker answers HTTP 200 on
+    // rollback too (`{transactionId, success:false, error, results:[]}` —
+    // server/src/handlers/data.rs::txn_fail_body, the SP RAISEs and the whole
+    // transaction is undone), so the status line alone cannot tell the two
+    // apart and this used to bill a tenant for messages that were never
+    // stored. The body can: `success` is a top-level bool on both paths.
     if op == OpClass::Txn {
-        let msgs = if status.is_success() { produce_n } else { 0 };
+        if !status.is_success() {
+            st.meter.record(Sample {
+                cluster_id: ctx.cluster_id,
+                op: OpClass::Txn,
+                reqs: 1,
+                msgs: 0,
+                bytes_in,
+                bytes_out: resp_cl,
+            });
+            let (rparts, rbody) = resp.into_parts();
+            return finalize(rparts, Body::new(rbody), &rid);
+        }
+        let (rparts, rbody) = resp.into_parts();
+        let buffered = match axum::body::to_bytes(Body::new(rbody), RESP_BUFFER_CAP).await {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "transaction response too large to buffer");
+                return errors::err_502("transaction response too large");
+            }
+        };
+        let msgs = match txn_outcome(&buffered) {
+            // Intra-batch first-wins dedup (txn_add_push's `seen` map) echoes
+            // `duplicate:true` and stores nothing new — excluded exactly like
+            // a `duplicate` status on the push path (M2).
+            TxnOutcome::Committed { duplicates } => produce_n.saturating_sub(duplicates),
+            TxnOutcome::RolledBack => 0,
+            TxnOutcome::Unknown => {
+                // Same stance as an unparseable push 201: charge nothing we
+                // cannot confirm. Under-billing on a shape we don't recognise
+                // beats billing a rollback.
+                tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "transaction response parse failed; msgs=0");
+                0
+            }
+        };
         st.meter.record(Sample {
             cluster_id: ctx.cluster_id,
             op: OpClass::Txn,
             reqs: 1,
             msgs,
             bytes_in,
-            bytes_out: resp_cl,
+            bytes_out: buffered.len() as u64,
         });
-        let (rparts, rbody) = resp.into_parts();
-        return finalize(rparts, Body::new(rbody), &rid);
+        return finalize(rparts, Body::from(buffered), &rid);
     }
 
     // Pop: 200 with body -> count deliveries + debit; 204 -> reqs only, no buffer.
@@ -457,6 +551,186 @@ async fn enforce_produce(
     Ok(n)
 }
 
+/// STEP 4 for `POST /api/v1/configure`, the explicit queue-creation path.
+/// Push auto-creates queues/partitions and is capped by the registry; configure
+/// creates them deliberately and must be capped identically (§4/§14), on top of
+/// the per-plan retention ceiling (§6.1). Shadow-aware like `enforce_produce`,
+/// and the body is forwarded verbatim either way.
+async fn enforce_configure(
+    st: &St,
+    ctx: &ClusterCtx,
+    bytes: &Bytes,
+    rid: &str,
+) -> Result<(), Response> {
+    let cfg = match parse_configure(bytes) {
+        Ok(c) => c,
+        Err(()) => {
+            // Malformed body: forward verbatim, let the broker return its own
+            // 400 — same rule as an unparseable produce batch, no half-enforcement.
+            tracing::warn!(
+                target: "limits", cluster = %ctx.slug, rid,
+                "configure body unparseable; forwarding without admin enforcement"
+            );
+            return Ok(());
+        }
+    };
+
+    // Retention ceiling. Checked BEFORE admission so a refused configure leaves
+    // nothing registered.
+    //
+    // REFUSE, not clamp: §14's queue-admin row says "retention clamp", but the
+    // proxy is parse-only and never rewrites a request body (§5, "parse-only,
+    // no rewrite, ever"), and every other limit here refuses — 403
+    // quota_exceeded, 413 payload_too_large, 429 rate_limited. Silently
+    // shortening a customer's retention would make their data disappear later
+    // with no signal at the moment they asked for it; an error they can see
+    // beats data they cannot get back.
+    if let Some(ceiling) = ctx.limits.max_retention_seconds {
+        if let Some((key, requested)) = cfg.retention_over(ceiling) {
+            if st.limits.enforcing() {
+                tracing::warn!(
+                    target: "limits", cluster = %ctx.slug, kind = "retention",
+                    queue = %cfg.queue, requested, ceiling, blocked = true, rid,
+                    "retention ceiling exceeded"
+                );
+                return Err(errors::err_403(
+                    errors::CODE_QUOTA_EXCEEDED,
+                    &format!(
+                        "{key} of {requested}s exceeds the plan's max_retention_seconds ({ceiling}s)"
+                    ),
+                ));
+            }
+            tracing::warn!(
+                target: "limits", cluster = %ctx.slug, kind = "retention",
+                queue = %cfg.queue, requested, ceiling, would_block = true, rid,
+                "retention ceiling exceeded (shadow)"
+            );
+        }
+    }
+
+    // Registry admission. configure_queue_v1 (server/sql/procedures/012_configure.sql)
+    // creates the queue plus exactly one partition, `Default` — there is no
+    // partition-count option in the body — so one admit call covers what this
+    // request can create, through the same API the produce path calls per
+    // distinct (queue, partition).
+    match st.registry.admit(ctx, &cfg.queue, DEFAULT_PARTITION).await {
+        Admit::Allowed => {}
+        Admit::OverQueues { max } => {
+            log_configure_deny(st.limits.enforcing(), "queues", ctx, &cfg.queue, max, rid);
+            if st.limits.enforcing() {
+                return Err(errors::err_403(
+                    errors::CODE_QUOTA_EXCEEDED,
+                    &format!("queue limit reached ({max})"),
+                ));
+            }
+        }
+        Admit::OverPartitions { max } => {
+            log_configure_deny(st.limits.enforcing(), "partitions", ctx, &cfg.queue, max, rid);
+            if st.limits.enforcing() {
+                return Err(errors::err_403(
+                    errors::CODE_QUOTA_EXCEEDED,
+                    &format!("partition limit reached ({max})"),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Uniform deny log for the configure path, same field shape as
+/// limits.rs::log_deny (`kind` plus `blocked`/`would_block` booleans — the
+/// canonical pair the limits dashboards filter on). `enforce_produce`'s
+/// registry arms predate that convention and put the kind in `would_block`
+/// itself; new code uses the canonical form.
+fn log_configure_deny(
+    enforcing: bool,
+    kind: &'static str,
+    ctx: &ClusterCtx,
+    queue: &str,
+    max: i64,
+    rid: &str,
+) {
+    if enforcing {
+        tracing::warn!(
+            target: "limits", cluster = %ctx.slug, kind, queue, max, blocked = true, rid,
+            "configure over cap"
+        );
+    } else {
+        tracing::warn!(
+            target: "limits", cluster = %ctx.slug, kind, queue, max, would_block = true, rid,
+            "configure over cap (shadow)"
+        );
+    }
+}
+
+/// The one QueueAdmin route with a body worth parsing. `classify` maps this
+/// path to QueueAdmin for every method, so the method check lives here.
+fn is_configure(method: &Method, path: &str) -> bool {
+    method == Method::POST && path == "/api/v1/configure"
+}
+
+/// Options that decide how long a queue keeps data: both are read by
+/// configure_queue_v1 (012_configure.sql) into queen.queues and become the
+/// retention sweep's rule-1 / rule-2 cutoffs (server/src/retention.rs).
+/// Deliberately NOT here: `maxWaitTimeSeconds`, an eviction deadline that only
+/// ever SHORTENS a message's life (045_log_maintenance.sql,
+/// log_evict_max_wait_step_v1), so it cannot exceed a retention ceiling; and
+/// `ttl`, which the segments engine only echoes back.
+const RETENTION_KEYS: &[&str] = &["retentionSeconds", "completedRetentionSeconds"];
+
+/// The parts of a `/configure` body the proxy enforces on.
+struct ConfigureInfo {
+    queue: String,
+    /// (option name, seconds) for each retention option set to a POSITIVE
+    /// value — see `parse_configure` for why non-positive is skipped.
+    retention: Vec<(&'static str, i64)>,
+}
+
+impl ConfigureInfo {
+    /// The first retention option above `ceiling`, if any.
+    fn retention_over(&self, ceiling: i64) -> Option<(&'static str, i64)> {
+        self.retention.iter().copied().find(|(_, secs)| *secs > ceiling)
+    }
+}
+
+/// Parse a configure body, mirroring the broker's own normalization
+/// (server/src/handlers/queues.rs::handle_configure): `queue` must be a string
+/// — an EMPTY name is legal and does create a queue — and the options bag is
+/// the nested `options` object when it *is* an object, otherwise the top-level
+/// body minus the routing keys (neither retention key is a routing key, so
+/// reading them straight off the root is the same bag). Err on anything the
+/// broker would 400 on, so the caller forwards without enforcing.
+fn parse_configure(bytes: &[u8]) -> Result<ConfigureInfo, ()> {
+    let root: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| ())?;
+    let obj = root.as_object().ok_or(())?;
+    let queue = obj.get("queue").and_then(|q| q.as_str()).ok_or(())?.to_string();
+    let opts = obj.get("options").and_then(|o| o.as_object()).unwrap_or(obj);
+
+    let mut retention = Vec::new();
+    for key in RETENTION_KEYS {
+        let Some(v) = opts.get(*key) else { continue };
+        // A JSON string counts too: the SP reads the option with `->>` (text)
+        // and casts to integer, so "3600" and 3600 configure the same
+        // retention — the ceiling has to see both or it is trivially bypassed.
+        let secs = v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()));
+        // Non-positive (or absent) means that rule is DISABLED, i.e. data is
+        // kept forever — retention.rs gates on `retention_enabled AND
+        // retention_seconds > 0`. Unbounded is not "under the ceiling", but it
+        // is also exactly what every client sends by default (the JS
+        // QUEUE_DEFAULTS post retentionSeconds: 0), so refusing it would 403 an
+        // out-of-the-box `.queue(x).create()`. Unbounded growth is the storage
+        // quota's job (max_retained_bytes -> push blocked, §6.1); this ceiling
+        // caps what a tenant explicitly asks to keep.
+        if let Some(s) = secs.filter(|s| *s > 0) {
+            retention.push((*key, s));
+        }
+    }
+    Ok(ConfigureInfo { queue, retention })
+}
+
 /// A single push item, resolved to owned data (no borrow of the request bytes
 /// escapes the parse — this is what STEP 4 iterates over).
 struct ItemInfo {
@@ -554,20 +828,118 @@ fn parse_produce_items(path: &str, bytes: &[u8]) -> Result<Vec<ItemInfo>, ()> {
     }
 }
 
-/// Count accepted messages in a push 201 response. The body is a top-level array
-/// of per-item `{...,"status":...}`; `queued` and `buffered` count, `duplicate`
-/// / `error` / `failed` do not (M1–M3). None on parse failure.
-fn count_push_statuses(bytes: &[u8]) -> Option<u64> {
+/// Per-item tallies from a push 201 response.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct PushCounts {
+    /// Billable items (M1–M3): `queued` + `buffered`.
+    accepted: u64,
+    /// `buffered` alone — tracked separately because it is the cell's
+    /// maintenance/spool signal (§6.10), not because it bills differently.
+    buffered: u64,
+    /// Items in the response, whatever their status.
+    total: u64,
+}
+
+/// Count a push 201 response. The body is a top-level array of per-item
+/// `{...,"status":...}`; `queued` and `buffered` are accepted, `duplicate` /
+/// `error` / `failed` are not (M1–M3). None on parse failure.
+fn count_push_statuses(bytes: &[u8]) -> Option<PushCounts> {
     #[derive(Deserialize)]
     struct StatusLite {
         status: String,
     }
     let arr: Vec<StatusLite> = serde_json::from_slice(bytes).ok()?;
-    Some(
-        arr.iter()
-            .filter(|s| s.status == "queued" || s.status == "buffered")
-            .count() as u64,
-    )
+    let mut counts = PushCounts { total: arr.len() as u64, ..PushCounts::default() };
+    for s in &arr {
+        match s.status.as_str() {
+            "queued" => counts.accepted += 1,
+            "buffered" => {
+                counts.accepted += 1;
+                counts.buffered += 1;
+            }
+            _ => {}
+        }
+    }
+    Some(counts)
+}
+
+/// What a transaction 2xx response says about the push ops counted on the way
+/// in. The two committed/rolled-back shapes are documented at
+/// server/src/handlers/data.rs::handle_transaction.
+#[derive(Debug, PartialEq, Eq)]
+enum TxnOutcome {
+    /// `success:true` — the SP committed. `duplicates` push ops were
+    /// first-wins-deduped inside the batch and created no message.
+    Committed { duplicates: u64 },
+    /// `success:false` — the SP raised and the whole transaction rolled back,
+    /// so NOTHING was stored, whatever the request contained.
+    RolledBack,
+    /// Not a shape this proxy can read (broker skew, truncation, non-JSON).
+    Unknown,
+}
+
+/// Read a transaction response. `success` is required: a body without it is
+/// `Unknown` rather than assumed-committed, so an unrecognised shape can never
+/// bill a rollback.
+fn txn_outcome(bytes: &[u8]) -> TxnOutcome {
+    #[derive(Deserialize)]
+    struct TxnResultLite {
+        #[serde(default, rename = "type")]
+        ty: Option<String>,
+        #[serde(default)]
+        duplicate: bool,
+    }
+    #[derive(Deserialize)]
+    struct TxnRespLite {
+        success: bool,
+        // Nulls are legal here (results is pre-sized per flat op index), so
+        // each entry is optional rather than failing the whole parse.
+        #[serde(default)]
+        results: Vec<Option<TxnResultLite>>,
+    }
+    let Ok(resp) = serde_json::from_slice::<TxnRespLite>(bytes) else {
+        return TxnOutcome::Unknown;
+    };
+    if !resp.success {
+        return TxnOutcome::RolledBack;
+    }
+    let duplicates = resp
+        .results
+        .iter()
+        .flatten()
+        .filter(|r| r.duplicate && r.ty.as_deref() == Some("push"))
+        .count() as u64;
+    TxnOutcome::Committed { duplicates }
+}
+
+/// §6.10: a cell in maintenance (or with its DB down) spools pushes to disk and
+/// answers `buffered` instead of `queued` (server/src/handlers/data.rs). A
+/// single buffered item can also be one item's failed transaction, so only a
+/// clear majority is read as "this cell is not writing to PG right now".
+fn predominantly_buffered(counts: &PushCounts) -> bool {
+    counts.total > 0 && counts.buffered * 2 > counts.total
+}
+
+/// Sampling interval for the maintenance signal — one line, not one per push.
+const MAINT_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Next instant a maintenance line may be emitted. Process-wide rather than
+/// per-cluster on purpose: one proxy fronts one cell (§2) and maintenance is a
+/// property of the cell, so the first cluster to notice reports for all of them.
+static MAINT_LOG_NEXT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Is a maintenance line due? Non-blocking try_lock, so a concurrent responder
+/// skips its line instead of waiting on the hot path (same shape as
+/// limits.rs::maybe_gc).
+fn maint_log_due(now: std::time::Instant) -> bool {
+    let Ok(mut next) = MAINT_LOG_NEXT.try_lock() else { return false };
+    match *next {
+        Some(at) if now < at => false,
+        _ => {
+            *next = Some(now + MAINT_LOG_INTERVAL);
+            true
+        }
+    }
 }
 
 /// Count delivered messages in a pop 200 response: `{...,"messages":[...]}`.
@@ -669,11 +1041,93 @@ mod tests {
             {"index":3,"status":"buffered","queueName":"b"},
             {"index":4,"status":"failed","queueName":"b"}
         ]"#;
-        // queued + buffered = 2; duplicate/error/failed excluded
-        assert_eq!(count_push_statuses(body), Some(2));
-        assert_eq!(count_push_statuses(b"[]"), Some(0));
+        // queued + buffered = 2 accepted; duplicate/error/failed excluded
+        let counts = count_push_statuses(body).expect("parse");
+        assert_eq!(counts.accepted, 2);
+        assert_eq!(counts.buffered, 1);
+        assert_eq!(counts.total, 5);
+        assert_eq!(count_push_statuses(b"[]"), Some(PushCounts::default()));
         // an error object (not an array) -> None (parse fail, msgs=0 at call site)
         assert_eq!(count_push_statuses(br#"{"error":"bad body"}"#), None);
+    }
+
+    #[test]
+    fn maintenance_signal_needs_a_buffered_majority() {
+        let all_buffered = br#"[{"status":"buffered"},{"status":"buffered"}]"#;
+        assert!(predominantly_buffered(&count_push_statuses(all_buffered).expect("parse")));
+
+        // one item's transaction failed and spooled: not a cell-wide signal
+        let one_of_three = br#"[{"status":"queued"},{"status":"queued"},{"status":"buffered"}]"#;
+        assert!(!predominantly_buffered(&count_push_statuses(one_of_three).expect("parse")));
+
+        // exactly half is not a majority
+        let half = br#"[{"status":"queued"},{"status":"buffered"}]"#;
+        assert!(!predominantly_buffered(&count_push_statuses(half).expect("parse")));
+
+        // nothing to report: empty array, and the parse-failure default
+        assert!(!predominantly_buffered(&count_push_statuses(b"[]").expect("parse")));
+        assert!(!predominantly_buffered(&PushCounts::default()));
+    }
+
+    #[test]
+    fn maint_log_sampling_gate_admits_one_line_per_interval() {
+        // The gate is a process-wide static; this is the only test touching it.
+        let t0 = std::time::Instant::now();
+        assert!(maint_log_due(t0), "first line is always due");
+        assert!(!maint_log_due(t0), "a second push in the same instant is sampled out");
+        assert!(
+            !maint_log_due(t0 + MAINT_LOG_INTERVAL - std::time::Duration::from_millis(1)),
+            "still inside the interval"
+        );
+        assert!(maint_log_due(t0 + MAINT_LOG_INTERVAL), "due again once the interval elapses");
+    }
+
+    // ---- transaction billing: a rollback is HTTP 200 and must not be charged ----
+
+    #[test]
+    fn transaction_rollback_is_not_charged() {
+        // txn_fail_body's exact shape (data.rs): 200, success:false, empty
+        // results. Every push op in the request was undone.
+        let rolled_back = br#"{"transactionId":"01890000-0000-7000-8000-000000000000",
+            "success":false,"error":"QDUP duplicate transaction","results":[]}"#;
+        assert_eq!(txn_outcome(rolled_back), TxnOutcome::RolledBack);
+    }
+
+    #[test]
+    fn transaction_commit_charges_pushes_minus_intra_batch_duplicates() {
+        let committed = br#"{"transactionId":"t","success":true,"results":[
+            {"index":0,"type":"push","success":true,"transactionId":"a","messageId":"m1","queueName":"q"},
+            {"index":1,"type":"push","success":true,"transactionId":"a","messageId":"m1","queueName":"q","duplicate":true},
+            {"index":2,"type":"ack","success":true,"transactionId":"a","error":null,"dlq":false}
+        ]}"#;
+        // One real push, one first-wins duplicate (M2: never charged), one ack.
+        assert_eq!(txn_outcome(committed), TxnOutcome::Committed { duplicates: 1 });
+
+        // Ack-only transaction: committed, nothing to subtract.
+        let ack_only = br#"{"transactionId":"t","success":true,"results":[
+            {"index":0,"type":"ack","success":true,"transactionId":"a","error":null,"dlq":true}
+        ]}"#;
+        assert_eq!(txn_outcome(ack_only), TxnOutcome::Committed { duplicates: 0 });
+    }
+
+    #[test]
+    fn transaction_results_may_contain_nulls() {
+        // results is pre-sized per flat op index and left Null where no echo
+        // landed — that must not fail the parse (which would bill 0).
+        let with_nulls = br#"{"transactionId":"t","success":true,"results":[
+            null,{"index":1,"type":"push","success":true,"duplicate":true}
+        ]}"#;
+        assert_eq!(txn_outcome(with_nulls), TxnOutcome::Committed { duplicates: 1 });
+    }
+
+    #[test]
+    fn transaction_unreadable_body_is_unknown_not_committed() {
+        // No `success` key, not JSON, or the wrong top-level shape: never
+        // assumed committed — Unknown charges 0 at the call site.
+        assert_eq!(txn_outcome(br#"{"transactionId":"t","results":[]}"#), TxnOutcome::Unknown);
+        assert_eq!(txn_outcome(b"not json"), TxnOutcome::Unknown);
+        assert_eq!(txn_outcome(br#"[{"success":true}]"#), TxnOutcome::Unknown);
+        assert_eq!(txn_outcome(b""), TxnOutcome::Unknown);
     }
 
     #[test]
@@ -726,6 +1180,104 @@ mod tests {
         let items = parse_produce_items("/api/v1/transaction", body).expect("parse");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].queue, "q");
+    }
+
+    // ---- /configure enforcement (registry admission + retention ceiling) ----
+
+    #[test]
+    fn configure_route_is_post_only() {
+        assert!(is_configure(&Method::POST, "/api/v1/configure"));
+        // classify() maps the path for every method; only POST carries a body
+        assert!(!is_configure(&Method::GET, "/api/v1/configure"));
+        assert!(!is_configure(&Method::POST, "/api/v1/configure/extra"));
+        assert!(!is_configure(&Method::POST, "/api/v1/push"));
+    }
+
+    #[test]
+    fn configure_queue_name_from_client_shape() {
+        // what QueueBuilder.create() posts: {queue, namespace, task, options}
+        let body = br#"{"queue":"orders","namespace":"ns","task":"t",
+            "options":{"leaseTime":300,"retryLimit":3,"retentionSeconds":0}}"#;
+        let cfg = parse_configure(body).expect("parse");
+        assert_eq!(cfg.queue, "orders");
+        // retentionSeconds:0 = retention disabled = not a ceiling candidate
+        assert_eq!(cfg.retention_over(60), None);
+    }
+
+    #[test]
+    fn configure_empty_queue_name_is_valid() {
+        // the broker creates a queue named "" (handle_configure accepts it), so
+        // the proxy must enforce on it rather than treat the body as malformed
+        let cfg = parse_configure(br#"{"queue":"","options":{}}"#).expect("parse");
+        assert_eq!(cfg.queue, "");
+    }
+
+    #[test]
+    fn configure_malformed_body_is_err() {
+        // no queue key -> broker 400s -> we forward without enforcing
+        assert!(parse_configure(br#"{"options":{"leaseTime":300}}"#).is_err());
+        // queue present but not a string
+        assert!(parse_configure(br#"{"queue":42}"#).is_err());
+        // not JSON at all, and a non-object top level
+        assert!(parse_configure(b"not json").is_err());
+        assert!(parse_configure(br#"[{"queue":"orders"}]"#).is_err());
+    }
+
+    #[test]
+    fn configure_retention_read_from_either_options_shape() {
+        // nested options bag (client shape)
+        let nested = parse_configure(br#"{"queue":"q","options":{"retentionSeconds":86400}}"#)
+            .expect("parse");
+        assert_eq!(nested.retention_over(3600), Some(("retentionSeconds", 86400)));
+        // top-level bag (raw caller shape — the broker's fallback)
+        let flat = parse_configure(br#"{"queue":"q","retentionSeconds":86400}"#).expect("parse");
+        assert_eq!(flat.retention_over(3600), Some(("retentionSeconds", 86400)));
+        // `options` present but not an object -> broker falls back to top level
+        let odd = parse_configure(br#"{"queue":"q","options":7,"retentionSeconds":86400}"#)
+            .expect("parse");
+        assert_eq!(odd.retention_over(3600), Some(("retentionSeconds", 86400)));
+    }
+
+    #[test]
+    fn configure_retention_ceiling_decision() {
+        let body = br#"{"queue":"q","options":{"retentionSeconds":3600,
+            "completedRetentionSeconds":7200,"maxWaitTimeSeconds":999999,"ttl":999999}}"#;
+        let cfg = parse_configure(body).expect("parse");
+        // under/at the ceiling: allowed (the check is strictly greater-than)
+        assert_eq!(cfg.retention_over(7200), None);
+        // completedRetentionSeconds alone over the ceiling is still a refusal,
+        // and the option name comes back for the error message
+        assert_eq!(cfg.retention_over(3600), Some(("completedRetentionSeconds", 7200)));
+        // both over -> reports the first one found, in RETENTION_KEYS order
+        assert_eq!(cfg.retention_over(60), Some(("retentionSeconds", 3600)));
+    }
+
+    #[test]
+    fn configure_retention_accepts_the_numeric_string_form() {
+        // the SP reads options with `->>` and casts, so "86400" configures the
+        // same retention as 86400 — the ceiling must not be bypassable that way
+        let cfg = parse_configure(br#"{"queue":"q","options":{"retentionSeconds":"86400"}}"#)
+            .expect("parse");
+        assert_eq!(cfg.retention_over(3600), Some(("retentionSeconds", 86400)));
+        // a non-numeric string is not a retention request (the SP's cast would
+        // error broker-side); nothing to enforce, forward and let it 500 there
+        let junk = parse_configure(br#"{"queue":"q","options":{"retentionSeconds":"forever"}}"#)
+            .expect("parse");
+        assert_eq!(junk.retention_over(1), None);
+    }
+
+    #[test]
+    fn configure_disabled_retention_is_not_a_ceiling_violation() {
+        // 0 / negative / absent all mean the retention rule is OFF (kept
+        // forever). Deliberately allowed here — see parse_configure.
+        for body in [
+            &br#"{"queue":"q","options":{"retentionSeconds":0}}"#[..],
+            &br#"{"queue":"q","options":{"retentionSeconds":-1}}"#[..],
+            &br#"{"queue":"q","options":{}}"#[..],
+        ] {
+            let cfg = parse_configure(body).expect("parse");
+            assert_eq!(cfg.retention_over(1), None, "body: {}", String::from_utf8_lossy(body));
+        }
     }
 
     #[test]

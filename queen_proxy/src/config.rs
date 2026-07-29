@@ -23,6 +23,65 @@ pub fn env_u64(key: &str, default: u64) -> u64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+/// Grace window past a cache entry's TTL during which the last known-good
+/// value may still be served, but only when pxdb failed to *answer* (PLAN §2:
+/// "keep serving cached clusters (fail-open for known good) ... pxdb down ≠
+/// data plane down"). Ten minutes covers the outages this exists to survive —
+/// a managed-PG failover, a restart, a migration — while bounding the damage:
+/// nothing is refreshed while pxdb is down, so this window is also the
+/// worst-case delay before a control-plane decision taken during the outage
+/// (suspend, delete, key revocation) takes effect. A clean "no such row"
+/// never uses it — see cache.rs::fallback. Read here rather than off `Config`
+/// (like QUEEN_PROXY_RECONCILE_MS in registry.rs) because one module consumes
+/// it and it is read once, at construction.
+pub fn stale_grace() -> std::time::Duration {
+    std::time::Duration::from_millis(env_u64("QUEEN_PROXY_STALE_GRACE_MS", 600_000))
+}
+
+/// Deny-list policy when the pxdb revocation lookup itself fails (pool or
+/// query error, not a clean "no such row"). Default false = fail OPEN: a
+/// transient pxdb blip must not 401 every session, and the token still had to
+/// pass signature + exp. true = fail CLOSED for deployments that would rather
+/// lose availability than honour a token that may have been revoked. Read here
+/// rather than off `Config` (like `stale_grace` above) because one module
+/// consumes it and it is read once, when `auth::Keys` is built.
+pub fn revocation_strict() -> bool {
+    env_bool("QUEEN_PROXY_REVOCATION_STRICT", false)
+}
+
+/// How often `queen_proxy.sweep_revoked_tokens()` drops deny-list rows whose
+/// own `exp` has passed. Pure GC — an expired row can no longer change a
+/// verify's outcome — so hourly is ample; 0 disables the sweep.
+pub fn revocation_sweep_interval() -> std::time::Duration {
+    std::time::Duration::from_millis(env_u64("QUEEN_PROXY_REVOCATION_SWEEP_MS", 3_600_000))
+}
+
+/// Bound on the metering drain that runs after the listener stops accepting.
+/// The drain spools to disk when pxdb is unreachable, so this only exists so a
+/// dead pxdb cannot hold the process open indefinitely.
+pub fn shutdown_drain_budget() -> std::time::Duration {
+    std::time::Duration::from_millis(env_u64("QUEEN_PROXY_SHUTDOWN_DRAIN_MS", 5_000))
+}
+
+/// Paths to the OPTIONAL TLS listener material — the Cloudflare-origin leg
+/// (PLAN §9: "origin cert between CF and the cell proxy"). Both must be set:
+/// TLS is opt-in, and a half-configured listener is a misconfiguration worth
+/// failing on rather than silently serving the plaintext port.
+#[derive(Clone, Debug)]
+pub struct TlsMaterial {
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+pub fn tls_material() -> Result<Option<TlsMaterial>, String> {
+    match (env_opt("QUEEN_PROXY_TLS_CERT"), env_opt("QUEEN_PROXY_TLS_KEY")) {
+        (Some(cert_path), Some(key_path)) => Ok(Some(TlsMaterial { cert_path, key_path })),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err("QUEEN_PROXY_TLS_CERT set without QUEEN_PROXY_TLS_KEY".to_string()),
+        (None, Some(_)) => Err("QUEEN_PROXY_TLS_KEY set without QUEEN_PROXY_TLS_CERT".to_string()),
+    }
+}
+
 /// The header the proxy injects toward the broker to scope queue identity
 /// (Track B). Trusted only inside the cell network.
 pub const TENANT_HEADER: &str = "x-queen-tenant";

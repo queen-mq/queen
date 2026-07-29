@@ -2,17 +2,31 @@
 import { ref, computed, onMounted } from 'vue'
 import { apiFetch } from '../api.js'
 
-defineProps({ overview: { type: Object, default: null } })
+const props = defineProps({ overview: { type: Object, default: null } })
 
 const usage = ref([])
 const usageError = ref(null)
 const usageLoading = ref(true)
 
+// The API accepts 1..168 (console.rs clamp_hours); these are the round points
+// inside that range, so the picker can never ask for a window that gets
+// silently clamped to something else.
+const HOUR_CHOICES = [
+  { hours: 1, label: 'Last hour' },
+  { hours: 6, label: 'Last 6h' },
+  { hours: 24, label: 'Last 24h' },
+  { hours: 72, label: 'Last 3 days' },
+  { hours: 168, label: 'Last 7 days' },
+]
+const hours = ref(24)
+
+const hoursLabel = computed(() => HOUR_CHOICES.find((c) => c.hours === hours.value)?.label ?? `Last ${hours.value}h`)
+
 async function loadUsage() {
   usageLoading.value = true
   usageError.value = null
   try {
-    usage.value = await apiFetch('/api/console/usage?hours=24')
+    usage.value = await apiFetch(`/api/console/usage?hours=${hours.value}`)
   } catch (e) {
     usageError.value = e.message || String(e)
   } finally {
@@ -79,6 +93,25 @@ function fmtBytes(n) {
   return `${v.toFixed(1)} ${units[u]}`
 }
 
+// --- plan + quota ----------------------------------------------------------
+
+// Month-to-date messages against plans.monthly_msgs_quota. Both come from the
+// overview response (queen_proxy.cluster_month_msgs), so the figure includes
+// today's not-yet-rolled-up minutes.
+const monthMsgs = computed(() => props.overview?.usage?.msgs ?? 0)
+const monthQuota = computed(() => props.overview?.plan?.monthly_msgs_quota ?? null)
+const quotaPct = computed(() => {
+  if (!monthQuota.value) return null
+  return Math.min(100, (monthMsgs.value / monthQuota.value) * 100)
+})
+
+// Live push-block reason as the proxy itself holds it ('storage' |
+// 'monthly_quota' | null) — the same flag gateway.rs turns into a 403, not a
+// verdict this page recomputes.
+const pushBlock = computed(() => props.overview?.push_block ?? null)
+const storageBlocked = computed(() => pushBlock.value === 'storage')
+const maxRetained = computed(() => props.overview?.storage?.max_retained_bytes ?? null)
+
 // Insertion order here is display order.
 const LIMIT_LABELS = {
   max_req_per_sec: 'Requests / sec',
@@ -106,6 +139,59 @@ function fmtLimit(key, value) {
 
 <template>
   <section>
+    <div class="card">
+      <div class="card-head">
+        <h2>Plan &amp; quota</h2>
+        <span v-if="overview" class="pill mono">{{ overview.plan.code }}</span>
+      </div>
+
+      <div v-if="storageBlocked" class="banner banner-error">
+        <strong>Pushes are being rejected</strong>: retained data is over this plan's
+        {{ fmtBytes(maxRetained) }} storage cap. Consumes still work. Delete or drain queues — the Queues tab shows
+        retained bytes per queue against the cap.
+      </div>
+      <div v-else-if="pushBlock === 'monthly_quota'" class="banner banner-error">
+        <strong>Pushes are being rejected</strong>: this cluster has used its
+        {{ monthQuota ? monthQuota.toLocaleString() : '' }} messages for {{ overview.usage.month }}. Consumes still
+        work, and the counter resets at the start of next month.
+      </div>
+      <div v-else-if="overview && overview.status === 'suspended'" class="banner banner-error">
+        <strong>This cluster is suspended</strong>: the whole data plane answers 403 until it is reactivated.
+      </div>
+      <div v-else-if="overview && overview.status === 'push_blocked'" class="banner banner-warn">
+        <p>
+          <strong>Pushes are blocked</strong> for this cluster. Consumes still work. No storage or monthly-message
+          quota is currently over, so this block came from the control plane (billing or an operator action).
+        </p>
+      </div>
+
+      <table v-if="overview" class="kv">
+        <tbody>
+          <tr>
+            <td class="dim">Messages this month ({{ overview.usage.month }})</td>
+            <td>
+              <template v-if="monthQuota">
+                {{ monthMsgs.toLocaleString() }} of {{ monthQuota.toLocaleString() }}
+                <span v-if="pushBlock === 'monthly_quota'" class="pill pill-off">Quota reached</span>
+                <div class="meter" :title="`${quotaPct.toFixed(1)}% of the monthly quota`">
+                  <div class="meter-fill" :class="{ 'meter-hot': quotaPct >= 90 }" :style="{ width: quotaPct + '%' }" />
+                </div>
+              </template>
+              <template v-else>{{ monthMsgs.toLocaleString() }} (no monthly quota)</template>
+            </td>
+          </tr>
+          <tr>
+            <td class="dim">Retained storage cap</td>
+            <td>
+              {{ fmtBytes(maxRetained) }}
+              <span v-if="storageBlocked" class="pill pill-off">Over quota</span>
+              <span v-else-if="maxRetained" class="pill pill-on">Within cap</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <div class="grid-2">
       <div class="card">
         <h2>Plan limits</h2>
@@ -145,7 +231,12 @@ function fmtLimit(key, value) {
     </div>
 
     <div class="card">
-      <h2>Usage — last 24h</h2>
+      <div class="card-head">
+        <h2>Usage — {{ hoursLabel.toLowerCase() }}</h2>
+        <select v-model.number="hours" @change="loadUsage">
+          <option v-for="c in HOUR_CHOICES" :key="c.hours" :value="c.hours">{{ c.label }}</option>
+        </select>
+      </div>
       <div v-if="usageLoading" class="hint">Loading…</div>
       <div v-else-if="usageError" class="banner banner-error">{{ usageError }}</div>
       <template v-else>

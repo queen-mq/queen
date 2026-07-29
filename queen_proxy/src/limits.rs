@@ -47,6 +47,27 @@ pub enum Decision {
     Deny { retry_after_s: u64, code: &'static str },
 }
 
+/// Why a cluster's pushes are blocked by a live (in-process) flag. The two
+/// sources are independent — a cluster can be over its storage cap and out of
+/// monthly messages at the same time, and releasing one must not release the
+/// other — so the flag set is keyed by (cluster, reason) rather than by
+/// cluster alone. Each maps to its own client-facing 403 code in gateway.rs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PushBlock {
+    /// Retained bytes over `max_retained_bytes` (registry reconciler ->
+    /// storage-quota pump in main.rs).
+    Storage,
+    /// Calendar-month messages at or over `plans.monthly_msgs_quota` (the
+    /// rollup task, meter::spawn_rollup).
+    MonthlyQuota,
+}
+
+/// Precedence when a cluster carries more than one live block: the first
+/// match wins the 403 code. Storage leads because it is the cell-protecting
+/// one — a tenant whose disk pressure is blocking pushes needs to hear that
+/// before a billing ceiling that will clear on its own at the month boundary.
+const PUSH_BLOCK_PRECEDENCE: &[PushBlock] = &[PushBlock::Storage, PushBlock::MonthlyQuota];
+
 pub struct ParkedGuard {
     cell_gauge: Option<Arc<AtomicI64>>,
     cluster_gauge: Option<Arc<AtomicI64>>,
@@ -174,7 +195,7 @@ pub struct Limits {
     cell_parked_max: i64,
     buckets: Vec<Mutex<HashMap<Uuid, ClusterBuckets>>>,
     parked: Vec<Mutex<HashMap<Uuid, ParkedEntry>>>,
-    push_blocked: RwLock<HashSet<Uuid>>,
+    push_blocked: RwLock<HashSet<(Uuid, PushBlock)>>,
     gc_next: Mutex<Instant>,
 }
 
@@ -281,24 +302,38 @@ impl Limits {
         Ok(ParkedGuard { cell_gauge: Some(self.cell_parked.clone()), cluster_gauge: Some(cluster_gauge) })
     }
 
-    /// Storage quota state, updated by the registry reconciler.
+    /// Storage quota state, updated by the registry reconciler (the
+    /// storage-quota pump in main.rs). Kept as the reason-less signature the
+    /// pump already calls; it is `PushBlock::Storage` and nothing else.
     pub fn set_push_blocked(&self, cluster_id: Uuid, blocked: bool) {
+        self.set_push_blocked_reason(cluster_id, PushBlock::Storage, blocked);
+    }
+
+    /// Same flag set, one reason at a time. Reasons are independent: setting
+    /// or clearing one never touches the other, so two pumps on different
+    /// cadences (storage every 10s, monthly quota hourly) can own one each
+    /// without racing over a shared boolean.
+    pub fn set_push_blocked_reason(&self, cluster_id: Uuid, reason: PushBlock, blocked: bool) {
         let mut set = self.push_blocked.write().unwrap();
         if blocked {
-            set.insert(cluster_id);
+            set.insert((cluster_id, reason));
         } else {
-            set.remove(&cluster_id);
+            set.remove(&(cluster_id, reason));
         }
     }
 
-    /// Fast in-process read of the push-blocked flag set by the registry
-    /// reconciler. Gateway: consult this alongside `ctx.status ==
+    /// Fast in-process read of the push-blocked flags set by the quota pumps,
+    /// resolved to the reason the client should be told about
+    /// (PUSH_BLOCK_PRECEDENCE). Gateway: consult this alongside `ctx.status ==
     /// ClusterStatus::PushBlocked` at the same pipeline point (step 2, the
-    /// cluster-status gate) — this is the faster-reacting signal between
-    /// reconcile ticks; ctx.status is the DB/cache-backed one. See report §2
-    /// for the exact suggested diff.
-    pub fn is_push_blocked(&self, cluster_id: Uuid) -> bool {
-        self.push_blocked.read().unwrap().contains(&cluster_id)
+    /// cluster-status gate) — these are the faster-reacting signals between
+    /// pump ticks; ctx.status is the DB/cache-backed one.
+    pub fn push_block_reason(&self, cluster_id: Uuid) -> Option<PushBlock> {
+        let set = self.push_blocked.read().unwrap();
+        PUSH_BLOCK_PRECEDENCE
+            .iter()
+            .copied()
+            .find(|reason| set.contains(&(cluster_id, *reason)))
     }
 
     /// Core dual-bucket decision: get-or-create the cluster's bucket pair,
@@ -670,11 +705,45 @@ mod tests {
     fn push_blocked_set_and_query() {
         let limits = Limits::new_for_test(true);
         let id = Uuid::new_v4();
-        assert!(!limits.is_push_blocked(id));
+        assert_eq!(limits.push_block_reason(id), None);
         limits.set_push_blocked(id, true);
-        assert!(limits.is_push_blocked(id));
+        // The reason-less setter is the storage one — that is what the
+        // storage-quota pump in main.rs calls.
+        assert_eq!(limits.push_block_reason(id), Some(PushBlock::Storage));
         limits.set_push_blocked(id, false);
-        assert!(!limits.is_push_blocked(id));
+        assert_eq!(limits.push_block_reason(id), None);
+    }
+
+    #[test]
+    fn push_block_reasons_are_independent_and_ordered() {
+        let limits = Limits::new_for_test(true);
+        let id = Uuid::new_v4();
+
+        limits.set_push_blocked_reason(id, PushBlock::MonthlyQuota, true);
+        assert_eq!(limits.push_block_reason(id), Some(PushBlock::MonthlyQuota));
+
+        // Both held at once: storage wins the reported reason...
+        limits.set_push_blocked(id, true);
+        assert_eq!(limits.push_block_reason(id), Some(PushBlock::Storage));
+
+        // ...and releasing storage must NOT release the monthly quota block
+        // (the bug a single shared boolean would have): the tenant is still
+        // out of messages for the month.
+        limits.set_push_blocked(id, false);
+        assert_eq!(limits.push_block_reason(id), Some(PushBlock::MonthlyQuota));
+
+        limits.set_push_blocked_reason(id, PushBlock::MonthlyQuota, false);
+        assert_eq!(limits.push_block_reason(id), None);
+    }
+
+    #[test]
+    fn push_block_is_per_cluster() {
+        let limits = Limits::new_for_test(true);
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        limits.set_push_blocked_reason(a, PushBlock::MonthlyQuota, true);
+        assert_eq!(limits.push_block_reason(a), Some(PushBlock::MonthlyQuota));
+        assert_eq!(limits.push_block_reason(b), None, "one cluster's quota must not block another's");
     }
 
     // ---- GC (synthetic future Instant, no real sleep) ----

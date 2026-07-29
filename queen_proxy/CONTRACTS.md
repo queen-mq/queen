@@ -53,10 +53,15 @@ agents work inside this crate. **Read both before writing code.**
   `migrations/NNN_name.sql`, registered in `db::migrations()` (include_str!),
   applied in order, recorded in `queen_proxy.schema_migrations`.
 - Control-plane contract (§2 rev 1.2): SQL functions in `queen_proxy.*`
-  (assign_plan, set_tenant_status, place_cluster, create_tenant,
-  create_cluster, create_user, issue_api_key, revoke_api_key,
-  record_operation) — SECURITY DEFINER-style discipline: validate, write,
-  append `operations` row, `pg_notify('queen_proxy_inval', cluster_id)`.
+  (assign_plan, set_tenant_status, create_tenant, create_cluster,
+  create_user, issue_api_key, revoke_api_key, record_operation;
+  set_limit_override in 003; revoke_session, sweep_revoked_tokens,
+  grant_cluster_role, revoke_cluster_role, bootstrap_tenant,
+  rollup_usage_days, cluster_month_msgs, emit_outbox in 004;
+  prune_usage_minutes in 005) — SECURITY DEFINER-style discipline: validate,
+  write, append `operations` row, `pg_notify('queen_proxy_inval', cluster_id)`.
+  `bootstrap_tenant` is the one-call onboarding path (tenant + cluster + admin
+  user + role + first api key, returning the plaintext key once).
 - Broker-facing constants: header `x-queen-tenant` (config::TENANT_HEADER),
   default tenant UUID `00000000-0000-0000-0000-000000000001` — must match
   server/ Track B.

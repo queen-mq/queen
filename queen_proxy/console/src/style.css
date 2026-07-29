@@ -96,6 +96,12 @@ body {
   font-size: 13px;
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
 .cluster-badge {
   display: flex;
   align-items: center;
@@ -322,6 +328,26 @@ table.list tr:last-child td {
   display: block;
 }
 
+/* --- quota meter ------------------------------------------------------------- */
+
+.meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--off-bg);
+  overflow: hidden;
+  margin-top: 6px;
+  max-width: 320px;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--accent);
+}
+
+.meter-fill.meter-hot {
+  background: var(--danger);
+}
+
 /* --- banners --------------------------------------------------------------- */
 
 .banner {
@@ -379,6 +405,27 @@ table.list tr:last-child td {
   border-color: var(--accent);
 }
 
+select {
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .scope-picker {
   display: flex;
   gap: 10px;
@@ -429,6 +476,11 @@ table.list tr:last-child td {
 
 .btn-ghost:hover {
   background: var(--off-bg);
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
 }
 
 .btn-link {
