@@ -56,9 +56,17 @@ const CLEANUP_LOCK_ID: i64 = 737_001;
 /// `now()`), and the step calls cast the text back. A NULL column = that rule is
 /// disabled for the queue (the 026-era `retention_seconds > 0` gating, decided
 /// here, not in SQL — 045 header).
+///
+/// Queue identity is (tenant_id, name) on BOTH sides of the queues→log_queues
+/// join (schema.sql, 041_log_schema.sql), so the join predicate MUST carry
+/// tenant_id: matching on name alone is a cross product as soon as two tenants
+/// hold the same queue name, and one tenant's cutoffs would then be emitted
+/// against another tenant's partitions — which the step calls below execute as
+/// deletes. Single-tenant deployments are unaffected (the join is 1:1 either
+/// way).
 const WORK_LIST_SQL: &str = "\
     SELECT p.id::text, \
-           qq.name, \
+           lq.id::text, \
            CASE WHEN qq.retention_enabled AND COALESCE(qq.retention_seconds, 0) > 0 \
                 THEN (now() - make_interval(secs => qq.retention_seconds))::text END, \
            CASE WHEN qq.retention_enabled AND COALESCE(qq.completed_retention_seconds, 0) > 0 \
@@ -69,7 +77,7 @@ const WORK_LIST_SQL: &str = "\
            CASE WHEN COALESCE(qq.max_wait_time_seconds, 0) > 0 \
                 THEN (now() - make_interval(secs => qq.max_wait_time_seconds))::text END \
     FROM queen.queues qq \
-    JOIN queen.log_queues lq ON lq.name = qq.name \
+    JOIN queen.log_queues lq ON lq.name = qq.name AND lq.tenant_id = qq.tenant_id \
     JOIN queen.log_partitions p ON p.queue_id = lq.id \
     WHERE qq.storage = 'segments' \
     ORDER BY p.id";
@@ -230,7 +238,7 @@ async fn cycle_body(
         .iter()
         .map(|r| WorkItem {
             pid: r.get(0),
-            queue: r.get(1),
+            queue_id: r.get(1),
             all_cutoff: r.get(2),
             completed_cutoff: r.get(3),
             txns_cutoff: r.get(4),
@@ -240,7 +248,9 @@ async fn cycle_body(
     let max_rows = knobs.max_rows();
 
     // Phase 1: retention rules 1+2 (queues gated 026-style: retention_enabled
-    // AND a positive window — encoded as at least one non-NULL cutoff).
+    // AND a positive window — encoded as at least one non-NULL cutoff). The
+    // swept-queue count is keyed by log_queues.id, not name: names repeat across
+    // tenants, so a name-keyed set would collapse distinct queues into one.
     let mut segments_deleted: i64 = 0;
     let mut retention_queues: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let stmt = client
@@ -253,7 +263,7 @@ async fn cycle_body(
         if w.all_cutoff.is_none() && w.completed_cutoff.is_none() {
             continue;
         }
-        retention_queues.insert(w.queue.as_str());
+        retention_queues.insert(w.queue_id.as_str());
         loop {
             let row = client
                 .query_one(&stmt, &[&w.pid, &w.all_cutoff, &w.completed_cutoff, &max_rows])
@@ -345,7 +355,7 @@ async fn cycle_body(
 /// `timestamptz::text` values (None = rule disabled for this queue).
 struct WorkItem {
     pid: String,
-    queue: String,
+    queue_id: String,
     all_cutoff: Option<String>,
     completed_cutoff: Option<String>,
     txns_cutoff: String,
@@ -378,4 +388,21 @@ async fn purge_metrics(
     )
     .await?;
     Ok(format!("worker={} system_rows={}", worker.trim(), system))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shape guard only — the cycle itself needs a live pool, so behavioural
+    /// coverage lives in the two-tenant isolation smoke. What this pins down is
+    /// the one property that silently turns the work list into a cross-tenant
+    /// delete: joining queues to log_queues on name without tenant_id.
+    #[test]
+    fn work_list_join_is_tenant_scoped() {
+        assert!(WORK_LIST_SQL.contains("lq.name = qq.name AND lq.tenant_id = qq.tenant_id"));
+        // The partition leg must stay keyed on the (already tenant-resolved)
+        // log_queues row, never re-resolved by name.
+        assert!(WORK_LIST_SQL.contains("queen.log_partitions p ON p.queue_id = lq.id"));
+    }
 }

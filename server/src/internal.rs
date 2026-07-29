@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
@@ -30,7 +30,16 @@ fn json(status: StatusCode, body: String) -> Response {
 }
 
 /// POST /internal/api/notify {queue, partition?}
-pub async fn handle_notify(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+///
+/// Track B (§5): the wake gate is keyed by (tenant, queue), so the route resolves the
+/// tenant from the same global middleware every other handler uses — the header comes
+/// from an operator/proxy, since the route is Admin-gated. Absent ⇒ default tenant,
+/// which is what an OSS caller has always meant.
+pub async fn handle_notify(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let v: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
@@ -44,7 +53,8 @@ pub async fn handle_notify(State(st): State<Arc<AppState>>, body: Bytes) -> Resp
     }
     let partition = v.get("partition").and_then(|x| x.as_str()).unwrap_or("");
     // Same signal a local push emits: wake local parked pops + broadcast to peers.
-    st.notifier.notify_pushed(queue, partition);
+    st.notifier
+        .notify_pushed(&crate::handlers::tenant_queue_key(tenant.as_str(), queue), partition);
     json(StatusCode::OK, "{\"status\":\"ok\"}".to_string())
 }
 

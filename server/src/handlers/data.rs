@@ -227,16 +227,22 @@ pub async fn handle_push(
     // the flush's pack_frames stamps it into the frame (FLAG_PSUB) — so auth-enabled
     // pushes coalesce across requests exactly like the anonymous path.
     let pending = groups.len();
-    // Capture the pushed (queue, partition) set before the submit loop consumes
+    // Capture the pushed (qkey, partition) set before the submit loop consumes
     // `groups`, so we can wake parked pops / notify peers once the write lands.
-    let notify_keys: Vec<(String, String)> = groups.keys().cloned().collect();
-    // 19-wildcard-hotlist §2: capture (queue, partition, count) before `groups`
+    // Track B (§5): the ring and the wake gate are keyed by (tenant, queue), so the
+    // composite key is built HERE — one String per touched queue, exactly the
+    // allocation the bare-name clone already cost.
+    let notify_keys: Vec<(String, String)> = groups
+        .keys()
+        .map(|(q, p)| (tenant_queue_key(tenant.as_str(), q), p.clone()))
+        .collect();
+    // 19-wildcard-hotlist §2: capture (qkey, partition, count) before `groups`
     // is consumed, so the post-commit mark knows each partition's frame count
     // (windowBuffer batch fattening). Only when the flag is on (else zero cost).
     let hotlist_marks: Vec<(String, String, u32)> = if st.hotlist.enabled() {
         groups
             .iter()
-            .map(|((q, p), v)| (q.clone(), p.clone(), v.len() as u32))
+            .map(|((q, p), v)| (tenant_queue_key(tenant.as_str(), q), p.clone(), v.len() as u32))
             .collect()
     } else {
         Vec::new()
@@ -291,8 +297,8 @@ pub async fn handle_push(
         // coalesced HOTLIST_DIRTY hints are additive. Incondizionato; a mark on a
         // partition whose push actually failed is the usual harmless false positive.
         let now_ms = crate::util::now_epoch_ms();
-        for (q, p, n) in &hotlist_marks {
-            st.hotlist.mark_local_quiet(q, p, *n, now_ms);
+        for (qkey, p, n) in &hotlist_marks {
+            st.hotlist.mark_local_quiet(qkey, p, *n, now_ms);
         }
         st.notifier.fan_out_pushed_batch(&notify_keys);
     } else {
@@ -565,13 +571,16 @@ pub async fn handle_pop(
         Some(v) if v > 0 => v,
         _ => st.lease_time_for(&queue, tenant.as_str()).await,
     };
+    // Track B (§5): the ring and the wake gate are keyed by (tenant, queue). Built
+    // ONCE per request, before any loop — never per poll iteration.
+    let qkey = tenant_queue_key(tenant.as_str(), &queue);
 
     // 19-wildcard-hotlist: with QUEEN_HOTLIST on, serve the wildcard pop from the
     // broker-side candidate ring instead of the SQL candidate scan. Flag off ⇒
     // this branch is never taken and the path below is byte-identical.
     if st.hotlist.enabled() {
         return serve_pop_hotlist(
-            &st, &queue, &group, batch, max_parts, auto_ack, wait, deadline, lease_seconds,
+            &st, &qkey, &queue, &group, batch, max_parts, auto_ack, wait, deadline, lease_seconds,
             &sub_mode, &sub_from, &worker, tenant.as_str(),
         )
         .await;
@@ -659,7 +668,7 @@ pub async fn handle_pop(
             // Parked gauge: held for exactly the awaited window (dashboard
             // Parked row / queue_parked_replica, sampled at 1 Hz).
             let parked = st.metrics.parked.enter(tenant.as_str(), &queue);
-            if st.notifier.wait_queue(&queue, waitd).await {
+            if st.notifier.wait_queue(&qkey, waitd).await {
                 backoff_count = 0;
                 // No longer parked — we're actively serving now.
                 drop(parked);
@@ -681,7 +690,7 @@ pub async fn handle_pop(
                 // CARRIES the seed. group_seeded is a cache hit (zero DB) in
                 // steady state, so the phase-2 fast path is preserved once seeded.
                 if st.group_seeded(&queue, &group, tenant.as_str()).await {
-                    let hints = st.notifier.drain_hints(&queue, max_parts.max(1) as usize);
+                    let hints = st.notifier.drain_hints(&qkey, max_parts.max(1) as usize);
                     if !hints.is_empty() {
                         if let Some(resp) = try_targeted_serve(
                             &st, &queue, &hints, &group, batch, lease_seconds, &worker, auto_ack,
@@ -854,6 +863,10 @@ const HOTLIST_CFG_TTL_MS: i64 = 30_000;
 #[allow(clippy::too_many_arguments)]
 async fn serve_pop_hotlist(
     st: &Arc<AppState>,
+    // Track B (§5): `qkey` addresses the in-memory ring + wake gate; `queue` is the
+    // bare name the SQL and the rendered response still use. They are never
+    // interchangeable — see the hotlist module note on the key contract.
+    qkey: &str,
     queue: &str,
     group: &str,
     batch: i32,
@@ -871,7 +884,7 @@ async fn serve_pop_hotlist(
     let mut backoff_count: u32 = 0;
     loop {
         let (body, count, meta, rtt) = hotlist_pop_attempt(
-            st, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
+            st, qkey, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
             worker, lease_id, tenant,
         )
         .await;
@@ -883,8 +896,8 @@ async fn serve_pop_hotlist(
                 .saturating_duration_since(Instant::now())
                 .min(interval);
             let _parked = st.metrics.parked.enter(tenant, queue);
-            if st.notifier.wait_queue(queue, waitd).await {
-                if st.hotlist.traced(queue) {
+            if st.notifier.wait_queue(qkey, waitd).await {
+                if st.hotlist.traced(qkey) {
                     eprintln!("[hlt] woken q={} g={} t={}", queue, group,
                         crate::hotlist::trace_now_ms());
                 }
@@ -896,7 +909,7 @@ async fn serve_pop_hotlist(
         register_leases(st, group, worker, lease_seconds, &meta);
         st.metrics.pop.record_request(count);
         st.metrics.pop.record_batch(count, true, rtt);
-        if count > 0 && st.hotlist.traced(queue) {
+        if count > 0 && st.hotlist.traced(qkey) {
             eprintln!("[hlt] served q={} g={} n={} t={}", queue, group, count,
                 crate::hotlist::trace_now_ms());
         }
@@ -932,7 +945,7 @@ async fn serve_pop_hotlist(
 // The normal paths set `armed = false` and run the real checkin.
 struct InflightGuard {
     hl: Arc<crate::hotlist::HotList>,
-    queue: String,
+    qkey: String,
     group: String,
     cands: Vec<crate::hotlist::Candidate>,
     now_ms: i64,
@@ -956,7 +969,7 @@ impl Drop for InflightGuard {
             })
             .collect();
         self.hl.checkin(
-            &self.queue,
+            &self.qkey,
             &self.group,
             back,
             self.now_ms,
@@ -974,6 +987,9 @@ impl Drop for InflightGuard {
 #[allow(clippy::too_many_arguments)]
 async fn hotlist_pop_attempt(
     st: &Arc<AppState>,
+    // Track B (§5): `qkey` addresses the ring; `queue` stays the bare name for the
+    // SQL calls and the rendered response.
+    qkey: &str,
     queue: &str,
     group: &str,
     batch: i32,
@@ -988,10 +1004,6 @@ async fn hotlist_pop_attempt(
 ) -> (String, usize, PopMeta, Duration) {
     let now_ms = crate::util::now_epoch_ms();
     let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption);
-    // Register the (queue, group) ring so pushes' marks reach it even before the
-    // first serve completes (a mark for an unknown group ring is otherwise lost
-    // until reseed, §8).
-    st.hotlist.ensure_group(queue, group);
 
     // First-contact BOOTSTRAP (spec §2 / §9, the st.group_seeded gate): the ring
     // path's log_pop_list_v1 does NOT carry the group-first-contact BULK SEED that
@@ -1038,7 +1050,7 @@ async fn hotlist_pop_attempt(
         if let Ok(parsed) = serde_json::from_str::<PopResult>(&txt) {
             for part in &parsed.partitions {
                 st.hotlist
-                    .note_partition_id(queue, &part.partition, &part.partition_id);
+                    .note_partition_id(qkey, &part.partition, &part.partition_id);
             }
             let (body, count, meta) = render_pop_parts(
                 &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption,
@@ -1048,6 +1060,19 @@ async fn hotlist_pop_attempt(
         let (b, c, m) = empty();
         return (b, c, m, rtt);
     }
+
+    // Register the (tenant, queue, group) ring so pushes' marks reach it even before
+    // the first serve completes (a mark for an unknown group ring is otherwise lost
+    // until reseed, §8).
+    //
+    // Deliberately AFTER the seed gate above, never before it: `group_seeded` is the
+    // proof that this (tenant, queue, group) EXISTS — it reads the committed
+    // consumer_groups_metadata marker. Creating the ring first meant any
+    // `GET /pop/queue/<random-name>` permanently allocated a QueueState (interning
+    // tables + per-group rings) for a queue that never existed, which on a shared free
+    // tier is a memory vector any untrusted tenant can drive in a loop. An unseeded
+    // (or nonexistent) queue now returns above having allocated nothing.
+    st.hotlist.ensure_group(qkey, group);
 
     // ── discovery-latency fix (2026-07-24): resolve the in-memory ring BEFORE
     // taking the pop_vegas serving permit / a pooled connection. A parked consumer
@@ -1063,9 +1088,9 @@ async fn hotlist_pop_attempt(
     // floor), or a stale deferral-config refresh (§6) — each gated by a cheap
     // in-memory predicate here. The quiet re-poll short-circuits WITHOUT ever
     // touching pop_vegas / the pool.
-    let need_reseed = st.hotlist.reseed_due(queue, group, now_ms, st.hotlist_reseed_ms);
-    let need_cfg = !st.hotlist.cfg_fresh(queue, now_ms, HOTLIST_CFG_TTL_MS);
-    if !need_reseed && !need_cfg && !st.hotlist.has_ready(queue, group, now_ms) {
+    let need_reseed = st.hotlist.reseed_due(qkey, group, now_ms, st.hotlist_reseed_ms);
+    let need_cfg = !st.hotlist.cfg_fresh(qkey, now_ms, HOTLIST_CFG_TTL_MS);
+    if !need_reseed && !need_cfg && !st.hotlist.has_ready(qkey, group, now_ms) {
         let (b, c, m) = empty();
         return (b, c, m, Duration::ZERO);
     }
@@ -1074,7 +1099,7 @@ async fn hotlist_pop_attempt(
     // limiter thus only ever gates genuine serving + the periodic per-(queue,group)
     // reseed/cfg floor (O(served + #queues / reseed_interval)), never the
     // O(#queues) quiet re-poll storm.
-    let tr = st.hotlist.traced(queue);
+    let tr = st.hotlist.traced(qkey);
     let t_start = if tr { crate::hotlist::trace_now_ms() } else { 0 };
     let permit = st.pop_vegas.acquire().await;
     let t_vegas = if tr { crate::hotlist::trace_now_ms() } else { 0 };
@@ -1094,16 +1119,16 @@ async fn hotlist_pop_attempt(
     // Lazy deferral-config refresh (§6), TTL-throttled.
     if need_cfg {
         if let Ok((d, w)) = db::queue_defer_cfg(&client, queue, tenant).await {
-            st.hotlist.set_queue_cfg(queue, d, w, now_ms);
+            st.hotlist.set_queue_cfg(qkey, d, w, now_ms);
         }
     }
 
     // Take candidates; reseed (bounded, throttled) if the ring is cold.
     let k = ((max_parts.max(1) as usize) * 8).clamp(16, 256);
-    let mut cands = st.hotlist.take_batch(queue, group, k, now_ms);
+    let mut cands = st.hotlist.take_batch(qkey, group, k, now_ms);
     if cands.is_empty() && need_reseed {
-        hotlist_reseed_scan(&st.hotlist, &client, queue, group, tenant, now_ms).await;
-        cands = st.hotlist.take_batch(queue, group, k, now_ms);
+        hotlist_reseed_scan(&st.hotlist, &client, qkey, group, now_ms).await;
+        cands = st.hotlist.take_batch(qkey, group, k, now_ms);
     }
     if cands.is_empty() {
         drop(client);
@@ -1113,7 +1138,7 @@ async fn hotlist_pop_attempt(
     }
 
     let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
-    let skip_window = st.hotlist.skip_window(queue);
+    let skip_window = st.hotlist.skip_window(qkey);
     let lease_ms = lease_seconds.max(1) as i64 * 1000;
     // Cancellation-safety: take_batch marked these candidates INFLIGHT. If this
     // pop future is DROPPED between here and checkin (a client disconnect mid
@@ -1125,7 +1150,7 @@ async fn hotlist_pop_attempt(
     // normal completion / DB-error paths disarm it and run the real checkin.
     let mut guard = InflightGuard {
         hl: st.hotlist.clone(),
-        queue: queue.to_string(),
+        qkey: qkey.to_string(),
         group: group.to_string(),
         cands,
         now_ms,
@@ -1170,7 +1195,7 @@ async fn hotlist_pop_attempt(
                     })
                     .collect();
                 st.hotlist
-                    .checkin(queue, group, back, now_ms, auto_ack, lease_ms);
+                    .checkin(qkey, group, back, now_ms, auto_ack, lease_ms);
                 let (b, c, m) = empty();
                 return (b, c, m, rtt);
             }
@@ -1243,11 +1268,11 @@ async fn hotlist_pop_attempt(
         })
         .collect();
     st.hotlist
-        .checkin(queue, group, results, now_ms, auto_ack, lease_ms);
+        .checkin(qkey, group, results, now_ms, auto_ack, lease_ms);
 
     for part in &parsed.partitions {
         st.hotlist
-            .note_partition_id(queue, &part.partition, &part.partition_id);
+            .note_partition_id(qkey, &part.partition, &part.partition_id);
     }
     let (body, count, meta) =
         render_pop_parts(&parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption);
@@ -1263,16 +1288,15 @@ async fn hotlist_pop_attempt(
 pub(crate) async fn hotlist_reseed_scan(
     hl: &crate::hotlist::HotList,
     client: &deadpool_postgres::Client,
-    queue: &str,
+    // Track B (§5): ONE composite key in, split here into the (tenant, queue) the
+    // keyset scan binds to SQL and the ring key it feeds back. Taking the pair as a
+    // single argument is what lets the background floor reseed a ring under its own
+    // tenant without a tenant registry to enumerate.
+    qkey: &str,
     group: &str,
-    // Track B (§5): the reseed keyset scan is scoped to this tenant's queue so the
-    // ring is never seeded with another tenant's partitions. NB the hotlist ring
-    // itself is keyed by (queue, group) only — see the module note; two tenants
-    // sharing a (queue, group) name under QUEEN_HOTLIST is a documented v1 limit,
-    // never a leak (every pop_list claim is still tenant-scoped in SQL).
-    tenant: &str,
     now_ms: i64,
 ) {
+    let (tenant, queue) = split_tenant_queue(qkey);
     let mut after = NIL_UUID.to_string();
     for _ in 0..HOTLIST_RESEED_MAX_PAGES {
         let rows = match db::hotlist_reseed(client, queue, group, &after, HOTLIST_RESEED_PAGE, tenant).await
@@ -1284,14 +1308,14 @@ pub(crate) async fn hotlist_reseed_scan(
             break;
         }
         for (id, name) in &rows {
-            hl.reseed_row(queue, group, id, name, now_ms);
+            hl.reseed_row(qkey, group, id, name, now_ms);
         }
         after = rows.last().map(|(id, _)| id.clone()).unwrap_or(after);
         if rows.len() < HOTLIST_RESEED_PAGE as usize {
             break;
         }
     }
-    hl.reseed_done(queue, group, now_ms);
+    hl.reseed_done(qkey, group, now_ms);
 }
 
 // GET /api/v1/pop/queue/:queue/partition/:partition — pop from ONE named
@@ -1321,6 +1345,9 @@ pub async fn handle_pop_partition(
         Some(v) if v > 0 => v,
         _ => st.lease_time_for(&queue, tenant.as_str()).await,
     };
+    // Track B (§5): the wake gate is keyed by (tenant, queue). Built once, outside
+    // the long-poll loop.
+    let qkey = tenant_queue_key(tenant.as_str(), &queue);
 
     let mut backoff_count: u32 = 0;
     loop {
@@ -1370,7 +1397,7 @@ pub async fn handle_pop_partition(
                 .min(interval);
             // Parked gauge: held for exactly the awaited window.
             let _parked = st.metrics.parked.enter(tenant.as_str(), &queue);
-            if st.notifier.wait_queue(&queue, waitd).await {
+            if st.notifier.wait_queue(&qkey, waitd).await {
                 backoff_count = 0;
             }
             continue;
@@ -2186,13 +2213,18 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                             // promote it to ready NOW + wake, so it is claimable
                             // immediately instead of at lease expiry. No-op if unknown.
                             if st.hotlist.enabled() {
-                                if st.hotlist.traced(q) {
+                                // Track B (§5): the pid→queue memo yields a BARE name;
+                                // pair it with this request's tenant to address the
+                                // ring. One small alloc per (partition, worker) ack
+                                // GROUP, not per message.
+                                let qkey = tenant_queue_key(tenant, q);
+                                if st.hotlist.traced(&qkey) {
                                     eprintln!("[hlt] promote q={} g={} t={}", q, group, crate::hotlist::trace_now_ms());
                                 }
                                 // covered=true: the registry cover test proved this
                                 // ack completes the WHOLE leased batch — eligible for
                                 // clear-su-ack when nothing arrived during the lease.
-                                st.hotlist.promote_ack(q, group, &pid, crate::util::now_epoch_ms(), true);
+                                st.hotlist.promote_ack(&qkey, group, &pid, crate::util::now_epoch_ms(), true);
                             }
                         }
                         continue; // whole group handled — skip the SQL path
@@ -2381,13 +2413,14 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
             // the correct expiry ("stale in eccesso", §1/§7).
             let released = idxs.iter().any(|&i| lease_released[i]);
             if released && st.hotlist.enabled() {
-                if st.hotlist.traced(&q) {
+                let qkey = tenant_queue_key(tenant, &q);
+                if st.hotlist.traced(&qkey) {
                     eprintln!("[hlt] promote2 q={} g={} t={}", q, group, crate::hotlist::trace_now_ms());
                 }
                 // covered=false: this is the SQL-fallback release path (NACK,
                 // partial, mixed) — coverage is unproven, so always promote; the
                 // worst case is one spurious ~0.2ms probe on a rare path.
-                st.hotlist.promote_ack(&q, group, &pid, crate::util::now_epoch_ms(), false);
+                st.hotlist.promote_ack(&qkey, group, &pid, crate::util::now_epoch_ms(), false);
             }
         }
 
@@ -2542,8 +2575,44 @@ struct RenewBody {
     seconds: Option<i32>,
 }
 
+// Track B (§5) OWNERSHIP GATE for the renew above. lease/extend is addressed by
+// the lease (= worker) id ALONE — bearer-token semantics — and
+// queen.log_renew_lease_v1 carries no tenant, so a leaked/logged lease id would
+// otherwise let one tenant keep another tenant's batch leased and delay its
+// redelivery. Gate and renew in ONE statement so the check cannot race the renew:
+// the SP is projected only when the one-time EXISTS proves a LIVE lease of that
+// worker sits on a partition of the request tenant. The renew semantics
+// (GREATEST, live-only, MIN expiry) stay in the SP — this only decides IF it
+// runs. Worker ids are broker-minted uuidv7 (never client-supplied), so all lease
+// rows of one worker belong to one tenant: proving one row proves the set.
+// No row back ⇒ the unknown-lease body, so a foreign lease is indistinguishable
+// from an expired or never-existing one (no existence leak).
+const RENEW_OWNED_SQL: &str = "SELECT (queen.log_renew_lease_v1($1, $2::int))::text \
+     WHERE EXISTS (SELECT 1 FROM queen.log_consumers c \
+                   JOIN queen.log_partitions p ON p.id = c.partition_id \
+                   JOIN queen.log_queues q ON q.id = p.queue_id \
+                   WHERE c.worker_id = $1 \
+                     AND q.tenant_id = $3::text::uuid \
+                     AND c.lease_expires_at IS NOT NULL \
+                     AND c.lease_expires_at > clock_timestamp())";
+
+async fn renew_lease_owned(
+    client: &deadpool_postgres::Client,
+    lease_id: &str,
+    seconds: i32,
+    tenant: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client.prepare_cached(RENEW_OWNED_SQL).await?;
+    let rows = client.query(&stmt, &[&lease_id, &seconds, &tenant]).await?;
+    Ok(match rows.first() {
+        Some(r) => r.get(0),
+        None => "{\"renewed\":0,\"expiresAt\":null}".to_string(),
+    })
+}
+
 pub async fn handle_lease_extend(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(lease_id): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -2561,7 +2630,17 @@ pub async fn handle_lease_extend(
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
 
-    match db::renew_lease(&client, &lease_id, seconds).await {
+    // Tenancy OFF ⇒ the verbatim unscoped call, no gate query (an OSS broker has
+    // only default-tenant queues, so the renew path stays byte-identical). ON ⇒
+    // the gated statement; a DB error on it surfaces below as a 500 with nothing
+    // renewed (deny-by-default — a transient failure never opens the gate).
+    let renewed = if st.tenancy_enabled {
+        renew_lease_owned(&client, &lease_id, seconds, tenant.as_str()).await
+    } else {
+        db::renew_lease(&client, &lease_id, seconds).await
+    };
+
+    match renewed {
         Ok(txt) => {
             // {"renewed":n,"expiresAt":iso|null}
             let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
@@ -3170,15 +3249,17 @@ pub async fn handle_transaction(
                     let now_ms = crate::util::now_epoch_ms();
                     for g in &groups {
                         if !g.frames.is_empty() {
+                            let qkey = tenant_queue_key(tenant.as_str(), &g.queue);
                             st.hotlist
-                                .mark_local(&g.queue, &g.partition, g.frames.len() as u32, now_ms);
+                                .mark_local(&qkey, &g.partition, g.frames.len() as u32, now_ms);
                         }
                     }
                     for ag in &ack_groups {
                         if let Some(q) = st.queue_for_partition(&client, &ag.partition_id).await {
                             // covered=false: txn acks may cover only part of a
                             // leased batch; promote unconditionally (rare path).
-                            st.hotlist.promote_ack(&q, &ag.group, &ag.partition_id, now_ms, false);
+                            let qkey = tenant_queue_key(tenant.as_str(), &q);
+                            st.hotlist.promote_ack(&qkey, &ag.group, &ag.partition_id, now_ms, false);
                         }
                     }
                 }
@@ -3239,3 +3320,21 @@ pub async fn handle_transaction(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shape guard only — the gate needs a live pool, so behavioural coverage
+    /// lives in the two-tenant isolation smoke. What this pins down is the one
+    /// property that turns lease/extend back into a bearer-token op: the renew
+    /// SP running without the tenant-scoped EXISTS in front of it.
+    #[test]
+    fn renew_gate_is_tenant_scoped() {
+        assert!(RENEW_OWNED_SQL.contains("q.tenant_id = $3::text::uuid"));
+        // The ownership leg must reach the queue through the lease's partition,
+        // never through a name the caller could influence.
+        assert!(RENEW_OWNED_SQL.contains("JOIN queen.log_partitions p ON p.id = c.partition_id"));
+        // The SP must stay behind the qual (projection), not beside it.
+        assert!(RENEW_OWNED_SQL.starts_with("SELECT (queen.log_renew_lease_v1($1, $2::int))::text WHERE EXISTS"));
+    }
+}

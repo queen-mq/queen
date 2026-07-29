@@ -42,6 +42,26 @@ use axum::Router;
 
 use handlers::AppState;
 
+/// Drop a queue's cached lease time + encryption flag after a peer's config change.
+/// Track B (§5): those caches are keyed by (tenant, name). A frame carrying the
+/// tenant removes exactly one entry; a tenant-less frame (a pre-Track-B peer) falls
+/// back to dropping every tenant's entry for that name — the cache is lazily
+/// re-filled, so over-invalidation costs one lookup and is never wrong.
+fn invalidate_queue_caches(st: &Arc<AppState>, tenant: Option<&str>, queue: &str) {
+    match tenant {
+        Some(t) => {
+            let key = handlers::tenant_queue_key(t, queue);
+            st.lease_cache.lock().unwrap().remove(&key);
+            st.enc_cache.lock().unwrap().remove(&key);
+        }
+        None => {
+            let suffix = format!("\u{1f}{queue}");
+            st.lease_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
+            st.enc_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // LOGGING_PLAN.md Phase 0: install the tracing subscriber (honours
@@ -189,7 +209,11 @@ async fn main() {
     // Long-poll waker + inter-instance notifier. Always constructed (the local
     // waker needs no cluster); the UDP transport is attached below only when peers
     // are configured.
-    let notifier = notify::Notifier::new();
+    // Track B (§5): the tenancy flag decides how a tenant-less peer frame is resolved.
+    // OFF ⇒ it provably names the default tenant (one lookup); ON ⇒ it is ambiguous and
+    // fans out to the tenants holding that queue name. The flag lives in the type so
+    // the mesh callbacks below never have to branch on it.
+    let notifier = notify::Notifier::new(cfg.tenancy_header);
 
     // File buffer (RUSTFIX items 1 & 17): DB-outage / maintenance push spool. Drain
     // any leftover on-disk spool BEFORE serving (startup recovery, capped 3600s) so
@@ -247,6 +271,7 @@ async fn main() {
         // no mesh the flusher never runs, so the local mark skips it (no per-push
         // lock/alloc for a hint nobody drains).
         cfg.sync.mesh_active(),
+        cfg.tenancy_header,
     );
     hotlist.attach_notifier(notifier.clone());
     if cfg.hotlist_enabled {
@@ -362,18 +387,15 @@ async fn main() {
                 let now = crate::util::now_epoch_ms();
                 // Reseed every due (queue,group). One pooled client at a time (the
                 // floor is background — it must never storm the pool the pops need).
-                for (q, g) in hl.periodic_reseed_due(now, interval_ms) {
+                // Track B (§5): the ring key carries the tenant, so each due ring is
+                // reseeded under ITS OWN tenant. The loop enumerates only rings that
+                // exist — a tenant with no consumer allocates none — so the idle floor
+                // stays O(#rings), never O(tenants × queues).
+                for d in hl.periodic_reseed_due(now, interval_ms) {
                     match pool_r.get().await {
                         Ok(client) => {
-                            // Track B (§5): the hotlist ring is keyed by (queue, group)
-                            // only, so this background floor has no tenant in scope. It
-                            // reseeds the DEFAULT tenant — correct whenever tenancy is
-                            // OFF (everything is the default tenant, the only v1-supported
-                            // hotlist config). Under tenancy ON, non-default tenants rely
-                            // on the pop-triggered reseed (hotlist_pop_attempt), which IS
-                            // tenant-scoped; see the module note on the ring limitation.
                             crate::handlers::hotlist_reseed_scan(
-                                &hl, &client, &q, &g, config::DEFAULT_TENANT, now,
+                                &hl, &client, &d.qkey, &d.group, now,
                             )
                             .await
                         }
@@ -387,8 +409,8 @@ async fn main() {
                     let secs = ((now - last_report) as f64 / 1000.0).max(1.0);
                     let mut sizes = hl.ring_sizes();
                     let rings = sizes.len();
-                    let ready: usize = sizes.iter().map(|x| x.2).sum();
-                    let wheel: usize = sizes.iter().map(|x| x.3).sum();
+                    let ready: usize = sizes.iter().map(|x| x.ready).sum();
+                    let wheel: usize = sizes.iter().map(|x| x.wheel).sum();
                     tracing::info!(
                         target: "hotlist",
                         reseeds_delta = delta,
@@ -403,15 +425,16 @@ async fn main() {
                     // Rank by (ready+wheel) desc and show only the busiest non-empty
                     // rings — the old `.take(24)` over a HashMap surfaced an arbitrary,
                     // unstable subset (the "a caso" the operator complained about).
-                    sizes.sort_by(|a, b| (b.2 + b.3).cmp(&(a.2 + a.3)));
-                    let nonempty = sizes.iter().filter(|x| x.2 + x.3 > 0).count();
-                    for (q, g, r, w) in sizes.iter().filter(|x| x.2 + x.3 > 0).take(dump_top_n) {
+                    sizes.sort_by(|a, b| (b.ready + b.wheel).cmp(&(a.ready + a.wheel)));
+                    let nonempty = sizes.iter().filter(|x| x.ready + x.wheel > 0).count();
+                    for r in sizes.iter().filter(|x| x.ready + x.wheel > 0).take(dump_top_n) {
                         tracing::info!(
                             target: "hotlist",
-                            queue = %q,
-                            group = %g,
-                            ready = *r,
-                            wheel = *w,
+                            tenant = %r.tenant,
+                            queue = %r.queue,
+                            group = %r.group,
+                            ready = r.ready,
+                            wheel = r.wheel,
                             shown = format!("{}/{}", dump_top_n.min(nonempty), nonempty),
                             "ring"
                         );
@@ -428,6 +451,10 @@ async fn main() {
     // one interval after a lost UDP packet. Spawned unconditionally (single-node
     // also benefits from DB reconvergence).
     reconcile::spawn(state.clone(), pool.clone(), cfg.sync.cache_refresh_ms);
+    // Shared-cell memory bound: drop hot-list rings / wake gates for (tenant, queue)
+    // pairs that have gone idle, so an untrusted tenant cannot pin per-name state by
+    // polling an unbounded set of queue names.
+    reconcile::spawn_idle_sweep(state.clone(), cfg.hotlist_idle_sweep_ms);
 
     // Inter-instance mesh notifications. Gated on QUEEN_SYNC_ENABLED (default true)
     // AND at least one configured peer — a single stock broker binds nothing and
@@ -441,18 +468,30 @@ async fn main() {
                 // A peer push wakes local pops AND records the partition hint, so a
                 // woken pop can target it (Phase 2) — no re-broadcast. Both the
                 // single and batched MESSAGE_AVAILABLE forms route through here.
+                // Track B (§5): a frame that CARRIES the tenant wakes exactly that
+                // (tenant, queue) gate. A frame WITHOUT one (a pre-Track-B peer mid
+                // rolling upgrade) fans out to every tenant holding the name — a safe
+                // over-wake; attributing it to the default tenant would silently drop
+                // the wake for every other tenant.
                 let n = notifier.clone();
-                Box::new(move |q: &str, p: &str| n.wake_local_hint(q, p))
+                Box::new(move |t: Option<&str>, q: &str, p: &str| match t {
+                    Some(t) => n.wake_local_hint(&handlers::tenant_queue_key(t, q), p),
+                    None => n.wake_local_hint_all_tenants(q, p),
+                })
             },
             on_hotlist_dirty: {
                 // 19-wildcard-hotlist §5: a peer's dirty hint marks our hot-list
                 // (idempotent, no re-broadcast). mark_remote wakes any parked
                 // wildcard pop on a vuoto→pending transition. No-op when the flag
                 // is off. Disjoint from MESSAGE_AVAILABLE (a pop wake), so no
-                // double-marking.
+                // double-marking. Same tenant-less fan-out contract as above.
                 let hl = hotlist.clone();
-                Box::new(move |q: &str, p: &str| {
-                    hl.mark_remote(q, p, crate::util::now_epoch_ms())
+                Box::new(move |t: Option<&str>, q: &str, p: &str| {
+                    let now = crate::util::now_epoch_ms();
+                    match t {
+                        Some(t) => hl.mark_remote(&handlers::tenant_queue_key(t, q), p, now),
+                        None => hl.mark_remote_all_tenants(q, p, now),
+                    }
                 })
             },
             on_maintenance: {
@@ -476,23 +515,19 @@ async fn main() {
             },
             on_queue_config_set: {
                 let s = state.clone();
-                Box::new(move |q: &str| {
-                    // Track B (§5): the lease/enc caches are keyed by (tenant, name)
-                    // but the mesh config frame carries only the name (mesh is
-                    // tenant-inert in v1, §5 point 8). Drop every tenant's entry for
-                    // this name; over-invalidation only forces a lazy re-fetch.
-                    let suffix = format!("\u{1f}{q}");
-                    s.lease_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
-                    // RUSTFIX item 8: a peer's config change may flip encryption_enabled.
-                    s.enc_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
+                Box::new(move |t: Option<&str>, q: &str| {
+                    // Track B (§5): the lease/enc caches are keyed by (tenant, name).
+                    // A tenant-carrying frame invalidates exactly one entry; a
+                    // tenant-less one (older peer) falls back to dropping every
+                    // tenant's entry for the name — over-invalidation only forces a
+                    // lazy re-fetch.
+                    invalidate_queue_caches(&s, t, q);
                 })
             },
             on_queue_config_delete: {
                 let s = state.clone();
-                Box::new(move |q: &str| {
-                    let suffix = format!("\u{1f}{q}");
-                    s.lease_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
-                    s.enc_cache.lock().unwrap().retain(|k, _| !k.ends_with(&suffix));
+                Box::new(move |t: Option<&str>, q: &str| {
+                    invalidate_queue_caches(&s, t, q);
                 })
             },
         };

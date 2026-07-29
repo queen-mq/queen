@@ -688,7 +688,13 @@ BEGIN
                      ELSE 0 END AS avg_lag_ms,
                 MAX(qlm.max_lag_ms)          AS max_lag_ms
             FROM queen.queue_lag_metrics qlm
-            JOIN queen.queues q ON q.name = qlm.queue_name
+            -- Track B (§5): queue identity is (tenant_id, name), so joining on the
+            -- name alone fans one metrics row out to every same-named queue and
+            -- multiplies the summed counters by the tenant count. This function is
+            -- deliberately operator/global (it aggregates across tenants); the
+            -- tenant_id equality only keeps each bucket counted ONCE.
+            JOIN queen.queues q
+              ON q.name = qlm.queue_name AND q.tenant_id = qlm.tenant_id
             WHERE qlm.bucket_time >= v_from_ts
               AND qlm.bucket_time <= v_to_ts
               AND (v_queue IS NULL OR q.name = v_queue)

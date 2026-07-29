@@ -150,6 +150,13 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
 // state_ops_applied, push_results, ack_result}. Always HTTP 200 on a completed
 // SP call (the SDK inspects success/error to decide whether to retry), matching
 // the C++ cycle route.
+//
+// On a committed cycle it ALSO runs the post-commit discoverability bookkeeping
+// (hot-list mark on each sink partition + promote-on-ack for the released source
+// lease) — see the block at the bottom. The SP commits everything internally, so
+// no push/ack fast path runs it for us; skipping it strands sink emits until the
+// 30s reseed floor. This is the log-engine form of 021's inline
+// update_partition_lookup_v1.
 pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -296,16 +303,33 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
     }
 
     // ---- map the SDK ack -> SP ack {ok,count} + top-level worker (= leaseId) ----
+    let mut ack_ok = false;
+    // The REQUESTED ack item count, kept for the post-commit ack metric: on a nack
+    // 046 forces its own `ack_result.count` to 0 (it advances no cursor), so the
+    // failed-item count has to come from the request or a nacked batch of N would
+    // report neither an ok nor a failed ack. See the metric block below.
+    let mut ack_req_count: u64 = 0;
     let (worker, ack_val) = match root.get("ack") {
         Some(a) if !a.is_null() => {
             let ok = status_is_ok(a.get("status").and_then(|x| x.as_str()));
             let count = a.get("count").and_then(|x| x.as_i64()).unwrap_or(0);
             let worker = a.get("leaseId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            ack_ok = ok;
+            ack_req_count = count.max(0) as u64;
             (worker, serde_json::json!({"ok": ok, "count": count}))
         }
         // idle-flush cycle: no source ack, skip the lease block SP-side.
         _ => (String::new(), serde_json::Value::Null),
     };
+
+    // 19-wildcard-hotlist §2/§7: the (queue, partition, frame count) triples this
+    // cycle emits to, captured BEFORE the SP call so the post-commit mark below
+    // can make them discoverable. Same role as handle_push's `hotlist_marks`.
+    let sink_marks: Vec<(String, String, u32)> = groups
+        .iter()
+        .filter(|(_, _, frames)| !frames.is_empty())
+        .map(|(q, p, frames)| (q.clone(), p.clone(), frames.len() as u32))
+        .collect();
 
     let element = serde_json::json!({
         "idx": 0,
@@ -325,7 +349,180 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
     match db::streams_cycle(&client, &requests).await {
-        Ok(txt) => json(StatusCode::OK, unwrap_stream_result(&txt).to_string()),
+        Ok(txt) => {
+            let result = unwrap_stream_result(&txt);
+            // 19-wildcard-hotlist §2/§7 (streams cycle): like the transaction wire —
+            // and UNLIKE handle_push — this cycle committed INSIDE the procedure
+            // (log_streams_cycle_v1's inline sink push + cursor advance), so nothing
+            // on the push/ack fast paths ran the post-commit bookkeeping that makes
+            // the write discoverable. Without it, with QUEEN_HOTLIST on (the default)
+            // a sink emit is invisible to consumers until the periodic reseed floor
+            // (QUEEN_HOTLIST_RESEED_MS, 30s) sweeps it up, and the source partition
+            // stays parked in the wheel until its lease expires even though the ack
+            // just released it — a window emit that lands in PG in milliseconds is
+            // not deliverable for tens of seconds. This is 021's inline
+            // update_partition_lookup_v1 (rows engine) in its log-engine form: the
+            // broker owns discoverability now, so it is a Rust-side call, not SQL.
+            //
+            // Gated on the element's success: the SP wraps each element in a
+            // subtransaction, so success:false means nothing committed and there is
+            // nothing to advertise.
+            if result.get("success").and_then(|x| x.as_bool()).unwrap_or(false) {
+                // Per-queue + broker-wide metric attribution for the traffic this
+                // cycle committed. Same root cause as the discoverability block
+                // below: the SP commits everything internally, so NEITHER
+                // handle_push's per-queue rollup NOR process_acks' ack counters ran
+                // for us. Without this the streaming engine's sink emits and source
+                // acks are invisible to queue_lag_metrics (the per-queue Push/s and
+                // Ack/s charts) and to worker_metrics (the broker-wide rollup
+                // syscollect.rs flushes) — the queue visibly fills and drains while
+                // both charts read flat zero.
+                //
+                // Gated on the element's success for the same reason as the hot-list
+                // block: the SP wraps each element in a subtransaction, so
+                // success:false means nothing committed and there is nothing to
+                // count. NOT gated on st.hotlist.enabled() — metrics are orthogonal
+                // to discoverability, so this sits ABOVE that if/else.
+                //
+                // Tenant is DEFAULT_TENANT, exactly as in the encryption lookup
+                // above and for the same reason: streams are plan-gated /
+                // dedicated-cell only in v1 (§5), so the default tenant is the only
+                // one a streams cell serves.
+                let mtenant = crate::config::DEFAULT_TENANT;
+
+                // Sink pushes. One push_request per DISTINCT sink queue plus its
+                // frame count as push_messages — handle_push's per_q rollup, which
+                // likewise aggregates across partitions. sink_marks already excludes
+                // empty groups, so a non-empty vec always carries >= 1 frame.
+                if !sink_marks.is_empty() {
+                    let mut per_q: HashMap<&str, u64> = HashMap::new();
+                    for (q, _p, n) in &sink_marks {
+                        *per_q.entry(q.as_str()).or_insert(0) += *n as u64;
+                    }
+                    let total: u64 = per_q.values().sum();
+                    for (q, msgs) in per_q {
+                        st.metrics.per_queue.add_push(mtenant, q, msgs);
+                    }
+                    // Broker-wide push counters (worker_metrics push_request /
+                    // push_message). One cycle = one request, like handle_push. Only
+                    // when the cycle actually emitted: record_request(0) books an
+                    // EMPTY push, and a state-only or ack-only cycle is not one.
+                    // record_batch is deliberately NOT called — its rtt histogram is
+                    // the fusion flush latency (fusion.rs), a path this cycle skips.
+                    st.metrics.push.record_request(total as usize);
+                }
+
+                // Source ack, attributed to the SOURCE queue — which is precisely
+                // what 046 resolves and returns `queueName` for (its comment names
+                // record_ack_with_queue, the C++ counterpart of add_ack). ack_result
+                // is JSON null on an idle-flush cycle that carried no ack.
+                if let Some(ar) = result.get("ack_result").filter(|a| !a.is_null()) {
+                    // Outcome split matches the direct ack path: only accepted
+                    // COMPLETIONS are ack_success, a nack is ack_failed (the
+                    // worker_metrics "Failed acks (retries, errors)" column). The ok
+                    // count comes from the SP (authoritative — it is what the cursor
+                    // actually advanced by, including the gate partial-ack case);
+                    // the failed count from the request, per ack_req_count above.
+                    let committed = ar
+                        .get("count")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    let (ok, failed) = if ack_ok {
+                        (committed, 0u64)
+                    } else {
+                        (0u64, ack_req_count)
+                    };
+                    if let Some(sq) = result
+                        .get("queueName")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        st.metrics.per_queue.add_ack(mtenant, sq, ok, failed);
+                    }
+                    // Broker-wide ack counters (worker_metrics ack_request +
+                    // ack_{success,failed}_count), bumped even if queueName came back
+                    // NULL so the rollup never under-counts what the per-queue view
+                    // could not attribute. No dlq_moved: 046 hard-codes
+                    // ack_result.dlq=false — a cycle has no dead-letter path.
+                    st.metrics.ack.record_request((ok + failed) as usize);
+                    st.metrics.ack_success.fetch_add(ok, Ordering::Relaxed);
+                    st.metrics.ack_failed.fetch_add(failed, Ordering::Relaxed);
+                }
+
+                let now_ms = crate::util::now_epoch_ms();
+                if st.hotlist.enabled() {
+                    // mark_local (not the push path's mark_local_quiet): this is a
+                    // low-frequency path with no separate notify, so it must do the
+                    // local wake itself. Also queues the coalesced mesh dirty hint,
+                    // so peers discover sink emits too.
+                    // Track B (§5): streams stay dedicated-only in v1, so the ring key
+                    // is built on the default tenant — the same tenant the encryption
+                    // lookup above resolves against.
+                    for (q, p, n) in &sink_marks {
+                        let qkey = crate::handlers::tenant_queue_key(
+                            crate::config::DEFAULT_TENANT,
+                            q,
+                        );
+                        st.hotlist.mark_local(&qkey, p, *n, now_ms);
+                    }
+                    // §7 promote-on-ack: the cycle's ack released the source lease
+                    // (the SP reports which). covered=true only when the ack both
+                    // succeeded AND released — i.e. it completed the WHOLE leased
+                    // batch, which is eligible for clear-on-ack when nothing arrived
+                    // during the lease. A nack (lease released, cursor untouched)
+                    // promotes with covered=false: that batch is redeliverable
+                    // content. A gate partial ack RETAINS the lease and so reports
+                    // lease_released=false — no promote, correctly.
+                    let lease_released = result
+                        .get("ack_result")
+                        .and_then(|a| a.get("lease_released"))
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
+                    if lease_released {
+                        if let Some(sq) = result
+                            .get("queueName")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            let group = if consumer_group.is_empty() {
+                                "__QUEUE_MODE__"
+                            } else {
+                                consumer_group.as_str()
+                            };
+                            st.hotlist.promote_ack(
+                                &crate::handlers::tenant_queue_key(
+                                    crate::config::DEFAULT_TENANT,
+                                    sq,
+                                ),
+                                group,
+                                &partition_id,
+                                now_ms,
+                                ack_ok && release_lease,
+                            );
+                        }
+                    }
+                } else if !sink_marks.is_empty() {
+                    // Flag off ⇒ pops fall back to the SQL candidate scan, which sees
+                    // the committed rows directly; all that is missing is the wake, so
+                    // mirror handle_push's else-branch (local parked pops + peers).
+                    let keys: Vec<(String, String)> = sink_marks
+                        .iter()
+                        .map(|(q, p, _)| {
+                            (
+                                crate::handlers::tenant_queue_key(
+                                    crate::config::DEFAULT_TENANT,
+                                    q,
+                                ),
+                                p.clone(),
+                            )
+                        })
+                        .collect();
+                    st.notifier.notify_pushed_batch(&keys);
+                }
+            }
+            json(StatusCode::OK, result.to_string())
+        }
         // The SP internalizes per-element failures as success:false; an Err here
         // is an infra/protocol error. 500 lets the SDK's HTTP client retry (the
         // whole SP call is one transaction, so a retry is safe).

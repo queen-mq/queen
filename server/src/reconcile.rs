@@ -63,3 +63,38 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
         }
     });
 }
+
+/// Idle sweep for the two per-(tenant, queue) maps that are NOT covered by the
+/// reconcile loop above (which only clears TTL-style scalar caches): the hot-list rings
+/// and the long-poll wake gates. Both are created on demand from a client-supplied queue
+/// NAME, so on a shared cell an untrusted tenant can otherwise pin one ring + one gate
+/// per distinct name for the process lifetime. Each map uses a second-chance flag, so an
+/// entry is dropped only after a full sweep with no access AND with no live state (see
+/// `HotList::evict_idle` / `Notifier::evict_idle`); the §8 reseed floor rebuilds a ring
+/// that was dropped too eagerly, and a gate is a wake fast path whose correctness floor
+/// is the pop's own backoff. `sweep_ms == 0` disables it.
+pub fn spawn_idle_sweep(state: Arc<AppState>, sweep_ms: u64) {
+    if sweep_ms == 0 {
+        tracing::info!(target: "reconcile", "hot-list/gate idle sweep disabled");
+        return;
+    }
+    let interval = Duration::from_millis(sweep_ms);
+    tracing::info!(target: "reconcile", sweep_ms, "hot-list/gate idle sweep started");
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let rings = state.hotlist.evict_idle();
+            let gates = state.notifier.evict_idle();
+            if rings > 0 || gates > 0 {
+                tracing::debug!(
+                    target: "reconcile",
+                    rings_evicted = rings,
+                    gates_evicted = gates,
+                    rings_live = state.hotlist.queue_count(),
+                    gates_live = state.notifier.gate_count(),
+                    "idle sweep"
+                );
+            }
+        }
+    });
+}

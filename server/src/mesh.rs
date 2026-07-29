@@ -90,15 +90,21 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5);
 /// closures (capturing the shared `AppState`/`Notifier`) so this module stays
 /// decoupled from the handler layer. All run on an inbound connection task, so
 /// they must be cheap and non-blocking (they only touch atomics / in-memory maps).
+///
+/// Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): the queue-carrying frames also carry the
+/// TENANT, passed here as `Option<&str>` — never `""` as a sentinel, because an
+/// ABSENT tenant (a pre-Track-B peer during a rolling upgrade) and the default tenant
+/// are different things: the former must fan out to every tenant holding that queue
+/// name, the latter targets exactly one ring.
 pub struct SyncHandlers {
-    pub on_message_available: Box<dyn Fn(&str, &str) + Send + Sync>,
+    pub on_message_available: Box<dyn Fn(Option<&str>, &str, &str) + Send + Sync>,
     // 19-wildcard-hotlist §5: a peer's coalesced hot-list dirty hint — mark the
     // local hot-list (idempotent, no re-broadcast).
-    pub on_hotlist_dirty: Box<dyn Fn(&str, &str) + Send + Sync>,
+    pub on_hotlist_dirty: Box<dyn Fn(Option<&str>, &str, &str) + Send + Sync>,
     pub on_maintenance: Box<dyn Fn(bool) + Send + Sync>,
     pub on_pop_maintenance: Box<dyn Fn(bool) + Send + Sync>,
-    pub on_queue_config_set: Box<dyn Fn(&str) + Send + Sync>,
-    pub on_queue_config_delete: Box<dyn Fn(&str) + Send + Sync>,
+    pub on_queue_config_set: Box<dyn Fn(Option<&str>, &str) + Send + Sync>,
+    pub on_queue_config_delete: Box<dyn Fn(Option<&str>, &str) + Send + Sync>,
 }
 
 // One configured outbound peer: the bounded sender its writer task drains, plus
@@ -225,16 +231,20 @@ impl MeshTransport {
         }
     }
 
-    pub fn send_message_available(&self, queue: &str, partition: &str) {
+    /// `qkey` is the composite `tenant_queue_key`; it is SPLIT here so the wire
+    /// carries `tenant` and `queue` as separate fields (a peer keys its own maps).
+    pub fn send_message_available(&self, qkey: &str, partition: &str) {
+        let (tenant, queue) = crate::handlers::split_tenant_queue(qkey);
         let payload = serde_json::to_vec(&serde_json::json!({
             "queue": queue,
             "partition": partition,
+            "tenant": tenant,
         }))
         .unwrap_or_default();
         self.broadcast(encode_frame(T_MESSAGE_AVAILABLE, &payload).into());
     }
 
-    /// Batched MESSAGE_AVAILABLE: one frame carrying every (queue, partition) a
+    /// Batched MESSAGE_AVAILABLE: one frame carrying every (qkey, partition) a
     /// committed push touched, so a multi-partition push wakes peers with a single
     /// send instead of one per partition. Empty input is a no-op.
     pub fn send_messages_available_batch(&self, items: &[(String, String)]) {
@@ -243,23 +253,29 @@ impl MeshTransport {
         }
         let arr: Vec<serde_json::Value> = items
             .iter()
-            .map(|(q, p)| serde_json::json!({ "queue": q, "partition": p }))
+            .map(|(qk, p)| {
+                let (t, q) = crate::handlers::split_tenant_queue(qk);
+                serde_json::json!({ "queue": q, "partition": p, "tenant": t })
+            })
             .collect();
         let payload = serde_json::to_vec(&serde_json::json!({ "items": arr })).unwrap_or_default();
         self.broadcast(encode_frame(T_MESSAGE_AVAILABLE_BATCH, &payload).into());
     }
 
     /// 19-wildcard-hotlist §5: batched hot-list dirty hints. Same wire shape as
-    /// the batched MESSAGE_AVAILABLE (`{"items":[{queue,partition}]}`), a distinct
-    /// tag so a peer marks its hot-list without conflating it with a pop wake.
-    /// Empty input is a no-op.
+    /// the batched MESSAGE_AVAILABLE (`{"items":[{queue,partition,tenant}]}`), a
+    /// distinct tag so a peer marks its hot-list without conflating it with a pop
+    /// wake. Empty input is a no-op.
     pub fn send_hotlist_dirty_batch(&self, items: &[(String, String)]) {
         if items.is_empty() {
             return;
         }
         let arr: Vec<serde_json::Value> = items
             .iter()
-            .map(|(q, p)| serde_json::json!({ "queue": q, "partition": p }))
+            .map(|(qk, p)| {
+                let (t, q) = crate::handlers::split_tenant_queue(qk);
+                serde_json::json!({ "queue": q, "partition": p, "tenant": t })
+            })
             .collect();
         let payload = serde_json::to_vec(&serde_json::json!({ "items": arr })).unwrap_or_default();
         self.broadcast(encode_frame(T_HOTLIST_DIRTY_BATCH, &payload).into());
@@ -277,15 +293,17 @@ impl MeshTransport {
         self.broadcast(encode_frame(T_POP_MAINTENANCE_MODE_SET, &payload).into());
     }
 
-    pub fn send_queue_config_set(&self, queue: &str) {
-        let payload =
-            serde_json::to_vec(&serde_json::json!({ "queue": queue })).unwrap_or_default();
+    pub fn send_queue_config_set(&self, qkey: &str) {
+        let (tenant, queue) = crate::handlers::split_tenant_queue(qkey);
+        let payload = serde_json::to_vec(&serde_json::json!({ "queue": queue, "tenant": tenant }))
+            .unwrap_or_default();
         self.broadcast(encode_frame(T_QUEUE_CONFIG_SET, &payload).into());
     }
 
-    pub fn send_queue_config_delete(&self, queue: &str) {
-        let payload =
-            serde_json::to_vec(&serde_json::json!({ "queue": queue })).unwrap_or_default();
+    pub fn send_queue_config_delete(&self, qkey: &str) {
+        let (tenant, queue) = crate::handlers::split_tenant_queue(qkey);
+        let payload = serde_json::to_vec(&serde_json::json!({ "queue": queue, "tenant": tenant }))
+            .unwrap_or_default();
         self.broadcast(encode_frame(T_QUEUE_CONFIG_DELETE, &payload).into());
     }
 
@@ -471,7 +489,8 @@ impl MeshTransport {
                     return;
                 }
                 let p = v.get("partition").and_then(|x| x.as_str()).unwrap_or("");
-                (self.handlers.on_message_available)(q, p);
+                let t = frame_tenant(&v);
+                (self.handlers.on_message_available)(t.as_deref(), q, p);
             }
             T_MESSAGE_AVAILABLE_BATCH => {
                 let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
@@ -482,7 +501,8 @@ impl MeshTransport {
                         continue;
                     }
                     let p = it.get("partition").and_then(|x| x.as_str()).unwrap_or("");
-                    (self.handlers.on_message_available)(q, p);
+                    let t = frame_tenant(it);
+                    (self.handlers.on_message_available)(t.as_deref(), q, p);
                 }
             }
             T_HOTLIST_DIRTY_BATCH => {
@@ -494,7 +514,8 @@ impl MeshTransport {
                         continue;
                     }
                     let p = it.get("partition").and_then(|x| x.as_str()).unwrap_or("");
-                    (self.handlers.on_hotlist_dirty)(q, p);
+                    let t = frame_tenant(it);
+                    (self.handlers.on_hotlist_dirty)(t.as_deref(), q, p);
                 }
             }
             T_MAINTENANCE_MODE_SET => {
@@ -510,13 +531,15 @@ impl MeshTransport {
             T_QUEUE_CONFIG_SET => {
                 let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
                 if let Some(q) = v.get("queue").and_then(|x| x.as_str()) {
-                    (self.handlers.on_queue_config_set)(q);
+                    let t = frame_tenant(&v);
+                    (self.handlers.on_queue_config_set)(t.as_deref(), q);
                 }
             }
             T_QUEUE_CONFIG_DELETE => {
                 let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
                 if let Some(q) = v.get("queue").and_then(|x| x.as_str()) {
-                    (self.handlers.on_queue_config_delete)(q);
+                    let t = frame_tenant(&v);
+                    (self.handlers.on_queue_config_delete)(t.as_deref(), q);
                 }
             }
             _ => {}
@@ -582,6 +605,18 @@ impl MeshTransport {
 }
 
 // ------------------------------------------------------------------- helpers
+
+/// Read a frame's `tenant` field. `None` means "this peer sent no tenant" — either a
+/// pre-Track-B build (rolling upgrade) or a garbled/hostile value: both must degrade
+/// to the caller's safe every-tenant fan-out, never to a bogus or default-tenant key.
+/// Validated with the same parser the HTTP boundary uses, so a malformed value can
+/// never reach a ring key.
+fn frame_tenant(v: &serde_json::Value) -> Option<String> {
+    v.get("tenant")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .and_then(crate::tenant::parse_tenant_uuid)
+}
 
 /// Encode a frame: `u32 BE (1 + payload.len()) | u8 type | payload`.
 fn encode_frame(msg_type: u8, payload: &[u8]) -> Vec<u8> {
@@ -772,21 +807,26 @@ mod tests {
 
     use tokio::sync::mpsc as tmpsc;
 
-    fn forwarding_handlers(tx: tmpsc::UnboundedSender<(String, String)>) -> SyncHandlers {
+    // Forwarded as (tenant, queue, partition); `tenant` is None when the frame
+    // carried none (an older peer), which the receiver must not conflate with the
+    // default tenant.
+    type Fwd = (Option<String>, String, String);
+
+    fn forwarding_handlers(tx: tmpsc::UnboundedSender<Fwd>) -> SyncHandlers {
         let dtx = tx.clone();
         SyncHandlers {
-            on_message_available: Box::new(move |q, p| {
-                let _ = tx.send((q.to_string(), p.to_string()));
+            on_message_available: Box::new(move |t, q, p| {
+                let _ = tx.send((t.map(|s| s.to_string()), q.to_string(), p.to_string()));
             }),
             // route dirty hints to the same channel, tagged, so the e2e test can
             // assert a HOTLIST_DIRTY frame round-trips.
-            on_hotlist_dirty: Box::new(move |q, p| {
-                let _ = dtx.send((format!("dirty:{q}"), p.to_string()));
+            on_hotlist_dirty: Box::new(move |t, q, p| {
+                let _ = dtx.send((t.map(|s| s.to_string()), format!("dirty:{q}"), p.to_string()));
             }),
             on_maintenance: Box::new(|_| {}),
             on_pop_maintenance: Box::new(|_| {}),
-            on_queue_config_set: Box::new(|_| {}),
-            on_queue_config_delete: Box::new(|_| {}),
+            on_queue_config_set: Box::new(|_, _| {}),
+            on_queue_config_delete: Box::new(|_, _| {}),
         }
     }
 
@@ -839,18 +879,21 @@ mod tests {
 
         assert!(wait_peer0_connected(&ta, true).await, "A never connected to B");
 
-        // Single-item MESSAGE_AVAILABLE.
-        ta.send_message_available("q1", "p1");
+        // Single-item MESSAGE_AVAILABLE. The send takes a COMPOSITE qkey and splits
+        // it onto the wire, so the peer receives the tenant alongside the queue.
+        let ta_uuid = "11111111-1111-1111-1111-111111111111";
+        ta.send_message_available(&crate::handlers::tenant_queue_key(ta_uuid, "q1"), "p1");
         let got = tokio::time::timeout(Duration::from_secs(2), brx.recv())
             .await
             .expect("no wake within 2s")
             .unwrap();
-        assert_eq!(got, ("q1".to_string(), "p1".to_string()));
+        assert_eq!(got, (Some(ta_uuid.to_string()), "q1".to_string(), "p1".to_string()));
 
         // Batched form — one frame carrying two partitions.
+        let k2 = crate::handlers::tenant_queue_key(ta_uuid, "q2");
         ta.send_messages_available_batch(&[
-            ("q2".into(), "pa".into()),
-            ("q2".into(), "pb".into()),
+            (k2.clone(), "pa".into()),
+            (k2.clone(), "pb".into()),
         ]);
         let g1 = tokio::time::timeout(Duration::from_secs(2), brx.recv())
             .await
@@ -864,20 +907,71 @@ mod tests {
         both.sort();
         assert_eq!(
             both,
-            [("q2".to_string(), "pa".to_string()), ("q2".to_string(), "pb".to_string())]
+            [
+                (Some(ta_uuid.to_string()), "q2".to_string(), "pa".to_string()),
+                (Some(ta_uuid.to_string()), "q2".to_string(), "pb".to_string())
+            ]
         );
 
         // 19-wildcard-hotlist §5: batched HOTLIST_DIRTY round-trips to a distinct
-        // handler (tagged "dirty:" by forwarding_handlers).
-        ta.send_hotlist_dirty_batch(&[("q3".into(), "p3".into())]);
+        // handler (tagged "dirty:" by forwarding_handlers), tenant included.
+        ta.send_hotlist_dirty_batch(&[(crate::handlers::tenant_queue_key(ta_uuid, "q3"), "p3".into())]);
         let gd = tokio::time::timeout(Duration::from_secs(2), brx.recv())
             .await
             .expect("no dirty within 2s")
             .unwrap();
-        assert_eq!(gd, ("dirty:q3".to_string(), "p3".to_string()));
+        assert_eq!(
+            gd,
+            (Some(ta_uuid.to_string()), "dirty:q3".to_string(), "p3".to_string())
+        );
 
         // Received-frame counter advanced on B (single + batch + dirty = 3 frames).
         assert!(tb.stats()["messages_received"].as_u64().unwrap() >= 3);
+    }
+
+    // Rolling upgrade, old → new: a frame with no `tenant` field must surface as
+    // None (never the default tenant), so the receiver takes the every-tenant
+    // fan-out. Dispatched directly — `dispatch` is private to this module.
+    #[tokio::test]
+    async fn a_tenantless_frame_is_never_attributed_to_a_tenant() {
+        let (tx, mut rx) = tmpsc::unbounded_channel();
+        let (t, _bind) = MeshTransport::bind(&mk_cfg(vec![], "", "solo"), forwarding_handlers(tx))
+            .await
+            .unwrap();
+        t.dispatch(
+            T_HOTLIST_DIRTY_BATCH,
+            br#"{"items":[{"queue":"orders","partition":"p0"}]}"#,
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            (None, "dirty:orders".to_string(), "p0".to_string())
+        );
+        // A garbled tenant degrades the same way — never to a bogus ring key.
+        t.dispatch(
+            T_MESSAGE_AVAILABLE,
+            br#"{"queue":"orders","partition":"p1","tenant":"not-a-uuid"}"#,
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            (None, "orders".to_string(), "p1".to_string())
+        );
+    }
+
+    // Rolling upgrade, new → old: the added `tenant` field is additive JSON, so an
+    // old reader still finds `queue`/`partition` exactly where it looked before.
+    #[test]
+    fn a_new_frame_still_parses_as_the_old_shape() {
+        let payload = serde_json::json!({
+            "queue": "orders",
+            "partition": "p0",
+            "tenant": "11111111-1111-1111-1111-111111111111",
+        });
+        let v: serde_json::Value = serde_json::from_slice(
+            &serde_json::to_vec(&payload).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v.get("queue").and_then(|x| x.as_str()), Some("orders"));
+        assert_eq!(v.get("partition").and_then(|x| x.as_str()), Some("p0"));
     }
 
     #[tokio::test]
@@ -980,7 +1074,15 @@ mod tests {
             .await
             .expect("no wake after reconnect")
             .unwrap();
-        assert_eq!(got, ("q3".to_string(), "p3".to_string()));
+        // A bare name splits to the default tenant, so it round-trips as such.
+        assert_eq!(
+            got,
+            (
+                Some(crate::config::DEFAULT_TENANT.to_string()),
+                "q3".to_string(),
+                "p3".to_string()
+            )
+        );
     }
 
     #[tokio::test]
@@ -1012,7 +1114,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(got, ("q".to_string(), "p".to_string()));
+        // A hand-rolled frame with no `tenant` field is the pre-Track-B wire shape.
+        assert_eq!(got, (None, "q".to_string(), "p".to_string()));
 
         // Past dead_threshold (300ms in the test cfg) the ghost is reported dead.
         let mut dead = false;
@@ -1040,6 +1143,6 @@ mod tests {
             .await
             .expect("listener stopped serving after a peer died")
             .unwrap();
-        assert_eq!(got2, ("q2".to_string(), "p2".to_string()));
+        assert_eq!(got2, (None, "q2".to_string(), "p2".to_string()));
     }
 }

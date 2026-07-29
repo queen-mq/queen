@@ -915,8 +915,11 @@ pub async fn seg_scan_segments(
 // per-group consumerGroups + leaseExpiresAt, DLQ error, and the flags to derive
 // `status`. Returns the assembled JSON as text (or None if the partition is
 // gone). Tolerates a missing queen.queues row (item 26) via COALESCE +
-// split_part. Signature kept from the seg engine: the message position travels
-// in `seq` (the absolute OFFSET); `frame_idx` is vestigial and ignored (pass 0).
+// split_part; that config LEFT JOIN matches on (name, tenant_id) because queue
+// identity is the PAIR (Track B §5) — name alone would match another tenant's
+// same-named queue and yield its config, or duplicate the row. Signature kept
+// from the seg engine: the message position travels in `seq` (the absolute
+// OFFSET); `frame_idx` is vestigial and ignored (pass 0).
 // Scalar cursor semantics: consumed = offset <= committed.
 pub async fn seg_message_detail(
     client: &deadpool_postgres::Client,
@@ -937,7 +940,7 @@ pub async fn seg_message_detail(
                    COALESCE(qq.priority, 0) AS priority \
             FROM queen.log_partitions lp \
             JOIN queen.log_queues lq ON lq.id = lp.queue_id \
-            LEFT JOIN queen.queues qq ON qq.name = lq.name \
+            LEFT JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id \
             WHERE lp.id = $1::text::uuid ), \
         d AS ( SELECT error, COALESCE(retry_count, 0) AS retry_count FROM queen.log_dlq dl \
                WHERE dl.partition_id = $1::text::uuid AND dl.\"offset\" = $2::bigint LIMIT 1 ), \
@@ -1080,14 +1083,18 @@ pub async fn get_message_traces(
     Ok(row.get(0))
 }
 
+// Track B (§5): the two NAME-addressed trace reads carry no pid, so the tenant
+// is the only thing that bounds them — the SPs resolve ownership through each
+// trace's partition (log OR rows engine).
 pub async fn get_traces_by_name(
     client: &deadpool_postgres::Client,
     name: &str,
     limit: i32,
     offset: i32,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.get_traces_by_name_v1($1, $2::int, $3::int))::text";
-    let row = client.query_one(stmt, &[&name, &limit, &offset]).await?;
+    let stmt = "SELECT (queen.get_traces_by_name_v1($1, $2::int, $3::int, $4::text::uuid))::text";
+    let row = client.query_one(stmt, &[&name, &limit, &offset, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -1095,9 +1102,10 @@ pub async fn get_trace_names(
     client: &deadpool_postgres::Client,
     limit: i32,
     offset: i32,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.get_available_trace_names_v1($1::int, $2::int))::text";
-    let row = client.query_one(stmt, &[&limit, &offset]).await?;
+    let stmt = "SELECT (queen.get_available_trace_names_v1($1::int, $2::int, $3::text::uuid))::text";
+    let row = client.query_one(stmt, &[&limit, &offset, &tenant]).await?;
     Ok(row.get(0))
 }
 

@@ -129,7 +129,10 @@ pub async fn handle_delete_consumer_group(
     // the discovery source and a pre-delete ring (stale IDLE/wheel entries + a
     // recent reseed clock) would suppress the reconsume until the ≤30s periodic
     // floor. Drop the group's ring on every queue so first contact reseeds cold.
-    st.hotlist.forget_group_all_queues(&group);
+    // Track B (§5): tenant-scoped, matching the SQL delete above and the
+    // `seeded_groups` purge below — on a shared cell `workers` is a universal group
+    // name and one tenant's delete must not cold-start every other tenant's ring.
+    st.hotlist.forget_group_all_queues(tenant.as_str(), &group);
     // The group-first-contact seed marker (consumer_groups_metadata) was removed
     // when delete_metadata, but the monotonic positive `seeded_groups` cache still
     // says "seeded" and would route the next pop down the ring path, skipping the
@@ -200,7 +203,8 @@ pub async fn handle_delete_consumer_group_for_queue(
     // pre-delete ring cannot mask the from-the-start reconsume, and (when the
     // per-(queue, group) seed marker was removed) drop the stale positive
     // `seeded_groups` entry so the next pop re-seeds via first contact.
-    st.hotlist.forget_group(&queue, &group);
+    st.hotlist
+        .forget_group(&crate::handlers::tenant_queue_key(tenant.as_str(), &queue), &group);
     if delete_metadata {
         // Track B (§5): seeded_groups is keyed by (tenant, queue).
         let key = crate::handlers::tenant_queue_key(tenant.as_str(), &queue);
@@ -309,7 +313,8 @@ async fn reseed_after_seek(
 ) {
     if st.hotlist.enabled() && seek_succeeded(txt) {
         let now_ms = crate::util::now_epoch_ms();
-        super::data::hotlist_reseed_scan(&st.hotlist, client, queue, group, tenant, now_ms).await;
+        let qkey = crate::handlers::tenant_queue_key(tenant, queue);
+        super::data::hotlist_reseed_scan(&st.hotlist, client, &qkey, group, now_ms).await;
     }
 }
 

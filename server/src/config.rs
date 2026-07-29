@@ -328,6 +328,13 @@ pub struct Config {
     // Reseed / cold-start interval (ms) — §8 correctness floor for missed marks /
     // dropped mesh hints. Default 30s; lower for tests / tighter cross-broker floor.
     pub hotlist_reseed_ms: i64,
+    // Idle-eviction sweep cadence (ms) for the per-(tenant,queue) hot-list rings and
+    // long-poll wake gates. Both use a second-chance flag, so a queue is dropped after
+    // [sweep, 2×sweep) with no mark / pop / parked waiter and no live ring entry. This
+    // is what bounds the two maps on a SHARED cell, where an untrusted tenant can name
+    // an unbounded number of distinct queues. 0 disables the sweep (unbounded growth —
+    // only for a single-tenant deployment that wants the pre-eviction behaviour).
+    pub hotlist_idle_sweep_ms: u64,
     // LOGGING_PLAN.md Phase 1: cadence of the periodic `rates`/`sizes` aggregate
     // log blocks (ms), and how many hot queues the per-queue lines rank & show.
     pub log_rates_ms: u64,
@@ -533,6 +540,7 @@ pub fn log_effective(cfg: &Config) {
         hotlist_shards = cfg.hotlist_shards,
         hotlist_window_batch = cfg.hotlist_window_batch,
         hotlist_reseed_ms = cfg.hotlist_reseed_ms,
+        hotlist_idle_sweep_ms = cfg.hotlist_idle_sweep_ms,
         zstd_level = cfg.zstd_level,
         "config: engine"
     );
@@ -673,6 +681,7 @@ pub fn load() -> Config {
             .max(1) as usize,
         hotlist_window_batch: env_int("QUEEN_HOTLIST_WINDOW_BATCH", 100).max(1) as u32,
         hotlist_reseed_ms: env_int("QUEEN_HOTLIST_RESEED_MS", 30000).max(1),
+        hotlist_idle_sweep_ms: env_int("QUEEN_HOTLIST_IDLE_SWEEP_MS", 300_000).max(0) as u64,
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
         tenancy_header: env_bool("QUEEN_TENANCY_HEADER", false),

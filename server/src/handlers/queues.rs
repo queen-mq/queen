@@ -150,9 +150,11 @@ pub async fn handle_configure(
 
     // Invalidate the cached lease so a leaseTime change is reflected on next pop.
     // Track B (§5): the cache is keyed by (tenant, name) — invalidate this tenant's.
-    st.lease_cache.lock().unwrap().remove(&crate::handlers::tenant_queue_key(tenant.as_str(), &queue));
-    // Invalidate the same queue's config cache on peer replicas.
-    st.notifier.broadcast_queue_config_set(&queue);
+    let qkey = crate::handlers::tenant_queue_key(tenant.as_str(), &queue);
+    st.lease_cache.lock().unwrap().remove(&qkey);
+    // Invalidate the same queue's config cache on peer replicas — the frame carries
+    // the tenant, so a peer invalidates exactly this tenant's entry (§5).
+    st.notifier.broadcast_queue_config_set(&qkey);
 
     json(StatusCode::OK, cfg_txt)
 }
@@ -189,9 +191,10 @@ pub async fn handle_delete_queue(
         );
     }
 
-    st.lease_cache.lock().unwrap().remove(&crate::handlers::tenant_queue_key(tenant.as_str(), &queue));
+    let qkey = crate::handlers::tenant_queue_key(tenant.as_str(), &queue);
+    st.lease_cache.lock().unwrap().remove(&qkey);
     // Invalidate the deleted queue's config cache on peer replicas.
-    st.notifier.broadcast_queue_config_delete(&queue);
+    st.notifier.broadcast_queue_config_delete(&qkey);
     json(StatusCode::OK, del_txt)
 }
 

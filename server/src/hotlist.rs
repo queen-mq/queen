@@ -17,6 +17,17 @@
 //! default off ⇒ the current path is byte-identical; the handler hooks branch
 //! on `enabled()` and never touch this).
 //!
+//! ## Keying (Track B, PLAN_QUEEN_PROXY_CLOUD.md §5)
+//! Every `qkey` parameter below is the COMPOSITE `handlers::tenant_queue_key(tenant,
+//! queue)` = `"<tenant>\x1f<queue>"`, never a bare queue name: on a shared cell the
+//! names `orders` / `workers` collide across tenants, and a shared ring means one
+//! tenant's pop checks out (and its `Empty`/leased `Took` checkin then clears or
+//! wheels) another tenant's candidate. The module treats the key as OPAQUE; only the
+//! display/match sites (`traced`, the trace prints, `ring_sizes`) split it back with
+//! `handlers::split_tenant_queue`. The key MUST be byte-identical to the one the
+//! `Notifier` gates use — [`HotList::wake`] forwards it straight into
+//! `Notifier::wake_local_hint`, so a mismatch is a silent lost wake.
+//!
 //! ## Structures (§3)
 //! * **Interning** — per QUEUE, partition name → dense `u32` index, append-only.
 //!   The strings live only here; the id↔name memo (learned from pop responses /
@@ -67,6 +78,25 @@ const REVISIT_MAX_MS: i64 = 1000;
 // that registered together (cold start), so the background floor never fires as
 // one synchronized keyset-scan storm.
 pub const RESEED_JITTER_MS: i64 = 15_000;
+
+/// One (tenant, queue, group) ring whose periodic reseed floor (§8) is due. A named
+/// struct, not a tuple: the caller must not be able to mis-order the composite key
+/// and the group.
+pub struct ReseedDue {
+    /// `handlers::tenant_queue_key(tenant, queue)` — the tenant is IN the key.
+    pub qkey: String,
+    pub group: String,
+}
+
+/// One ring's observability snapshot (`ring_sizes`). `ready` is exact; `wheel` is the
+/// heap length (an upper bound — it includes not-yet-drained stale entries).
+pub struct RingSize {
+    pub tenant: String,
+    pub queue: String,
+    pub group: String,
+    pub ready: usize,
+    pub wheel: usize,
+}
 
 /// A candidate handed to the handler for one SQL `log_pop_list_v1` call.
 #[derive(Clone, Debug)]
@@ -336,6 +366,12 @@ struct QueueState {
     // residual producer-RTT gap. Immediate wakes (transaction / mesh-remote /
     // wheel / promote-on-ack) bypass this and wake at once, unchanged.
     wake_pending: std::sync::atomic::AtomicBool,
+    // Idle-eviction second chance (CLOCK): set by every `qstate`/`qstate_existing`
+    // access (mark, take, checkin, has_ready, reseed, cfg), cleared by each evictor
+    // sweep. A queue survives at least one full sweep after its last access, so the
+    // effective idle window is [sweep, 2×sweep). A flag, not a timestamp, so the
+    // per-access cost is one relaxed store and never a clock read.
+    active: std::sync::atomic::AtomicBool,
 }
 
 impl QueueState {
@@ -345,6 +381,7 @@ impl QueueState {
             cfg: Mutex::new(DeferCfg::default()),
             groups: Mutex::new(HashMap::new()),
             wake_pending: std::sync::atomic::AtomicBool::new(false),
+            active: std::sync::atomic::AtomicBool::new(true),
         }
     }
     fn group(&self, group: &str, shards: usize) -> Arc<GroupRing> {
@@ -371,11 +408,28 @@ pub struct HotList {
     // mark skips it entirely — no global-lock traffic and no per-push (Box<str>,
     // Box<str>) allocation on a single-broker deployment.
     mesh_active: bool,
+    // QUEEN_TENANCY_HEADER. OFF (the OSS default) means no non-default tenant can
+    // exist, so a tenant-less peer frame provably addresses `DEFAULT_TENANT` and the
+    // legacy fan-out below must NOT run: it would turn one hash lookup into a scan of
+    // every ring on a path (rolling HA upgrade) every OSS cluster traverses.
+    tenancy: bool,
+    // Keyed by the COMPOSITE `tenant_queue_key(tenant, queue)` (see the module note):
+    // two tenants sharing a queue name own disjoint rings, interning tables and
+    // deferral configs.
     queues: Mutex<HashMap<String, Arc<QueueState>>>,
+    // Secondary index, bare queue name → the composite keys holding it. Sole reader is
+    // the tenant-less (pre-Track-B peer) mark, which would otherwise scan `queues`
+    // whole ON THE MESH INBOUND TASK. Maintained ONLY when `tenancy` is on — with the
+    // flag off nothing reads it, so the OSS path pays nothing — and mutated in exactly
+    // the two places `queues` is: the create branch of `qstate` and `evict_idle`. It
+    // therefore cannot outlive its primary entries (an empty name-set is removed), so
+    // it is bounded BY `queues` and adds no second leak.
+    by_queue: Mutex<HashMap<String, HashSet<String>>>,
     notifier: OnceLock<Arc<Notifier>>,
     trace_prefix: Option<String>,
-    // Coalesced local vuoto→pending transitions, drained by main's mesh flusher
-    // (§5). Received (remote) marks never enqueue here (no re-broadcast).
+    // Coalesced local vuoto→pending transitions as (qkey, partition), drained by
+    // main's mesh flusher (§5), which splits the qkey back onto the wire. Received
+    // (remote) marks never enqueue here (no re-broadcast).
     dirty: Mutex<HashSet<(Box<str>, Box<str>)>>,
     // Observability.
     pub reseeds: std::sync::atomic::AtomicU64,
@@ -384,13 +438,21 @@ pub struct HotList {
 }
 
 impl HotList {
-    pub fn new(enabled: bool, shards: usize, window_batch: u32, mesh_active: bool) -> Arc<HotList> {
+    pub fn new(
+        enabled: bool,
+        shards: usize,
+        window_batch: u32,
+        mesh_active: bool,
+        tenancy: bool,
+    ) -> Arc<HotList> {
         Arc::new(HotList {
             enabled,
             shards: shards.max(1),
             window_batch: window_batch.max(1),
             mesh_active,
+            tenancy,
             queues: Mutex::new(HashMap::new()),
+            by_queue: Mutex::new(HashMap::new()),
             notifier: OnceLock::new(),
             trace_prefix: std::env::var("QUEEN_HOTLIST_TRACE").ok().filter(|v| !v.is_empty()),
             dirty: Mutex::new(HashSet::new()),
@@ -412,41 +474,66 @@ impl HotList {
     #[inline]
     /// Env-gated chain trace (QUEEN_HOTLIST_TRACE=<queue-prefix>): bounded-volume
     /// mark/wake/serve breadcrumbs for latency debugging. Default: off, zero cost
-    /// beyond one Option check.
-    pub fn traced(&self, queue: &str) -> bool {
+    /// beyond one Option check. The prefix is matched against the QUEUE half of the
+    /// composite key, so the operator still writes a plain queue prefix.
+    pub fn traced(&self, qkey: &str) -> bool {
         match &self.trace_prefix {
-            Some(p) => queue.starts_with(p.as_str()),
+            Some(p) => crate::handlers::split_tenant_queue(qkey).1.starts_with(p.as_str()),
             None => false,
         }
     }
 
-    fn wake(&self, queue: &str) {
+    /// The hotlist↔notifier key contract: the gate is keyed by the SAME composite
+    /// key as the ring, so a mark wakes exactly the pops parked on that
+    /// (tenant, queue) — never another tenant's.
+    fn wake(&self, qkey: &str) {
         if let Some(n) = self.notifier.get() {
             // Empty partition hint = wake the queue gate only (no targeted hint).
-            n.wake_local_hint(queue, "");
+            n.wake_local_hint(qkey, "");
         }
     }
 
-    fn qstate(&self, queue: &str) -> Arc<QueueState> {
+    /// get-or-create. Every accessor funnels through here (or [`qstate_existing`]), so
+    /// this is the ONE place that stamps the second-chance `active` flag the idle
+    /// evictor reads — no clock read, no extra lock, and no way to add an access path
+    /// that forgets to keep its own state alive.
+    fn qstate(&self, qkey: &str) -> Arc<QueueState> {
         let mut q = self.queues.lock().unwrap();
-        if let Some(s) = q.get(queue) {
+        if let Some(s) = q.get(qkey) {
+            s.active.store(true, std::sync::atomic::Ordering::Relaxed);
             return s.clone();
         }
         let s = Arc::new(QueueState::new());
-        q.insert(queue.to_string(), s.clone());
+        q.insert(qkey.to_string(), s.clone());
+        drop(q);
+        if self.tenancy {
+            let (_, queue) = crate::handlers::split_tenant_queue(qkey);
+            self.by_queue
+                .lock()
+                .unwrap()
+                .entry(queue.to_string())
+                .or_default()
+                .insert(qkey.to_string());
+        }
         s
     }
 
-    fn qstate_existing(&self, queue: &str) -> Option<Arc<QueueState>> {
-        self.queues.lock().unwrap().get(queue).cloned()
+    fn qstate_existing(&self, qkey: &str) -> Option<Arc<QueueState>> {
+        let s = self.queues.lock().unwrap().get(qkey).cloned();
+        if let Some(s) = &s {
+            s.active.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        s
     }
 
     // -------------------------------------------------------- queue config
 
     /// Cache a queue's deferral config (from queen.queues; the handler fetches
-    /// it, TTL-throttled). `now_ms` stamps the fetch for the TTL check.
-    pub fn set_queue_cfg(&self, queue: &str, delayed: i32, window: i32, now_ms: i64) {
-        let s = self.qstate(queue);
+    /// it, TTL-throttled). `now_ms` stamps the fetch for the TTL check. Per
+    /// (tenant, queue): `delayed`/`windowBuffer` are per-tenant queue config, so a
+    /// same-named queue of another tenant must never install its deferral here.
+    pub fn set_queue_cfg(&self, qkey: &str, delayed: i32, window: i32, now_ms: i64) {
+        let s = self.qstate(qkey);
         let mut c = s.cfg.lock().unwrap();
         c.delayed = delayed;
         c.window = window;
@@ -454,8 +541,8 @@ impl HotList {
     }
 
     /// Is the cached config fresh enough (within `ttl_ms`)? Absent ⇒ false.
-    pub fn cfg_fresh(&self, queue: &str, now_ms: i64, ttl_ms: i64) -> bool {
-        match self.qstate_existing(queue) {
+    pub fn cfg_fresh(&self, qkey: &str, now_ms: i64, ttl_ms: i64) -> bool {
+        match self.qstate_existing(qkey) {
             Some(s) => {
                 let c = s.cfg.lock().unwrap();
                 c.fetched_ms != 0 && now_ms - c.fetched_ms < ttl_ms
@@ -464,8 +551,8 @@ impl HotList {
         }
     }
 
-    fn cfg_of(&self, queue: &str) -> DeferCfg {
-        match self.qstate_existing(queue) {
+    fn cfg_of(&self, qkey: &str) -> DeferCfg {
+        match self.qstate_existing(qkey) {
             Some(s) => *s.cfg.lock().unwrap(),
             None => DeferCfg::default(),
         }
@@ -474,15 +561,15 @@ impl HotList {
     /// Should the list pop skip the SQL windowBuffer debounce for this queue?
     /// Yes only when the broker KNOWS windowBuffer>0 (cache hit) and is holding
     /// it in the wheel — otherwise the SQL debounce stays the (safe) floor.
-    pub fn skip_window(&self, queue: &str) -> bool {
-        self.cfg_of(queue).window > 0
+    pub fn skip_window(&self, qkey: &str) -> bool {
+        self.cfg_of(qkey).window > 0
     }
 
     // -------------------------------------------------------------- marks
 
     fn mark_inner(
         &self,
-        queue: &str,
+        qkey: &str,
         partition: &str,
         count: u32,
         now_ms: i64,
@@ -494,7 +581,7 @@ impl HotList {
         }
         // One global `queues` lookup for the whole mark (was two: a separate
         // cfg_of + qstate each locked it — hot under the push rate).
-        let s = self.qstate(queue);
+        let s = self.qstate(qkey);
         let cfg = *s.cfg.lock().unwrap();
         let idx = s.intern.lock().unwrap().intern(partition);
         // A mark is incondizionato across every EXISTING group ring of the queue:
@@ -502,15 +589,24 @@ impl HotList {
         // polling it. A group nobody polls has no ring (no allocation) and will
         // discover the partition via reseed on first contact (§8).
         let groups = s.groups.lock().unwrap();
-        let mut woke = false;
+        // R4: a queue with NO group ring still has parked pops to wake. A
+        // partition-targeted long-poll (handle_pop_partition) parks on the queue GATE
+        // and never registers a ring, so gating the wake purely on a ring transition
+        // strands a tenant whose only consumer is partition-targeted: its own push
+        // would never wake it and it would burn the whole long-poll on the backoff
+        // floor. A ring-less queue therefore always counts as a transition — the wake
+        // is still coalesced through the tick, so this is one notify per queue per
+        // tick, never a per-push storm.
+        let mut woke = groups.is_empty();
         for ring in groups.values() {
             let sh = (idx as usize) % self.shards;
             let local = idx / self.shards as u32;
             let mut sub = ring.subs[sh].lock().unwrap();
             sub.ensure(local);
-            if self.trace_prefix.is_some() && self.traced(queue) {
-                eprintln!("[hlt] mark q={} p={} st={} t={}", queue, partition,
-                    sub.state[local as usize], crate::hotlist::trace_now_ms());
+            if self.trace_prefix.is_some() && self.traced(qkey) {
+                let (t, q) = crate::handlers::split_tenant_queue(qkey);
+                eprintln!("[hlt] mark q={} p={} st={} tn={} t={}", q, partition,
+                    sub.state[local as usize], t, crate::hotlist::trace_now_ms());
             }
             sub.epoch[local as usize] = sub.epoch[local as usize].wrapping_add(1);
             sub.batch_count[local as usize] =
@@ -574,7 +670,7 @@ impl HotList {
                 // Bounded: drop the hint if the coalescing set is huge (loss is healed
                 // by the reseed floor — §5/§8).
                 if d.len() < 200_000 {
-                    d.insert((queue.into(), partition.into()));
+                    d.insert((qkey.into(), partition.into()));
                 }
             }
         } else {
@@ -589,7 +685,7 @@ impl HotList {
         // is the floor, so a late/missed tick only adds bounded latency, never a hang.
         if woke {
             if wake {
-                self.wake(queue);
+                self.wake(qkey);
             } else {
                 s.wake_pending
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -601,31 +697,64 @@ impl HotList {
     /// path that does not separately notify): sets the partition pending on every
     /// group ring, wakes on a vuoto→pending transition, and (with peers) queues a
     /// coalesced mesh dirty hint (§5).
-    pub fn mark_local(&self, queue: &str, partition: &str, count: u32, now_ms: i64) {
-        self.mark_inner(queue, partition, count, now_ms, true, true);
+    pub fn mark_local(&self, qkey: &str, partition: &str, count: u32, now_ms: i64) {
+        self.mark_inner(qkey, partition, count, now_ms, true, true);
     }
 
     /// Local mark WITHOUT the internal wake — for the push handler, which already
     /// calls notify_pushed_batch (one wake per push, issued AFTER the ring is
     /// marked). Still queues the mesh dirty hint (with peers). Avoids the redundant
     /// second notify_waiters per push (the flag-on push-RTT regression).
-    pub fn mark_local_quiet(&self, queue: &str, partition: &str, count: u32, now_ms: i64) {
-        self.mark_inner(queue, partition, count, now_ms, true, false);
+    pub fn mark_local_quiet(&self, qkey: &str, partition: &str, count: u32, now_ms: i64) {
+        self.mark_inner(qkey, partition, count, now_ms, true, false);
     }
 
     /// Remote mark (a peer's mesh dirty hint): same effect, wakes parked pops (the
     /// receiving broker has no other wake for this), no re-broadcast (§5).
-    pub fn mark_remote(&self, queue: &str, partition: &str, now_ms: i64) {
-        self.mark_inner(queue, partition, 1, now_ms, false, true);
+    pub fn mark_remote(&self, qkey: &str, partition: &str, now_ms: i64) {
+        self.mark_inner(qkey, partition, 1, now_ms, false, true);
+    }
+
+    /// Remote mark from a peer that sent NO tenant (a pre-Track-B build, i.e. a
+    /// rolling upgrade). Runs on the mesh INBOUND connection task, once per frame
+    /// ITEM (main drains up to 50k hints per batch), so it may never scan `queues`.
+    ///
+    /// * Tenancy OFF (the OSS default): no non-default tenant can exist, so the frame
+    ///   provably names the default tenant — ONE hash lookup, exactly the pre-Track-B
+    ///   cost. Every OSS HA rolling upgrade traverses this branch.
+    /// * Tenancy ON: the bare name is genuinely ambiguous, so the only sound reading is
+    ///   "some tenant holding this queue name got data" — mark each of them. Attributing
+    ///   it to the default tenant would silently drop the wake for every other tenant;
+    ///   over-waking only costs redundant empty SKIP LOCKED probes (~0.2ms each, the §1
+    ///   "stale in eccesso" contract). The `by_queue` index makes that proportional to
+    ///   the tenants ACTUALLY holding the name, not to the whole map.
+    pub fn mark_remote_all_tenants(&self, queue: &str, partition: &str, now_ms: i64) {
+        if !self.enabled || queue.is_empty() || partition.is_empty() {
+            return;
+        }
+        if !self.tenancy {
+            let qkey = crate::handlers::tenant_queue_key(crate::config::DEFAULT_TENANT, queue);
+            self.mark_inner(&qkey, partition, 1, now_ms, false, true);
+            return;
+        }
+        let keys: Vec<String> = match self.by_queue.lock().unwrap().get(queue) {
+            Some(set) => set.iter().cloned().collect(),
+            None => return,
+        };
+        for k in keys {
+            self.mark_inner(&k, partition, 1, now_ms, false, true);
+        }
     }
 
     /// Learn a partition's id↔name (from a pop response / reseed) for the ack
-    /// bridge (§7 promote-on-ack is keyed by partition id).
-    pub fn note_partition_id(&self, queue: &str, name: &str, id: &str) {
+    /// bridge (§7 promote-on-ack is keyed by partition id). Per (tenant, queue):
+    /// two tenants' same-named partitions have DIFFERENT ids and must not share an
+    /// intern slot (the same-name/different-uuid collision).
+    pub fn note_partition_id(&self, qkey: &str, name: &str, id: &str) {
         if !self.enabled || name.is_empty() || id.is_empty() {
             return;
         }
-        let s = self.qstate(queue);
+        let s = self.qstate(qkey);
         s.intern.lock().unwrap().note_id(name, id);
     }
 
@@ -636,7 +765,7 @@ impl HotList {
     /// (the empty-path CAS / reseed floor still covers it).
     pub fn promote_ack(
         &self,
-        queue: &str,
+        qkey: &str,
         group: &str,
         partition_id: &str,
         now_ms: i64,
@@ -645,7 +774,7 @@ impl HotList {
         if !self.enabled {
             return;
         }
-        let s = match self.qstate_existing(queue) {
+        let s = match self.qstate_existing(qkey) {
             Some(s) => s,
             None => return,
         };
@@ -689,7 +818,7 @@ impl HotList {
                     sub.revisit_at[local as usize] = 0;
                     sub.ready_push_tail(local);
                     drop(sub);
-                    self.wake(queue);
+                    self.wake(qkey);
                 }
             }
             INFLIGHT => {
@@ -707,11 +836,11 @@ impl HotList {
     /// across sub-rings), marking them INFLIGHT. Drains due wheel entries first.
     /// Returns the candidates (name + epoch snapshot for the CAS). An empty
     /// return means the ring is empty (the caller parks / reseeds).
-    pub fn take_batch(&self, queue: &str, group: &str, k: usize, now_ms: i64) -> Vec<Candidate> {
+    pub fn take_batch(&self, qkey: &str, group: &str, k: usize, now_ms: i64) -> Vec<Candidate> {
         if !self.enabled || k == 0 {
             return Vec::new();
         }
-        let s = match self.qstate_existing(queue) {
+        let s = match self.qstate_existing(qkey) {
             Some(s) => s,
             None => return Vec::new(),
         };
@@ -770,11 +899,11 @@ impl HotList {
     /// acquiring the shared pop_vegas permit / a pooled connection, so a quiet
     /// empty re-poll (the O(#queues) long-poll storm) short-circuits without ever
     /// contending on the serving limiter.
-    pub fn has_ready(&self, queue: &str, group: &str, now_ms: i64) -> bool {
+    pub fn has_ready(&self, qkey: &str, group: &str, now_ms: i64) -> bool {
         if !self.enabled {
             return false;
         }
-        let s = match self.qstate_existing(queue) {
+        let s = match self.qstate_existing(qkey) {
             Some(s) => s,
             None => return false,
         };
@@ -804,7 +933,7 @@ impl HotList {
     /// skipped, un-leased) always re-appends.
     pub fn checkin(
         &self,
-        queue: &str,
+        qkey: &str,
         group: &str,
         results: Vec<CheckinResult>,
         now_ms: i64,
@@ -814,8 +943,8 @@ impl HotList {
         if !self.enabled || results.is_empty() {
             return;
         }
-        let cfg = self.cfg_of(queue);
-        let s = match self.qstate_existing(queue) {
+        let cfg = self.cfg_of(qkey);
+        let s = match self.qstate_existing(qkey) {
             Some(s) => s,
             None => return,
         };
@@ -916,11 +1045,11 @@ impl HotList {
     /// (ring cold / stale beyond `interval_ms`)? Caller runs the SQL scan and
     /// feeds rows via [`reseed_row`], then calls [`reseed_done`]. `force` marks
     /// a fresh (never-reseeded) group as cold-start.
-    pub fn reseed_due(&self, queue: &str, group: &str, now_ms: i64, interval_ms: i64) -> bool {
+    pub fn reseed_due(&self, qkey: &str, group: &str, now_ms: i64, interval_ms: i64) -> bool {
         if !self.enabled {
             return false;
         }
-        let s = self.qstate(queue);
+        let s = self.qstate(qkey);
         let ring = s.group(group, self.shards);
         let last = *ring.reseed_ms.lock().unwrap();
         last == 0 || now_ms - last >= interval_ms
@@ -928,12 +1057,12 @@ impl HotList {
 
     /// Feed one reseed row: intern the name, remember the id, and mark the
     /// partition pending WITHOUT broadcasting (a reseed is local discovery).
-    pub fn reseed_row(&self, queue: &str, group: &str, id: &str, name: &str, now_ms: i64) {
+    pub fn reseed_row(&self, qkey: &str, group: &str, id: &str, name: &str, now_ms: i64) {
         if !self.enabled {
             return;
         }
-        let cfg = self.cfg_of(queue);
-        let s = self.qstate(queue);
+        let cfg = self.cfg_of(qkey);
+        let s = self.qstate(qkey);
         {
             let mut it = s.intern.lock().unwrap();
             it.note_id(name, id);
@@ -990,7 +1119,12 @@ impl HotList {
     /// a missed mark) is recovered within one interval. Skips never-reseeded groups
     /// (`last == 0`): those are the pop-path cold-start bootstrap's job, and firing
     /// them here would be the cold-start scan storm the jitter exists to avoid.
-    pub fn periodic_reseed_due(&self, now_ms: i64, interval_ms: i64) -> Vec<(String, String)> {
+    ///
+    /// The returned `qkey` carries the tenant, so the background caller reseeds each
+    /// ring under ITS OWN tenant — there is no tenant registry to enumerate and none
+    /// is needed: a ring only exists for a (tenant, queue, group) some pop actually
+    /// touched, so a tenant with no consumer costs nothing here.
+    pub fn periodic_reseed_due(&self, now_ms: i64, interval_ms: i64) -> Vec<ReseedDue> {
         if !self.enabled {
             return Vec::new();
         }
@@ -1015,17 +1149,17 @@ impl HotList {
             for (gname, ring) in groups {
                 let last = *ring.reseed_ms.lock().unwrap();
                 if last != 0 && now_ms - last >= interval_ms + ring.reseed_jitter_ms {
-                    out.push((qname.clone(), gname));
+                    out.push(ReseedDue { qkey: qname.clone(), group: gname });
                 }
             }
         }
         out
     }
 
-    /// Observability (§10 / VM plan): per (queue, group) ring sizes —
-    /// (queue, group, ready_len, wheel_len). `ready_len` is exact; `wheel_len` is the
-    /// heap length (an upper bound — it includes not-yet-drained stale entries).
-    pub fn ring_sizes(&self) -> Vec<(String, String, usize, usize)> {
+    /// Observability (§10 / VM plan): per (tenant, queue, group) ring sizes. The
+    /// composite key is split here so the log/metrics surface shows a readable queue
+    /// name attributed to the right tenant.
+    pub fn ring_sizes(&self) -> Vec<RingSize> {
         let queues: Vec<(String, Arc<QueueState>)> = {
             self.queues
                 .lock()
@@ -1044,6 +1178,7 @@ impl HotList {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
             };
+            let (tenant, queue) = crate::handlers::split_tenant_queue(&qname);
             for (gname, ring) in groups {
                 let mut ready = 0usize;
                 let mut wheel = 0usize;
@@ -1052,7 +1187,13 @@ impl HotList {
                     ready += sg.len_ready;
                     wheel += sg.wheel.len();
                 }
-                out.push((qname.clone(), gname, ready, wheel));
+                out.push(RingSize {
+                    tenant: tenant.to_string(),
+                    queue: queue.to_string(),
+                    group: gname,
+                    ready,
+                    wheel,
+                });
             }
         }
         out
@@ -1060,16 +1201,16 @@ impl HotList {
 
     /// Mark this (queue, group) reseeded at `now_ms` (resets the interval clock)
     /// and wake parked pops (the reseed may have populated the ring).
-    pub fn reseed_done(&self, queue: &str, group: &str, now_ms: i64) {
+    pub fn reseed_done(&self, qkey: &str, group: &str, now_ms: i64) {
         if !self.enabled {
             return;
         }
-        let s = self.qstate(queue);
+        let s = self.qstate(qkey);
         let ring = s.group(group, self.shards);
         *ring.reseed_ms.lock().unwrap() = now_ms;
         self.reseeds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.wake(queue);
+        self.wake(qkey);
     }
 
     // -------------------------------------------------------- background
@@ -1125,7 +1266,8 @@ impl HotList {
         for (qname, s) in queues {
             if s.wake_pending.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 if self.traced(&qname) {
-                    eprintln!("[hlt] tickwake q={} t={}", qname, trace_now_ms());
+                    let (tn, q) = crate::handlers::split_tenant_queue(&qname);
+                    eprintln!("[hlt] tickwake q={} tn={} t={}", q, tn, trace_now_ms());
                 }
                 self.wake(&qname);
                 woke += 1;
@@ -1139,11 +1281,11 @@ impl HotList {
     /// with no ring is a no-op (the group discovers via reseed on first poll, §8),
     /// so a group must be registered before marks flow to it. Exposed mainly for
     /// tests and any caller that wants to pre-warm a group.
-    pub fn ensure_group(&self, queue: &str, group: &str) {
+    pub fn ensure_group(&self, qkey: &str, group: &str) {
         if !self.enabled {
             return;
         }
-        let s = self.qstate(queue);
+        let s = self.qstate(qkey);
         let _ = s.group(group, self.shards);
     }
 
@@ -1159,23 +1301,26 @@ impl HotList {
     /// Over-forgetting is a harmless cold-start; the danger the caller guards
     /// against is a SURVIVING stale ring that hides the reconsume until the
     /// periodic floor.
-    pub fn forget_group(&self, queue: &str, group: &str) {
+    pub fn forget_group(&self, qkey: &str, group: &str) {
         if !self.enabled {
             return;
         }
-        if let Some(s) = self.qstate_existing(queue) {
+        if let Some(s) = self.qstate_existing(qkey) {
             let removed = s.groups.lock().unwrap().remove(group).is_some();
             if removed {
-                self.wake(queue);
+                self.wake(qkey);
             }
         }
     }
 
     /// Invalidate the hot-list ring of a deleted consumer group ACROSS EVERY QUEUE
-    /// (the delete-consumer-group admin op, all queues). Same rationale as
-    /// [`forget_group`], applied to every queue that currently holds a ring for the
-    /// group; each such queue is woken.
-    pub fn forget_group_all_queues(&self, group: &str) {
+    /// OF ONE TENANT (the delete-consumer-group admin op, all queues). Same rationale
+    /// as [`forget_group`], applied to every queue that currently holds a ring for the
+    /// group; each such queue is woken. Tenant-scoped to match the SQL delete
+    /// (008_consumer_groups.sql) and the `seeded_groups` purge beside it: on a shared
+    /// cell `workers` is a universal group name, and one tenant's DELETE must not
+    /// cold-start every other tenant's ring.
+    pub fn forget_group_all_queues(&self, tenant: &str, group: &str) {
         if !self.enabled {
             return;
         }
@@ -1184,6 +1329,7 @@ impl HotList {
                 .lock()
                 .unwrap()
                 .iter()
+                .filter(|(k, _)| crate::handlers::split_tenant_queue(k).0 == tenant)
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         };
@@ -1195,8 +1341,91 @@ impl HotList {
         }
     }
 
+    /// Idle eviction (shared-cell memory bound). Drop the whole `QueueState` — interning
+    /// tables, group rings, wheels — of every (tenant, queue) that has had NO access
+    /// since the previous sweep AND holds no live ring state. Without this the map only
+    /// ever grows: on a shared free tier an untrusted tenant can loop
+    /// `GET /pop/queue/<random>` and pin one `QueueState` per distinct name for the
+    /// process lifetime.
+    ///
+    /// Three conditions, all required, all checked while holding `queues` so nothing can
+    /// slip in between them:
+    /// * `!active.swap(false)` — untouched for a full sweep (see `QueueState::active`).
+    /// * `Arc::strong_count == 1` — the map is the ONLY holder. Any concurrent operation
+    ///   cloned the Arc out of `qstate`, so this is an exact "nobody is mid-operation"
+    ///   test, and no new clone can appear while we hold the lock.
+    /// * every ring entry is `IDLE` — no READY candidate, no WHEEL deferral/lease, no
+    ///   INFLIGHT claim. Stale heap entries whose state is already IDLE are droppable by
+    ///   construction (the wheel skips them lazily anyway).
+    ///
+    /// Evicting is never a correctness event even if all three were somehow wrong: the
+    /// ring is a cache over PG, and the §8 periodic reseed floor rebuilds it on first
+    /// contact. Returns how many queues were dropped.
+    pub fn evict_idle(&self) -> usize {
+        if !self.enabled {
+            return 0;
+        }
+        // `queues` is held across the index cleanup, not released between the two. The
+        // only writer of `by_queue` is `qstate`'s create branch, which reaches it AFTER
+        // inserting into `queues` — so holding `queues` here makes the pair atomic
+        // against a re-create and the index can never end up missing a live key. Lock
+        // order is always queues → by_queue (the fan-out reader drops its `by_queue`
+        // guard before it marks), so this nesting cannot invert.
+        let mut q = self.queues.lock().unwrap();
+        let mut evicted: Vec<String> = Vec::new();
+        q.retain(|qkey, s| {
+            // Untouched for a full sweep? (Consumes the second chance.)
+            if s.active.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                return true;
+            }
+            // The map is the sole holder ⇒ nobody is mid-operation on this state, and
+            // no new clone can appear while we hold `queues`.
+            if Arc::strong_count(s) != 1 {
+                return true;
+            }
+            // No READY candidate, no WHEEL deferral/lease, no INFLIGHT claim anywhere.
+            let groups = s.groups.lock().unwrap();
+            let quiet = groups.values().all(|ring| {
+                ring.subs.iter().all(|sub| {
+                    let sg = sub.lock().unwrap();
+                    sg.len_ready == 0 && sg.state.iter().all(|&st| st == IDLE)
+                })
+            });
+            drop(groups);
+            if !quiet {
+                return true;
+            }
+            evicted.push(qkey.clone());
+            false
+        });
+        if self.tenancy && !evicted.is_empty() {
+            let mut idx = self.by_queue.lock().unwrap();
+            for qkey in &evicted {
+                let (_, queue) = crate::handlers::split_tenant_queue(qkey);
+                if let Some(set) = idx.get_mut(queue) {
+                    set.remove(qkey);
+                    if set.is_empty() {
+                        idx.remove(queue);
+                    }
+                }
+            }
+        }
+        evicted.len()
+    }
+
+    /// Number of live (tenant, queue) ring states — the map the memory bound is stated
+    /// over, reported by the idle sweep.
+    pub fn queue_count(&self) -> usize {
+        self.queues.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    fn index_len(&self) -> usize {
+        self.by_queue.lock().unwrap().len()
+    }
+
     /// Drain up to `max` coalesced local dirty transitions for the mesh flusher
-    /// (§5). Returns (queue, partition) pairs; the set is cleared.
+    /// (§5). Returns (qkey, partition) pairs; the set is cleared.
     pub fn drain_dirty(&self, max: usize) -> Vec<(String, String)> {
         if !self.enabled {
             return Vec::new();
@@ -1227,11 +1456,16 @@ mod tests {
 
     // mesh_active=true so the dirty-hint tests exercise the coalescing set.
     fn hl() -> Arc<HotList> {
-        HotList::new(true, 4, 100, true)
+        HotList::new(true, 4, 100, true, false)
     }
     // single-shard variant makes ring order deterministic for the ordering tests.
     fn hl1() -> Arc<HotList> {
-        HotList::new(true, 1, 100, true)
+        HotList::new(true, 1, 100, true, false)
+    }
+    // …with QUEEN_TENANCY_HEADER on (a shared cell). The tenant-less legacy paths
+    // behave differently by design on the two lanes, so the flag is never implicit.
+    fn hl1t() -> Arc<HotList> {
+        HotList::new(true, 1, 100, true, true)
     }
 
     fn names(c: &[Candidate]) -> Vec<String> {
@@ -1245,9 +1479,23 @@ mod tests {
         h.ensure_group(q, g);
     }
 
+    // Two distinct tenants sharing every NAME — the shared-cell shape (free tier).
+    const TA: &str = "11111111-1111-1111-1111-111111111111";
+    const TB: &str = "22222222-2222-2222-2222-222222222222";
+
+    // The composite ring/gate key. `tenant_queue_key` is the ONE producer of these
+    // keys in the broker; a test that builds its own would not prove the contract.
+    fn k(t: &str, q: &str) -> String {
+        crate::handlers::tenant_queue_key(t, q)
+    }
+
+    fn due_keys(d: &[ReseedDue]) -> Vec<(String, String)> {
+        d.iter().map(|x| (x.qkey.clone(), x.group.clone())).collect()
+    }
+
     #[test]
     fn disabled_is_all_noop() {
-        let h = HotList::new(false, 4, 100, true);
+        let h = HotList::new(false, 4, 100, true, false);
         h.ensure_group("q", "g");
         h.mark_local("q", "p0", 1, 0);
         assert!(h.take_batch("q", "g", 10, 0).is_empty());
@@ -1813,7 +2061,7 @@ mod tests {
     // flusher would ever drain it) — no per-push lock/alloc on a single broker.
     #[test]
     fn no_peers_skips_dirty_set() {
-        let h = HotList::new(true, 1, 100, false); // mesh_active = false
+        let h = HotList::new(true, 1, 100, false, false); // mesh_active = false
         reg(&h, "q", "g");
         h.mark_local("q", "p0", 1, 0);
         // still marks the ring (discovery works locally)…
@@ -1864,13 +2112,13 @@ mod tests {
         // The ring is NON-empty (p_keep is ready) ⇒ the pop-path empty-ring reseed
         // can NEVER trigger. ring_sizes confirms it (and exercises the observability
         // snapshot the VM log line uses).
-        assert_eq!(h.ring_sizes()[0].2, 1, "ring must be non-empty (p_keep ready)");
+        assert_eq!(h.ring_sizes()[0].ready, 1, "ring must be non-empty (p_keep ready)");
         // Not due before the interval; due after interval + the max per-group jitter,
         // regardless of the busy ring.
         assert!(h.periodic_reseed_due(base + 1_000, 30_000).is_empty());
         let due_at = base + 30_000 + RESEED_JITTER_MS + 1;
         assert_eq!(
-            h.periodic_reseed_due(due_at, 30_000),
+            due_keys(&h.periodic_reseed_due(due_at, 30_000)),
             vec![("q".to_string(), "g".to_string())],
             "periodic floor must be due even with a non-empty ring"
         );
@@ -2128,7 +2376,7 @@ mod tests {
         assert!(h.has_ready("qb", "g", 0));
         assert!(h.has_ready("qa", "other", 0));
 
-        h.forget_group_all_queues("g");
+        h.forget_group_all_queues(crate::config::DEFAULT_TENANT, "g");
         // The deleted group is cold on every queue…
         assert!(!h.has_ready("qa", "g", 0));
         assert!(!h.has_ready("qb", "g", 0));
@@ -2142,18 +2390,416 @@ mod tests {
     // a safe no-op (never panics, never creates a ring).
     #[test]
     fn forget_group_is_safe_when_absent_or_disabled() {
-        let off = HotList::new(false, 1, 100, true);
+        let off = HotList::new(false, 1, 100, true, false);
         off.forget_group("q", "g");
-        off.forget_group_all_queues("g");
+        off.forget_group_all_queues(crate::config::DEFAULT_TENANT, "g");
 
         let h = hl1();
         h.forget_group("never-seen", "g"); // unknown queue
         reg(&h, "q", "g");
         h.forget_group("q", "other"); // unregistered group in a known queue
-        h.forget_group_all_queues("still-unknown");
+        h.forget_group_all_queues(crate::config::DEFAULT_TENANT, "still-unknown");
         // The registered ring is still intact and usable.
         h.mark_local("q", "p0", 1, 0);
         assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p0"]);
+    }
+
+    // ---------------------------------------------------------------- tenancy
+    // Track B (§5). The shared free-tier cell runs many tenants on ONE broker with
+    // colliding queue and consumer-group names, so every ring must be keyed by
+    // (tenant, queue). Each test below fails on a bare-name key.
+
+    #[test]
+    fn two_tenants_same_queue_and_group_have_independent_rings() {
+        let h = hl1();
+        reg(&h, &k(TA, "orders"), "workers");
+        reg(&h, &k(TB, "orders"), "workers");
+        h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+        // B has nothing pending: its take must not see A's candidate.
+        assert!(h.take_batch(&k(TB, "orders"), "workers", 10, 0).is_empty());
+        assert_eq!(names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)), vec!["p0"]);
+    }
+
+    // The headline shared-cell defect: with one shared ring, tenant B's pop checks
+    // A's candidate out INFLIGHT, its SQL returns nothing (the claim is tenant-scoped)
+    // and its Empty checkin CAS-clears the entry — A's message becomes invisible until
+    // the ≤30s periodic floor.
+    #[test]
+    fn empty_checkin_by_one_tenant_does_not_clear_the_other() {
+        let h = hl1();
+        reg(&h, &k(TA, "orders"), "workers");
+        reg(&h, &k(TB, "orders"), "workers");
+        h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+        // B pops its own (empty) ring and checks in whatever it got.
+        let cb = h.take_batch(&k(TB, "orders"), "workers", 10, 0);
+        let back: Vec<CheckinResult> = cb
+            .iter()
+            .map(|c| CheckinResult {
+                name: c.name.clone(),
+                epoch: c.epoch,
+                verdict: Verdict::Empty,
+                drained: false,
+            })
+            .collect();
+        h.checkin(&k(TB, "orders"), "workers", back, 0, true, 60_000);
+        assert_eq!(
+            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)),
+            vec!["p0"],
+            "tenant B's empty verdict must not clear tenant A's candidate"
+        );
+    }
+
+    // Worst variant of the same family: B's leased Took parks the entry in the wheel
+    // for the whole leaseTime (300s by default), so A waits minutes for a message
+    // that is already committed.
+    #[test]
+    fn leased_took_by_one_tenant_does_not_park_the_other() {
+        let h = hl1();
+        reg(&h, &k(TA, "orders"), "workers");
+        reg(&h, &k(TB, "orders"), "workers");
+        h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+        let cb = h.take_batch(&k(TB, "orders"), "workers", 10, 0);
+        let back: Vec<CheckinResult> = cb
+            .iter()
+            .map(|c| CheckinResult {
+                name: c.name.clone(),
+                epoch: c.epoch,
+                verdict: Verdict::Took,
+                drained: false,
+            })
+            .collect();
+        // auto_ack=false ⇒ wheel_schedule(now + lease + pad).
+        h.checkin(&k(TB, "orders"), "workers", back, 0, false, 300_000);
+        assert_eq!(
+            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)),
+            vec!["p0"],
+            "tenant B's lease must not wheel tenant A's candidate"
+        );
+    }
+
+    // The interning table is nested in the per-(tenant,queue) state, so two tenants'
+    // same-NAMED partitions (different uuids) can no longer share a dense index.
+    #[test]
+    fn promote_ack_is_scoped_by_tenant() {
+        let h = hl1();
+        reg(&h, &k(TA, "orders"), "workers");
+        reg(&h, &k(TB, "orders"), "workers");
+        h.note_partition_id(&k(TA, "orders"), "shared-part", "id-a");
+        h.note_partition_id(&k(TB, "orders"), "shared-part", "id-b");
+        // Park both in the wheel: mark, take, leased-Took checkin.
+        for t in [TA, TB] {
+            h.mark_local(&k(t, "orders"), "shared-part", 1, 0);
+            let c = h.take_batch(&k(t, "orders"), "workers", 10, 0);
+            let back: Vec<CheckinResult> = c
+                .iter()
+                .map(|x| CheckinResult {
+                    name: x.name.clone(),
+                    epoch: x.epoch,
+                    verdict: Verdict::Took,
+                    drained: false,
+                })
+                .collect();
+            h.checkin(&k(t, "orders"), "workers", back, 0, false, 300_000);
+        }
+        // B's partition id must be unknown to A's ring: a shared intern table would
+        // resolve it to the same dense index and promote A's entry.
+        h.promote_ack(&k(TA, "orders"), "workers", "id-b", 1, false);
+        assert!(
+            h.take_batch(&k(TA, "orders"), "workers", 10, 1).is_empty(),
+            "another tenant's partition id must not promote this tenant's entry"
+        );
+        // A's own ack releases A's lease — and only A's.
+        h.promote_ack(&k(TA, "orders"), "workers", "id-a", 1, false);
+        assert_eq!(
+            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 1)),
+            vec!["shared-part"]
+        );
+        assert!(
+            h.take_batch(&k(TB, "orders"), "workers", 10, 1).is_empty(),
+            "tenant B's entry must stay wheeled until B's own ack"
+        );
+    }
+
+    // D3: the periodic floor must cover every tenant with a live ring, not just the
+    // default one — a non-default tenant otherwise has NO correctness floor at all.
+    #[test]
+    fn periodic_reseed_due_reports_every_tenant() {
+        let h = hl1();
+        let base = 100i64;
+        for t in [TA, TB] {
+            reg(&h, &k(t, "orders"), "workers");
+            h.reseed_done(&k(t, "orders"), "workers", base);
+        }
+        assert!(h.periodic_reseed_due(base + 1_000, 30_000).is_empty());
+        let due_at = base + 30_000 + RESEED_JITTER_MS + 1;
+        let got: HashSet<(String, String)> =
+            due_keys(&h.periodic_reseed_due(due_at, 30_000)).into_iter().collect();
+        assert!(got.contains(&(k(TA, "orders"), "workers".to_string())), "got {got:?}");
+        assert!(got.contains(&(k(TB, "orders"), "workers".to_string())), "got {got:?}");
+        // And the key round-trips to the tenant the background scan will bind to SQL.
+        assert_eq!(
+            crate::handlers::split_tenant_queue(&k(TB, "orders")),
+            (TB, "orders")
+        );
+    }
+
+    // D4: one tenant's DELETE /consumer-groups/:g must not cold-start every other
+    // tenant's ring for the same (universal) group name.
+    #[test]
+    fn forget_group_all_queues_is_tenant_scoped() {
+        let h = hl1();
+        for key in [k(TA, "qa"), k(TA, "qb"), k(TB, "qa")] {
+            reg(&h, &key, "g");
+            h.mark_local(&key, "p0", 1, 0);
+        }
+        h.forget_group_all_queues(TB, "g");
+        assert!(!h.has_ready(&k(TB, "qa"), "g", 0), "B's ring is dropped");
+        assert!(h.has_ready(&k(TA, "qa"), "g", 0), "A's ring is untouched");
+        assert!(h.has_ready(&k(TA, "qb"), "g", 0), "A's ring is untouched");
+    }
+
+    // F3: DeferCfg is per-(tenant, queue) too — tenant B's windowBuffer must not
+    // defer tenant A's messages on a same-named queue.
+    #[test]
+    fn defer_cfg_is_scoped_by_tenant() {
+        let h = hl1();
+        reg(&h, &k(TA, "orders"), "workers");
+        reg(&h, &k(TB, "orders"), "workers");
+        h.set_queue_cfg(&k(TB, "orders"), 0, 60, 0); // B: windowBuffer=60s
+        h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+        assert!(!h.skip_window(&k(TA, "orders")));
+        assert!(h.skip_window(&k(TB, "orders")));
+        assert_eq!(
+            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)),
+            vec!["p0"],
+            "A must be claimable now — B's window may not wheel it"
+        );
+    }
+
+    // D2b: with tenancy ON a tenant-less remote mark (an older peer, rolling upgrade)
+    // fans out to EVERY tenant holding that queue name. Attributing it to the default
+    // tenant would silently drop the wake for every other tenant.
+    #[test]
+    fn tenantless_remote_mark_fans_out_to_every_tenant() {
+        let h = hl1t();
+        for key in [k(TA, "orders"), k(TB, "orders"), k(TA, "other")] {
+            reg(&h, &key, "workers");
+        }
+        h.mark_remote_all_tenants("orders", "p0", 0);
+        assert!(h.has_ready(&k(TA, "orders"), "workers", 0));
+        assert!(h.has_ready(&k(TB, "orders"), "workers", 0));
+        assert!(!h.has_ready(&k(TA, "other"), "workers", 0), "other queues untouched");
+    }
+
+    // R1 — the flag-OFF invariant. With QUEEN_TENANCY_HEADER unset no non-default
+    // tenant can exist, so a tenant-less frame is NOT ambiguous and must resolve with a
+    // single hash lookup, exactly as it did pre-Track-B. This is the path every OSS HA
+    // rolling upgrade takes, so a fan-out here would be a pure regression. Proven two
+    // ways: the default tenant's ring gets the mark, and a ring that only a scan could
+    // have reached (another tenant, same queue name) does NOT.
+    #[test]
+    fn tenantless_remote_mark_is_o1_default_tenant_when_tenancy_off() {
+        let h = hl1();
+        let def = k(crate::config::DEFAULT_TENANT, "orders");
+        reg(&h, &def, "workers");
+        reg(&h, &k(TB, "orders"), "workers"); // unreachable without tenancy — a scan would hit it
+        h.mark_remote_all_tenants("orders", "p0", 0);
+        assert!(h.has_ready(&def, "workers", 0), "the default tenant's ring is marked");
+        assert!(
+            !h.has_ready(&k(TB, "orders"), "workers", 0),
+            "flag-off must not scan the ring map — only the default tenant is reachable"
+        );
+        // …and the fan-out index nothing reads is never even built on this lane.
+        assert_eq!(h.index_len(), 0, "flag-off must not maintain the fan-out index");
+    }
+
+    // R2 — the fan-out is served by the bare-name → composite-keys index, so its cost is
+    // the number of tenants holding THAT NAME, not the size of the ring map. A queue name
+    // no tenant holds costs one miss, not a scan.
+    #[test]
+    fn tenantless_fanout_index_tracks_only_holders_of_the_name() {
+        let h = hl1t();
+        for key in [k(TA, "orders"), k(TB, "orders"), k(TA, "other")] {
+            reg(&h, &key, "workers");
+        }
+        // Two distinct bare names indexed; "orders" is held by exactly two tenants.
+        assert_eq!(h.index_len(), 2);
+        h.mark_remote_all_tenants("no-such-queue", "p0", 0); // pure miss, no scan
+        assert!(!h.has_ready(&k(TA, "orders"), "workers", 0));
+        assert!(!h.has_ready(&k(TB, "orders"), "workers", 0));
+        assert!(!h.has_ready(&k(TA, "other"), "workers", 0));
+    }
+
+    // R3 — the shared-cell memory bound. Before: `queues` had no removal path at all, so
+    // every distinct (tenant, queue) string ever seen pinned a QueueState for the process
+    // lifetime. After: an entry survives at least one sweep (second chance) and is then
+    // dropped iff nothing is holding it and no ring entry is live.
+    #[test]
+    fn idle_queues_are_evicted_after_a_full_sweep() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        assert_eq!(h.queue_count(), 1);
+        // Second chance: the sweep that follows the access keeps it…
+        assert_eq!(h.evict_idle(), 0, "an entry accessed this sweep is kept");
+        assert_eq!(h.queue_count(), 1);
+        // …the next one, with no access in between, drops it.
+        assert_eq!(h.evict_idle(), 1);
+        assert_eq!(h.queue_count(), 0);
+    }
+
+    // A tenant looping GET /pop/queue/<random> is the actual vector: each distinct name
+    // used to cost one permanent QueueState. The bound is now "names touched in the last
+    // sweep window", not "names ever seen".
+    #[test]
+    fn unbounded_distinct_names_collapse_to_the_active_set() {
+        let h = hl1();
+        for i in 0..10_000 {
+            reg(&h, &k(TA, &format!("junk-{i}")), "g");
+        }
+        assert_eq!(h.queue_count(), 10_000);
+        h.evict_idle(); // second chance
+        assert_eq!(h.evict_idle(), 10_000, "every idle, empty ring is reclaimed");
+        assert_eq!(h.queue_count(), 0);
+    }
+
+    // Never evict a queue with live ring state: a READY candidate is pending work, and
+    // dropping it would hide a committed message until the §8 floor.
+    #[test]
+    fn a_queue_with_a_pending_candidate_is_never_evicted() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.mark_local("q", "p0", 1, 0);
+        h.evict_idle();
+        h.evict_idle();
+        assert_eq!(h.queue_count(), 1, "a READY candidate blocks eviction");
+
+        let c = h.take_batch("q", "g", 5, 0);
+        assert_eq!(names(&c), vec!["p0"]);
+        // Now INFLIGHT (checked out by a pop, checkin still to come) — also protected.
+        h.evict_idle();
+        h.evict_idle();
+        assert_eq!(h.queue_count(), 1, "an INFLIGHT claim blocks eviction");
+        // Drain it: Empty verdict clears to IDLE, and only then may it be reclaimed.
+        h.checkin(
+            "q", "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Empty, drained: false }],
+            0, true, 60_000,
+        );
+        h.evict_idle();
+        assert_eq!(h.evict_idle(), 1);
+    }
+
+    // A queue holding a wheel entry (a delayed/windowBuffer deferral, or a lease parking)
+    // has work scheduled in the future — evicting it would drop that schedule.
+    #[test]
+    fn a_queue_with_a_wheeled_entry_is_never_evicted() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0); // windowBuffer ⇒ the mark parks in the wheel
+        h.mark_local("q", "p0", 1, 0);
+        h.evict_idle();
+        h.evict_idle();
+        assert_eq!(h.queue_count(), 1);
+        assert_eq!(names(&h.take_batch("q", "g", 5, 6000)), vec!["p0"], "the deferral survived");
+    }
+
+    // Eviction must take the fan-out index with it, or the index becomes the second leak
+    // (bare names accumulating dead composite keys forever).
+    #[test]
+    fn eviction_reclaims_the_fanout_index_too() {
+        let h = hl1t();
+        reg(&h, &k(TA, "orders"), "g");
+        reg(&h, &k(TB, "orders"), "g");
+        assert_eq!(h.index_len(), 1); // one bare name, two holders
+        h.evict_idle();
+        assert_eq!(h.evict_idle(), 2);
+        assert_eq!(h.queue_count(), 0);
+        assert_eq!(h.index_len(), 0, "the emptied name-set is removed, not left behind");
+        // A tenant-less frame for the now-unknown name is a miss, not a stale wake.
+        h.mark_remote_all_tenants("orders", "p0", 0);
+        assert_eq!(h.queue_count(), 0, "a fan-out must not resurrect evicted rings");
+    }
+
+    // R4 (missed wake, empty groups map): a (tenant, queue) whose ONLY consumer is a
+    // partition-targeted long-poll has NO group ring — handle_pop_partition parks on
+    // the queue gate and never registers one. The push path's local wake is the
+    // coalescing tick, which fires only for queues flagged by a mark, so a queue with
+    // an empty groups map must still flag: otherwise the tenant's own push never wakes
+    // its own consumer and the pop burns its whole long-poll on the backoff floor.
+    #[tokio::test]
+    async fn quiet_mark_wakes_a_gate_with_no_group_ring() {
+        let h = hl1();
+        let n = Notifier::new(false);
+        h.attach_notifier(n.clone());
+        let qk = k(TA, "orders");
+        // NB: no reg() — a partition-targeted pop registers no group ring.
+        let n2 = n.clone();
+        let qk2 = qk.clone();
+        let waiter = tokio::spawn(async move {
+            n2.wait_queue(&qk2, std::time::Duration::from_secs(2)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        h.mark_local_quiet(&qk, "p0", 1, 0);
+        assert_eq!(h.wake_tick(), 1, "a push to a ring-less queue must flag the wake tick");
+        assert!(
+            waiter.await.unwrap(),
+            "the partition-targeted pop parked on this queue must be woken by its own push"
+        );
+    }
+
+    // …and the same on the immediate-wake path (transaction commit / DLQ move), which
+    // has no tick behind it at all: a lost wake there is the full backoff interval.
+    #[tokio::test]
+    async fn immediate_mark_wakes_a_gate_with_no_group_ring() {
+        let h = hl1();
+        let n = Notifier::new(false);
+        h.attach_notifier(n.clone());
+        let qk = k(TA, "orders");
+        let n2 = n.clone();
+        let qk2 = qk.clone();
+        let waiter = tokio::spawn(async move {
+            n2.wait_queue(&qk2, std::time::Duration::from_secs(2)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        h.mark_local(&qk, "p0", 1, 0);
+        assert!(waiter.await.unwrap(), "commit-path mark must wake a ring-less queue's gate");
+    }
+
+    // The hotlist↔notifier key contract (see the module note): a mark must wake the
+    // gate the matching pop parks on. A mismatch is latency-only — no other test
+    // would catch it.
+    #[tokio::test]
+    async fn a_mark_wakes_the_gate_the_pop_parks_on() {
+        let h = hl1();
+        let n = Notifier::new(false);
+        h.attach_notifier(n.clone());
+        reg(&h, &k(TA, "orders"), "workers");
+        let qk = k(TA, "orders");
+        let n2 = n.clone();
+        let qk2 = qk.clone();
+        let waiter = tokio::spawn(async move {
+            n2.wait_queue(&qk2, std::time::Duration::from_secs(3)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        h.mark_local(&qk, "p0", 1, 0);
+        assert!(waiter.await.unwrap(), "the mark must wake the pop parked on the same qkey");
+    }
+
+    // …and it must NOT wake a pop parked on another tenant's same-named queue.
+    #[tokio::test]
+    async fn a_mark_does_not_wake_another_tenants_parked_pop() {
+        let h = hl1();
+        let n = Notifier::new(false);
+        h.attach_notifier(n.clone());
+        reg(&h, &k(TA, "orders"), "workers");
+        let n2 = n.clone();
+        let kb = k(TB, "orders");
+        let waiter = tokio::spawn(async move {
+            n2.wait_queue(&kb, std::time::Duration::from_millis(300)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+        assert!(!waiter.await.unwrap(), "tenant B's gate must time out");
     }
 }
 

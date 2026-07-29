@@ -359,8 +359,8 @@ pub fn spawn_reporter(h: ReporterHandles) {
             };
             let (ack_entries, ack_bytes) = h.ack_registry.footprint();
             let rings = h.hotlist.ring_sizes();
-            let ready: usize = rings.iter().map(|x| x.2).sum();
-            let wheel: usize = rings.iter().map(|x| x.3).sum();
+            let ready: usize = rings.iter().map(|x| x.ready).sum();
+            let wheel: usize = rings.iter().map(|x| x.wheel).sum();
             let rss_gb = h.metrics.resident_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
             tracing::info!(
                 target: "sizes",

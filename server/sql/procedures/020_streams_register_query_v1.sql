@@ -98,9 +98,17 @@ BEGIN
             SELECT * INTO v_existing FROM queen_streams.queries WHERE name = v_name;
 
             IF NOT FOUND THEN
+                -- Conflict target is (name), matching queen_streams.queries'
+                -- own UNIQUE(name) (019). Streams are deliberately NOT
+                -- tenant-scoped in v1 (PLAN §5: plan-gated, dedicated cells)
+                -- and every read path here resolves by bare name, including
+                -- the SELECT above. Scoping them means adding tenant_id to the
+                -- table AND threading it through the handlers and all of these
+                -- statements — naming it only here matches no index and makes
+                -- every register fail with "column tenant_id does not exist".
                 INSERT INTO queen_streams.queries (name, source_queue, sink_queue, config_hash)
                 VALUES (v_name, v_source_queue, v_sink_queue, v_config_hash)
-                ON CONFLICT (tenant_id, name) DO UPDATE SET
+                ON CONFLICT (name) DO UPDATE SET
                     source_queue = EXCLUDED.source_queue,
                     sink_queue   = EXCLUDED.sink_queue,
                     config_hash  = EXCLUDED.config_hash,

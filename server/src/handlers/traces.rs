@@ -30,7 +30,11 @@ use crate::vegas::Vegas;
 // transactionId/partitionId/data, default consumerGroup/eventType, pass through
 // traceNames. record_trace_v1 is segment-aware via 030 (resolves message_id from
 // seg_dedup, records with NULL message_id past the dedup window).
-pub async fn handle_record_trace(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+pub async fn handle_record_trace(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let body_v: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
@@ -82,6 +86,18 @@ pub async fn handle_record_trace(State(st): State<Arc<AppState>>, body: Bytes) -
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
+    // Track B (§5) OWNERSHIP GATE (pid-addressed WRITE): partitionId is taken
+    // straight off the wire, so a leaked/guessed pid would otherwise let anyone
+    // attach trace records to another tenant's messages. A foreign pid gets the
+    // SAME "Message not found" a genuinely-unknown one would (the GET/DELETE
+    // /messages/:pid precedent) — a distinct 403 would confirm the partition
+    // exists under some other tenant. No-op, zero DB round-trips, when off.
+    if !st.tenant_owns_partition(&client, pid, tenant.as_str()).await {
+        return json(
+            StatusCode::NOT_FOUND,
+            "{\"success\":false,\"error\":\"Message not found\"}".to_string(),
+        );
+    }
     match db::record_trace(&client, &sp_json).await {
         Ok(txt) => {
             let v: serde_json::Value = serde_json::from_str(&txt).unwrap_or(serde_json::Value::Null);
@@ -121,8 +137,11 @@ pub async fn handle_message_traces(
 }
 
 // ------------------------------------------ GET /api/v1/traces/by-name/:traceName
+// Track B (§5): NAME-addressed read — there is no pid to gate on, so the tenant
+// travels into the SP, which resolves each trace's owner through its partition.
 pub async fn handle_traces_by_name(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Path(trace_name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
@@ -132,7 +151,7 @@ pub async fn handle_traces_by_name(
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_traces_by_name(&client, &trace_name, limit, offset).await {
+    match db::get_traces_by_name(&client, &trace_name, limit, offset, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -142,8 +161,11 @@ pub async fn handle_traces_by_name(
 }
 
 // ------------------------------------------------------- GET /api/v1/traces/names
+// Track B (§5): the trace-name set is caller-chosen text — enumerating it across
+// tenants leaks both the names and the activity times, so it is tenant-scoped.
 pub async fn handle_trace_names(
     State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let limit = qint(&params, "limit", 50);
@@ -152,7 +174,7 @@ pub async fn handle_trace_names(
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::get_trace_names(&client, limit, offset).await {
+    match db::get_trace_names(&client, limit, offset, tenant.as_str()).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
