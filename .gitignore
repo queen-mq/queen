@@ -36,3 +36,7 @@ server/target
 **/target/
 
 server/webapp/dist
+
+# dev-cell runtime artefacts (scripts/dev-cell.sh): logs and pid files of a
+# throwaway local stack, rewritten on every run.
+queen_proxy/.devcell/

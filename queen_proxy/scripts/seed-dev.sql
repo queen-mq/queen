@@ -41,6 +41,17 @@
 --
 -- Idempotent: safe to re-run against a pxdb this script already seeded
 -- (every step is guarded by a "does it already exist" check).
+--
+-- SINGLE-TENANT ON PURPOSE. This seed is the "one cluster, one key, one
+-- console login" fixture; it is NOT the isolation fixture. scripts/
+-- isolation-smoke.sh provisions what a two-tenant test needs on top of it, at
+-- run time and idempotently: clusters `two` (plan free, the adversary tenant),
+-- `pro1`/`pro2` (plan pro -- the only seeded plan carrying the streams+traces
+-- features, which come from the plan and cannot be switched on by a limit
+-- override) and `rl` (plan free, left on the stock 5 req/s so the live 429
+-- check has something to overrun), plus a short-lived api key per cluster per
+-- run. Keep those out of here: a cluster whose limits this file pinned would
+-- make the smoke's own overrides ambiguous.
 
 DO $$
 DECLARE

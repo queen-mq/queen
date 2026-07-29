@@ -14,12 +14,17 @@ CELLPG=qcell-pg # cell (broker) PG -> host :5466
 BROKER_PORT=6710
 PROXY_PORT=6711
 
-wait_pg() { # container
+wait_pg() { # container db
+  # pg_isready alone is not enough: the postgres entrypoint runs initdb against a
+  # temporary server and then RESTARTS it, and pg_isready answers "ready" during
+  # that window. A broker that connects there dies with "error communicating with
+  # the server" while applying the schema. Require a real query on the target
+  # database instead, which only succeeds once the final server is serving.
   for _ in $(seq 1 60); do
-    if docker exec "$1" pg_isready -U postgres >/dev/null 2>&1; then return 0; fi
+    if docker exec "$1" psql -U postgres -d "$2" -qtAc 'SELECT 1' >/dev/null 2>&1; then return 0; fi
     sleep 0.5
   done
-  echo "PG $1 not ready" >&2; return 1
+  echo "PG $1 (db $2) not ready" >&2; return 1
 }
 
 up() {
@@ -35,7 +40,7 @@ up() {
   docker rm -f $PXPG $CELLPG >/dev/null 2>&1 || true
   docker run -d --name $PXPG  -p 5465:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=queen_proxy postgres:16 >/dev/null
   docker run -d --name $CELLPG -p 5466:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=queen postgres:16 >/dev/null
-  wait_pg $PXPG; wait_pg $CELLPG
+  wait_pg $PXPG queen_proxy; wait_pg $CELLPG queen
 
   echo "== building broker + proxy"
   (cd "$ROOT/server" && cargo build 2>&1 | tail -2)
@@ -46,11 +51,16 @@ up() {
     PG_DATABASE=queen QUEEN_TENANCY_HEADER=true \
     "$ROOT/server/target/debug/queen-seg" >"$RUN_DIR/broker.log" 2>&1 & echo $! >"$RUN_DIR/broker.pid" )
 
-  echo "== starting proxy :$PROXY_PORT (shadow mode; pxdb-backed)"
+  # Shadow by default (proxy default), so the cell mirrors a stock deployment.
+  # QUEEN_PROXY_ENFORCE=true dev-cell.sh up flips real 429s on, which is what
+  # the rate-limit and SDK-backoff checks need.
+  ENFORCE="${QUEEN_PROXY_ENFORCE:-false}"
+  echo "== starting proxy :$PROXY_PORT (enforce=$ENFORCE; pxdb-backed)"
   ( QUEEN_PROXY_PORT=$PROXY_PORT PXDB_HOST=127.0.0.1 PXDB_PORT=5465 PXDB_USER=postgres \
     PXDB_PASSWORD=postgres PXDB_DB=queen_proxy \
     QUEEN_PROXY_SPOOL_DIR="$RUN_DIR/spool" \
     QUEEN_PROXY_JWT_SECRET="${QUEEN_PROXY_JWT_SECRET:-dev-only-hs256-secret}" \
+    QUEEN_PROXY_ENFORCE="$ENFORCE" \
     QUEEN_PROXY_DEFAULT_CLUSTER=dev QUEEN_PROXY_RECONCILE_MS=10000 \
     "$PROXY_DIR/target/debug/queen-proxy" >"$RUN_DIR/proxy.log" 2>&1 & echo $! >"$RUN_DIR/proxy.pid" )
 

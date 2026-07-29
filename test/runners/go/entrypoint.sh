@@ -12,5 +12,10 @@ export PG_HOST="$QUEEN_PG_HOST" PG_PORT="$QUEEN_PG_PORT" \
 /usr/local/bin/wait-for-broker
 
 cd /src
+# The root package holds the broker-free unit suites (ack semantics, and the
+# proxy 429/Retry-After contract against a canned local server). They were
+# outside the ./tests/ pattern and so ran nowhere.
+go test -count=1 .
+
 # -count=1 disables the test cache so every run actually hits the live broker.
 exec go test -count=1 -v ./tests/ ./tests/streams_integration/

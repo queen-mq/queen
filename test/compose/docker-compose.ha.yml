@@ -9,6 +9,11 @@
 #
 # Client suites point at queen-a (proving HA is transparent to clients); the
 # `mesh` runner asserts the mesh itself is up.
+#
+# QUEEN_TEST_TENANCY selects the lane: `false` (topology `ha`) is the OSS
+# flag-off path; `true` (topology `ha-tenanted`) starts BOTH brokers with native
+# tenant scoping ON, which is what the `tenancy` runner needs — it drives two
+# tenants over the mesh pair with the trusted x-queen-tenant header.
 
 services:
   pg:
@@ -42,6 +47,7 @@ services:
       QUEEN_MESH_PORT: "6633"
       QUEEN_MESH_PEERS: "queen-b:6633"
       QUEEN_SYNC_SECRET: "queen-harness-mesh-secret"
+      QUEEN_TENANCY_HEADER: "${QUEEN_TEST_TENANCY:-false}"
       FILE_BUFFER_DIR: /var/lib/queen/buffers
     tmpfs:
       - /var/lib/queen/buffers
@@ -64,6 +70,7 @@ services:
       QUEEN_MESH_PORT: "6633"
       QUEEN_MESH_PEERS: "queen-a:6633"
       QUEEN_SYNC_SECRET: "queen-harness-mesh-secret"   # byte-identical to queen-a
+      QUEEN_TENANCY_HEADER: "${QUEEN_TEST_TENANCY:-false}"
       FILE_BUFFER_DIR: /var/lib/queen/buffers
     tmpfs:
       - /var/lib/queen/buffers

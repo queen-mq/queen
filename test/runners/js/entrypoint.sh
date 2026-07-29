@@ -10,5 +10,10 @@ export PG_HOST="$QUEEN_PG_HOST" PG_PORT="$QUEEN_PG_PORT" \
 /usr/local/bin/wait-for-broker
 
 cd /suite
+# Broker-free unit suites first, including the proxy 429/Retry-After contract
+# (test-v2/http-unit). They live behind `npm test`, which the harness does not
+# use, so they ran nowhere.
+node --test test-v2/http-unit/retry429.test.js
+
 # No argument = human + stream in one process; run.js calls process.exit(fail?1:0).
 exec node test-v2/run.js

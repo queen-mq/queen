@@ -24,7 +24,9 @@ COPY test/vendor/cpp/threadpool.hpp clients/server/include/threadpool.hpp
 COPY clients/client-cpp ./clients/client-cpp
 
 # make test = compile bin/test_client only (it does not run the binary).
-RUN cd clients/client-cpp && make test
+# retry429 is the proxy-contract suite (bearer/429/403); it serves its own
+# responses in-process, so it compiles and runs without a broker.
+RUN cd clients/client-cpp && make test && make retry429
 
 COPY test/runners/common/wait-for-broker.sh /usr/local/bin/wait-for-broker
 COPY test/runners/cpp/entrypoint.sh /entrypoint.sh
