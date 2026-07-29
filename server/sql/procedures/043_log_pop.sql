@@ -67,6 +67,19 @@
 -- delayed_processing is NEVER skipped (it stays SQL-enforced; the wheel only
 -- schedules revisits for it, §6). Both prior signatures are dropped so a re-apply
 -- over a DB carrying the old 9-arg function leaves no ambiguous overload.
+-- ----------------------------------------------------------------------------
+-- MINIMUM POP WAIT (queen.queues.min_pop_wait_time, TASK M 2026-07-29) is
+-- deliberately NOT implemented here, and this note is the record of why. Making
+-- an under-full claim wait INSIDE this function (a pg_sleep before or between the
+-- per-partition claims) would hold, for the whole window: a pooled PG connection,
+-- the broker's pop_vegas serving permit, a PG backend, and — after the first
+-- log_pop_v1 — the claimed rows' locks. That trades one cheap commit for a scarce
+-- connection and a held lock, which on a 2-core cell is worse than the commit it
+-- saves. The wait therefore lives in the broker (handlers/data.rs,
+-- serve_pop_hotlist), BEFORE the permit and the connection are taken, following
+-- the parked-long-poll precedent: a waiting pop costs the broker a timer and
+-- nothing else. This function is unchanged by the feature; it simply gets called
+-- later, with more marks accumulated, and claims a fatter batch in one commit.
 DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT);
 DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN);
 -- Track B (§5): p_tenant scopes the (queue,partition) resolution + the durable

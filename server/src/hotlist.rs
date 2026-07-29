@@ -134,10 +134,16 @@ pub struct CheckinResult {
 /// A queue's deferral config, cached broker-side with a TTL (§6). `delayed` and
 /// `window` are seconds; both 0 = no deferral (marks go straight to the ready
 /// ring, empties hard-clear).
+///
+/// `min_pop_wait_ms` (TASK M) rides along in the same row/fetch/TTL because it is
+/// read on exactly the same pop path — it is NOT a deferral: it never changes when
+/// a message becomes visible, only how long ONE pop holds an under-full claim
+/// back. `is_deferral()` therefore deliberately ignores it.
 #[derive(Clone, Copy, Default)]
 struct DeferCfg {
     delayed: i32,
     window: i32,
+    min_pop_wait_ms: i32,
     fetched_ms: i64,
 }
 
@@ -431,6 +437,15 @@ pub struct HotList {
     // main's mesh flusher (§5), which splits the qkey back onto the wire. Received
     // (remote) marks never enqueue here (no re-broadcast).
     dirty: Mutex<HashSet<(Box<str>, Box<str>)>>,
+    // TASK M: has ANY queue on this broker ever been seen with
+    // min_pop_wait_time > 0? A monotonic latch, set by set_queue_cfg. It exists
+    // so the pop path can answer "is this feature in play at all" with ONE relaxed
+    // atomic load instead of taking the global `queues` mutex on every pop
+    // attempt: the OSS default is that no queue configures it, and that lane must
+    // pay nothing. Never cleared — turning the option back off leaves the broker
+    // on the (still correct, per-queue-gated) slower predicate until restart,
+    // which is the cheap direction to be wrong in.
+    any_min_pop_wait: std::sync::atomic::AtomicBool,
     // Observability.
     pub reseeds: std::sync::atomic::AtomicU64,
     pub marks_local: std::sync::atomic::AtomicU64,
@@ -456,6 +471,7 @@ impl HotList {
             notifier: OnceLock::new(),
             trace_prefix: std::env::var("QUEEN_HOTLIST_TRACE").ok().filter(|v| !v.is_empty()),
             dirty: Mutex::new(HashSet::new()),
+            any_min_pop_wait: std::sync::atomic::AtomicBool::new(false),
             reseeds: std::sync::atomic::AtomicU64::new(0),
             marks_local: std::sync::atomic::AtomicU64::new(0),
             marks_remote: std::sync::atomic::AtomicU64::new(0),
@@ -532,12 +548,26 @@ impl HotList {
     /// it, TTL-throttled). `now_ms` stamps the fetch for the TTL check. Per
     /// (tenant, queue): `delayed`/`windowBuffer` are per-tenant queue config, so a
     /// same-named queue of another tenant must never install its deferral here.
-    pub fn set_queue_cfg(&self, qkey: &str, delayed: i32, window: i32, now_ms: i64) {
+    pub fn set_queue_cfg(&self, qkey: &str, delayed: i32, window: i32, min_pop_wait_ms: i32, now_ms: i64) {
         let s = self.qstate(qkey);
         let mut c = s.cfg.lock().unwrap();
         c.delayed = delayed;
         c.window = window;
+        c.min_pop_wait_ms = min_pop_wait_ms;
         c.fetched_ms = now_ms;
+        if min_pop_wait_ms > 0 {
+            self.any_min_pop_wait
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// TASK M — the cheap global gate (see `any_min_pop_wait`). False ⇒ no queue
+    /// on this broker has ever configured a minimum pop wait, so the pop path can
+    /// skip the per-queue lookup entirely.
+    #[inline]
+    pub fn min_pop_wait_in_play(&self) -> bool {
+        self.any_min_pop_wait
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Is the cached config fresh enough (within `ttl_ms`)? Absent ⇒ false.
@@ -563,6 +593,14 @@ impl HotList {
     /// it in the wheel — otherwise the SQL debounce stays the (safe) floor.
     pub fn skip_window(&self, qkey: &str) -> bool {
         self.cfg_of(qkey).window > 0
+    }
+
+    /// TASK M — the queue's configured minimum pop wait, in milliseconds.
+    /// 0 (the default, and the value for any queue whose config has not been
+    /// fetched yet) means the feature is OFF for this queue and the pop path is
+    /// byte-identical to the pre-feature broker.
+    pub fn min_pop_wait_ms(&self, qkey: &str) -> i32 {
+        self.cfg_of(qkey).min_pop_wait_ms
     }
 
     // -------------------------------------------------------------- marks
@@ -921,6 +959,61 @@ impl HotList {
             }
         }
         false
+    }
+
+    /// TASK M — how many messages a `take_batch` right now would plausibly be
+    /// able to claim, from the marks already accumulated in the ring. Same
+    /// non-destructive discipline as [`has_ready`]: brief sub-ring locks, no
+    /// state touched, no ring ever created.
+    ///
+    /// This is an ESTIMATE and is only ever used to decide whether to *hold an
+    /// under-full pop back*, never to decide what to serve — the SQL claim
+    /// remains the sole authority on what exists. Two known biases, both
+    /// deliberate and both safe:
+    ///   * LOW when a partition entered the ring by reseed / remote mesh hint
+    ///     (count 1) while carrying a large backlog. The pop then waits its
+    ///     bounded window once; the claim that follows still takes the whole
+    ///     backlog. Bounded latency, never lost work.
+    ///   * HIGH is impossible to act on wrongly: over-counting only makes the
+    ///     pop stop waiting EARLIER, i.e. it degrades to today's behaviour.
+    /// Saturating, so a pathological mark count cannot wrap.
+    pub fn ready_est(&self, qkey: &str, group: &str, now_ms: i64) -> u64 {
+        if !self.enabled {
+            return 0;
+        }
+        let s = match self.qstate_existing(qkey) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let ring = {
+            let g = s.groups.lock().unwrap();
+            match g.get(group) {
+                Some(r) => r.clone(),
+                None => return 0,
+            }
+        };
+        let mut total: u64 = 0;
+        for sub in ring.subs.iter() {
+            let sg = sub.lock().unwrap();
+            // A due WHEEL entry (expired lease, elapsed delayed/windowBuffer) is
+            // about to become claimable and its content is NOT described by
+            // batch_count. Report "effectively unbounded" so the caller serves at
+            // once instead of holding it: the wait must never add latency to work
+            // whose size we cannot see.
+            if sg.wheel_peek_due(now_ms) {
+                return u64::MAX;
+            }
+            // Walk the READY list only — O(pending partitions), the same order
+            // take_batch itself walks, never O(interned partitions).
+            let mut l = sg.ready_head;
+            let mut hops = 0usize;
+            while l != NIL && hops <= sg.len_ready {
+                total = total.saturating_add(sg.batch_count[l as usize] as u64);
+                l = sg.next[l as usize];
+                hops += 1;
+            }
+        }
+        total
     }
 
     /// Check the tri-state verdicts back in (§4/§6/§7). `auto_ack` / `lease_ms`
@@ -1574,7 +1667,7 @@ mod tests {
     fn has_ready_true_only_when_wheel_entry_is_due() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 0, 5, 0); // window_buffer = 5s ⇒ mark parks in the wheel
+        h.set_queue_cfg("q", 0, 5, 0, 0); // window_buffer = 5s ⇒ mark parks in the wheel
         h.mark_local("q", "p0", 1, 0); // scheduled at now(0) + 5000ms
         assert!(!h.has_ready("q", "g", 1000), "not due yet");
         assert!(h.has_ready("q", "g", 6000), "due ⇒ ready to drain");
@@ -1920,7 +2013,7 @@ mod tests {
     fn delayed_mark_holds_until_wheel_fires() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 2, 0, 0); // delayed 2s
+        h.set_queue_cfg("q", 2, 0, 0, 0); // delayed 2s
         h.mark_local("q", "p0", 1, 0);
         // held in the wheel — not claimable immediately
         assert!(h.take_batch("q", "g", 1, 500).is_empty());
@@ -1937,7 +2030,7 @@ mod tests {
         // window 5s, threshold 100 (hl* default)
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 0, 5, 0);
+        h.set_queue_cfg("q", 0, 5, 0, 0);
         // small batch: held until the window expires
         h.mark_local("q", "p0", 10, 0);
         assert!(h.take_batch("q", "g", 1, 1000).is_empty());
@@ -1953,7 +2046,7 @@ mod tests {
     fn window_buffer_early_promote_when_batch_fattens_in_wheel() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 0, 5, 0);
+        h.set_queue_cfg("q", 0, 5, 0, 0);
         h.mark_local("q", "p0", 40, 0); // below threshold → wheel
         assert!(h.take_batch("q", "g", 1, 100).is_empty());
         h.mark_local("q", "p0", 70, 100); // now batch_count=110 ≥ 100 → early promote
@@ -1964,7 +2057,7 @@ mod tests {
     fn deferral_empty_revisits_not_clears() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 2, 0, 0); // delayed queue
+        h.set_queue_cfg("q", 2, 0, 0, 0); // delayed queue
         // put p0 ready via the wheel firing
         h.mark_local("q", "p0", 1, 0);
         h.tick(2400);
@@ -2141,7 +2234,7 @@ mod tests {
     fn window_took_rearms_the_wheel_not_ready() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 0, 5, 0); // windowBuffer 5s, no delayed
+        h.set_queue_cfg("q", 0, 5, 0, 0); // windowBuffer 5s, no delayed
         h.mark_local("q", "p0", 10, 0); // small batch → wheel
         h.tick(5100); // window fires → ready
         let c = h.take_batch("q", "g", 1, 5100);
@@ -2308,7 +2401,7 @@ mod tests {
     fn reseed_leaves_deferral_wheel_entry_until_due() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 0, 5, 0); // window_buffer = 5s ⇒ deferral queue
+        h.set_queue_cfg("q", 0, 5, 0, 0); // window_buffer = 5s ⇒ deferral queue
         h.note_partition_id("q", "p0", "id0");
         h.mark_local("q", "p0", 1, 0); // parked in the wheel at 5000ms (window)
         assert!(h.take_batch("q", "g", 1, 1_000).is_empty());
@@ -2565,7 +2658,7 @@ mod tests {
         let h = hl1();
         reg(&h, &k(TA, "orders"), "workers");
         reg(&h, &k(TB, "orders"), "workers");
-        h.set_queue_cfg(&k(TB, "orders"), 0, 60, 0); // B: windowBuffer=60s
+        h.set_queue_cfg(&k(TB, "orders"), 0, 60, 0, 0); // B: windowBuffer=60s
         h.mark_local(&k(TA, "orders"), "p0", 1, 0);
         assert!(!h.skip_window(&k(TA, "orders")));
         assert!(h.skip_window(&k(TB, "orders")));
@@ -2695,7 +2788,7 @@ mod tests {
     fn a_queue_with_a_wheeled_entry_is_never_evicted() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.set_queue_cfg("q", 0, 5, 0); // windowBuffer ⇒ the mark parks in the wheel
+        h.set_queue_cfg("q", 0, 5, 0, 0); // windowBuffer ⇒ the mark parks in the wheel
         h.mark_local("q", "p0", 1, 0);
         h.evict_idle();
         h.evict_idle();
@@ -2800,6 +2893,80 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         h.mark_local(&k(TA, "orders"), "p0", 1, 0);
         assert!(!waiter.await.unwrap(), "tenant B's gate must time out");
+    }
+
+    // ------------------------------------------------- TASK M: minimum pop wait
+
+    // ready_est must count the marks a take_batch could actually claim, and count
+    // nothing at all when the ring is empty — the empty case is the long-poll's,
+    // and a non-zero estimate there would make an idle consumer wait for nothing.
+    #[test]
+    fn ready_est_counts_claimable_marks_only() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        assert_eq!(h.ready_est("q", "g", 0), 0, "empty ring ⇒ 0 (long-poll's case)");
+        h.mark_local("q", "p0", 3, 0);
+        h.mark_local("q", "p1", 4, 0);
+        assert_eq!(h.ready_est("q", "g", 0), 7);
+        // Accumulating marks on the same partition fatten the same entry.
+        h.mark_local("q", "p0", 5, 0);
+        assert_eq!(h.ready_est("q", "g", 0), 12);
+        // Checked-out (INFLIGHT) candidates are NOT claimable by another pop.
+        let c = h.take_batch("q", "g", 10, 0);
+        assert_eq!(c.len(), 2);
+        assert_eq!(h.ready_est("q", "g", 0), 0);
+    }
+
+    // An unknown group / unknown queue must never allocate and must read 0.
+    #[test]
+    fn ready_est_never_creates_a_ring() {
+        let h = hl1();
+        assert_eq!(h.ready_est("nope", "g", 0), 0);
+        assert_eq!(h.queue_count(), 0, "a peek must not allocate a QueueState");
+    }
+
+    // A due wheel entry (expired lease, elapsed delayed/windowBuffer) carries a
+    // backlog batch_count cannot describe. It must read as "unbounded" so the
+    // caller serves at once rather than holding work whose size it cannot see.
+    #[test]
+    fn ready_est_reports_unbounded_for_a_due_wheel_entry() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0, 0); // windowBuffer ⇒ the mark parks in the wheel
+        h.mark_local("q", "p0", 1, 0);
+        assert_eq!(h.ready_est("q", "g", 0), 0, "not due yet ⇒ nothing claimable");
+        assert_eq!(
+            h.ready_est("q", "g", 6_000),
+            u64::MAX,
+            "due wheel entry ⇒ serve now, never wait"
+        );
+    }
+
+    // The config carrier: min_pop_wait rides in DeferCfg but is NOT a deferral —
+    // it must not turn a plain queue into one (which would change empty-verdict
+    // handling from hard-clear to revisit).
+    // The global latch is what keeps the DEFAULT lane free: it must stay false
+    // while every queue configures the option to 0, and flip only when a queue
+    // really asks for a window.
+    #[test]
+    fn min_pop_wait_global_latch_stays_off_until_a_queue_asks() {
+        let h = hl1();
+        assert!(!h.min_pop_wait_in_play(), "fresh broker ⇒ feature not in play");
+        h.set_queue_cfg("a", 0, 0, 0, 1); // plain queue
+        h.set_queue_cfg("b", 3, 5, 0, 1); // deferrals, but no pop wait
+        assert!(!h.min_pop_wait_in_play(), "deferrals must not arm the pop wait");
+        h.set_queue_cfg("c", 0, 0, 10, 1);
+        assert!(h.min_pop_wait_in_play(), "a configured window arms it");
+    }
+
+    #[test]
+    fn min_pop_wait_is_not_a_deferral() {
+        let h = hl1();
+        assert_eq!(h.min_pop_wait_ms("q"), 0, "absent config ⇒ OFF");
+        h.set_queue_cfg("q", 0, 0, 25, 1);
+        assert_eq!(h.min_pop_wait_ms("q"), 25);
+        assert!(!h.cfg_of("q").is_deferral(), "min pop wait is not a deferral");
+        assert!(!h.skip_window("q"), "min pop wait must not bypass the SQL window");
     }
 }
 

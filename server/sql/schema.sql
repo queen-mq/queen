@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS queen.queues (
     encryption_enabled BOOLEAN DEFAULT FALSE,
     max_wait_time_seconds INTEGER DEFAULT 0,
     max_queue_size INTEGER DEFAULT 0,
+    -- MINIMUM POP WAIT (2026-07-29, TASK M). Milliseconds a pop may hold its
+    -- claim back while the batch is UNDER-FULL, so one PG commit carries more
+    -- messages ("pop magro" — the ~4-commits-per-delivered-message ceiling).
+    -- Distinct from long-poll wait (which waits on an EMPTY queue) and from
+    -- window_buffer (seconds, message VISIBILITY deferral for every consumer):
+    -- this delays only THIS pop's claim, only when the queue is NON-empty, and
+    -- ends early the instant the ring holds the requested batch size.
+    -- 0 = OFF = every existing deployment byte-identical.
+    min_pop_wait_time INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -84,6 +93,11 @@ ALTER TABLE queen.messages ADD COLUMN IF NOT EXISTS producer_sub TEXT;
 -- dual-engine observability guards in 026/027 and the rows→segments migration can key
 -- off it. Catalog-only change on PG >= 11: constant default, no table rewrite.
 ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS storage VARCHAR(16) NOT NULL DEFAULT 'segments';
+
+-- MINIMUM POP WAIT (TASK M): idempotent upgrade for existing installations.
+-- Nullable-with-constant-default ⇒ catalog-only on PG >= 11 (no table rewrite),
+-- and DEFAULT 0 means an upgraded deployment behaves exactly as before.
+ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS min_pop_wait_time INTEGER DEFAULT 0;
 
 -- RUSTFIX item 2: flip the DLQ column defaults to TRUE on existing tables too
 -- (CREATE TABLE IF NOT EXISTS above does not alter an existing table's defaults).

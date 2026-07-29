@@ -854,6 +854,53 @@ const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
 // this window.
 const HOTLIST_CFG_TTL_MS: i64 = 30_000;
 
+/// TASK M — should this pop hold its under-full batch back, and for how long?
+/// Pure so the policy is unit-testable without a broker; every guard here is a
+/// case where waiting would cost latency for no batching benefit.
+///
+/// `est` is the hot-list's in-memory estimate of what a claim right now could
+/// take (see `HotList::ready_est`); `remaining` is what is left of the caller's
+/// own deadline. Returns None (= serve now, pre-feature behaviour) whenever the
+/// queue is not configured for it, the caller did not ask to block, the batch is
+/// already full, or the queue is EMPTY — an empty queue belongs to the long-poll.
+#[inline]
+fn min_pop_wait_window(
+    min_pop_wait_ms: i32,
+    wait: bool,
+    batch: i32,
+    est: u64,
+    remaining: Duration,
+) -> Option<Duration> {
+    // OFF by default: 0 ⇒ every existing deployment is byte-identical.
+    if min_pop_wait_ms <= 0 {
+        return None;
+    }
+    // A pop that explicitly refuses to block (`wait=false`) means "give me what is
+    // there right now"; delaying it would break that contract.
+    if !wait {
+        return None;
+    }
+    // A batch of one is full on arrival — there is nothing to fatten.
+    if batch <= 1 {
+        return None;
+    }
+    // EMPTY: not our case. The long-poll park/wake path owns it, unchanged.
+    if est == 0 {
+        return None;
+    }
+    // Already full (or an unmeasurable wheel-due backlog ⇒ u64::MAX): serve now.
+    if est >= batch as u64 {
+        return None;
+    }
+    // Never exceed the caller's deadline.
+    let w = Duration::from_millis(min_pop_wait_ms as u64).min(remaining);
+    if w.is_zero() {
+        None
+    } else {
+        Some(w)
+    }
+}
+
 // 19-wildcard-hotlist: serve a wildcard pop from the broker candidate ring. One
 // ring-serve attempt per loop iteration; an empty ring / all-empty candidate set
 // parks on the SAME queue wake gate (woken by a local push, a peer's mesh dirty
@@ -883,6 +930,69 @@ async fn serve_pop_hotlist(
     let lease_id: &str = if auto_ack { "" } else { worker };
     let mut backoff_count: u32 = 0;
     loop {
+        // ── TASK M (minimum pop wait). The ceiling on a small cell is
+        // COMMIT-bound, ~4 tiny PG commits per DELIVERED message, because a pop
+        // claims whatever single message just arrived ("pop magro"). This holds an
+        // UNDER-FULL claim back for up to the queue's configured window so ONE
+        // commit carries more messages.
+        //
+        // WHERE the wait lives is the whole design. It is HERE — in Rust, before
+        // hotlist_pop_attempt — and never inside the SQL, because a wait inside
+        // log_pop_list_v1 (pg_sleep) would hold a pooled PG connection, a pop_vegas
+        // serving permit and (once claimed) row locks for the entire window: it
+        // would trade a commit for a connection, and on a 2-core cell with a Vegas
+        // limit in the tens that is strictly worse than the disease. Waiting here
+        // costs the broker a timer and nothing else — the same precedent as the
+        // parked long-poll, which releases its connection BEFORE parking.
+        //
+        // Semantics (deliberately NOT long-poll's): long-poll `wait=true` waits on
+        // an EMPTY queue; this waits only when the queue is NON-EMPTY and the batch
+        // is UNDER-FULL, and it ends at the FIRST of: batch full, window elapsed,
+        // caller's deadline. `est == 0` ⇒ return immediately and let the normal
+        // park/wake path own the empty case, so an idle consumer's discovery
+        // latency is untouched.
+        // The gate is a relaxed atomic load, false on every broker where no queue
+        // has ever configured the option — so the default lane pays ONE load and
+        // never the global `queues` mutex the per-queue lookup would take.
+        let min_wait_ms = if st.hotlist.min_pop_wait_in_play() {
+            st.hotlist.min_pop_wait_ms(qkey)
+        } else {
+            0
+        };
+        if min_wait_ms > 0 {
+            let now_ms = crate::util::now_epoch_ms();
+            let est = st.hotlist.ready_est(qkey, group, now_ms);
+            if let Some(w) = min_pop_wait_window(
+                min_wait_ms,
+                wait,
+                batch,
+                est,
+                deadline.saturating_duration_since(Instant::now()),
+            ) {
+                let t_w = Instant::now();
+                let end = t_w + w;
+                loop {
+                    let left = end.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    // A push wake cuts the sleep short so a batch that fills early
+                    // is served early; a MISSED wake only costs the remainder of an
+                    // already-bounded window, never correctness.
+                    st.notifier.wait_queue(qkey, left).await;
+                    if st.hotlist.ready_est(qkey, group, crate::util::now_epoch_ms())
+                        >= batch as u64
+                    {
+                        break;
+                    }
+                }
+                st.metrics.pop_fill_wait.fetch_add(1, Ordering::Relaxed);
+                st.metrics
+                    .pop_fill_wait_us
+                    .fetch_add(t_w.elapsed().as_micros() as u64, Ordering::Relaxed);
+            }
+        }
+
         let (body, count, meta, rtt) = hotlist_pop_attempt(
             st, qkey, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
             worker, lease_id, tenant,
@@ -1118,8 +1228,8 @@ async fn hotlist_pop_attempt(
 
     // Lazy deferral-config refresh (§6), TTL-throttled.
     if need_cfg {
-        if let Ok((d, w)) = db::queue_defer_cfg(&client, queue, tenant).await {
-            st.hotlist.set_queue_cfg(qkey, d, w, now_ms);
+        if let Ok((d, w, mpw)) = db::queue_defer_cfg(&client, queue, tenant).await {
+            st.hotlist.set_queue_cfg(qkey, d, w, mpw, now_ms);
         }
     }
 
@@ -3338,5 +3448,69 @@ mod tests {
         assert!(RENEW_OWNED_SQL.contains("JOIN queen.log_partitions p ON p.id = c.partition_id"));
         // The SP must stay behind the qual (projection), not beside it.
         assert!(RENEW_OWNED_SQL.starts_with("SELECT (queen.log_renew_lease_v1($1, $2::int))::text WHERE EXISTS"));
+    }
+
+    // --------------------------------------------- TASK M: minimum pop wait
+
+    const SEC: Duration = Duration::from_secs(1);
+
+    // OFF is the default and must be indistinguishable from the pre-feature
+    // broker: whatever the ring says, no wait is ever produced.
+    #[test]
+    fn min_pop_wait_off_never_waits() {
+        for est in [0u64, 1, 5, 1_000, u64::MAX] {
+            assert_eq!(min_pop_wait_window(0, true, 50, est, SEC), None);
+            assert_eq!(min_pop_wait_window(-1, true, 50, est, SEC), None);
+        }
+    }
+
+    // The semantic distinction the whole feature rests on: long-poll waits when
+    // the queue is EMPTY, this waits when it is NON-EMPTY but under-full.
+    #[test]
+    fn min_pop_wait_only_when_non_empty_and_under_full() {
+        // empty ⇒ the long-poll's case, untouched
+        assert_eq!(min_pop_wait_window(25, true, 50, 0, SEC), None);
+        // non-empty but under-full ⇒ hold, for the configured window
+        assert_eq!(
+            min_pop_wait_window(25, true, 50, 1, SEC),
+            Some(Duration::from_millis(25))
+        );
+        assert_eq!(
+            min_pop_wait_window(25, true, 50, 49, SEC),
+            Some(Duration::from_millis(25))
+        );
+        // full ⇒ serve now
+        assert_eq!(min_pop_wait_window(25, true, 50, 50, SEC), None);
+        assert_eq!(min_pop_wait_window(25, true, 50, 51, SEC), None);
+        // an unmeasurable (wheel-due) backlog reads as unbounded ⇒ serve now
+        assert_eq!(min_pop_wait_window(25, true, 50, u64::MAX, SEC), None);
+    }
+
+    // A non-blocking pop means "what is there right now"; the window must not
+    // silently turn it into a blocking one. A batch of one is full on arrival.
+    #[test]
+    fn min_pop_wait_respects_the_callers_contract() {
+        assert_eq!(min_pop_wait_window(25, false, 50, 1, SEC), None);
+        assert_eq!(min_pop_wait_window(25, true, 1, 0, SEC), None);
+        assert_eq!(min_pop_wait_window(25, true, 1, 1, SEC), None);
+        assert_eq!(min_pop_wait_window(25, true, 0, 1, SEC), None);
+    }
+
+    // Never exceed the caller's own deadline: a 100ms window on a pop with 10ms
+    // left waits 10ms, and one with nothing left does not wait at all.
+    #[test]
+    fn min_pop_wait_never_outlives_the_deadline() {
+        assert_eq!(
+            min_pop_wait_window(100, true, 50, 1, Duration::from_millis(10)),
+            Some(Duration::from_millis(10))
+        );
+        assert_eq!(
+            min_pop_wait_window(100, true, 50, 1, Duration::ZERO),
+            None
+        );
+        assert_eq!(
+            min_pop_wait_window(100, true, 50, 1, Duration::from_millis(100)),
+            Some(Duration::from_millis(100))
+        );
     }
 }

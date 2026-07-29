@@ -91,6 +91,13 @@ pub struct Metrics {
     /// pop_wildcard)` is the fraction of scans the hint mailbox replaced.
     pub pop_targeted: AtomicU64,
     pub pop_wildcard: AtomicU64,
+    /// TASK M (minimum pop wait): how many pops held an UNDER-FULL batch back to
+    /// let it fatten, and the total microseconds they spent doing so. The ratio
+    /// is the average window actually paid; `pop_fill_wait / pop_requests` is how
+    /// often the lever engaged at all. Both stay 0 on every queue with
+    /// `minPopWaitTime = 0`, which is the default.
+    pub pop_fill_wait: AtomicU64,
+    pub pop_fill_wait_us: AtomicU64,
     /// RUSTFIX item 24: per-queue throughput, flushed into queen.queue_lag_metrics.
     pub per_queue: PerQueue,
     /// Parked long-poll gauge (dashboard Parked row / queue_parked_replica).
@@ -373,6 +380,8 @@ impl Metrics {
             db_errors: AtomicU64::new(0),
             pop_targeted: AtomicU64::new(0),
             pop_wildcard: AtomicU64::new(0),
+            pop_fill_wait: AtomicU64::new(0),
+            pop_fill_wait_us: AtomicU64::new(0),
             per_queue: PerQueue::default(),
             parked: Parked::default(),
             evl_sum_us: AtomicU64::new(0),
@@ -454,6 +463,10 @@ impl Metrics {
         g(&mut s, "queen_pop_targeted_total", "", self.pop_targeted.load(Ordering::Relaxed).to_string());
         ht(&mut s, "queen_pop_wildcard_total", "Wildcard candidate-scan pops issued", "counter");
         g(&mut s, "queen_pop_wildcard_total", "", self.pop_wildcard.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_pop_fill_wait_total", "Pops that held an under-full batch back (minPopWaitTime)", "counter");
+        g(&mut s, "queen_pop_fill_wait_total", "", self.pop_fill_wait.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_pop_fill_wait_microseconds_total", "Total time pops spent fattening an under-full batch", "counter");
+        g(&mut s, "queen_pop_fill_wait_microseconds_total", "", self.pop_fill_wait_us.load(Ordering::Relaxed).to_string());
         // Live parked long-polls per queue (instantaneous; the DB-backed
         // queen_queue_parked_consumers in status.rs is the minute-average).
         ht(&mut s, "queen_parked_long_polls", "Currently parked long-poll pops on this process", "gauge");

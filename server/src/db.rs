@@ -497,21 +497,25 @@ pub async fn hotlist_reseed(
 
 // 19-wildcard-hotlist §6: a queue's deferral config (delayed_processing,
 // window_buffer) in seconds, for the broker's hot-list mark routing / wheel /
-// skip-window decision. Absent row = (0, 0).
+// skip-window decision. TASK M adds min_pop_wait_time (MILLISECONDS) to the same
+// row read — it is consumed on the same pop path under the same TTL, so giving it
+// its own query would double the per-queue config traffic for nothing.
+// Absent row = (0, 0, 0) ⇒ no deferral and the pop wait OFF.
 pub async fn queue_defer_cfg(
     client: &deadpool_postgres::Client,
     queue: &str,
     tenant: &str,
-) -> Result<(i32, i32), tokio_postgres::Error> {
+) -> Result<(i32, i32, i32), tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
-            "SELECT COALESCE(delayed_processing,0), COALESCE(window_buffer,0) \
+            "SELECT COALESCE(delayed_processing,0), COALESCE(window_buffer,0), \
+                    COALESCE(min_pop_wait_time,0) \
              FROM queen.queues WHERE name = $1 AND tenant_id = $2::text::uuid",
         )
         .await?;
     match client.query_opt(&stmt, &[&queue, &tenant]).await? {
-        Some(r) => Ok((r.get(0), r.get(1))),
-        None => Ok((0, 0)),
+        Some(r) => Ok((r.get(0), r.get(1), r.get(2))),
+        None => Ok((0, 0, 0)),
     }
 }
 

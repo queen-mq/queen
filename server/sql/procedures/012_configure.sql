@@ -34,6 +34,7 @@ DECLARE
     v_retention_enabled BOOLEAN;
     v_encryption_enabled BOOLEAN;
     v_max_wait_time_seconds INTEGER;
+    v_min_pop_wait_time INTEGER;
     v_queue_id UUID;
     v_partition_id UUID;
 BEGIN
@@ -58,18 +59,25 @@ BEGIN
     v_retention_enabled := COALESCE((p_options->>'retentionEnabled')::boolean, false);
     v_encryption_enabled := COALESCE((p_options->>'encryptionEnabled')::boolean, false);
     v_max_wait_time_seconds := COALESCE((p_options->>'maxWaitTimeSeconds')::integer, 0);
+    -- MINIMUM POP WAIT (TASK M): milliseconds a NON-EMPTY pop may hold an
+    -- UNDER-FULL batch before claiming, so one commit carries more messages.
+    -- Default 0 = OFF (byte-identical to every pre-feature deployment). Clamped
+    -- to [0, 60000]: it is bounded independently by the caller's own long-poll
+    -- deadline, so this only stops a typo (e.g. seconds passed as ms) from
+    -- parking a delivery for an absurd window.
+    v_min_pop_wait_time := LEAST(GREATEST(COALESCE((p_options->>'minPopWaitTime')::integer, 0), 0), 60000);
     
     -- Insert or update queue (Track B: identity is (tenant_id, name)).
     INSERT INTO queen.queues (
         tenant_id, name, namespace, task, priority, lease_time, retry_limit, retry_delay,
         max_queue_size, ttl, dead_letter_queue, dlq_after_max_retries, delayed_processing,
         window_buffer, retention_seconds, completed_retention_seconds,
-        retention_enabled, encryption_enabled, max_wait_time_seconds
+        retention_enabled, encryption_enabled, max_wait_time_seconds, min_pop_wait_time
     ) VALUES (
         p_tenant, p_queue_name, v_namespace, v_task, v_priority, v_lease_time, v_retry_limit, v_retry_delay,
         v_max_size, v_ttl, v_dead_letter_queue, v_dlq_after_max_retries, v_delayed_processing,
         v_window_buffer, v_retention_seconds, v_completed_retention_seconds,
-        v_retention_enabled, v_encryption_enabled, v_max_wait_time_seconds
+        v_retention_enabled, v_encryption_enabled, v_max_wait_time_seconds, v_min_pop_wait_time
     )
     ON CONFLICT (tenant_id, name) DO UPDATE SET
         namespace = EXCLUDED.namespace,
@@ -88,7 +96,8 @@ BEGIN
         completed_retention_seconds = EXCLUDED.completed_retention_seconds,
         retention_enabled = EXCLUDED.retention_enabled,
         encryption_enabled = EXCLUDED.encryption_enabled,
-        max_wait_time_seconds = EXCLUDED.max_wait_time_seconds
+        max_wait_time_seconds = EXCLUDED.max_wait_time_seconds,
+        min_pop_wait_time = EXCLUDED.min_pop_wait_time
     RETURNING id INTO v_queue_id;
     
     -- Ensure default partition exists
@@ -126,7 +135,8 @@ BEGIN
             'completedRetentionSeconds', v_completed_retention_seconds,
             'retentionEnabled', v_retention_enabled,
             'encryptionEnabled', v_encryption_enabled,
-            'maxWaitTimeSeconds', v_max_wait_time_seconds
+            'maxWaitTimeSeconds', v_max_wait_time_seconds,
+            'minPopWaitTime', v_min_pop_wait_time
         )
     );
 END;
