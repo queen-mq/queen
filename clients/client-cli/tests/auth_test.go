@@ -16,11 +16,10 @@ import (
 //
 //   - --token plumbing is verified against an httptest fake that
 //     accepts/rejects based on the Authorization header.
-//   - login --method password is verified via the same fake speaking the
-//     proxy's /api/login contract.
-//   - --method google is verified by spinning up a fake /api/auth/config
-//     and asserting the CLI surfaces "not configured" cleanly when the
-//     proxy says google.enabled=false.
+//   - login --method password is verified via the same fake speaking
+//     queen-proxy's /auth/login contract (form body, 303 + session cookie).
+//   - --method google is verified by spinning up a fake /auth/google that
+//     answers 404 not_configured, asserting the CLI surfaces it cleanly.
 
 // TestAuth_TokenFlagAttachesBearer verifies that --token surfaces as
 // Authorization: Bearer X on every server-bound request.
@@ -71,10 +70,12 @@ func TestAuth_TokenEnvAttachesBearer(t *testing.T) {
 func TestAuth_LoginPasswordCapturesCookieJWT(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/login":
-			http.SetCookie(w, &http.Cookie{Name: "token", Value: "fake-jwt-from-proxy", HttpOnly: true})
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true}`))
+		case "/auth/login":
+			http.SetCookie(w, &http.Cookie{
+				Name: "queen_session", Value: "fake.jwt.from-proxy", Path: "/", HttpOnly: true,
+			})
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusSeeOther)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -105,8 +106,10 @@ func TestAuth_LoginPasswordCapturesCookieJWT(t *testing.T) {
 // (CodeAuth) at the CLI surface.
 func TestAuth_LoginPasswordRejectsBadCredentials(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// queen-proxy re-renders its HTML login page on a bad password.
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"Invalid credentials"}`))
+		_, _ = w.Write([]byte(`<html>Invalid email or password.</html>`))
 	}))
 	defer srv.Close()
 
@@ -127,14 +130,15 @@ func TestAuth_LoginPasswordRejectsBadCredentials(t *testing.T) {
 	}
 }
 
-// TestAuth_LoginGoogleNotConfiguredFailsCleanly: when /api/auth/config
-// reports google.enabled=false, login --method google must error out with
-// a useful message, not crash.
+// TestAuth_LoginGoogleNotConfiguredFailsCleanly: when /auth/google reports
+// not_configured, login --method google must error out with a useful
+// message, not crash.
 func TestAuth_LoginGoogleNotConfiguredFailsCleanly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/auth/config" {
+		if r.URL.Path == "/auth/google" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"google":{"enabled":false}}`))
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"google login not configured","code":"not_configured"}`))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -156,8 +160,7 @@ func TestAuth_LoginGoogleNotConfiguredFailsCleanly(t *testing.T) {
 	if code == 0 {
 		t.Errorf("login --method google should fail when proxy disables google; stderr: %s", stderr)
 	}
-	if !strings.Contains(stderr, "Google auth is not enabled") &&
-		!strings.Contains(stderr, "google") {
+	if !strings.Contains(stderr, "not enabled") && !strings.Contains(stderr, "google") {
 		t.Errorf("error message should mention google: %s", stderr)
 	}
 }

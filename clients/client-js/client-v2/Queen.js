@@ -123,7 +123,7 @@ export class Queen {
   }
 
   #createHttpClient() {
-    const { urls, timeoutMillis, retryAttempts, retryDelayMillis, loadBalancingStrategy, affinityHashRing, healthRetryAfterMillis, enableFailover, bearerToken, headers, retry429 } = this.#config
+    const { urls, timeoutMillis, retryAttempts, retryDelayMillis, loadBalancingStrategy, affinityHashRing, healthRetryAfterMillis, enableFailover, bearerToken, headers, hostHeader, retry429 } = this.#config
 
     if (urls.length === 1) {
       // Single server
@@ -134,6 +134,7 @@ export class Queen {
         retryDelayMillis,
         bearerToken,
         headers,
+        hostHeader,
         retry429
       })
     }
@@ -151,6 +152,7 @@ export class Queen {
       enableFailover,
       bearerToken,
       headers,
+      hostHeader,
       retry429
     })
   }

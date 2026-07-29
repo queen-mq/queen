@@ -385,6 +385,13 @@ func (hc *HttpClient) attemptOnce(ctx context.Context, method, url string, body 
 	}
 	for key, value := range hc.config.Headers {
 		req.Header.Set(key, value)
+		// net/http writes the Host line from req.Host (falling back to the URL),
+		// ignoring any "Host" entry in req.Header. A queen_proxy deployment
+		// routes to a cluster by Host, so a configured Host header has to land
+		// on the field or the request reaches the wrong cluster (or none).
+		if http.CanonicalHeaderKey(key) == "Host" {
+			req.Host = value
+		}
 	}
 
 	// Execute request.

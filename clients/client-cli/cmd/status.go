@@ -65,7 +65,8 @@ detailed view including per-partition counts (--partitions).`,
 		}
 		data, err := c.A.GetStatus(ctx, params)
 		if err != nil {
-			return err
+			return blockedErr(err, "GET /api/v1/status",
+				"run 'queenctl queue list' for the tenant-scoped queue table, or 'queenctl status <queue>' for one queue")
 		}
 		view := output.View{
 			Columns: []output.Column{

@@ -14,6 +14,9 @@ class Defaults
         'healthRetryAfterMillis' => 5000,
         'bearerToken' => null,
         'headers' => [],
+        // HTTP 429 backoff: ['maxAttempts' => int, 'baseMs' => int,
+        // 'capMs' => int]. Empty = per-request-kind defaults (Retry429Policy).
+        'retry429' => [],
     ];
 
     public const QUEUE_DEFAULTS = [

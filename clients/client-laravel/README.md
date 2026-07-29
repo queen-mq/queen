@@ -462,6 +462,11 @@ $queen = new Queen([
     'enableFailover' => true,
     'healthRetryAfterMillis' => 5000,
     'headers' => ['X-Custom' => 'value'],
+    'retry429' => [                         // backoff for rate-limited requests
+        'maxAttempts' => 10,                // omit: 10 ordinary, unbounded for long-poll pop
+        'baseMs' => 500,
+        'capMs' => 30000,
+    ],
 ]);
 ```
 
@@ -476,8 +481,51 @@ return [
     'retry_attempts' => env('QUEEN_RETRY_ATTEMPTS', 3),
     'load_balancing_strategy' => env('QUEEN_LB_STRATEGY', 'affinity'),
     'headers' => [],
+    'retry_429' => [
+        'maxAttempts' => env('QUEEN_RETRY_429_MAX_ATTEMPTS'),
+        'baseMs' => env('QUEEN_RETRY_429_BASE_MS'),
+        'capMs' => env('QUEEN_RETRY_429_CAP_MS'),
+    ],
 ];
 ```
+
+## Rate Limiting and Quotas
+
+Behind the Queen proxy a request can be rate limited (HTTP 429) or refused by
+a plan/tenant rule (HTTP 403). 429s are retried transparently: the client waits
+`Retry-After` seconds when the response carries one, otherwise an exponential
+backoff (500ms doubling up to 30s), always with ±20% jitter. Ordinary requests
+give up after 10 attempts; a long-poll pop (`wait(true)`, the consumers, the
+artisan command) retries for as long as it polls. A 429 is a tenant signal, not
+a backend-health one, so it never marks a server unhealthy nor fails over to
+another one.
+
+403s are terminal and surface immediately. Both carry a machine-readable code:
+
+```php
+use Queen\Exceptions\ErrorCode;
+use Queen\Exceptions\HttpException;
+
+try {
+    $queen->queue('orders')->push([['data' => ['orderId' => 1]]])->execute();
+} catch (HttpException $e) {
+    switch ($e->errorCode) {
+        case ErrorCode::RATE_LIMITED:            // 429, retries exhausted
+        case ErrorCode::QUOTA_EXCEEDED:          // 429, message/rate quota
+            break;
+        case ErrorCode::CLUSTER_SUSPENDED:       // 403, needs operator action
+        case ErrorCode::STORAGE_QUOTA_EXCEEDED:  // 403, needs a bigger plan
+        case ErrorCode::FEATURE_GATED:           // 403, not on this plan
+        case ErrorCode::FORBIDDEN:               // 403, generic
+            break;
+        default:                                 // null: pre-proxy broker error
+            throw $e;
+    }
+}
+```
+
+`$e->statusCode`, `$e->retryAfterSeconds` (429 only) and the helpers
+`$e->isRateLimited()` / `$e->isClusterSuspended()` are available too.
 
 ## Graceful Shutdown
 

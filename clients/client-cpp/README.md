@@ -6,6 +6,7 @@ A comprehensive C++ client for Queen Message Queue, providing a fluent API match
 
 - ✅ **Fluent API** - Chainable methods for intuitive queue operations
 - ✅ **HTTP Client** - Built-in retry logic and failover support
+- ✅ **Proxy/Cloud Ready** - Bearer-token auth, 429 backoff, terminal 403 codes
 - ✅ **Load Balancing** - Round-robin and session-based strategies
 - ✅ **Client-Side Buffering** - Automatic batching with time/count triggers
 - ✅ **Consumer Groups** - Distributed message processing
@@ -301,6 +302,54 @@ QueenClient client(urls, config);
 // Requests are load-balanced across servers
 // Automatic failover if a server is down
 ```
+
+### Authentication (Queen Proxy / Cloud)
+
+```cpp
+ClientConfig config;
+config.bearer_token = "eyJhbGciOi...";   // Authorization: Bearer <token> on every request
+
+QueenClient client({"https://cell.example.com"}, config);
+```
+
+When the server is a Queen proxy it enforces per-tenant rate limits and quotas.
+The client handles that contract for you:
+
+- **429 (rate limited)** is retried in place with `±20%` jittered backoff —
+  `Retry-After` (seconds) wins when present, otherwise `500ms * 2^attempt`
+  capped at `30s`. A long-poll pop (`wait(true)`) backs off indefinitely; every
+  other request gives up after 10 attempts. A 429 never fails over to another
+  backend — it is a tenant-quota signal, not a backend-health one.
+- **403 (forbidden)** is terminal and is surfaced immediately, never retried.
+
+```cpp
+ClientConfig config;
+config.bearer_token = "...";
+config.retry_429.max_attempts = 5;    // 0 = kind-based default (10, unbounded for waiting pop)
+config.retry_429.base_millis = 500;   // 0 = 500
+config.retry_429.cap_millis = 30000;  // 0 = 30000
+```
+
+Failed requests throw `queen::HttpError` (a `std::runtime_error`), which carries
+the machine-readable proxy error code so callers do not have to match on message
+text:
+
+```cpp
+try {
+    client.queue("tasks").push({{{"data", {{"job", "test"}}}}});
+} catch (const queen::HttpError& e) {
+    // 429 -> "rate_limited" | "quota_exceeded"
+    // 403 -> "cluster_suspended" | "storage_quota_exceeded" | "feature_gated" | "forbidden"
+    std::cerr << e.status_code() << " [" << e.code() << "] " << e.what() << std::endl;
+
+    if (e.is_cluster_suspended()) {
+        // Terminal: only operator intervention resolves this. Stop producing.
+    }
+}
+```
+
+`consume()` applies the same rules per worker: it backs off through a 429 and
+rethrows a 403 to the caller after its workers stop.
 
 ## Building
 

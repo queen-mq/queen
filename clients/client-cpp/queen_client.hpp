@@ -7,6 +7,7 @@
  * Features:
  * - Fluent API matching Node.js client
  * - HTTP client with retry and failover
+ * - Bearer-token auth, 429 backoff and terminal 403 codes (proxy contract)
  * - Load balancing (round-robin & session)
  * - Client-side buffering with time/count triggers
  * - Consumer groups and partitions
@@ -91,6 +92,35 @@ class ConsumerManager;
 // Configuration Structures
 // ============================================================================
 
+/**
+ * Which 429 backoff policy applies to a request.
+ * Pop marks a long-poll pop (wait=true): the outer poll loop is already an
+ * indefinite wait, so a 429 there is waited out rather than surfaced as a
+ * failure after a handful of tries.
+ */
+enum class RetryKind {
+    Default,
+    Pop
+};
+
+/**
+ * Backoff policy applied when the server returns HTTP 429 (rate limited),
+ * separate from the 5xx/network retry_attempts above. Zero-value fields fall
+ * back to kind-based defaults:
+ * - max_attempts: bounded (10 total attempts) for ordinary requests (push,
+ *   admin calls, non-waiting pop); unbounded for a long-poll pop. Setting it
+ *   explicitly applies the same bound to both kinds.
+ * - base_millis: initial backoff absent a Retry-After header (default 500).
+ * - cap_millis: ceiling for the exponential backoff (default 30000).
+ * A Retry-After header (seconds) always wins over the computed delay.
+ * See PLAN_QUEEN_PROXY_CLOUD.md §4/§9 (client 429 backoff, blocker B4).
+ */
+struct Retry429Options {
+    int max_attempts = 0;                    // 0 = kind-based default
+    int base_millis = 0;                     // 0 = 500
+    int cap_millis = 0;                      // 0 = 30000
+};
+
 struct ClientConfig {
     std::vector<std::string> urls;
     int timeout_millis = 30000;
@@ -98,6 +128,8 @@ struct ClientConfig {
     int retry_delay_millis = 1000;
     std::string load_balancing_strategy = "round-robin"; // "round-robin" or "session"
     bool enable_failover = true;
+    std::string bearer_token;                // sent as "Authorization: Bearer <token>"
+    Retry429Options retry_429;
 };
 
 struct QueueConfig {
@@ -151,6 +183,56 @@ struct ConsumeOptions {
 struct BufferOptions {
     int message_count = 100;
     int time_millis = 1000;
+};
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+/**
+ * Thrown for any HTTP response with a >= 400 status. Derives from
+ * std::runtime_error and keeps what() equal to the server's "error" message,
+ * so existing catch (const std::exception&) sites are unaffected; the extra
+ * accessors let callers branch on the proxy contract without string matching:
+ *
+ *   429  Retry-After: <seconds>  {"error", "code": "rate_limited" | "quota_exceeded"}
+ *   403                          {"error", "code": "cluster_suspended" | "storage_quota_exceeded"
+ *                                                | "feature_gated" | "forbidden"}
+ *
+ * code() is empty when the body carries no such field (e.g. a broker that
+ * predates the proxy contract). Transport failures (no response at all) still
+ * surface as a plain std::runtime_error.
+ */
+class HttpError : public std::runtime_error {
+private:
+    int status_code_;
+    std::string body_;
+    std::string code_;
+    std::optional<double> retry_after_seconds_;
+
+public:
+    HttpError(int status_code, const std::string& message, const std::string& body,
+              const std::string& code, std::optional<double> retry_after_seconds)
+        : std::runtime_error(message), status_code_(status_code), body_(body),
+          code_(code), retry_after_seconds_(retry_after_seconds) {
+    }
+
+    int status_code() const { return status_code_; }
+    const std::string& body() const { return body_; }
+    const std::string& code() const { return code_; }
+
+    /** Retry-After (seconds) from a 429; empty when absent or non-numeric. */
+    std::optional<double> retry_after_seconds() const { return retry_after_seconds_; }
+
+    /**
+     * Terminal cluster_suspended 403: nothing short of operator intervention
+     * resolves it, so consumer loops must stop rather than back off and retry.
+     * The other 403 codes are equally non-retryable but are surfaced through
+     * code() instead of being named here.
+     */
+    bool is_cluster_suspended() const {
+        return status_code_ == 403 && code_ == "cluster_suspended";
+    }
 };
 
 // ============================================================================
@@ -287,6 +369,37 @@ inline std::string get_iso_timestamp() {
 }
 
 /**
+ * Delay before the next 429 retry attempt (milliseconds).
+ * Honors Retry-After (seconds) when the server sent one, with +-20% jitter to
+ * avoid a synchronized thundering herd; otherwise falls back to exponential
+ * backoff (base_millis * 2^attempt_index, capped at cap_millis), also jittered.
+ */
+inline int compute_retry429_delay_millis(int attempt_index,
+                                         std::optional<double> retry_after_seconds,
+                                         int base_millis, int cap_millis) {
+    double delay_millis;
+
+    if (retry_after_seconds.has_value() && *retry_after_seconds >= 0) {
+        delay_millis = *retry_after_seconds * 1000.0;
+    } else {
+        delay_millis = base_millis;
+        for (int i = 0; i < attempt_index && delay_millis < cap_millis; ++i) {
+            delay_millis *= 2;
+        }
+        if (delay_millis > cap_millis) {
+            delay_millis = cap_millis;
+        }
+    }
+
+    // Each consumer thread jitters independently.
+    static thread_local std::mt19937 jitter_gen(std::random_device{}());
+    std::uniform_real_distribution<double> jitter(0.8, 1.2);
+
+    double final_millis = delay_millis * jitter(jitter_gen);
+    return final_millis > 0 ? static_cast<int>(final_millis) : 0;
+}
+
+/**
  * Logging utility (controlled by QUEEN_CLIENT_LOG env var)
  */
 inline bool is_log_enabled() {
@@ -300,6 +413,13 @@ inline bool is_log_enabled() {
 inline void log(const std::string& operation, const std::string& details) {
     if (is_log_enabled()) {
         std::cout << "[" << get_iso_timestamp() << "] [INFO] [" << operation << "] " 
+                  << details << std::endl;
+    }
+}
+
+inline void log_warn(const std::string& operation, const std::string& details) {
+    if (is_log_enabled()) {
+        std::cerr << "[" << get_iso_timestamp() << "] [WARN] [" << operation << "] "
                   << details << std::endl;
     }
 }
@@ -391,12 +511,22 @@ private:
     int retry_attempts_;
     int retry_delay_millis_;
     bool enable_failover_;
+    std::string bearer_token_;
+    Retry429Options retry_429_;
     
     struct HttpResponse {
-        int status_code;
+        int status_code = 0;
         std::string body;
-        bool success;
+        bool success = false;
         std::string error_message;
+        std::string error_code;                     // proxy contract "code" field
+        std::optional<double> retry_after_seconds;  // 429 only
+    };
+
+    struct Retry429Policy {
+        int max_attempts;                           // 0 = unbounded
+        int base_millis;
+        int cap_millis;
     };
     
     HttpResponse execute_request(const std::string& url, const std::string& method,
@@ -415,6 +545,9 @@ private:
             httplib::Headers headers = {
                 {"Content-Type", "application/json"}
             };
+            if (!bearer_token_.empty()) {
+                headers.emplace("Authorization", "Bearer " + bearer_token_);
+            }
             
             httplib::Result res;
             
@@ -429,48 +562,127 @@ private:
             } else if (method == "DELETE") {
                 res = client.Delete(path.c_str(), headers);
             } else {
-                return {0, "", false, "Unsupported HTTP method: " + method};
+                return {0, "", false, "Unsupported HTTP method: " + method, "", std::nullopt};
             }
             
             if (!res) {
-                return {0, "", false, "HTTP request failed: " + httplib::to_string(res.error())};
+                return {0, "", false, "HTTP request failed: " + httplib::to_string(res.error()), "", std::nullopt};
             }
             
             // Handle 204 No Content
             if (res->status == 204) {
-                return {204, "", true, ""};
+                return {204, "", true, "", "", std::nullopt};
             }
             
             // Handle errors
             if (res->status >= 400) {
                 std::string error_msg = "HTTP " + std::to_string(res->status);
+                std::string error_code;
                 try {
                     if (!res->body.empty()) {
                         json error_body = json::parse(res->body);
                         if (error_body.contains("error")) {
                             error_msg = error_body["error"].get<std::string>();
                         }
+                        if (error_body.contains("code") && error_body["code"].is_string()) {
+                            error_code = error_body["code"].get<std::string>();
+                        }
                     }
                 } catch (...) {
                     // Ignore JSON parse errors
                 }
-                return {res->status, res->body, false, error_msg};
+
+                std::optional<double> retry_after;
+                if (res->status == 429) {
+                    retry_after = parse_retry_after(res->get_header_value("Retry-After"));
+                }
+                return {res->status, res->body, false, error_msg, error_code, retry_after};
             }
             
-            return {res->status, res->body, true, ""};
+            return {res->status, res->body, true, "", "", std::nullopt};
             
         } catch (const std::exception& e) {
-            return {0, "", false, std::string("Exception: ") + e.what()};
+            return {0, "", false, std::string("Exception: ") + e.what(), "", std::nullopt};
+        }
+    }
+    
+    /** Retry-After header value (seconds) -> number; empty when non-numeric. */
+    static std::optional<double> parse_retry_after(const std::string& value) {
+        if (value.empty()) {
+            return std::nullopt;
+        }
+        try {
+            size_t consumed = 0;
+            double seconds = std::stod(value, &consumed);
+            if (consumed != value.size() || seconds < 0) {
+                return std::nullopt;
+            }
+            return seconds;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    Retry429Policy retry429_policy_for(RetryKind retry_kind) const {
+        Retry429Policy policy;
+        policy.base_millis = retry_429_.base_millis > 0 ? retry_429_.base_millis : 500;
+        policy.cap_millis = retry_429_.cap_millis > 0 ? retry_429_.cap_millis : 30000;
+
+        if (retry_429_.max_attempts > 0) {
+            policy.max_attempts = retry_429_.max_attempts; // explicit override applies to both kinds
+        } else {
+            policy.max_attempts = (retry_kind == RetryKind::Pop) ? 0 : 10;
+        }
+
+        return policy;
+    }
+
+    /**
+     * One logical request against a single URL, transparently retrying HTTP 429
+     * with backoff until the policy for retry_kind is exhausted (or never, for
+     * an unbounded pop policy). Every other outcome is returned immediately:
+     * 429 is the only status this layer treats as retryable, 5xx/network retry
+     * and cross-backend failover are the callers' job.
+     */
+    HttpResponse execute_with_retry429(const std::string& url, const std::string& method,
+                                       const std::string& path, const json& body,
+                                       int request_timeout_millis, RetryKind retry_kind) {
+        Retry429Policy policy = retry429_policy_for(retry_kind);
+        int tries = 0;
+
+        while (true) {
+            ++tries;
+            HttpResponse response = execute_request(url, method, path, body, request_timeout_millis);
+
+            if (response.status_code != 429) {
+                return response;
+            }
+
+            if (policy.max_attempts > 0 && tries >= policy.max_attempts) {
+                util::log_error("HttpClient.retry429", method + " " + path +
+                    " max 429 attempts exhausted after " + std::to_string(tries) +
+                    " (code=" + response.error_code + ")");
+                return response;
+            }
+
+            int delay = util::compute_retry429_delay_millis(tries - 1, response.retry_after_seconds,
+                                                            policy.base_millis, policy.cap_millis);
+            util::log_warn("HttpClient.retry429", method + " " + path + " attempt " +
+                std::to_string(tries) + ", retrying in " + std::to_string(delay) +
+                "ms (code=" + response.error_code + ")");
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
         }
     }
     
     HttpResponse request_with_retry(const std::string& method, const std::string& path,
-                                    const json& body = nullptr, int request_timeout_millis = 0) {
+                                    const json& body = nullptr, int request_timeout_millis = 0,
+                                    RetryKind retry_kind = RetryKind::Default) {
         HttpResponse last_response;
         
         for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
             std::string url = get_url();
-            last_response = execute_request(url, method, path, body, request_timeout_millis);
+            last_response = execute_with_retry429(url, method, path, body,
+                                                  request_timeout_millis, retry_kind);
             
             if (last_response.success) {
                 return last_response;
@@ -492,9 +704,10 @@ private:
     }
     
     HttpResponse request_with_failover(const std::string& method, const std::string& path,
-                                       const json& body = nullptr, int request_timeout_millis = 0) {
+                                       const json& body = nullptr, int request_timeout_millis = 0,
+                                       RetryKind retry_kind = RetryKind::Default) {
         if (!load_balancer_ || !enable_failover_) {
-            return request_with_retry(method, path, body, request_timeout_millis);
+            return request_with_retry(method, path, body, request_timeout_millis, retry_kind);
         }
         
         auto urls = load_balancer_->get_all_urls();
@@ -509,7 +722,12 @@ private:
             }
             
             attempted_urls.insert(url);
-            last_response = execute_request(url, method, path, body, request_timeout_millis);
+            // 429s are retried in place (same backend, backoff-paced) inside
+            // execute_with_retry429: rate limiting is a tenant-quota signal, not
+            // a backend-health one, so an exhausted 429 falls into the 4xx
+            // short-circuit below instead of failing over to another backend.
+            last_response = execute_with_retry429(url, method, path, body,
+                                                  request_timeout_millis, retry_kind);
             
             if (last_response.success) {
                 return last_response;
@@ -530,13 +748,29 @@ private:
         }
         return base_url_;
     }
+
+    /**
+     * Turn a failed response into the exception callers see. A response that
+     * carries an HTTP status becomes an HttpError (status/body/code, plus
+     * Retry-After on a 429); a transport failure has no status and stays a
+     * plain runtime_error.
+     */
+    [[noreturn]] static void throw_response_error(const HttpResponse& response) {
+        if (response.status_code > 0) {
+            throw HttpError(response.status_code, response.error_message, response.body,
+                            response.error_code, response.retry_after_seconds);
+        }
+        throw std::runtime_error(response.error_message);
+    }
     
 public:
     HttpClient(const std::string& base_url, int timeout_millis = 30000,
-               int retry_attempts = 3, int retry_delay_millis = 1000)
+               int retry_attempts = 3, int retry_delay_millis = 1000,
+               const std::string& bearer_token = "",
+               const Retry429Options& retry_429 = Retry429Options())
         : base_url_(base_url), timeout_millis_(timeout_millis),
           retry_attempts_(retry_attempts), retry_delay_millis_(retry_delay_millis),
-          enable_failover_(false) {
+          enable_failover_(false), bearer_token_(bearer_token), retry_429_(retry_429) {
         // Remove trailing slash
         if (!base_url_.empty() && base_url_.back() == '/') {
             base_url_.pop_back();
@@ -544,17 +778,26 @@ public:
     }
     
     HttpClient(std::shared_ptr<LoadBalancer> load_balancer, int timeout_millis = 30000,
-               int retry_attempts = 3, int retry_delay_millis = 1000, bool enable_failover = true)
+               int retry_attempts = 3, int retry_delay_millis = 1000, bool enable_failover = true,
+               const std::string& bearer_token = "",
+               const Retry429Options& retry_429 = Retry429Options())
         : load_balancer_(load_balancer), timeout_millis_(timeout_millis),
           retry_attempts_(retry_attempts), retry_delay_millis_(retry_delay_millis),
-          enable_failover_(enable_failover) {
+          enable_failover_(enable_failover), bearer_token_(bearer_token), retry_429_(retry_429) {
     }
     
-    json get(const std::string& path, int request_timeout_millis = 0) {
-        auto response = request_with_failover("GET", path, nullptr, request_timeout_millis);
+    /**
+     * retry_kind: pass RetryKind::Pop for long-poll (wait=true) pop requests to
+     * get the unbounded-with-backoff 429 policy; leave it defaulted for
+     * everything else (push, admin calls, non-waiting pop), which gets the
+     * bounded 10-attempt budget.
+     */
+    json get(const std::string& path, int request_timeout_millis = 0,
+             RetryKind retry_kind = RetryKind::Default) {
+        auto response = request_with_failover("GET", path, nullptr, request_timeout_millis, retry_kind);
         
         if (!response.success) {
-            throw std::runtime_error(response.error_message);
+            throw_response_error(response);
         }
         
         if (response.body.empty() || response.status_code == 204) {
@@ -564,11 +807,12 @@ public:
         return json::parse(response.body);
     }
     
-    json post(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0) {
-        auto response = request_with_failover("POST", path, body, request_timeout_millis);
+    json post(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0,
+              RetryKind retry_kind = RetryKind::Default) {
+        auto response = request_with_failover("POST", path, body, request_timeout_millis, retry_kind);
         
         if (!response.success) {
-            throw std::runtime_error(response.error_message);
+            throw_response_error(response);
         }
         
         if (response.body.empty() || response.status_code == 204) {
@@ -578,11 +822,12 @@ public:
         return json::parse(response.body);
     }
     
-    json put(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0) {
-        auto response = request_with_failover("PUT", path, body, request_timeout_millis);
+    json put(const std::string& path, const json& body = nullptr, int request_timeout_millis = 0,
+             RetryKind retry_kind = RetryKind::Default) {
+        auto response = request_with_failover("PUT", path, body, request_timeout_millis, retry_kind);
         
         if (!response.success) {
-            throw std::runtime_error(response.error_message);
+            throw_response_error(response);
         }
         
         if (response.body.empty() || response.status_code == 204) {
@@ -592,11 +837,12 @@ public:
         return json::parse(response.body);
     }
     
-    json del(const std::string& path, int request_timeout_millis = 0) {
-        auto response = request_with_failover("DELETE", path, nullptr, request_timeout_millis);
+    json del(const std::string& path, int request_timeout_millis = 0,
+             RetryKind retry_kind = RetryKind::Default) {
+        auto response = request_with_failover("DELETE", path, nullptr, request_timeout_millis, retry_kind);
         
         if (!response.success) {
-            throw std::runtime_error(response.error_message);
+            throw_response_error(response);
         }
         
         if (response.body.empty() || response.status_code == 204) {
@@ -1337,13 +1583,24 @@ public:
 
         try {
             int client_timeout = wait_ ? timeout_millis_ + 5000 : timeout_millis_;
-            json result = http_client_->get(path.str() + params.str(), client_timeout);
+            // A waiting pop backs off indefinitely through a 429 rather than
+            // giving up after a handful of tries.
+            json result = http_client_->get(path.str() + params.str(), client_timeout,
+                                            wait_ ? RetryKind::Pop : RetryKind::Default);
             
             if (result.is_null() || !result.contains("messages")) {
                 return json::array();
             }
             
             return result["messages"];
+        } catch (const HttpError& e) {
+            // Also covers a 429 whose retry429 budget was exhausted and a
+            // terminal 403 (e.g. cluster_suspended): both are logged with their
+            // code rather than thrown, matching this method's swallow-to-[]
+            // contract.
+            util::log_error("QueueBuilder.pop", std::string("Error: ") + e.what() +
+                " (status=" + std::to_string(e.status_code()) + ", code=" + e.code() + ")");
+            return json::array();
         } catch (const std::exception& e) {
             util::log_error("QueueBuilder.pop", std::string("Error: ") + e.what());
             return json::array();
@@ -1410,17 +1667,22 @@ public:
         setup_graceful_shutdown();
     }
     
+    // Authenticated (proxy/cloud) use goes through this constructor:
+    //   ClientConfig config; config.bearer_token = "...";
+    //   QueenClient client({"https://cell.example"}, config);
     QueenClient(const std::vector<std::string>& urls, const ClientConfig& config = ClientConfig())
         : config_(config) {
         config_.urls = urls;
         
         if (urls.size() == 1) {
             http_client_ = std::make_shared<HttpClient>(urls[0], config_.timeout_millis,
-                config_.retry_attempts, config_.retry_delay_millis);
+                config_.retry_attempts, config_.retry_delay_millis,
+                config_.bearer_token, config_.retry_429);
         } else {
             auto load_balancer = std::make_shared<LoadBalancer>(urls, config_.load_balancing_strategy);
             http_client_ = std::make_shared<HttpClient>(load_balancer, config_.timeout_millis,
-                config_.retry_attempts, config_.retry_delay_millis, config_.enable_failover);
+                config_.retry_attempts, config_.retry_delay_millis, config_.enable_failover,
+                config_.bearer_token, config_.retry_429);
         }
         
         buffer_manager_ = std::make_shared<BufferManager>(http_client_);
@@ -1676,8 +1938,18 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
 
     std::string full_url = path + params.str();
     
+    // Workers run inside packaged_tasks whose futures are only wait()ed on, so
+    // a thrown exception would be discarded. A terminal (403) response is
+    // recorded here instead and rethrown to the caller once every worker has
+    // stopped.
+    struct TerminalError {
+        std::mutex mutex;
+        std::exception_ptr error;
+    };
+    auto terminal_error = std::make_shared<TerminalError>();
+
     // Worker function
-    auto worker = [this, handler, full_url, options](int worker_id) {
+    auto worker = [this, handler, full_url, options, terminal_error](int worker_id) {
         int processed_count = 0;
         auto last_message_time = std::chrono::steady_clock::now();
         
@@ -1707,7 +1979,8 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
             
             try {
                 int client_timeout = options.wait ? options.timeout_millis + 5000 : options.timeout_millis;
-                json result = http_client_->get(full_url, client_timeout);
+                json result = http_client_->get(full_url, client_timeout,
+                                                options.wait ? RetryKind::Pop : RetryKind::Default);
                 
                 if (result.is_null() || !result.contains("messages") || 
                     result["messages"].empty()) {
@@ -1770,6 +2043,42 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                     processed_count += messages.size();
                 }
                 
+            } catch (const HttpError& e) {
+                // 429 (rate limited): HttpClient already retries this internally
+                // with backoff (unbounded for a wait=true pop). This branch is a
+                // defensive fallback for the case where an explicit
+                // retry_429.max_attempts override got exhausted -- back off and
+                // keep polling instead of hot-looping.
+                if (e.status_code() == 429) {
+                    int delay = e.retry_after_seconds().has_value()
+                        ? static_cast<int>(*e.retry_after_seconds() * 1000) : 1000;
+                    util::log_warn("ConsumerManager.worker", std::string("Worker ") +
+                                  std::to_string(worker_id) + " rate-limited (code=" + e.code() +
+                                  "), retrying in " + std::to_string(delay) + "ms");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                    continue;
+                }
+
+                // 403 (forbidden): terminal. cluster_suspended in particular can
+                // never resolve itself, and none of the other proxy codes
+                // (storage_quota_exceeded / feature_gated / forbidden) are worth
+                // hot-looping either -- stop this worker and surface the error
+                // to the caller instead of retrying.
+                if (e.status_code() == 403) {
+                    util::log_error("ConsumerManager.worker", std::string("Worker ") +
+                                  std::to_string(worker_id) + " forbidden (code=" + e.code() +
+                                  "): " + e.what());
+                    std::lock_guard<std::mutex> lock(terminal_error->mutex);
+                    if (!terminal_error->error) {
+                        terminal_error->error = std::current_exception();
+                    }
+                    break;
+                }
+
+                util::log_error("ConsumerManager.worker", std::string("Worker ") +
+                              std::to_string(worker_id) + " error: " + e.what() +
+                              " (status=" + std::to_string(e.status_code()) + ")");
+                throw;
             } catch (const std::exception& e) {
                 // Check if timeout error (expected for long polling)
                 std::string error_msg = e.what();
@@ -1803,6 +2112,10 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     // Wait for all workers to complete
     for (auto& future : futures) {
         future.wait();
+    }
+
+    if (terminal_error->error) {
+        std::rethrow_exception(terminal_error->error);
     }
 }
 

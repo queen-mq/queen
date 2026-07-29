@@ -85,15 +85,48 @@ Tokens are stored in the OS keychain by default; pass `--no-keychain` to
 ## Auth
 
 ```bash
-queenctl login --method password -u alice
-queenctl login --method google
-queenctl login --method token              # paste a JWT
+queenctl login --method password -u alice@example.com
+queenctl login --method google              # or --method github
+queenctl login --method token               # paste a JWT or a qk_ API key
 queenctl logout
 ```
 
-`--method password` and `--method google` flow through the
-[Queen Proxy](../../proxy/README.md) which issues the JWT.
-`--method token` pastes any JWT (works with external IdPs / JWKS).
+`--method password`, `google` and `github` flow through
+[queen-proxy](../../PLAN_QUEEN_PROXY_CLOUD.md), which mounts its human-identity
+endpoints under `/auth` (`/auth/login`, `/auth/google`, `/auth/github`,
+`/auth/session-token`). The legacy Node proxy's `/api/login` +
+`/api/auth/config` are still tried as a fallback, so one binary works against
+both generations.
+
+| method | what gets stored | lifetime |
+|---|---|---|
+| `password` | the proxy's session JWT, read from the `Set-Cookie` of `/auth/login` | `QUEEN_PROXY_JWT_TTL_S` (24h default) |
+| `google` / `github` | the bearer printed by `/auth/session-token`, pasted from the browser | 15 minutes |
+| `token` | whatever you paste - a JWT from any IdP, or a `qk_` cluster API key | API keys do not expire |
+
+The browser flows cannot capture the session themselves: the proxy's session
+cookie is httpOnly and it only accepts same-origin relative redirect targets,
+so there is no loopback callback for the CLI to listen on. They land the
+browser on `/auth/session-token` instead and ask you to paste the `token`
+field. **For unattended use (CI, daemons) create a cluster API key and store
+it with `--method token`, or set `$QUEEN_TOKEN`.**
+
+### Operator-only surfaces
+
+queen-proxy fails closed on broker routes that cannot be scoped to a single
+tenant, and answers them with a 404. The affected commands report that
+explicitly and name what to run instead:
+
+| command | blocked route | use instead |
+|---|---|---|
+| `status` (no queue) | `/api/v1/status` | `queue list`, or `status <queue>` |
+| `metrics [--prometheus]` | `/metrics`, `/metrics/prometheus` | `analytics queue-ops` / `queue-lag` |
+| `analytics system\|worker\|postgres` | `/api/v1/analytics/*-metrics`, `/postgres-stats` | `analytics queue-ops` / `queue-lag` |
+| `maintenance [get\|on\|off]` | `/api/v1/system/maintenance` | operator credentials against the broker |
+| `cg refresh-stats` | `/api/v1/stats/refresh` | nothing - the broker refreshes on its own interval |
+| `pop --namespace/--task` (no queue) | `/api/v1/pop` | name a queue |
+
+All of them work normally when the context points straight at a broker.
 
 ## Command index
 

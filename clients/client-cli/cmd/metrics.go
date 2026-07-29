@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 
-	clierr "github.com/smartpricing/queen/clients/client-cli/internal/errors"
 	"github.com/spf13/cobra"
 )
 
 var metricsPrometheus bool
+
+// The broker's metrics endpoints are process-wide (host CPU, worker
+// lifetimes, PG internals) and cannot be scoped to one tenant, so a proxied
+// cluster has no equivalent - only the per-queue series.
+const metricsAlternative = "the broker's metrics endpoints are not tenant-scopable; " +
+	"use 'queenctl analytics queue-ops' / 'queenctl analytics queue-lag' instead"
 
 var metricsCmd = &cobra.Command{
 	Use:   "metrics",
@@ -30,7 +35,7 @@ inspection.
 		if metricsPrometheus {
 			text, err := c.A.PrometheusMetrics(ctx)
 			if err != nil {
-				return clierr.Server(err)
+				return blockedErr(err, "GET /metrics/prometheus", metricsAlternative)
 			}
 			fmt.Fprint(stdout(), text)
 			return nil
@@ -40,7 +45,7 @@ inspection.
 		// it returns the empty string. We try both forms.
 		raw, err := c.A.Metrics(ctx)
 		if err != nil {
-			return clierr.Server(err)
+			return blockedErr(err, "GET /metrics", metricsAlternative)
 		}
 		if raw == "" {
 			// No raw body means it parsed as JSON - re-fetch via the SDK by

@@ -28,17 +28,25 @@ var (
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
-	Short: "Authenticate against the broker / proxy and store a JWT",
-	Long: `Authenticate and persist a JWT for the active context.
+	Short: "Authenticate against the broker / proxy and store a bearer token",
+	Long: `Authenticate and persist a bearer credential for the active context.
 
 Methods:
-  --method token            paste a JWT (works with any IdP / JWKS setup)
-  --method password         POST /api/login on the proxy (default if -u set)
+  --method token            paste a JWT or a qk_ cluster API key
+  --method password         POST /auth/login on the proxy (default if -u set)
   --method google           open the browser to the proxy's Google OAuth flow
+  --method github           open the browser to the proxy's GitHub OAuth flow
 
 The token is stored in the OS keychain by default and the config file holds
 only a 'keychain://<context>' reference. Pass --context to bind to a
-specific context, otherwise the active context is used.`,
+specific context, otherwise the active context is used.
+
+The password flow stores the proxy's session JWT, which expires with
+QUEEN_PROXY_JWT_TTL_S (24h by default). The browser flows can only hand back
+the short bearer from /auth/session-token (15 minutes), because the session
+cookie is httpOnly and the proxy accepts no loopback redirect target. For
+unattended use create a cluster API key and store it with
+'--method token' instead - it does not expire.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		f, err := config.Load(gf.configPath)
 		if err != nil {
@@ -93,8 +101,8 @@ specific context, otherwise the active context is used.`,
 				}
 				return clierr.Server(err)
 			}
-		case "google":
-			jwt, err = googleFlow(serverURL)
+		case auth.ProviderGoogle, auth.ProviderGitHub:
+			jwt, err = oauthFlow(serverURL, method)
 			if err != nil {
 				return clierr.Server(err)
 			}
@@ -164,7 +172,7 @@ func readToken(in any) (string, error) {
 	if loginToken != "" {
 		return strings.TrimSpace(loginToken), nil
 	}
-	fmt.Fprint(os.Stderr, "Paste JWT and press Enter: ")
+	fmt.Fprint(os.Stderr, "Paste JWT or API key and press Enter: ")
 	if term.IsTerminal(int(syscall.Stdin)) {
 		bb, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Fprintln(os.Stderr)
@@ -184,7 +192,7 @@ func readToken(in any) (string, error) {
 func passwordFlow(serverURL string) (string, error) {
 	user := loginUsername
 	if user == "" {
-		fmt.Fprint(os.Stderr, "Username: ")
+		fmt.Fprint(os.Stderr, "Email: ")
 		r := bufio.NewReader(os.Stdin)
 		line, err := r.ReadString('\n')
 		if err != nil {
@@ -205,15 +213,24 @@ func passwordFlow(serverURL string) (string, error) {
 	return auth.PasswordLogin(serverURL, user, pw, gf.insecure)
 }
 
-func googleFlow(serverURL string) (string, error) {
-	ok, err := auth.IsGoogleEnabled(serverURL)
+// oauthFlow drives a browser sign-in for provider. The proxy sets the session
+// as an httpOnly cookie on the browser, so the CLI cannot capture it: the
+// authorize URL carries next=/auth/session-token, which leaves the browser on
+// the JSON document holding a bearer minted from that session.
+func oauthFlow(serverURL, provider string) (string, error) {
+	ok, err := auth.IsProviderEnabled(serverURL, provider, gf.insecure)
 	if err != nil {
-		return "", fmt.Errorf("check google config: %w", err)
+		return "", fmt.Errorf("check %s config: %w", provider, err)
 	}
 	if !ok {
-		return "", errors.New("Google auth is not enabled on this proxy (set GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI on the proxy)")
+		return "", fmt.Errorf("%s login is not enabled on this proxy (set %s_CLIENT_ID and %s_CLIENT_SECRET on it)",
+			provider, strings.ToUpper(provider), strings.ToUpper(provider))
 	}
-	authURL, err := auth.GoogleAuthorizeURL(serverURL)
+	authURL, err := auth.AuthorizeURL(serverURL, provider)
+	if err != nil {
+		return "", err
+	}
+	tokenURL, err := auth.SessionTokenURL(serverURL)
 	if err != nil {
 		return "", err
 	}
@@ -221,18 +238,18 @@ func googleFlow(serverURL string) (string, error) {
 		_ = openBrowser(authURL)
 	}
 	fmt.Fprintf(os.Stderr, `
-queenctl: Google login
+queenctl: %s login
 
-  1. The proxy will set a 'token' cookie in your browser after the OAuth
-     callback. The dashboard's "About" panel exposes that JWT on a button
-     labelled "Copy CLI token".
-  2. If you don't see the panel yet, open your browser DevTools while on
-     the dashboard and copy the value of the 'token' cookie.
-  3. Paste it below.
+  1. Finish the sign-in in your browser. The proxy then lands you on
+     %s, which prints {"token": "...", "expires_in": ...}.
+  2. Copy the value of "token" and paste it below.
+
+The pasted bearer is short-lived (15 minutes). For unattended use store a
+cluster API key with 'queenctl login --method token' instead.
 
 Authorize URL (open if your browser didn't): %s
 
-Paste JWT: `, authURL)
+Paste token: `, provider, tokenURL, authURL)
 	if term.IsTerminal(int(syscall.Stdin)) {
 		bb, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Fprintln(os.Stderr)
@@ -265,12 +282,12 @@ func openBrowser(u string) error {
 }
 
 func init() {
-	loginCmd.Flags().StringVar(&loginMethod, "method", "", "auth method: token | password | google")
-	loginCmd.Flags().StringVarP(&loginUsername, "user", "u", "", "username (proxy password flow)")
+	loginCmd.Flags().StringVar(&loginMethod, "method", "", "auth method: token | password | google | github")
+	loginCmd.Flags().StringVarP(&loginUsername, "user", "u", "", "email (proxy password flow)")
 	loginCmd.Flags().StringVar(&loginPassword, "password", "", "password (avoid: prefer interactive prompt)")
-	loginCmd.Flags().StringVar(&loginToken, "token", "", "JWT to store (skips prompt)")
+	loginCmd.Flags().StringVar(&loginToken, "token", "", "JWT or qk_ API key to store (skips prompt)")
 	loginCmd.Flags().StringVar(&loginContext, "context", "", "target context (default: active)")
-	loginCmd.Flags().BoolVar(&loginNoOpen, "no-browser", false, "do not auto-open the browser for --method google")
+	loginCmd.Flags().BoolVar(&loginNoOpen, "no-browser", false, "do not auto-open the browser for the OAuth flows")
 	logoutCmd.Flags().StringVar(&loginContext, "context", "", "target context (default: active)")
 	rootCmd.AddCommand(loginCmd, logoutCmd)
 }

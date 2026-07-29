@@ -281,6 +281,10 @@ class Queen
         $retryDelayMillis = $this->config['retryDelayMillis'];
         $bearerToken = $this->config['bearerToken'];
         $headers = $this->config['headers'];
+        $retry429 = $this->config['retry429'];
+        // Undocumented Guzzle handler override, threaded so tests can drive
+        // the whole builder stack against a canned server.
+        $handler = $this->config['handler'] ?? null;
 
         if (count($urls) === 1) {
             return new HttpClient([
@@ -290,6 +294,8 @@ class Queen
                 'retryDelayMillis' => $retryDelayMillis,
                 'bearerToken' => $bearerToken,
                 'headers' => $headers,
+                'retry429' => $retry429,
+                'handler' => $handler,
             ]);
         }
 
@@ -306,6 +312,8 @@ class Queen
             'enableFailover' => $this->config['enableFailover'],
             'bearerToken' => $bearerToken,
             'headers' => $headers,
+            'retry429' => $retry429,
+            'handler' => $handler,
         ]);
     }
 

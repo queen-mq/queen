@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test clean help
+.PHONY: all test retry429 run-retry429 clean help
 
 all: test
 
@@ -62,6 +62,21 @@ test: bin/test_client
 bin/test_client: test_client.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INCLUDES) test_client.cpp -o bin/test_client $(LIBS)
+
+# Build proxy contract test suite (bearer auth, 429 backoff, terminal 403).
+# Self-contained: serves its own responses from an in-process httplib::Server,
+# so it needs neither a broker nor Postgres.
+retry429: bin/test_retry429
+	@echo "Proxy contract test suite built successfully!"
+	@echo "Run with: ./bin/test_retry429"
+
+bin/test_retry429: test_retry429.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_retry429.cpp -o bin/test_retry429 $(LIBS)
+
+# Run proxy contract tests (no server required)
+run-retry429: bin/test_retry429
+	./bin/test_retry429
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -111,6 +126,8 @@ help:
 	@echo "  make              - Build test suite (default)"
 	@echo "  make test         - Build test suite"
 	@echo "  make run-test     - Build and run tests (server must be running)"
+	@echo "  make retry429     - Build proxy contract tests (bearer/429/403)"
+	@echo "  make run-retry429 - Build and run proxy contract tests (no server needed)"
 	@echo "  make clean        - Remove build artifacts"
 	@echo "  make help         - Show this help message"
 	@echo ""

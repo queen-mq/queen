@@ -29,6 +29,13 @@ Test suite built successfully!
 Run with: ./test_client [server_url]
 ```
 
+The proxy contract suite (bearer auth, 429 backoff, terminal 403) needs no
+server at all — it serves its own responses in-process:
+
+```bash
+make run-retry429
+```
+
 ### Step 3: Start Queen Server
 
 ```bash

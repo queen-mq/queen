@@ -16,6 +16,17 @@ export const CLIENT_DEFAULTS = {
   healthRetryAfterMillis: 5000,        // Retry unhealthy backends after 5 seconds
   bearerToken: null,                   // Bearer token for proxy authentication
   headers: {},                         // Custom headers to include in every request
+  // Host to advertise on every request, independent of the address dialed.
+  // A queen_proxy deployment picks the tenant cluster from the Host header's
+  // first DNS label, so this selects a cluster when `url` points at a shared
+  // address (an IP, a cell endpoint, a local rig) instead of the cluster's own
+  // subdomain. Bare authority only: 'acme.eu1.queenmq.cloud' or 'acme:6711'.
+  // The connection still goes to `url`; only the request authority (and TLS
+  // SNI) is rewritten. In production each cluster has its own hostname, so the
+  // base URL usually carries the right Host and this stays null.
+  // NOTE: `headers: { Host }` cannot work (fetch forbids it) — it is mapped
+  // onto this option with a warning.
+  hostHeader: null,
   handleSignals: true,                 // Register SIGINT/SIGTERM handlers (disable when used as a library)
   logger: null,                        // Custom logger instance (must implement info/warn/error)
   // Backoff policy for HTTP 429 (rate limited) responses from a queen_proxy

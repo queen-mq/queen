@@ -4,6 +4,7 @@ namespace Queen\Builders;
 
 use Queen\Queen;
 use Queen\Http\HttpClient;
+use Queen\Http\Retry429Policy;
 use Queen\Buffer\BufferManager;
 use Queen\Consumer\HighLevelConsumer;
 use Queen\Support\Defaults;
@@ -344,7 +345,11 @@ class QueueBuilder
 
         $query = http_build_query($params);
         $affinityKey = $this->getAffinityKey();
-        $result = $this->httpClient->get("{$path}?{$query}", $this->consumeTimeoutMillis + 5000, $affinityKey);
+
+        // wait=true is a long-poll: on 429 it should back off and keep waiting
+        // rather than give up after the bounded push-like budget.
+        $retryKind = $this->consumeWait ? Retry429Policy::KIND_POP : null;
+        $result = $this->httpClient->get("{$path}?{$query}", $this->consumeTimeoutMillis + 5000, $affinityKey, $retryKind);
 
         if (!$result || !isset($result['messages'])) {
             return [];

@@ -3,6 +3,7 @@
 namespace Queen\Consumer;
 
 use Queen\Http\HttpClient;
+use Queen\Http\Retry429Policy;
 use Queen\Queen;
 
 /**
@@ -109,7 +110,9 @@ class HighLevelConsumer
 
         try {
             $clientTimeout = $timeoutMs + 5000;
-            $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey);
+            // Always a long-poll (wait=true above): a 429 backs off and keeps
+            // waiting instead of exhausting the bounded push-like budget.
+            $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey, Retry429Policy::KIND_POP);
 
             if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                 return null;
@@ -174,7 +177,7 @@ class HighLevelConsumer
 
         try {
             $clientTimeout = $timeoutMs + 5000;
-            $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey);
+            $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey, Retry429Policy::KIND_POP);
 
             if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                 return [];

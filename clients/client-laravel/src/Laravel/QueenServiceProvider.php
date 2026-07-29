@@ -24,6 +24,9 @@ class QueenServiceProvider extends ServiceProvider
                 'affinityHashRing' => $config['affinity_hash_ring'] ?? 150,
                 'healthRetryAfterMillis' => $config['health_retry_after'] ?? 30000,
                 'headers' => $config['headers'] ?? [],
+                // Unset env vars land here as nulls; drop them so the
+                // per-request-kind defaults in Retry429Policy apply.
+                'retry429' => array_filter($config['retry_429'] ?? [], fn($value) => $value !== null),
             ];
 
             if (!empty($config['urls'])) {

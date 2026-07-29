@@ -5,8 +5,8 @@
   "description": "Partitioned message queue on PostgreSQL — broker client + fluent streaming SDK (windows, joins, gates) in one package",
   "main": "client-v2/index.js",
   "scripts": {
-    "test": "node --test test-v2/streams-unit/configHash.test.js test-v2/streams-unit/operators.test.js test-v2/streams-unit/cycle.test.js test-v2/streams-unit/eventTime.test.js test-v2/streams-unit/ack.test.js test-v2/http-unit/retry429.test.js && node test-v2/run.js human",
-    "test:unit": "node --test test-v2/streams-unit/configHash.test.js test-v2/streams-unit/operators.test.js test-v2/streams-unit/cycle.test.js test-v2/streams-unit/eventTime.test.js test-v2/streams-unit/ack.test.js test-v2/http-unit/retry429.test.js",
+    "test": "node --test test-v2/streams-unit/configHash.test.js test-v2/streams-unit/operators.test.js test-v2/streams-unit/cycle.test.js test-v2/streams-unit/eventTime.test.js test-v2/streams-unit/ack.test.js test-v2/http-unit/retry429.test.js test-v2/http-unit/hostHeader.test.js && node test-v2/run.js human",
+    "test:unit": "node --test test-v2/streams-unit/configHash.test.js test-v2/streams-unit/operators.test.js test-v2/streams-unit/cycle.test.js test-v2/streams-unit/eventTime.test.js test-v2/streams-unit/ack.test.js test-v2/http-unit/retry429.test.js test-v2/http-unit/hostHeader.test.js",
     "test:unit:e2e": "node --test test-v2/streams-unit/e2e.test.js",
     "test:integration": "node test-v2/run.js human",
     "test:streams": "node test-v2/run.js stream",

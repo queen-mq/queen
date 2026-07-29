@@ -12,4 +12,14 @@ return [
     'affinity_hash_ring' => env('QUEEN_AFFINITY_HASH_RING', 150),
     'health_retry_after' => env('QUEEN_HEALTH_RETRY_AFTER', 30000),
     'headers' => [],
+
+    // Backoff for HTTP 429 (rate limited by the proxy), independent of the
+    // retry_attempts above. Nulls keep the per-request-kind defaults: 10
+    // attempts for ordinary requests, unbounded for long-poll pops, 500ms
+    // base doubling up to a 30s cap. A Retry-After header always wins.
+    'retry_429' => [
+        'maxAttempts' => env('QUEEN_RETRY_429_MAX_ATTEMPTS'),
+        'baseMs' => env('QUEEN_RETRY_429_BASE_MS'),
+        'capMs' => env('QUEEN_RETRY_429_CAP_MS'),
+    ],
 ];

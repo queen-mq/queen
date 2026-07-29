@@ -14,6 +14,19 @@ var (
 	mainYes     bool
 )
 
+// Maintenance quiesces a whole broker process, so it stays operator-only on a
+// shared cell: one tenant must not be able to stop every other tenant's
+// traffic.
+const maintenanceAlternative = "it quiesces the whole broker process, so it has no per-tenant equivalent; " +
+	"point the context at the broker directly with operator credentials"
+
+func maintenanceSurface() string {
+	if mainPopOnly {
+		return "/api/v1/system/maintenance/pop"
+	}
+	return "/api/v1/system/maintenance"
+}
+
 var maintenanceCmd = &cobra.Command{
 	Use:     "maintenance",
 	Aliases: []string{"maint"},
@@ -40,7 +53,7 @@ var maintenanceGetCmd = &cobra.Command{
 			data, err = c.A.GetMaintenanceMode(ctx)
 		}
 		if err != nil {
-			return clierr.Server(err)
+			return blockedErr(err, maintenanceSurface(), maintenanceAlternative)
 		}
 		r, err := rendererFor(output.View{}, stdout())
 		if err != nil {
@@ -82,7 +95,7 @@ func toggleMaintenance(enabled bool) func(*cobra.Command, []string) error {
 			_, err = c.A.SetMaintenanceMode(ctx, enabled)
 		}
 		if err != nil {
-			return clierr.Server(err)
+			return blockedErr(err, maintenanceSurface(), maintenanceAlternative)
 		}
 		if !quiet() {
 			scope := "maintenance"

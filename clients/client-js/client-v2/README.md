@@ -104,6 +104,43 @@ const queen = new Queen({
 })
 ```
 
+### Connecting Through a Hosted Proxy (Cluster Selection)
+
+A Queen proxy deployment routes each request to a tenant cluster using the
+**Host header** (its first DNS label is the cluster slug). Normally you don't
+have to think about it — every cluster has its own hostname, so pointing the
+client at that hostname is all it takes:
+
+```javascript
+const queen = new Queen({
+  url: 'https://acme.eu1.queenmq.cloud',   // Host follows from the URL
+  bearerToken: process.env.QUEEN_API_KEY
+})
+```
+
+When the base URL can't be the cluster's hostname — an IP or a shared cell
+endpoint, a local rig, a staging box, split-horizon DNS — use `hostHeader` to
+advertise the cluster host while the connection still goes to the configured
+address (the same thing `curl --resolve` does; TLS SNI and certificate
+validation follow `hostHeader`, not the address):
+
+```javascript
+const queen = new Queen({
+  url: 'https://10.0.0.7:6711',            // where we connect
+  hostHeader: 'acme.eu1.queenmq.cloud',    // which cluster we ask for
+  bearerToken: process.env.QUEEN_API_KEY
+})
+```
+
+`hostHeader` takes a bare authority (`'acme'`, `'acme.eu1.queenmq.cloud'`,
+`'acme.local:6711'`) — not a URL. It works with `urls: [...]` too: every
+backend is dialed as usual, and all of them get the same Host.
+
+> ⚠️ `headers: { Host: '...' }` **cannot** work in JavaScript: `Host` is a
+> WHATWG forbidden header name and `fetch()` drops it. Rather than let that
+> silently route you to the wrong cluster, the client maps it onto
+> `hostHeader` and warns once. Set `hostHeader` directly.
+
 ---
 
 ## Part 1: Hello Queue!

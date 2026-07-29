@@ -140,7 +140,8 @@ var cgRefreshStatsCmd = &cobra.Command{
 		}
 		defer cleanup()
 		if _, err := c.A.RefreshConsumerStats(context.Background()); err != nil {
-			return clierr.Server(err)
+			return blockedErr(err, "POST /api/v1/stats/refresh",
+				"the broker refreshes consumer-group stats on its own interval (QUEEN_STATS_INTERVAL_MS)")
 		}
 		if !quiet() {
 			fmt.Fprintln(stdout(), "refreshed")

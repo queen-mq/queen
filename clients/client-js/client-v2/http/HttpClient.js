@@ -4,6 +4,80 @@
 
 import * as logger from '../utils/logger.js'
 
+// --------------------------------------------------------------------------
+// Host-routed proxy support (queen_proxy selects the tenant cluster from the
+// first DNS label of the Host header -- queen_proxy/src/cache.rs
+// slug_from_host).
+//
+// `fetch()` refuses to send a caller-supplied Host header: `host` is on the
+// WHATWG forbidden-header list, so undici drops it *silently*. Sending the
+// wrong Host is not a cosmetic problem at a proxy -- it either 421s
+// (cluster_unknown) or, on a cell with a default cluster, lands the traffic on
+// somebody else's cluster. So the Host is never taken from `headers`; it is a
+// first-class option (`hostHeader`) that rewrites the request URL's authority
+// while the connection stays pinned to the configured address (the same thing
+// `curl --resolve` does), and a Host found in `headers` is mapped onto it with
+// a loud warning rather than being ignored.
+// --------------------------------------------------------------------------
+
+// Warn once per distinct offending value: a second cluster misconfigured the
+// same way must not be masked by the first. Bounded so a pathological caller
+// can't grow it without limit (past the cap every occurrence warns, which is
+// the safe direction).
+const WARNED_HOST_TRAPS = new Set()
+const WARNED_HOST_TRAPS_CAP = 64
+
+function warnHostTrap(key, message) {
+  logger.warn('HttpClient.hostHeader', message)
+  if (WARNED_HOST_TRAPS.has(key)) return
+  if (WARNED_HOST_TRAPS.size < WARNED_HOST_TRAPS_CAP) WARNED_HOST_TRAPS.add(key)
+  // Deliberately not gated behind QUEEN_CLIENT_LOG: a request that reaches the
+  // wrong tenant must never be quiet.
+  if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+    console.warn(`[queen-mq] ${message}`)
+  }
+}
+
+/**
+ * Validate/parse a `hostHeader` value into the pieces we need.
+ * Accepts a bare authority: 'acme', 'acme.eu1.queenmq.cloud', 'acme.local:6711',
+ * '[::1]:6711'. Rejects anything URL-shaped so a mistake fails at construction
+ * instead of routing somewhere unexpected at runtime.
+ */
+function parseHostOverride(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error("hostHeader must be a non-empty string, e.g. hostHeader: 'acme.eu1.queenmq.cloud'")
+  }
+  const authority = value.trim()
+  if (authority.includes('://') || /[\s/\\?#@]/.test(authority)) {
+    throw new Error(`hostHeader must be a bare authority ('acme.eu1.queenmq.cloud' or 'acme.local:6711'), not a URL — got '${authority}'`)
+  }
+  let parsed
+  try {
+    parsed = new URL(`http://${authority}`)
+  } catch {
+    throw new Error(`hostHeader is not a valid host[:port] — got '${authority}'`)
+  }
+  if (!parsed.hostname || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+    throw new Error(`hostHeader is not a valid host[:port] — got '${authority}'`)
+  }
+  return { authority, hostname: parsed.hostname, port: parsed.port }
+}
+
+/** Split a user headers object into { hostValue, headers-without-Host }. */
+function splitHostHeader(headers) {
+  const rest = {}
+  let hostValue = null
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (key.toLowerCase() === 'host') {
+      hostValue = typeof value === 'string' ? value.trim() : String(value)
+      continue
+    }
+    rest[key] = value
+  }
+  return { hostValue: hostValue || null, headers: rest }
+}
+
 export class HttpClient {
   #baseUrl
   #loadBalancer
@@ -21,6 +95,12 @@ export class HttpClient {
   // `null` = unavailable (browser / import failed) -> fall back to global fetch.
   #dispatcher = undefined
   #destroyed = false
+  // Host-routed proxy support: parsed `hostHeader` ({authority, hostname, port})
+  // or null, plus one connection-pinned Agent per real backend (`host:port` ->
+  // Agent) so load balancing still reaches each backend while every request
+  // carries the same virtual Host.
+  #hostOverride = null
+  #pinnedDispatchers = new Map()
 
   constructor(options = {}) {
     const {
@@ -32,6 +112,15 @@ export class HttpClient {
       enableFailover = true,
       bearerToken = null,
       headers = {},
+      // Host to advertise, independent of the address we connect to. A
+      // queen_proxy deployment resolves the tenant cluster from the Host
+      // header's first DNS label, so this is what selects a cluster when the
+      // base URL points at a shared address (an IP, a cell endpoint, a test
+      // rig). The connection still goes to baseUrl/loadBalancer; only the
+      // request's authority (and TLS SNI) is rewritten. Normally unnecessary
+      // in production, where each cluster has its own subdomain and the base
+      // URL already carries the right Host.
+      hostHeader = null,
       // 429 (rate-limited) backoff policy, separate from the 5xx/network
       // retryAttempts above. { maxAttempts, baseMs, capMs }, all optional.
       // maxAttempts defaults to 10 for ordinary requests; long-poll pop
@@ -49,8 +138,22 @@ export class HttpClient {
     this.#retryDelayMillis = retryDelayMillis
     this.#enableFailover = enableFailover
     this.#bearerToken = bearerToken
-    this.#headers = headers || {}
     this.#retry429 = retry429 || {}
+
+    // A Host in `headers` can never go out over fetch(); rather than let it be
+    // dropped, map it onto the supported mechanism and say so out loud.
+    const { hostValue, headers: plainHeaders } = splitHostHeader(headers)
+    this.#headers = plainHeaders
+    let effectiveHost = hostHeader
+    if (hostValue) {
+      if (!effectiveHost) {
+        effectiveHost = hostValue
+        warnHostTrap(`map:${hostValue}`, `headers: { Host: '${hostValue}' } cannot be sent by fetch() (Host is a forbidden header name); it has been mapped onto hostHeader: '${hostValue}'. Set hostHeader directly to silence this warning.`)
+      } else if (String(effectiveHost).trim().toLowerCase() !== hostValue.toLowerCase()) {
+        warnHostTrap(`conflict:${hostValue}=>${effectiveHost}`, `headers: { Host: '${hostValue}' } is ignored because hostHeader: '${effectiveHost}' is also configured — requests will carry Host: '${effectiveHost}'.`)
+      }
+    }
+    this.#hostOverride = effectiveHost ? parseHostOverride(effectiveHost) : null
 
     logger.log('HttpClient.constructor', {
       hasLoadBalancer: !!loadBalancer,
@@ -60,6 +163,7 @@ export class HttpClient {
       enableFailover,
       hasAuth: !!bearerToken,
       customHeaders: Object.keys(this.#headers).length,
+      hostHeader: this.#hostOverride ? this.#hostOverride.authority : null,
       retry429: this.#retry429
     })
   }
@@ -144,10 +248,85 @@ export class HttpClient {
     return this.#dispatcher
   }
 
+  /**
+   * Agent whose connector always dials `realHostname:realPort`, whatever
+   * authority the request URL carries — so the URL (and therefore the Host
+   * header, and TLS SNI) can name the tenant cluster while the socket still
+   * goes to the configured address. One Agent per real backend keeps load
+   * balancing and failover intact. Returns null when undici is unavailable
+   * (browser) or the client was destroyed; the caller must then refuse to
+   * send rather than fall back to a wrong Host.
+   */
+  #getPinnedDispatcher(realHostname, realPort) {
+    const key = `${realHostname}:${realPort}`
+    const existing = this.#pinnedDispatchers.get(key)
+    if (existing) return existing
+    if (this.#destroyed) return Promise.resolve(null)
+    // Cache the in-flight promise, not the resolved Agent: concurrent first
+    // requests to the same backend must share one Agent, or the extra ones
+    // would hold keep-alive sockets that destroy() never sees.
+    const pending = this.#createPinnedDispatcher(realHostname, realPort)
+    this.#pinnedDispatchers.set(key, pending)
+    return pending
+  }
+
+  async #createPinnedDispatcher(realHostname, realPort) {
+    let undici
+    try {
+      undici = await import('undici')
+    } catch {
+      return null
+    }
+
+    const { Agent, buildConnector } = undici
+    if (typeof buildConnector !== 'function' || typeof Agent !== 'function') return null
+
+    const connector = buildConnector({})
+    const servername = this.#hostOverride.hostname
+    const connect = (opts, callback) => connector({
+      ...opts,
+      hostname: realHostname,
+      host: realHostname,
+      port: realPort,
+      // SNI/cert validation follow the advertised host, not the dialed
+      // address — same contract as `curl --resolve`.
+      servername: opts.servername || servername
+    }, callback)
+
+    const agent = new Agent({ keepAliveTimeout: 4000, keepAliveMaxTimeout: 30000, connect })
+    // destroy() may have run while the import was in flight; don't leave an
+    // Agent behind that nobody will close.
+    if (this.#destroyed) {
+      try { await agent.destroy() } catch { /* nothing to release */ }
+      return null
+    }
+    return agent
+  }
+
+  /**
+   * Split a real backend URL into the URL we put on the wire (authority
+   * replaced by the configured hostHeader, so fetch emits it as Host) and the
+   * address the socket must actually dial.
+   */
+  #applyHostOverride(url) {
+    const real = new URL(url)
+    const virtual = new URL(url)
+    virtual.hostname = this.#hostOverride.hostname
+    virtual.port = this.#hostOverride.port
+    return {
+      requestUrl: virtual.toString(),
+      // undici's own connector receives an already-unbracketed IPv6 literal;
+      // we bypass that step, so strip the brackets here.
+      realHostname: real.hostname.replace(/^\[(.*)\]$/, '$1'),
+      realPort: real.port || (real.protocol === 'https:' ? '443' : '80'),
+      realAuthority: real.host
+    }
+  }
+
   async #executeRequest(url, method, body = null, requestTimeoutMillis = null) {
     const effectiveTimeout = requestTimeoutMillis || this.#timeoutMillis
-    logger.log('HttpClient.request', { method, url, hasBody: !!body, timeout: effectiveTimeout })
-    
+    logger.log('HttpClient.request', { method, url, hasBody: !!body, timeout: effectiveTimeout, host: this.#hostOverride ? this.#hostOverride.authority : undefined })
+
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), effectiveTimeout)
 
@@ -164,17 +343,30 @@ export class HttpClient {
         headers
       }
 
-      const dispatcher = await this.#getDispatcher()
-      if (dispatcher) {
+      let requestUrl = url
+      if (this.#hostOverride) {
+        const target = this.#applyHostOverride(url)
+        const dispatcher = await this.#getPinnedDispatcher(target.realHostname, target.realPort)
+        if (!dispatcher) {
+          // Sending anyway would advertise Host: <address> and, at a proxy
+          // with a default cluster, silently write to the wrong tenant.
+          throw new Error(`hostHeader '${this.#hostOverride.authority}' cannot be honored here: no undici dispatcher available (browser environment, or this client was destroyed). Refusing to send with Host: ${target.realAuthority}, which would reach the wrong cluster.`)
+        }
         options.dispatcher = dispatcher
+        requestUrl = target.requestUrl
+      } else {
+        const dispatcher = await this.#getDispatcher()
+        if (dispatcher) {
+          options.dispatcher = dispatcher
+        }
       }
 
       if (body) {
         options.body = JSON.stringify(body)
       }
 
-      const response = await fetch(url, options)
-      
+      const response = await fetch(requestUrl, options)
+
       logger.log('HttpClient.response', { method, url, status: response.status })
 
       // Handle 204 No Content
@@ -376,10 +568,18 @@ export class HttpClient {
     this.#destroyed = true
     const dispatcher = this.#dispatcher
     // Subsequent (stray) requests use global fetch instead of a dead agent.
+    // With a hostHeader configured there is no such fallback (global fetch
+    // could not carry the Host) — those requests fail loudly instead.
     this.#dispatcher = null
-    if (dispatcher) {
+    const pending = [...this.#pinnedDispatchers.values()]
+    this.#pinnedDispatchers.clear()
+    // Entries are promises (see #getPinnedDispatcher); settle them so an Agent
+    // created concurrently with close() is released too.
+    const pinned = await Promise.all(pending.map(p => Promise.resolve(p).catch(() => null)))
+    for (const agent of [dispatcher, ...pinned]) {
+      if (!agent) continue
       try {
-        await dispatcher.destroy()
+        await agent.destroy()
         logger.log('HttpClient.destroy', 'Agent destroyed')
       } catch (error) {
         logger.warn('HttpClient.destroy', { error: error.message })

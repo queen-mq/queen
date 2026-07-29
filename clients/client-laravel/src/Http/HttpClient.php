@@ -18,6 +18,7 @@ class HttpClient
     private bool $enableFailover;
     private ?string $bearerToken;
     private array $headers;
+    private array $retry429;
     private Client $guzzle;
 
     public function __construct(array $options = [])
@@ -30,36 +31,56 @@ class HttpClient
         $this->enableFailover = $options['enableFailover'] ?? true;
         $this->bearerToken = $options['bearerToken'] ?? null;
         $this->headers = $options['headers'] ?? [];
-        $this->guzzle = new Client();
+        // 429 (rate-limited) backoff policy, separate from the 5xx/network
+        // retryAttempts above: ['maxAttempts' => int, 'baseMs' => int,
+        // 'capMs' => int], all optional. See Retry429Policy.
+        $this->retry429 = $options['retry429'] ?? [];
+
+        // 'handler' overrides Guzzle's handler stack, the seam tests use to
+        // drive the retry/failover paths without a live server.
+        $handler = $options['handler'] ?? null;
+        $this->guzzle = new Client($handler !== null ? ['handler' => $handler] : []);
     }
 
     // ===========================
     // Synchronous API
     // ===========================
 
-    public function get(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): mixed
+    /**
+     * $retryKind selects the 429 backoff budget: pass Retry429Policy::KIND_POP
+     * for long-poll (wait=true) pop requests to get the unbounded policy,
+     * null/anything else for the bounded one.
+     */
+    public function get(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
     {
-        return $this->requestWithFailover('GET', $path, null, $requestTimeoutMillis, $affinityKey);
+        return $this->requestWithFailover('GET', $path, null, $requestTimeoutMillis, $affinityKey, $retryKind);
     }
 
-    public function post(string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): mixed
+    public function post(string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
     {
-        return $this->requestWithFailover('POST', $path, $body, $requestTimeoutMillis, $affinityKey);
+        return $this->requestWithFailover('POST', $path, $body, $requestTimeoutMillis, $affinityKey, $retryKind);
     }
 
-    public function put(string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): mixed
+    public function put(string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
     {
-        return $this->requestWithFailover('PUT', $path, $body, $requestTimeoutMillis, $affinityKey);
+        return $this->requestWithFailover('PUT', $path, $body, $requestTimeoutMillis, $affinityKey, $retryKind);
     }
 
-    public function delete(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): mixed
+    public function delete(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
     {
-        return $this->requestWithFailover('DELETE', $path, null, $requestTimeoutMillis, $affinityKey);
+        return $this->requestWithFailover('DELETE', $path, null, $requestTimeoutMillis, $affinityKey, $retryKind);
     }
 
     // ===========================
     // Async API (returns Guzzle promises)
     // ===========================
+    //
+    // Unlike the synchronous API these do NOT retry 429 in flight: the only
+    // way to wait inside a promise chain here is to block, which would stall
+    // every other request sharing the cURL multi-handle. The rejection is an
+    // HttpException carrying errorCode/retryAfterSeconds, so callers pace
+    // themselves between rounds (see ConsumerManager::concurrentWorkers) using
+    // the policy from getRetry429Policy().
 
     public function getAsync(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
     {
@@ -113,6 +134,16 @@ class HttpClient
         return $this->loadBalancer;
     }
 
+    /**
+     * Effective 429 backoff policy for a request kind. Exposed so callers of
+     * the async API — which has no in-flight 429 retry — pace their own poll
+     * rounds with the same numbers the synchronous path uses.
+     */
+    public function getRetry429Policy(?string $retryKind = null): Retry429Policy
+    {
+        return Retry429Policy::forKind($this->retry429, $retryKind);
+    }
+
     private function resolveUrl(?string $affinityKey = null): string
     {
         if ($this->loadBalancer !== null) {
@@ -160,13 +191,26 @@ class HttpClient
 
         if ($statusCode >= 400) {
             $error = "HTTP {$statusCode}";
+            $errorCode = null;
             if ($responseBody) {
                 $decoded = json_decode($responseBody, true);
                 if (isset($decoded['error'])) {
                     $error = $decoded['error'];
                 }
+                // Proxy error contract: 429 {error, code: 'rate_limited' |
+                // 'quota_exceeded'} with Retry-After (seconds); 403 {error,
+                // code: 'cluster_suspended' | 'storage_quota_exceeded' |
+                // 'feature_gated' | 'forbidden'}. See ErrorCode.
+                if (isset($decoded['code']) && is_string($decoded['code'])) {
+                    $errorCode = $decoded['code'];
+                }
             }
-            throw new HttpException($error, $statusCode);
+
+            $retryAfterSeconds = $statusCode === 429
+                ? $this->parseRetryAfter($response->getHeaderLine('Retry-After'))
+                : null;
+
+            throw new HttpException($error, $statusCode, 0, null, $errorCode, $retryAfterSeconds);
         }
 
         if (empty($responseBody)) {
@@ -176,11 +220,54 @@ class HttpClient
         return json_decode($responseBody, true);
     }
 
+    /**
+     * Parse the Retry-After header (seconds, per the proxy contract) into a
+     * float. Null when absent, non-numeric or negative.
+     */
+    private function parseRetryAfter(string $value): ?float
+    {
+        if ($value === '' || !is_numeric($value)) {
+            return null;
+        }
+
+        $seconds = (float) $value;
+
+        return $seconds >= 0 ? $seconds : null;
+    }
+
     private function executeRequest(string $url, string $method, ?array $body = null, ?int $requestTimeoutMillis = null): mixed
     {
         $options = $this->buildRequestOptions($method, $body, $requestTimeoutMillis);
         $response = $this->guzzle->request($method, $url, $options);
         return $this->parseResponse($response);
+    }
+
+    /**
+     * Run one logical request against a single URL, transparently retrying
+     * HTTP 429 with backoff until the policy for $retryKind is exhausted (or
+     * never, for the unbounded pop policy). Every other outcome — success,
+     * network error, non-429 4xx, 5xx — passes straight through: 429 is the
+     * only status this layer retries, and 5xx/network retry plus
+     * cross-backend failover stay with the callers below.
+     */
+    private function executeRequestWithRetry429(string $url, string $method, ?array $body, ?int $requestTimeoutMillis, ?string $retryKind): mixed
+    {
+        $policy = Retry429Policy::forKind($this->retry429, $retryKind);
+        $tries = 0;
+
+        while (true) {
+            $tries++;
+
+            try {
+                return $this->executeRequest($url, $method, $body, $requestTimeoutMillis);
+            } catch (HttpException $error) {
+                if ($error->statusCode !== 429 || $policy->isExhausted($tries)) {
+                    throw $error;
+                }
+
+                usleep($policy->delayMillis($tries - 1, $error->retryAfterSeconds) * 1000);
+            }
+        }
     }
 
     private function executeRequestAsync(string $url, string $method, ?array $body = null, ?int $requestTimeoutMillis = null): PromiseInterface
@@ -197,14 +284,14 @@ class HttpClient
         return ($error instanceof HttpException) ? $error->statusCode : 0;
     }
 
-    private function requestWithRetry(string $method, string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): mixed
+    private function requestWithRetry(string $method, string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
     {
         $lastError = null;
 
         for ($attempt = 0; $attempt < $this->retryAttempts; $attempt++) {
             try {
                 $url = $this->resolveUrl($affinityKey) . $path;
-                return $this->executeRequest($url, $method, $body, $requestTimeoutMillis);
+                return $this->executeRequestWithRetry429($url, $method, $body, $requestTimeoutMillis, $retryKind);
             } catch (\Throwable $error) {
                 $lastError = $error;
 
@@ -223,10 +310,10 @@ class HttpClient
         throw $lastError;
     }
 
-    private function requestWithFailover(string $method, string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): mixed
+    private function requestWithFailover(string $method, string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null, ?string $retryKind = null): mixed
     {
         if ($this->loadBalancer === null || !$this->enableFailover) {
-            return $this->requestWithRetry($method, $path, $body, $requestTimeoutMillis, $affinityKey);
+            return $this->requestWithRetry($method, $path, $body, $requestTimeoutMillis, $affinityKey, $retryKind);
         }
 
         $urls = $this->loadBalancer->getAllUrls();
@@ -243,7 +330,14 @@ class HttpClient
             $attemptedUrls[] = $url;
 
             try {
-                $result = $this->executeRequest($url . $path, $method, $body, $requestTimeoutMillis);
+                // 429s are retried in place against this same backend inside
+                // executeRequestWithRetry429: rate limiting is a tenant-quota
+                // signal, not a backend-health one, so it must neither mark
+                // the server unhealthy nor fail over to another (every backend
+                // would answer the same, and spraying the fleet only makes the
+                // limiter angrier). An exhausted 429 is a 4xx and therefore
+                // leaves the loop below without a second server being tried.
+                $result = $this->executeRequestWithRetry429($url . $path, $method, $body, $requestTimeoutMillis, $retryKind);
                 $this->loadBalancer->markHealthy($url);
                 return $result;
             } catch (\Throwable $error) {

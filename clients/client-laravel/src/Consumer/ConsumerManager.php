@@ -2,7 +2,9 @@
 
 namespace Queen\Consumer;
 
+use Queen\Exceptions\HttpException;
 use Queen\Http\HttpClient;
+use Queen\Http\Retry429Policy;
 use Queen\Queen;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
 
@@ -113,6 +115,8 @@ class ConsumerManager
         $perWorkerLimit = $limit !== null ? (int) ceil($limit / $concurrency) : null;
         $clientTimeout = $wait ? $timeoutMillis + 5000 : $timeoutMillis;
         $url = "{$path}?{$baseParams}";
+        $pollPolicy = $this->httpClient->getRetry429Policy($wait ? Retry429Policy::KIND_POP : null);
+        $consecutive429 = 0;
 
         while ($running) {
             if (function_exists('pcntl_signal_dispatch')) {
@@ -157,6 +161,7 @@ class ConsumerManager
             }
 
             // Process results per worker
+            $rateLimitError = null;
             foreach ($results as $w => $outcome) {
                 if (!$running) {
                     break;
@@ -164,6 +169,15 @@ class ConsumerManager
 
                 if ($outcome['state'] === 'rejected') {
                     $error = $outcome['reason'];
+
+                    // 429: the async path can't retry in flight without
+                    // blocking every other worker on the shared multi-handle,
+                    // so remember it and pace the next poll round once, below.
+                    if ($error instanceof HttpException && $error->statusCode === 429) {
+                        $rateLimitError = $error;
+                        continue;
+                    }
+
                     $isTimeout = str_contains($error->getMessage(), 'timeout') || str_contains($error->getMessage(), 'timed out');
                     if ($isTimeout && $wait) {
                         continue; // Normal for long polling
@@ -173,6 +187,9 @@ class ConsumerManager
                         usleep(1_000_000);
                         continue;
                     }
+                    // 403 (forbidden) included: cluster_suspended and the other
+                    // terminal codes never resolve on their own, so surface
+                    // them (with ->errorCode) instead of retrying.
                     throw $error;
                 }
 
@@ -219,6 +236,15 @@ class ConsumerManager
                 }
             }
 
+            // One backoff for the whole round: every worker shares the tenant
+            // bucket, so N sleeps would only stall the poll N times over.
+            if ($rateLimitError !== null) {
+                usleep($pollPolicy->delayMillis($consecutive429, $rateLimitError->retryAfterSeconds) * 1000);
+                $consecutive429++;
+            } else {
+                $consecutive429 = 0;
+            }
+
             // Check global limit
             if ($limit !== null && array_sum($workerProcessed) >= $limit) {
                 break;
@@ -245,6 +271,9 @@ class ConsumerManager
     ): void {
         $processedCount = 0;
         $lastMessageTime = $idleMillis !== null ? $this->nowMillis() : null;
+        $retryKind = $wait ? Retry429Policy::KIND_POP : null;
+        $pollPolicy = $this->httpClient->getRetry429Policy($retryKind);
+        $consecutive429 = 0;
 
         while ($running) {
             if (function_exists('pcntl_signal_dispatch')) {
@@ -268,7 +297,10 @@ class ConsumerManager
 
             try {
                 $clientTimeout = $wait ? $timeoutMillis + 5000 : $timeoutMillis;
-                $result = $this->httpClient->get("{$path}?{$baseParams}", $clientTimeout, $affinityKey);
+                // wait=true is a long-poll: mark it so a 429 backs off and keeps
+                // waiting instead of giving up after the bounded push-like budget.
+                $result = $this->httpClient->get("{$path}?{$baseParams}", $clientTimeout, $affinityKey, $retryKind);
+                $consecutive429 = 0;
 
                 if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                     if (!$wait) {
@@ -314,6 +346,16 @@ class ConsumerManager
                     $processedCount += count($messages);
                 }
             } catch (\Throwable $error) {
+                // 429: HttpClient already retried this with backoff (unbounded
+                // for a wait=true poll), so getting here means an explicit
+                // maxAttempts override ran out. Keep polling behind the same
+                // backoff rather than hot-looping against the limiter.
+                if ($error instanceof HttpException && $error->statusCode === 429) {
+                    usleep($pollPolicy->delayMillis($consecutive429, $error->retryAfterSeconds) * 1000);
+                    $consecutive429++;
+                    continue;
+                }
+
                 $isTimeout = str_contains($error->getMessage(), 'timeout') || str_contains($error->getMessage(), 'timed out');
                 if ($isTimeout && $wait) {
                     continue;
@@ -325,6 +367,9 @@ class ConsumerManager
                     continue;
                 }
 
+                // 403 (forbidden) falls through here: cluster_suspended and the
+                // other terminal codes never resolve on their own, so surface
+                // them (with ->errorCode) instead of retrying.
                 throw $error;
             }
         }

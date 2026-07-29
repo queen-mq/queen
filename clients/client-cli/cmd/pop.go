@@ -79,7 +79,10 @@ server ack the messages atomically with the pop.
 
 		messages, err := qb.Pop(ctx)
 		if err != nil {
-			return clierr.Server(fmt.Errorf("pop: %w", err))
+			// Only the queue-less discovery pop (namespace/task) is blocked;
+			// a pop that names its queue never trips this branch.
+			return blockedErr(fmt.Errorf("pop: %w", err), "GET /api/v1/pop",
+				"discovery pop by namespace/task was removed from the product surface; name a queue")
 		}
 		if len(messages) == 0 {
 			return clierr.Empty("no messages")
