@@ -70,6 +70,20 @@ const NIL: u32 = u32::MAX;
 // §6: scheduling padding on every PG-derived deadline (the broker clock only
 // schedules the retry; PG remains the visibility authority).
 const PAD_MS: i64 = 300;
+// Cap on how long a leased entry is parked in the wheel before it is re-probed.
+// The lease-expiry deadline is only an OPTIMISATION to avoid probing a genuinely
+// held partition on every delivery — but a lease is routinely released EARLY by
+// an ack, and the ring learns of an early release only two ways: the acking
+// pop's `promote_ack`, or a re-probe. `promote_ack` loses a race whenever a
+// pop's SQL snapshot still saw the lease live and its `Leased` checkin re-parks
+// the entry AFTER the releasing ack already fired: no future ack then references
+// that partition and it sits dark until the ORIGINAL lease expiry — up to
+// leaseTime, 300s by default (a multi-minute single-partition delivery stall,
+// root-caused on the bench VM 2026-07-29). Capping the park turns that unbounded
+// stall into at most one empty re-probe per this interval per still-leased
+// partition — bounded and self-healing. Fast consumers almost never hit it:
+// their ack's promote_ack wins the race and re-arms the entry first.
+const MAX_LEASE_REVISIT_MS: i64 = 1000;
 // §6: bounded backoff for a revisit on a deferral queue that popped empty.
 const REVISIT_MIN_MS: i64 = 50;
 const REVISIT_MAX_MS: i64 = 1000;
@@ -1073,7 +1087,12 @@ impl HotList {
                     // Claim-time fact, stored unconditionally: the covered-ack
                     // clear may only fire on a drained claim (spec §2).
                     sub.drained[local as usize] = r.drained;
-                    sub.wheel_schedule(local, now_ms + lease_ms.max(1) + PAD_MS);
+                    // Bounded (MAX_LEASE_REVISIT_MS): our own ack normally promotes
+                    // this before the deadline, but if that promote is lost to the
+                    // race the cap re-probes within ~1s instead of at lease expiry.
+                    let park = (now_ms + lease_ms.max(1) + PAD_MS)
+                        .min(now_ms + MAX_LEASE_REVISIT_MS);
+                    sub.wheel_schedule(local, park);
                 }
                 Verdict::Took => {
                     // auto-ack Took (same epoch guard as the leased arm above).
@@ -1103,8 +1122,14 @@ impl HotList {
                     sub.ready_push_tail(local);
                 }
                 Verdict::Leased(until_ms) => {
-                    // Never clear a leased candidate (§7): wheel at T + pad.
-                    sub.wheel_schedule(local, until_ms + PAD_MS);
+                    // Never clear a leased candidate (§7): wheel at T + pad, but
+                    // BOUNDED by MAX_LEASE_REVISIT_MS. `until_ms` came from the SQL
+                    // snapshot and may already be stale (the foreign lease released
+                    // between the pop and this checkin); parking at the full expiry
+                    // strands the partition until then. The cap re-probes within
+                    // ~1s so a stale lease is rediscovered promptly.
+                    let park = (until_ms + PAD_MS).min(now_ms + MAX_LEASE_REVISIT_MS);
+                    sub.wheel_schedule(local, park);
                 }
                 Verdict::Empty => {
                     // Epoch-CAS (§4): clear only if no mark raced.
@@ -1766,6 +1791,46 @@ mod tests {
         );
     }
 
+    // Re-arm stall (root-caused on the bench VM 2026-07-29): a Leased verdict
+    // carries the foreign lease's expiry from the SQL snapshot, which may already
+    // be stale (the lease released between the pop and this checkin). Parking the
+    // entry at that expiry stranded it for up to leaseTime (300s default) because
+    // the releasing ack's promote_ack had already fired for that partition and no
+    // future ack referenced it. The park is now capped at MAX_LEASE_REVISIT_MS so
+    // a stale lease is re-probed within ~1s instead of held to expiry.
+    #[test]
+    fn leased_verdict_is_reprobed_within_the_cap_not_at_lease_expiry() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.note_partition_id("q", "p0", "id0");
+        h.mark_local("q", "p0", 1, 0);
+        let c = h.take_batch("q", "g", 1, 0);
+        assert_eq!(names(&c), vec!["p0"]);
+        // SQL snapshot says a foreign lease is held until 300s from epoch.
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult {
+                name: "p0".into(),
+                epoch: c[0].epoch,
+                verdict: Verdict::Leased(300_000),
+                drained: false,
+            }],
+            100,
+            false,
+            60_000,
+        );
+        // Not claimable inside the cap window (the lease may be genuinely held)...
+        assert!(h.take_batch("q", "g", 1, 500).is_empty());
+        // ...but re-probed at the cap (claim now_ms 100 + MAX_LEASE_REVISIT_MS),
+        // NOT held to the reported 300s expiry.
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 100 + MAX_LEASE_REVISIT_MS + 1)),
+            vec!["p0"],
+            "a possibly-stale foreign lease must be re-probed within the cap, not at lease expiry"
+        );
+    }
+
     // The intermittent concurrency race (2026-07-24): with N concurrent
     // poppers on one partition, a racing Leased checkin can win over the
     // Took (the INFLIGHT-ownership gate skips the loser) and park the entry
@@ -1977,10 +2042,14 @@ mod tests {
             true,
             60_000,
         );
-        // not claimable before the lease expiry (+pad)
-        assert!(h.take_batch("q", "g", 1, 2000).is_empty());
-        // claimable after T + pad
-        assert_eq!(names(&h.take_batch("q", "g", 1, 5500)), vec!["p0"]);
+        // not cleared, not immediately claimable: it is parked in the wheel.
+        assert!(h.take_batch("q", "g", 1, 1500).is_empty());
+        // re-probed at the bounded cap (claim now_ms 1000 + MAX_LEASE_REVISIT_MS),
+        // NOT held to the reported 5000ms lease expiry (2026-07-29 re-arm fix).
+        assert_eq!(
+            names(&h.take_batch("q", "g", 1, 1000 + MAX_LEASE_REVISIT_MS + 1)),
+            vec!["p0"]
+        );
     }
 
     #[test]
@@ -2383,13 +2452,16 @@ mod tests {
             false,
             300_000,
         );
-        // Not claimable: parked in the wheel until the 300s lease expiry.
-        assert!(h.take_batch("q", "g", 1, 1_000).is_empty());
-        // The reseed floor reports p0 pending (last_offset > committed) → it MUST
-        // reclaim the stale wheel entry instead of waiting 300s.
-        h.reseed_row("q", "g", "id0", "p0", 1_000);
+        // Not claimable yet: parked in the wheel (the bounded revisit at
+        // now + MAX_LEASE_REVISIT_MS has not fired at t=500).
+        assert!(h.take_batch("q", "g", 1, 500).is_empty());
+        // The reseed floor reports p0 pending (last_offset > committed) and MUST
+        // reclaim the stale wheel entry — a secondary backstop below the bounded
+        // re-probe, for entries stranded by other paths (e.g. a dropped INFLIGHT
+        // pop) that the lease cap does not cover.
+        h.reseed_row("q", "g", "id0", "p0", 500);
         assert_eq!(
-            names(&h.take_batch("q", "g", 1, 1_000)),
+            names(&h.take_batch("q", "g", 1, 500)),
             vec!["p0"],
             "reseed floor must reclaim a stale lease-parked wheel entry"
         );
