@@ -434,6 +434,14 @@
   color: var(--text-hi);
   background: var(--ink-3);
 }
+/* The same banner used INSIDE a page instead of edge-to-edge under the topbar:
+   it closes into a block of its own. Unlayered and compound on purpose — it has
+   to out-specify `.status-banner:last-child`, which strips the bottom border. */
+.status-banner.view-banner {
+  border: 1px solid currentColor;
+  border-radius: var(--r-card);
+  margin-bottom: 12px;
+}
 @media (max-width: 700px) {
   .status-banner { padding: 8px 14px 8px 48px; font-size: 12px; }
 }
@@ -756,6 +764,304 @@
     .hs-item { flex-basis: 50%; border-right: none; border-bottom: 1px solid var(--bd); }
     .hs-item:nth-child(odd) { border-right: 1px solid var(--bd); }
     .hs-item:nth-last-child(-n+2) { border-bottom: none; }
+  }
+
+  /* --- Scope strip ------------------------------------------------------
+     Whose numbers these are. Built from identity, never from a fetch, so it
+     renders while loading, while failing and on an empty page. */
+  .scope-strip {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px; margin-bottom: 12px;
+    border: 1px solid var(--bd); border-radius: var(--r-card);
+    background: var(--ink-2);
+    font-size: 11.5px; color: var(--text-mid);
+  }
+  /* Amber is the CELL-scope signal, not a warning: the inset rule says
+     "these numbers are the whole cell's". */
+  .scope-strip-cell { border-color: var(--warn-bd); box-shadow: inset 3px 0 0 var(--warn-400); }
+  .scope-text { font-family: var(--font-mono); color: var(--text-mid); }
+  .scope-text strong { color: var(--text-hi); font-weight: 600; }
+  /* System's cell strip is a sentence, not a slug triple — three lines of
+     11.5px mono prose is unreadable. */
+  .scope-strip-cell .scope-text { font-family: inherit; }
+  .scope-sep { margin: 0 5px; color: var(--text-faint); }
+  .scope-fill { flex: 1; }
+  .scope-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-low); }
+
+  /* --- Cell / operator vocabulary ---------------------------------------
+     Three amber marks, three scales, one meaning: "this covers every tenant
+     on the cell, not just yours". Amber is never a failure here. */
+  .cell-section {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px; margin: 24px 0 14px;
+    font-size: 12px; color: var(--text-low);
+    border: 1px solid var(--bd); border-left: 3px solid var(--warn-400);
+    border-radius: var(--r-card);
+    background: color-mix(in srgb, var(--warn-400) 5%, transparent);
+  }
+  /* Same band squeezed into a table body (Dashboard's metric table): rules
+     instead of a rounded panel, because a card inside a table reads as a
+     nested card. MUST stay after .cell-section — the element carries both. */
+  .cell-section-inline {
+    padding: 8px 16px; margin: 0;
+    font-size: 11px;
+    border: 0; border-top: 1px solid var(--bd); border-bottom: 1px solid var(--bd);
+    border-radius: 0;
+  }
+  .cell-tag {
+    font-size: 9.5px; font-weight: 600; letter-spacing: .12em;
+    color: var(--warn-400); border: 1px solid var(--warn-400);
+    border-radius: var(--r-chip); padding: 1px 5px; white-space: nowrap;
+  }
+  /* `font-style: normal` is load-bearing: two call sites are <i> elements
+     (Dashboard's counts strip, MetricRow). */
+  .cell-chip {
+    font-style: normal;
+    font-size: 9px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--warn-400); border: 1px solid var(--warn-400);
+    border-radius: var(--r-chip); padding: 0 3px;
+    margin-left: 5px; vertical-align: 1px; opacity: .8;
+  }
+
+  /* --- Filter card ------------------------------------------------------
+     The app-wide control container: a card with no header. */
+  .filters { margin-bottom: 16px; }
+  .filter-rows { display: flex; flex-direction: column; gap: 14px; }
+  .filter-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 20px; }
+  .filter-row-sep { padding-top: 12px; border-top: 1px solid var(--bd); }
+  .filter-field { display: flex; align-items: center; gap: 8px; }
+  /* `.input` is width:100%; an inline-label field (a `.seg` or a
+     datetime-local) must not stretch across the row. This replaces the
+     byte-identical `.an-dt` / `.sys-dt` copies. */
+  .filter-field > .input { width: auto; font-size: 13px; }
+  .filter-field-col {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+    flex: 1 1 160px; min-width: 150px; max-width: 220px;
+  }
+  .filter-field-col > .input { width: 100%; }
+  .filter-field-right { margin-left: auto; }
+  .filter-hint { font-size: 11px; color: var(--text-low); }
+  .filter-invalid { font-size: 11.5px; color: var(--ember-400); }
+  .filter-check {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-mid); cursor: pointer; white-space: nowrap;
+  }
+  .filter-check input { width: 14px; height: 14px; accent-color: var(--accent); }
+
+  .filter-search { position: relative; flex: 1 1 220px; min-width: 220px; max-width: 360px; }
+  .filter-search .input { padding-left: 32px; width: 100%; }
+  .filter-search-icon {
+    position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    width: 14px; height: 14px; color: var(--text-low); pointer-events: none;
+  }
+
+  /* --- Card header subtitle ---------------------------------------------
+     What this panel IS, left-aligned beside the title. The right edge of a
+     card header belongs to freshness (`.card-header .muted`, L490) and to
+     nothing else. */
+  .card-header .card-sub { font-size: 11px; color: var(--text-low); font-weight: 400; }
+  .card-header .modal-close { margin-left: auto; }
+
+  /* --- Stat tiles: the grid --------------------------------------------- */
+  .stat-grid { display: grid; gap: 12px; }
+  .stat-grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .stat-grid-3 { grid-template-columns: repeat(3, 1fr); }
+  .stat-grid-4 { grid-template-columns: repeat(4, 1fr); }
+  .stat-grid-5 { grid-template-columns: repeat(5, 1fr); }
+  .stat-grid-6 { grid-template-columns: repeat(6, 1fr); }
+  .stat-grid-center .stat { text-align: center; }
+  .stat-grid-center .stat .stat-label { justify-content: center; }
+  .stat-grid-center .stat .stat-foot { justify-content: center; }
+
+  @media (max-width: 1100px) {
+    .stat-grid-5, .stat-grid-6 { grid-template-columns: repeat(3, 1fr); }
+    .stat-grid-4 { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 640px) {
+    .stat-grid-3, .stat-grid-4, .stat-grid-5, .stat-grid-6 { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* A stat whose value is text, not a number — DeadLetter's "Most frequent
+     error". Keeps the tile's shape without pretending a long mono string is
+     a 22px figure. Colour is deliberately left to the call site. */
+  .stat .stat-value-text {
+    margin-top: 8px; font-size: 13px; line-height: 1.5;
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+
+  /* --- Unknown / not-recorded / empty: three looks, three meanings -------
+     Failure and emptiness must not look alike: one is "we do not know", the
+     other is "we know, and it is nothing". A third case — "the engine does
+     not record it" — is neither, and owns the dashed amber alone. */
+
+  /* 1. We could not ask. */
+  .panel-err {
+    padding: 12px 14px; margin-bottom: 12px;
+    border: 1px solid var(--ember-bd); border-radius: var(--r-card);
+    background: var(--ember-glow); color: var(--ember-400);
+    font-size: 12.5px; line-height: 1.45;
+  }
+  .panel-err:last-child { margin-bottom: 0; }
+
+  /* 2. We asked; the engine does not record it. */
+  .panel-na {
+    padding: 16px 14px;
+    border: 1px dashed var(--warn-400); border-radius: var(--r-card);
+    font-size: 12.5px; font-style: italic; text-align: center; color: var(--text-mid);
+  }
+
+  /* 3. We asked and it is nothing — card-body scale. */
+  .panel-msg { padding: 32px 0; text-align: center; font-size: 13px; color: var(--text-mid); }
+  .panel-msg-ok { color: var(--ok-500); }
+
+  /* 3b. Same fact at tile scale (inside a chart cell or a mini-table). */
+  .empty-tile {
+    padding: 18px 10px;
+    border: 1px dashed var(--bd); border-radius: var(--r-card);
+    font-size: 12px; text-align: center; color: var(--text-low);
+  }
+  .empty-tile-ok { color: var(--ok-500); }
+
+  /* --- Empty state / prompt block --------------------------------------- */
+  .empty-state { padding: 48px 16px; text-align: center; }
+  .empty-state .empty-state-icon {
+    display: block; width: 40px; height: 40px; margin: 0 auto 12px;
+    color: var(--text-low); opacity: .4;
+  }
+  .empty-state h3 { font-size: 13px; font-weight: 600; color: var(--text-hi); margin: 0 0 4px; }
+  .empty-state p  { font-size: 13px; color: var(--text-mid); margin: 0; }
+  .empty-state .btn { margin-top: 14px; }
+  /* Two buttons happen on the full-page failure cards (QueueDetail: Retry +
+     Back to queues). Without this they touch. */
+  .empty-state .btn + .btn { margin-left: 8px; }
+  /* The failure variant of a list slot: same block, ember headline, so
+     "cannot list" never reads as "nothing here". */
+  .empty-state-failed h3 { color: var(--ember-400); }
+
+  /* --- Pager footer ------------------------------------------------------ */
+  .pager {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-top: 1px solid var(--bd);
+  }
+  .pager-count { font-size: 13px; color: var(--text-mid); }
+  .pager-nav { display: flex; gap: 8px; }
+  .pager-nav .btn { font-size: 12px; }
+
+  /* --- Modal shell / drawer ---------------------------------------------- */
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+    background: rgba(0, 0, 0, .5);
+    backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  }
+  .modal-card { width: 100%; max-width: 480px; max-height: 88vh; overflow-y: auto; }
+  .modal-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 14px; border-top: 1px solid var(--bd);
+  }
+  /* Right-side drawers (Messages, DeadLetter, Traces). Above the scrim.
+     CARD level, not --ink-1: the payload blocks inside these drawers are
+     var(--recessed), which IS --ink-1, so an --ink-1 drawer would swallow
+     them whole. Translucent + blur is kept — it is what all three already
+     had and it reads as a surface floating over the page. */
+  .drawer-panel {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 51;
+    width: 100%; max-width: 640px; overflow-y: auto;
+    background: color-mix(in srgb, var(--ink-2) 97%, transparent);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border-left: 1px solid var(--bd);
+  }
+
+  /* --- Multi-select pill row ---------------------------------------------
+     A `.pill` row is multi-select; a `.seg` is single-select. Keeping them
+     visually distinct is load-bearing. */
+  .pill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: var(--r-pill);
+    font-size: 11px; font-weight: 500; cursor: pointer;
+    border: 1px solid var(--bd-hi); color: var(--text-mid);
+    background: transparent; transition: .15s var(--ease);
+  }
+  .pill:hover { color: var(--text-hi); }
+  .pill.on { color: var(--text-hi); background: var(--ink-5); border-color: var(--bd-hi); }
+
+  /* --- Liveness tick ----------------------------------------------------- */
+  .live-tick {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--text-low);
+    font-family: var(--font-mono);
+  }
+
+  /* --- Counts strip (Dashboard + QueueDetail) ----------------------------
+     Hoisted verbatim from the two identical scoped copies. */
+  .counts-strip {
+    display: flex; align-items: baseline; justify-content: space-between;
+    flex-wrap: wrap; gap: 14px 24px;
+    padding: 12px 16px; margin-bottom: 14px;
+    border: 1px solid var(--bd); border-radius: var(--r-card);
+    background: var(--ink-2);
+  }
+  .counts-group { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+  .counts-group-right { color: var(--text-low); }
+  .count-item-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-low); margin-right: 2px;
+  }
+  .count-item {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    background: transparent; border: none; padding: 0;
+    color: var(--text-mid); font-size: 12.5px; cursor: pointer;
+    transition: color .12s var(--ease);
+  }
+  .count-item.count-static { cursor: default; }
+  .count-item.count-tight { gap: 4px; }
+  .count-item:not(:disabled):not(.count-static):hover { color: var(--text-hi); }
+  .count-item:not(:disabled):not(.count-static):hover strong { color: var(--accent); }
+  .count-item:disabled { opacity: .5; cursor: default; }
+  .count-item strong {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 14px; font-weight: 600; color: var(--text-hi); letter-spacing: -.005em;
+  }
+  .counts-group-right .count-item strong { color: var(--text-mid); font-size: 13px; }
+  .count-suffix {
+    font-family: var(--font-mono); font-size: 10.5px;
+    color: var(--text-low); letter-spacing: .04em; text-transform: uppercase;
+  }
+  .count-muted strong { color: var(--text-mid); }
+  .count-sep { color: var(--bd-hi); font-size: 11px; user-select: none; }
+
+  /* --- Metric table head (Dashboard + QueueDetail) -----------------------
+     Hoisted verbatim. Both media queries must travel with it or the head
+     desyncs from MetricRow's own grid. `.h-spark` keeps text-transform:
+     lowercase — it renders the range value (1h / 24h) as a column header. */
+  .metric-table {
+    border: 1px solid var(--bd); border-radius: var(--r-card);
+    background: var(--ink-2);
+    overflow: hidden; margin-bottom: 14px;
+  }
+  .metric-head {
+    display: grid;
+    grid-template-columns: 14px 150px 160px 1fr 260px 24px;
+    gap: 16px; padding: 9px 16px;
+    font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-low);
+    border-bottom: 1px solid var(--bd);
+    background: color-mix(in srgb, var(--text-hi) 1.5%, transparent);
+  }
+  .metric-head .h-value { text-align: right; }
+  .metric-head .h-spark {
+    text-align: left; font-family: var(--font-mono);
+    letter-spacing: .04em; text-transform: lowercase;
+  }
+  @media (max-width: 1100px) {
+    .metric-head { grid-template-columns: 14px 140px 140px 1fr 180px 24px; gap: 12px; }
+  }
+  @media (max-width: 900px) {
+    .metric-head { grid-template-columns: 14px 1fr auto 110px 24px; }
+    .metric-head > :nth-child(4) { display: none; }
   }
 }
 
