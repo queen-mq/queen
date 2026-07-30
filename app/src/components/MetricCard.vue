@@ -5,7 +5,7 @@
       {{ label }}
     </div>
 
-    <div v-if="loading" class="skeleton" style="width:80px; height:36px; margin-top:8px; border-radius:6px;" />
+    <div v-if="loading" class="skeleton" style="width:80px; height:36px; margin-top:8px; border-radius:var(--r-card);" />
     <div v-else class="stat-value">
       {{ formattedValue }}<small v-if="unit">{{ unit }}</small>
     </div>
@@ -84,7 +84,7 @@ const trendClass = computed(() => {
    the data (threshold-based .num classes), not the decoration. */
 .stat-icon-badge {
   position: absolute; top: 10px; right: 10px;
-  width: 22px; height: 22px; border-radius: 4px;
+  width: 22px; height: 22px; border-radius: var(--r-control);
   display: grid; place-items: center;
   background: var(--ink-3);
   color: var(--text-mid);

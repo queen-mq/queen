@@ -396,7 +396,7 @@
         </div>
 
         <div v-if="loadingQueues" class="card-body entity-list">
-          <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:8px;" />
+          <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:var(--r-card);" />
         </div>
 
         <div v-else-if="queuesFailed" class="card-body entity-empty entity-failed">
@@ -444,7 +444,7 @@
         </div>
 
         <div v-if="loadingConsumers" class="card-body entity-list">
-          <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:8px;" />
+          <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:var(--r-card);" />
         </div>
 
         <div v-else-if="consumersFailed" class="card-body entity-empty entity-failed">
@@ -506,6 +506,7 @@ import {
   useApi, formatNumber, toNum, latestFinite, trimIncompleteBuckets,
 } from '@/composables/useApi'
 import { formatChartLabel } from '@/composables/useFormat'
+import { semanticColors } from '@/composables/useChartTheme'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useIdentity } from '@/stores/identity'
 import MetricRow from '@/components/MetricRow.vue'
@@ -697,7 +698,7 @@ const throughputSeries = computed(() => {
   return [
     { label: 'Push', data: h.map(x => toNum(x.pushPerSecond)) },
     { label: 'Pop',  data: h.map(x => toNum(x.popPerSecond)) },
-    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: '#4ade80' },
+    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: semanticColors.ok.line },
   ]
 })
 const throughputPeak = computed(() => {
@@ -923,7 +924,7 @@ const retentionSeriesData = computed(() => {
   return [
     { label: 'Retention', data: rows.map(r => toNum(r.retentionMsgs)) },
     { label: 'Completed', data: rows.map(r => toNum(r.completedRetentionMsgs)) },
-    { label: 'Evicted',   data: rows.map(r => toNum(r.evictionMsgs)), color: '#e6b450' },
+    { label: 'Evicted',   data: rows.map(r => toNum(r.evictionMsgs)), color: semanticColors.warn.line },
   ]
 })
 const retentionLabels = computed(() =>
@@ -1320,7 +1321,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   padding: 4px 10px 4px 8px;
-  border-radius: 6px;
+  border-radius: var(--r-control);
   border: 1px solid var(--bd);
   background: var(--ink-2);
   color: var(--text-mid);
@@ -1352,7 +1353,7 @@ onUnmounted(() => {
   margin-bottom: 14px;
   border: 1px solid var(--bd);
   background: var(--ink-2);
-  border-radius: 8px;
+  border-radius: var(--r-card);
 }
 .counts-group {
   display: flex;
@@ -1425,7 +1426,7 @@ onUnmounted(() => {
 .metric-table {
   border: 1px solid var(--bd);
   background: var(--ink-2);
-  border-radius: 8px;
+  border-radius: var(--r-card);
   overflow: hidden;
   margin-bottom: 14px;
 }
@@ -1440,7 +1441,7 @@ onUnmounted(() => {
   text-transform: uppercase;
   color: var(--text-low);
   border-bottom: 1px solid var(--bd);
-  background: rgba(255, 255, 255, .015);
+  background: color-mix(in srgb, var(--text-hi) 1.5%, transparent);
 }
 .metric-head .h-value { text-align: right; }
 .metric-head .h-spark { text-align: left; font-family: 'JetBrains Mono', monospace; letter-spacing: .04em; text-transform: lowercase; }
@@ -1469,7 +1470,7 @@ onUnmounted(() => {
   color: var(--text-low);
   border-top: 1px solid var(--bd);
   border-bottom: 1px solid var(--bd);
-  background: rgba(230, 180, 80, .05);
+  background: color-mix(in srgb, var(--warn-400) 5%, transparent);
 }
 .metric-cell-tag {
   font-size: 9.5px;
@@ -1477,7 +1478,7 @@ onUnmounted(() => {
   letter-spacing: .12em;
   color: var(--warn-400);
   border: 1px solid var(--warn-400);
-  border-radius: 3px;
+  border-radius: var(--r-chip);
   padding: 1px 5px;
   white-space: nowrap;
 }
@@ -1488,7 +1489,7 @@ onUnmounted(() => {
   text-transform: uppercase;
   color: var(--warn-400);
   border: 1px solid var(--warn-400);
-  border-radius: 3px;
+  border-radius: var(--r-chip);
   padding: 0 3px;
   margin-left: 4px;
   opacity: .8;
@@ -1534,17 +1535,16 @@ onUnmounted(() => {
   width: 100%;
   text-align: left;
   border: 1px solid var(--bd);
-  border-radius: 8px;
-  background: transparent;
+  border-radius: var(--r-card);
+  background: color-mix(in srgb, var(--text-hi) 1.2%, transparent);
   padding: 9px 12px 10px;
   cursor: pointer;
   transition: border-color .12s var(--ease), background .12s var(--ease);
 }
-:global(.dark) .entity-row { background: rgba(255, 255, 255, .012); }
-:global(.light) .entity-row { background: rgba(10, 10, 10, .012); }
-.entity-row:hover { border-color: var(--bd-hi); }
-:global(.dark) .entity-row:hover { background: rgba(255, 255, 255, .03); }
-:global(.light) .entity-row:hover { background: rgba(10, 10, 10, .03); }
+.entity-row:hover {
+  border-color: var(--bd-hi);
+  background: color-mix(in srgb, var(--text-hi) 3%, transparent);
+}
 
 .entity-head {
   display: flex;
@@ -1598,7 +1598,7 @@ onUnmounted(() => {
 .meta-tag {
   display: inline-block;
   padding: 1px 6px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--bd);
   background: var(--ink-3);
   color: var(--text-mid);

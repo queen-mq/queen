@@ -200,18 +200,23 @@ function DlqIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', 
 </script>
 
 <style>
+/* Scrim: the page colour at 60%, so it dims what is behind the drawer without
+   the faint blue cast the old hand-mixed near-black carried. */
 .sidebar-overlay {
-  position: fixed; inset: 0; background: rgba(4,4,6,.6);
+  position: fixed; inset: 0;
+  background: color-mix(in srgb, var(--ink-0) 60%, transparent);
   backdrop-filter: blur(6px); z-index: 44; display: none;
 }
+/* Floats over the page, so it has to read RAISED. Its old fill (rgb 20,20,26)
+   was picked to sit at the old page level and would now be an ambiguous smear
+   over var(--ink-0); --ink-3 is the fill every other bordered control uses. */
 .sidebar-mobile-toggle {
   position: fixed; top: 10px; left: 10px; z-index: 50;
-  width: 36px; height: 36px; border-radius: 9px;
+  width: 36px; height: 36px; border-radius: var(--r-card);
+  background: var(--ink-3);
   border: 1px solid var(--bd-hi); display: none;
   place-items: center; cursor: pointer; color: var(--text-mid);
 }
-html:not(.light) .sidebar-mobile-toggle { background: rgba(20,20,26,.9); }
-html.light .sidebar-mobile-toggle { background: rgba(255,255,255,.9); }
 
 @media (max-width: 700px) {
   .sidebar-overlay { display: block; }

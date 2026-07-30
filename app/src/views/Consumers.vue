@@ -802,7 +802,7 @@ onMounted(() => {
   padding: 7px 12px;
   margin-bottom: 12px;
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
   background: var(--ink-2);
   font-size: 11.5px;
   color: var(--text-mid);
@@ -825,7 +825,7 @@ onMounted(() => {
   margin-bottom: 12px;
   background: var(--ink-2);
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
 }
 .qtoolbar-search {
   position: relative;
@@ -861,7 +861,7 @@ onMounted(() => {
   color: var(--text-mid);
   margin-left: 4px;
 }
-.qhg-legend .ld { width: 7px; height: 7px; border-radius: 99px; }
+.qhg-legend .ld { width: 7px; height: 7px; border-radius: var(--r-pill); }
 @media (max-width: 880px) {
   .qhg-legend { display: none; }
 }
@@ -873,13 +873,13 @@ onMounted(() => {
 .lp-card {
   background: var(--ink-2);
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
   overflow: hidden;
   margin-bottom: 12px;
   transition: border-color .15s var(--ease);
 }
 .lp-card-warn {
-  border-color: rgba(230, 180, 80, .35);
+  border-color: color-mix(in srgb, var(--warn-400) 35%, transparent);
   box-shadow: inset 3px 0 0 var(--warn-400);
 }
 .lp-head {
@@ -897,7 +897,7 @@ onMounted(() => {
   font-size: 12px;
   transition: background .12s var(--ease), border-color .12s var(--ease);
 }
-.lp-head:hover { background: rgba(255, 255, 255, .02); }
+.lp-head:hover { background: var(--ink-4); }
 .lp-head-open { border-bottom-color: var(--bd); }
 .lp-head-chevron {
   color: var(--text-low);
@@ -919,7 +919,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
   font-weight: 500;
@@ -928,18 +928,18 @@ onMounted(() => {
 }
 .lp-head-badge-warn {
   color: var(--warn-400);
-  background: rgba(230, 180, 80, .10);
-  border-color: rgba(230, 180, 80, .26);
+  background: color-mix(in srgb, var(--warn-400) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warn-400) 26%, transparent);
 }
 .lp-head-badge-ok {
   color: var(--text-low);
-  background: rgba(255, 255, 255, .025);
+  background: var(--ink-3);
   border-color: var(--bd);
 }
 .lp-head-badge-bad {
   color: var(--ember-400);
   background: var(--ember-glow);
-  border-color: rgba(244, 63, 94, .28);
+  border-color: var(--ember-bd);
 }
 
 .lp-head-hint {
@@ -967,8 +967,8 @@ onMounted(() => {
 .lp-error {
   margin: 12px 14px;
   padding: 10px 12px;
-  border: 1px solid rgba(244, 63, 94, .28);
-  border-radius: 6px;
+  border: 1px solid var(--ember-bd);
+  border-radius: var(--r-card);
   background: var(--ember-glow);
   color: var(--ember-400);
   font-size: 12.5px;
@@ -983,7 +983,7 @@ onMounted(() => {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: var(--r-chip);
   background: var(--ink-3);
   border: 1px solid var(--bd);
   color: var(--text-mid);
@@ -1015,7 +1015,10 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background: rgba(7, 7, 10, .6);
+  /* A scrim has to sit BELOW what it dims. The old blue-cast near-black was
+     mixed against the old, much lighter page; over --ink-0 it composites
+     ABOVE the page — a scrim that lifts. Neutral black, same opacity. */
+  background: rgba(0, 0, 0, .6);
   backdrop-filter: blur(12px);
 }
 .modal-card {
@@ -1025,8 +1028,8 @@ onMounted(() => {
 }
 .modal-queue-pill {
   padding: 12px;
-  border-radius: 10px;
+  border-radius: var(--r-card);
   border: 1px solid var(--bd);
-  background: rgba(255, 255, 255, .02);
+  background: var(--ink-3);
 }
 </style>

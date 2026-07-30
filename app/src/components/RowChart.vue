@@ -63,8 +63,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { useTheme } from '@/composables/useTheme'
-import { chartTheme, semanticColors, chartPalette } from '@/composables/useChartTheme'
+import { chartTheme, semanticColors, chartPalette, chartColor, alpha } from '@/composables/useChartTheme'
 import {
   Chart, LineController, CategoryScale, LinearScale,
   PointElement, LineElement, Filler, Tooltip,
@@ -108,7 +107,6 @@ const props = defineProps({
   unit: { type: String, default: '' },
 })
 
-const { isDark } = useTheme()
 const canvas = ref(null)
 let chart = null
 
@@ -159,7 +157,11 @@ function singleColor() {
     case 'ok':   return semanticColors.ok
     case 'warn': return semanticColors.warn
     case 'bad':  return semanticColors.bad
-    default:     return { line: '#9a9a9a', fill: 'rgba(154,154,154,0.10)' }
+    // 'mute' = no severity to report, so it takes the achromatic ramp rather
+    // than a status hue — same convention stateColor() uses for neutral
+    // labels. Slot 2 is the ramp's mid grey, the closest token to the
+    // hand-typed literal it replaces.
+    default:     return chartColor(1)
   }
 }
 
@@ -185,7 +187,7 @@ function buildChartData() {
         pointRadius: 0,
         pointHoverRadius: 3,
         pointHoverBackgroundColor: c.line,
-        pointHoverBorderColor: isDark.value ? chartTheme.tooltipBg : '#fff',
+        pointHoverBorderColor: chartTheme.tooltipBg,
         pointHoverBorderWidth: 1,
         tension: 0.4,
         fill: true,
@@ -205,9 +207,9 @@ function buildChartData() {
     datasets: ss.map((s, i) => {
       const palette = chartPalette[i % chartPalette.length]
       const line = s.color || palette.line
-      const fill = s.color
-        ? line.startsWith('#') ? line + '20' : line
-        : palette.fill
+      // alpha() hands back non-hex input untouched, which is what the old
+      // `line + '20'` string concat was hand-rolling (0x20/255 ≈ .125).
+      const fill = s.color ? alpha(line, 0.125) : palette.fill
       return {
         label: s.label || `Series ${i + 1}`,
         data: s.data,
@@ -217,7 +219,7 @@ function buildChartData() {
         pointRadius: 0,
         pointHoverRadius: 3,
         pointHoverBackgroundColor: line,
-        pointHoverBorderColor: isDark.value ? chartTheme.tooltipBg : '#fff',
+        pointHoverBorderColor: chartTheme.tooltipBg,
         pointHoverBorderWidth: 1,
         tension: 0.4,
         fill: i === 0 || s.fill === true,
@@ -230,15 +232,17 @@ function buildChartData() {
 function buildOptions() {
   const fmt = props.valueFormat
   const isFull = props.variant === 'full'
-  const gridColor = isDark.value ? chartTheme.grid : 'rgba(10,10,10,0.06)'
-  const tickColor = isDark.value ? chartTheme.tick : '#8a8a86'
+  const gridColor = chartTheme.grid
+  const tickColor = chartTheme.tick
 
   const tooltip = {
-    backgroundColor: isDark.value ? chartTheme.tooltipBg : '#fff',
-    titleColor:      isDark.value ? chartTheme.tooltipText : '#0a0a0a',
-    bodyColor:       isDark.value ? chartTheme.tooltipBody : '#6a6a6a',
-    borderColor:     isDark.value ? chartTheme.tooltipBorder : 'rgba(10,10,10,0.08)',
+    backgroundColor: chartTheme.tooltipBg,
+    titleColor:      chartTheme.tooltipText,
+    bodyColor:       chartTheme.tooltipBody,
+    borderColor:     chartTheme.tooltipBorder,
     borderWidth: 1,
+    // --r-chip. Canvas-painted tooltip: Chart.js wants a number here, so it
+    // cannot be a var(); keep it equal to the token.
     cornerRadius: 4,
     padding: { top: 6, bottom: 6, left: 10, right: 10 },
     titleFont: { family: chartTheme.fontFamily, size: 10.5, weight: 500 },
@@ -379,8 +383,6 @@ watch(renderMode, (m) => {
   }
 })
 
-watch(isDark, () => { if (renderMode.value === 'chart') createChart() })
-
 onMounted(() => {
   if (renderMode.value === 'chart') nextTick(createChart)
 })
@@ -438,7 +440,7 @@ onUnmounted(() => { if (chart) { chart.destroy(); chart = null } })
 .rcl-swatch {
   width: 10px;
   height: 10px;
-  border-radius: 2px;
+  border-radius: var(--r-chip);
   display: inline-block;
 }
 .rcl-label {

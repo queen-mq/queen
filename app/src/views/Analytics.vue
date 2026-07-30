@@ -594,7 +594,7 @@ const doughnutOptions = {
   padding: 7px 12px;
   margin-bottom: 12px;
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
   background: var(--ink-2);
   font-size: 11.5px;
   color: var(--text-mid);
@@ -627,8 +627,8 @@ const doughnutOptions = {
 .panel-msg { padding: 40px 0; text-align: center; font-size: 13px; color: var(--text-mid); }
 .panel-err {
   padding: 12px 14px;
-  border: 1px solid rgba(244, 63, 94, .28);
-  border-radius: 6px;
+  border: 1px solid var(--ember-bd);
+  border-radius: var(--r-card);
   background: var(--ember-glow);
   color: var(--ember-400);
   font-size: 12.5px;

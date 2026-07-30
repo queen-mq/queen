@@ -461,6 +461,7 @@ import { formatChartLabel } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import { semanticColors } from '@/composables/useChartTheme'
 import MetricRow from '@/components/MetricRow.vue'
 
 const route = useRoute()
@@ -626,7 +627,9 @@ const throughputSeries = computed(() => {
   return [
     { label: 'Push', data: h.map(x => toNum(x.pushPerSecond)) },
     { label: 'Pop',  data: h.map(x => toNum(x.popPerSecond)) },
-    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: '#4ade80' },
+    // Ack is the only semantically-coloured line here (it means "work landed");
+    // the colour is resolved from --ok-500, never re-typed.
+    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: semanticColors.ok.line },
   ]
 })
 const throughputPeak = computed(() => {
@@ -1084,13 +1087,13 @@ onUnmounted(() => {
 .qd-actions-spacer { flex: 1 1 auto; }
 .qd-badge {
   display: inline-flex; align-items: center;
-  padding: 0 5px; border-radius: 99px;
+  padding: 0 5px; border-radius: var(--r-pill);
   font-size: 10px; font-family: 'JetBrains Mono', monospace;
   margin-left: 4px;
 }
 .qd-badge-bad {
   background: var(--ember-glow); color: var(--ember-400);
-  border: 1px solid rgba(244,63,94,.25);
+  border: 1px solid color-mix(in srgb, var(--ember-500) 25%, transparent);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1104,7 +1107,7 @@ onUnmounted(() => {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 14px;
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
   font-size: 12.5px;
   background: var(--ink-2);
   cursor: default;
@@ -1113,15 +1116,15 @@ onUnmounted(() => {
 .qd-banner:has(> .qd-banner-cta) { cursor: pointer; }
 .qd-banner:has(> .qd-banner-cta):hover { border-color: var(--bd-hi); }
 .qd-banner-warn {
-  background: rgba(230,180,80,.06);
-  border-color: rgba(230,180,80,.22);
+  background: color-mix(in srgb, var(--warn-400) 6%, transparent);
+  border-color: color-mix(in srgb, var(--warn-400) 22%, transparent);
 }
 .qd-banner-bad {
-  background: rgba(244,63,94,.06);
-  border-color: rgba(244,63,94,.25);
+  background: color-mix(in srgb, var(--ember-500) 6%, transparent);
+  border-color: color-mix(in srgb, var(--ember-500) 25%, transparent);
 }
 .qd-banner-dot {
-  width: 7px; height: 7px; border-radius: 99px;
+  width: 7px; height: 7px; border-radius: var(--r-pill);
   flex-shrink: 0;
 }
 .qd-banner-dot-warn { background: var(--warn-400); }
@@ -1149,7 +1152,7 @@ onUnmounted(() => {
   margin-bottom: 14px;
   border: 1px solid var(--bd);
   background: var(--ink-2);
-  border-radius: 8px;
+  border-radius: var(--r-card);
 }
 .counts-group {
   display: flex; align-items: baseline;
@@ -1204,7 +1207,7 @@ onUnmounted(() => {
 .metric-table {
   border: 1px solid var(--bd);
   background: var(--ink-2);
-  border-radius: 8px;
+  border-radius: var(--r-card);
   overflow: hidden;
   margin-bottom: 14px;
 }
@@ -1219,7 +1222,9 @@ onUnmounted(() => {
   text-transform: uppercase;
   color: var(--text-low);
   border-bottom: 1px solid var(--bd);
-  background: rgba(255, 255, 255, .015);
+  /* One step up from the card it sits in — the 1.5% white wash it used to
+     carry was hand-mixed against the old, lighter card. */
+  background: var(--ink-3);
 }
 .metric-head .h-value { text-align: right; }
 .metric-head .h-spark {
@@ -1297,16 +1302,16 @@ onUnmounted(() => {
 /* Inline banner used inside a view (the shell's own strip is edge-to-edge). */
 .view-banner {
   border: 1px solid currentColor;
-  border-radius: 6px;
+  border-radius: var(--r-card);
   margin-bottom: 12px;
 }
 .qd-modal-error {
   margin: 14px 0 0;
   padding: 8px 10px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
   font-size: 12.5px;
   color: var(--ember-400);
   border: 1px solid var(--ember-400);
-  background: rgba(244, 63, 94, .08);
+  background: color-mix(in srgb, var(--ember-500) 8%, transparent);
 }
 </style>

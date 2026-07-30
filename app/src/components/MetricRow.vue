@@ -168,8 +168,10 @@ const onRowClick = () => {
   border-bottom: 1px solid var(--bd);
 }
 .mr-wrap:last-child { border-bottom: none; }
-:global(.dark) .mr-wrap-expanded { background: rgba(255, 255, 255, .015); }
-:global(.light) .mr-wrap-expanded { background: rgba(10, 10, 10, .015); }
+/* Expanded rows carry a wash, not a ladder step: --ink-3 is what the chevron
+   uses for its own hover a few rules down, and a wrap painted --ink-3 would
+   swallow it. Same 1.5% weight as before, off the text token. */
+.mr-wrap-expanded { background: color-mix(in srgb, var(--text-hi) 1.5%, transparent); }
 
 .mr {
   display: grid;
@@ -186,13 +188,14 @@ const onRowClick = () => {
   cursor: pointer;
   transition: background .12s var(--ease);
 }
-:global(.dark) .mr-clickable:hover { background: rgba(255, 255, 255, .025); }
-:global(.light) .mr-clickable:hover { background: rgba(10, 10, 10, .025); }
+/* Same 2.5% wash the ported `.t tr:hover td` uses, so a metric row and a
+   table row hover identically. */
+.mr-clickable:hover { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
 
 .mr-dot {
   width: 6px;
   height: 6px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   justify-self: center;
 }
 .mr-dot-mute { background: var(--text-low); opacity: .45; }
@@ -219,7 +222,7 @@ const onRowClick = () => {
   text-transform: uppercase;
   color: var(--warn-400);
   border: 1px solid var(--warn-400);
-  border-radius: 3px;
+  border-radius: var(--r-chip);
   padding: 0 3px;
   margin-left: 6px;
   vertical-align: 1px;
@@ -279,7 +282,7 @@ const onRowClick = () => {
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--r-control);
   color: var(--text-low);
   cursor: pointer;
   display: inline-flex;

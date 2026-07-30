@@ -238,7 +238,7 @@ const displayed = computed(() => {
 .chg {
   background: var(--ink-2);
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
   overflow: hidden;
 }
 
@@ -250,7 +250,7 @@ const displayed = computed(() => {
   align-items: center;
   padding: 0 12px 0 0;
   height: 28px;
-  background: rgba(255, 255, 255, .012);
+  background: color-mix(in srgb, var(--text-hi) 1.2%, transparent);
   border-bottom: 1px solid var(--bd);
   font-size: 9.5px;
   letter-spacing: .12em;
@@ -276,7 +276,7 @@ const displayed = computed(() => {
   font-size: 11.5px;
 }
 .crow:last-child { border-bottom: none; }
-.crow:hover { background: rgba(255, 255, 255, .025); }
+.crow:hover { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
 
 /* left status stripe — same idiom as QueueHealthGrid so the two pages
    read as siblings in the same visual system. */
@@ -292,10 +292,10 @@ const displayed = computed(() => {
 .crow.sev-warn::before { background: var(--warn-400); }
 .crow.sev-bad::before {
   background: var(--ember-400);
-  box-shadow: 1px 0 12px rgba(244, 63, 94, .55);
+  box-shadow: 1px 0 12px color-mix(in srgb, var(--ember-500) 55%, transparent);
 }
-.crow.sev-bad { background: rgba(244, 63, 94, .030); }
-.crow.sev-warn { background: rgba(230, 180, 80, .020); }
+.crow.sev-bad { background: color-mix(in srgb, var(--ember-500) 3%, transparent); }
+.crow.sev-warn { background: color-mix(in srgb, var(--warn-400) 2%, transparent); }
 .crow.sev-mute { opacity: 0.78; }
 
 .crow-skeleton { cursor: default; }
@@ -305,7 +305,7 @@ const displayed = computed(() => {
 /* status dot */
 .cdot {
   width: 6px; height: 6px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   background: var(--bd-hi);
   margin-left: 10px;
   position: relative;
@@ -317,7 +317,7 @@ const displayed = computed(() => {
 .crow.sev-bad .cdot::after {
   content: '';
   position: absolute; inset: -2px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   background: var(--ember-400);
   opacity: .25;
   animation: chg-pulse 2.4s ease-out infinite;
@@ -346,7 +346,7 @@ const displayed = computed(() => {
 .cname-tag {
   display: inline-block;
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: var(--r-chip);
   border: 1px solid var(--bd);
   background: var(--ink-3);
   color: var(--text-low);
@@ -368,7 +368,7 @@ const displayed = computed(() => {
   align-items: baseline;
   justify-content: center;
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
   font-size: 11px;
@@ -386,10 +386,12 @@ const displayed = computed(() => {
   margin-left: 4px;
   font-size: 9.5px;
 }
-.cc.sev-mute { background: rgba(255, 255, 255, .025); color: var(--text-mid); border-color: var(--bd); }
-.cc.sev-ok   { background: rgba(74, 222, 128, .07); color: var(--ok-500); border-color: rgba(74, 222, 128, .20); }
-.cc.sev-warn { background: rgba(230, 180, 80, .10); color: var(--warn-400); border-color: rgba(230, 180, 80, .26); }
-.cc.sev-bad  { background: rgba(244, 63, 94, .12); color: var(--ember-400); border-color: rgba(244, 63, 94, .30); }
+/* Fill + border are the status tokens, same as QueueHealthGrid — the two
+   grids must never drift apart on a palette change. */
+.cc.sev-mute { background: var(--ink-3); color: var(--text-mid); border-color: var(--bd); }
+.cc.sev-ok   { background: var(--ok-glow); color: var(--ok-500); border-color: var(--ok-bd); }
+.cc.sev-warn { background: var(--warn-glow); color: var(--warn-400); border-color: var(--warn-bd); }
+.cc.sev-bad  { background: var(--ember-glow); color: var(--ember-400); border-color: var(--ember-bd); }
 .cc-empty {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 11px;
@@ -416,7 +418,7 @@ const displayed = computed(() => {
   place-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--r-control);
   color: var(--text-low);
   cursor: pointer;
 }
@@ -427,8 +429,8 @@ const displayed = computed(() => {
 }
 .caction-danger:hover {
   color: var(--ember-400);
-  border-color: rgba(244, 63, 94, .28);
-  background: rgba(244, 63, 94, .06);
+  border-color: var(--ember-bd);
+  background: color-mix(in srgb, var(--ember-500) 6%, transparent);
 }
 .caction svg { width: 12px; height: 12px; }
 

@@ -135,7 +135,7 @@ const paginatedData = computed(() => {
 }
 .dt-skel .skeleton {
   height: 28px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
 }
 
 /* Sortable header */
@@ -205,7 +205,7 @@ const paginatedData = computed(() => {
   display: inline-flex; align-items: center; justify-content: center;
   background: transparent;
   border: 1px solid var(--bd);
-  border-radius: 4px;
+  border-radius: var(--r-control);
   color: var(--text-mid);
   cursor: pointer;
   transition: color 0.1s, background 0.1s, border-color 0.1s;

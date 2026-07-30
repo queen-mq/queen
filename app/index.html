@@ -7,10 +7,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Queen - Message Queue Dashboard</title>
     
-    <!-- Fonts -->
+    <!-- Fonts. Variable axes, not a weight list: the stylesheet asks for 450
+         and 550 in several places (.card-header h3, .stat-label) and Google
+         Fonts only ships static instances at 100-step intervals, so those two
+         were silently rounding to 400/500. `wght@100..900` serves the variable
+         face, which is also what the docs site self-hosts. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;450;500;550;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..800&display=swap" rel="stylesheet">
     
     <!-- Theme initialization (prevent flash) -->
     <!-- App is dark-only. Force dark before any bundle loads so SPA routes

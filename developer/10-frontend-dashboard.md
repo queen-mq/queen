@@ -26,9 +26,10 @@ app/
 │   ├── views/                Analytics, Consumers, Dashboard, DeadLetter,
 │   │                          Messages, Migration, QueueDetail, Queues,
 │   │                          System, Traces (.vue)
-│   ├── components/           Header, Sidebar, BaseChart, Sparkline, DataTable,
+│   ├── components/           Header, Sidebar, BaseChart, DataTable,
 │   │                          MetricCard, MetricRow, MultiSelect, RowChart,
-│   │                          QueueHealthGrid, ConsumerHealthGrid (.vue)
+│   │                          QueueHealthGrid, ConsumerHealthGrid,
+│   │                          ClusterSelector, ToastHost, NotFound (.vue)
 │   ├── composables/          useApi, useTheme, useChartTheme, useProxy, useRefresh
 │   ├── stores/               Pinia stores
 │   └── api/
@@ -120,7 +121,6 @@ Because the bytes are compiled in, a source change ships only after `npm run bui
 | Auto-refresh helper               | `src/composables/useRefresh.js`   |
 | Pinia stores                      | `src/stores/`                     |
 | Reusable chart base               | `src/components/BaseChart.vue`    |
-| Sparkline                         | `src/components/Sparkline.vue`    |
 | Queue list page                   | `src/views/Queues.vue`            |
 | Single queue detail               | `src/views/QueueDetail.vue`       |
 | Message browser                   | `src/views/Messages.vue`          |
@@ -167,7 +167,7 @@ The brand palette (magenta / cyan / gold inspired by the logo) lives in `tailwin
 
 ### Add a new chart
 
-1. Reuse `src/components/BaseChart.vue` (Chart.js wrapper) for the chart itself, or `Sparkline.vue` for a small inline trendline.
+1. Reuse `src/components/BaseChart.vue` (Chart.js wrapper) for the chart itself, or `RowChart.vue` for a small inline trendline.
 2. If the chart needs new aggregate data, add the SQL query (or extend an existing one) in `lib/schema/procedures/013_stats.sql` (system stats) or `017_retention_analytics.sql` (retention).
 3. Expose the data via `server/src/routes/<topic>.cpp`.
 4. Wrap the call in `src/api/index.js` and consume from a Pinia store under `src/stores/` if multiple components need it.

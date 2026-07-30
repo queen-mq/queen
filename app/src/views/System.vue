@@ -1049,16 +1049,20 @@ const poolOptions = {
   padding: 8px 12px;
   margin-bottom: 12px;
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
   background: var(--ink-2);
   font-size: 11.5px;
   color: var(--text-mid);
 }
-.scope-strip-cell { border-color: rgba(230, 180, 80, .30); box-shadow: inset 3px 0 0 var(--warn-400); }
+/* Amber is this page's CELL-scope signal, not a warning: the strip and the
+   inset rule say "these numbers are the whole cell's". Kept on --warn-400. */
+.scope-strip-cell { border-color: var(--warn-bd); box-shadow: inset 3px 0 0 var(--warn-400); }
 .scope-text strong { color: var(--text-hi); font-weight: 600; }
 .scope-sep { margin: 0 6px; color: var(--text-faint); }
 
-.card-alarm { border-color: rgba(230, 180, 80, .35); }
+/* One step louder than the scope strip on purpose — the spool is actually in
+   trouble here, so it keeps its own alpha rather than collapsing to --warn-bd. */
+.card-alarm { border-color: color-mix(in srgb, var(--warn-400) 35%, transparent); }
 
 .sys-controls { padding: 12px 14px; }
 .sys-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
@@ -1082,7 +1086,7 @@ const poolOptions = {
 .sys-workers { display: flex; flex-direction: column; gap: 8px; }
 .sys-worker {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
-  padding: 8px 10px; border: 1px solid var(--bd); border-radius: 6px;
+  padding: 8px 10px; border: 1px solid var(--bd); border-radius: var(--r-card);
 }
 .sys-worker-host { font-size: 12px; color: var(--text-hi); font-weight: 500; }
 .sys-worker-meta { font-size: 11px; color: var(--text-mid); }
@@ -1101,8 +1105,8 @@ const poolOptions = {
 .panel-err {
   padding: 12px 14px;
   margin-bottom: 12px;
-  border: 1px solid rgba(244, 63, 94, .28);
-  border-radius: 6px;
+  border: 1px solid var(--ember-bd);
+  border-radius: var(--r-card);
   background: var(--ember-glow);
   color: var(--ember-400);
   font-size: 12.5px;

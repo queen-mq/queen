@@ -125,7 +125,7 @@
 
     <!-- The list failed. Whatever is in the table below is stale, and saying so
          is the whole point — an empty table would read as "no messages". -->
-    <div v-if="listError" class="status-banner banner-bad" style="border-radius:10px; margin-bottom:16px;">
+    <div v-if="listError" class="status-banner banner-bad" style="border-radius:var(--r-card); margin-bottom:16px;">
       <span class="pulse-ember" style="width:7px; height:7px; flex-shrink:0;" />
       <span>
         <strong>Could not load messages</strong> · {{ describeApiError(listError) }}<template v-if="messages.length">
@@ -135,7 +135,7 @@
 
     <!-- The broker answered page N with page N-1's rows: paging further would
          renumber the same messages. -->
-    <div v-if="paginationStalled" class="status-banner banner-warn" style="border-radius:10px; margin-bottom:16px;">
+    <div v-if="paginationStalled" class="status-banner banner-warn" style="border-radius:var(--r-card); margin-bottom:16px;">
       <span>
         <strong>Pagination is not advancing</strong> ·
         this broker returned the same rows for page {{ currentPage }}. Narrow the time range or the filters instead.
@@ -456,7 +456,7 @@
 
           <!-- Actions -->
           <div style="display:flex; flex-direction:column; gap:8px; padding-top:8px;">
-            <div v-if="messageDetail.status === 'completed'" class="card" style="padding:12px 14px; border-color:var(--ok-glow);">
+            <div v-if="messageDetail.status === 'completed'" class="card" style="padding:12px 14px; border-color:var(--ok-bd);">
               <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:var(--ok-500);">
                 <svg style="width:18px; height:18px; flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -899,31 +899,28 @@ watch([filterQueue, filterPartition, filterStatus], () => {
 
 <style scoped>
 /* The panel is teleported but still this component's DOM, so scoped styles
-   apply. Split by theme: a hardcoded dark gradient stays dark in light mode. */
+   apply. The drawer floats over the page, so it sits at card level; the two
+   near-black gradient stops it used to carry were picked to sit BELOW the old,
+   lighter page and would read as raised chrome on the current one. */
 .msg-panel {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: 100%; max-width: 640px; z-index: 50;
   overflow-y: auto;
   border-left: 1px solid var(--bd);
+  background: color-mix(in srgb, var(--card) 97%, transparent);
   backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-}
-html:not(.light) .msg-panel {
-  background: linear-gradient(180deg, rgba(14,14,18,.97), rgba(10,10,14,.97));
-}
-html.light .msg-panel {
-  background: rgba(255,255,255,.97);
-  box-shadow: -10px 0 40px -10px rgba(0,0,0,.1);
 }
 
 .msg-backdrop {
   position: fixed; inset: 0; z-index: 40;
-  background: rgba(4,4,6,.5); backdrop-filter: blur(4px);
+  background: color-mix(in srgb, var(--ink-0) 50%, transparent);
+  backdrop-filter: blur(4px);
 }
 
+/* Payload: recessed against the drawer, hairline to close the box. */
 .msg-code {
-  border: 1px solid var(--bd); border-radius: 10px;
+  border: 1px solid var(--bd); border-radius: var(--r-card);
   padding: 14px 16px; overflow-x: auto;
+  background: var(--recessed);
 }
-html:not(.light) .msg-code { background: var(--ink-0); }
-html.light .msg-code { background: var(--paper-1); }
 </style>

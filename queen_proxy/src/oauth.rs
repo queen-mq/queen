@@ -1350,11 +1350,15 @@ fn render_login(st: &St, next: &str, error: Option<&str>) -> String {
     // The sign-in page is plain server-rendered HTML: it exists BEFORE the SPA
     // (and, under mandatory auth, before any of its assets are reachable), so it
     // cannot import the webapp's stylesheet. It therefore restates the app's
-    // design tokens inline — surfaces ink-0/2/3, border bd, text hi/mid/low,
-    // white primary accent, ember for errors, Inter — and the brand block copies
-    // .brand / .brand-mark / .brand-word from the sidebar so the two read as one
-    // product. Keep these values in step with app/src/style.css; they are a copy
-    // by necessity, not by choice.
+    // design tokens inline — surfaces ink-0/2/3/4, borders bd/bd-hi, text
+    // hi/low/faint, the #dedede primary, ember for errors, the 6/8px radius
+    // ladder and the 2px focus ring — and the brand block copies .brand /
+    // .brand-mark / .brand-word from the sidebar so the two read as one product.
+    //
+    // THESE VALUES ARE A COPY BY NECESSITY, NOT BY CHOICE. They must be kept in
+    // step with the `:root` block in app/src/style.css by hand; there is no
+    // build step that checks it. The current set is the docs-derived palette
+    // (page #020202, card #0f0f0f, input #171717, border #262626/#404040).
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -1368,31 +1372,31 @@ fn render_login(st: &St, next: &str, error: Option<&str>) -> String {
 *{{box-sizing:border-box}}\
 body{{font:15px/1.5 'Inter',ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.005em;\
 margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
-background:#141415;color:#e6e6e6;padding:24px}}\
+background:#020202;color:#f5f5f5;padding:24px}}\
 .card{{width:100%;max-width:340px}}\
 .brand{{display:flex;align-items:center;gap:9px;margin-bottom:20px}}\
 .mark{{width:28px;height:28px;flex:none;object-fit:contain}}\
-.word{{font-size:15px;font-weight:600;line-height:1;color:#e6e6e6;letter-spacing:-.015em}}\
-.word b{{font-weight:500;font-size:11px;letter-spacing:.06em;margin-left:3px;color:#9a9a9a}}\
-.panel{{background:#1d1d1f;border:1px solid #26262a;border-radius:10px;padding:22px 20px}}\
-h1{{font-size:14px;margin:0 0 16px;font-weight:600;letter-spacing:-.01em;color:#e6e6e6}}\
+.word{{font-size:15px;font-weight:600;line-height:1;color:#f5f5f5;letter-spacing:-.015em}}\
+.word b{{font-weight:500;font-size:11px;letter-spacing:.06em;margin-left:3px;color:#9e9e9e}}\
+.panel{{background:#0f0f0f;border:1px solid #262626;border-radius:8px;padding:22px 20px}}\
+h1{{font-size:14px;margin:0 0 16px;font-weight:600;letter-spacing:-.01em;color:#f5f5f5}}\
 label{{display:block;font-size:11px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;\
-color:#6a6a6a;margin:14px 0 5px}}\
-input{{width:100%;padding:9px 10px;border:1px solid #26262a;border-radius:7px;font-size:14px;\
-font-family:inherit;background:#232325;color:#e6e6e6}}\
-input:hover{{border-color:#35353a}}\
-input:focus{{outline:none;border-color:#6a6a6a;background:#252527}}\
-button{{width:100%;margin-top:18px;padding:9px;border:0;border-radius:7px;background:#fff;color:#141415;\
+color:#808080;margin:14px 0 5px}}\
+input{{width:100%;padding:9px 10px;border:1px solid #262626;border-radius:6px;font-size:14px;\
+font-family:inherit;background:#171717;color:#f5f5f5}}\
+input:hover{{border-color:#404040}}\
+input:focus{{outline:2px solid rgba(222,222,222,.35);outline-offset:2px;border-color:#404040;background:#1e1e1e}}\
+button{{width:100%;margin-top:18px;padding:9px;border:0;border-radius:6px;background:#dedede;color:#020202;\
 font-family:inherit;font-size:14px;font-weight:600;letter-spacing:-.005em;cursor:pointer}}\
-button:hover{{background:#d4d4d4}}\
-.oauth{{display:block;text-align:center;margin-bottom:8px;padding:9px;border:1px solid #26262a;\
-border-radius:7px;text-decoration:none;color:#e6e6e6;background:#1d1d1f;font-size:14px;font-weight:500}}\
-.oauth:hover{{background:#232325;border-color:#35353a}}\
-.sep{{display:flex;align-items:center;gap:10px;color:#464649;font-size:10px;margin:14px 0 2px;\
+button:hover{{background:#9e9e9e}}\
+.oauth{{display:block;text-align:center;margin-bottom:8px;padding:9px;border:1px solid #262626;\
+border-radius:6px;text-decoration:none;color:#f5f5f5;background:#0f0f0f;font-size:14px;font-weight:500}}\
+.oauth:hover{{background:#171717;border-color:#404040}}\
+.sep{{display:flex;align-items:center;gap:10px;color:#525252;font-size:10px;margin:14px 0 2px;\
 text-transform:uppercase;letter-spacing:.08em}}\
-.sep:before,.sep:after{{content:'';flex:1;height:1px;background:#26262a}}\
-.err{{background:rgba(244,63,94,.10);border:1px solid rgba(244,63,94,.35);color:#fb7185;\
-padding:8px 10px;border-radius:7px;font-size:13px;margin-bottom:14px}}\
+.sep:before,.sep:after{{content:'';flex:1;height:1px;background:#262626}}\
+.err{{background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.28);color:#fb7185;\
+padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
 </style></head><body><div class=\"card\">\
 <div class=\"brand\">{mark}<span class=\"word\">Queen<b>MQ</b></span></div>\
 <div class=\"panel\"><h1>Sign in</h1>{err_html}{divider}\

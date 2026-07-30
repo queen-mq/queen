@@ -381,7 +381,7 @@ onMounted(() => {
   margin-bottom: 12px;
   background: var(--ink-2);
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
 }
 
 .qtoolbar-search {
@@ -413,24 +413,24 @@ onMounted(() => {
 .qhg-legend .ld {
   width: 7px;
   height: 7px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
 }
 
 /* Inline banner used inside a view (the shell's own strip is edge-to-edge). */
 .view-banner {
   border: 1px solid currentColor;
-  border-radius: 6px;
+  border-radius: var(--r-card);
   margin-bottom: 12px;
 }
 
 .qdel-error {
   margin: 0 0 16px;
   padding: 8px 10px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
   font-size: 12.5px;
   color: var(--ember-400);
   border: 1px solid var(--ember-400);
-  background: rgba(244, 63, 94, .08);
+  background: color-mix(in srgb, var(--ember-500) 8%, transparent);
 }
 
 @media (max-width: 880px) {

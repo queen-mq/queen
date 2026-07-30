@@ -263,7 +263,7 @@ const displayed = computed(() => {
 .qhg {
   background: var(--ink-2);
   border: 1px solid var(--bd);
-  border-radius: 6px;
+  border-radius: var(--r-card);
   overflow: hidden;
 }
 
@@ -275,7 +275,7 @@ const displayed = computed(() => {
   align-items: center;
   padding: 0 12px 0 0;
   height: 28px;
-  background: rgba(255, 255, 255, .012);
+  background: color-mix(in srgb, var(--text-hi) 1.2%, transparent);
   border-bottom: 1px solid var(--bd);
   font-size: 9.5px;
   letter-spacing: .12em;
@@ -307,7 +307,7 @@ const displayed = computed(() => {
   grid-template-columns: 14px minmax(200px, 1fr) 76px 78px 92px 82px 84px 32px;
 }
 .qrow:last-child { border-bottom: none; }
-.qrow:hover { background: rgba(255, 255, 255, .025); }
+.qrow:hover { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
 
 /* left status stripe */
 .qrow::before {
@@ -323,10 +323,10 @@ const displayed = computed(() => {
 .qrow.sev-warn::before { background: var(--warn-400); }
 .qrow.sev-bad::before {
   background: var(--ember-400);
-  box-shadow: 1px 0 12px rgba(244, 63, 94, .55);
+  box-shadow: 1px 0 12px color-mix(in srgb, var(--ember-500) 55%, transparent);
 }
-.qrow.sev-bad { background: rgba(244, 63, 94, .030); }
-.qrow.sev-warn { background: rgba(230, 180, 80, .020); }
+.qrow.sev-bad { background: color-mix(in srgb, var(--ember-500) 3%, transparent); }
+.qrow.sev-warn { background: color-mix(in srgb, var(--warn-400) 2%, transparent); }
 
 .qrow-skeleton { cursor: default; }
 .qrow-skeleton::before { background: var(--bd-hi) !important; box-shadow: none !important; }
@@ -335,7 +335,7 @@ const displayed = computed(() => {
 /* status dot */
 .qdot {
   width: 6px; height: 6px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   background: var(--bd-hi);
   margin-left: 10px;
   position: relative;
@@ -348,7 +348,7 @@ const displayed = computed(() => {
 .qrow.sev-bad .qdot::after {
   content: '';
   position: absolute; inset: -2px;
-  border-radius: 99px;
+  border-radius: var(--r-pill);
   background: var(--ember-400);
   opacity: .25;
   animation: qhg-pulse 2.4s ease-out infinite;
@@ -381,7 +381,7 @@ const displayed = computed(() => {
   align-items: baseline;
   justify-content: center;
   padding: 2px 7px;
-  border-radius: 4px;
+  border-radius: var(--r-control);
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
   font-size: 11px;
@@ -399,11 +399,13 @@ const displayed = computed(() => {
   margin-left: 4px;
   font-size: 9.5px;
 }
-.cc.sev-ice { background: rgba(34, 211, 238, .08); color: var(--ice-400); border-color: rgba(34, 211, 238, .20); }
-.cc.sev-mute { background: rgba(255, 255, 255, .025); color: var(--text-mid); border-color: var(--bd); }
-.cc.sev-ok { background: rgba(74, 222, 128, .07); color: var(--ok-500); border-color: rgba(74, 222, 128, .20); }
-.cc.sev-warn { background: rgba(230, 180, 80, .10); color: var(--warn-400); border-color: rgba(230, 180, 80, .26); }
-.cc.sev-bad { background: rgba(244, 63, 94, .12); color: var(--ember-400); border-color: rgba(244, 63, 94, .30); }
+/* Fill + border are the status tokens, never hand-typed rgba: a chip that
+   half-follows the palette is how a hue change ends up half-applied. */
+.cc.sev-ice { background: var(--ice-glow); color: var(--ice-400); border-color: var(--ice-bd); }
+.cc.sev-mute { background: var(--ink-3); color: var(--text-mid); border-color: var(--bd); }
+.cc.sev-ok { background: var(--ok-glow); color: var(--ok-500); border-color: var(--ok-bd); }
+.cc.sev-warn { background: var(--warn-glow); color: var(--warn-400); border-color: var(--warn-bd); }
+.cc.sev-bad { background: var(--ember-glow); color: var(--ember-400); border-color: var(--ember-bd); }
 
 .arrow-ok { color: var(--ok-500); }
 .arrow-mid { color: var(--text-mid); }
@@ -418,15 +420,15 @@ const displayed = computed(() => {
   place-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--r-control);
   color: var(--text-low);
   cursor: pointer;
   margin: 0 auto;
 }
 .qaction:hover {
   color: var(--ember-400);
-  border-color: rgba(244, 63, 94, .28);
-  background: rgba(244, 63, 94, .06);
+  border-color: var(--ember-bd);
+  background: color-mix(in srgb, var(--ember-500) 6%, transparent);
 }
 .qaction svg { width: 12px; height: 12px; }
 

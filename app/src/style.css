@@ -3,68 +3,132 @@
 @tailwind utilities;
 
 /* ==========================================================================
-   QUEEN DASHBOARD — Cursor theme
-   Monochrome dark, white as primary accent.
-   Logo cyan (#22d3ee) + logo pink (#fb7185) reserved for chart series.
-   Semantic: green = ok, amber = warn, pink/red = bad.
+   QUEEN DASHBOARD — docs palette, dashboard density
+   Dark-only. Neutral near-black ladder taken from the documentation site
+   (webdoc/src/styles/globals.css, [data-mode="dark"]) so the two surfaces
+   read as one product. Every grey here is oklch(L 0 0) — chroma zero. The
+   old ladder carried a faint blue cast (#141415 is rgb 20,20,21, C≈0.002 at
+   h=286°); on a page this dark that cast is visible as a tint, so it is gone.
+
+   WHAT IS PORTED: the surface ramp, the border ladder, the text ladder, the
+   focus ring, the radius scale, and the primary accent.
+
+   WHAT IS NOT: the docs' reading rhythm (15px/1.75 body, 10px cell padding)
+   would cost ~38% of the visible table rows on a fixed-viewport console, and
+   the docs' four status hues, which are tuned for prose callouts and are 28%
+   less separable by luminance than the ones below — the wrong trade for a
+   surface whose whole job is telling healthy from broken at a glance.
    ========================================================================== */
 
 @layer base {
   :root {
-    /* Surfaces — Cursor greys */
-    --ink-0: #141415;  /* app bg                */
-    --ink-1: #1a1a1b;  /* sidebar               */
-    --ink-2: #1d1d1f;  /* card                  */
-    --ink-3: #232325;  /* elevated / input      */
-    --ink-4: #252527;  /* hover                 */
-    --ink-5: #2d2d30;  /* active                */
+    /* ---- Surfaces — the docs' dark ramp, C=0 -------------------------- */
+    --ink-0: #020202;  /* page      — docs --nb-background  oklch(.085)    */
+    --ink-1: #060606;  /* sidebar   — docs --nb-muted       oklch(.1221)   */
+    --ink-2: #0f0f0f;  /* card      — docs --nb-card        oklch(.1684)   */
+    --ink-3: #171717;  /* input     — oklch(.205), interpolated: the docs  */
+    --ink-4: #1e1e1e;  /* hover     — oklch(.237), same. A console needs   */
+                       /*             two states the docs never render.    */
+    --ink-5: #262626;  /* active    — docs --nb-accent      oklch(.269)    */
 
-    /* Paper-* aliased to ink-* so any leftover light-mode call sites
-       still render dark. Cleaned up in phase 7. */
-    --paper-0: #141415; --paper-1: #1a1a1b;
-    --paper-2: #1d1d1f; --paper-3: #232325; --paper-4: #2d2d30;
+    /* Docs role names for the same surfaces, so call sites can migrate to
+       the vocabulary without a rename pass. */
+    --recessed: var(--ink-1);   /* table head / inline code fill           */
+    --card:     var(--ink-2);
+    --selected: var(--ink-5);
 
-    /* Text */
-    --text-hi:    #e6e6e6;
-    --text-mid:   #9a9a9a;
-    --text-low:   #6a6a6a;
-    --text-faint: #464649;
+    /* ---- Text — four steps; the docs ship one muted level, a dashboard
+           needs three (value / label / unit / separator). Every step is
+           re-cut against the darker page: --text-low now clears AA on the
+           card (4.85:1) where the old #6a6a6a did not (3.54:1). -------- */
+    --text-hi:    #f5f5f5;  /* docs --nb-foreground        oklch(.97)      */
+    --text-mid:   #9e9e9e;  /* oklch(.70)                                  */
+    --text-low:   #808080;  /* oklch(.60)                                  */
+    --text-faint: #525252;  /* oklch(.44) — rules and glyphs, never text   */
+    --text: var(--text-mid);          /* legacy alias, .env-label          */
 
-    /* Primary accent — white (Cursor's "Accept button" vibe) */
-    --accent:     #ffffff;
-    --accent-dim: #d4d4d4;
+    /* ---- Primary accent — the docs step back from pure white, and on a
+           #020202 page so should we: #dedede is 14.25:1 on a card and
+           stops the primary button from flaring. ---------------------- */
+    --accent:     #dedede;  /* docs --nb-primary           oklch(.90)      */
+    --accent-dim: #9e9e9e;  /* docs --nb-primary-hover     oklch(.70)      */
+    --on-accent:  var(--ink-0);
 
-    /* Brand tokens, semantically repurposed
-       - crown = primary UI accent   (white)
-       - ember = danger / chart-out  (logo pink)
-       - ice   = info    / chart-in  (logo cyan)
-       - warn  = warning semantic    (muted amber, NEW)                 */
-    --crown-400: #ffffff;
-    --crown-500: #d4d4d4;
-    --crown-600: #9a9a9a;
-    --crown-glow: rgba(255, 255, 255, 0.08);
+    /* ---- Status — the app's own hues, KEPT. These are not decoration:
+           ok/warn/bad/idle are five distinguishable states an operator
+           reads off 8px dots and 2px strokes, and they separate 1.63:1 by
+           luminance where the docs' four separate 1.13:1. Re-tinted for
+           the darker card, not re-hued. --------------------------------- */
+    --ok-500: #4ade80;                       /* healthy  11.00:1 on card   */
+    --ok-glow: rgba(74, 222, 128, 0.12);
+    --ok-bd:   rgba(74, 222, 128, 0.28);
 
-    --ember-400: #fb7185;           /* logo pink — kept */
+    --warn-400: #e6b450;                     /* warning / cell scope       */
+    --warn-500: #d9a03d;
+    --warn-glow: rgba(230, 180, 80, 0.12);
+    --warn-bd:   rgba(230, 180, 80, 0.28);
+    --amber: var(--warn-400);                /* legacy alias               */
+
+    --ember-400: #fb7185;                    /* danger / DLQ — logo pink   */
     --ember-500: #f43f5e;
     --ember-600: #e11d48;
-    --ember-glow: rgba(244, 63, 94, 0.10);
+    --ember-glow: rgba(244, 63, 94, 0.12);
+    --ember-bd:   rgba(244, 63, 94, 0.28);
 
-    --ice-400: #22d3ee;             /* logo cyan — kept */
+    --ice-400: #22d3ee;                      /* idle, proven — logo cyan   */
     --ice-500: #06b6d4;
     --ice-600: #0891b2;
-    --ice-glow: rgba(34, 211, 238, 0.10);
+    --ice-glow: rgba(34, 211, 238, 0.12);
+    --ice-bd:   rgba(34, 211, 238, 0.28);
 
-    /* Warning — muted amber, not gold */
-    --warn-400: #e6b450;
-    --warn-500: #d9a03d;
-    --warn-glow: rgba(230, 180, 80, 0.10);
+    /* Informational, from the docs. Gives "FYI" a slot of its own so the
+       cyan above can go on meaning "idle, and we measured it". */
+    --info-400: #79b1f9;    /* docs --nb-info              oklch(.75 .12 255) */
+    --info-glow: rgba(121, 177, 249, 0.12);
+    --info-bd:   rgba(121, 177, 249, 0.28);
 
-    --ok-500: #4ade80;
-    --ok-glow: rgba(74, 222, 128, 0.10);
+    --crown-400: var(--accent);              /* legacy aliases             */
 
-    /* Borders — solid, no alpha glow */
-    --bd:    #26262a;
-    --bd-hi: #35353a;
+    /* ---- Chart series ramp. Achromatic on purpose: colour in a chart is
+           reserved for status, never handed out by series index. The order
+           alternates light/dark so ADJACENT series stay apart (1.65×–2.10×
+           by luminance). Same lightness as before, chroma zeroed — slots 2
+           and 5 used to carry the blue cast. Read by useChartTheme.js. -- */
+    --series-1: #e6e6e6;
+    --series-2: #8b8b8b;
+    --series-3: #6a6a6a;
+    --series-4: #b8b8b8;
+    --series-5: #4a4a4a;
+
+    /* ---- Borders — the single biggest legibility win in the port. The
+           old pair sat at 1.12:1 against a card: boxes had no edges. ---- */
+    --bd:      #262626;  /* docs --nb-border         1.27:1 on card        */
+    --bd-hi:   #404040;  /* docs --nb-border-strong  1.85:1 on card        */
+    --bd-soft: #171717;  /* interior rules inside a card                   */
+
+    /* ---- Focus — docs: primary @35%, 2px, offset 2px. The old ring was
+           1px of white @28% and was effectively invisible. -------------- */
+    --ring: rgba(222, 222, 222, 0.35);
+
+    /* ---- Radius ladder. The app had ELEVEN values between 2px and 10px —
+           seven distinct steps inside 8px, which is finer than the eye
+           resolves and finer than any scale can defend. Four steps, and
+           nothing improvises. (The docs' fifth step, a 12px table frame, is
+           not here: this app's tables are full-bleed inside a card and would
+           just nest a rounder corner inside a squarer one.) ------------- */
+    --r-chip:    4px;
+    --r-control: 6px;
+    --r-card:    8px;
+    --r-pill:    999px;
+
+    /* ---- Elevation. On a #020202 page a black shadow is under 1.03:1,
+           i.e. invisible; separation is the hairline above. These exist
+           only for things that float over a card. --------------------- */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow:    0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
+
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
     --ease: cubic-bezier(.2, .7, .2, 1);
     color-scheme: dark;
@@ -83,25 +147,44 @@
     color: var(--text-hi);
   }
 
-  ::selection { background: rgba(255, 255, 255, 0.14); }
+  /* Inline code, the docs' recipe: mono, recessed fill, hairline, 6px. The
+     app's own <code> elements all carry a class and keep their own styling;
+     this catches the classless ones (today: NotFound's echo of the bad URL),
+     which used to render as plain body text and lose the "this is a literal"
+     signal entirely.
+     No matching `a` rule: every anchor in this app is classed, so a
+     `a:not([class])` port of the docs' link idiom would be dead CSS. */
+  code:not([class]):not(pre *) {
+    font-family: var(--font-mono);
+    font-size: 0.8125em;
+    font-weight: 450;
+    background: var(--recessed);
+    border: 1px solid var(--bd);
+    border-radius: var(--r-control);
+    padding: 0.125em 0.375em;
+  }
+
+  /* Selection and focus, from the docs. The old ring was 1px of white at
+     28% — on any surface in this app it was effectively invisible, which
+     made the whole keyboard path untestable. 2px at 35%, offset 2px, is
+     the docs' treatment and it is legible on every surface in the ladder. */
+  ::selection { background: color-mix(in srgb, var(--accent) 12%, transparent); }
   *:focus-visible {
-    outline: 1px solid rgba(255, 255, 255, 0.28);
-    outline-offset: 1px;
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
     box-shadow: none;
   }
 
-  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  /* Thin scrollbars, tracking the text colour rather than a fixed grey, so
+     they sit correctly on every surface (docs: 6px, foreground @20%). */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb {
-    background: #2a2a2d;
-    border: 2px solid transparent;
-    background-clip: padding-box;
-    border-radius: 10px;
+    background: color-mix(in srgb, var(--text-hi) 20%, transparent);
+    border-radius: var(--r-pill);   /* 6px wide, so this is a capsule */
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #3a3a3e;
-    background-clip: padding-box;
-    border: 2px solid transparent;
+    background: var(--text-low);
   }
 }
 
@@ -177,9 +260,6 @@
   position: absolute; inset: 0;
   background: var(--ink-1);
 }
-html.light .sidebar-glass {
-  background: linear-gradient(180deg, rgba(250,250,247,.9), rgba(244,244,239,.95));
-}
 .sidebar-content { position: relative; display: flex; flex-direction: column; height: 100%; z-index: 1; }
 
 .brand { display: flex; align-items: center; gap: 9px; padding: 12px 14px 10px; }
@@ -189,10 +269,9 @@ html.light .sidebar-glass {
 .brand-mark img { width: 100%; height: 100%; object-fit: contain; }
 .brand-health {
   position: absolute; bottom: -1px; right: -1px;
-  width: 8px; height: 8px; border-radius: 99px;
+  width: 8px; height: 8px; border-radius: var(--r-pill);
   border: 2px solid var(--ink-1);
 }
-html.light .brand-health { border-color: var(--paper-0); }
 
 .brand-word {
   font-size: 15px; font-weight: 600; line-height: 1;
@@ -212,7 +291,7 @@ html.light .brand-health { border-color: var(--paper-0); }
    ========================================================================= */
 .nav-item {
   display: flex; align-items: center; gap: 9px;
-  padding: 5px 10px; border-radius: 5px;
+  padding: 5px 10px; border-radius: var(--r-control);
   color: var(--text-mid); font-size: 12.5px; font-weight: 500;
   letter-spacing: -0.005em; cursor: pointer;
   border: 1px solid transparent;
@@ -220,21 +299,19 @@ html.light .brand-health { border-color: var(--paper-0); }
   position: relative; text-decoration: none;
 }
 .nav-item:hover { color: var(--text-hi); }
-html:not(.light) .nav-item:hover { background: var(--ink-4); }
-html.light .nav-item:hover { background: rgba(10,10,10,.04); }
+.nav-item:hover { background: var(--ink-4); }
 .nav-item svg { flex: 0 0 14px; width: 14px; height: 14px; opacity: .85; }
 
 .nav-item-active {
   color: var(--text-hi) !important;
   border-color: transparent;
 }
-html:not(.light) .nav-item-active { background: var(--ink-5); }
-html.light .nav-item-active { background: #fff; box-shadow: 0 1px 2px -1px rgba(10,10,10,.06); }
+.nav-item-active { background: var(--ink-5); }
 .nav-item-active svg { color: var(--text-hi) !important; opacity: 1; }
 
 .nav-count {
   margin-left: auto; font-family: 'JetBrains Mono',monospace;
-  font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  font-size: 10px; padding: 1px 5px; border-radius: var(--r-chip);
   background: var(--ink-3); color: var(--text-low);
   border: 1px solid var(--bd);
 }
@@ -248,25 +325,23 @@ html.light .nav-item-active { background: #fff; box-shadow: 0 1px 2px -1px rgba(
 }
 .env-pill {
   display: flex; align-items: center; gap: 7px;
-  padding: 5px 8px; border-radius: 4px;
+  padding: 5px 8px; border-radius: var(--r-control);
   border: 1px solid var(--bd); font-size: 11px; font-weight: 500;
 }
-html:not(.light) .env-pill { background: var(--ink-3); }
-html.light .env-pill { background: #fff; }
+.env-pill { background: var(--ink-3); }
 .env-label { font-family: 'JetBrains Mono',monospace; color: var(--text); flex: 1; font-size: 10.5px; }
 .env-refresh {
-  margin-left: auto; padding: 3px; border-radius: 3px; cursor: pointer;
+  margin-left: auto; padding: 3px; border-radius: var(--r-chip); cursor: pointer;
   color: var(--text-low); border: none; background: transparent; transition: color .12s;
 }
 .env-refresh:hover { color: var(--text-hi); }
 
 .collapse-btn {
-  width: 100%; height: 26px; border-radius: 4px;
+  width: 100%; height: 26px; border-radius: var(--r-control);
   border: 1px solid var(--bd); display: grid; place-items: center;
   color: var(--text-mid); cursor: pointer; transition: .12s;
 }
-html:not(.light) .collapse-btn { background: var(--ink-3); }
-html.light .collapse-btn { background: #fff; }
+.collapse-btn { background: var(--ink-3); }
 .collapse-btn:hover { color: var(--text-hi); border-color: var(--bd-hi); }
 
 /* =========================================================================
@@ -278,8 +353,7 @@ html.light .collapse-btn { background: #fff; }
   border-bottom: 1px solid var(--bd);
   z-index: 5;
 }
-html:not(.light) .topbar { background: var(--ink-0); }
-html.light .topbar { background: linear-gradient(180deg, rgba(250,250,247,.85), rgba(250,250,247,.6)); }
+.topbar { background: var(--ink-0); }
 
 .crumbs { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-mid); white-space: nowrap; }
 .crumbs .sep { opacity: .5; color: var(--text-faint); font-size: 11px; }
@@ -288,15 +362,13 @@ html.light .topbar { background: linear-gradient(180deg, rgba(250,250,247,.85), 
 .cmd-search {
   margin-left: auto; display: flex; align-items: center; gap: 7px;
   min-width: 240px; max-width: 440px; flex: 1;
-  padding: 5px 10px; border-radius: 5px;
+  padding: 5px 10px; border-radius: var(--r-control);
   border: 1px solid var(--bd); color: var(--text-mid);
   font-size: 12.5px; cursor: text; position: relative; transition: border-color .12s, background .12s;
 }
-html:not(.light) .cmd-search { background: var(--ink-2); }
-html.light .cmd-search { background: #fff; }
+.cmd-search { background: var(--ink-2); }
 .cmd-search:hover { border-color: var(--bd-hi); }
 .cmd-search:focus-within { border-color: var(--bd-hi); background: var(--ink-3); }
-html.light .cmd-search:hover { border-color: rgba(10,10,10,.2); }
 .cmd-input {
   flex: 1; background: transparent; border: none; outline: none;
   font-size: 12.5px; color: var(--text-hi);
@@ -305,14 +377,13 @@ html.light .cmd-search:hover { border-color: rgba(10,10,10,.2); }
 
 .kbd {
   font-family: 'JetBrains Mono',monospace; font-size: 10px;
-  padding: 1px 5px; border-radius: 3px;
+  padding: 1px 5px; border-radius: var(--r-chip);
   background: var(--ink-4); border: 1px solid var(--bd);
   color: var(--text-mid);
 }
-html.light .kbd { background: var(--paper-2); }
 
 .top-btn {
-  width: 26px; height: 26px; border-radius: 4px; flex-shrink: 0;
+  width: 26px; height: 26px; border-radius: var(--r-control); flex-shrink: 0;
   border: 1px solid transparent; display: grid; place-items: center;
   color: var(--text-mid); cursor: pointer; transition: color .12s, background .12s, border-color .12s;
   background: transparent;
@@ -322,7 +393,7 @@ html.light .kbd { background: var(--paper-2); }
 
 .maint-group {
   display: flex; align-items: center;
-  border-radius: 4px; border: 1px solid var(--bd); overflow: hidden; flex-shrink: 0;
+  border-radius: var(--r-control); border: 1px solid var(--bd); overflow: hidden; flex-shrink: 0;
   background: var(--ink-2);
 }
 
@@ -331,7 +402,7 @@ html.light .kbd { background: var(--paper-2); }
 .maint-scope {
   font-size: 9px; font-weight: 700; letter-spacing: .08em;
   padding: 0 6px; align-self: stretch; display: flex; align-items: center;
-  color: var(--amber, #b45309); background: color-mix(in srgb, var(--amber, #b45309) 12%, transparent);
+  color: var(--warn-400); background: var(--warn-glow);
   border-right: 1px solid var(--bd);
 }
 
@@ -353,11 +424,11 @@ html.light .kbd { background: var(--paper-2); }
 .status-banner strong { font-weight: 600; }
 .banner-warn {
   color: var(--warn-400);
-  background: rgba(230,180,80,.06);
+  background: color-mix(in srgb, var(--warn-400) 6%, transparent);
 }
 .banner-bad {
   color: var(--ember-400);
-  background: rgba(244,63,94,.06);
+  background: color-mix(in srgb, var(--ember-500) 6%, transparent);
 }
 .banner-info {
   color: var(--text-hi);
@@ -374,26 +445,23 @@ html.light .kbd { background: var(--paper-2); }
 }
 .maint-btn:hover { color: var(--text-hi); background: var(--ink-4); }
 .maint-btn.on { color: var(--warn-400); }
-html:not(.light) .maint-btn.on { background: var(--warn-glow); }
-html.light .maint-btn.on { background: rgba(230,180,80,.08); }
+.maint-btn.on { background: var(--warn-glow); }
 .maint-btn svg { width: 12px !important; height: 12px !important; }
 
 .search-dropdown {
   position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
-  border-radius: 6px; overflow: hidden; border: 1px solid var(--bd-hi);
+  border-radius: var(--r-card); overflow: hidden; border: 1px solid var(--bd-hi);
   z-index: 50; max-height: 320px; overflow-y: auto;
   box-shadow: 0 12px 32px -8px rgba(0,0,0,.6);
 }
-html:not(.light) .search-dropdown { background: var(--ink-3); }
-html.light .search-dropdown { background: #fff; box-shadow: 0 10px 30px -10px rgba(0,0,0,.15); }
+.search-dropdown { background: var(--ink-3); }
 .search-item {
   display: flex; align-items: center; gap: 10px;
   padding: 7px 12px; cursor: pointer; transition: background .1s;
 }
 .search-item:hover, .search-item.active { background: var(--ink-4); }
-html.light .search-item:hover, html.light .search-item.active { background: var(--paper-1); }
 .search-type {
-  width: 20px; height: 20px; border-radius: 3px; display: grid; place-items: center;
+  width: 20px; height: 20px; border-radius: var(--r-chip); display: grid; place-items: center;
   font-size: 9.5px; font-weight: 600; background: var(--ink-4); color: var(--text-mid);
   border: 1px solid var(--bd);
 }
@@ -404,16 +472,15 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 @layer components {
   /* --- Cards --- */
   .card {
-    position: relative; border-radius: 6px; border: 1px solid var(--bd);
+    position: relative; border-radius: var(--r-card); border: 1px solid var(--bd);
     overflow: hidden;
     transition: border-color 0.12s var(--ease);
   }
-  html:not(.light) .card { background: var(--ink-2); }
-  html.light .card { background: #ffffffd9; box-shadow: 0 1px 0 rgba(10,10,10,.02), 0 14px 40px -30px rgba(0,0,0,.18); }
+  .card { background: var(--ink-2); }
 
   .card-accent::after {
     content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,.05), transparent);
+    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text-hi) 5%, transparent), transparent);
   }
   .card-header {
     display: flex; align-items: center; gap: 10px;
@@ -425,12 +492,11 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 
   /* --- Stat tiles --- */
   .stat {
-    position: relative; padding: 12px 14px; border-radius: 6px;
+    position: relative; padding: 12px 14px; border-radius: var(--r-card);
     border: 1px solid var(--bd); overflow: hidden; min-height: 0;
     display: flex; flex-direction: column; gap: 3px;
   }
-  html:not(.light) .stat { background: var(--ink-2); }
-  html.light .stat { background: #fff; box-shadow: 0 1px 0 rgba(10,10,10,.02), 0 20px 40px -40px rgba(0,0,0,.25); }
+  .stat { background: var(--ink-2); }
 
   .stat .stat-label {
     font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
@@ -446,24 +512,23 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
   .stat .stat-foot { margin-top: 2px; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-low); }
 
   /* --- Trend pills --- */
-  .trend { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 999px; font-family: 'JetBrains Mono',monospace; font-size: 10.5px; font-weight: 500; border: 1px solid transparent; }
-  .trend-up   { background: var(--ok-glow);    color: var(--ok-500);    border-color: rgba(74,222,128,.20); }
-  .trend-down { background: var(--ember-glow); color: var(--ember-400); border-color: rgba(244,63,94,.20); }
+  .trend { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: var(--r-pill); font-family: 'JetBrains Mono',monospace; font-size: 10.5px; font-weight: 500; border: 1px solid transparent; }
+  .trend-up   { background: var(--ok-glow);    color: var(--ok-500);    border-color: color-mix(in srgb, var(--ok-500) 20%, transparent); }
+  .trend-down { background: var(--ember-glow); color: var(--ember-400); border-color: color-mix(in srgb, var(--ember-500) 20%, transparent); }
   .trend-flat { background: var(--ink-3);      color: var(--text-mid);  border-color: var(--bd); }
 
   /* --- Chips/Badges --- */
-  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: 3px; font-size: 10.5px; font-weight: 500; border: 1px solid transparent; letter-spacing: 0.01em; }
-  .chip .dot { width: 4px; height: 4px; border-radius: 99px; }
-  .chip-ok      { color: var(--ok-500); background: var(--ok-glow); border-color: rgba(74,222,128,.22); }
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: var(--r-chip); font-size: 10.5px; font-weight: 500; border: 1px solid transparent; letter-spacing: 0.01em; }
+  .chip .dot { width: 4px; height: 4px; border-radius: var(--r-pill); }
+  .chip-ok      { color: var(--ok-500); background: var(--ok-glow); border-color: color-mix(in srgb, var(--ok-500) 22%, transparent); }
   .chip-ok .dot { background: var(--ok-500); }
-  .chip-warn      { color: var(--warn-400); background: var(--warn-glow); border-color: rgba(230,180,80,.22); }
+  .chip-warn      { color: var(--warn-400); background: var(--warn-glow); border-color: color-mix(in srgb, var(--warn-400) 22%, transparent); }
   .chip-warn .dot { background: var(--warn-400); }
-  .chip-bad      { color: var(--ember-400); background: var(--ember-glow); border-color: rgba(244,63,94,.25); }
+  .chip-bad      { color: var(--ember-400); background: var(--ember-glow); border-color: color-mix(in srgb, var(--ember-500) 25%, transparent); }
   .chip-bad .dot { background: var(--ember-400); }
-  .chip-ice      { color: var(--ice-400); background: var(--ice-glow); border-color: rgba(34,211,238,.22); }
+  .chip-ice      { color: var(--ice-400); background: var(--ice-glow); border-color: color-mix(in srgb, var(--ice-400) 22%, transparent); }
   .chip-ice .dot { background: var(--ice-400); }
   .chip-mute     { color: var(--text-mid); background: var(--ink-3); border-color: var(--bd); }
-  html.light .chip-mute { background: rgba(10,10,10,.04); }
 
   .badge { @apply chip; }
   .badge-success { @apply chip-ok; }
@@ -476,29 +541,26 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
   /* --- Buttons --- */
   .btn {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 10px; border-radius: 5px; font-size: 12px; font-weight: 500;
+    padding: 5px 10px; border-radius: var(--r-control); font-size: 12px; font-weight: 500;
     border: 1px solid var(--bd-hi); color: var(--text-hi); cursor: pointer;
     transition: .12s var(--ease); background: transparent;
   }
-  html:not(.light) .btn { background: rgba(255,255,255,.03); }
-  html.light .btn { background: #fff; }
-  .btn:hover { border-color: rgba(255,255,255,.22); }
-  html.light .btn:hover { border-color: rgba(10,10,10,.24); }
+  .btn { background: color-mix(in srgb, var(--text-hi) 3%, transparent); }
+  .btn:hover { border-color: var(--bd-hi); }
 
   .btn-primary {
     background: var(--accent) !important;
     border-color: var(--accent) !important;
-    color: #000 !important;
+    color: var(--on-accent) !important;
     font-weight: 500;
     box-shadow: none;
   }
   .btn-primary:hover { background: var(--accent-dim) !important; border-color: var(--accent-dim) !important; }
   .btn-ghost { background: transparent !important; border-color: transparent !important; color: var(--text-mid); }
   .btn-ghost:hover { color: var(--text-hi); }
-  html:not(.light) .btn-ghost:hover { background: rgba(255,255,255,.04) !important; }
-  html.light .btn-ghost:hover { background: rgba(10,10,10,.04) !important; }
+  .btn-ghost:hover { background: color-mix(in srgb, var(--text-hi) 4%, transparent) !important; }
   .btn-icon { padding: 5px; }
-  .btn-danger { color: var(--ember-400) !important; border-color: rgba(244,63,94,.28) !important; }
+  .btn-danger { color: var(--ember-400) !important; border-color: var(--ember-bd) !important; }
 
   /* --- Tables --- */
   .t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -506,75 +568,75 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
     text-align: left; font-weight: 500; font-size: 10.5px;
     letter-spacing: .08em; text-transform: uppercase;
     color: var(--text-low); padding: 7px 12px;
-    border-bottom: 1px solid var(--bd); background: transparent;
+    border-bottom: 1px solid var(--bd);
+    /* The docs' one table trait worth stealing: the header band is its own
+       recessed surface rather than transparent. Costs no vertical space, and
+       it is what makes a table read as a table on a page this dark. */
+    background: var(--recessed);
   }
-  html.light .t th { background: rgba(10,10,10,.015); }
   .t td { padding: 7px 12px; border-bottom: 1px solid var(--bd-soft, var(--bd)); color: var(--text-hi); vertical-align: middle; }
   .t tr:last-child td { border-bottom: 0; }
-  .t tr:hover td { background: rgba(255,255,255,.02); }
-  html.light .t tr:hover td { background: rgba(10,10,10,.018); }
+  .t tr:hover td { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
   .table { @apply t; }
   .table thead { background: transparent; }
-  .table-container { overflow-x: auto; border-radius: 6px; }
+  .table-container { overflow-x: auto; border-radius: var(--r-card); }
 
   /* --- Inputs --- */
   .input {
-    width: 100%; padding: 5px 9px; border-radius: 5px; font-size: 12.5px;
+    width: 100%; padding: 5px 9px; border-radius: var(--r-control); font-size: 12.5px;
     border: 1px solid var(--bd-hi); color: var(--text-hi); transition: .12s var(--ease);
   }
-  html:not(.light) .input { background: rgba(255,255,255,.04); }
-  html.light .input { background: #fff; }
-  .input:focus { border-color: var(--bd-hi); box-shadow: 0 0 0 1px rgba(255,255,255,.12); outline: none; }
+  .input { background: var(--ink-3); }
+  .input:focus { border-color: var(--bd-hi); box-shadow: 0 0 0 1px var(--ring); outline: none; }
   .input::placeholder { color: var(--text-low); }
 
   select.input {
     appearance: none; cursor: pointer;
     background-repeat: no-repeat; background-position: right 10px center; background-size: 14px;
     padding-right: 32px;
-    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236a6a62' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    /* Chevron glyph. A data URI cannot hold a var(), so this hex is the one
+       place a token has to be restated: keep it equal to --text-low, which is
+       what every other control glyph uses. (It was carrying the OLD --text-low
+       plus a warm cast, and survived the re-key only because %23-encoding
+       hides a hex from a `#hex` grep.) */
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%23808080' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
   }
   select.input option {
     background: var(--ink-3); color: var(--text-hi);
   }
-  html.light select.input option {
-    background: #fff; color: var(--text-hi);
-  }
 
   /* --- Segmented control --- */
-  .seg { display: inline-flex; padding: 2px; border-radius: 5px; border: 1px solid var(--bd); gap: 1px; }
-  html:not(.light) .seg { background: var(--ink-2); }
-  html.light .seg { background: #fff; }
-  .seg button { padding: 3px 10px; border-radius: 3px; font-size: 11.5px; color: var(--text-mid); font-weight: 500; cursor: pointer; border: none; background: transparent; transition: .12s; }
+  .seg { display: inline-flex; padding: 2px; border-radius: var(--r-control); border: 1px solid var(--bd); gap: 1px; }
+  .seg { background: var(--ink-2); }
+  .seg button { padding: 3px 10px; border-radius: var(--r-chip); font-size: 11.5px; color: var(--text-mid); font-weight: 500; cursor: pointer; border: none; background: transparent; transition: .12s; }
   .seg button:hover { color: var(--text-hi); }
   .seg button.on { color: var(--text-hi); }
-  html:not(.light) .seg button.on { background: var(--ink-5); }
-  html.light .seg button.on { background: var(--paper-1); }
+  .seg button.on { background: var(--ink-5); }
 
   /* --- Bars --- */
-  .bar { display: inline-block; height: 4px; border-radius: 2px; background: var(--ink-4); overflow: hidden; vertical-align: middle; }
-  html.light .bar { background: rgba(10,10,10,.06); }
-  .bar i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+  .bar { display: inline-block; height: 4px; border-radius: var(--r-pill); background: var(--ink-4); overflow: hidden; vertical-align: middle; }
+  .bar i { display: block; height: 100%; border-radius: var(--r-pill); background: var(--accent); }
   .bar.warn i { background: var(--warn-400); }
   .bar.bad i { background: var(--ember-400); }
 
   /* --- Pulse --- */
-  .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 99px; background: var(--ok-500); position: relative; }
-  .pulse::after { content: ""; position: absolute; inset: -3px; border-radius: 99px; background: var(--ok-500); opacity: .25; animation: pulse-ring 2.4s ease-out infinite; }
+  .pulse { display: inline-block; width: 7px; height: 7px; border-radius: var(--r-pill); background: var(--ok-500); position: relative; }
+  .pulse::after { content: ""; position: absolute; inset: -3px; border-radius: var(--r-pill); background: var(--ok-500); opacity: .25; animation: pulse-ring 2.4s ease-out infinite; }
   @keyframes pulse-ring { 0% { transform: scale(.6); opacity: .35; } 100% { transform: scale(1.8); opacity: 0; } }
   .pulse-amber { background: var(--warn-400); } .pulse-amber::after { background: var(--warn-400); }
   .pulse-ember { background: var(--ember-400); } .pulse-ember::after { background: var(--ember-400); }
 
   /* --- Loading --- */
-  .skeleton { background: var(--bd-hi); border-radius: 6px; animation: skel 1.5s ease-in-out infinite; }
+  .skeleton { background: var(--bd-hi); border-radius: var(--r-card); animation: skel 1.5s ease-in-out infinite; }
   @keyframes skel { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
-  .spinner { animation: spin 1s linear infinite; width: 20px; height: 20px; border: 2px solid transparent; border-top-color: var(--crown-400); border-radius: 50%; }
+  .spinner { animation: spin 1s linear infinite; width: 20px; height: 20px; border: 2px solid transparent; border-top-color: var(--crown-400); border-radius: var(--r-pill); }
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* --- Labels --- */
   .label-xs { font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; font-weight: 500; color: var(--text-low); }
 
   /* --- Status dots --- */
-  .status-dot { width: 6px; height: 6px; border-radius: 99px; }
+  .status-dot { width: 6px; height: 6px; border-radius: var(--r-pill); }
   .status-dot-success { background: var(--ok-500); }
   .status-dot-warning { background: var(--warn-400); }
   .status-dot-danger  { background: var(--ember-400); }
@@ -610,7 +672,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
   }
   .detail-back {
     width: 24px; height: 24px; display: grid; place-items: center;
-    background: transparent; border: 1px solid var(--bd); border-radius: 4px;
+    background: transparent; border: 1px solid var(--bd); border-radius: var(--r-control);
     color: var(--text-mid); cursor: pointer; transition: .12s var(--ease);
   }
   .detail-back:hover { color: var(--text-hi); border-color: var(--bd-hi); background: var(--ink-3); }
@@ -630,14 +692,15 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 
   /* --- Legend --- */
   .legend { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-mid); }
-  .legend .sw { width: 10px; height: 10px; border-radius: 3px; }
+  .legend .sw { width: 10px; height: 10px; border-radius: var(--r-chip); }
 
   /* --- Gauge ring --- */
-  .gauge-ring { --p: 42; width: 64px; height: 64px; border-radius: 99px; background: conic-gradient(var(--crown-400) calc(var(--p) * 1%), rgba(255,255,255,.07) 0); display: grid; place-items: center; position: relative; }
-  html.light .gauge-ring { background: conic-gradient(var(--crown-500) calc(var(--p) * 1%), rgba(10,10,10,.07) 0); }
-  .gauge-ring::before { content: ""; position: absolute; inset: 6px; border-radius: 99px; }
-  html:not(.light) .gauge-ring::before { background: var(--ink-1); }
-  html.light .gauge-ring::before { background: #fff; }
+  .gauge-ring { --p: 42; width: 64px; height: 64px; border-radius: var(--r-pill); background: conic-gradient(var(--crown-400) calc(var(--p) * 1%), var(--ink-4) 0); display: grid; place-items: center; position: relative; }
+  .gauge-ring::before { content: ""; position: absolute; inset: 6px; border-radius: var(--r-pill); }
+  /* Donut hole: it has to read as the CARD showing through the ring, not as a
+     void punched in it. --ink-1 said "card" back when ink-1 and ink-2 were 3/255
+     apart; on the new ladder they are 9 apart and it reads as a hole. */
+  .gauge-ring::before { background: var(--card); }
   .gauge-ring span { position: relative; font-family: 'JetBrains Mono',monospace; font-size: 13px; font-weight: 600; }
 
   /* --- Chart grid bg --- */
@@ -660,7 +723,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 
   /* --- Row action button, danger variant: neutral at rest, red on hover --- */
   .row-action-danger {
-    padding: 4px; border-radius: 4px;
+    padding: 4px; border-radius: var(--r-control);
     background: transparent; border: none; cursor: pointer;
     color: var(--text-low); transition: color .12s, background .12s;
     display: inline-flex; align-items: center; justify-content: center;
@@ -671,7 +734,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
   /* --- Compact health strip (Dashboard) — 4 inline metrics in a single bordered row --- */
   .health-strip {
     display: flex; align-items: stretch;
-    border: 1px solid var(--bd); border-radius: 6px;
+    border: 1px solid var(--bd); border-radius: var(--r-card);
     background: var(--ink-2);
     overflow: hidden;
   }
@@ -740,7 +803,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 
 .cluster-chip {
   width: 100%; display: flex; align-items: center; gap: 6px;
-  padding: 6px 8px; border-radius: 5px; cursor: pointer; text-align: left;
+  padding: 6px 8px; border-radius: var(--r-control); cursor: pointer; text-align: left;
   border: 1px solid var(--bd); background: var(--ink-2);
   color: var(--text-hi); transition: border-color .12s var(--ease), background .12s var(--ease);
 }
@@ -763,7 +826,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 
 .cluster-chip-mini {
   width: 30px; height: 26px; margin: 0 auto; display: grid; place-items: center;
-  border-radius: 5px; border: 1px solid var(--bd); background: var(--ink-2);
+  border-radius: var(--r-control); border: 1px solid var(--bd); background: var(--ink-2);
   color: var(--text-mid); font-size: 10px; font-weight: 600; cursor: pointer;
   font-family: 'JetBrains Mono', monospace;
 }
@@ -771,7 +834,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 
 .cluster-menu {
   position: absolute; left: 8px; right: 8px; top: calc(100% - 2px); z-index: 60;
-  border-radius: 6px; border: 1px solid var(--bd-hi); background: var(--ink-3);
+  border-radius: var(--r-card); border: 1px solid var(--bd-hi); background: var(--ink-3);
   box-shadow: 0 14px 34px -10px rgba(0,0,0,.65); overflow: hidden;
 }
 .cluster-menu-head {
@@ -795,7 +858,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 .cluster-option-meta { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
 .cluster-role {
   font-size: 9.5px; letter-spacing: .04em; text-transform: uppercase;
-  color: var(--text-low); border: 1px solid var(--bd); border-radius: 3px; padding: 1px 4px;
+  color: var(--text-low); border: 1px solid var(--bd); border-radius: var(--r-chip); padding: 1px 4px;
 }
 .cluster-status { font-size: 9.5px; color: var(--warn-400); text-transform: uppercase; }
 .cluster-empty { padding: 10px; font-size: 12px; color: var(--text-low); text-align: center; }
@@ -804,7 +867,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 .nav-group-label { display: flex; align-items: center; gap: 6px; }
 .nav-scope-badge {
   font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--warn-400); border: 1px solid var(--warn-400); border-radius: 3px;
+  color: var(--warn-400); border: 1px solid var(--warn-400); border-radius: var(--r-chip);
   padding: 0 3px; opacity: .8;
 }
 .nav-group-operator {
@@ -832,11 +895,11 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 }
 .toast {
   display: flex; align-items: flex-start; gap: 9px;
-  padding: 9px 10px; border-radius: 6px; cursor: pointer;
+  padding: 9px 10px; border-radius: var(--r-card); cursor: pointer;
   border: 1px solid var(--bd-hi); background: var(--ink-3);
   box-shadow: 0 14px 34px -14px rgba(0,0,0,.75);
 }
-.toast-dot { width: 6px; height: 6px; border-radius: 99px; margin-top: 5px; flex-shrink: 0; background: var(--text-low); }
+.toast-dot { width: 6px; height: 6px; border-radius: var(--r-pill); margin-top: 5px; flex-shrink: 0; background: var(--text-low); }
 .toast-error { border-color: var(--ember-600); }
 .toast-error .toast-dot { background: var(--ember-400); }
 .toast-warn .toast-dot { background: var(--warn-400); }
@@ -867,7 +930,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 .boot-error code { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-hi); }
 .boot-actions { display: flex; gap: 8px; margin-top: 6px; }
 .boot-btn {
-  padding: 6px 14px; border-radius: 5px; font-size: 12.5px; cursor: pointer;
+  padding: 6px 14px; border-radius: var(--r-control); font-size: 12.5px; cursor: pointer;
   border: 1px solid var(--bd-hi); background: var(--ink-3); color: var(--text-hi);
   text-decoration: none;
 }
@@ -884,7 +947,7 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
 .empty-page h2 { font-size: 16px; color: var(--text-hi); font-weight: 600; }
 .empty-page code { font-family: 'JetBrains Mono', monospace; color: var(--text-hi); }
 .empty-action {
-  margin-top: 6px; padding: 6px 14px; border-radius: 5px; font-size: 12.5px;
+  margin-top: 6px; padding: 6px 14px; border-radius: var(--r-control); font-size: 12.5px;
   border: 1px solid var(--bd-hi); background: var(--ink-3); color: var(--text-hi);
   text-decoration: none;
 }

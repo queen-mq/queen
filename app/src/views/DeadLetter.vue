@@ -32,7 +32,7 @@
     <p style="margin-bottom:24px; font-size:11px; color:var(--text-low); font-family:'JetBrains Mono',monospace;" :title="scopeTitle">{{ scopeLabel }}</p>
 
     <!-- The list failed: say so instead of drawing an empty, healthy-looking page. -->
-    <div v-if="error" class="status-banner banner-bad" style="border-radius:10px; margin-bottom:16px;">
+    <div v-if="error" class="status-banner banner-bad" style="border-radius:var(--r-card); margin-bottom:16px;">
       <span class="pulse-ember" style="width:7px; height:7px; flex-shrink:0;" />
       <span>
         <strong>Could not load the dead-letter queue</strong> · {{ describeApiError(error) }}<template v-if="messages.length">
@@ -102,7 +102,7 @@
     <!-- Messages table -->
     <div class="card">
       <div v-if="loading && !messages.length" style="padding:24px;">
-        <div v-for="i in 6" :key="i" class="skeleton" style="height:44px; margin-bottom:8px; border-radius:6px;" />
+        <div v-for="i in 6" :key="i" class="skeleton" style="height:44px; margin-bottom:8px; border-radius:var(--r-card);" />
       </div>
 
       <table v-else-if="messages.length" class="t">
@@ -260,7 +260,7 @@
             <!-- The DLQ read path does no decryption: what follows is the stored
                  envelope, not the message. Saying "payload" over ciphertext is
                  how a debugger loses an hour. -->
-            <div v-if="encryptedPayload" class="status-banner banner-warn" style="border-radius:10px; margin-bottom:8px;">
+            <div v-if="encryptedPayload" class="status-banner banner-warn" style="border-radius:var(--r-card); margin-bottom:8px;">
               <span>
                 <strong>Encrypted envelope</strong> · this queue encrypts payloads and the DLQ endpoint
                 returns them as stored. This is ciphertext, not the message body.
@@ -504,36 +504,33 @@ fetchMessages()
 <style scoped>
 .dlq-panel-backdrop {
   position: fixed; inset: 0; z-index: 49;
-  background: rgba(4,4,6,.4); backdrop-filter: blur(4px);
+  background: color-mix(in srgb, var(--ink-0) 40%, transparent);
+  backdrop-filter: blur(4px);
 }
 
+/* The drawer floats over the page and sits at card level. Its old gradient was
+   picked to sit BELOW the old, lighter page; on this one it reads as raised. */
 .dlq-panel {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: 100%; max-width: 560px; z-index: 50;
   overflow-y: auto;
   border-left: 1px solid var(--bd);
+  background: color-mix(in srgb, var(--card) 97%, transparent);
   backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-}
-html:not(.light) .dlq-panel {
-  background: linear-gradient(180deg, rgba(14,14,18,.97), rgba(10,10,14,.97));
-}
-html.light .dlq-panel {
-  background: rgba(255,255,255,.97);
-  box-shadow: -10px 0 40px -10px rgba(0,0,0,.1);
 }
 
 .dlq-kv { display: flex; flex-direction: column; gap: 16px; }
 .dlq-kv-row { display: flex; flex-direction: column; gap: 4px; }
 
+/* Stored envelope / payload: recessed against the drawer. */
 .dlq-code {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px; line-height: 1.6;
-  padding: 14px 16px; border-radius: 10px;
+  padding: 14px 16px; border-radius: var(--r-card);
   border: 1px solid var(--bd);
   color: var(--text-mid);
+  background: var(--recessed);
   white-space: pre; overflow-x: auto;
   max-height: 400px; overflow-y: auto;
 }
-html:not(.light) .dlq-code { background: var(--ink-0); }
-html.light .dlq-code { background: var(--paper-1); }
 </style>

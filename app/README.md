@@ -123,8 +123,7 @@ app/
 │   │   ├── MultiSelect.vue
 │   │   ├── QueueHealthGrid.vue
 │   │   ├── RowChart.vue
-│   │   ├── Sidebar.vue
-│   │   └── Sparkline.vue
+│   │   └── Sidebar.vue
 │   ├── composables/              # Vue composables
 │   │   ├── useApi.js             # panel state: data/loading/error/lastUpdated
 │   │   ├── useChartTheme.js

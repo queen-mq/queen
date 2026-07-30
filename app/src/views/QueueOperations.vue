@@ -55,7 +55,7 @@
     <div v-if="loading">
       <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:16px;">
         <div v-for="i in 4" :key="i" class="card" style="padding:24px;">
-          <div class="skeleton" style="height:192px; width:100%; border-radius:8px;" />
+          <div class="skeleton" style="height:192px; width:100%; border-radius:var(--r-card);" />
         </div>
       </div>
     </div>
@@ -237,10 +237,10 @@
                   v-for="op in queueOpTabs"
                   :key="op.key"
                   @click="selectedQueueOp = op.key"
-                  style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                  style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
                   :class="selectedQueueOp === op.key ? op.activeClass : 'opacity-50'"
                 >
-                  <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedQueueOp === op.key ? op.activeDot : 'var(--text-faint)' }" />
+                  <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedQueueOp === op.key ? op.activeDot : 'var(--text-faint)' }" />
                   {{ op.label }}
                 </button>
               </div>
@@ -360,10 +360,10 @@
                     v-for="metric in throughputMetrics"
                     :key="metric.key"
                     @click="toggleThroughputMetric(metric.key)"
-                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
                     :class="selectedThroughputMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
                   >
-                    <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedThroughputMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
+                    <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedThroughputMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
                     {{ metric.label }}
                   </button>
                 </div>
@@ -413,10 +413,10 @@
                     v-for="metric in eventLoopMetrics"
                     :key="metric.key"
                     @click="toggleEventLoopMetric(metric.key)"
-                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
                     :class="selectedEventLoopMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
                   >
-                    <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedEventLoopMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
+                    <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedEventLoopMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
                     {{ metric.label }}
                   </button>
                 </div>
@@ -446,10 +446,10 @@
                     v-for="metric in errorMetrics"
                     :key="metric.key"
                     @click="toggleErrorMetric(metric.key)"
-                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
                     :class="selectedErrorMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
                   >
-                    <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedErrorMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
+                    <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedErrorMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
                     {{ metric.label }}
                   </button>
                 </div>
@@ -551,6 +551,7 @@ import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import { chartColor, chartTheme, semanticColors, alpha } from '@/composables/useChartTheme'
 import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
 
@@ -670,17 +671,20 @@ const timestampsOf = (rows) => (rows || []).map(r => r.timestamp)
 // ---------------------------------------------------------------------------
 // Throughput / latency / event loop / errors — chip metric toggles
 // ---------------------------------------------------------------------------
+// `activeDot` is a CSS colour for the inline dot next to each chip, so it is
+// written as a var() the same way the inactive fallback (`var(--text-faint)`)
+// already is — no literal to drift from the series ramp it is quoting.
 const throughputMetrics = [
-  { key: 'push', label: 'Push', activeClass: 'chip-mute', activeDot: '#e6e6e6' },
-  { key: 'pop',  label: 'Pop',  activeClass: 'chip-mute', activeDot: '#8a8a92' },
-  { key: 'ack',  label: 'Ack',  activeClass: 'chip-ok',   activeDot: '#4ade80' },
+  { key: 'push', label: 'Push', activeClass: 'chip-mute', activeDot: 'var(--series-1)' },
+  { key: 'pop',  label: 'Pop',  activeClass: 'chip-mute', activeDot: 'var(--series-2)' },
+  { key: 'ack',  label: 'Ack',  activeClass: 'chip-ok',   activeDot: 'var(--ok-500)' },
 ]
 const selectedThroughputMetrics = reactive({ push: true, pop: true, ack: true })
 const toggleThroughputMetric = (key) => { selectedThroughputMetrics[key] = !selectedThroughputMetrics[key] }
 
 const eventLoopMetrics = [
-  { key: 'avg', label: 'Avg Event Loop', activeClass: 'chip-mute', activeDot: '#e6e6e6' },
-  { key: 'max', label: 'Max Event Loop', activeClass: 'chip-bad',  activeDot: '#fb7185' },
+  { key: 'avg', label: 'Avg Event Loop', activeClass: 'chip-mute', activeDot: 'var(--series-1)' },
+  { key: 'max', label: 'Max Event Loop', activeClass: 'chip-bad',  activeDot: 'var(--ember-400)' },
 ]
 const selectedEventLoopMetrics = reactive({ avg: true, max: true })
 const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !selectedEventLoopMetrics[key] }
@@ -689,8 +693,8 @@ const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !select
 // db.rs writes it, but nothing in the broker ever increments it — the series
 // was a guaranteed zero wearing the name of a real failure mode.
 const errorMetrics = [
-  { key: 'ackFailed', label: 'Ack Failed', activeClass: 'chip-warn', activeDot: '#e6b450' },
-  { key: 'dlq',       label: 'DLQ',        activeClass: 'chip-bad',  activeDot: '#fb7185' },
+  { key: 'ackFailed', label: 'Ack Failed', activeClass: 'chip-warn', activeDot: 'var(--warn-400)' },
+  { key: 'dlq',       label: 'DLQ',        activeClass: 'chip-bad',  activeDot: 'var(--ember-400)' },
 ]
 const selectedErrorMetrics = reactive({ ackFailed: true, dlq: true })
 const toggleErrorMetric = (key) => { selectedErrorMetrics[key] = !selectedErrorMetrics[key] }
@@ -770,14 +774,14 @@ const retentionChartOptions = {
 // for derived metrics.
 // ---------------------------------------------------------------------------
 const queueOpTabs = [
-  { key: 'pop',    label: 'Pop/s',   activeClass: 'chip-mute', activeDot: '#8a8a92', field: 'popPerSecond',   yLabel: 'Pops/s',     kind: 'rate'  },
-  { key: 'push',   label: 'Push/s',  activeClass: 'chip-mute', activeDot: '#e6e6e6', field: 'pushPerSecond',  yLabel: 'Pushes/s',   kind: 'rate'  },
-  { key: 'ack',    label: 'Ack/s',   activeClass: 'chip-ok',   activeDot: '#4ade80', field: 'ackPerSecond',   yLabel: 'Acks/s',     kind: 'rate'  },
-  { key: 'empty',  label: 'Empty/s', activeClass: 'chip-mute', activeDot: '#b8b8b8', field: 'emptyPerSecond', yLabel: 'Empty/s',    kind: 'rate'  },
+  { key: 'pop',    label: 'Pop/s',   activeClass: 'chip-mute', activeDot: 'var(--series-2)', field: 'popPerSecond',   yLabel: 'Pops/s',     kind: 'rate'  },
+  { key: 'push',   label: 'Push/s',  activeClass: 'chip-mute', activeDot: 'var(--series-1)', field: 'pushPerSecond',  yLabel: 'Pushes/s',   kind: 'rate'  },
+  { key: 'ack',    label: 'Ack/s',   activeClass: 'chip-ok',   activeDot: 'var(--ok-500)',   field: 'ackPerSecond',   yLabel: 'Acks/s',     kind: 'rate'  },
+  { key: 'empty',  label: 'Empty/s', activeClass: 'chip-mute', activeDot: 'var(--series-4)', field: 'emptyPerSecond', yLabel: 'Empty/s',    kind: 'rate'  },
   // Fill ratio = popMessages / (popMessages + popEmpty). Returns null
   // (= chart gap) when the bucket has too few completions to compute
   // meaningfully — a once-a-minute blip mustn't read as 100%.
-  { key: 'fill',   label: 'Fill %',  activeClass: 'chip-ok',   activeDot: '#4ade80',
+  { key: 'fill',   label: 'Fill %',  activeClass: 'chip-ok',   activeDot: 'var(--ok-500)',
     field: (e) => {
       const pop = toNum(e.popMessages)
       const empty = toNum(e.popEmpty)
@@ -788,7 +792,7 @@ const queueOpTabs = [
     },
     yLabel: 'Fill %', kind: 'percent' },
   // Signed push − pop rate: positive = backlog growing, negative = draining.
-  { key: 'delta',  label: 'Push−Pop Δ', activeClass: 'chip-warn', activeDot: '#e6b450',
+  { key: 'delta',  label: 'Push−Pop Δ', activeClass: 'chip-warn', activeDot: 'var(--warn-400)',
     field: (e) => {
       const push = toNum(e.pushPerSecond)
       const pop  = toNum(e.popPerSecond)
@@ -796,8 +800,11 @@ const queueOpTabs = [
       return Math.round(((push || 0) - (pop || 0)) * 100) / 100
     },
     yLabel: 'Push − Pop (msgs/s)', kind: 'rate-signed' },
-  { key: 'trx',    label: 'Trx',     activeClass: 'chip-mute', activeDot: '#e6b450', field: 'transactions',   yLabel: 'Transactions', kind: 'count' },
-  { key: 'parked', label: 'Parked',  activeClass: 'chip-mute', activeDot: '#7aa2f7', field: 'parkedCount',    yLabel: 'Parked',     kind: 'gauge' },
+  { key: 'trx',    label: 'Trx',     activeClass: 'chip-mute', activeDot: 'var(--warn-400)', field: 'transactions',   yLabel: 'Transactions', kind: 'count' },
+  // The parked dot was a hand-picked blue — the app's only chip hue with no
+  // token behind it. --info-400 is the slot the palette added for exactly
+  // this ("FYI", not a health state), and is the same blue to within 2%.
+  { key: 'parked', label: 'Parked',  activeClass: 'chip-mute', activeDot: 'var(--info-400)', field: 'parkedCount',    yLabel: 'Parked',     kind: 'gauge' },
 ]
 const queueOpActive = computed(() => queueOpTabs.find(t => t.key === selectedQueueOp.value) || queueOpTabs[0])
 const isParkedIndividual = computed(() =>
@@ -872,8 +879,12 @@ const perQueueThroughputOptions = computed(() => {
       callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${Number(ctx.parsed.y).toFixed(1)}%` }
     }
   } else if (kind === 'rate-signed') {
+    // Zero is the line that carries the meaning here (filling vs draining), so
+    // it gets a bright rule; every other tick falls back to the same grid
+    // token BaseChart paints on every other chart — the old 6%-white mix was
+    // a hand-rolled duplicate of --bd and drifted the moment the ramp moved.
     yScale.grid = {
-      color: (ctx) => ctx.tick.value === 0 ? 'rgba(230,230,230,0.35)' : 'rgba(230,230,230,0.06)',
+      color: (ctx) => ctx.tick.value === 0 ? alpha(chartColor(0).line, 0.35) : chartTheme.grid,
       lineWidth: (ctx) => ctx.tick.value === 0 ? 1.5 : 1
     }
     tooltipOpts = {
@@ -916,18 +927,16 @@ const perQueueLagOptions = computed(() => ({
 }))
 
 // ---------------------------------------------------------------------------
-// Per-queue color palette — five greys + one warm accent for the 5th line.
-// We deliberately do NOT use red/green/yellow here: those are reserved for
-// status semantics (chips, threshold tones). Distinction stays via legend
-// + tooltip rather than color symbolism that would mislead.
+// Per-queue colors come from chartColor() / chartPalette in useChartTheme —
+// five greys, no red/green/yellow, because those are reserved for status
+// semantics (chips, threshold tones). Distinction stays via legend + tooltip
+// rather than color symbolism that would mislead.
+//
+// This file used to carry a verbatim copy of that ramp as a local
+// `queueColors` array, which meant the per-queue charts kept painting the old
+// blue-cast greys after the palette moved. Deleted; the call sites below now
+// index the real one.
 // ---------------------------------------------------------------------------
-const queueColors = [
-  { border: '#e6e6e6', bg: 'rgba(230, 230, 230, 0.10)' },
-  { border: '#8a8a92', bg: 'rgba(138, 138, 146, 0.10)' },
-  { border: '#6a6a6a', bg: 'rgba(106, 106, 106, 0.10)' },
-  { border: '#b8b8b8', bg: 'rgba(184, 184, 184, 0.10)' },
-  { border: '#4a4a4f', bg: 'rgba(74, 74, 79, 0.18)'    },
-]
 
 // ---------------------------------------------------------------------------
 // Computed: derived metrics + chart datasets
@@ -950,21 +959,21 @@ const throughputChartData = computed(() => {
   if (selectedThroughputMetrics.push) {
     datasets.push({
       label: 'Push/s', data: ts.map(t => toNum(t.pushPerSecond)),
-      borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
+      borderColor: chartColor(0).line, backgroundColor: alpha(chartColor(0).line, 0.12),
       fill: true, tension: 0
     })
   }
   if (selectedThroughputMetrics.pop) {
     datasets.push({
       label: 'Pop/s', data: ts.map(t => toNum(t.popPerSecond)),
-      borderColor: '#8a8a92', backgroundColor: 'rgba(138, 138, 146, 0.12)',
+      borderColor: chartColor(1).line, backgroundColor: alpha(chartColor(1).line, 0.12),
       fill: true, tension: 0
     })
   }
   if (selectedThroughputMetrics.ack) {
     datasets.push({
       label: 'Ack/s', data: ts.map(t => toNum(t.ackPerSecond)),
-      borderColor: '#6a6a6a', backgroundColor: 'rgba(106, 106, 106, 0.12)',
+      borderColor: chartColor(2).line, backgroundColor: alpha(chartColor(2).line, 0.12),
       fill: true, tension: 0
     })
   }
@@ -980,10 +989,10 @@ const latencyChartData = computed(() => {
     labels,
     datasets: [
       { label: 'Avg Lag (ms)', data: ts.map(t => toNum(t.avgLagMs)),
-        borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.1)',
+        borderColor: chartColor(0).line, backgroundColor: chartColor(0).fill,
         fill: true, tension: 0 },
       { label: 'Max Lag (ms)', data: ts.map(t => toNum(t.maxLagMs)),
-        borderColor: '#8a8a92', fill: false, tension: 0 }
+        borderColor: chartColor(1).line, fill: false, tension: 0 }
     ]
   }
 })
@@ -997,14 +1006,14 @@ const eventLoopChartData = computed(() => {
   if (selectedEventLoopMetrics.avg) {
     datasets.push({
       label: 'Avg Event Loop (ms)', data: ts.map(t => toNum(t.avgEventLoopLagMs)),
-      borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
+      borderColor: chartColor(0).line, backgroundColor: alpha(chartColor(0).line, 0.12),
       fill: true, tension: 0
     })
   }
   if (selectedEventLoopMetrics.max) {
     datasets.push({
       label: 'Max Event Loop (ms)', data: ts.map(t => toNum(t.maxEventLoopLagMs)),
-      borderColor: '#8a8a92', backgroundColor: 'rgba(138, 138, 146, 0.10)',
+      borderColor: chartColor(1).line, backgroundColor: chartColor(1).fill,
       fill: true, tension: 0
     })
   }
@@ -1026,13 +1035,13 @@ const errorsChartData = computed(() => {
   if (selectedErrorMetrics.ackFailed) {
     datasets.push({
       label: 'Ack Failed', data: ts.map(t => toNum(t.ackFailed)),
-      backgroundColor: 'rgba(138, 138, 146, 0.6)', borderColor: '#8a8a92', borderWidth: 1
+      backgroundColor: alpha(chartColor(1).line, 0.6), borderColor: chartColor(1).line, borderWidth: 1
     })
   }
   if (selectedErrorMetrics.dlq) {
     datasets.push({
       label: 'DLQ', data: ts.map(t => toNum(t.dlqCount)),
-      backgroundColor: 'rgba(230, 230, 230, 0.6)', borderColor: '#e6e6e6', borderWidth: 1
+      backgroundColor: alpha(chartColor(0).line, 0.6), borderColor: chartColor(0).line, borderWidth: 1
     })
   }
   return { labels, datasets }
@@ -1054,8 +1063,8 @@ const dlqChartData = computed(() => {
     labels,
     datasets: [{
       label: 'DLQ', data,
-      backgroundColor: 'rgba(244, 63, 94, 0.6)',
-      borderColor: '#f43f5e', borderWidth: 1
+      backgroundColor: alpha(semanticColors.badStrong.line, 0.6),
+      borderColor: semanticColors.badStrong.line, borderWidth: 1
     }]
   }
 })
@@ -1077,11 +1086,13 @@ const retentionChartData = computed(() => {
     labels,
     datasets: [
       { label: 'Retention',           data: rows.map(r => toNum(r.retentionMsgs)),
-        backgroundColor: 'rgba(230,230,230,0.6)', borderColor: '#e6e6e6', borderWidth: 1 },
+        backgroundColor: alpha(chartColor(0).line, 0.6), borderColor: chartColor(0).line, borderWidth: 1 },
       { label: 'Completed retention', data: rows.map(r => toNum(r.completedRetentionMsgs)),
-        backgroundColor: 'rgba(138,138,146,0.6)', borderColor: '#8a8a92', borderWidth: 1 },
+        backgroundColor: alpha(chartColor(1).line, 0.6), borderColor: chartColor(1).line, borderWidth: 1 },
+      // Eviction is the one series here that carries a warning, not just a
+      // third slot in the ramp — it keeps the warn hue.
       { label: 'Eviction',            data: rows.map(r => toNum(r.evictionMsgs)),
-        backgroundColor: 'rgba(230,180,80,0.5)', borderColor: '#e6b450', borderWidth: 1 },
+        backgroundColor: alpha(semanticColors.warn.line, 0.5), borderColor: semanticColors.warn.line, borderWidth: 1 },
     ]
   }
 })
@@ -1108,7 +1119,7 @@ const buildPerQueueOpsChart = (valueAccessor) => {
   raw.forEach(r => { lookup[`${r.queueName}|${r.bucket}`] = r })
 
   const datasets = pick.map((q, i) => {
-    const color = queueColors[i % queueColors.length]
+    const color = chartColor(i)
     return {
       label: q,
       // valueAccessor may return null to indicate "not enough data this
@@ -1123,8 +1134,8 @@ const buildPerQueueOpsChart = (valueAccessor) => {
         const n = Number(v)
         return Number.isFinite(n) ? n : null
       }),
-      borderColor: color.border,
-      backgroundColor: color.bg,
+      borderColor: color.line,
+      backgroundColor: color.fill,
       fill: false,
       tension: 0,
       spanGaps: true
@@ -1171,7 +1182,7 @@ const queueParkedReplicaChartData = computed(() => {
   for (const r of filtered) lookup[`${seriesKey(r)}|${r.bucket}`] = r
 
   const datasets = series.map((s, i) => {
-    const color = queueColors[i % queueColors.length]
+    const color = chartColor(i)
     return {
       label: s,
       // No entry for this (series, bucket) → null so the chart renders a
@@ -1180,8 +1191,8 @@ const queueParkedReplicaChartData = computed(() => {
         const entry = lookup[`${s}|${b}`]
         return entry ? toNum(entry.parkedCount) : null
       }),
-      borderColor: color.border,
-      backgroundColor: color.bg,
+      borderColor: color.line,
+      backgroundColor: color.fill,
       fill: false,
       tension: 0
     }
@@ -1227,9 +1238,9 @@ const partitionRateChartData = computed(() => {
     labels,
     datasets: [
       { label: 'Created', data: buckets.map(b => created[b]),
-        backgroundColor: 'rgba(230,230,230,0.5)', borderColor: '#e6e6e6', borderWidth: 1 },
+        backgroundColor: alpha(chartColor(0).line, 0.5), borderColor: chartColor(0).line, borderWidth: 1 },
       { label: 'Deleted', data: buckets.map(b => -deleted[b]),
-        backgroundColor: 'rgba(138,138,146,0.5)', borderColor: '#8a8a92', borderWidth: 1 },
+        backgroundColor: alpha(chartColor(1).line, 0.5), borderColor: chartColor(1).line, borderWidth: 1 },
     ]
   }
 })
@@ -1474,7 +1485,7 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
   text-align: center;
   padding: 20px 12px;
   border: 1px dashed var(--warn-400);
-  border-radius: 6px;
+  border-radius: var(--r-card);
 }
 
 /* CELL · OPERATOR divider — same amber vocabulary as the sidebar's Cell
@@ -1490,8 +1501,10 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
   color: var(--text-low);
   border: 1px solid var(--bd);
   border-left: 3px solid var(--warn-400);
-  border-radius: 6px;
-  background: rgba(230, 180, 80, .05);
+  border-radius: var(--r-card);
+  /* Half the --warn-glow tint: this band is a full-width divider, and at the
+     glow's .12 it stops reading as a rule and starts reading as a panel. */
+  background: color-mix(in srgb, var(--warn-400) 5%, transparent);
 }
 .cell-tag {
   font-size: 9.5px;
@@ -1499,7 +1512,7 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
   letter-spacing: .12em;
   color: var(--warn-400);
   border: 1px solid var(--warn-400);
-  border-radius: 3px;
+  border-radius: var(--r-chip);
   padding: 1px 5px;
   white-space: nowrap;
 }
@@ -1510,7 +1523,7 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
   text-transform: uppercase;
   color: var(--warn-400);
   border: 1px solid var(--warn-400);
-  border-radius: 3px;
+  border-radius: var(--r-chip);
   padding: 0 3px;
   margin-left: 6px;
   vertical-align: 2px;
@@ -1562,6 +1575,6 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
 }
 .empty-tile {
   font-size: 12px; color: var(--text-low); text-align: center;
-  padding: 16px 0; border: 1px dashed var(--bd); border-radius: 6px;
+  padding: 16px 0; border: 1px dashed var(--bd); border-radius: var(--r-card);
 }
 </style>

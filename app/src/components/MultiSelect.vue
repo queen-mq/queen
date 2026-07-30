@@ -115,35 +115,39 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside, true
 <style>
 .ms-trigger {
   width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 5px 10px; font-size: 12px; border-radius: 5px;
+  padding: 5px 10px; font-size: 12px; border-radius: var(--r-control);
+  background: var(--ink-3);
   border: 1px solid var(--bd); color: var(--text-hi); cursor: pointer;
   transition: border-color .12s, background .12s;
 }
-html:not(.light) .ms-trigger { background: var(--ink-3); }
-html.light .ms-trigger { background: #fff; }
 .ms-trigger:hover { border-color: var(--bd-hi); }
-.ms-trigger:focus-visible { outline: 1px solid rgba(255,255,255,0.2); outline-offset: 1px; }
+/* Focus comes from the global `*:focus-visible` ring (2px var(--ring), offset
+   2px). The local override here was the pre-port 1px white @20%, i.e. exactly
+   the ring the palette replaced for being invisible — dropped, not re-tinted. */
 
 .ms-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; flex: 1; }
 .ms-chevron { width: 12px; height: 12px; flex-shrink: 0; color: var(--text-low); transition: transform .12s; }
 .ms-chevron-open { transform: rotate(180deg); }
 
+/* Floats above the page, so it takes the same recipe as .search-dropdown in
+   style.css: --ink-3 fill, --bd-hi edge, and the lifted shadow. */
 .ms-dropdown {
   position: absolute; z-index: 50; margin-top: 4px; width: 100%;
-  border-radius: 6px; border: 1px solid var(--bd-hi);
+  border-radius: var(--r-card); border: 1px solid var(--bd-hi);
+  background: var(--ink-3);
+  box-shadow: 0 12px 32px -8px rgba(0,0,0,.6);
   overflow: hidden; transform-origin: top;
 }
-html:not(.light) .ms-dropdown { background: var(--ink-3); box-shadow: 0 12px 32px -8px rgba(0,0,0,.6); }
-html.light .ms-dropdown { background: #fff; box-shadow: 0 10px 30px -10px rgba(0,0,0,.15); }
 
+/* Recessed INSIDE the dropdown: an input at --ink-3 would vanish into the
+   panel it sits on, so this one step down to --ink-2 is the recess. */
 .ms-search {
-  width: 100%; padding: 5px 9px; font-size: 12px; border-radius: 4px;
+  width: 100%; padding: 5px 9px; font-size: 12px; border-radius: var(--r-control);
+  background: var(--ink-2);
   border: 1px solid var(--bd); color: var(--text-hi); outline: none;
   transition: border-color .12s;
 }
-html:not(.light) .ms-search { background: var(--ink-2); }
-html.light .ms-search { background: var(--paper-1); }
-.ms-search:focus { border-color: var(--bd-hi); box-shadow: 0 0 0 1px rgba(255,255,255,0.1); }
+.ms-search:focus { border-color: var(--bd-hi); box-shadow: 0 0 0 1px var(--ring); }
 .ms-search::placeholder { color: var(--text-low); }
 
 .ms-option {
@@ -151,10 +155,9 @@ html.light .ms-search { background: var(--paper-1); }
   padding: 5px 12px; font-size: 12px; cursor: pointer; transition: background .1s;
 }
 .ms-option:hover { background: var(--ink-4); }
-html.light .ms-option:hover { background: var(--paper-1); }
 
 .ms-checkbox {
-  width: 13px; height: 13px; border-radius: 3px; cursor: pointer;
+  width: 13px; height: 13px; border-radius: var(--r-chip); cursor: pointer;
   accent-color: var(--accent);
 }
 

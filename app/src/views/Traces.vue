@@ -90,7 +90,7 @@
     </div>
 
     <!-- Error State -->
-    <div v-else-if="error" class="card" style="border-color:rgba(244,63,94,.25);">
+    <div v-else-if="error" class="card" style="border-color:var(--ember-bd);">
       <div class="card-body">
         <p style="font-size:13px; color:var(--ember-400);">
           <strong>Error:</strong> {{ error }}
@@ -125,7 +125,7 @@
               <td>
                 <div style="display:flex; align-items:center; gap:8px;">
                   <span
-                    style="width:8px; height:8px; border-radius:99px; flex-shrink:0;"
+                    style="width:8px; height:8px; border-radius:var(--r-pill); flex-shrink:0;"
                     :style="{ background: eventColor(trace.event_type) }"
                   />
                   <span style="font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--text-hi);">
@@ -268,7 +268,7 @@
             <div style="flex:1; min-width:0;">
               <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
                 <span
-                  style="width:10px; height:10px; border-radius:99px; flex-shrink:0;"
+                  style="width:10px; height:10px; border-radius:var(--r-pill); flex-shrink:0;"
                   :style="{ background: eventColor(selectedTrace.event_type) }"
                 />
                 <h3 style="font-size:15px; font-weight:700; color:var(--text-hi); text-transform:uppercase; letter-spacing:.06em;">
@@ -282,7 +282,7 @@
             <button
               @click="selectedTrace = null"
               class="btn btn-ghost btn-icon"
-              style="padding:6px; border-radius:8px;"
+              style="padding:6px; border-radius:var(--r-card);"
             >
               <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -570,40 +570,36 @@ onMounted(loadExampleTraceNames)
 </script>
 
 <style scoped>
-/* Teleported, but still this component's DOM — scoped styles apply. Split by
-   theme instead of hardcoding a dark gradient inline. */
+/* Teleported, but still this component's DOM — scoped styles apply. The drawer
+   floats over the page and sits at card level: its old gradient was picked to
+   sit BELOW the old, lighter page and reads as raised chrome on the current
+   one. */
 .trace-panel {
   position: fixed; top: 0; right: 0; bottom: 0;
   width: 100%; max-width: 640px; z-index: 50;
   overflow-y: auto;
   border-left: 1px solid var(--bd);
+  background: color-mix(in srgb, var(--card) 96%, transparent);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-}
-html:not(.light) .trace-panel {
-  background: linear-gradient(180deg, rgba(20,20,26,.95), rgba(14,14,18,.97));
-}
-html.light .trace-panel {
-  background: rgba(255,255,255,.97);
-  box-shadow: -10px 0 40px -10px rgba(0,0,0,.1);
 }
 
 .trace-backdrop {
   position: fixed; inset: 0; z-index: 40;
-  background: rgba(4,4,6,.55);
+  background: color-mix(in srgb, var(--ink-0) 55%, transparent);
   backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
 }
 
+/* Free text stays one step ABOVE the drawer (it was a white-4% lift), the
+   JSON block below it stays recessed — the pair has to keep reading apart. */
 .trace-text {
   font-size: 13px; color: var(--text-hi);
-  border: 1px solid var(--bd); border-radius: 10px; padding: 12px;
+  border: 1px solid var(--bd); border-radius: var(--r-card); padding: 12px;
+  background: var(--ink-3);
 }
-html:not(.light) .trace-text { background: rgba(255,255,255,.04); }
-html.light .trace-text { background: var(--paper-1); }
 
 .trace-code {
-  border: 1px solid var(--bd); border-radius: 10px;
+  border: 1px solid var(--bd); border-radius: var(--r-card);
   padding: 14px; overflow-x: auto;
+  background: var(--recessed);
 }
-html:not(.light) .trace-code { background: var(--ink-0); }
-html.light .trace-code { background: var(--paper-1); }
 </style>
