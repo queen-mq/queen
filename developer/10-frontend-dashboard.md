@@ -1,6 +1,6 @@
 # 10 — Frontend dashboard
 
-The dashboard is a Vue 3 + Vite app under `app/`. It's served by the broker — when you visit `http://localhost:6632/`, the broker serves the prebuilt `app/dist/` bundle that was copied into the binary's runtime path.
+The dashboard is a Vue 3 + Vite app under `app/`. It is served by the QUEEN-PROXY at `/`, behind mandatory auth (`queen_proxy/src/webapp.rs`), and by the broker at `http://localhost:6632/` as the port-forward escape hatch (`server/src/handlers/static_files.rs`). Both embed the SAME build output, `server/webapp/dist`, at compile time.
 
 This page is for people changing the dashboard.
 
@@ -99,9 +99,12 @@ nvm use 22
 npm run build
 ```
 
-Output goes to `app/dist/`. The `Dockerfile` builds this in a separate stage and copies `dist/` into the runtime image at `/app/webapp/dist`. The broker (`server/src/routes/static_files.cpp`) serves files from there at `/`.
+Output goes to `server/webapp/dist` (set in `app/vite.config.js`) — the one folder both Rust binaries embed with `rust_embed`:
 
-For a release build that the broker will pick up locally, run `npm run build` and then restart the broker. The broker resolves `webapp/dist` relative to its own working directory.
+* `server/src/handlers/static_files.rs` — `#[folder = "webapp/dist"]`
+* `queen_proxy/src/webapp.rs` — `#[folder = "../server/webapp/dist"]`
+
+Because the bytes are compiled in, a source change ships only after `npm run build` AND a rebuild of whichever binary serves it. Debug builds of rust-embed read from disk, so locally the npm build alone is usually enough; release builds are not. The `Dockerfile` runs the npm build in its own stage and copies the result into the Rust build stage for exactly this reason.
 
 ---
 

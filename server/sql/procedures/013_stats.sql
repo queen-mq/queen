@@ -2158,11 +2158,13 @@ AS $$
 DECLARE
     v_namespace TEXT;
     v_task TEXT;
+    v_queue TEXT;
     -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
     v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_namespace := p_filters->>'namespace';
     v_task := p_filters->>'task';
+    v_queue := p_filters->>'queue';
 
     RETURN (
         SELECT jsonb_build_object(
@@ -2183,7 +2185,12 @@ BEGIN
                 'messages', jsonb_build_object(
                     'total', COALESCE(s.total_messages, 0),
                     'pending', COALESCE(s.pending_messages, 0),
-                    'processing', COALESCE(s.processing_messages, 0)
+                    'processing', COALESCE(s.processing_messages, 0),
+                    -- Exposed so the console's per-queue volume chart stops
+                    -- stacking a "Completed" series off a key that was never
+                    -- in the payload (silently 0 for every queue).
+                    'completed', COALESCE(s.completed_messages, 0),
+                    'deadLetter', COALESCE(s.dead_letter_messages, 0)
                 )
             ) as queue_data
             FROM queen.queues q
@@ -2191,6 +2198,9 @@ BEGIN
             WHERE q.tenant_id = v_tenant
               AND (v_namespace IS NULL OR q.namespace = v_namespace)
               AND (v_task IS NULL OR q.task = v_task)
+              -- `queue` is forwarded by the handler; filtering here stops the
+              -- client from having to fetch the whole tenant list to show one.
+              AND (v_queue IS NULL OR q.name = v_queue)
             ORDER BY q.created_at DESC
             LIMIT p_limit OFFSET p_offset
         ) subq

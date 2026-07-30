@@ -1,0 +1,87 @@
+---
+params: []
+---
+
+{/* GENERATED FILE — do not edit by hand.
+    Regenerate with: pnpm --dir webdoc gen
+    Source of truth:
+      - server/src/metrics.rs
+      - server/src/handlers/status.rs
+*/}
+
+`GET /metrics/prometheus` exposes **50 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
+
+### Process (this broker instance)
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_event_loop_lag_avg_milliseconds` | gauge | Mean scheduler (event-loop) lag since start |
+| `queen_parked_long_polls` | gauge | Currently parked long-poll pops on this process |
+| `queen_process_ack_messages_total` | counter | Messages acked by this process |
+| `queen_process_ack_requests_total` | counter | Ack API requests handled by this process |
+| `queen_process_pop_messages_total` | counter | Messages popped by this process |
+| `queen_process_pop_requests_total` | counter | Pop API requests handled by this process |
+| `queen_process_push_messages_total` | counter | Messages pushed by this process |
+| `queen_process_push_requests_total` | counter | Push API requests handled by this process |
+| `queen_process_resident_memory_bytes` | gauge | Resident memory of this process |
+| `queen_uptime_seconds` | gauge | Process uptime in seconds |
+
+### Cluster lifetime totals (from PostgreSQL)
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_cluster_ack_messages_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_ack_requests_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_ack_total` | counter | Acks by outcome (DB-backed) |
+| `queen_cluster_db_errors_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_dlq_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_pop_messages_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_pop_requests_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_push_messages_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_push_requests_total` | counter | DB-backed cluster lifetime total |
+| `queen_cluster_transactions_total` | counter | DB-backed cluster lifetime total |
+
+### Per-queue rates and depth
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_dlq_depth` | gauge | Dead-letter queue depth |
+| `queen_dlq_depth_by_queue` | gauge | Dead-letter depth per queue |
+| `queen_queue_ack_per_minute` | gauge | Per-queue acks by result |
+| `queen_queue_depth_pending` | gauge | Pending (unconsumed) messages per queue |
+| `queen_queue_depth_total` | gauge | Total messages stored per queue |
+| `queen_queue_metrics_age_seconds` | gauge | Per-queue minute-rate |
+| `queen_queue_parked_consumers` | gauge | Per-queue minute-rate |
+| `queen_queue_pop_empty_per_minute` | gauge | Per-queue minute-rate |
+| `queen_queue_pop_lag_milliseconds` | gauge | Per-queue pop lag |
+| `queen_queue_pop_messages_per_minute` | gauge | Per-queue minute-rate |
+| `queen_queue_push_messages_per_minute` | gauge | Per-queue minute-rate |
+| `queen_queue_push_requests_per_minute` | gauge | Per-queue minute-rate |
+| `queen_queue_transactions_per_minute` | gauge | Per-queue minute-rate |
+
+### Engine internals
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_batch_items_fired_total` | counter | Items flushed across fusion batches |
+| `queen_batch_rtt_milliseconds` | gauge | Fusion batch round-trip latency |
+| `queen_batches_fired_total` | counter | Fusion batches flushed |
+| `queen_fusion_items_per_batch` | gauge | Mean items per fusion batch |
+| `queen_pop_fill_wait_microseconds_total` | counter | Total time pops spent fattening an under-full batch |
+| `queen_pop_fill_wait_total` | counter | Pops that held an under-full batch back (minPopWaitTime) |
+| `queen_pop_targeted_total` | counter | Hinted targeted single-partition pops issued |
+| `queen_pop_wildcard_total` | counter | Wildcard candidate-scan pops issued |
+| `queen_seg_pop_vegas_limit` | gauge | Adaptive pop concurrency limit |
+| `queen_seg_push_vegas_limit` | gauge | Adaptive push concurrency limit |
+
+### Other
+
+| Family | Type | Help |
+| --- | --- | --- |
+| `queen_db_pool_active` | gauge | Active pooled connections |
+| `queen_db_pool_idle` | gauge | Idle pooled connections |
+| `queen_db_pool_size` | gauge | Configured DB pool size |
+| `queen_file_buffer_db_healthy` | gauge | File-buffer DB-reachability hint |
+| `queen_file_buffer_failed` | gauge | Spool write failures |
+| `queen_file_buffer_pending` | gauge | Spooled push events awaiting drain |
+| `queen_maintenance_mode_enabled` | gauge | Push maintenance mode flag |

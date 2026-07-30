@@ -4,8 +4,7 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 
 ## Features
 
-- **Modern UI** — Vibrant magenta, cyan, and gold accents inspired by the Queen logo
-- **Dark/Light Theme** — Seamless theme switching with system preference detection
+- **Modern UI** — monochrome dark (light mode is retired)
 - **Real-time Charts** — Live throughput, latency, and resource monitoring
 - **Queue Management** — View, search, configure, and manage queues
 - **Queue Operations** — Push / pop / ack / transaction inspector (`QueueOperations.vue`)
@@ -14,8 +13,7 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 - **Consumer Groups** — Monitor consumer health, lag, and subscriptions
 - **Message Tracing** — Cross-message trace timeline viewer
 - **Analytics** — Per-queue / per-cg performance insights
-- **System Monitoring** — Server health, memory, CPU, worker status, PostgreSQL stats
-- **Maintenance Mode** — Toggle broker into maintenance and migrate the database (`Migration.vue`)
+- **System Monitoring** — cell-level server health, memory, CPU, worker status, PostgreSQL stats (operators only)
 
 ## Tech Stack
 
@@ -46,7 +44,11 @@ npm install
 npm run dev
 ```
 
-The app will be available at `http://localhost:5173`
+The app will be available at `http://localhost:4000`, proxying `/api`, `/auth`,
+`/health` and `/metrics` to the queen-proxy dev cell on `:6711`
+(`queen_proxy/scripts/dev-cell.sh up`). Set `QUEEN_DEV_UPSTREAM=http://localhost:6632`
+to talk to a broker directly instead — that mode exercises no auth, no tenancy,
+no role checks and no 429s, so do not develop against it by default.
 
 ### Build for Production
 
@@ -54,7 +56,16 @@ The app will be available at `http://localhost:5173`
 npm run build
 ```
 
-The built files will be in the `dist` directory.
+The output goes straight to `server/webapp/dist` — the ONE artifact both Rust
+binaries embed at compile time:
+
+* `server/src/handlers/static_files.rs` — `#[folder = "webapp/dist"]`
+* `queen_proxy/src/webapp.rs` — `#[folder = "../server/webapp/dist"]`
+
+Because the bytes are baked in, **a source change ships only after
+`npm run build` AND a `cargo build` of whichever binary serves it.** Debug
+builds of rust-embed read from disk, so locally the npm build alone is usually
+enough; release builds are not.
 
 ## Configuration
 
@@ -72,7 +83,28 @@ VITE_API_BASE_URL=http://your-queen-server:6632
 
 ### API Proxy
 
-In development, the Vite dev server proxies API requests to `http://localhost:6632`. You can change this in `vite.config.js`.
+In development the Vite dev server proxies to the queen-proxy (`:6711`), not the
+broker: auth, tenancy, role checks and rate limits all live there. Override with
+`QUEEN_DEV_UPSTREAM`. `QUEEN_APP_BASE` sets the router/asset base if the app is
+ever mounted under a path prefix.
+
+## Shell contract
+
+The shell owns identity, errors and the acting cluster. Views must not
+re-implement any of it.
+
+| Need | Use | Never |
+|---|---|---|
+| Who am I / what may I show | `useIdentity()` from `@/stores/identity`, `can('read'\|'produce'\|'consume'\|'queueAdmin'\|'operator')` | parse a role, infer from a 403 |
+| Acting tenant / cluster | `actingCluster`, `actingTenantSlug`, `actingClusterSlug` | read a header, a hostname |
+| Report a local outcome | `useToast()` from `@/composables/useToast` | `alert()` / `confirm()` |
+| API failure | catch the `ApiError` (`status`, `code`, `retryAfter`) and render an inline state | swallow it — it is already on the global surface |
+| Panel state | `useApi()` from `@/composables/useApi` (`data/loading/error/lastUpdated`) | render `0` for an unknown |
+| Polling | `useAutoRefresh(cb)` from `@/composables/useRefresh` | a private `setInterval` |
+| Cell-level numbers | `operator.*` in `@/api`, and say "cell" on screen | present them as the tenant's |
+
+`x-queen-act-cluster` is attached by the axios request interceptor, once, for
+every `/api/v1/*` call. No view sends it.
 
 ## Project Structure
 
@@ -94,19 +126,22 @@ app/
 │   │   ├── Sidebar.vue
 │   │   └── Sparkline.vue
 │   ├── composables/              # Vue composables
-│   │   ├── useApi.js
+│   │   ├── useApi.js             # panel state: data/loading/error/lastUpdated
 │   │   ├── useChartTheme.js
-│   │   ├── useProxy.js
-│   │   ├── useRefresh.js
-│   │   └── useTheme.js
-│   ├── router/                   # Vue Router configuration
+│   │   ├── useRefresh.js         # shell refresh registry + shared ticker
+│   │   ├── useTheme.js
+│   │   └── useToast.js           # notifications
+│   ├── stores/                   # module singletons
+│   │   ├── identity.js           # /auth/me, roles, acting cluster
+│   │   ├── queuesStore.js        # tenant-keyed queue cache
+│   │   └── ui.js                 # global error / toast surface
+│   ├── router/                   # routes + role metadata + guard
 │   ├── views/                    # Page components
 │   │   ├── Analytics.vue
 │   │   ├── Consumers.vue
 │   │   ├── Dashboard.vue
 │   │   ├── DeadLetter.vue
 │   │   ├── Messages.vue
-│   │   ├── Migration.vue
 │   │   ├── QueueDetail.vue
 │   │   ├── QueueOperations.vue
 │   │   ├── Queues.vue
@@ -125,9 +160,12 @@ app/
 
 ### Colors
 
-- **Queen (Primary)** - Vibrant magenta/pink `#EC4899`
-- **Cyber (Secondary)** - Cyan/teal `#06B6D4`
-- **Crown (Accent)** - Gold/yellow `#F59E0B`
+Tokens live in `src/style.css` — use the CSS variables, not hex literals.
+
+- `--crown-*` — primary accent (white)
+- `--ice-*` — info / chart-in (logo cyan)
+- `--ember-*` — danger / chart-out (logo pink)
+- `--warn-*` — warning, and the operator/cell-level surfaces
 
 ### Components
 
@@ -136,8 +174,10 @@ The app includes several reusable components:
 - `MetricCard` - Display metrics with icons, trends, and progress bars
 - `BaseChart` - Wrapper for Chart.js with theme support
 - `DataTable` - Sortable, paginated tables with custom templates
-- `Sidebar` - Navigation with health status
-- `Header` - Search, theme toggle, and notifications
+- `Sidebar` - Navigation (derived from route meta + identity), cell health
+- `ClusterSelector` - Acting tenant / cluster, present on every route
+- `ToastHost` - The one place a failure becomes visible
+- `Header` - Search and refresh
 
 ## License
 

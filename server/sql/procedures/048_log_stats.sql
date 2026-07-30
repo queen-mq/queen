@@ -469,10 +469,14 @@ BEGIN
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
                 'id', id, 'name', name,
                 'createdAt', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                -- 'failed' is NULL, not 0: the log engine keeps no per-partition
+                -- failure counter (ack failures are per (queue, minute) in
+                -- queue_lag_metrics), and a literal 0 next to a live ack-failure
+                -- chart for the same queue reads as "no failures".
                 'messages', jsonb_build_object('total', total, 'pending', pending,
-                    'processing', processing, 'completed', completed, 'failed', 0, 'deadLetter', dead_letter),
+                    'processing', processing, 'completed', completed, 'failed', NULL, 'deadLetter', dead_letter),
                 'stats', jsonb_build_object('total', total, 'pending', pending,
-                    'processing', processing, 'completed', completed, 'failed', 0, 'deadLetter', dead_letter),
+                    'processing', processing, 'completed', completed, 'failed', NULL, 'deadLetter', dead_letter),
                 'cursor', jsonb_build_object('totalConsumed', total_consumed, 'batchesConsumed', 0),
                 'lastActivity', CASE WHEN last_activity IS NOT NULL THEN to_char(last_activity, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
                 'oldestMessage', CASE WHEN oldest_message IS NOT NULL THEN to_char(oldest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
@@ -481,7 +485,7 @@ BEGIN
            jsonb_build_object('messages', jsonb_build_object(
                 'total', COALESCE(SUM(total),0), 'pending', COALESCE(SUM(pending),0),
                 'processing', COALESCE(SUM(processing),0), 'completed', COALESCE(SUM(completed),0),
-                'failed', 0, 'deadLetter', COALESCE(SUM(dead_letter),0)))
+                'failed', NULL, 'deadLetter', COALESCE(SUM(dead_letter),0)))
     INTO v_partitions, v_totals FROM per_part;
 
     RETURN v_queue_info || jsonb_build_object('partitions', v_partitions, 'totals', v_totals);
@@ -489,6 +493,234 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.get_queue_detail_v2(TEXT, UUID) TO PUBLIC;
+
+-- ============================================================================
+-- queen.get_queue_v2 — dual-mode redefinition (rows + LOG).
+-- ============================================================================
+-- 013's body reads queen.partitions + the 'partition' stat rows, both of which
+-- are EMPTY under the log engine (048 writes only 'queue'-type stat rows, and
+-- log partitions live in queen.log_partitions). It therefore described every
+-- healthy log queue as "0 partitions / 0 messages" at HTTP 200 — the shape a
+-- caller cannot distinguish from a real empty queue. This redefinition keeps
+-- 013's body verbatim for rows queues and computes the SAME output shape from
+-- the log tables (same watermark arithmetic as get_queue_detail_v2 above) for
+-- storage='segments'. `failed` is NULL, not 0: the log engine keeps no
+-- per-partition failure counter.
+-- ============================================================================
+-- 013's rows-engine body, verbatim, under its own name so the dual-mode
+-- entry point below can delegate to it without duplicating it here.
+CREATE OR REPLACE FUNCTION queen.get_queue_v2_rows(
+    p_queue_name TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_queue_id UUID;
+    v_queue_info JSONB;
+    v_partitions JSONB;
+    v_totals JSONB;
+BEGIN
+    -- Get queue info
+    SELECT q.id, jsonb_build_object(
+        'id', q.id,
+        'name', q.name,
+        'namespace', q.namespace,
+        'task', q.task,
+        'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    )
+    INTO v_queue_id, v_queue_info
+    FROM queen.queues q
+    WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
+    
+    IF v_queue_id IS NULL THEN
+        RETURN jsonb_build_object('error', 'Queue not found');
+    END IF;
+    
+    -- Get partitions with pre-computed stats
+    -- Aggregate across ALL consumer groups per partition (MAX for totals since they're the same)
+    WITH partition_stats AS (
+        SELECT 
+            p.id,
+            p.name,
+            p.created_at,
+            -- Use MAX to get the message counts (same for all consumer groups)
+            COALESCE(MAX(s.total_messages), 0) as total,
+            -- Pending/processing may differ per consumer group - use MAX for queue view
+            COALESCE(MAX(s.pending_messages), 0) as pending,
+            COALESCE(MAX(s.processing_messages), 0) as processing,
+            COALESCE(MAX(s.completed_messages), 0) as completed,
+            0 as failed,
+            COALESCE(MAX(s.dead_letter_messages), 0) as dead_letter,
+            MAX(s.oldest_pending_at) as oldest_message,
+            MAX(s.newest_message_at) as newest_message
+        FROM queen.partitions p
+        LEFT JOIN queen.stats s ON s.stat_type = 'partition' 
+            AND s.partition_id = p.id
+        WHERE p.queue_id = v_queue_id
+        GROUP BY p.id, p.name, p.created_at
+    )
+    SELECT 
+        COALESCE(jsonb_agg(
+            jsonb_build_object(
+                'id', id,
+                'name', name,
+                'createdAt', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'stats', jsonb_build_object(
+                    'total', total,
+                    'pending', pending,
+                    'processing', processing,
+                    'completed', completed,
+                    'failed', failed,
+                    'deadLetter', dead_letter
+                ),
+                'oldestMessage', CASE WHEN oldest_message IS NOT NULL 
+                    THEN to_char(oldest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+                'newestMessage', CASE WHEN newest_message IS NOT NULL 
+                    THEN to_char(newest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
+            ) ORDER BY name
+        ), '[]'::jsonb),
+        jsonb_build_object(
+            'total', COALESCE(SUM(total), 0),
+            'pending', COALESCE(SUM(pending), 0),
+            'processing', COALESCE(SUM(processing), 0),
+            'completed', COALESCE(SUM(completed), 0),
+            'failed', COALESCE(SUM(failed), 0),
+            'deadLetter', COALESCE(SUM(dead_letter), 0)
+        )
+    INTO v_partitions, v_totals
+    FROM partition_stats;
+    
+    RETURN v_queue_info || jsonb_build_object(
+        'partitions', v_partitions,
+        'totals', v_totals,
+        -- Storage quota (§6.1): retained payload bytes for this queue, from the
+        -- queue's stat row (refreshed at the stats cadence). Scoped implicitly:
+        -- v_queue_id was resolved WHERE tenant_id = p_tenant above.
+        'retainedBytes', COALESCE((SELECT retained_bytes FROM queen.stats
+                                   WHERE stat_type = 'queue' AND queue_id = v_queue_id), 0)
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.get_queue_v2_rows(TEXT, UUID) TO PUBLIC;
+
+DROP FUNCTION IF EXISTS queen.get_queue_v2(TEXT);
+CREATE OR REPLACE FUNCTION queen.get_queue_v2(
+    p_queue_name TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_queue_id UUID;
+    v_is_seg BOOLEAN;
+    v_queue_info JSONB;
+    v_partitions JSONB;
+    v_totals JSONB;
+BEGIN
+    SELECT q.id, (q.storage = 'segments') INTO v_queue_id, v_is_seg
+    FROM queen.queues q WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
+
+    IF v_queue_id IS NULL THEN
+        RETURN jsonb_build_object('error', 'Queue not found');
+    END IF;
+
+    IF NOT v_is_seg THEN
+        RETURN queen.get_queue_v2_rows(p_queue_name, p_tenant);
+    END IF;
+
+    SELECT jsonb_build_object(
+        'id', q.id, 'name', q.name, 'namespace', q.namespace, 'task', q.task,
+        'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+    INTO v_queue_info
+    FROM queen.queues q WHERE q.id = v_queue_id;
+
+    WITH parts AS (
+        SELECT lp.id, lp.name, lp.created_at, lp.last_offset, lp.log_start
+        FROM queen.log_partitions lp
+        JOIN queen.log_queues lq ON lq.id = lp.queue_id
+        WHERE lq.name = p_queue_name AND lq.tenant_id = p_tenant
+    ),
+    worst AS (
+        SELECT c.partition_id, MIN(c.committed) AS committed
+        FROM queen.log_consumers c
+        JOIN parts pa ON pa.id = c.partition_id
+        GROUP BY c.partition_id
+    ),
+    base AS (
+        SELECT pa.id, pa.name, pa.created_at,
+               GREATEST(pa.last_offset - pa.log_start + 1, 0)::bigint AS total,
+               GREATEST(pa.last_offset
+                        - GREATEST(COALESCE(w.committed, -1), pa.log_start - 1),
+                        0)::bigint AS pending,
+               GREATEST(COALESCE(w.committed, -1), pa.log_start - 1) AS floor_off
+        FROM parts pa
+        LEFT JOIN worst w ON w.partition_id = pa.id
+    ),
+    enrich AS (
+        SELECT b.id, b.name, b.created_at, b.total, b.pending,
+               CASE WHEN b.pending > 0
+                    THEN queen.log_oldest_pending_at_v1(b.id, b.floor_off + 1)
+               END AS oldest_message,
+               tail.created_at AS newest_message
+        FROM base b
+        LEFT JOIN LATERAL (
+            SELECT s.created_at FROM queen.log_segments s
+            WHERE s.partition_id = b.id
+            ORDER BY s.base_offset DESC LIMIT 1
+        ) tail ON true
+    ),
+    cur AS (
+        SELECT c.partition_id,
+               SUM(GREATEST(0, COALESCE(c.batch_end, c.committed) - c.committed))
+                   FILTER (WHERE c.lease_expires_at IS NOT NULL AND c.lease_expires_at > NOW())::bigint AS processing
+        FROM queen.log_consumers c
+        JOIN parts pa ON pa.id = c.partition_id
+        GROUP BY c.partition_id
+    ),
+    dlq AS (
+        SELECT d.partition_id, COUNT(*)::bigint AS dead_letter
+        FROM queen.log_dlq d JOIN parts pa ON pa.id = d.partition_id
+        GROUP BY d.partition_id
+    ),
+    per_part AS (
+        SELECT en.id, en.name, en.created_at, en.total, en.pending,
+               LEAST(COALESCE(cu.processing, 0), en.pending) AS processing,
+               GREATEST(0, en.total - en.pending - COALESCE(dl.dead_letter, 0)) AS completed,
+               COALESCE(dl.dead_letter, 0) AS dead_letter,
+               en.oldest_message, en.newest_message
+        FROM enrich en
+        LEFT JOIN cur cu ON cu.partition_id = en.id
+        LEFT JOIN dlq dl ON dl.partition_id = en.id
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                'id', id, 'name', name,
+                'createdAt', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'stats', jsonb_build_object(
+                    'total', total, 'pending', pending, 'processing', processing,
+                    'completed', completed, 'failed', NULL, 'deadLetter', dead_letter),
+                'oldestMessage', CASE WHEN oldest_message IS NOT NULL
+                    THEN to_char(oldest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+                'newestMessage', CASE WHEN newest_message IS NOT NULL
+                    THEN to_char(newest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
+            ) ORDER BY name), '[]'::jsonb),
+           jsonb_build_object(
+                'total', COALESCE(SUM(total), 0), 'pending', COALESCE(SUM(pending), 0),
+                'processing', COALESCE(SUM(processing), 0), 'completed', COALESCE(SUM(completed), 0),
+                'failed', NULL, 'deadLetter', COALESCE(SUM(dead_letter), 0))
+    INTO v_partitions, v_totals FROM per_part;
+
+    RETURN v_queue_info || jsonb_build_object(
+        'partitions', v_partitions,
+        'totals', v_totals,
+        'retainedBytes', COALESCE((SELECT retained_bytes FROM queen.stats
+                                   WHERE stat_type = 'queue' AND queue_id = v_queue_id), 0)
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.get_queue_v2(TEXT, UUID) TO PUBLIC;
 
 -- ============================================================================
 -- queen.get_analytics_v1 — log-native redefinition.

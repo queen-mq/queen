@@ -1,9 +1,11 @@
 import { ref } from 'vue'
 
-// Cursor theme is dark-only. Light mode has been retired.
-// The toggle button is kept in the Header component as a no-op until
-// phase 7 removes it completely; this composable prevents any stored
-// `queen-theme=light` cookie / localStorage value from flipping the app.
+// Cursor theme is dark-only. Light mode has been retired and there is no
+// toggle anywhere in the UI. What this module still does is prevent a stored
+// `queen-theme=light` cookie / localStorage value from flipping the app, and
+// hand the chart components the `isDark` they read (BaseChart, RowChart).
+// `toggleTheme`/`setTheme`/`initTheme` are inert and exist only so a stray
+// call site cannot throw.
 
 const isDark = ref(true)
 

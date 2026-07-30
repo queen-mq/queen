@@ -1,0 +1,111 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import Header from "../components/Header.astro";
+import { config } from "virtual:nimbus/config";
+
+const tiers = [
+  {
+    href: "/start",
+    eyebrow: "Start here",
+    title: "What Queen is, and whether you want it",
+    body: "The problem it was built for, the eight things it does differently, and an honest list of what it does not do.",
+  },
+  {
+    href: "/use",
+    eyebrow: "Use Queen",
+    title: "Build on it",
+    body: "The model in one page, then six client SDKs, the plain HTTP API, and examples extracted from the test suites that run them.",
+  },
+  {
+    href: "/selfhost",
+    eyebrow: "Self-hosting",
+    title: "Run it yourself",
+    body: "One binary and one PostgreSQL. Configuration, high availability, security, observability, retention — and how to run it multi-tenant.",
+  },
+  {
+    href: "/internals",
+    eyebrow: "Internals",
+    title: "Understand how it works",
+    body: "Segments, offsets, the life of a push and of a pop, deduplication, flow control, and the schema underneath.",
+  },
+];
+
+const proof = [
+  { figure: "51.8B", label: "messages in a 24-hour soak, explicit acks, zero restarts" },
+  { figure: "1000", label: "FIFO partitions consumed in order, zero order violations" },
+  { figure: "1", label: "stateless binary next to the PostgreSQL you already run" },
+];
+---
+
+<BaseLayout title={config.title} description={config.description}>
+  <div class="flex flex-col min-h-screen">
+    <Header />
+    <main class="flex-1 mx-auto max-w-4xl w-full px-6 py-20">
+      <p class="text-sm font-medium text-muted-foreground">Queen MQ 1.0</p>
+      <h1
+        class="mt-2 text-foreground leading-tight"
+        style="font-size: var(--nb-h1-size); font-weight: var(--nb-h1-weight); letter-spacing: var(--nb-h1-tracking);"
+      >
+        Ordered partitions, on Postgres.
+      </h1>
+      <p class="mt-4 max-w-2xl text-[1.0625rem] text-muted-foreground leading-relaxed">
+        Queen gives you as many FIFO partitions as you have entities — created on first
+        push, so a slow consumer on one never stalls another — plus consumer groups with
+        replay and transactional delivery. Clients and broker are stateless: no
+        rebalancing, no cluster, no JVM. Storage is the database you already operate.
+      </p>
+
+      <div class="mt-8 flex flex-wrap gap-3">
+        <a
+          href="/start/quickstart"
+          class="rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
+        >
+          Quickstart
+        </a>
+        <a
+          href="/start"
+          class="rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
+        >
+          Why Queen exists
+        </a>
+      </div>
+
+      <div class="mt-14 grid grid-cols-1 gap-6 sm:grid-cols-3">
+        {
+          proof.map((p) => (
+            <div>
+              <div class="text-2xl font-semibold text-foreground">{p.figure}</div>
+              <div class="mt-1 text-sm text-muted-foreground leading-relaxed">{p.label}</div>
+            </div>
+          ))
+        }
+      </div>
+      <p class="mt-4 text-sm text-muted-foreground">
+        Every number on this site names the run that produced it — see{" "}
+        <a href="/benchmarks">benchmarks</a>.
+      </p>
+
+      <div class="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {
+          tiers.map((t) => (
+            <a
+              href={t.href}
+              class="block rounded-lg border border-border p-5 transition-colors hover:border-border-strong no-underline"
+            >
+              <div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                {t.eyebrow}
+              </div>
+              <div class="mt-1.5 font-medium text-foreground">{t.title}</div>
+              <div class="mt-1 text-sm text-muted-foreground leading-relaxed">{t.body}</div>
+            </a>
+          ))
+        }
+      </div>
+
+      <div class="mt-14 border-t border-border pt-6 text-sm text-muted-foreground">
+        Apache 2.0 · <a href="https://github.com/queen-mq/queen">source on GitHub</a> ·{" "}
+        <a href="/reference">API reference</a>
+      </div>
+    </main>
+  </div>
+</BaseLayout>

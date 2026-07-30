@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "rules": {
+    "nimbus/frontmatter-shape": "error",
+    "nimbus/internal-link": "error",
+    "nimbus/description-required": "error",
+    "nimbus/single-h1": "error",
+    "nimbus/heading-hierarchy": "error",
+    "nimbus/code-block-lang": "error",
+    "nimbus/code-block-prompt-prefix": "error",
+    "nimbus/no-self-host-url": "error",
+    "nimbus/image-ref": "error",
+    "nimbus/duplicate-heading-text": "warn",
+    "nimbus/heading-punctuation": "warn",
+    "nimbus/bare-url": "warn"
+  },
+  "collections": {},
+  "site": "https://queenmq.com"
+}

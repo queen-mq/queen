@@ -1,15 +1,15 @@
 <template>
   <div class="view-container">
 
-    <!-- Page head -->
-    <!-- Mode Indicator (for Bus Mode) -->
-    <div v-if="queueMode && queueMode.type === 'bus'" class="card" style="padding:10px 14px; margin-bottom:16px;">
+    <!-- Bus mode. Driven by what the rows actually report as well as by the
+         top-level mode: a log-engine queue reports its groups per message. -->
+    <div v-if="busGroups > 0" class="card" style="padding:10px 14px; margin-bottom:16px;">
       <div style="display:flex; align-items:center; gap:8px; font-size:13px;">
         <svg style="width:16px; height:16px; color:var(--text-mid);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
         </svg>
         <span style="font-weight:600; color:var(--text-hi);">Bus Mode Active</span>
-        <span class="chip chip-ice">{{ queueMode.busGroupsCount }} consumer group(s)</span>
+        <span class="chip chip-ice">{{ busGroups }} consumer group(s)</span>
       </div>
     </div>
 
@@ -19,17 +19,18 @@
         <h3>Filters</h3>
       </div>
       <div class="card-body" style="display:flex; flex-direction:column; gap:14px;">
-        <!-- First Row: Search, Queue, Status, Limit -->
+        <!-- First Row: Filter, Queue, Status, Limit -->
         <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:12px; align-items:end;">
           <div>
-            <label class="label-xs" style="display:block; margin-bottom:6px;">Search</label>
+            <label class="label-xs" style="display:block; margin-bottom:6px;">Filter loaded rows</label>
             <div style="position:relative;">
               <input
                 v-model="searchQuery"
                 type="text"
-                placeholder="Search by transaction ID..."
+                placeholder="Transaction or partition ID…"
                 class="input"
                 style="padding-left:34px;"
+                title="Filters the rows already on this page. It is not a server-side transaction lookup."
               />
               <svg
                 style="position:absolute; left:10px; top:50%; transform:translateY(-50%); width:15px; height:15px; color:var(--text-low);"
@@ -122,12 +123,31 @@
       </div>
     </div>
 
+    <!-- The list failed. Whatever is in the table below is stale, and saying so
+         is the whole point — an empty table would read as "no messages". -->
+    <div v-if="listError" class="status-banner banner-bad" style="border-radius:10px; margin-bottom:16px;">
+      <span class="pulse-ember" style="width:7px; height:7px; flex-shrink:0;" />
+      <span>
+        <strong>Could not load messages</strong> · {{ describeApiError(listError) }}<template v-if="messages.length">
+          · showing the last rows that loaded{{ lastUpdatedText ? ` (${lastUpdatedText})` : '' }}</template>
+      </span>
+    </div>
+
+    <!-- The broker answered page N with page N-1's rows: paging further would
+         renumber the same messages. -->
+    <div v-if="paginationStalled" class="status-banner banner-warn" style="border-radius:10px; margin-bottom:16px;">
+      <span>
+        <strong>Pagination is not advancing</strong> ·
+        this broker returned the same rows for page {{ currentPage }}. Narrow the time range or the filters instead.
+      </span>
+    </div>
+
     <!-- Messages list -->
     <div class="card">
       <div class="card-header">
         <h3>Messages</h3>
         <span class="chip chip-ice">{{ formatNumber(messages.length) }} loaded</span>
-        <span class="muted">Page <span class="font-mono tabular-nums">{{ currentPage }}</span></span>
+        <span class="muted" :title="scopeTitle">{{ scopeLabel }} · page <span class="font-mono tabular-nums">{{ currentPage }}</span></span>
       </div>
 
       <div style="overflow-x:auto;">
@@ -143,7 +163,7 @@
             </tr>
           </thead>
           <tbody>
-            <template v-if="loading">
+            <template v-if="loading && !messages.length">
               <tr v-for="i in 10" :key="i">
                 <td><div class="skeleton" style="height:16px; width:96px;" /></td>
                 <td class="hidden xl:table-cell"><div class="skeleton" style="height:16px; width:128px;" /></td>
@@ -155,10 +175,10 @@
             </template>
             <template v-else-if="filteredMessages.length > 0">
               <tr
-                v-for="message in filteredMessages"
-                :key="message.id"
-                style="cursor:pointer;"
-                @click="selectMessage(message)"
+                v-for="(message, idx) in filteredMessages"
+                :key="rowKey(message, idx)"
+                :style="isAddressable(message) ? 'cursor:pointer;' : 'cursor:default;'"
+                @click="isAddressable(message) && selectMessage(message)"
               >
                 <td>
                   <div style="font-size:13px; font-weight:500; color:var(--text-hi);">{{ message.queue }}</div>
@@ -175,9 +195,23 @@
                   <span style="font-size:12px; color:var(--text-mid);">{{ message.partition }}</span>
                 </td>
                 <td>
-                  <div class="font-mono" style="font-size:11px; color:var(--text-hi); word-break:break-all; user-select:all;">
+                  <!-- The txn id lives inside the segment blob. Once retention
+                       drops the segment the broker cannot resolve it: say so
+                       instead of rendering an empty, clickable cell. -->
+                  <div
+                    v-if="isAddressable(message)"
+                    class="font-mono"
+                    style="font-size:11px; color:var(--text-hi); word-break:break-all; user-select:all;"
+                  >
                     {{ message.transactionId }}
                   </div>
+                  <span
+                    v-else
+                    class="chip chip-mute"
+                    title="The covering log segment was removed by retention, so the broker can no longer resolve this message's transaction id or payload."
+                  >
+                    payload expired
+                  </span>
                 </td>
                 <td class="font-mono tabular-nums" style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;">
                   {{ formatDateTime(message.createdAt) }}
@@ -202,12 +236,25 @@
                 </td>
               </tr>
             </template>
+            <!-- Never an idle empty state on a failure: that is a load error
+                 wearing "no messages" as a disguise. -->
+            <tr v-else-if="listError">
+              <td colspan="6" style="text-align:center; padding:48px 16px;">
+                <p style="color:var(--ember-400); font-size:13px;">{{ describeApiError(listError) }}</p>
+                <p style="color:var(--text-low); font-size:12px; margin-top:6px;">
+                  Nothing loaded — this is a failure, not an empty queue.
+                </p>
+              </td>
+            </tr>
             <tr v-else>
               <td colspan="6" style="text-align:center; padding:48px 16px;">
                 <svg style="width:48px; height:48px; margin:0 auto 12px; color:var(--text-low);" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
                 </svg>
-                <p style="color:var(--text-mid);">No messages found</p>
+                <p v-if="searchQuery && messages.length" style="color:var(--text-mid);">
+                  No loaded row matches “{{ searchQuery }}” — the filter only searches this page.
+                </p>
+                <p v-else style="color:var(--text-mid);">No messages found</p>
               </td>
             </tr>
           </tbody>
@@ -231,7 +278,7 @@
           </button>
           <button
             @click="nextPage"
-            :disabled="messages.length < limit"
+            :disabled="!canPageForward"
             class="btn btn-ghost" style="padding:6px 10px;"
           >
             <svg style="width:16px; height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -244,10 +291,7 @@
 
     <!-- Message detail panel (teleported to body to avoid transform issues) -->
     <Teleport to="body">
-      <div
-        v-if="selectedMessage"
-        style="position:fixed; top:0; right:0; bottom:0; width:100%; max-width:640px; z-index:50; overflow-y:auto; border-left:1px solid var(--bd); background:linear-gradient(180deg, rgba(14,14,18,.97), rgba(10,10,14,.97)); backdrop-filter:blur(16px);"
-      >
+      <div v-if="selectedMessage" class="msg-panel">
       <div style="padding:20px 24px;">
         <!-- Header -->
         <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; padding-bottom:16px; border-bottom:1px solid var(--bd);">
@@ -258,7 +302,7 @@
             </p>
           </div>
           <button
-            @click="selectedMessage = null"
+            @click="closePanel"
             class="btn btn-ghost btn-icon"
           >
             <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -364,19 +408,27 @@
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
               <h4 style="font-size:13px; font-weight:600; color:var(--text-hi);">Payload</h4>
               <button
+                v-if="payloadAvailable"
                 @click="copyPayload"
                 class="btn btn-ghost" style="padding:4px 8px; font-size:11px; gap:4px;"
               >
                 <svg v-if="!payloadCopied" style="width:14px; height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                 </svg>
-                <svg v-else style="width:14px; height:14px; color:#4ade80;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg v-else style="width:14px; height:14px; color:var(--ok-500);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
                 </svg>
                 {{ payloadCopied ? 'Copied!' : 'Copy' }}
               </button>
             </div>
-            <div style="background:rgba(0,0,0,.35); border:1px solid var(--bd); border-radius:10px; padding:14px 16px; overflow-x:auto;">
+            <!-- payloadAvailable:false means the segment is gone. An empty
+                 payload box would read as "this message carried nothing". -->
+            <div v-if="!payloadAvailable" class="card" style="padding:12px 14px;">
+              <p style="font-size:13px; color:var(--text-mid);">
+                Payload unavailable — the covering log segment was removed by retention.
+              </p>
+            </div>
+            <div v-else class="msg-code">
               <pre class="font-mono" style="font-size:12px; white-space:pre-wrap; margin:0;" v-html="highlightJson(messageDetail.payload)"></pre>
             </div>
           </div>
@@ -404,9 +456,8 @@
 
           <!-- Actions -->
           <div style="display:flex; flex-direction:column; gap:8px; padding-top:8px;">
-            <!-- Completed message info -->
-            <div v-if="messageDetail.status === 'completed'" class="card" style="padding:12px 14px; border-color:rgba(74,222,128,.2);">
-              <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:#4ade80;">
+            <div v-if="messageDetail.status === 'completed'" class="card" style="padding:12px 14px; border-color:var(--ok-glow);">
+              <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:var(--ok-500);">
                 <svg style="width:18px; height:18px; flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
@@ -414,28 +465,12 @@
               </div>
             </div>
 
+            <!-- Only dead-lettered messages are deletable: a live payload lives
+                 in an immutable log segment, and the broker answers a delete on
+                 one with success:false. Retry / move-to-DLQ are not offered at
+                 all — the broker has no route for either. -->
             <button
-              v-if="messageDetail.status === 'dead_letter'"
-              @click="retryMessage"
-              :disabled="actionLoading"
-              class="btn btn-primary" style="width:100%; justify-content:center;"
-            >
-              <svg style="width:16px; height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              Retry Message
-            </button>
-
-            <button
-              v-if="messageDetail.status === 'pending'"
-              @click="moveToDLQ"
-              :disabled="actionLoading"
-              class="btn btn-ghost" style="width:100%; justify-content:center;"
-            >
-              Move to Dead Letter Queue
-            </button>
-
-            <button
+              v-if="isDeletable && canAdmin"
               @click="deleteMessage"
               :disabled="actionLoading"
               class="btn btn-danger" style="width:100%; justify-content:center;"
@@ -443,8 +478,17 @@
               <svg style="width:16px; height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
-              Delete Message
+              {{ actionLoading ? 'Purging…' : 'Purge dead-letter entry' }}
             </button>
+
+            <p v-else-if="isDeletable" style="font-size:12px; color:var(--text-low);">
+              Purging a dead-letter entry needs the admin role on this cluster.
+            </p>
+
+            <p v-else style="font-size:12px; color:var(--text-low);">
+              Live messages are stored in immutable log segments: they cannot be deleted, retried or
+              re-routed from here. Only dead-lettered entries can be purged.
+            </p>
           </div>
 
           <div v-if="actionError" style="font-size:13px; color:var(--ember-400); margin-top:16px;">
@@ -457,27 +501,30 @@
       <!-- Backdrop -->
       <div
         v-if="selectedMessage"
-        style="position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.5); backdrop-filter:blur(4px);"
-        @click="selectedMessage = null"
+        class="msg-backdrop"
+        @click="closePanel"
       ></div>
     </Teleport>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { messages as messagesApi, queues as queuesApi } from '@/api'
-import { formatNumber, formatDateTime } from '@/composables/useApi'
+import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
+import { useApi, formatNumber, formatDateTime, formatRelativeTime } from '@/composables/useApi'
 import { useRefresh } from '@/composables/useRefresh'
+import { useToast } from '@/composables/useToast'
+import { useIdentity } from '@/stores/identity'
 
 const route = useRoute()
+const { can, actingTenantSlug, actingClusterSlug } = useIdentity()
+const { notifySuccess } = useToast()
 
 // State
-const messages = ref([])
-const queues = ref([])
-const queueMode = ref(null)
-const loading = ref(true)
+const paginationStalled = ref(false)
+let requestedPage = 1
+let pageHeadKey = null
 
 const searchQuery = ref('')
 const filterQueue = ref('')
@@ -496,24 +543,93 @@ const actionLoading = ref(false)
 const actionError = ref(null)
 const payloadCopied = ref(false)
 
+// The list, its loading/error state and its "as of when" come from one place.
+// useApi also aborts on unmount and discards any response that belongs to a
+// cluster we have since left, so a late answer cannot land under a new tenant.
+const {
+  data: listData,
+  loading,
+  error: listError,
+  lastUpdated,
+  execute: executeList,
+} = useApi((params, config) => messagesApi.list(params, config), {
+  immediate: false,
+  onSuccess: (payload) => {
+    const rows = payload?.messages || []
+    // Same head row on a later page means the broker ignored the offset: the
+    // page counter would climb over identical rows.
+    paginationStalled.value = requestedPage > 1 && rows.length > 0 && headKey(rows) === pageHeadKey
+    pageHeadKey = headKey(rows)
+  },
+})
+
+const { data: queuesData, refresh: refreshQueues } = useApi(
+  (config) => queuesApi.list(undefined, config),
+  { immediate: false },
+)
+
+const messages = computed(() => listData.value?.messages || [])
+const queues = computed(() => queuesData.value?.queues || [])
+const queueMode = computed(() => listData.value?.mode || null)
+
+// Permissions come from the identity store only — never from whether a call 403'd.
+const canAdmin = computed(() => can('queueAdmin'))
+
+// Scope. These rows are the acting tenant's, on the acting cluster's cell;
+// saying so is what keeps a tenant number from being read as a cell number.
+const scopeLabel = computed(
+  () => `tenant ${actingTenantSlug.value || '—'} · cluster ${actingClusterSlug.value || '—'}`
+)
+const scopeTitle = 'Tenant-scoped: only messages belonging to this tenant on the acting cluster.'
+
 // Computed
 const filteredMessages = computed(() => {
   let result = [...messages.value]
-  
+
   if (searchQuery.value) {
     const query = searchQuery.value.toLowerCase()
-    result = result.filter(m => 
+    result = result.filter(m =>
       m.transactionId?.toLowerCase().includes(query) ||
       m.partitionId?.toLowerCase().includes(query)
     )
   }
-  
+
   return result
 })
 
 const hasActiveFilters = computed(() => {
   return searchQuery.value || filterQueue.value || filterPartition.value || filterStatus.value
 })
+
+// A log queue reports its groups per message even when the queue-level mode
+// probe says nothing, so take whichever evidence exists.
+const busGroups = computed(() => {
+  const declared = Number(queueMode.value?.busGroupsCount) || 0
+  const observed = messages.value.reduce(
+    (max, m) => Math.max(max, Number(m.busStatus?.totalGroups) || 0), 0
+  )
+  return Math.max(declared, observed)
+})
+
+const lastUpdatedText = computed(() =>
+  lastUpdated.value ? formatRelativeTime(lastUpdated.value) : null
+)
+
+// The combined page can carry rows from both engines (up to 2x limit), so a
+// short page is the only reliable "there is no more" signal.
+const canPageForward = computed(
+  () => !paginationStalled.value && messages.value.length >= limit.value
+)
+
+const isDeletable = computed(() => messageDetail.value?.status === 'dead_letter')
+const payloadAvailable = computed(() => messageDetail.value?.payloadAvailable !== false)
+
+// 047 emits id/transactionId as NULL for log entries and the broker backfills
+// them from the frame — which it cannot do once retention removed the segment.
+// Such a row is not addressable: no key, no detail fetch.
+const isAddressable = (m) => Boolean(m?.partitionId && m?.transactionId)
+const rowKey = (m, idx) => m.transactionId || m.txnHash || `${m.partitionId || 'na'}:${idx}`
+const headKey = (rows) => (rows.length ? rowKey(rows[0], 0) : null)
 
 // Helper to format Date to datetime-local input format
 const formatDateTimeLocal = (date) => {
@@ -535,7 +651,7 @@ const toISOString = (dateTimeLocal) => {
 const setTimeRange = (hours) => {
   const now = new Date()
   const from = new Date(now.getTime() - hours * 60 * 60 * 1000)
-  
+
   filterFrom.value = formatDateTimeLocal(from)
   filterTo.value = formatDateTimeLocal(now)
 }
@@ -546,45 +662,32 @@ const clearFilters = () => {
   filterQueue.value = ''
   filterPartition.value = ''
   filterStatus.value = ''
-  
+
   // Reset to default last 1 hour
   setTimeRange(1)
-  
+
   applyFilters()
 }
 
 // Methods
-const fetchMessages = async () => {
-  // Only show loading skeleton if we don't have data yet (smooth background refresh)
-  if (!messages.value.length) loading.value = true
-  try {
-    const params = { 
-      limit: limit.value,
-      offset: (currentPage.value - 1) * limit.value
-    }
-    if (filterQueue.value) params.queue = filterQueue.value
-    if (filterPartition.value) params.partition = filterPartition.value
-    if (filterStatus.value) params.status = filterStatus.value
-    if (filterFrom.value) params.from = toISOString(filterFrom.value)
-    if (filterTo.value) params.to = toISOString(filterTo.value)
-    
-    const response = await messagesApi.list(params)
-    messages.value = response.data?.messages || []
-    queueMode.value = response.data?.mode || null
-  } catch (err) {
-    console.error('Failed to fetch messages:', err)
-  } finally {
-    loading.value = false
+const buildParams = () => {
+  const params = {
+    limit: limit.value,
+    offset: (currentPage.value - 1) * limit.value
   }
+  if (filterQueue.value) params.queue = filterQueue.value
+  if (filterPartition.value) params.partition = filterPartition.value
+  if (filterStatus.value) params.status = filterStatus.value
+  if (filterFrom.value) params.from = toISOString(filterFrom.value)
+  if (filterTo.value) params.to = toISOString(filterTo.value)
+  return params
 }
 
-const fetchQueues = async () => {
-  try {
-    const response = await queuesApi.list()
-    queues.value = response.data?.queues || []
-  } catch (err) {
-    console.error('Failed to fetch queues:', err)
-  }
+// A failed load keeps the rows that are already on screen — the banner says
+// they are stale. The failure itself is already on the global surface.
+const fetchMessages = () => {
+  requestedPage = currentPage.value
+  return executeList(buildParams()).catch(() => {})
 }
 
 const applyFilters = () => {
@@ -600,74 +703,58 @@ const prevPage = () => {
 }
 
 const nextPage = () => {
+  if (!canPageForward.value) return
   currentPage.value++
   fetchMessages()
 }
 
-const selectMessage = async (message) => {
-  selectedMessage.value = message
+const closePanel = () => {
+  selectedMessage.value = null
+  actionError.value = null
+}
+
+const openMessage = async (partitionId, transactionId) => {
+  selectedMessage.value = { partitionId, transactionId }
   detailLoading.value = true
   detailError.value = null
+  actionError.value = null
   messageDetail.value = null
   payloadCopied.value = false
-  
+
   try {
-    const response = await messagesApi.get(message.partitionId, message.transactionId)
+    const response = await messagesApi.get(partitionId, transactionId)
     messageDetail.value = response.data
   } catch (err) {
-    detailError.value = err.response?.data?.error || err.message
+    detailError.value = describeApiError(err)
   } finally {
     detailLoading.value = false
   }
 }
 
-const retryMessage = async () => {
-  if (!messageDetail.value) return
-  
-  actionLoading.value = true
-  actionError.value = null
-  
-  try {
-    await messagesApi.retry(messageDetail.value.partitionId, messageDetail.value.transactionId)
-    selectedMessage.value = null
-    fetchMessages()
-  } catch (err) {
-    actionError.value = err.response?.data?.error || err.message
-  } finally {
-    actionLoading.value = false
-  }
-}
-
-const moveToDLQ = async () => {
-  if (!messageDetail.value) return
-  
-  actionLoading.value = true
-  actionError.value = null
-  
-  try {
-    await messagesApi.moveToDLQ(messageDetail.value.partitionId, messageDetail.value.transactionId)
-    selectedMessage.value = null
-    fetchMessages()
-  } catch (err) {
-    actionError.value = err.response?.data?.error || err.message
-  } finally {
-    actionLoading.value = false
-  }
-}
+const selectMessage = (message) => openMessage(message.partitionId, message.transactionId)
 
 const deleteMessage = async () => {
-  if (!messageDetail.value) return
-  if (!confirm('Are you sure you want to delete this message? This action cannot be undone.')) return
-  
+  const detail = messageDetail.value
+  if (!detail || !canAdmin.value) return
+  if (!confirm('Purge this dead-letter entry? This action cannot be undone.')) return
+
   actionLoading.value = true
   actionError.value = null
-  
+
   try {
-    await messagesApi.delete(messageDetail.value.partitionId, messageDetail.value.transactionId)
-    selectedMessage.value = null
+    const res = await messagesApi.delete(detail.partitionId, detail.transactionId)
+    // 200 with success:false is the broker's "nothing matched" (and its
+    // cross-tenant refusal). Closing the panel on that reports a deletion that
+    // did not happen.
+    if (res.data?.success !== true) {
+      actionError.value = res.data?.message || 'The broker did not delete this message.'
+      return
+    }
+    notifySuccess(`Purged dead-letter entry ${detail.transactionId}`)
+    closePanel()
     fetchMessages()
   } catch (err) {
-    actionError.value = err.response?.data?.error || err.message
+    actionError.value = describeApiError(err)
   } finally {
     actionLoading.value = false
   }
@@ -687,18 +774,18 @@ const formatPayload = (payload) => {
 
 const highlightJson = (payload) => {
   const json = formatPayload(payload)
-  
+
   // Tokenize and highlight JSON properly
   let result = ''
   let i = 0
-  
+
   const escapeHtml = (str) => {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   }
-  
+
   while (i < json.length) {
     const char = json[i]
-    
+
     // String
     if (char === '"') {
       let str = '"'
@@ -714,7 +801,7 @@ const highlightJson = (payload) => {
       }
       str += '"'
       i++
-      result += `<span class="text-emerald-400">${escapeHtml(str)}</span>`
+      result += `<span style="color:var(--ok-500)">${escapeHtml(str)}</span>`
     }
     // Number
     else if (char === '-' || (char >= '0' && char <= '9')) {
@@ -723,19 +810,19 @@ const highlightJson = (payload) => {
         num += json[i]
         i++
       }
-      result += `<span class="text-amber-400">${num}</span>`
+      result += `<span style="color:var(--warn-400)">${num}</span>`
     }
     // true, false, null
     else if (json.slice(i, i + 4) === 'true') {
-      result += '<span class="text-purple-400">true</span>'
+      result += '<span style="color:var(--ice-400)">true</span>'
       i += 4
     }
     else if (json.slice(i, i + 5) === 'false') {
-      result += '<span class="text-purple-400">false</span>'
+      result += '<span style="color:var(--ice-400)">false</span>'
       i += 5
     }
     else if (json.slice(i, i + 4) === 'null') {
-      result += '<span class="text-purple-400">null</span>'
+      result += '<span style="color:var(--ice-400)">null</span>'
       i += 4
     }
     // Braces and brackets
@@ -754,13 +841,13 @@ const highlightJson = (payload) => {
       i++
     }
   }
-  
+
   return result
 }
 
 const copyPayload = async () => {
   if (!messageDetail.value?.payload) return
-  
+
   try {
     const text = formatPayload(messageDetail.value.payload)
     await navigator.clipboard.writeText(text)
@@ -776,26 +863,32 @@ const copyPayload = async () => {
 // Register for global refresh
 useRefresh(fetchMessages)
 
-// Initialize from query params and set default time range
-onMounted(() => {
-  if (route.query.queue) {
-    filterQueue.value = route.query.queue
-  }
-  if (route.query.partition) {
-    filterPartition.value = route.query.partition
-  }
-  if (route.query.status) {
-    filterStatus.value = route.query.status
-  }
-  
-  // Set default time range to last 1 hour if not set via query
-  if (!route.query.from && !route.query.to) {
-    setTimeRange(1)
-  }
-  
-  fetchQueues()
-  fetchMessages()
-})
+// Initialize from query params and set the default time range. This runs in
+// setup, not onMounted, so the very first paint is the loading state rather
+// than "No messages found" — an empty table before the first request is an
+// answer we do not have yet.
+if (route.query.queue) {
+  filterQueue.value = route.query.queue
+}
+if (route.query.partition) {
+  filterPartition.value = route.query.partition
+}
+if (route.query.status) {
+  filterStatus.value = route.query.status
+}
+if (!route.query.from && !route.query.to) {
+  setTimeRange(1)
+}
+
+refreshQueues()
+fetchMessages()
+
+// Deep link from Traces ("View Full Message"): the addressed message is not
+// necessarily on the default page, so open it directly instead of hoping the
+// list happens to contain it.
+if (route.query.partitionId && route.query.transactionId) {
+  openMessage(route.query.partitionId, route.query.transactionId)
+}
 
 // Watch for filter changes (auto-apply on queue/status change)
 watch([filterQueue, filterPartition, filterStatus], () => {
@@ -803,3 +896,34 @@ watch([filterQueue, filterPartition, filterStatus], () => {
   fetchMessages()
 })
 </script>
+
+<style scoped>
+/* The panel is teleported but still this component's DOM, so scoped styles
+   apply. Split by theme: a hardcoded dark gradient stays dark in light mode. */
+.msg-panel {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 100%; max-width: 640px; z-index: 50;
+  overflow-y: auto;
+  border-left: 1px solid var(--bd);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+}
+html:not(.light) .msg-panel {
+  background: linear-gradient(180deg, rgba(14,14,18,.97), rgba(10,10,14,.97));
+}
+html.light .msg-panel {
+  background: rgba(255,255,255,.97);
+  box-shadow: -10px 0 40px -10px rgba(0,0,0,.1);
+}
+
+.msg-backdrop {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(4,4,6,.5); backdrop-filter: blur(4px);
+}
+
+.msg-code {
+  border: 1px solid var(--bd); border-radius: 10px;
+  padding: 14px 16px; overflow-x: auto;
+}
+html:not(.light) .msg-code { background: var(--ink-0); }
+html.light .msg-code { background: var(--paper-1); }
+</style>

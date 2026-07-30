@@ -610,6 +610,11 @@ async fn main() {
             "/api/v1/messages/:partitionId/:transactionId",
             get(handlers::handle_get_message).delete(handlers::handle_delete_message),
         )
+        // DLQ replay: re-push the dead-letter snapshot, then drop the DLQ row.
+        .route(
+            "/api/v1/messages/:partitionId/:transactionId/retry",
+            post(handlers::handle_retry_message),
+        )
         .route("/api/v1/dlq", get(handlers::handle_dlq))
         .route("/api/v1/traces", post(handlers::handle_record_trace))
         .route("/api/v1/traces/names", get(handlers::handle_trace_names))
@@ -720,10 +725,12 @@ async fn main() {
         .route("/metrics/prometheus", get(handlers::handle_prometheus))
         .route("/status", get(handlers::handle_status))
         .route("/metrics", get(handlers::handle_metrics))
-        // SPA dashboard: any request not matching a route above is served from
-        // QUEEN_STATIC_DIR (default webapp/dist), falling back to index.html for
-        // client-side routes. A fallback only, so it never shadows /api/v1; 404s
-        // when the dir is absent (dev/CI). Replaces the C++ server's static surface.
+        // SPA dashboard: any request not matching a route above is served from the
+        // assets embedded at compile time (server/webapp/dist — there is no
+        // runtime static-dir override), falling back to index.html for
+        // client-side routes. A fallback only, so it never shadows /api/v1; it
+        // answers a JSON 404 for anything under /api/ and for non-GET/HEAD, so a
+        // call to a nonexistent endpoint can never read as a 200.
         .fallback(handlers::handle_static)
         // Raise the request body cap above axum's 2 MiB default so large payloads
         // (pushLargePayload) don't 413. Configurable via QUEEN_MAX_BODY_BYTES.

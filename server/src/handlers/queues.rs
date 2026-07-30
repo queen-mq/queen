@@ -162,8 +162,9 @@ pub async fn handle_configure(
 // -------------------------------------------------------------- delete queue
 // DELETE /api/v1/resources/queues/:queue — drop the queue. Removes the rows-side
 // coordination data (queen.delete_queue_v1) AND the segment data (seg_queues
-// cascade). Response is the SP JSON {deleted:true,...} at HTTP 200 (a 204 would
-// make the JS client return null and fail res.deleted===true).
+// cascade). Response is the SP JSON at HTTP 200 (a 204 would make the JS client
+// return null and fail res.deleted===true), with `deleted` reflecting whether a
+// queue was actually removed — see the existed:false guard below.
 pub async fn handle_delete_queue(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
@@ -195,6 +196,25 @@ pub async fn handle_delete_queue(
     st.lease_cache.lock().unwrap().remove(&qkey);
     // Invalidate the deleted queue's config cache on peer replicas.
     st.notifier.broadcast_queue_config_delete(&qkey);
+
+    // The SP always reports deleted:true and hides the real outcome in
+    // `existed`, so "delete a queue that isn't yours / doesn't exist" reads as
+    // success to any client that trusts `deleted`. Make the body self-consistent
+    // (deleted mirrors existed). The status stays 200: DELETE is idempotent here
+    // and the SDKs use delete-before-create as a cleanup idiom, so a 404 would
+    // turn a no-op into a thrown error for them.
+    let mut v: serde_json::Value =
+        serde_json::from_str(&del_txt).unwrap_or(serde_json::Value::Null);
+    if v.get("existed").and_then(|x| x.as_bool()) == Some(false) {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("deleted".to_string(), serde_json::json!(false));
+            o.insert(
+                "message".to_string(),
+                serde_json::json!("Queue not found — nothing was deleted"),
+            );
+            return json(StatusCode::OK, v.to_string());
+        }
+    }
     json(StatusCode::OK, del_txt)
 }
 
@@ -295,14 +315,17 @@ pub async fn handle_list_queues(
                         serde_json::json!({"segments": segs, "messages": msgs}),
                     );
                     obj.insert("partitions".to_string(), serde_json::json!(parts));
-                    // The SP's messages{} block is all-zero for seg queues; overlay
-                    // total/pending with the segment message count.
+                    // `msgs` is the RETAINED frame count (log_queue_stats_all_v1),
+                    // which is `total`, NOT the unconsumed backlog. `pending` and
+                    // `processing` must keep the SP's watermark values (queen.stats,
+                    // refreshed for seg queues by log_refresh_all_stats_v1) — the
+                    // same numbers the overview sums — or the queue list contradicts
+                    // every other pending reading in the UI.
                     let m = obj.entry("messages".to_string()).or_insert_with(
                         || serde_json::json!({"total": 0, "pending": 0, "processing": 0}),
                     );
                     if let Some(mo) = m.as_object_mut() {
                         mo.insert("total".to_string(), serde_json::json!(msgs));
-                        mo.insert("pending".to_string(), serde_json::json!(msgs));
                     }
                 }
             }

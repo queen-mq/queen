@@ -1,14 +1,27 @@
-import { ref, onUnmounted } from 'vue'
+import { computed, ref, onUnmounted } from 'vue'
+
+import { currentEpoch, onClusterChange } from '@/stores/identity'
 
 /**
- * Composable for API data fetching with loading, error, and auto-refresh
+ * One panel's worth of data, with the three states a panel must be able to
+ * show: loading, error, and "as of when".
+ *
+ * `error` holds the ApiError itself (status / code / retryAfter preserved), so
+ * a view can distinguish 403 from 404 route_blocked from 429 — render
+ * `describeApiError(error)` for the human sentence. The failure is ALSO
+ * already on the global surface; what this gives you is the inline state, so
+ * an unreachable panel never renders as an empty or zeroed one.
+ *
+ * `fetchFn` receives `{ signal }` as its last argument — pass it through to
+ * the api wrapper (every wrapper takes an axios config) and the request is
+ * aborted on unmount and on a cluster switch, so a late response can never
+ * overwrite the new tenant's state.
  */
 export function useApi(fetchFn, options = {}) {
-  const { 
-    immediate = true, 
-    refreshInterval = null,
+  const {
+    immediate = true,
     onSuccess = null,
-    onError = null 
+    onError = null,
   } = options
 
   const data = ref(null)
@@ -16,64 +29,56 @@ export function useApi(fetchFn, options = {}) {
   const error = ref(null)
   const lastUpdated = ref(null)
 
-  let intervalId = null
+  let controller = null
+
+  const abort = () => {
+    if (controller) {
+      controller.abort()
+      controller = null
+    }
+  }
 
   const execute = async (...args) => {
+    abort()
+    controller = new AbortController()
+    const signal = controller.signal
+    const epochAtStart = currentEpoch()
     loading.value = true
     error.value = null
 
     try {
-      const response = await fetchFn(...args)
+      const response = await fetchFn(...args, { signal })
+      // Discard anything that belongs to a cluster we are no longer on.
+      if (signal.aborted || epochAtStart !== currentEpoch()) return data.value
       data.value = response.data
       lastUpdated.value = new Date()
-      
-      if (onSuccess) {
-        onSuccess(response.data)
-      }
-      
+      if (onSuccess) onSuccess(response.data)
       return response.data
     } catch (err) {
-      error.value = err.message || 'An error occurred'
-      
-      if (onError) {
-        onError(err)
-      }
-      
+      if (signal.aborted) return data.value
+      error.value = err
+      if (onError) onError(err)
       throw err
     } finally {
-      loading.value = false
+      if (!signal.aborted) loading.value = false
     }
   }
 
-  const refresh = () => execute()
+  /** Fire-and-forget variant: never produces an unhandled rejection. */
+  const refresh = () => execute().catch(() => {})
 
-  // Set up auto-refresh
-  const startAutoRefresh = (interval = refreshInterval) => {
-    if (interval && !intervalId) {
-      intervalId = setInterval(refresh, interval)
-    }
-  }
+  const stopClusterWatch = onClusterChange(() => {
+    abort()
+    data.value = null
+    lastUpdated.value = null
+    error.value = null
+  })
 
-  const stopAutoRefresh = () => {
-    if (intervalId) {
-      clearInterval(intervalId)
-      intervalId = null
-    }
-  }
+  if (immediate) refresh()
 
-  // Initial fetch
-  if (immediate) {
-    execute()
-  }
-
-  // Start auto-refresh if configured
-  if (refreshInterval) {
-    startAutoRefresh()
-  }
-
-  // Cleanup on unmount
   onUnmounted(() => {
-    stopAutoRefresh()
+    abort()
+    stopClusterWatch()
   })
 
   return {
@@ -81,10 +86,11 @@ export function useApi(fetchFn, options = {}) {
     loading,
     error,
     lastUpdated,
+    /** True once a load failed and nothing newer succeeded. */
+    failed: computed(() => error.value !== null),
     execute,
     refresh,
-    startAutoRefresh,
-    stopAutoRefresh
+    abort,
   }
 }
 

@@ -30,7 +30,9 @@ RUN npm ci
 # Copy frontend source
 COPY app/ ./
 
-# Build frontend
+# Build frontend. vite writes to ../server/webapp/dist relative to the app
+# source root (app/vite.config.js) — the one path both Rust binaries embed —
+# which with this WORKDIR lands at /app/server/webapp/dist.
 RUN npm run build
 
 # Stage 2: Build the Rust broker
@@ -45,6 +47,11 @@ COPY server/Cargo.toml server/Cargo.lock server/server.json server/build.rs ./
 # Layer 2: source + the SQL schema (embedded into the binary with include_str!).
 COPY server/src ./src
 COPY server/sql ./sql
+
+# Layer 3: the built dashboard. server/src/handlers/static_files.rs embeds
+# `webapp/dist` with rust_embed, which hard-errors at compile time when the
+# folder is missing — so this COPY is a build dependency, not packaging.
+COPY --from=frontend-builder /app/server/webapp/dist ./webapp/dist
 
 # Build. Cargo registry + target dirs are BuildKit caches; copy the binary out of
 # the (non-persisted) target cache so it lands in the image layer.
@@ -112,8 +119,10 @@ WORKDIR /app
 # Rust broker binary (SQL schema is compiled in — no schema files to copy).
 COPY --from=server-builder /queen-seg ./bin/queen-seg
 
-# Frontend build — served by the broker's SPA fallback from QUEEN_STATIC_DIR.
-COPY --from=frontend-builder /app/webapp/dist ./webapp/dist
+# The same dashboard bytes the binary already embeds, on disk for inspection.
+# The binary does not read them: nothing in server/src implements a
+# static-dir override, so this is a copy for humans, not a serving path.
+COPY --from=frontend-builder /app/server/webapp/dist ./webapp/dist
 
 # The queenctl operator CLI onto $PATH. With QUEEN_SERVER pre-set below, an
 # in-container invocation needs no flags:  docker exec -it queen queenctl status
@@ -121,8 +130,9 @@ COPY --from=cli-builder /out/queenctl /usr/local/bin/queenctl
 
 # In-container default for queenctl. Overridden by --server or `docker run -e ...`.
 ENV QUEEN_SERVER=http://localhost:6632
-# Where the broker serves the dashboard from (matches the COPY above).
-ENV QUEEN_STATIC_DIR=/app/webapp/dist
+# QUEEN_STATIC_DIR is deliberately NOT set: no code reads it (the dashboard is
+# compiled into the binary), and an env var that configures nothing is a lie to
+# whoever tries to point it somewhere.
 
 # Expose the broker port
 EXPOSE 6632

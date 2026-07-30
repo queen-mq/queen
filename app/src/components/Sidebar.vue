@@ -16,26 +16,40 @@
       <div class="brand">
         <div class="brand-mark">
           <img src="/queen-badge-open.svg" alt="" />
-          <span class="brand-health" :class="isConnected ? 'bg-ok' : 'bg-ember'" />
+          <span class="brand-health" :class="healthDot" :title="healthTitle" />
         </div>
         <div v-if="!props.collapsed" class="brand-text">
           <span class="brand-word">Queen<b>MQ</b></span>
         </div>
       </div>
 
-      <!-- Navigation -->
+      <!-- Acting tenant / cluster. Present on every route because every number
+           on every route belongs to it. -->
+      <ClusterSelector :collapsed="props.collapsed" />
+
+      <!-- Navigation, derived from route meta filtered by what identity
+           grants. An entry the user cannot use is never in the DOM. -->
       <nav class="nav-groups">
-        <div class="nav-group" v-for="group in navGroups" :key="group.label">
-          <div class="label-xs" v-if="!props.collapsed">{{ group.label }}</div>
+        <div
+          class="nav-group"
+          :class="{ 'nav-group-operator': group.operator }"
+          v-for="group in navGroups"
+          :key="group.label"
+        >
+          <div class="label-xs nav-group-label" v-if="!props.collapsed">
+            <span>{{ group.label }}</span>
+            <span v-if="group.operator" class="nav-scope-badge" title="Covers the whole cell, every tenant on it">cell</span>
+          </div>
           <router-link
             v-for="item in group.items"
             :key="item.path"
             :to="item.path"
             class="nav-item"
             :class="{ 'nav-item-active': isActive(item.path) }"
+            :title="item.scope === 'cell' ? `${item.name} — cell-level, not scoped to your tenant` : item.name"
             @click="closeMobile"
           >
-            <component :is="item.icon" style="width:16px; height:16px;" />
+            <component :is="icons[item.icon]" style="width:16px; height:16px;" />
             <span v-if="!props.collapsed">{{ item.name }}</span>
           </router-link>
         </div>
@@ -43,15 +57,19 @@
 
       <!-- Footer -->
       <div class="sidebar-foot">
-        <!-- Proxy user -->
-        <div v-if="isProxied && !props.collapsed" class="env-pill">
-          <span style="font-size:11px; color:var(--text-mid);">{{ proxyUser?.username || 'User' }}</span>
-          <button @click="logout" class="env-refresh" title="Logout">
+        <div v-if="!props.collapsed" class="env-pill">
+          <span class="user-email" :title="email || 'signed in'">{{ email || 'signed in' }}</span>
+          <button @click="logout" class="env-refresh" title="Sign out">
             <svg style="width:14px; height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75"/></svg>
           </button>
         </div>
 
-        <p v-if="!props.collapsed" style="font-size:10.5px; color:var(--text-low); text-align:center; margin-top:4px; font-family:'JetBrains Mono',monospace;">v{{ appVersion }}</p>
+        <!-- The BROKER's version (cell-level), not the frontend package's:
+             the app's own version number says nothing about what is serving
+             the data. Unknown stays unknown. -->
+        <p v-if="!props.collapsed" class="foot-version" :title="`broker on the acting cell${brokerVersion ? '' : ' — version unavailable'}`">
+          broker {{ brokerVersion || 'unknown' }}
+        </p>
 
         <button class="collapse-btn" @click="$emit('toggle-collapse')">
           <svg style="width:14px; height:14px;" :style="props.collapsed ? 'transform:rotate(180deg)' : ''" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M15 6l-6 6 6 6"/></svg>
@@ -62,59 +80,113 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, h } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, watch, h } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+
+import ClusterSelector from '@/components/ClusterSelector.vue'
 import { system } from '@/api'
-import { useProxy } from '@/composables/useProxy'
-import { version as appVersion } from '../../package.json'
+import { useAutoRefresh } from '@/composables/useRefresh'
+import { useIdentity } from '@/stores/identity'
 
 const props = defineProps({ collapsed: Boolean })
 defineEmits(['toggle-collapse'])
 
 const route = useRoute()
-const { isProxied, proxyUser, logout } = useProxy()
+const router = useRouter()
+const { email, can, epoch, logout } = useIdentity()
 const mobileOpen = ref(false)
 
 const closeMobile = () => { if (window.innerWidth < 1024) mobileOpen.value = false }
 watch(() => route.path, closeMobile)
 
+// ---------------------------------------------------------------------------
+// Cell health. Three states, never two: reachable, unreachable, and not yet
+// known — an unknown must not render as "offline" any more than as "healthy".
+// ---------------------------------------------------------------------------
 const health = ref(null)
+const healthFailed = ref(false)
 const loadingHealth = ref(false)
-const isConnected = computed(() => health.value?.status === 'healthy' || health.value?.status === 'ok')
-const healthStatus = computed(() => {
-  if (loadingHealth.value) return { text: 'Checking…' }
-  if (!health.value) return { text: 'Offline' }
-  if (isConnected.value) return { text: 'Healthy' }
-  return { text: 'Degraded' }
-})
+
 const refreshHealth = async () => {
   loadingHealth.value = true
-  try { health.value = (await system.getHealth()).data } catch { health.value = null }
-  finally { loadingHealth.value = false }
+  try {
+    health.value = (await system.getHealth()).data
+    healthFailed.value = false
+  } catch {
+    // The failure is already on the global surface; here it only has to stop
+    // the dot from claiming health it cannot see.
+    health.value = null
+    healthFailed.value = true
+  } finally {
+    loadingHealth.value = false
+  }
 }
-onMounted(() => { refreshHealth(); setInterval(refreshHealth, 30000) })
+
+const isConnected = computed(() => health.value?.status === 'healthy' || health.value?.status === 'ok')
+const healthDot = computed(() => {
+  if (!health.value && !healthFailed.value) return 'bg-unknown'
+  return isConnected.value ? 'bg-ok' : 'bg-ember'
+})
+const healthTitle = computed(() => {
+  if (loadingHealth.value && !health.value) return 'Checking the cell…'
+  if (healthFailed.value) return 'Cell unreachable'
+  if (!health.value) return 'Cell status unknown'
+  return isConnected.value ? 'Cell healthy' : 'Cell degraded'
+})
+const brokerVersion = computed(() => health.value?.version || null)
+
+refreshHealth()
+useAutoRefresh(refreshHealth)
+// A cluster switch can mean a different cell entirely, so the dot must stop
+// asserting the old one immediately. The refetch itself comes from the shell,
+// which fires every registered refresh callback on the same switch.
+watch(epoch, () => { health.value = null; healthFailed.value = false })
 
 const isActive = (path) => path === '/' ? route.path === '/' : route.path.startsWith(path)
 
-const navGroups = [
-  { label: 'Overview', items: [
-    { name: 'Dashboard', path: '/', icon: DashboardIcon },
-    { name: 'Queue Operations', path: '/operations', icon: OperationsIcon },
-  ]},
-  { label: 'Routing', items: [
-    { name: 'Queues', path: '/queues', icon: QueuesIcon },
-    { name: 'Consumers', path: '/consumers', icon: ConsumersIcon },
-    { name: 'Messages', path: '/messages', icon: MessagesIcon },
-  ]},
-  { label: 'Observability', items: [
-    { name: 'Traces', path: '/traces', icon: TracesIcon },
-    { name: 'Analytics', path: '/analytics', icon: AnalyticsIcon },
-    { name: 'Dead letter', path: '/dlq', icon: DlqIcon },
-  ]},
-  { label: 'Infrastructure', items: [
-    { name: 'System', path: '/system', icon: SystemIcon },
-  ]},
-]
+// ---------------------------------------------------------------------------
+// Nav, straight off the route table. Group order is fixed; the operator group
+// is last and marked, because its pages answer for the CELL and not for the
+// acting tenant.
+// ---------------------------------------------------------------------------
+const GROUP_ORDER = ['Overview', 'Routing', 'Observability', 'Cell']
+const OPERATOR_GROUP = 'Cell'
+
+const navGroups = computed(() => {
+  const groups = new Map()
+  for (const r of router.getRoutes()) {
+    const nav = r.meta?.nav
+    if (!nav) continue
+    if (!can(r.meta.requires || 'read')) continue
+    if (!groups.has(nav.group)) groups.set(nav.group, [])
+    groups.get(nav.group).push({
+      name: r.meta.title,
+      path: r.path,
+      icon: nav.icon,
+      order: nav.order ?? 99,
+      scope: r.meta.scope || 'tenant',
+    })
+  }
+  return GROUP_ORDER
+    .filter(label => groups.has(label))
+    .map(label => ({
+      label: label === OPERATOR_GROUP ? 'Cell · operator' : label,
+      operator: label === OPERATOR_GROUP,
+      items: groups.get(label).sort((a, b) => a.order - b.order),
+    }))
+})
+
+const icons = {
+  dashboard: DashboardIcon,
+  operations: OperationsIcon,
+  queues: QueuesIcon,
+  consumers: ConsumersIcon,
+  messages: MessagesIcon,
+  traces: TracesIcon,
+  analytics: AnalyticsIcon,
+  dlq: DlqIcon,
+  system: SystemIcon,
+}
 
 function DashboardIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('rect',{x:'3',y:'3',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'14',y:'3',width:'7',height:'5',rx:'1.5'}),h('rect',{x:'14',y:'12',width:'7',height:'9',rx:'1.5'}),h('rect',{x:'3',y:'16',width:'7',height:'5',rx:'1.5'})]) }
 function OperationsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('path',{d:'M3 12h3l2-6 4 12 2.5-7 1.5 4H21'})]) }

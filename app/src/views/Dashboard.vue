@@ -51,56 +51,69 @@
     -->
     <div class="counts-strip">
       <div class="counts-group">
-        <button class="count-item" @click="$router.push('/messages')" :disabled="loadingOverview">
-          <strong>{{ formatNumber(overview?.messages?.total || 0) }}</strong>
-          <span>messages</span>
-        </button>
+        <span class="count-item count-static" title="Messages currently stored for this tenant (retention has already swept the rest)">
+          <strong>{{ overviewFailed ? '—' : formatNumber(overview?.messages?.total ?? 0) }}</strong>
+          <span>stored</span>
+        </span>
         <span class="count-sep">·</span>
         <button class="count-item" @click="$router.push('/queues')" :disabled="loadingQueues">
-          <strong>{{ formatNumber(overview?.queues || 0) }}</strong>
+          <strong>{{ overviewFailed ? '—' : formatNumber(overview?.queues ?? 0) }}</strong>
           <span>queues</span>
         </button>
         <span class="count-sep">·</span>
         <span class="count-item count-static">
-          <strong>{{ formatNumber(totalPartitions) }}</strong>
+          <strong>{{ queuesFailed ? '—' : formatNumber(totalPartitions) }}</strong>
           <span>partitions</span>
         </span>
         <span class="count-sep">·</span>
         <button class="count-item" @click="$router.push('/consumers')" :disabled="loadingConsumers">
-          <strong>{{ formatNumber(consumers?.length || 0) }}</strong>
+          <strong>{{ consumersFailed ? '—' : formatNumber(consumers?.length || 0) }}</strong>
           <span>consumer groups</span>
         </button>
         <span class="count-sep">·</span>
         <span class="count-item count-static">
-          <strong class="num" :class="pendingNumClass(overview?.messages?.pending)">{{ formatNumber(Math.max(0, overview?.messages?.pending || 0)) }}</strong>
+          <strong class="num" :class="pendingNumClass(overview?.messages?.pending)">
+            {{ overviewFailed ? '—' : formatNumber(overview?.messages?.pending ?? 0) }}
+          </strong>
           <span>pending</span>
         </span>
         <span class="count-sep">·</span>
         <span class="count-item count-static count-muted">
-          <strong>{{ formatNumber(overview?.messages?.completed || 0) }}</strong>
+          <strong>{{ overviewFailed ? '—' : formatNumber(overview?.messages?.completed ?? 0) }}</strong>
           <span>completed</span>
         </span>
       </div>
 
-      <!-- Right group — current engine efficiency. Avg rows per batch is a
-           snapshot (no time-series), so it lives here rather than in the
-           metric table below. Higher = healthier (less per-commit overhead). -->
-      <div class="counts-group counts-group-right" :title="'Average rows per batch — push / pop / ack. Higher = healthier engine, less per-commit overhead.'">
-        <span class="count-item-label">batch eff</span>
-        <span class="count-item count-static count-tight">
-          <strong>{{ batchEfficiency.push }}</strong>
-          <span class="count-suffix">push</span>
-        </span>
-        <span class="count-sep">·</span>
-        <span class="count-item count-static count-tight">
-          <strong>{{ batchEfficiency.pop }}</strong>
-          <span class="count-suffix">pop</span>
-        </span>
-        <span class="count-sep">·</span>
-        <span class="count-item count-static count-tight">
-          <strong>{{ batchEfficiency.ack }}</strong>
-          <span class="count-suffix">ack</span>
-        </span>
+      <!-- Right group — engine efficiency for the whole CELL, not this tenant:
+           it comes from the operator-only /api/v1/status, so it is hidden
+           entirely for anyone the proxy would answer 404. -->
+      <div
+        v-if="can('operator')"
+        class="counts-group counts-group-right"
+        :title="'Average rows per batch — push / pop / ack, across every tenant on this cell. Higher = healthier engine, less per-commit overhead.'"
+      >
+        <span class="count-item-label">batch eff <i class="count-scope">cell</i></span>
+        <template v-if="statusFailed">
+          <span class="count-item count-static count-tight count-muted">
+            <strong>—</strong><span class="count-suffix">unavailable</span>
+          </span>
+        </template>
+        <template v-else>
+          <span class="count-item count-static count-tight">
+            <strong>{{ batchEfficiency.push }}</strong>
+            <span class="count-suffix">push</span>
+          </span>
+          <span class="count-sep">·</span>
+          <span class="count-item count-static count-tight">
+            <strong>{{ batchEfficiency.pop }}</strong>
+            <span class="count-suffix">pop</span>
+          </span>
+          <span class="count-sep">·</span>
+          <span class="count-item count-static count-tight">
+            <strong>{{ batchEfficiency.ack }}</strong>
+            <span class="count-suffix">ack</span>
+          </span>
+        </template>
       </div>
     </div>
 
@@ -127,27 +140,30 @@
       <MetricRow
         label="Throughput"
         :value="throughput.current"
-        unit="/s"
+        :unit="throughput.current === '—' ? '' : '/s'"
         :context="throughputContext"
         :series="throughputSeries"
         :labels="chartLabels"
         :value-format="fmtRate"
         expand-unit="msgs / sec"
-        :loading="loadingStatus"
+        :loading="loadingOps"
+        :error="opsError"
+        tooltip="Push / pop / ack rates for this tenant, summed across its queues (from queue-ops)."
         :expanded="isExpanded('throughput')"
         @toggle-expand="toggleRow('throughput')"
       />
       <MetricRow
         label="Pending Δ"
         :value="pendingDeltaDisplay"
-        unit="msgs"
+        :unit="pendingDeltaDisplay === '—' ? '' : 'msgs'"
         :context="pendingDeltaContext"
         :sparkline="pendingDeltaSeries"
         :labels="chartLabels"
         :value-format="fmtCount"
         expand-unit="msgs (cumulative)"
         :severity="pendingDeltaSeverity"
-        :loading="loadingStatus"
+        :loading="loadingOps"
+        :error="opsError"
         tooltip="Cumulative (push − ack) over the selected window. Positive = falling behind, negative = catching up."
         :expanded="isExpanded('pendingDelta')"
         @toggle-expand="toggleRow('pendingDelta')"
@@ -159,14 +175,15 @@
            when they finally do get delivered. -->
       <MetricRow
         label="Parked"
-        :value="formatNumber(Math.round(parkedLatest))"
-        unit="consumers"
+        :value="parkedLatest === null ? '—' : formatNumber(Math.round(parkedLatest))"
+        :unit="parkedLatest === null ? '' : 'consumers'"
         :context="parkedContext"
         :series="parkedSeriesData"
-        :labels="partitionLabels"
+        :labels="chartLabels"
         :value-format="fmtCount"
         expand-unit="long-polls"
-        :loading="loadingStatus"
+        :loading="loadingOps"
+        :error="opsError"
         tooltip="Long-poll consumer connections currently waiting for work, summed across all queues. Approximates idle connected consumers (busy consumers, mid-job, not counted)."
         :expanded="isExpanded('parked')"
         @toggle-expand="toggleRow('parked')"
@@ -175,11 +192,12 @@
         label="Fill ratio"
         :context="fillContext"
         :series="fillSeriesData"
-        :labels="partitionLabels"
+        :labels="chartLabels"
         :value-format="fmtFillPct"
         expand-unit="%"
         :severity="fillSeverity"
-        :loading="loadingStatus"
+        :loading="loadingOps"
+        :error="opsError"
         tooltip="Long-polls returning a message ÷ all long-poll completions, across all queues. Below 30% with traffic = consumers mostly waiting (over-provisioned); near 100% sustained = consumers fully utilized — watch the Time lag row for under-provisioning."
         :expanded="isExpanded('fillRatio')"
         @toggle-expand="toggleRow('fillRatio')"
@@ -195,20 +213,29 @@
       </MetricRow>
       <MetricRow
         label="Time lag"
-        :context="'avg / max p99 across consumer groups'"
+        :context="lagContext"
         :series="lagSeriesData"
         :labels="chartLabels"
         :value-format="fmtLagMs"
         expand-unit="ms"
         :severity="lagSeverity"
         :loading="loadingOverview"
+        :error="overviewError"
+        tooltip="Headline is the tenant's current oldest-message age (avg / max). The chart is pop-sampled per bucket, so it has gaps whenever nothing was consumed — it cannot report the lag of a stalled queue."
         :expanded="isExpanded('timeLag')"
         @toggle-expand="toggleRow('timeLag')"
       >
         <template #value>
-          <span class="num" :class="lagNumClass(overview?.lag?.time?.avg)">{{ formatDuration(overview?.lag?.time?.avg || 0) }}</span>
-          <span class="mr-sep">/</span>
-          <span class="num" :class="lagNumClass(overview?.lag?.time?.max)">{{ formatDuration(overview?.lag?.time?.max || 0) }}</span>
+          <!-- `0` and "no sample" are different answers. The SP emits NULL when
+               it never measured, and that must not read as a healthy zero. -->
+          <template v-if="lagAvgSeconds === null && lagMaxSeconds === null">
+            <span class="num">—</span>
+          </template>
+          <template v-else>
+            <span class="num" :class="lagNumClass(lagAvgSeconds)">{{ fmtLagSeconds(lagAvgSeconds) }}</span>
+            <span class="mr-sep">/</span>
+            <span class="num" :class="lagNumClass(lagMaxSeconds)">{{ fmtLagSeconds(lagMaxSeconds) }}</span>
+          </template>
         </template>
       </MetricRow>
 
@@ -217,76 +244,30 @@
         label="Errors"
         :value="formatNumber(errorTotal)"
         :context="errorContext"
-        :series="errorSeriesData"
+        :sparkline="errorSeriesData"
         :labels="chartLabels"
         :value-format="fmtCount"
-        expand-unit="count"
+        expand-unit="ack failures"
         :severity="errorSeverity"
         :clickable="errorTotal > 0"
         @click="$router.push('/dlq')"
-        :loading="loadingStatus"
+        :loading="loadingOps"
+        :error="opsError"
+        tooltip="Ack failures for this tenant across the window. DLQ depth is a current snapshot, not a per-window count, so it is shown separately in the context line."
         :expanded="isExpanded('errors')"
         @toggle-expand="toggleRow('errors')"
       />
-      <MetricRow
-        label="Event loop"
-        :context="`${workerCount || 0} worker${workerCount === 1 ? '' : 's'} · avg / max`"
-        :series="elSeriesData"
-        :labels="chartLabels"
-        :value-format="(v) => v + ' ms'"
-        expand-unit="ms"
-        :severity="elNumClass(maxEventLoopLag)"
-        :loading="loadingStatus"
-        :expanded="isExpanded('eventLoop')"
-        @toggle-expand="toggleRow('eventLoop')"
-      >
-        <template #value>
-          <span class="num" :class="elNumClass(avgEventLoopLag)">{{ avgEventLoopLag }}<i class="mr-unit">ms</i></span>
-          <span class="mr-sep">/</span>
-          <span class="num" :class="elNumClass(maxEventLoopLag)">{{ maxEventLoopLag }}<i class="mr-unit">ms</i></span>
-        </template>
-      </MetricRow>
-      <MetricRow
-        label="Queen CPU"
-        :value="cpuLatest.toFixed(1)"
-        unit="%"
-        :context="cpuContext"
-        :series="cpuSeriesData"
-        :labels="cpuLabels"
-        :value-format="(v) => v.toFixed(1) + '%'"
-        expand-unit="%"
-        :loading="loadingStatus"
-        :expanded="isExpanded('cpu')"
-        @toggle-expand="toggleRow('cpu')"
-      />
-      <MetricRow
-        label="DB pool"
-        :context="poolContext"
-        :series="poolSeriesData"
-        :labels="chartLabels"
-        :value-format="(v) => Math.round(v) + ' conns'"
-        expand-unit="connections"
-        :severity="poolSeverity"
-        :loading="loadingStatus"
-        :expanded="isExpanded('dbPool')"
-        @toggle-expand="toggleRow('dbPool')"
-      >
-        <template #value>
-          <span class="num" :class="poolSeverity">{{ poolLatest?.active ?? 0 }}</span>
-          <span class="mr-sep">/</span>
-          <span class="num">{{ poolLatest?.size ?? '—' }}</span>
-          <i class="mr-unit">conns</i>
-        </template>
-      </MetricRow>
 
       <!-- Admin -->
       <MetricRow
         label="Partitions"
         :context="'created / deleted in window'"
         :series="partitionSeriesData"
-        :labels="partitionLabels"
+        :labels="chartLabels"
         :value-format="fmtCount"
         expand-unit="count"
+        :loading="loadingOps"
+        :error="opsError"
         :expanded="isExpanded('partitions')"
         @toggle-expand="toggleRow('partitions')"
       >
@@ -298,16 +279,103 @@
       </MetricRow>
       <MetricRow
         label="Retention"
-        :value="formatNumber(retentionTotal)"
-        unit="msgs"
-        context="evicted + completed-retention in window"
+        :context="retentionContext"
         :series="retentionSeriesData"
         :labels="retentionLabels"
         :value-format="fmtCount"
         expand-unit="msgs"
+        :error="retentionError"
+        tooltip="Messages deleted by the retention / eviction workers. The log engine does not write retention_history yet, so an empty series means NOT REPORTED — it is not proof that nothing was deleted."
         :expanded="isExpanded('retention')"
         @toggle-expand="toggleRow('retention')"
-      />
+      >
+        <template #value>
+          <span v-if="retentionTotal === null" class="num">—</span>
+          <template v-else>
+            <span class="num">{{ formatNumber(retentionTotal) }}</span><i class="mr-unit">msgs</i>
+          </template>
+        </template>
+      </MetricRow>
+
+      <!-- =====================================================================
+           CELL · OPERATOR. Everything below covers every tenant on this cell,
+           and each source is a route the proxy answers 404 for anyone else.
+           ===================================================================== -->
+      <template v-if="can('operator')">
+        <div class="metric-cell-head">
+          <span class="metric-cell-tag">CELL · OPERATOR</span>
+          <span>host and engine figures for the whole cell — every tenant on it, not just {{ actingTenantSlug || 'this tenant' }}</span>
+        </div>
+        <MetricRow
+          label="Event loop"
+          scope="cell"
+          :context="eventLoopContext"
+          :series="elSeriesData"
+          :labels="statusChartLabels"
+          :value-format="(v) => v + ' ms'"
+          expand-unit="ms"
+          :severity="elNumClass(maxEventLoopLag)"
+          :loading="loadingStatus"
+          :error="statusError"
+          :expanded="isExpanded('eventLoop')"
+          @toggle-expand="toggleRow('eventLoop')"
+        >
+          <template #value>
+            <template v-if="avgEventLoopLag === null && maxEventLoopLag === null">
+              <span class="num">—</span>
+            </template>
+            <template v-else>
+              <span class="num" :class="elNumClass(avgEventLoopLag)">{{ avgEventLoopLag ?? '—' }}<i class="mr-unit">ms</i></span>
+              <span class="mr-sep">/</span>
+              <span class="num" :class="elNumClass(maxEventLoopLag)">{{ maxEventLoopLag ?? '—' }}<i class="mr-unit">ms</i></span>
+            </template>
+          </template>
+        </MetricRow>
+        <MetricRow
+          label="Queen CPU"
+          scope="cell"
+          :context="cpuContext"
+          :series="cpuSeriesData"
+          :labels="cpuLabels"
+          :value-format="(v) => v.toFixed(1) + '%'"
+          expand-unit="%"
+          :loading="loadingStatus"
+          :error="cpuError"
+          :expanded="isExpanded('cpu')"
+          @toggle-expand="toggleRow('cpu')"
+        >
+          <template #value>
+            <span v-if="cpuLatest === null" class="num">—</span>
+            <template v-else>
+              <span class="num">{{ cpuLatest.toFixed(1) }}</span><i class="mr-unit">%</i>
+            </template>
+          </template>
+        </MetricRow>
+        <MetricRow
+          label="DB pool"
+          scope="cell"
+          :context="poolContext"
+          :series="poolSeriesData"
+          :labels="statusChartLabels"
+          :value-format="(v) => Math.round(v) + ' conns'"
+          expand-unit="connections"
+          :severity="poolSeverity"
+          :loading="loadingStatus"
+          :error="statusError"
+          :expanded="isExpanded('dbPool')"
+          @toggle-expand="toggleRow('dbPool')"
+        >
+          <template #value>
+            <span v-if="!poolLatest" class="num">—</span>
+            <template v-else>
+              <span class="num" :class="poolSeverity">{{ poolLatest.active ?? '—' }}</span>
+              <span class="mr-sep">/</span>
+              <span class="num">{{ poolLatest.size ?? '—' }}</span>
+              <i class="mr-unit">conns</i>
+            </template>
+          </template>
+        </MetricRow>
+      </template>
     </div>
 
     <!--
@@ -324,11 +392,15 @@
       <div class="card">
         <div class="card-header">
           <h3>Top queues by pending</h3>
-          <span class="muted">{{ enrichedQueues.length }} queues</span>
+          <span class="muted">{{ queuesFailed ? '—' : `${enrichedQueues.length} queues` }}</span>
         </div>
 
         <div v-if="loadingQueues" class="card-body entity-list">
           <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:8px;" />
+        </div>
+
+        <div v-else-if="queuesFailed" class="card-body entity-empty entity-failed">
+          {{ queuesErrorText }}
         </div>
 
         <div v-else-if="topPendingQueues.length" class="card-body entity-list">
@@ -342,7 +414,7 @@
               <span class="status-dot" :class="statusDotClass(q._status)" />
               <span class="entity-name">{{ q.name }}</span>
               <span class="entity-right num" :class="lagNumClass(q._lag)">
-                {{ q._lag > 0 ? formatDuration(q._lag) : '—' }}
+                {{ q._lag > 0 ? fmtLagSeconds(q._lag) : '—' }}
               </span>
             </div>
             <div class="entity-meta">
@@ -350,7 +422,7 @@
                 <i :class="depthBarClass(q._status)" :style="{ width: q._depthPct + '%' }" />
               </span>
               <span class="meta-text">
-                <strong>{{ formatNumber(q._pending) }}</strong> pending
+                <strong>{{ q._pending === null ? '—' : formatNumber(q._pending) }}</strong> pending
                 <span class="meta-sep">·</span>
                 {{ q.partitions || 1 }} {{ (q.partitions || 1) === 1 ? 'part' : 'parts' }}
               </span>
@@ -368,11 +440,15 @@
       <div class="card">
         <div class="card-header">
           <h3>Consumer groups by lag</h3>
-          <span class="muted">{{ consumers.length }} total · {{ laggingCount }} lagging</span>
+          <span class="muted">{{ consumersFailed ? '—' : `${consumers.length} total · ${laggingCount} lagging` }}</span>
         </div>
 
         <div v-if="loadingConsumers" class="card-body entity-list">
           <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:8px;" />
+        </div>
+
+        <div v-else-if="consumersFailed" class="card-body entity-empty entity-failed">
+          {{ consumersErrorText }}
         </div>
 
         <div v-else-if="sortedConsumers.length" class="card-body entity-list">
@@ -386,7 +462,7 @@
               <span class="status-dot" :class="cgDotClass(g)" />
               <span class="entity-name">{{ g.queueName || '?' }}</span>
               <span class="entity-right num" :class="lagNumClass(g.maxTimeLag)">
-                {{ (g.maxTimeLag || 0) > 0 ? formatDuration(g.maxTimeLag) : '—' }}
+                {{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '—' }}
               </span>
             </div>
             <div class="entity-meta">
@@ -394,7 +470,9 @@
                 <span v-if="g.name === '__QUEUE_MODE__'" class="meta-tag">queue mode</span>
                 <span v-else><strong>{{ g.name }}</strong></span>
                 <span class="meta-sep">·</span>
-                {{ g.members || 0 }} {{ (g.members || 0) === 1 ? 'member' : 'members' }}
+                <!-- One row per (partition, group) cursor — NOT a consumer
+                     count: one process on a 32-partition queue is 32 rows. -->
+                {{ g.members || 0 }} {{ (g.members || 0) === 1 ? 'partition' : 'partitions' }} assigned
                 <template v-if="(g.partitionsWithLag || 0) > 0">
                   <span class="meta-sep">·</span>
                   <span class="num warn">{{ g.partitionsWithLag }} lagging</span>
@@ -416,33 +494,96 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { resources, queues as queuesApi, analytics, consumers as consumersApi, system as systemApi } from '@/api'
-import { formatNumber, toNum, latestFinite, trimIncompleteBuckets } from '@/composables/useApi'
-import { useRefresh } from '@/composables/useRefresh'
+import {
+  resources,
+  queues as queuesApi,
+  consumers as consumersApi,
+  system as systemApi,
+  operator as operatorApi,
+  describeApiError,
+} from '@/api'
+import {
+  useApi, formatNumber, toNum, latestFinite, trimIncompleteBuckets,
+} from '@/composables/useApi'
+import { formatChartLabel } from '@/composables/useFormat'
+import { useAutoRefresh } from '@/composables/useRefresh'
+import { useIdentity } from '@/stores/identity'
 import MetricRow from '@/components/MetricRow.vue'
 
-// ---------------------------------------------------------------------------
-// State (unchanged from prior dashboard — same data sources)
-// ---------------------------------------------------------------------------
-const overview = ref(null)
-const queues = ref([])
-const consumers = ref([])
-const statusData = ref(null)
-const retentionData = ref([])
-const partitionOpsData = ref([])
-const systemMetricsData = ref(null)
+const { can, actingTenantSlug } = useIdentity()
 
-const loadingOverview = ref(true)
-const loadingQueues = ref(true)
-const loadingConsumers = ref(true)
-const loadingStatus = ref(true)
-
+// ---------------------------------------------------------------------------
+// Range
+// ---------------------------------------------------------------------------
 const selectedRange = ref('1h')
 const timeRanges = [
   { label: '1h',  value: '1h',  minutes: 60 },
   { label: '6h',  value: '6h',  minutes: 360 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
+const getTimeRangeParams = () => {
+  const r = timeRanges.find(x => x.value === selectedRange.value) || timeRanges[0]
+  const now = new Date()
+  return {
+    from: new Date(now.getTime() - r.minutes * 60 * 1000).toISOString(),
+    to: now.toISOString(),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SOURCES. Two surfaces, and each row says which one it came from.
+//
+//   TENANT-SCOPED (the proxy injects the acting cluster's tenant): overview,
+//   queues, consumer groups, queue-ops, retention. These answer "for this
+//   tenant" and every row built from them is unlabelled.
+//
+//   CELL-LEVEL: /api/v1/status and /analytics/system-metrics are operator
+//   routes — 404 route_blocked for every other principal. They are fetched
+//   only when can('operator') and every row built from them carries the
+//   `cell` chip, because a cell figure read as a tenant figure is a lie.
+//
+// Nothing here swallows a failure: `error` drives an inline "unavailable"
+// state, so an endpoint we cannot reach never renders as an idle cluster.
+// ---------------------------------------------------------------------------
+const overviewQ  = useApi((config) => resources.getOverview(config), { immediate: false })
+const queuesQ    = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
+const consumersQ = useApi((config) => consumersApi.list(config), { immediate: false })
+const opsQ       = useApi((config) => systemApi.getQueueOps(getTimeRangeParams(), config), { immediate: false })
+const retentionQ = useApi((config) => systemApi.getRetention(getTimeRangeParams(), config), { immediate: false })
+const statusQ    = useApi((config) => operatorApi.getStatus(getTimeRangeParams(), config), { immediate: false })
+const sysQ       = useApi((config) => operatorApi.getSystemMetrics(getTimeRangeParams(), config), { immediate: false })
+
+const overview = overviewQ.data
+const queues = computed(() => {
+  const d = queuesQ.data.value
+  return d?.queues || (Array.isArray(d) ? d : [])
+})
+const consumers = computed(() => {
+  const d = consumersQ.data.value
+  return Array.isArray(d) ? d : (d?.consumer_groups || [])
+})
+
+// Skeletons only until the first payload lands; a 30s refresh must not blank
+// the page the user is reading.
+const firstLoad = (q) => computed(() => q.loading.value && q.data.value === null)
+const loadingOverview  = firstLoad(overviewQ)
+const loadingQueues    = firstLoad(queuesQ)
+const loadingConsumers = firstLoad(consumersQ)
+const loadingOps       = firstLoad(opsQ)
+const loadingStatus    = firstLoad(statusQ)
+
+const overviewError  = computed(() => overviewQ.error.value)
+const opsError       = computed(() => opsQ.error.value)
+const retentionError = computed(() => retentionQ.error.value)
+const statusError    = computed(() => statusQ.error.value)
+
+const overviewFailed  = computed(() => overviewQ.error.value !== null)
+const queuesFailed    = computed(() => queuesQ.error.value !== null)
+const consumersFailed = computed(() => consumersQ.error.value !== null)
+const statusFailed    = computed(() => statusQ.error.value !== null)
+
+const queuesErrorText    = computed(() => describeApiError(queuesQ.error.value))
+const consumersErrorText = computed(() => describeApiError(consumersQ.error.value))
 
 // ---------------------------------------------------------------------------
 // Expand state — per-row + master toggle.
@@ -451,8 +592,8 @@ const timeRanges = [
 // ---------------------------------------------------------------------------
 const ALL_ROW_KEYS = [
   'throughput', 'pendingDelta', 'parked', 'fillRatio', 'timeLag',
-  'errors', 'eventLoop', 'cpu', 'dbPool',
-  'partitions', 'retention',
+  'errors', 'partitions', 'retention',
+  'eventLoop', 'cpu', 'dbPool',
 ]
 const expandedRows = ref(new Set())
 const isExpanded = (key) => expandedRows.value.has(key)
@@ -466,45 +607,72 @@ const toggleAllRows = () => {
   expandedRows.value = anyExpanded.value ? new Set() : new Set(ALL_ROW_KEYS)
 }
 
-// Dashboard is cluster-wide by design. Per-queue investigation lives on
-// /queues/[name] (and will get its own metric table when that page is
-// redesigned), so we no longer host a queue-scope filter here.
-const getTimeRangeParams = () => {
-  const r = timeRanges.find(x => x.value === selectedRange.value) || timeRanges[0]
-  const now = new Date()
-  return {
-    from: new Date(now.getTime() - r.minutes * 60 * 1000).toISOString(),
-    to: now.toISOString(),
-  }
-}
-
 // ---------------------------------------------------------------------------
-// History (oldest → newest) — single source for every chart below.
-// chartLabels are pre-formatted timestamps so RowChart tooltips can render
-// "01:33 PM" or "Apr 28, 01:33 PM" as the title without the children
-// having to know about the time-axis convention.
+// TENANT history — queue-ops rolled up from one row per (queue, bucket) to one
+// row per bucket. This is the source for every unlabelled row on the page.
 // ---------------------------------------------------------------------------
 const history = computed(() => {
-  if (!statusData.value?.throughput?.length) return []
-  // Status v3 returns throughput rows newest → oldest; reverse for charts.
-  // Then drop the in-flight current bucket so the right edge of each
-  // chart doesn't show the partial-minute sample reading low/zero.
-  const sorted = [...statusData.value.throughput].reverse()
-  return trimIncompleteBuckets(sorted, {
-    bucketKey: 'timestamp',
-    bucketMinutes: statusData.value?.bucketMinutes || 1,
+  const payload = opsQ.data.value
+  const series = payload?.series || []
+  if (!series.length) return []
+
+  const byBucket = new Map()
+  for (const row of series) {
+    let b = byBucket.get(row.bucket)
+    if (!b) {
+      b = {
+        bucket: row.bucket,
+        pushPerSecond: 0, popPerSecond: 0, ackPerSecond: 0,
+        pushMessages: 0, popMessages: 0, ackSuccess: 0, ackFailed: 0, popEmpty: 0,
+        partitionsCreated: 0, partitionsDeleted: 0,
+        // parkedCount is already SUM-ed across workers per (queue, bucket);
+        // summing again across queues is a legitimate gauge composition since
+        // a long-poll lives on exactly one (queue, partition, worker).
+        parkedTotal: 0,
+        lagWeighted: 0, lagPops: 0, maxLagMs: null,
+      }
+      byBucket.set(row.bucket, b)
+    }
+    b.pushPerSecond += toNum(row.pushPerSecond) || 0
+    b.popPerSecond  += toNum(row.popPerSecond)  || 0
+    b.ackPerSecond  += toNum(row.ackPerSecond)  || 0
+    b.pushMessages  += toNum(row.pushMessages)  || 0
+    b.popMessages   += toNum(row.popMessages)   || 0
+    b.ackSuccess    += toNum(row.ackSuccess)    || 0
+    b.ackFailed     += toNum(row.ackFailed)     || 0
+    b.popEmpty      += toNum(row.popEmpty)      || 0
+    b.partitionsCreated += toNum(row.partitionsCreated) || 0
+    b.partitionsDeleted += toNum(row.partitionsDeleted) || 0
+    b.parkedTotal   += toNum(row.parkedCount)   || 0
+
+    // Lag is sampled AT POP. A queue with no pops in the bucket contributes no
+    // measurement — folding its 0 in would report a stalled backlog as zero lag.
+    const pops = toNum(row.popMessages) || 0
+    if (pops > 0) {
+      b.lagWeighted += (toNum(row.avgLagMs) || 0) * pops
+      b.lagPops += pops
+      const mx = toNum(row.maxLagMs)
+      if (mx !== null) b.maxLagMs = b.maxLagMs === null ? mx : Math.max(b.maxLagMs, mx)
+    }
+  }
+
+  const rows = [...byBucket.values()].sort((a, b) => a.bucket.localeCompare(b.bucket))
+  for (const b of rows) b.avgLagMs = b.lagPops > 0 ? b.lagWeighted / b.lagPops : null
+  // Drop the still-aggregating tail bucket so the right edge of every chart
+  // isn't a partial sample reading low.
+  return trimIncompleteBuckets(rows, {
+    bucketKey: 'bucket',
+    bucketMinutes: payload?.bucketMinutes || 1,
   })
 })
+
 const multiDay = computed(() => {
   const h = history.value
   if (h.length < 2) return false
-  return new Date(h[0].timestamp).toDateString() !== new Date(h[h.length - 1].timestamp).toDateString()
+  return new Date(h[0].bucket).toDateString() !== new Date(h[h.length - 1].bucket).toDateString()
 })
-const formatChartLabel = (date, multi) => multi
-  ? date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-  : date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
 const chartLabels = computed(() =>
-  history.value.map(h => formatChartLabel(new Date(h.timestamp), multiDay.value))
+  history.value.map(h => formatChartLabel(new Date(h.bucket), multiDay.value))
 )
 
 // ---------------------------------------------------------------------------
@@ -515,78 +683,71 @@ const totalPartitions = computed(() =>
 )
 
 // ---------------------------------------------------------------------------
-// Throughput row — three real series (push / pop / ack) so the operator
-// can hover and see all three rates at any moment in time. ack is given
-// the semantic green color (healthy completion) so it visually pops when
-// it falls behind push.
+// Throughput row — real push / pop / ack rates for this tenant, summed across
+// its queues. NOT the overview's ingestedPerSecond, which under the per-tenant
+// path is a retained-message delta and collapses to 0 after a retention sweep.
 // ---------------------------------------------------------------------------
 const throughput = computed(() => {
-  if (!overview.value?.throughput) return { current: '0.0' }
-  const current =
-    overview.value.throughput.ingestedPerSecond ||
-    overview.value.throughput.processedPerSecond || 0
-  return { current: current.toFixed(1) }
+  const v = latestFinite(history.value.map(x => x.pushPerSecond))
+  return { current: v === null ? '—' : v.toFixed(1) }
 })
 const throughputSeries = computed(() => {
   const h = history.value
   if (!h.length) return null
   return [
-    { label: 'Push', data: h.map(x => toNum(x.ingestedPerSecond)) },
+    { label: 'Push', data: h.map(x => toNum(x.pushPerSecond)) },
     { label: 'Pop',  data: h.map(x => toNum(x.popPerSecond)) },
-    { label: 'Ack',  data: h.map(x => toNum(x.processedPerSecond)), color: '#4ade80' },
+    { label: 'Ack',  data: h.map(x => toNum(x.ackPerSecond)), color: '#4ade80' },
   ]
 })
 const throughputPeak = computed(() => {
-  const h = history.value
-  if (!h.length) return 0
-  // Math.max ignores nulls when filtered first; default to 0 if all missing.
-  const finite = h.map(x => toNum(x.ingestedPerSecond)).filter(v => v !== null)
+  const finite = history.value.map(x => toNum(x.pushPerSecond)).filter(v => v !== null)
   return finite.length ? Math.max(0, ...finite) : 0
 })
 const throughputContext = computed(() => {
+  if (!history.value.length) return 'no queue-ops buckets in window'
   const peak = throughputPeak.value
   const cur = Number(throughput.value.current) || 0
   if (peak === 0 && cur === 0) return 'idle · no traffic in window'
   if (peak === 0) return `current ${cur.toFixed(1)} /s`
-  return `peak ${formatNumber(Math.round(peak))} /s · push ≈ ack`
+  return `peak ${formatNumber(Math.round(peak))} /s push`
 })
 
 // ---------------------------------------------------------------------------
-// Pending Δ row — cumulative (ingested - processed) across the window.
-// Positive = falling behind, negative = catching up. The severity tone is
-// what makes this row tell its story: grey at zero, amber when growing,
-// red when growing fast, green only when actively shrinking by a lot.
+// Pending Δ row — cumulative (push − ack) across the window.
+// Positive = falling behind, negative = catching up. When a bucket's source
+// values are missing we emit `null` (not 0) so the chart shows a gap; the
+// cumulative carries forward so the next valid bucket continues the total.
 // ---------------------------------------------------------------------------
-// Cumulative push − ack across the window. When a bucket's source values
-// are missing we emit `null` (not 0) so the chart shows a gap instead of
-// the line lying flat. The cumulative carries forward across gaps so the
-// next valid bucket continues from the last known total.
 const pendingDeltaSeries = computed(() => {
   const h = history.value
   if (!h.length) return []
   let cum = 0
   return h.map(x => {
-    const ingested = toNum(x.ingested)
-    const processed = toNum(x.processed)
-    if (ingested === null && processed === null) return null
-    cum += (ingested || 0) - (processed || 0)
+    const pushed = toNum(x.pushMessages)
+    const acked = toNum(x.ackSuccess)
+    if (pushed === null && acked === null) return null
+    cum += (pushed || 0) - (acked || 0)
     return cum
   })
 })
-const pendingDeltaLatest = computed(() => latestFinite(pendingDeltaSeries.value) ?? 0)
+const pendingDeltaLatest = computed(() => latestFinite(pendingDeltaSeries.value))
 const pendingDeltaDisplay = computed(() => {
   const v = pendingDeltaLatest.value
+  if (v === null) return '—'
   if (v === 0) return '0'
   return (v > 0 ? '+' : '−') + formatNumber(Math.abs(v))
 })
 const pendingDeltaContext = computed(() => {
   const v = pendingDeltaLatest.value
+  if (v === null) return 'no push / ack samples in window'
   if (v === 0) return 'flat · push = ack across window'
   if (v > 0) return 'falling behind · push > ack'
   return 'catching up · ack > push'
 })
 const pendingDeltaSeverity = computed(() => {
   const v = pendingDeltaLatest.value
+  if (v === null) return ''
   if (v > 100000) return 'bad'
   if (v > 1000)   return 'warn'
   if (v < -1000)  return 'ok'
@@ -594,10 +755,17 @@ const pendingDeltaSeverity = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Time lag row — uses overview.lag.time.{avg,max} (seconds) for the value
-// shown left-of-chart. The chart pulls avg + max from history.{avg,max}LagMs
-// so hovering the chart reveals both at any given timestamp.
+// Time lag row.
+//
+// VALUE  = the tenant overview's lag, which under the log engine falls back to
+//          the age of the oldest unconsumed message — so it stays correct with
+//          consumers stopped. NULL means the broker has no measurement, and
+//          that must render '—', never 0s.
+// CHART  = per-bucket pop-sampled lag, with a gap for every bucket that had no
+//          pops (see `history` above).
 // ---------------------------------------------------------------------------
+const lagAvgSeconds = computed(() => toNum(overview.value?.lag?.time?.avg))
+const lagMaxSeconds = computed(() => toNum(overview.value?.lag?.time?.max))
 const lagSeriesData = computed(() => {
   const h = history.value
   if (!h.length) return null
@@ -607,285 +775,95 @@ const lagSeriesData = computed(() => {
   ]
 })
 const lagNumClass = (s) => !s || s === 0 ? '' : s < 60 ? '' : s < 300 ? 'warn' : 'bad'
-const lagSeverity = computed(() => lagNumClass(overview.value?.lag?.time?.max || 0))
+const lagSeverity = computed(() => lagNumClass(lagMaxSeconds.value || 0))
+const lagContext = computed(() => {
+  const sampled = history.value.some(x => x.avgLagMs !== null)
+  return sampled
+    ? 'oldest-message age now · chart is pop-sampled'
+    : 'oldest-message age now · no pops in window, chart empty'
+})
 
 // ---------------------------------------------------------------------------
-// Errors row
+// Errors row — ack failures for this tenant across the window, plus the CURRENT
+// DLQ depth (a snapshot, so it is named as one rather than added to a window
+// sum). `db_errors` is deliberately absent: it is a cell-wide counter the
+// broker never increments, and charting a constant zero labelled "DB errors"
+// is worse than not charting it.
 // ---------------------------------------------------------------------------
-// Errors chart has TWO series: db errors (red) and ack failures (amber).
-// dlqCount is a cumulative snapshot rather than a per-bucket count, so we
-// only show its latest value in the context line — never on the chart.
-const errorSeriesData = computed(() => {
-  const h = history.value
-  if (!h.length) return null
-  return [
-    { label: 'DB errors', data: h.map(x => toNum(x.dbErrors)), color: '#fb7185' },
-    { label: 'Ack failed', data: h.map(x => toNum(x.ackFailed)), color: '#e6b450' },
-  ]
-})
-const errorBuckets = computed(() => {
-  let db = 0, ack = 0
-  for (const x of history.value) {
-    db  += toNum(x.dbErrors)  || 0
-    ack += toNum(x.ackFailed) || 0
-  }
-  // DLQ is a cumulative snapshot — read the most recent finite value
-  // (skipping over null buckets so an in-flight last bucket doesn't read 0).
-  const dlq = latestFinite(history.value.map(x => x.dlqCount)) ?? 0
-  return { db, ack, dlq }
-})
-const errorTotal = computed(() => {
-  const b = errorBuckets.value
-  return b.db + b.ack + b.dlq
-})
+const errorSeriesData = computed(() => history.value.map(x => toNum(x.ackFailed)))
+const ackFailedTotal = computed(() =>
+  history.value.reduce((s, x) => s + (toNum(x.ackFailed) || 0), 0)
+)
+const dlqDepth = computed(() => toNum(overview.value?.messages?.deadLetter))
+const errorTotal = computed(() => ackFailedTotal.value)
 const errorContext = computed(() => {
-  const b = errorBuckets.value
-  return `db ${formatNumber(b.db)} · ack ${formatNumber(b.ack)} · dlq ${formatNumber(b.dlq)}`
+  const dlq = dlqDepth.value
+  const dlqText = dlq === null ? 'dlq —' : `dlq ${formatNumber(dlq)} now`
+  return `ack ${formatNumber(ackFailedTotal.value)} in window · ${dlqText}`
 })
 const errorSeverity = computed(() => {
-  const b = errorBuckets.value
-  if (b.db > 0 || b.ack > 100) return 'bad'
-  if (b.ack > 0 || b.dlq > 0)  return 'warn'
+  const ack = ackFailedTotal.value
+  const dlq = dlqDepth.value || 0
+  if (ack > 100) return 'bad'
+  if (ack > 0 || dlq > 0) return 'warn'
   return ''
 })
 
 // ---------------------------------------------------------------------------
-// Event loop row
-// ---------------------------------------------------------------------------
-const workerCount = computed(() => statusData.value?.workers?.length || 0)
-const avgEventLoopLag = computed(() => {
-  const w = statusData.value?.workers
-  if (!w?.length) return 0
-  // Average only over workers that actually reported a value — a worker
-  // missing the field shouldn't pull the cluster average towards zero.
-  const finite = w.map(x => toNum(x.avgEventLoopLagMs)).filter(v => v !== null)
-  if (!finite.length) return 0
-  return Math.round(finite.reduce((s, x) => s + x, 0) / finite.length)
-})
-const maxEventLoopLag = computed(() => {
-  const w = statusData.value?.workers
-  if (!w?.length) return 0
-  const finite = w.map(x => toNum(x.maxEventLoopLagMs)).filter(v => v !== null)
-  return finite.length ? Math.max(...finite) : 0
-})
-const elSeriesData = computed(() => {
-  const h = history.value
-  if (!h.length) return null
-  return [
-    { label: 'Avg', data: h.map(x => toNum(x.avgEventLoopLagMs)) },
-    { label: 'Max', data: h.map(x => toNum(x.maxEventLoopLagMs)) },
-  ]
-})
-const elNumClass = (ms) => !ms || ms === 0 ? '' : ms < 50 ? '' : ms < 100 ? 'warn' : 'bad'
-
-// ---------------------------------------------------------------------------
-// Queen CPU row — single replica or "hottest" replica when multi-replica.
-// CPU is reported as cumulative-across-cores % (so 4 cores fully pinned =
-// 400%); we don't tone it semantic without core count, just show the
-// number and a contextual breakdown.
-// ---------------------------------------------------------------------------
-const hasMultipleReplicas = computed(() =>
-  (systemMetricsData.value?.replicas || []).length > 1
-)
-// Single replica → split into user/system so the chart shows the kernel
-// vs userspace work balance. Multi replica → one line per replica so
-// fanout imbalance becomes visible (the metric value still shows the
-// hottest replica). Both modes are real multi-series charts.
-const cpuSeriesData = computed(() => {
-  if (hasMultipleReplicas.value) {
-    const replicas = systemMetricsData.value?.replicas || []
-    return replicas.map(r => ({
-      label: r.hostname?.substring(0, 12) || 'replica',
-      // If either user_us or system_us is missing for a bucket we have no
-      // honest CPU number — emit null so the line renders a gap there.
-      data: (r.timeSeries || []).map(t => {
-        const user = toNum(t.metrics?.cpu?.user_us?.avg)
-        const sys  = toNum(t.metrics?.cpu?.system_us?.avg)
-        if (user === null && sys === null) return null
-        return ((user || 0) + (sys || 0)) / 100
-      }),
-    }))
-  }
-  const h = history.value
-  if (!h.length) return null
-  return [
-    { label: 'User',   data: h.map(x => toNum(x.queenCpuUserPct)) },
-    { label: 'System', data: h.map(x => toNum(x.queenCpuSysPct)) },
-  ]
-})
-
-// CPU labels need their own computed in multi-replica mode, since the
-// per-replica time-series buckets aren't necessarily aligned with the
-// throughput-history buckets that drive the rest of the rows. Fall back
-// to chartLabels when single-replica (data IS history-aligned there).
-const cpuLabels = computed(() => {
-  if (!hasMultipleReplicas.value) return chartLabels.value
-  const replicas = systemMetricsData.value?.replicas || []
-  const ts = replicas[0]?.timeSeries || []
-  if (!ts.length) return []
-  const multi = ts.length >= 2 &&
-    new Date(ts[0].timestamp).toDateString() !== new Date(ts[ts.length - 1].timestamp).toDateString()
-  return ts.map(t => formatChartLabel(new Date(t.timestamp), multi))
-})
-// Per-replica CPU "Now" — pull each replica's latest finite combined %
-// (so a replica that hasn't reported in the last bucket doesn't drag the
-// hottest reading down to 0).
-const cpuLatest = computed(() => {
-  if (hasMultipleReplicas.value) {
-    const replicas = systemMetricsData.value?.replicas || []
-    let max = 0
-    for (const r of replicas) {
-      const ts = r.timeSeries || []
-      const combined = ts.map(t => {
-        const user = toNum(t.metrics?.cpu?.user_us?.avg)
-        const sys  = toNum(t.metrics?.cpu?.system_us?.avg)
-        if (user === null && sys === null) return null
-        return ((user || 0) + (sys || 0)) / 100
-      })
-      const v = latestFinite(combined) || 0
-      if (v > max) max = v
-    }
-    return max
-  }
-  const u = latestFinite(history.value.map(x => x.queenCpuUserPct)) || 0
-  const s = latestFinite(history.value.map(x => x.queenCpuSysPct)) || 0
-  return u + s
-})
-const cpuContext = computed(() => {
-  if (hasMultipleReplicas.value) {
-    const n = (systemMetricsData.value?.replicas || []).length
-    return `${n} replicas · hottest shown`
-  }
-  const u = latestFinite(history.value.map(x => x.queenCpuUserPct))
-  const s = latestFinite(history.value.map(x => x.queenCpuSysPct))
-  if (u === null && s === null) return '—'
-  return `user ${(u || 0).toFixed(0)}% · sys ${(s || 0).toFixed(0)}%`
-})
-
-// ---------------------------------------------------------------------------
-// DB pool row — saturation = waiters; warn at 80% util, bad once active = size.
-// ---------------------------------------------------------------------------
-// Pool "Now" reads the most recent finite value per field, since the
-// bucket boundary often arrives with system_metrics not yet flushed.
-const poolLatest = computed(() => {
-  const h = history.value
-  if (!h.length) return null
-  const active = Math.round(latestFinite(h.map(x => x.dbPoolActive)) ?? 0)
-  const idle   = Math.round(latestFinite(h.map(x => x.dbPoolIdle))   ?? 0)
-  const sizeRaw = latestFinite(h.map(x => x.dbPoolSize))
-  const size   = Math.round(sizeRaw ?? (active + idle))
-  return { active, idle, size }
-})
-const poolSeriesData = computed(() => {
-  const h = history.value
-  if (!h.length) return null
-  return [
-    { label: 'Active', data: h.map(x => toNum(x.dbPoolActive)) },
-    { label: 'Idle',   data: h.map(x => toNum(x.dbPoolIdle)) },
-  ]
-})
-const poolSeverity = computed(() => {
-  const p = poolLatest.value
-  if (!p || !p.size) return ''
-  if (p.active >= p.size) return 'bad'
-  if (p.active / p.size > 0.8) return 'warn'
-  return ''
-})
-const poolContext = computed(() => {
-  const p = poolLatest.value
-  if (!p) return '—'
-  return `idle ${p.idle} · size ${p.size}`
-})
-
-// ---------------------------------------------------------------------------
-// Partitions row — admin events; no severity, just shape + counts.
-// Partitions and retention have their own time-series buckets (separate
-// from the throughput history), so they each carry their own labels too.
+// Partitions row — admin events from the same queue-ops buckets.
 // ---------------------------------------------------------------------------
 const partitionSeriesData = computed(() => {
-  const rows = partitionOpsData.value || []
-  if (!rows.length) return null
+  const h = history.value
+  if (!h.length) return null
   return [
-    { label: 'Created', data: rows.map(r => toNum(r.partitionsCreated)) },
-    { label: 'Deleted', data: rows.map(r => toNum(r.partitionsDeleted)) },
+    { label: 'Created', data: h.map(x => toNum(x.partitionsCreated)) },
+    { label: 'Deleted', data: h.map(x => toNum(x.partitionsDeleted)) },
   ]
 })
-const partitionLabels = computed(() =>
-  (partitionOpsData.value || []).map(r => formatChartLabel(new Date(r.bucket), false))
-)
 const partitionCreatedTotal = computed(() =>
-  (partitionOpsData.value || []).reduce((s, r) => s + (toNum(r.partitionsCreated) || 0), 0)
+  history.value.reduce((s, x) => s + (toNum(x.partitionsCreated) || 0), 0)
 )
 const partitionDeletedTotal = computed(() =>
-  (partitionOpsData.value || []).reduce((s, r) => s + (toNum(r.partitionsDeleted) || 0), 0)
+  history.value.reduce((s, x) => s + (toNum(x.partitionsDeleted) || 0), 0)
 )
 
 // ---------------------------------------------------------------------------
-// Parked row — gauge: in-flight long-poll consumer connections, summed
-// across all queues per bucket. Approximates "idle connected consumers"
-// at any moment in time (busy consumers, mid-job, are NOT counted —
-// they're not parked). The latest bucket is what reads on the row; the
-// sparkline is the trend across the selected window.
+// Parked row — in-flight long-poll consumer connections, summed across the
+// tenant's queues per bucket.
 // ---------------------------------------------------------------------------
 const parkedSeriesData = computed(() => {
-  const rows = partitionOpsData.value || []
-  if (!rows.length) return null
-  return [{ label: 'Parked', data: rows.map(r => toNum(r.parkedTotal)) }]
+  const h = history.value
+  if (!h.length) return null
+  return [{ label: 'Parked', data: h.map(x => toNum(x.parkedTotal)) }]
 })
-const parkedLatest = computed(() => {
-  const rows = partitionOpsData.value || []
-  // Walk back to the most recent populated bucket — avoids reading "0
-  // parked" from a still-aggregating tail bucket.
-  return latestFinite(rows.map(r => r.parkedTotal)) ?? 0
-})
+const parkedLatest = computed(() => latestFinite(history.value.map(x => x.parkedTotal)))
 const parkedAvg = computed(() => {
-  const rows = partitionOpsData.value || []
-  if (!rows.length) return 0
-  const finite = rows.map(r => toNum(r.parkedTotal)).filter(v => v !== null)
+  const finite = history.value.map(x => toNum(x.parkedTotal)).filter(v => v !== null)
   if (!finite.length) return 0
   return finite.reduce((s, v) => s + v, 0) / finite.length
 })
 const parkedContext = computed(() => {
-  const rows = partitionOpsData.value || []
-  if (!rows.length) return '—'
+  if (!history.value.length) return '—'
   return `avg ${parkedAvg.value.toFixed(1)} across window · idle long-polls`
 })
 
 // ---------------------------------------------------------------------------
-// Fill ratio row — popMessages / (popMessages + popEmpty) aggregated across
-// queues per bucket, rendered as a percentage. The single best "is my
-// consumer pool sized right?" signal computable from queue-ops alone:
+// Fill ratio row — popMessages / (popMessages + popEmpty) per bucket.
 //   • near 0% with traffic → consumers waiting in vain (over-provisioned)
-//   • near 100% sustained  → consumers fully utilized; watch lag for
-//                            under-provisioning
-// We gate on FILL_NOISE_FLOOR completions per bucket to silence single-event
-// noise in quiet windows (and return null so RowChart renders gaps rather
-// than misleading drops to zero).
+//   • near 100% sustained  → consumers fully utilized; watch the lag row
+// Buckets below the noise floor carry the previous value forward so the line
+// stays continuous; the headline uses a real null → '—' so a truly idle window
+// is distinguishable from 0% delivery.
 // ---------------------------------------------------------------------------
 const FILL_NOISE_FLOOR = 5
 
-// Quiet-bucket handling: RowChart strips non-finite values from its data
-// arrays via Number.isFinite, but Number(null) === 0 sneaks past that
-// check and would render quiet buckets as a misleading "0% fill" dip.
-// Returning NaN/undefined would drop the points but desync the timestamp
-// labels in the expanded chart. Pragmatic compromise: carry forward the
-// previous bucket's measured value through quiet periods so the sparkline
-// stays continuous and honest. The headline "Now" value (fillLatest)
-// uses its own gating with a real null → "—" to make truly-idle windows
-// distinguishable in the row's value cell.
 const fillSeriesData = computed(() => {
-  const rows = partitionOpsData.value || []
-  if (!rows.length) return null
-  // We distinguish three states per bucket:
-  //   - null source data       → emit null (real gap)
-  //   - <FILL_NOISE_FLOOR pops → carry the last computed value (so the
-  //                              chart stays visually continuous through
-  //                              quiet but populated minutes)
-  //   - enough activity        → compute and remember it
+  const h = history.value
+  if (!h.length) return null
   let last = null
-  const data = rows.map(r => {
-    const pop = toNum(r.popMessages)
-    const empty = toNum(r.popEmpty)
+  const data = h.map(x => {
+    const pop = toNum(x.popMessages)
+    const empty = toNum(x.popEmpty)
     if (pop === null && empty === null) return null
     const total = (pop || 0) + (empty || 0)
     if (total < FILL_NOISE_FLOOR) return last
@@ -895,13 +873,9 @@ const fillSeriesData = computed(() => {
   return [{ label: 'Fill', data }]
 })
 
-// "Now" value smoothed across the last few buckets so a single noisy
-// minute doesn't dictate the headline number. Returns null when the
-// recent window has too little long-poll activity to compute meaningfully.
 const fillLatest = computed(() => {
-  const rows = partitionOpsData.value || []
-  if (!rows.length) return null
-  const tail = rows.slice(-5)
+  const tail = history.value.slice(-5)
+  if (!tail.length) return null
   let pop = 0, empty = 0
   for (const r of tail) {
     pop   += toNum(r.popMessages) || 0
@@ -919,9 +893,8 @@ const fillContext = computed(() => {
   return 'balanced · consumer pool sized OK'
 })
 
-// We only flag low fill as `warn` — high fill is a positive signal in
-// isolation (becomes a problem only when paired with rising lag, which
-// already has its own row). Without traffic, leave neutral.
+// Only LOW fill is flagged — high fill is a positive signal on its own, and
+// becomes a problem only alongside rising lag, which has its own row.
 const fillSeverity = computed(() => {
   const v = fillLatest.value
   if (v === null) return ''
@@ -930,11 +903,22 @@ const fillSeverity = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Retention row — three series (retention sweep, completed-retention sweep,
-// hard eviction). Only "Evicted" gets the warn color; the others are quiet.
+// Retention row.
+//
+// queen.retention_history has no writer under the log engine, so an empty
+// series means NOT REPORTED. Rendering that as "0 msgs evicted" would assert
+// something the product cannot know while the engine is deleting segments.
 // ---------------------------------------------------------------------------
+const retentionRows = computed(() => {
+  const payload = retentionQ.data.value
+  const series = payload?.series || []
+  return trimIncompleteBuckets(series, {
+    bucketKey: 'bucket',
+    bucketMinutes: payload?.bucketMinutes || 1,
+  })
+})
 const retentionSeriesData = computed(() => {
-  const rows = retentionData.value || []
+  const rows = retentionRows.value
   if (!rows.length) return null
   return [
     { label: 'Retention', data: rows.map(r => toNum(r.retentionMsgs)) },
@@ -943,28 +927,189 @@ const retentionSeriesData = computed(() => {
   ]
 })
 const retentionLabels = computed(() =>
-  (retentionData.value || []).map(r => formatChartLabel(new Date(r.bucket), false))
+  retentionRows.value.map(r => formatChartLabel(new Date(r.bucket), false))
 )
-const retentionTotal = computed(() =>
-  (retentionData.value || []).reduce((s, r) =>
+const retentionTotal = computed(() => {
+  const rows = retentionRows.value
+  if (!rows.length) return null
+  return rows.reduce((s, r) =>
     s +
     (toNum(r.retentionMsgs) || 0) +
     (toNum(r.completedRetentionMsgs) || 0) +
     (toNum(r.evictionMsgs) || 0)
   , 0)
+})
+const retentionContext = computed(() => {
+  if (retentionQ.data.value === null) return 'loading…'
+  if (!retentionRows.value.length) {
+    return 'not reported · the log engine does not record retention events yet'
+  }
+  return 'evicted + completed-retention in window'
+})
+
+// ===========================================================================
+// CELL · OPERATOR sources. Everything below reads /api/v1/status or
+// /analytics/system-metrics — cell-wide by nature, operator-only at the proxy.
+// ===========================================================================
+const statusHistory = computed(() => {
+  const s = statusQ.data.value
+  if (!s?.throughput?.length) return []
+  // status_v3 returns rows newest → oldest; charts read left→right.
+  return trimIncompleteBuckets([...s.throughput].reverse(), {
+    bucketKey: 'timestamp',
+    bucketMinutes: s.bucketMinutes || 1,
+  })
+})
+const statusMultiDay = computed(() => {
+  const h = statusHistory.value
+  if (h.length < 2) return false
+  return new Date(h[0].timestamp).toDateString() !== new Date(h[h.length - 1].timestamp).toDateString()
+})
+const statusChartLabels = computed(() =>
+  statusHistory.value.map(h => formatChartLabel(new Date(h.timestamp), statusMultiDay.value))
 )
 
-// ---------------------------------------------------------------------------
-// Batch efficiency row — point-in-time averages (no series), shows whether
-// batching is healthy. <5 means we're committing tiny batches (overhead-bound).
-// ---------------------------------------------------------------------------
-const batchEfficiency = computed(() => {
-  const b = statusData.value?.messages?.batchEfficiency
-  return {
-    push: b?.push?.toFixed(1) || '0',
-    pop:  b?.pop?.toFixed(1)  || '0',
-    ack:  b?.ack?.toFixed(1)  || '0',
+// --- Event loop (cell) ---
+const workerCount = computed(() => statusQ.data.value?.workers?.length || 0)
+const avgEventLoopLag = computed(() => {
+  const w = statusQ.data.value?.workers
+  if (!w?.length) return null
+  // Average only over workers that actually reported — a worker missing the
+  // field must not pull the cell average towards zero.
+  const finite = w.map(x => toNum(x.avgEventLoopLagMs)).filter(v => v !== null)
+  if (!finite.length) return null
+  return Math.round(finite.reduce((s, x) => s + x, 0) / finite.length)
+})
+const maxEventLoopLag = computed(() => {
+  const w = statusQ.data.value?.workers
+  if (!w?.length) return null
+  const finite = w.map(x => toNum(x.maxEventLoopLagMs)).filter(v => v !== null)
+  return finite.length ? Math.max(...finite) : null
+})
+const elSeriesData = computed(() => {
+  const h = statusHistory.value
+  if (!h.length) return null
+  return [
+    { label: 'Avg', data: h.map(x => toNum(x.avgEventLoopLagMs)) },
+    { label: 'Max', data: h.map(x => toNum(x.maxEventLoopLagMs)) },
+  ]
+})
+const elNumClass = (ms) => !ms || ms === 0 ? '' : ms < 50 ? '' : ms < 100 ? 'warn' : 'bad'
+const eventLoopContext = computed(() => {
+  const n = workerCount.value
+  if (!n) return 'no workers reporting on this cell'
+  return `${n} worker${n === 1 ? '' : 's'} on this cell · avg / max`
+})
+
+// --- Queen CPU (cell) ---
+// CPU is cumulative across cores (4 cores pinned = 400%), so it is shown
+// without a semantic tone: without a core count a threshold would be a guess.
+const hasMultipleReplicas = computed(() => (sysQ.data.value?.replicas || []).length > 1)
+const cpuError = computed(() => hasMultipleReplicas.value ? sysQ.error.value : statusQ.error.value)
+
+const combinedCpu = (t) => {
+  const user = toNum(t.metrics?.cpu?.user_us?.avg)
+  const sys  = toNum(t.metrics?.cpu?.system_us?.avg)
+  if (user === null && sys === null) return null
+  return ((user || 0) + (sys || 0)) / 100
+}
+
+// Single replica → user vs system split. Multi replica → one line per replica
+// so fanout imbalance is visible (the value still shows the hottest).
+const cpuSeriesData = computed(() => {
+  if (hasMultipleReplicas.value) {
+    return (sysQ.data.value?.replicas || []).map(r => ({
+      label: r.hostname?.substring(0, 12) || 'replica',
+      data: (r.timeSeries || []).map(combinedCpu),
+    }))
   }
+  const h = statusHistory.value
+  if (!h.length) return null
+  return [
+    { label: 'User',   data: h.map(x => toNum(x.queenCpuUserPct)) },
+    { label: 'System', data: h.map(x => toNum(x.queenCpuSysPct)) },
+  ]
+})
+
+// Per-replica buckets aren't necessarily aligned with the status buckets that
+// drive the other cell rows, so multi-replica mode carries its own labels.
+const cpuLabels = computed(() => {
+  if (!hasMultipleReplicas.value) return statusChartLabels.value
+  const ts = (sysQ.data.value?.replicas || [])[0]?.timeSeries || []
+  if (!ts.length) return []
+  const multi = ts.length >= 2 &&
+    new Date(ts[0].timestamp).toDateString() !== new Date(ts[ts.length - 1].timestamp).toDateString()
+  return ts.map(t => formatChartLabel(new Date(t.timestamp), multi))
+})
+const cpuLatest = computed(() => {
+  if (hasMultipleReplicas.value) {
+    let max = null
+    for (const r of (sysQ.data.value?.replicas || [])) {
+      const v = latestFinite((r.timeSeries || []).map(combinedCpu))
+      if (v !== null && (max === null || v > max)) max = v
+    }
+    return max
+  }
+  const u = latestFinite(statusHistory.value.map(x => x.queenCpuUserPct))
+  const s = latestFinite(statusHistory.value.map(x => x.queenCpuSysPct))
+  if (u === null && s === null) return null
+  return (u || 0) + (s || 0)
+})
+const cpuContext = computed(() => {
+  if (hasMultipleReplicas.value) {
+    return `${(sysQ.data.value?.replicas || []).length} replicas on this cell · hottest shown`
+  }
+  const u = latestFinite(statusHistory.value.map(x => x.queenCpuUserPct))
+  const s = latestFinite(statusHistory.value.map(x => x.queenCpuSysPct))
+  if (u === null && s === null) return 'no CPU samples for this cell'
+  return `user ${(u || 0).toFixed(0)}% · sys ${(s || 0).toFixed(0)}% · whole cell`
+})
+
+// --- DB pool (cell) — saturation = waiters; warn at 80% util, bad at size. ---
+const poolLatest = computed(() => {
+  const h = statusHistory.value
+  if (!h.length) return null
+  const active = latestFinite(h.map(x => x.dbPoolActive))
+  const idle   = latestFinite(h.map(x => x.dbPoolIdle))
+  const size   = latestFinite(h.map(x => x.dbPoolSize))
+  if (active === null && idle === null && size === null) return null
+  return {
+    active: active === null ? null : Math.round(active),
+    idle: idle === null ? null : Math.round(idle),
+    size: size === null
+      ? (active === null && idle === null ? null : Math.round((active || 0) + (idle || 0)))
+      : Math.round(size),
+  }
+})
+const poolSeriesData = computed(() => {
+  const h = statusHistory.value
+  if (!h.length) return null
+  return [
+    { label: 'Active', data: h.map(x => toNum(x.dbPoolActive)) },
+    { label: 'Idle',   data: h.map(x => toNum(x.dbPoolIdle)) },
+  ]
+})
+const poolSeverity = computed(() => {
+  const p = poolLatest.value
+  if (!p || !p.size || p.active === null) return ''
+  if (p.active >= p.size) return 'bad'
+  if (p.active / p.size > 0.8) return 'warn'
+  return ''
+})
+const poolContext = computed(() => {
+  const p = poolLatest.value
+  if (!p) return 'no pool samples for this cell'
+  return `idle ${p.idle ?? '—'} · size ${p.size ?? '—'} · whole cell`
+})
+
+// --- Batch efficiency (cell) — point-in-time averages. <5 = tiny commits. ---
+const batchEfficiency = computed(() => {
+  const b = statusQ.data.value?.messages?.batchEfficiency
+  const one = (v) => {
+    const n = toNum(v)
+    return n === null ? '—' : n.toFixed(1)
+  }
+  return { push: one(b?.push), pop: one(b?.pop), ack: one(b?.ack) }
 })
 
 // ---------------------------------------------------------------------------
@@ -974,13 +1119,11 @@ const pendingNumClass = (n) => !n || n < 1000 ? '' : n < 10000 ? 'warn' : 'bad'
 
 // ---------------------------------------------------------------------------
 // Bottom panels — Top queues by pending + Consumer groups by lag.
-// Both panels share one row idiom (dot · name · right metric · meta line),
-// so the entity-row / .entity-head / .entity-meta classes are applied
-// identically below regardless of which entity is rendered.
+// Both panels share one row idiom (dot · name · right metric · meta line).
 // ---------------------------------------------------------------------------
 
-// Per-queue worst-lag rollup, keyed off consumer-group lag (the queue
-// itself doesn't carry a lag; it's a property of its consumer groups).
+// Per-queue worst-lag rollup, keyed off consumer-group lag (the queue itself
+// doesn't carry a lag; it's a property of its consumer groups).
 const queueLagMap = computed(() => {
   const m = {}
   for (const c of consumers.value) {
@@ -993,33 +1136,30 @@ const queueLagMap = computed(() => {
 })
 
 const enrichedQueues = computed(() => {
-  const base = [...queues.value].map(q => ({ ...q, _pending: Math.max(0, q.messages?.pending || 0) }))
-  const maxPending = Math.max(...base.map(q => q._pending), 1)
+  // `pending` is passed through verbatim: null when the broker did not report
+  // one, so the panel can render '—' instead of claiming an empty queue.
+  const base = queues.value.map(q => ({ ...q, _pending: toNum(q.messages?.pending) }))
+  const maxPending = Math.max(...base.map(q => q._pending ?? 0), 1)
   return base
     .map(q => {
       const lag = queueLagMap.value[q.name] || 0
+      const depth = q._pending ?? 0
       const status =
-        lag >= 300 || (q._pending / maxPending) > 0.8 ? 'degraded'
-      : lag >= 60  || (q._pending / maxPending) > 0.5 ? 'watch'
+        lag >= 300 || (depth / maxPending) > 0.8 ? 'degraded'
+      : lag >= 60  || (depth / maxPending) > 0.5 ? 'watch'
       : 'healthy'
       return {
         ...q,
         _lag: lag,
         _status: status,
-        _depthPct: Math.min(100, (q._pending / maxPending) * 100),
+        _depthPct: Math.min(100, (depth / maxPending) * 100),
       }
     })
-    .sort((a, b) => b._pending - a._pending)
+    .sort((a, b) => (b._pending ?? -1) - (a._pending ?? -1))
 })
 
 // Top 6 by pending depth — the operational priority for "what's piling up".
-const topPendingQueues = computed(() =>
-  enrichedQueues.value.filter(q => q._pending > 0).slice(0, 6)
-    // If no queue has pending, still show the top 6 (mostly to populate
-    // the panel with something rather than the empty state).
-    .concat(enrichedQueues.value.filter(q => q._pending === 0).slice(0, 6))
-    .slice(0, 6)
-)
+const topPendingQueues = computed(() => enrichedQueues.value.slice(0, 6))
 
 const sortedConsumers = computed(() =>
   [...consumers.value].sort((a, b) => (b.maxTimeLag || 0) - (a.maxTimeLag || 0))
@@ -1051,9 +1191,8 @@ const cgDotClass = (g) => {
 const depthBarClass = (s) => s === 'degraded' ? 'bad' : s === 'watch' ? 'warn' : ''
 
 // ---------------------------------------------------------------------------
-// Tooltip value formatters — passed to RowChart so hover tooltips render
-// human-friendly numbers instead of raw floats. fmtRate caps precision the
-// same way the Queues page does (no IEEE-754 tails).
+// Formatters. The unit is in the name: `fmtLagMs` takes milliseconds,
+// `fmtLagSeconds` takes seconds — the two used to share one name across views.
 // ---------------------------------------------------------------------------
 const fmtRate = (n) => {
   const v = Number(n) || 0
@@ -1073,22 +1212,9 @@ const fmtLagMs = (n) => {
   if (v < 60000) return (v / 1000).toFixed(1) + ' s'
   return (v / 60000).toFixed(1) + ' m'
 }
-// Fill ratio tooltip formatter — the Fill row inserts null in `data` for
-// buckets that didn't have enough long-poll activity to compute meaningfully.
-// We render those as an em dash so the user can tell "no data" apart from
-// "0% delivered".
-const fmtFillPct = (n) => {
-  if (n === null || n === undefined) return '—'
-  const v = Number(n)
-  if (!Number.isFinite(v)) return '—'
-  return v.toFixed(1) + '%'
-}
-
-// ---------------------------------------------------------------------------
-// Helpers — duration + last-refresh ticker
-// ---------------------------------------------------------------------------
-const formatDuration = (seconds) => {
-  if (!seconds || seconds === 0) return '0s'
+const fmtLagSeconds = (seconds) => {
+  if (seconds === null || seconds === undefined) return '—'
+  if (seconds === 0) return '0s'
   if (seconds < 60) return `${Math.round(seconds)}s`
   if (seconds < 3600) {
     const m = Math.floor(seconds / 60); const s = Math.round(seconds % 60)
@@ -1101,7 +1227,18 @@ const formatDuration = (seconds) => {
   const d = Math.floor(seconds / 86400); const h = Math.floor((seconds % 86400) / 3600)
   return h ? `${d}d ${h}h` : `${d}d`
 }
+// Fill-ratio buckets can be null ("not enough long-poll activity"); render
+// those as an em dash so the user can tell it apart from "0% delivered".
+const fmtFillPct = (n) => {
+  if (n === null || n === undefined) return '—'
+  const v = Number(n)
+  if (!Number.isFinite(v)) return '—'
+  return v.toFixed(1) + '%'
+}
 
+// ---------------------------------------------------------------------------
+// Last-refresh ticker
+// ---------------------------------------------------------------------------
 const lastRefreshAt = ref(null)
 const nowTick = ref(Date.now())
 const refreshAgo = computed(() => {
@@ -1114,108 +1251,36 @@ const refreshAgo = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Fetchers (unchanged)
+// Loading
 // ---------------------------------------------------------------------------
-const fetchOverview = async () => {
-  if (!overview.value) loadingOverview.value = true
-  try { overview.value = (await resources.getOverview()).data } catch {}
-  finally { loadingOverview.value = false }
-}
-const fetchQueues = async () => {
-  if (!queues.value.length) loadingQueues.value = true
-  try { const r = await queuesApi.list(); queues.value = r.data?.queues || r.data || [] } catch {}
-  finally { loadingQueues.value = false }
-}
-const fetchConsumers = async () => {
-  if (!consumers.value.length) loadingConsumers.value = true
-  try {
-    const r = await consumersApi.list()
-    consumers.value = Array.isArray(r.data) ? r.data : r.data?.consumer_groups || []
-  } catch {}
-  finally { loadingConsumers.value = false }
-}
-const fetchStatus = async () => {
-  if (!statusData.value) loadingStatus.value = true
-  try { statusData.value = (await analytics.getStatus(getTimeRangeParams())).data } catch {}
-  finally { loadingStatus.value = false }
-}
-const fetchRetention = async () => {
-  try {
-    const r = await systemApi.getRetention(getTimeRangeParams())
-    const series = r.data?.series || []
-    // Trim the still-aggregating current bucket so the right edge of the
-    // retention sparkline doesn't read a partial-minute sample.
-    retentionData.value = trimIncompleteBuckets(series, {
-      bucketKey: 'bucket',
-      bucketMinutes: r.data?.bucketMinutes || 1,
-    })
-  } catch { retentionData.value = [] }
-}
-const fetchQueueOps = async () => {
-  try {
-    const r = await systemApi.getQueueOps(getTimeRangeParams())
-    const series = r.data?.series || []
-    // Roll up the per-(queue, bucket) series into one row per bucket.
-    // Beyond the original partition lifecycle counters, we also accumulate
-    // parked / popMessages / popEmpty across queues so the Parked and
-    // Fill ratio rows below can chart cluster-wide gauges/derivations.
-    // (parkedCount is a SUM across workers per (queue, bucket), and we
-    // SUM again here across queues for the cluster-wide gauge — a
-    // legitimate gauge composition since each long-poll lives on exactly
-    // one (queue, partition, worker).)
-    const byBucket = {}
-    for (const row of series) {
-      const b = byBucket[row.bucket] ||= {
-        bucket: row.bucket,
-        partitionsCreated: 0, partitionsDeleted: 0,
-        parkedTotal: 0, popMessages: 0, popEmpty: 0
-      }
-      b.partitionsCreated += Number(row.partitionsCreated) || 0
-      b.partitionsDeleted += Number(row.partitionsDeleted) || 0
-      b.parkedTotal       += Number(row.parkedCount)      || 0
-      b.popMessages       += Number(row.popMessages)      || 0
-      b.popEmpty          += Number(row.popEmpty)         || 0
-    }
-    const sorted = Object.values(byBucket).sort((a, b) => a.bucket.localeCompare(b.bucket))
-    partitionOpsData.value = trimIncompleteBuckets(sorted, {
-      bucketKey: 'bucket',
-      bucketMinutes: r.data?.bucketMinutes || 1,
-    })
-  } catch { partitionOpsData.value = [] }
-}
-const fetchSystemMetrics = async () => {
-  try {
-    const r = timeRanges.find(x => x.value === selectedRange.value) || timeRanges[0]
-    const now = new Date()
-    const params = {
-      from: new Date(now.getTime() - r.minutes * 60 * 1000).toISOString(),
-      to: now.toISOString(),
-    }
-    const res = await systemApi.getSystemMetrics(params)
-    systemMetricsData.value = res.data
-  } catch { systemMetricsData.value = null }
-}
 const fetchAll = async () => {
-  await Promise.all([
-    fetchOverview(), fetchQueues(), fetchConsumers(),
-    fetchStatus(), fetchRetention(), fetchQueueOps(),
-    fetchSystemMetrics(),
-  ])
+  const jobs = [
+    overviewQ.refresh(), queuesQ.refresh(), consumersQ.refresh(),
+    opsQ.refresh(), retentionQ.refresh(),
+  ]
+  // The two cell-level sources are operator routes: for anyone else the proxy
+  // answers 404 route_blocked, so we don't ask and don't render their rows.
+  if (can('operator')) jobs.push(statusQ.refresh(), sysQ.refresh())
+  await Promise.all(jobs)
   lastRefreshAt.value = Date.now()
 }
 
-useRefresh(fetchAll)
-watch(selectedRange, () => { fetchStatus(); fetchRetention(); fetchQueueOps(); fetchSystemMetrics() })
+// One shared ticker for the whole app (paused while the tab is hidden) —
+// a private setInterval here would keep spending the tenant's rate budget.
+useAutoRefresh(fetchAll)
 
-let interval = null
+watch(selectedRange, () => {
+  opsQ.refresh()
+  retentionQ.refresh()
+  if (can('operator')) { statusQ.refresh(); sysQ.refresh() }
+})
+
 let tickInterval = null
 onMounted(() => {
   fetchAll()
-  interval = setInterval(fetchAll, 30000)
   tickInterval = setInterval(() => { nowTick.value = Date.now() }, 1000)
 })
 onUnmounted(() => {
-  if (interval) clearInterval(interval)
   if (tickInterval) clearInterval(tickInterval)
 })
 </script>
@@ -1390,6 +1455,47 @@ onUnmounted(() => {
     grid-template-columns: 14px 1fr auto 110px 24px;
   }
   .metric-head > :nth-child(4) { display: none; }
+}
+
+/* Cell section divider inside the metric table. Same amber vocabulary the
+   sidebar's CELL group uses, so "this is not your tenant's number" reads the
+   same wherever it appears. */
+.metric-cell-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  font-size: 11px;
+  color: var(--text-low);
+  border-top: 1px solid var(--bd);
+  border-bottom: 1px solid var(--bd);
+  background: rgba(230, 180, 80, .05);
+}
+.metric-cell-tag {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  color: var(--warn-400);
+  border: 1px solid var(--warn-400);
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.count-scope {
+  font-style: normal;
+  font-size: 9px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--warn-400);
+  border: 1px solid var(--warn-400);
+  border-radius: 3px;
+  padding: 0 3px;
+  margin-left: 4px;
+  opacity: .8;
+}
+.entity-failed {
+  color: var(--ember-400);
+  font-style: italic;
 }
 
 /* The slot-defined value separators — used by compound rows like "avg / max" */

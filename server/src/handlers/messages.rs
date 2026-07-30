@@ -213,7 +213,9 @@ pub async fn handle_get_message(
 // Delete a message by address. In the log engine live payloads live in
 // immutable segments; the deletable rows are the DLQ snapshots in queen.log_dlq.
 // This backs the DLQ manual-requeue workflow (dlq list -> re-push -> delete the
-// DLQ row). Always 200 with {success,...}; success:false when nothing matched.
+// DLQ row). A live (pending/processing/completed) message cannot be deleted at
+// all, so "nothing matched" is a 404, not a 200 carrying success:false — a
+// caller that ignores the body must not read a no-op as a deletion.
 pub async fn handle_delete_message(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
@@ -223,30 +225,175 @@ pub async fn handle_delete_message(
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
+    let not_found = || {
+        json(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "success": false,
+                "partitionId": partition_id,
+                "transactionId": transaction_id,
+                "error": "Message not found",
+                "message": "No dead-letter row for this address — live messages live in immutable segments and cannot be deleted",
+            })
+            .to_string(),
+        )
+    };
     // Track B (§5) OWNERSHIP GATE (pid-addressed delete): a foreign pid must not
     // delete another tenant's DLQ row — treat it as "not found" (no-op when off).
     if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
-        let out = serde_json::json!({
-            "success": false,
-            "partitionId": partition_id,
-            "transactionId": transaction_id,
-            "message": "Message not found",
-        });
-        return json(StatusCode::OK, out.to_string());
+        return not_found();
     }
     match db::delete_message(&client, &partition_id, &transaction_id).await {
-        Ok(deleted) => {
+        Ok(true) => {
             let out = serde_json::json!({
-                "success": deleted,
+                "success": true,
                 "partitionId": partition_id,
                 "transactionId": transaction_id,
-                "message": if deleted { "Message deleted successfully" } else { "Message not found" },
+                "message": "Message deleted successfully",
             });
             json(StatusCode::OK, out.to_string())
         }
+        Ok(false) => not_found(),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,
             json_err("delete failed: ", &e),
+        ),
+    }
+}
+
+// ------------------------------------- POST /api/v1/messages/:pid/:txn/retry
+// Replay a dead-lettered message: re-push the queen.log_dlq payload snapshot to
+// its own queue/partition, then drop the DLQ row. This is the DLQ's replay
+// action (the console's "Retry"); it exists ONLY for dead-lettered addresses —
+// a live message has nothing to replay and 404s.
+//
+// The replayed frame gets a FRESH transaction id (the push path mints one from
+// the new message id): reusing the original would be seen by the dedup window
+// as a duplicate and silently dropped. The DLQ row is deleted only AFTER the
+// push is accepted, so a failure leaves the message in the DLQ rather than
+// losing it.
+pub async fn handle_retry_message(
+    State(st): State<Arc<AppState>>,
+    Extension(authed): Extension<crate::auth::AuthedSub>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    Path((partition_id, transaction_id)): Path<(String, String)>,
+) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+    let not_found = || {
+        json(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "success": false,
+                "partitionId": partition_id,
+                "transactionId": transaction_id,
+                "error": "Message not found",
+                "message": "No dead-letter row for this address — only dead-lettered messages can be replayed",
+            })
+            .to_string(),
+        )
+    };
+    // Track B (§5) OWNERSHIP GATE: a foreign pid must not replay (or reveal)
+    // another tenant's DLQ row — same 404 as a genuinely-missing address.
+    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+        return not_found();
+    }
+
+    let (queue, partition, payload_txt) =
+        match db::dlq_row_for_replay(&client, &partition_id, &transaction_id).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return not_found(),
+            Err(e) => {
+                return json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json_err("dlq lookup failed: ", &e),
+                )
+            }
+        };
+
+    // The snapshot is stored verbatim, so on an encryption-enabled queue it is
+    // the {encrypted,iv,authTag} envelope. Re-pushing that as the payload would
+    // double-encrypt it; replay the PLAINTEXT and let the push path re-encrypt.
+    let payload_txt = match st.encryption.decrypt_payload_bytes(payload_txt.as_bytes()) {
+        Some(pt) => String::from_utf8_lossy(&pt).into_owned(),
+        None => payload_txt,
+    };
+
+    let push_body = serde_json::json!({
+        "items": [{
+            "queue": queue,
+            "partition": partition,
+            "payload": serde_json::from_str::<serde_json::Value>(&payload_txt)
+                .unwrap_or(serde_json::Value::Null),
+        }]
+    })
+    .to_string();
+
+    let resp = super::data::handle_push(
+        State(st.clone()),
+        Extension(authed),
+        Extension(tenant),
+        Bytes::from(push_body),
+    )
+    .await;
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    if !status.is_success() {
+        return json(
+            status,
+            serde_json::json!({
+                "success": false,
+                "error": "Replay push failed — the message is still in the dead-letter queue",
+                "pushStatus": status.as_u16(),
+                "pushResult": serde_json::from_slice::<serde_json::Value>(&body)
+                    .unwrap_or(serde_json::Value::Null),
+            })
+            .to_string(),
+        );
+    }
+    let pushed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let first = pushed.get(0).cloned().unwrap_or(serde_json::Value::Null);
+    let push_status = first.get("status").and_then(|s| s.as_str()).unwrap_or("");
+    if push_status == "error" || push_status.is_empty() {
+        return json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({
+                "success": false,
+                "error": "Replay push was rejected — the message is still in the dead-letter queue",
+                "pushResult": pushed,
+            })
+            .to_string(),
+        );
+    }
+
+    // Push accepted: drop the DLQ row. A failure here is reported (the message
+    // now exists twice: replayed AND still dead-lettered) rather than swallowed.
+    match db::delete_message(&client, &partition_id, &transaction_id).await {
+        Ok(removed) => json(
+            StatusCode::OK,
+            serde_json::json!({
+                "success": true,
+                "queue": queue,
+                "partition": partition,
+                "replayedAs": first,
+                "dlqRowRemoved": removed,
+            })
+            .to_string(),
+        ),
+        Err(e) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({
+                "success": false,
+                "replayed": true,
+                "dlqRowRemoved": false,
+                "error": format!("dlq cleanup failed: {e}"),
+            })
+            .to_string(),
         ),
     }
 }
@@ -413,10 +560,46 @@ pub async fn handle_dlq(
     if v.get("error").filter(|e| !e.is_null()).is_some() {
         return sp_result_to_response(v.to_string());
     }
+    // The snapshot is stored VERBATIM at quarantine time (dlq_file_head), so on
+    // an encryption-enabled queue it is the {encrypted,iv,authTag} envelope.
+    // Decrypt on read — same sniff the live read paths use — or the DLQ shows
+    // ciphertext and is useless for the debugging it exists for.
+    decrypt_dlq_payloads(&st.encryption, &mut v);
     if let Some(obj) = v.as_object_mut() {
         let total = obj.get("messages").and_then(|m| m.as_array()).map(|a| a.len()).unwrap_or(0);
         obj.insert("total".to_string(), serde_json::json!(total));
     }
     json(StatusCode::OK, v.to_string())
+}
+
+// Walk a get_dlq_messages_v1 result and replace every encrypted `data` envelope
+// with its plaintext, flagging the row with isEncrypted so the client can tell
+// a decrypted payload from one that was never encrypted. A payload that does
+// not sniff as an envelope (or that fails to decrypt — wrong/rotated key) is
+// left exactly as stored: showing the envelope beats inventing a payload.
+fn decrypt_dlq_payloads(enc: &crate::encryption::Encryption, v: &mut serde_json::Value) {
+    if !enc.is_enabled() {
+        return;
+    }
+    let msgs = match v.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        Some(m) => m,
+        None => return,
+    };
+    for msg in msgs.iter_mut() {
+        let obj = match msg.as_object_mut() {
+            Some(o) => o,
+            None => continue,
+        };
+        let raw = match obj.get("data") {
+            Some(d) if d.is_object() => d.to_string(),
+            _ => continue,
+        };
+        if let Some(pt) = enc.decrypt_payload_bytes(raw.as_bytes()) {
+            let plain: serde_json::Value =
+                serde_json::from_slice(&pt).unwrap_or(serde_json::Value::Null);
+            obj.insert("data".to_string(), plain);
+            obj.insert("isEncrypted".to_string(), serde_json::Value::Bool(true));
+        }
+    }
 }
 

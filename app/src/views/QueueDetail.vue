@@ -15,13 +15,27 @@
       </div>
     </div>
 
-    <!-- Error state -->
-    <div v-else-if="error && !queueData" class="card" style="padding:24px; color:var(--ember-400);">
-      <p style="font-weight:600; margin-bottom:8px;">Error loading queue</p>
-      <p style="font-size:13px;">{{ error }}</p>
+    <!-- Error state. "Queue not found" is reserved for an actual 404: a 500 or
+         a dropped connection is a different problem with a different fix, and
+         telling the user their queue is gone is the worse of the two lies. -->
+    <div v-else-if="detailError" class="card" style="padding:24px;">
+      <p style="font-weight:600; margin-bottom:8px; color:var(--ember-400);">
+        {{ detailError.isNotFound ? 'Queue not found' : 'Cannot load this queue' }}
+      </p>
+      <p style="font-size:13px; color:var(--text-mid);">
+        <template v-if="detailError.isNotFound">
+          No queue named <strong class="font-mono">{{ queueName }}</strong> on
+          <strong>{{ actingClusterSlug || 'this cluster' }}</strong>.
+        </template>
+        <template v-else>{{ describeApiError(detailError) }}</template>
+      </p>
+      <div style="margin-top:16px; display:flex; gap:10px;">
+        <button class="btn btn-ghost" @click="fetchAll">Retry</button>
+        <button class="btn btn-ghost" @click="$router.push('/queues')">Back to queues</button>
+      </div>
     </div>
 
-    <template v-else-if="queueData || statusData">
+    <template v-else-if="statusData">
       <!-- ====================================================================
            Detail bar — back · queue · meta · time-range · live · actions.
            Same idiom as before, plus a Dashboard-style range selector and
@@ -86,12 +100,24 @@
 
         <span class="qd-actions-spacer" />
 
-        <button @click="showDeleteModal = true" class="btn btn-danger">
+        <!-- DELETE is RouteClass::QueueAdmin at the proxy; anyone else would
+             get a 403 from a button that looks perfectly enabled. -->
+        <button v-if="can('queueAdmin')" @click="openDeleteModal" class="btn btn-danger">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
             <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
           </svg>
           Delete queue
         </button>
+      </div>
+
+      <!-- A refresh that failed while data is on screen: the counts and config
+           below are the last good ones, not the current ones. -->
+      <div v-if="detailStale" class="status-banner banner-bad view-banner">
+        <span>
+          <strong>Live status did not refresh</strong> ·
+          {{ describeApiError(detailStale) }} — the counts and configuration
+          below are from {{ lastRefreshText }}.
+        </span>
       </div>
 
       <!-- ====================================================================
@@ -127,11 +153,9 @@
             <strong>{{ formatNumber(totalMessages.completed) }}</strong>
             <span>completed</span>
           </span>
-          <span class="count-sep">·</span>
-          <span class="count-item count-static">
-            <strong class="num" :class="{ bad: totalMessages.failed > 0 }">{{ formatNumber(totalMessages.failed) }}</strong>
-            <span>failed</span>
-          </span>
+          <!-- No "failed" tile: get_queue_detail_v2's log branch hardcodes
+               `failed` to 0, so the tile could only ever assert zero while the
+               Errors row two blocks down charts the queue's real ack failures. -->
           <span class="count-sep">·</span>
           <button class="count-item" @click="goDLQ">
             <strong class="num" :class="{ bad: totalMessages.deadLetter > 0 }">{{ formatNumber(totalMessages.deadLetter) }}</strong>
@@ -197,6 +221,7 @@
           :value-format="fmtRate"
           expand-unit="msgs / sec"
           :loading="loadingOps"
+          :error="opsError"
           :expanded="isExpanded('throughput')"
           @toggle-expand="toggleRow('throughput')"
         />
@@ -211,6 +236,7 @@
           expand-unit="msgs (cumulative)"
           :severity="pendingDeltaSeverity"
           :loading="loadingOps"
+          :error="opsError"
           tooltip="Cumulative (push − ack) across the selected window. Positive = queue filling, negative = draining."
           :expanded="isExpanded('pendingDelta')"
           @toggle-expand="toggleRow('pendingDelta')"
@@ -224,6 +250,7 @@
           expand-unit="ms"
           :severity="lagSeverityKey"
           :loading="loadingOps"
+          :error="opsError"
           tooltip="Per-bucket avg / max delivery delay, derived from queue lag metrics."
           :expanded="isExpanded('timeLag')"
           @toggle-expand="toggleRow('timeLag')"
@@ -248,6 +275,7 @@
           expand-unit="%"
           :severity="fillSeverityKey"
           :loading="loadingOps"
+          :error="opsError"
           tooltip="Long-polls returning a message ÷ all long-poll completions on this queue. <30% with traffic = consumers mostly empty; ~100% sustained = fully utilized — watch Time lag."
           :expanded="isExpanded('fillRatio')"
           @toggle-expand="toggleRow('fillRatio')"
@@ -271,6 +299,7 @@
           expand-unit="count"
           :severity="errorsSeverity"
           :loading="loadingOps"
+          :error="opsError"
           tooltip="ack failures over the selected window for this queue."
           :expanded="isExpanded('errors')"
           @toggle-expand="toggleRow('errors')"
@@ -285,6 +314,7 @@
           :value-format="fmtCount"
           expand-unit="long-polls"
           :loading="loadingOps"
+          :error="opsError"
           tooltip="Long-poll consumer connections currently waiting on this queue, averaged each minute."
           :expanded="isExpanded('parked')"
           @toggle-expand="toggleRow('parked')"
@@ -297,6 +327,7 @@
           :value-format="fmtCount"
           expand-unit="count"
           :loading="loadingOps"
+          :error="opsError"
           :expanded="isExpanded('partitionsOps')"
           @toggle-expand="toggleRow('partitionsOps')"
         >
@@ -316,6 +347,7 @@
           :value-format="fmtCount"
           expand-unit="msgs (per bucket)"
           :loading="loadingOps"
+          :error="opsError"
           tooltip="Lifetime messages consumed across all consumer groups on this queue (from partition cursors); sparkline shows pop rate per bucket."
           :expanded="isExpanded('consumed')"
           @toggle-expand="toggleRow('consumed')"
@@ -334,14 +366,21 @@
         </div>
         <div class="card-body">
           <div class="qd-config-grid">
+            <!-- formatDuration(0) is the string '0ms', which is truthy — the
+                 old `|| '—'` guard could never fire, so "no TTL" rendered as
+                 "0ms" (instant expiry). Test the raw value instead. -->
             <div class="qd-config">
               <span class="label-xs">Lease time</span>
-              <span class="qd-config-val font-mono">{{ formatDuration((queueData.config.leaseTime || 0) * 1000) }}</span>
+              <span class="qd-config-val font-mono">
+                {{ queueData.config.leaseTime ? formatDuration(queueData.config.leaseTime * 1000) : '—' }}
+              </span>
               <span class="qd-config-hint">how long a lease is held</span>
             </div>
             <div class="qd-config">
               <span class="label-xs">TTL</span>
-              <span class="qd-config-val font-mono">{{ formatDuration((queueData.config.ttl || 0) * 1000) || '—' }}</span>
+              <span class="qd-config-val font-mono">
+                {{ queueData.config.ttl ? formatDuration(queueData.config.ttl * 1000) : '∞' }}
+              </span>
               <span class="qd-config-hint">message lifetime</span>
             </div>
             <div class="qd-config">
@@ -399,10 +438,13 @@
             all partitions ({{ partitions.length }}), and {{ formatNumber(totalMessages.total) }} messages.
             This action cannot be undone.
           </p>
+          <p v-if="deleteError" class="qd-modal-error">{{ deleteError }}</p>
         </div>
         <div class="qd-modal-foot">
-          <button @click="showDeleteModal = false" class="btn btn-ghost">Cancel</button>
-          <button @click="deleteQueue" class="btn btn-danger">Delete queue</button>
+          <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
+          <button @click="deleteQueue" class="btn btn-danger" :disabled="deleting">
+            {{ deleting ? 'Deleting…' : 'Delete queue' }}
+          </button>
         </div>
       </div>
     </div>
@@ -413,28 +455,40 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { analytics, queues as queuesApi, system as systemApi } from '@/api'
+import { analytics, queues as queuesApi, system as systemApi, describeApiError } from '@/api'
 import { formatNumber, formatDuration, toNum, latestFinite, trimIncompleteBuckets } from '@/composables/useApi'
-import { useRefresh } from '@/composables/useRefresh'
+import { formatChartLabel } from '@/composables/useFormat'
+import { useAutoRefresh } from '@/composables/useRefresh'
+import { useToast } from '@/composables/useToast'
+import { useIdentity } from '@/stores/identity'
 import MetricRow from '@/components/MetricRow.vue'
 
 const route = useRoute()
 const router = useRouter()
 const queueName = computed(() => route.params.queueName)
+const { can, actingClusterSlug } = useIdentity()
+const { notifySuccess } = useToast()
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 const loading = ref(true)
-const error = ref(null)
+// The failure that stopped the page from loading, kept as the ApiError so the
+// template can tell a real 404 from a 500 or a dropped connection.
+const detailError = ref(null)
+// A failure that arrived while data was already on screen — the page keeps
+// rendering, but says the numbers are the previous load's.
+const detailStale = ref(null)
 
-const queueData = ref(null)
 const statusData = ref(null)
 const opsData = ref(null)
+const opsError = ref(null)
 
 const loadingOps = ref(true)
 
 const showDeleteModal = ref(false)
+const deleteError = ref(null)
+const deleting = ref(false)
 
 const selectedRange = ref('1h')
 const timeRanges = [
@@ -445,6 +499,9 @@ const timeRanges = [
 
 const lastRefreshAt = ref(null)
 const nowTick = ref(Date.now())
+const lastRefreshText = computed(() =>
+  lastRefreshAt.value ? new Date(lastRefreshAt.value).toLocaleTimeString() : 'an earlier load'
+)
 const refreshAgo = computed(() => {
   if (!lastRefreshAt.value) return '—'
   const sec = Math.max(0, Math.floor((nowTick.value - lastRefreshAt.value) / 1000))
@@ -477,6 +534,12 @@ const getTimeRangeParams = () => {
   }
 }
 
+// The queue's identity + config come from /api/v1/status/queues/:name, the
+// only endpoint that describes a log queue. The old `get_queue_v2` fallback
+// read the rows-engine tables (empty under the log engine) and rendered a
+// healthy queue as 0 partitions / 0 messages / no config, so it is gone.
+const queueData = computed(() => statusData.value?.queue || null)
+
 // History (oldest → newest). The queue-ops endpoint returns one row per
 // (bucket, queueName); since we filter to a single queue, that's
 // effectively one row per bucket. We sort by bucket ascending so charts
@@ -496,9 +559,6 @@ const multiDay = computed(() => {
   if (h.length < 2) return false
   return new Date(h[0].bucket).toDateString() !== new Date(h[h.length - 1].bucket).toDateString()
 })
-const formatChartLabel = (date, multi) => multi
-  ? date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-  : date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
 const chartLabels = computed(() =>
   history.value.map(r => formatChartLabel(new Date(r.bucket), multiDay.value))
 )
@@ -506,12 +566,7 @@ const chartLabels = computed(() =>
 // ---------------------------------------------------------------------------
 // Partitions (existing logic, retained but enriched)
 // ---------------------------------------------------------------------------
-const partitions = computed(() => {
-  const statusPartitions = statusData.value?.partitions || []
-  const queuePartitions = queueData.value?.partitions || []
-  if (statusPartitions.length > 0) return statusPartitions
-  return queuePartitions.map(p => ({ ...p, messages: p.stats || p.messages || {} }))
-})
+const partitions = computed(() => statusData.value?.partitions || [])
 
 const totalMessages = computed(() => {
   const apiTotals = statusData.value?.totals
@@ -522,18 +577,16 @@ const totalMessages = computed(() => {
       pending: Math.max(0, msgs.pending || 0),
       processing: msgs.processing || 0,
       completed: msgs.completed || 0,
-      failed: msgs.failed || 0,
       deadLetter: msgs.deadLetter || 0
     }
   }
-  const t = { total: 0, pending: 0, processing: 0, completed: 0, failed: 0, deadLetter: 0 }
+  const t = { total: 0, pending: 0, processing: 0, completed: 0, deadLetter: 0 }
   for (const p of partitions.value) {
     const m = p.messages || p.stats || {}
     t.total += m.total || 0
     t.pending += m.pending || 0
     t.processing += m.processing || 0
     t.completed += m.completed || 0
-    t.failed += m.failed || 0
     t.deadLetter += m.deadLetter || 0
   }
   t.pending = Math.max(0, t.pending)
@@ -633,22 +686,32 @@ const pendingDeltaSeverity = computed(() => {
 // ---------------------------------------------------------------------------
 // Time lag row — avg / max from queue-ops series
 // ---------------------------------------------------------------------------
+// Lag is measured AT POP. get_queue_ops_v1 emits 0 for a bucket with pushes
+// but no pops, and 0 read as a measurement is how a backlogged queue with
+// stopped consumers reports zero lag. A bucket with no pops has NO SAMPLE.
+const lagPerBucket = computed(() =>
+  history.value.map(x => {
+    const pops = toNum(x.popMessages) || 0
+    if (pops <= 0) return { avg: null, max: null }
+    return { avg: toNum(x.avgLagMs), max: toNum(x.maxLagMs) }
+  })
+)
 const lagSeriesData = computed(() => {
-  const h = history.value
-  if (!h.length) return null
+  const l = lagPerBucket.value
+  if (!l.length) return null
   return [
-    { label: 'Avg', data: h.map(x => toNum(x.avgLagMs)) },
-    { label: 'Max', data: h.map(x => toNum(x.maxLagMs)) },
+    { label: 'Avg', data: l.map(x => x.avg) },
+    { label: 'Max', data: l.map(x => x.max) },
   ]
 })
 const lagLatest = computed(() => {
-  const h = history.value
-  if (!h.length) return { avg: null, max: null }
-  // Read the latest finite value for each so a still-aggregating last
-  // bucket doesn't make lag appear to drop to 0.
+  const l = lagPerBucket.value
+  if (!l.length) return { avg: null, max: null }
+  // Latest *sampled* value for each, so a still-aggregating last bucket
+  // doesn't make lag appear to drop.
   return {
-    avg: latestFinite(h.map(x => x.avgLagMs)),
-    max: latestFinite(h.map(x => x.maxLagMs)),
+    avg: latestFinite(l.map(x => x.avg)),
+    max: latestFinite(l.map(x => x.max)),
   }
 })
 const lagNumClass = (ms) => {
@@ -661,12 +724,10 @@ const lagNumClass = (ms) => {
 // MetricRow.severity expects a key like 'warn' / 'bad'; map from the raw ms.
 const lagSeverityKey = computed(() => lagNumClass(lagLatest.value.max))
 const lagContext = computed(() => {
-  const h = history.value
-  if (!h.length) return '—'
-  const finite = h.map(x => toNum(x.maxLagMs)).filter(v => v !== null)
-  if (!finite.length) return 'no measured lag in window'
+  const finite = lagPerBucket.value.map(x => x.max).filter(v => v !== null)
+  if (!finite.length) return 'no pops in window · lag not measured'
   const peak = Math.max(...finite)
-  if (peak === 0) return 'no measured lag in window'
+  if (peak === 0) return 'measured, and zero across the window'
   return `peak max ${fmtLagShort(peak)} · avg-bucket lag`
 })
 
@@ -888,26 +949,20 @@ function goTraces() {
 // ---------------------------------------------------------------------------
 // Fetchers
 // ---------------------------------------------------------------------------
+// One call describes the queue: /api/v1/status/queues/:name. The old second
+// fetch of /resources/queues/:name doubled the request rate of the busiest
+// detail page for a fallback that could only ever render an all-zero view.
 const fetchQueueDetail = async () => {
   try {
-    const [queueResponse, statusResponse] = await Promise.all([
-      queuesApi.get(queueName.value).catch(() => null),
-      analytics.getQueueDetail(queueName.value).catch(() => null),
-    ])
-    const rawQueue = queueResponse?.data || null
-    const rawStatus = statusResponse?.data || null
-
-    if (rawStatus?.queue) {
-      queueData.value = { ...rawStatus.queue, config: rawStatus.queue.config }
-    } else if (rawQueue) {
-      queueData.value = rawQueue
-    } else {
-      queueData.value = null
-    }
-    statusData.value = rawStatus
-    if (!queueData.value && !statusData.value) error.value = 'Queue not found'
+    const r = await analytics.getQueueDetail(queueName.value)
+    statusData.value = r.data
+    detailError.value = null
+    detailStale.value = null
   } catch (err) {
-    error.value = err.response?.data?.error || err.message
+    // Keep whatever is on screen; the banner says the refresh failed. Only a
+    // page with nothing to show falls back to the error card.
+    if (statusData.value) detailStale.value = err
+    else detailError.value = err
   }
 }
 
@@ -916,8 +971,11 @@ const fetchOps = async () => {
   try {
     const r = await systemApi.getQueueOps(getTimeRangeParams())
     opsData.value = r.data
-  } catch {
-    opsData.value = null
+    opsError.value = null
+  } catch (err) {
+    // Already announced globally; this drives the per-row "unavailable" state
+    // so the metric table never paints an unreachable endpoint as an idle queue.
+    opsError.value = err
   } finally {
     loadingOps.value = false
   }
@@ -936,38 +994,63 @@ const fetchAll = async () => {
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
+const openDeleteModal = () => {
+  deleteError.value = null
+  showDeleteModal.value = true
+}
+const closeDeleteModal = () => {
+  showDeleteModal.value = false
+  deleteError.value = null
+}
+
 const deleteQueue = async () => {
+  if (deleting.value) return
+  const name = queueName.value
+  deleting.value = true
+  deleteError.value = null
   try {
-    await queuesApi.delete(queueName.value)
-    showDeleteModal.value = false
+    const res = await queuesApi.delete(name)
+    // delete_queue_v1 answers 200 {deleted:true, existed:false} when there was
+    // nothing to delete. Navigating away on that reports a deletion that
+    // never happened.
+    if (res.data && res.data.existed === false) {
+      deleteError.value = `No queue named "${name}" on this cluster — nothing was deleted.`
+      return
+    }
+    closeDeleteModal()
+    notifySuccess(`Deleted queue ${name}`)
     router.push('/queues')
   } catch (err) {
-    console.error('Failed to delete queue:', err)
+    deleteError.value = describeApiError(err)
+  } finally {
+    deleting.value = false
   }
 }
 
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-useRefresh(fetchAll)
+// The shell's shared ticker drives the 30s poll (and pauses it while the tab
+// is hidden); a private setInterval here would keep spending the tenant's
+// metered request budget off screen.
+useAutoRefresh(fetchAll)
 watch(selectedRange, fetchOps)
 watch(queueName, () => {
   loading.value = true
-  queueData.value = null
+  detailError.value = null
+  detailStale.value = null
   statusData.value = null
   opsData.value = null
+  opsError.value = null
   fetchAll()
 })
 
-let interval = null
 let tickInterval = null
 onMounted(() => {
   fetchAll()
-  interval = setInterval(fetchAll, 30000)
   tickInterval = setInterval(() => { nowTick.value = Date.now() }, 1000)
 })
 onUnmounted(() => {
-  if (interval) clearInterval(interval)
   if (tickInterval) clearInterval(tickInterval)
 })
 </script>
@@ -1210,5 +1293,20 @@ onUnmounted(() => {
   border-top: 1px solid var(--bd);
   display: flex; align-items: center;
   justify-content: flex-end; gap: 12px;
+}
+/* Inline banner used inside a view (the shell's own strip is edge-to-edge). */
+.view-banner {
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+.qd-modal-error {
+  margin: 14px 0 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--ember-400);
+  border: 1px solid var(--ember-400);
+  background: rgba(244, 63, 94, .08);
 }
 </style>

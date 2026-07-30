@@ -6,31 +6,43 @@
   <div class="mr-wrap" :class="{ 'mr-wrap-expanded': expanded }">
     <div
       class="mr"
-      :class="{ 'mr-clickable': clickable, 'mr-loading': loading, [`mr-sev-${severity}`]: severity }"
+      :class="{ 'mr-clickable': clickable, 'mr-loading': loading, 'mr-failed': !!error, [`mr-sev-${severity}`]: severity && !error }"
       @click="onRowClick"
       :title="tooltip || undefined"
     >
       <span class="mr-dot" :class="dotClass" />
 
-      <span class="mr-label">{{ label }}</span>
-
-      <span class="mr-value">
-        <slot name="value">
-          <template v-if="loading">
-            <span class="skeleton" style="display:inline-block; width:60px; height:14px; vertical-align:middle;" />
-          </template>
-          <template v-else>
-            <span class="num" :class="severity">{{ formattedValue }}</span><i v-if="unit" class="mr-unit">{{ unit }}</i>
-          </template>
-        </slot>
+      <span class="mr-label">
+        {{ label }}
+        <!-- A cell-level number read as a tenant number is the lie this chip
+             exists to prevent: it covers every tenant on the cell. -->
+        <i v-if="scope === 'cell'" class="mr-scope" title="Cell-level: covers every tenant on this cell">cell</i>
       </span>
 
-      <span class="mr-context">
-        <slot name="context">{{ context }}</slot>
+      <span class="mr-value">
+        <!-- Unknown is NEVER zero. A failed source renders as unavailable,
+             never as an idle-looking 0 the caller's slot would draw. -->
+        <span v-if="error" class="mr-na" :title="errorText">unavailable</span>
+        <template v-else>
+          <slot name="value">
+            <template v-if="loading">
+              <span class="skeleton" style="display:inline-block; width:60px; height:14px; vertical-align:middle;" />
+            </template>
+            <template v-else>
+              <span class="num" :class="severity">{{ formattedValue }}</span><i v-if="unit" class="mr-unit">{{ unit }}</i>
+            </template>
+          </slot>
+        </template>
+      </span>
+
+      <span class="mr-context" :class="{ 'mr-context-err': !!error }">
+        <template v-if="error">{{ errorText }}</template>
+        <slot v-else name="context">{{ context }}</slot>
       </span>
 
       <span class="mr-spark">
         <RowChart
+          v-if="!error"
           :data="sparkline"
           :series="series"
           :labels="labels"
@@ -60,7 +72,9 @@
       provided). Clicking the chevron above toggles this panel.
     -->
     <div v-if="expanded" class="mr-expand">
+      <p v-if="error" class="mr-expand-na">{{ errorText }}</p>
       <RowChart
+        v-else
         :data="sparkline"
         :series="series"
         :labels="labels"
@@ -76,6 +90,7 @@
 <script setup>
 import { computed } from 'vue'
 import RowChart from './RowChart.vue'
+import { describeApiError } from '@/api/errors'
 
 const props = defineProps({
   label: { type: String, required: true },
@@ -99,6 +114,15 @@ const props = defineProps({
   // Optional override; falls back to severity tone.
   sparklineTone: { type: String, default: '' },
   loading: { type: Boolean, default: false },
+  /**
+   * The failure that produced this row's data, if any. An ApiError (or any
+   * Error, or a string). While set, the row refuses to render a value at all —
+   * a 404 from a blocked route must never be indistinguishable from an idle
+   * cluster.
+   */
+  error: { type: [Object, String], default: null },
+  /** 'tenant' (default, implicit) | 'cell' — cell rows carry a visible chip. */
+  scope: { type: String, default: '' },
   clickable: { type: Boolean, default: false },
   tooltip: { type: String, default: '' },
   // Controlled-component pattern: parent owns expand state so the
@@ -109,7 +133,14 @@ const props = defineProps({
 
 const emit = defineEmits(['click', 'toggle-expand'])
 
+const errorText = computed(() =>
+  typeof props.error === 'string' ? props.error : describeApiError(props.error)
+)
+
 const dotClass = computed(() => {
+  // A failed row gets its own dot: not grey (which reads "nothing happening"),
+  // not red (which reads "your queues are on fire").
+  if (props.error)               return 'mr-dot-na'
   if (props.severity === 'bad')  return 'status-dot-danger'
   if (props.severity === 'warn') return 'status-dot-warning'
   if (props.severity === 'ok')   return 'status-dot-success'
@@ -165,6 +196,12 @@ const onRowClick = () => {
   justify-self: center;
 }
 .mr-dot-mute { background: var(--text-low); opacity: .45; }
+.mr-dot-na {
+  background: transparent;
+  border: 1px dashed var(--text-low);
+  width: 8px;
+  height: 8px;
+}
 
 .mr-label {
   font-size: 12.5px;
@@ -174,6 +211,33 @@ const onRowClick = () => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.mr-scope {
+  font-style: normal;
+  font-size: 9px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--warn-400);
+  border: 1px solid var(--warn-400);
+  border-radius: 3px;
+  padding: 0 3px;
+  margin-left: 6px;
+  vertical-align: 1px;
+  opacity: .8;
+}
+
+.mr-na {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-low);
+}
+.mr-context-err { color: var(--text-low); font-style: italic; }
+.mr-expand-na {
+  margin: 0;
+  padding: 16px 0;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--text-low);
 }
 
 .mr-value {

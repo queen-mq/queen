@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "base": "/",
+  "knownRoutes": [
+    "/",
+    "/404",
+    "/benchmarks",
+    "/internals",
+    "/reference",
+    "/selfhost",
+    "/start",
+    "/use"
+  ],
+  "opaqueNamespaces": []
+}

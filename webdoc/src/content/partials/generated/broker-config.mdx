@@ -1,0 +1,171 @@
+---
+params: []
+---
+
+{/* GENERATED FILE — do not edit by hand.
+    Regenerate with: pnpm --dir webdoc gen
+    Source of truth:
+      - server/src/config.rs
+      - server/src/fusion.rs (fusion-only overrides)
+*/}
+
+The broker is configured entirely through environment variables — 83 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+
+### Server
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `PORT` | string | `6632` | — |
+| `QUEEN_APPLY_SCHEMA` | boolean | `true` | — |
+| `QUEEN_MAX_BODY_BYTES` | integer | `67108864 (64 MiB)` | — |
+
+### PostgreSQL
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `DB_POOL_SIZE` | integer | `160` | — |
+| `PG_DATABASE` | string | `postgres` | `PG_DB` |
+| `PG_HOST` | string | `localhost` | — |
+| `PG_PASSWORD` | string | `postgres` | — |
+| `PG_PORT` | integer | `5432` | — |
+| `PG_SSL_REJECT_UNAUTHORIZED` | boolean | `true` | — |
+| `PG_USE_SSL` | boolean | `false` | — |
+| `PG_USER` | string | `postgres` | — |
+| `QUEEN_STMT_TIMEOUT_MS` | integer | `30000` | — |
+
+### Authentication
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `JWT_ALGORITHM` | string | `HS256` | — |
+| `JWT_AUDIENCE` | string | `(empty)` | — |
+| `JWT_CLOCK_SKEW` | integer | `30` | — |
+| `JWT_ENABLED` | boolean | `false` | — |
+| `JWT_ISSUER` | string | `(empty)` | — |
+| `JWT_JWKS_REFRESH_INTERVAL` | integer | `3600` | — |
+| `JWT_JWKS_TIMEOUT_MS` | integer | `5000` | — |
+| `JWT_JWKS_URL` | string | `(empty)` | — |
+| `JWT_PUBLIC_KEY` | string | `(empty)` | — |
+| `JWT_ROLE_ADMIN` | string | `admin` | — |
+| `JWT_ROLE_READ_ONLY` | string | `read-only` | — |
+| `JWT_ROLE_READ_WRITE` | string | `read-write` | — |
+| `JWT_ROLE_WRITE_ONLY` | string | `write-only` | — |
+| `JWT_ROLES_ARRAY_CLAIM` | string | `roles` | — |
+| `JWT_ROLES_CLAIM` | string | `role` | — |
+| `JWT_SECRET` | string | `(empty)` | — |
+| `JWT_SKIP_PATHS` | string | `/health,/metrics/prometheus,/metrics,/` | — |
+
+### Multi-broker mesh
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `QUEEN_CACHE_REFRESH_INTERVAL_MS` | integer | `60000` | — |
+| `QUEEN_MESH_PEERS` | string | `(empty)` | — |
+| `QUEEN_MESH_PORT` | integer | `6633` | `QUEEN_UDP_NOTIFY_PORT` |
+| `QUEEN_SYNC_DEAD_THRESHOLD_MS` | integer | `5000` | — |
+| `QUEEN_SYNC_ENABLED` | boolean | `true` | — |
+| `QUEEN_SYNC_HEARTBEAT_MS` | integer | `1000` | — |
+| `QUEEN_SYNC_SECRET` | string | `(empty)` | — |
+| `QUEEN_UDP_NOTIFY_PORT` | integer | `6633` | — |
+| `QUEEN_UDP_PEERS` | string | `(empty)` | — |
+
+### Consume and long-poll
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `DEFAULT_TIMEOUT` | integer | `30000` | `POP_DEFAULT_TIMEOUT_MS` |
+| `POP_DEFAULT_TIMEOUT_MS` | integer | `30000` | — |
+| `POP_WAIT_BACKOFF_MULTIPLIER` | number | `2.0` | — |
+| `POP_WAIT_BACKOFF_THRESHOLD` | integer | `3` | — |
+| `POP_WAIT_INITIAL_INTERVAL_MS` | integer | `100` | — |
+| `POP_WAIT_MAX_INTERVAL_MS` | integer | `1000` | — |
+
+### Storage engine
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `QUEEN_ACK_FUSION` | boolean | `true` | — |
+| `QUEEN_ACK_FUSION_HOLD_MS` | integer | `3` | — |
+| `QUEEN_ACK_FUSION_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |
+| `QUEEN_ACK_REGISTRY` | boolean | `true` | — |
+| `QUEEN_ACK_REGISTRY_MB` | integer | `64` | — |
+| `QUEEN_DEDUP_CACHE` | boolean | `true` | — |
+| `QUEEN_DEDUP_CACHE_MB` | integer | `512` | — |
+| `QUEEN_HOTLIST` | boolean | `true` | — |
+| `QUEEN_HOTLIST_IDLE_SWEEP_MS` | integer | `300_000` | — |
+| `QUEEN_HOTLIST_RESEED_MS` | integer | `30000` | — |
+| `QUEEN_HOTLIST_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |
+| `QUEEN_HOTLIST_WINDOW_BATCH` | integer | `100` | — |
+| `QUEEN_V2_FUSION_HOLD_MS` | integer | `15` | — |
+| `QUEEN_V2_FUSION_SHARDS` | integer | `8` | — |
+| `QUEEN_V2_ZSTD_LEVEL` | integer | `3` | — |
+
+### Flow control
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `QUEEN_SEG_POP_INIT` | integer | `16` | — |
+| `QUEEN_SEG_POP_MAX` | integer | `64` | — |
+| `QUEEN_SEG_POP_MIN` | integer | `4` | — |
+| `QUEEN_SEG_PUSH_INIT` | integer | `16` | — |
+| `QUEEN_SEG_PUSH_MAX` | integer | `64` | — |
+| `QUEEN_SEG_PUSH_MIN` | integer | `4` | — |
+| `QUEEN_VEGAS_ALPHA` | number | `3.0` | — |
+| `QUEEN_VEGAS_BETA` | number | `6.0` | — |
+
+### Background jobs
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `METRICS_FLUSH_MS` | integer | `60000` | — |
+| `METRICS_RETENTION_DAYS` | integer | `90` | — |
+| `RETENTION_BATCH_SIZE` | integer | `1000` | — |
+| `RETENTION_INTERVAL` | integer | `5000` | — |
+| `STATS_INTERVAL_MS` | integer | `10000` | — |
+
+### Durability spool
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `FILE_BUFFER_DIR` | string | `/var/lib/queen/buffers` | — |
+| `FILE_BUFFER_EVENTS_PER_FILE` | integer | `10000` | — |
+| `FILE_BUFFER_FLUSH_MS` | integer | `100` | — |
+| `FILE_BUFFER_MAX_BATCH` | integer | `100` | — |
+
+### Security
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `QUEEN_ENCRYPTION_KEY` | string | `(empty)` | — |
+| `QUEEN_TENANCY_HEADER` | boolean | `false` | — |
+
+### Logging
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `LOG_LEVEL` | string | `info` | — |
+| `QUEEN_LOG_JSON` | boolean | `false` | — |
+| `QUEEN_LOG_RATES_MS` | integer | `10000` | — |
+| `QUEEN_LOG_TOPN_QUEUES` | integer | `10` | — |
+| `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` | — |
+
+### Experiment-only
+
+These exist to run experiments against the storage engine. The source marks them as such, they are not part of any compatibility promise, and a deployment should not set them.
+
+| Variable | Default | Why it is not a product knob |
+| --- | --- | --- |
+| `QUEEN_V2_BUNDLE_MAX` | `see notes` | fusion.rs: internal override only |
+| `QUEEN_V2_FUSION_MAX_INFLIGHT` | `see notes` | fusion.rs: internal override only |
+| `QUEEN_V2_FUSION_MIN_FRAMES` | `see notes` | fusion.rs: “a knob for experiments, not a product contract” |
+| `QUEEN_V2_FUSION_MIN_WAIT_MS` | `see notes` | fusion.rs: “a knob for experiments, not a product contract” |
+
+### Read but inert
+
+The broker still parses these and still prints them in its boot configuration block, so they look live in a log. They change nothing.
+
+| Variable | Default | Status |
+| --- | --- | --- |
+| `PARTITION_CLEANUP_DAYS` | `30` | read and ignored; partitions are never auto-deleted |
+| `QUEEN_V2_FUSION_FRAMES` | `500` | kept for env compatibility; no longer a flush trigger (fusion.rs) |
+| `RETENTION_PARALLELISM` | `1` | read and ignored; retention runs one bounded step at a time |

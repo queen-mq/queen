@@ -325,6 +325,10 @@ pub async fn handle_push(
             .filter(|&i| guard[i].dup_of.is_none() && guard[i].status == "error")
             .collect()
     };
+    // status "error" == the DB transaction that would have stored these frames
+    // failed. Count them before they are re-labelled "buffered" below, or the
+    // spool hides the failure from the "DB errors" series entirely.
+    st.metrics.record_db_errors(error_leaders.len() as u64);
 
     let mut enc_flags: HashMap<String, bool> = HashMap::new();
     let mut new_status: Vec<(usize, &'static str)> = Vec::with_capacity(error_leaders.len());
@@ -611,6 +615,7 @@ pub async fn handle_pop(
             let client = match st.pool.get().await {
                 Ok(c) => c,
                 Err(_) => {
+                    st.metrics.record_db_error();
                     drop(permit);
                     return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
                 }
@@ -634,7 +639,7 @@ pub async fn handle_pop(
             // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
             // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE
             // any parking below — a parked pop must never pin a PG connection.
-            let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard") {
+            let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard", &st.metrics) {
                 Some(t) => {
                     // Phase 2 observability: an actual wildcard candidate scan.
                     st.metrics.pop_wildcard.fetch_add(1, Ordering::Relaxed);
@@ -770,6 +775,7 @@ async fn try_targeted_serve(
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
+                st.metrics.record_db_error();
                 drop(permit);
                 break;
             }
@@ -791,7 +797,7 @@ async fn try_targeted_serve(
         // This is a targeted (hint-driven) pop — count it whether or not it found
         // data; an empty result still cost ~1ms vs the wildcard's ~10ms.
         st.metrics.pop_targeted.fetch_add(1, Ordering::Relaxed);
-        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_targeted") {
+        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_targeted", &st.metrics) {
             Some(t) => t,
             None => break, // DB error/timeout — abandon targeted, fall back to wildcard
         };
@@ -1129,6 +1135,7 @@ async fn hotlist_pop_attempt(
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
+                st.metrics.record_db_error();
                 drop(permit);
                 let (b, c, m) = empty();
                 return (b, c, m, Duration::ZERO);
@@ -1147,7 +1154,7 @@ async fn hotlist_pop_attempt(
         let rtt = t0.elapsed();
         st.pop_vegas.record(rtt);
         drop(permit);
-        let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard")
+        let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard", &st.metrics)
         {
             Some(t) => t,
             None => {
@@ -1216,6 +1223,7 @@ async fn hotlist_pop_attempt(
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => {
+            st.metrics.record_db_error();
             drop(permit);
             let (b, c, m) = empty();
             return (b, c, m, Duration::ZERO);
@@ -1290,7 +1298,7 @@ async fn hotlist_pop_attempt(
     let cands = std::mem::take(&mut guard.cands);
 
     let (meta_txt, blobs, states_txt) =
-        match db::resolve_query_timeout(res, client, cancel_token, "pop_list") {
+        match db::resolve_query_timeout(res, client, cancel_token, "pop_list", &st.metrics) {
             Some(t) => t,
             None => {
                 // DB error/timeout — the candidates were checked out (INFLIGHT).
@@ -1465,6 +1473,7 @@ pub async fn handle_pop_partition(
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
+                st.metrics.record_db_error();
                 drop(permit);
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
             }
@@ -1488,7 +1497,7 @@ pub async fn handle_pop_partition(
         // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
         // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
         // parking below — a parked pop must never pin a PG connection.
-        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_specific") {
+        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_specific", &st.metrics) {
             Some(t) => t,
             None => {
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
@@ -1615,6 +1624,7 @@ pub async fn handle_pop_discover(
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
+                st.metrics.record_db_error();
                 drop(permit);
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
             }
@@ -1638,7 +1648,7 @@ pub async fn handle_pop_discover(
         // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
         // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
         // parking below — a parked pop must never pin a PG connection.
-        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_discover") {
+        let txt = match db::resolve_query_timeout(res, client, cancel_token, "pop_discover", &st.metrics) {
             Some(t) => t,
             None => {
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pop failed\"}".to_string())
@@ -2195,6 +2205,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
         match st.pool.get().await {
             Ok(c) => client = Some(c),
             Err(_) => {
+                st.metrics.record_db_error();
                 for e in errors.iter_mut() {
                     *e = Some("pool".to_string());
                 }
@@ -2380,6 +2391,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
             match st.pool.get().await {
                 Ok(c) => client = Some(c),
                 Err(_) => {
+                    st.metrics.record_db_error();
                     for &i in &idxs {
                         errors[i] = Some("pool".to_string());
                     }
@@ -2514,6 +2526,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                 }
             }
             Err(e) => {
+                st.metrics.record_db_error();
                 let msg = e.to_string();
                 for &i in &idxs {
                     errors[i] = Some(msg.clone());
@@ -3115,7 +3128,10 @@ pub async fn handle_transaction(
     // pre-check below both need it, and it is reused for the SP call.
     let client = match st.pool.get().await {
         Ok(c) => c,
-        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+        Err(_) => {
+            st.metrics.record_db_error();
+            return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+        }
     };
 
     // Resolve each ack group's worker/lease. The JS/Go builders carry the leaseId
@@ -3201,7 +3217,10 @@ pub async fn handle_transaction(
             .await
         {
             Ok(s) => s,
-            Err(e) => return txn_fail_body(&txn_id, &e.to_string(), StatusCode::OK),
+            Err(e) => {
+                st.metrics.record_db_error();
+                return txn_fail_body(&txn_id, &e.to_string(), StatusCode::OK);
+            }
         };
         match client.query_opt(&stmt, &[&ag.partition_id, &hashes]).await {
             Ok(Some(_)) => {
@@ -3211,7 +3230,10 @@ pub async fn handle_transaction(
                     StatusCode::OK,
                 )
             }
-            Err(e) => return txn_fail_body(&txn_id, &e.to_string(), StatusCode::OK),
+            Err(e) => {
+                st.metrics.record_db_error();
+                return txn_fail_body(&txn_id, &e.to_string(), StatusCode::OK);
+            }
             Ok(None) => {}
         }
     }
@@ -3452,6 +3474,12 @@ pub async fn handle_transaction(
                 .as_db_error()
                 .map(|d| d.message().to_string())
                 .unwrap_or_else(|| e.to_string());
+            // A QDUP/QTXN RAISE is a business rollback, not a database failure —
+            // counting it would inflate "DB errors" on every duplicate push.
+            // Anything else (connection dropped, timeout, syntax) is a real one.
+            if !(msg.starts_with("QDUP") || msg.starts_with("QTXN")) {
+                st.metrics.record_db_error();
+            }
             txn_fail_body(&txn_id, &msg, StatusCode::OK)
         }
     }

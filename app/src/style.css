@@ -326,6 +326,15 @@ html.light .kbd { background: var(--paper-2); }
   background: var(--ink-2);
 }
 
+/* Maintenance is cell-wide: the badge says so at the control itself, so the
+   scope is never inferred from where the button happens to sit. */
+.maint-scope {
+  font-size: 9px; font-weight: 700; letter-spacing: .08em;
+  padding: 0 6px; align-self: stretch; display: flex; align-items: center;
+  color: var(--amber, #b45309); background: color-mix(in srgb, var(--amber, #b45309) 12%, transparent);
+  border-right: 1px solid var(--bd);
+}
+
 /* Status banner strip below the topbar */
 .topbar-wrap {
   position: relative; z-index: 5;
@@ -718,3 +727,165 @@ html.light .search-item:hover, html.light .search-item.active { background: var(
   .maint-group { display: none !important; }
   .crumbs { flex: 1; text-align: center; justify-content: center; }
 }
+
+/* =========================================================================
+   SHELL: identity, cluster selector, notifications, boot + empty states
+   ========================================================================= */
+
+/* Health dot — a third state, because "not yet known" is not "offline". */
+.bg-unknown { background: var(--text-faint); }
+
+/* --- acting tenant / cluster selector ----------------------------------- */
+.cluster-select { position: relative; padding: 0 8px 2px; }
+
+.cluster-chip {
+  width: 100%; display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border-radius: 5px; cursor: pointer; text-align: left;
+  border: 1px solid var(--bd); background: var(--ink-2);
+  color: var(--text-hi); transition: border-color .12s var(--ease), background .12s var(--ease);
+}
+.cluster-chip:hover { border-color: var(--bd-hi); background: var(--ink-3); }
+.cluster-chip-text { min-width: 0; flex: 1; }
+.cluster-line {
+  display: flex; align-items: baseline; gap: 4px;
+  font-size: 12px; font-weight: 550; overflow: hidden; white-space: nowrap;
+}
+.cluster-tenant { color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; }
+.cluster-name { color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; }
+.cluster-sep { color: var(--text-faint); }
+.cluster-sub {
+  display: flex; align-items: center; gap: 5px; margin-top: 1px;
+  font-size: 10px; color: var(--text-low);
+  font-family: 'JetBrains Mono', monospace;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.cluster-caret { width: 13px; height: 13px; flex-shrink: 0; color: var(--text-low); }
+
+.cluster-chip-mini {
+  width: 30px; height: 26px; margin: 0 auto; display: grid; place-items: center;
+  border-radius: 5px; border: 1px solid var(--bd); background: var(--ink-2);
+  color: var(--text-mid); font-size: 10px; font-weight: 600; cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+}
+.cluster-chip-mini:hover { color: var(--text-hi); border-color: var(--bd-hi); }
+
+.cluster-menu {
+  position: absolute; left: 8px; right: 8px; top: calc(100% - 2px); z-index: 60;
+  border-radius: 6px; border: 1px solid var(--bd-hi); background: var(--ink-3);
+  box-shadow: 0 14px 34px -10px rgba(0,0,0,.65); overflow: hidden;
+}
+.cluster-menu-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 10px; border-bottom: 1px solid var(--bd);
+  font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-low);
+}
+.cluster-menu-count { font-family: 'JetBrains Mono', monospace; letter-spacing: 0; }
+.cluster-filter {
+  width: 100%; padding: 6px 10px; border: none; border-bottom: 1px solid var(--bd);
+  background: var(--ink-2); color: var(--text-hi); font-size: 12px; outline: none;
+}
+.cluster-menu-list { max-height: 280px; overflow-y: auto; }
+.cluster-option {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 10px; cursor: pointer; border: none; background: transparent; text-align: left;
+}
+.cluster-option:hover { background: var(--ink-4); }
+.cluster-option-active { background: var(--ink-5); }
+.cluster-option-main { display: flex; align-items: baseline; gap: 4px; font-size: 12px; min-width: 0; }
+.cluster-option-meta { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.cluster-role {
+  font-size: 9.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-low); border: 1px solid var(--bd); border-radius: 3px; padding: 1px 4px;
+}
+.cluster-status { font-size: 9.5px; color: var(--warn-400); text-transform: uppercase; }
+.cluster-empty { padding: 10px; font-size: 12px; color: var(--text-low); text-align: center; }
+
+/* --- operator nav group: cell-level, and it has to look it --------------- */
+.nav-group-label { display: flex; align-items: center; gap: 6px; }
+.nav-scope-badge {
+  font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--warn-400); border: 1px solid var(--warn-400); border-radius: 3px;
+  padding: 0 3px; opacity: .8;
+}
+.nav-group-operator {
+  margin-top: 14px; padding-top: 8px; border-top: 1px dashed var(--bd-hi);
+}
+.nav-group-operator .nav-item { color: var(--warn-400); opacity: .92; }
+.nav-group-operator .nav-item:hover { color: var(--warn-400); opacity: 1; }
+.nav-group-operator .nav-item-active { color: var(--warn-400) !important; }
+
+/* --- sidebar footer ------------------------------------------------------ */
+.user-email {
+  font-size: 11px; color: var(--text-mid); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.foot-version {
+  font-size: 10.5px; color: var(--text-low); text-align: center; margin-top: 4px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* --- toasts -------------------------------------------------------------- */
+.toast-host {
+  position: fixed; right: 14px; bottom: 14px; z-index: 90;
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(380px, calc(100vw - 28px));
+}
+.toast {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 9px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--bd-hi); background: var(--ink-3);
+  box-shadow: 0 14px 34px -14px rgba(0,0,0,.75);
+}
+.toast-dot { width: 6px; height: 6px; border-radius: 99px; margin-top: 5px; flex-shrink: 0; background: var(--text-low); }
+.toast-error { border-color: var(--ember-600); }
+.toast-error .toast-dot { background: var(--ember-400); }
+.toast-warn .toast-dot { background: var(--warn-400); }
+.toast-success .toast-dot { background: var(--ok-500); }
+.toast-body { flex: 1; min-width: 0; }
+.toast-title { font-size: 12.5px; font-weight: 550; color: var(--text-hi); }
+.toast-count {
+  margin-left: 5px; font-size: 10px; color: var(--text-low);
+  font-family: 'JetBrains Mono', monospace;
+}
+.toast-detail { font-size: 11.5px; color: var(--text-mid); margin-top: 2px; word-break: break-word; }
+.toast-close {
+  border: none; background: transparent; color: var(--text-faint);
+  cursor: pointer; padding: 1px; flex-shrink: 0;
+}
+.toast-close svg { width: 13px; height: 13px; }
+.toast-close:hover { color: var(--text-hi); }
+
+/* --- boot gate + empty page ---------------------------------------------- */
+.boot-screen {
+  height: 100vh; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  color: var(--text-mid); font-size: 13px; padding: 24px; text-align: center;
+}
+.boot-mark { width: 46px; height: 46px; opacity: .85; }
+.boot-error h2 { font-size: 16px; color: var(--text-hi); font-weight: 600; }
+.boot-error p { max-width: 460px; line-height: 1.5; }
+.boot-error code { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-hi); }
+.boot-actions { display: flex; gap: 8px; margin-top: 6px; }
+.boot-btn {
+  padding: 6px 14px; border-radius: 5px; font-size: 12.5px; cursor: pointer;
+  border: 1px solid var(--bd-hi); background: var(--ink-3); color: var(--text-hi);
+  text-decoration: none;
+}
+.boot-btn:hover { border-color: var(--text-faint); }
+
+.empty-page {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 60px 24px; text-align: center; color: var(--text-mid); font-size: 13px;
+}
+.empty-code {
+  font-family: 'JetBrains Mono', monospace; font-size: 34px;
+  color: var(--text-faint); letter-spacing: .06em;
+}
+.empty-page h2 { font-size: 16px; color: var(--text-hi); font-weight: 600; }
+.empty-page code { font-family: 'JetBrains Mono', monospace; color: var(--text-hi); }
+.empty-action {
+  margin-top: 6px; padding: 6px 14px; border-radius: 5px; font-size: 12.5px;
+  border: 1px solid var(--bd-hi); background: var(--ink-3); color: var(--text-hi);
+  text-decoration: none;
+}
+.empty-action:hover { border-color: var(--text-faint); }

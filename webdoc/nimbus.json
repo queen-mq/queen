@@ -1,0 +1,75 @@
+{
+  "$schema": "https://nimbus-docs.com/schema/nimbus.json",
+  "version": "0.6.3",
+  "templatesTag": "templates-v0.6.3",
+  "variant": "empty",
+  "registry": "https://nimbus-docs.com/registry",
+  "install": {
+    "root": "src",
+    "aliases": {
+      "@/*": "src/*"
+    }
+  },
+  "components": [
+    {
+      "slug": "code-group",
+      "type": "registry:ui",
+      "version": "0.8.2",
+      "source": "https://nimbus-docs.com/registry",
+      "hash": "sha256:ead8f7019f289e305329b57cdcce7024c81be26e1202910fa25262bdeecd0837",
+      "files": [
+        "src/components/ui/code-group/CodeGroup.astro",
+        "src/components/ui/code-group/code-group.client.ts",
+        "src/components/ui/code-group/index.ts"
+      ]
+    },
+    {
+      "slug": "link-card",
+      "type": "registry:ui",
+      "version": "0.8.2",
+      "source": "https://nimbus-docs.com/registry",
+      "hash": "sha256:50a1a703d1111aff309a92256dda1d8dbcb10ba92afd3ff8d4b2a92ac8aab069",
+      "files": [
+        "src/components/ui/link-card/LinkCard.astro",
+        "src/components/ui/link-card/index.ts"
+      ]
+    },
+    {
+      "slug": "file-tree",
+      "type": "registry:ui",
+      "version": "0.8.2",
+      "source": "https://nimbus-docs.com/registry",
+      "hash": "sha256:1135ced13a158f3556ba587a7d8d7b47c0707b357ed53c4878a426f7ca9158a2",
+      "files": [
+        "src/components/ui/file-tree/FileTree.astro",
+        "src/components/ui/file-tree/file-tree.client.ts",
+        "src/components/ui/file-tree/index.ts"
+      ]
+    },
+    {
+      "slug": "accordion",
+      "type": "registry:ui",
+      "version": "0.8.2",
+      "source": "https://nimbus-docs.com/registry",
+      "hash": "sha256:ad4b8419f8f4918e06ccc6b7bc94ae7060a0aa3fe84aa17fb603dd45df55cc5f",
+      "files": [
+        "src/components/ui/accordion/Accordion.astro",
+        "src/components/ui/accordion/AccordionContent.astro",
+        "src/components/ui/accordion/AccordionGroup.astro",
+        "src/components/ui/accordion/AccordionTrigger.astro",
+        "src/components/ui/accordion/index.ts"
+      ]
+    },
+    {
+      "slug": "frame",
+      "type": "registry:ui",
+      "version": "0.8.2",
+      "source": "https://nimbus-docs.com/registry",
+      "hash": "sha256:26927e8807fe74b6eabd342f0d4f6572e1366fe6e65e4d00c9a6fce4c1962367",
+      "files": [
+        "src/components/ui/frame/Frame.astro",
+        "src/components/ui/frame/index.ts"
+      ]
+    }
+  ]
+}

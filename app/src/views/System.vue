@@ -1,630 +1,672 @@
 <template>
   <div class="view-container">
 
-    <!-- Controls: source toggle (Resources / Postgres) + range picker.
-         Queue Operations used to be the third option here but it now
-         lives at /operations as its own first-class page under the
-         Overview sidebar group. -->
-    <div class="card" style="padding:12px 16px; margin-bottom:20px;">
-      <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px 20px;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-size:11px; font-weight:500; color:var(--text-low);">Source</span>
-          <div class="seg">
-            <button
-              @click="dataSource = 'system'; fetchData()"
-              :class="{ on: dataSource === 'system' }"
-            >System Resources</button>
-            <button
-              @click="dataSource = 'postgres'; fetchData()"
-              :class="{ on: dataSource === 'postgres' }"
-            >Postgres Stats</button>
-          </div>
-        </div>
-
-        <div v-if="dataSource !== 'postgres'" style="display:flex; align-items:center; gap:8px; margin-left:auto;">
-          <span style="font-size:11px; font-weight:500; color:var(--text-low);">Range</span>
-          <div class="seg">
-            <button
-              v-for="range in timeRanges"
-              :key="range.value"
-              @click="selectQuickRange(range.value)"
-              :class="{ on: timeRange === range.value && !customMode }"
-            >{{ range.label }}</button>
-            <button
-              @click="toggleCustomMode"
-              :class="{ on: customMode }"
-            >Custom</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Secondary row: System-only contextual controls (per-server vs
-           aggregate, plus aggregation type for the resource charts). -->
-      <div
-        v-if="dataSource === 'system'"
-        style="display:flex; flex-wrap:wrap; align-items:center; gap:12px 20px; padding-top:10px; margin-top:10px; border-top:1px solid var(--bd);"
-      >
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-size:11px; font-weight:500; color:var(--text-low);">View</span>
-          <div class="seg">
-            <button
-              @click="viewMode = 'individual'"
-              :class="{ on: viewMode === 'individual' }"
-            >Per Server</button>
-            <button
-              @click="viewMode = 'aggregate'"
-              :class="{ on: viewMode === 'aggregate' }"
-            >Aggregate</button>
-          </div>
-        </div>
-
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-size:11px; font-weight:500; color:var(--text-low);">Metric</span>
-          <div class="seg">
-            <button
-              v-for="agg in aggregationTypes"
-              :key="agg.value"
-              @click="aggregationType = agg.value"
-              :class="{ on: aggregationType === agg.value }"
-            >{{ agg.label }}</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Custom Date/Time Range -->
-      <div v-if="customMode" style="display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding-top:12px; margin-top:12px; border-top:1px solid var(--bd);">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <label style="font-size:12px; font-weight:500; color:var(--text-low); white-space:nowrap;">From:</label>
-          <input
-            type="datetime-local"
-            v-model="customFrom"
-            class="input font-mono" style="font-size:13px; padding:6px 10px; width:auto;"
-          />
-        </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <label style="font-size:12px; font-weight:500; color:var(--text-low); white-space:nowrap;">To:</label>
-          <input
-            type="datetime-local"
-            v-model="customTo"
-            class="input font-mono" style="font-size:13px; padding:6px 10px; width:auto;"
-          />
-        </div>
-        <button
-          @click="applyCustomRange"
-          class="btn btn-primary" style="font-size:12px;"
-        >Apply</button>
-      </div>
-    </div>
-
-    <!-- Loading skeleton -->
-    <div v-if="loading">
-      <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:16px;">
-        <div v-for="i in 4" :key="i" class="card" style="padding:24px;">
-          <div class="skeleton" style="height:192px; width:100%; border-radius:8px;" />
+    <!-- CELL-LEVEL PAGE. Every source below is an operator route the proxy
+         answers 200 for only when /auth/me says operator_live; the numbers
+         cover the whole cell, every tenant on it. Say that on screen — a cell
+         figure read as the acting tenant's is the exact lie this page could
+         tell. -->
+    <div v-if="!canOperate" class="card">
+      <div class="card-body">
+        <div class="panel-err">
+          This page is cell-level and only a live operator may open it. Nothing
+          here is scoped to <strong>{{ actingTenantSlug || 'your tenant' }}</strong>.
         </div>
       </div>
     </div>
 
-    <!-- System Resources View -->
-    <template v-else-if="dataSource === 'system' && systemData">
-      <!-- CPU & Memory Charts -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
-        <div class="card">
-          <div class="card-header">
-            <h3>CPU Usage</h3>
-            <span class="muted">{{ systemData.replicaCount || 0 }} replicas</span>
-          </div>
-          <div class="card-body">
-            <BaseChart
-              v-if="cpuChartData.labels.length > 0"
-              type="line"
-              :data="cpuChartData"
-              :options="cpuChartOptions"
-              height="240px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-              No CPU data available
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <h3>Memory Usage</h3>
-          </div>
-          <div class="card-body">
-            <BaseChart
-              v-if="memoryChartData.labels.length > 0"
-              type="line"
-              :data="memoryChartData"
-              :options="memoryChartOptions"
-              height="240px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-              No memory data available
-            </div>
-          </div>
-        </div>
+    <template v-else>
+      <div class="scope-strip scope-strip-cell">
+        <span class="chip chip-warn"><span class="dot"></span>cell · operator</span>
+        <span class="scope-text">
+          host resources, the disk spool and Postgres internals for
+          <strong>cell {{ actingCellSlug || 'unknown' }}</strong>
+          <span class="scope-sep">·</span>
+          shared by every tenant on it, not scoped to {{ actingTenantSlug || 'your tenant' }}
+        </span>
       </div>
 
-      <!-- Database & Thread Pool -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
-        <div class="card">
-          <div class="card-header">
-            <h3>Database Pool</h3>
-          </div>
-          <div class="card-body">
-            <BaseChart
-              v-if="databaseChartData.labels.length > 0"
-              type="line"
-              :data="databaseChartData"
-              :options="poolChartOptions"
-              height="200px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-              No database pool data available
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <h3>Thread Pool</h3>
-          </div>
-          <div class="card-body">
-            <BaseChart
-              v-if="threadPoolChartData.labels.length > 0"
-              type="line"
-              :data="threadPoolChartData"
-              :options="queueChartOptions"
-              height="200px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-              No thread pool data available
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Stats Summary -->
-      <div class="card" style="margin-bottom:16px;">
+      <!-- =================== FILE BUFFER (disk spool) =================== -->
+      <div class="card" :class="{ 'card-alarm': spoolAlarm }" style="margin-bottom:16px;">
         <div class="card-header">
-          <h3>System Summary</h3>
+          <h3>File buffer</h3>
+          <span class="chip chip-mute">cell-level</span>
+          <span class="muted">{{ stamp(buffers) }}</span>
         </div>
         <div class="card-body">
-          <div style="display:grid; grid-template-columns:repeat(6,1fr); gap:16px;">
-            <div class="stat">
-              <div class="stat-label">Replicas</div>
-              <div class="stat-value font-mono">{{ systemData.replicaCount || 0 }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Data Points</div>
-              <div class="stat-value font-mono">{{ systemData.pointCount || 0 }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Bucket Size</div>
-              <div class="stat-value font-mono">{{ formatBucketSize(systemData.bucketMinutes) }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Latest CPU</div>
-              <div class="stat-value font-mono">{{ formatCPU(lastMetrics?.cpu?.user_us?.last) }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Latest Memory</div>
-              <div class="stat-value font-mono" >{{ formatMemory(lastMetrics?.memory?.rss_bytes?.last) }}</div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">DB Active</div>
-              <div class="stat-value font-mono">{{ lastMetrics?.database?.pool_active?.last || 0 }}</div>
-            </div>
+          <div v-if="buffers.failed.value" class="panel-err">
+            Spool state unavailable — {{ describeApiError(buffers.error.value) }}.
+            Pending and failed counts below are unknown, not zero.
           </div>
-        </div>
-      </div>
-
-      <!-- Per-Server Stats (when in individual mode) -->
-      <div v-if="viewMode === 'individual' && systemData?.replicas?.length > 1" class="card">
-        <div class="card-header">
-          <h3>Server Details</h3>
-        </div>
-        <div class="card-body">
-          <div style="overflow-x:auto;">
-            <table class="t">
-              <thead>
-                <tr>
-                  <th>Hostname</th>
-                  <th style="text-align:right;">Port</th>
-                  <th style="text-align:right;">CPU (User)</th>
-                  <th style="text-align:right;">CPU (Sys)</th>
-                  <th style="text-align:right;">Memory</th>
-                  <th style="text-align:right;">DB Pool</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="replica in systemData.replicas"
-                  :key="`${replica.hostname}:${replica.port}`"
-                >
-                  <td style="font-weight:500;">{{ replica.hostname }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ replica.port }}</td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">
-                    {{ formatCPU(getLastMetricForReplica(replica)?.cpu?.user_us?.last) }}
-                  </td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">
-                    {{ formatCPU(getLastMetricForReplica(replica)?.cpu?.system_us?.last) }}
-                  </td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">
-                    {{ formatMemory(getLastMetricForReplica(replica)?.memory?.rss_bytes?.last) }}
-                  </td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">
-                    {{ getLastMetricForReplica(replica)?.database?.pool_active?.last || 0 }}/{{ getLastMetricForReplica(replica)?.database?.pool_size?.last || 0 }}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </template>
-
-    <!-- Postgres Stats View -->
-    <template v-else-if="dataSource === 'postgres' && postgresData">
-      <!-- Cache Hit Ratios Summary -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Cache Performance</h3>
-          <span class="muted">{{ postgresData.database }}</span>
-        </div>
-        <div class="card-body">
-          <div class="grid-4">
+          <div class="sys-grid-3">
             <div class="stat">
-              <div class="stat-label">Database Hit Ratio</div>
-              <div class="stat-value font-mono" :class="getCacheRatioClass(postgresData.databaseCache?.cacheHitRatio)">
-                {{ postgresData.databaseCache?.cacheHitRatio || 0 }}%
+              <div class="stat-label">Database</div>
+              <div class="stat-value">
+                <span v-if="dbHealthy === null" class="font-mono">—</span>
+                <span v-else-if="dbHealthy" class="chip chip-ok"><span class="dot"></span>reachable</span>
+                <span v-else class="chip chip-bad"><span class="dot"></span>unreachable</span>
+              </div>
+              <div class="stat-foot">
+                {{ dbHealthy === false
+                  ? 'the broker is spooling pushes to disk'
+                  : 'pushes go straight to Postgres' }}
               </div>
             </div>
             <div class="stat">
-              <div class="stat-label">Table Hit Ratio</div>
-              <div class="stat-value font-mono" :class="getCacheRatioClass(postgresData.cacheSummary?.tables?.hitRatio)">
-                {{ postgresData.cacheSummary?.tables?.hitRatio || 0 }}%
+              <div class="stat-label">Pending on disk</div>
+              <div class="stat-value font-mono num" :class="{ warn: (bufferPending || 0) > 0 }">
+                {{ metric(bufferPending) }}
               </div>
+              <div class="stat-foot">messages waiting to drain into Postgres</div>
             </div>
             <div class="stat">
-              <div class="stat-label">Index Hit Ratio</div>
-              <div class="stat-value font-mono" :class="getCacheRatioClass(postgresData.cacheSummary?.indexes?.hitRatio)">
-                {{ postgresData.cacheSummary?.indexes?.hitRatio || 0 }}%
+              <div class="stat-label">Failed on disk</div>
+              <div class="stat-value font-mono num" :class="{ bad: (bufferFailed || 0) > 0 }">
+                {{ metric(bufferFailed) }}
               </div>
-            </div>
-            <div class="stat">
-              <div class="stat-label">Shared Buffers</div>
-              <div class="stat-value font-mono">
-                {{ postgresData.bufferConfig?.sharedBuffersSize || 'N/A' }}
-              </div>
+              <div class="stat-foot">spool files that could not be replayed</div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Table Cache Details -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Table Cache Stats</h3>
-          <span class="muted">hit ratios per table in queen schema</span>
-        </div>
-        <div class="card-body">
-          <div style="overflow-x:auto;">
-            <table class="t">
-              <thead>
-                <tr>
-                  <th>Table</th>
-                  <th style="text-align:right;">Disk Reads</th>
-                  <th style="text-align:right;">Cache Hits</th>
-                  <th style="text-align:right;">Hit Ratio</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="table in postgresData.tableCache"
-                  :key="table.table"
-                >
-                  <td class="font-mono" style="font-weight:500;">{{ table.table }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ formatNumber(table.diskReads) }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ formatNumber(table.cacheHits) }}</td>
-                  <td style="text-align:right;">
-                    <span class="font-mono tabular-nums" :class="getCacheRatioClass(table.cacheHitRatio)">
-                      {{ table.cacheHitRatio || 0 }}%
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+      <!-- =================== CONTROLS =================== -->
+      <div class="card sys-controls" style="margin-bottom:16px;">
+        <div class="sys-row">
+          <div class="sys-field">
+            <span class="label-xs">Source</span>
+            <div class="seg">
+              <button :class="{ on: dataSource === 'system' }" @click="selectSource('system')">Server resources</button>
+              <button :class="{ on: dataSource === 'postgres' }" @click="selectSource('postgres')">Postgres stats</button>
+            </div>
           </div>
+
+          <div v-if="dataSource === 'system'" class="sys-field sys-field-right">
+            <span class="label-xs">Range</span>
+            <div class="seg">
+              <button
+                v-for="range in timeRanges"
+                :key="range.value"
+                :class="{ on: timeRange === range.value && !customMode }"
+                @click="selectQuickRange(range.value)"
+              >{{ range.label }}</button>
+              <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="dataSource === 'system'" class="sys-row sys-row-sep">
+          <div class="sys-field">
+            <span class="label-xs">View</span>
+            <div class="seg">
+              <button :class="{ on: viewMode === 'individual' }" @click="viewMode = 'individual'">Per server</button>
+              <button :class="{ on: viewMode === 'aggregate' }" @click="viewMode = 'aggregate'">Aggregate</button>
+            </div>
+          </div>
+          <div class="sys-field">
+            <span class="label-xs">Metric</span>
+            <div class="seg">
+              <button
+                v-for="agg in aggregationTypes"
+                :key="agg.value"
+                :class="{ on: aggregationType === agg.value }"
+                @click="aggregationType = agg.value"
+              >{{ agg.label }}</button>
+            </div>
+          </div>
+          <span class="sys-hint">
+            {{ viewMode === 'aggregate'
+              ? `summed across ${replicaCountLabel}; a bucket where a replica sent no sample sums only those that did`
+              : 'one line per broker replica; gaps are buckets that replica never reported' }}
+          </span>
+        </div>
+
+        <div v-if="dataSource === 'system' && customMode" class="sys-row sys-row-sep">
+          <div class="sys-field">
+            <span class="label-xs">From</span>
+            <input v-model="customFrom" type="datetime-local" class="input font-mono sys-dt" />
+          </div>
+          <div class="sys-field">
+            <span class="label-xs">To</span>
+            <input v-model="customTo" type="datetime-local" class="input font-mono sys-dt" />
+          </div>
+          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+          <span v-if="customError" class="sys-invalid">{{ customError }}</span>
         </div>
       </div>
 
-      <!-- Index Cache Details -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Index Cache Stats</h3>
-          <span class="muted">top 20 by disk reads</span>
-        </div>
-        <div class="card-body">
-          <div style="overflow-x:auto;">
-            <table class="t">
-              <thead>
-                <tr>
-                  <th>Index</th>
-                  <th>Table</th>
-                  <th style="text-align:right;">Disk Reads</th>
-                  <th style="text-align:right;">Cache Hits</th>
-                  <th style="text-align:right;">Hit Ratio</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="idx in postgresData.indexCache"
-                  :key="idx.index"
-                >
-                  <td class="font-mono" style="font-size:12px;">{{ idx.index }}</td>
-                  <td style="color:var(--text-mid);">{{ idx.table }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ formatNumber(idx.diskReads) }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ formatNumber(idx.cacheHits) }}</td>
-                  <td style="text-align:right;">
-                    <span class="font-mono tabular-nums" :class="getCacheRatioClass(idx.cacheHitRatio)">
-                      {{ idx.cacheHitRatio || 0 }}%
-                    </span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+      <!-- =================== SERVER RESOURCES =================== -->
+      <template v-if="dataSource === 'system'">
+        <div v-if="metricsFirstLoad" class="sys-grid-2">
+          <div v-for="i in 4" :key="i" class="card" style="padding:20px;">
+            <div class="skeleton" style="height:192px;" />
           </div>
         </div>
-      </div>
 
-      <!-- Buffer Usage -->
-      <div v-if="postgresData.bufferUsage?.length" class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Buffer Cache Contents</h3>
-          <span class="muted">what's cached in shared_buffers</span>
-        </div>
-        <div class="card-body">
-          <div style="overflow-x:auto;">
-            <table class="t">
-              <thead>
-                <tr>
-                  <th>Object</th>
-                  <th style="text-align:right;">Buffered Size</th>
-                  <th style="text-align:right;">% of Cache</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="buf in postgresData.bufferUsage"
-                  :key="buf.object"
-                >
-                  <td class="font-mono" style="font-weight:500;">{{ buf.object }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ buf.bufferedSize }}</td>
-                  <td style="text-align:right;">
-                    <div style="display:flex; align-items:center; justify-content:flex-end; gap:8px;">
-                      <div class="bar" style="width:64px;">
-                        <i :style="{ width: `${Math.min(buf.percentOfCache, 100)}%` }" />
-                      </div>
-                      <span class="font-mono tabular-nums" style="font-size:12px; color:var(--text-mid); width:48px; text-align:right;">
-                        {{ buf.percentOfCache }}%
+        <template v-else>
+          <div v-if="metrics.failed.value" class="card" style="margin-bottom:16px;">
+            <div class="card-body">
+              <div class="panel-err">
+                Server metrics unavailable — {{ describeApiError(metrics.error.value) }}.
+                <span v-if="systemData">
+                  Everything below is from {{ metrics.lastUpdated.value?.toLocaleTimeString() }} and may no longer be true.
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <template v-if="systemData">
+            <div class="sys-grid-2" style="margin-bottom:16px;">
+              <div class="card">
+                <div class="card-header">
+                  <h3>CPU usage</h3>
+                  <span class="chip chip-mute">cell-level</span>
+                  <span class="muted">{{ replicaCountLabel }}</span>
+                </div>
+                <div class="card-body">
+                  <BaseChart
+                    v-if="cpuChart.labels.length"
+                    type="line" :data="cpuChart" :options="cpuOptions" height="240px"
+                  />
+                  <div v-else class="panel-msg">No CPU samples in this range.</div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <h3>Memory usage</h3>
+                  <span class="chip chip-mute">cell-level</span>
+                </div>
+                <div class="card-body">
+                  <BaseChart
+                    v-if="memoryChart.labels.length"
+                    type="line" :data="memoryChart" :options="memoryOptions" height="240px"
+                  />
+                  <div v-else class="panel-msg">No memory samples in this range.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sys-grid-2" style="margin-bottom:16px;">
+              <div class="card">
+                <div class="card-header">
+                  <h3>Database pool</h3>
+                  <span class="chip chip-mute">cell-level</span>
+                </div>
+                <div class="card-body">
+                  <BaseChart
+                    v-if="databaseChart.labels.length"
+                    type="line" :data="databaseChart" :options="poolOptions" height="200px"
+                  />
+                  <div v-else class="panel-msg">No pool samples in this range.</div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <h3>Broker workers</h3>
+                  <span class="chip chip-mute">cell-level</span>
+                  <span class="muted">{{ stamp(status) }}</span>
+                </div>
+                <div class="card-body">
+                  <div v-if="status.failed.value" class="panel-err">
+                    {{ describeApiError(status.error.value) }}
+                  </div>
+                  <div v-else-if="!workers.length" class="panel-msg">
+                    No worker reported in the last two minutes.
+                  </div>
+                  <div v-else class="sys-workers">
+                    <div v-for="w in workers" :key="`${w.hostname}:${w.workerId}`" class="sys-worker">
+                      <span class="sys-worker-host font-mono">{{ w.hostname }}</span>
+                      <span class="chip" :class="workerChip(w).cls">
+                        <span class="dot"></span>{{ workerChip(w).label }}
+                      </span>
+                      <span class="sys-worker-meta font-mono">
+                        loop {{ msOrDash(w.avgEventLoopLagMs) }} avg · {{ msOrDash(w.maxEventLoopLagMs) }} peak
+                      </span>
+                      <span class="sys-worker-meta font-mono">
+                        {{ metric(toNum(w.messagesProcessed)) }} msg / 2 min
                       </span>
                     </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- Table Sizes -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Table Sizes</h3>
-          <span class="muted">storage usage per table</span>
-        </div>
-        <div class="card-body">
-          <div style="overflow-x:auto;">
-            <table class="t">
-              <thead>
-                <tr>
-                  <th>Table</th>
-                  <th style="text-align:right;">Total Size</th>
-                  <th style="text-align:right;">Table Size</th>
-                  <th style="text-align:right;">Index Size</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="tbl in postgresData.tableSizes"
-                  :key="tbl.table"
-                >
-                  <td class="font-mono" style="font-weight:500;">{{ tbl.table }}</td>
-                  <td style="text-align:right; font-weight:500;" class="font-mono tabular-nums">{{ tbl.totalSize }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ tbl.tableSize }}</td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">{{ tbl.indexSize }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- Dead Tuples & HOT Updates (side by side) -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
-        <div class="card">
-          <div class="card-header">
-            <h3>Dead Tuples</h3>
-            <span v-if="postgresData.deadTuples?.length" class="chip chip-warn" style="margin-left:auto;">
-              {{ postgresData.deadTuples.length }} tables
-            </span>
-            <span v-else class="muted">tables needing vacuum</span>
-          </div>
-          <div class="card-body">
-            <div v-if="postgresData.deadTuples?.length" style="overflow-x:auto;">
-              <table class="t">
-                <thead>
-                  <tr>
-                    <th>Table</th>
-                    <th style="text-align:right;">Dead</th>
-                    <th style="text-align:right;">Dead %</th>
-                    <th>Last Vacuum</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="tbl in postgresData.deadTuples"
-                    :key="tbl.table"
-                  >
-                    <td class="font-mono" style="font-size:12px;">{{ tbl.table }}</td>
-                    <td style="text-align:right;" class="font-mono tabular-nums">{{ formatNumber(tbl.deadTuples) }}</td>
-                    <td style="text-align:right;">
-                      <span class="font-mono tabular-nums" :style="{ color: tbl.deadPercentage > 10 ? '#f43f5e' : 'var(--text-mid)' }">
-                        {{ tbl.deadPercentage || 0 }}%
+                    <p class="sys-note">
+                      DB errors since broker start (cell-wide):
+                      <span class="font-mono" :class="{ 'color-ember': (lifetimeDbErrors || 0) > 0 }">
+                        {{ metric(lifetimeDbErrors) }}
                       </span>
-                    </td>
-                    <td style="font-size:12px; color:var(--text-low);">
-                      {{ formatTimestamp(tbl.lastAutovacuum || tbl.lastVacuum) }}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-else style="text-align:center; padding:32px 0; color:var(--ok-500);">
-              No dead tuples — tables are clean
-            </div>
-          </div>
-        </div>
-
-        <!-- HOT Updates -->
-        <div class="card">
-          <div class="card-header">
-            <h3>HOT Update Efficiency</h3>
-            <span class="muted">higher is better</span>
-          </div>
-          <div class="card-body">
-            <div v-if="postgresData.hotUpdates?.length" style="overflow-x:auto;">
-              <table class="t">
-                <thead>
-                  <tr>
-                    <th>Table</th>
-                    <th style="text-align:right;">Updates</th>
-                    <th style="text-align:right;">HOT %</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="tbl in postgresData.hotUpdates"
-                    :key="tbl.table"
-                  >
-                    <td class="font-mono" style="font-size:12px;">{{ tbl.table }}</td>
-                    <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ formatNumber(tbl.totalUpdates) }}</td>
-                    <td style="text-align:right;">
-                      <span class="font-mono tabular-nums" :class="getHotRatioClass(tbl.hotUpdatePercentage)">
-                        {{ tbl.hotUpdatePercentage || 0 }}%
-                      </span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-else style="text-align:center; padding:32px 0; color:var(--text-low);">
-              No updates recorded yet
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Active Queries -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Active Queries</h3>
-          <span v-if="postgresData.activeQueries?.length" class="chip chip-bad" style="margin-left:auto;">
-            {{ postgresData.activeQueries.length }} slow
-          </span>
-          <span v-else class="muted">queries running longer than 1s</span>
-        </div>
-        <div class="card-body">
-          <div v-if="postgresData.activeQueries?.length" style="display:flex; flex-direction:column; gap:12px;">
-            <div
-              v-for="query in postgresData.activeQueries"
-              :key="query.pid"
-              class="card" style="padding:12px 14px;"
-            >
-              <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                <span style="font-size:12px; font-weight:500; color:var(--text-mid);">
-                  PID: {{ query.pid }} · {{ query.state }}
-                </span>
-                <span class="font-mono tabular-nums" style="font-size:12px;" :style="{ color: query.duration > 10 ? 'var(--ember-400)' : 'var(--warn-400)' }">
-                  {{ formatDurationSeconds(query.duration) }}
-                </span>
-              </div>
-              <code class="font-mono" style="font-size:12px; color:var(--text-hi); display:block; word-break:break-all;">
-                {{ query.query }}
-              </code>
-              <div v-if="query.waitEventType" style="margin-top:8px; font-size:12px; color:var(--text-low);">
-                Wait: {{ query.waitEventType }} / {{ query.waitEvent }}
+                      · ack failures
+                      <span class="font-mono">{{ metric(lifetimeAckFailed) }}</span>
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-          <div v-else style="text-align:center; padding:32px 0; color:var(--ok-500);">
-            No slow queries running
-          </div>
-        </div>
-      </div>
 
-      <!-- Autovacuum Status -->
-      <div v-if="postgresData.autovacuumStatus?.length" class="card">
-        <div class="card-header">
-          <h3>Autovacuum Status</h3>
-          <span class="chip chip-warn" style="margin-left:auto;">{{ postgresData.autovacuumStatus.length }} pending</span>
-        </div>
-        <div class="card-body">
-          <div style="overflow-x:auto;">
-            <table class="t">
-              <thead>
-                <tr>
-                  <th>Table</th>
-                  <th style="text-align:right;">Dead Tuples</th>
-                  <th style="text-align:right;">Vacuum Count</th>
-                  <th>Last Autovacuum</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="tbl in postgresData.autovacuumStatus"
-                  :key="tbl.table"
-                >
-                  <td class="font-mono" style="font-weight:500;">{{ tbl.table }}</td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">{{ formatNumber(tbl.deadTuples) }}</td>
-                  <td style="text-align:right; color:var(--text-mid);" class="font-mono tabular-nums">{{ tbl.autovacuumCount }}</td>
-                  <td style="font-size:12px; color:var(--text-low);">{{ formatTimestamp(tbl.lastAutovacuum) }}</td>
-                </tr>
-              </tbody>
-            </table>
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Cell summary</h3>
+                <span class="chip chip-mute">cell-level</span>
+                <span class="muted">{{ stamp(metrics) }}</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-grid-6">
+                  <div class="stat">
+                    <div class="stat-label">Replicas</div>
+                    <div class="stat-value font-mono">{{ metric(toNum(systemData.replicaCount)) }}</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Data points</div>
+                    <div class="stat-value font-mono">{{ metric(toNum(systemData.pointCount)) }}</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Bucket size</div>
+                    <div class="stat-value font-mono">{{ formatBucketSize(systemData.bucketMinutes) }}</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">CPU</div>
+                    <div class="stat-value font-mono">{{ pct(latest.cpuUser) }}</div>
+                    <div class="stat-foot">{{ acrossLabel }}</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Memory</div>
+                    <div class="stat-value font-mono">{{ mb(latest.rss) }}</div>
+                    <div class="stat-foot">{{ acrossLabel }}</div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">DB active</div>
+                    <div class="stat-value font-mono">{{ metric(latest.dbActive) }}</div>
+                    <div class="stat-foot">{{ acrossLabel }}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="replicas.length" class="card">
+              <div class="card-header">
+                <h3>Server details</h3>
+                <span class="chip chip-mute">cell-level</span>
+                <span class="muted">last sample per replica</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-scroll">
+                  <table class="t">
+                    <thead>
+                      <tr>
+                        <th>Hostname</th>
+                        <th class="right">Port</th>
+                        <th class="right">CPU (user)</th>
+                        <th class="right">CPU (sys)</th>
+                        <th class="right">Memory</th>
+                        <th class="right">DB pool</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="replica in replicas" :key="`${replica.hostname}:${replica.port}`">
+                        <td style="font-weight:500;">{{ replica.hostname }}</td>
+                        <td class="right font-mono tabular-nums">{{ replica.port }}</td>
+                        <td class="right font-mono tabular-nums">{{ pct(cpuOf(replica, 'user_us')) }}</td>
+                        <td class="right font-mono tabular-nums">{{ pct(cpuOf(replica, 'system_us')) }}</td>
+                        <td class="right font-mono tabular-nums">{{ mb(lastOf(replica, ['memory', 'rss_bytes'])) }}</td>
+                        <td class="right font-mono tabular-nums">
+                          {{ metric(lastOf(replica, ['database', 'pool_active'])) }}/{{ metric(lastOf(replica, ['database', 'pool_size'])) }}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </template>
+        </template>
+      </template>
+
+      <!-- =================== POSTGRES =================== -->
+      <template v-else>
+        <div v-if="pgFirstLoad" class="sys-grid-2">
+          <div v-for="i in 4" :key="i" class="card" style="padding:20px;">
+            <div class="skeleton" style="height:192px;" />
           </div>
         </div>
-      </div>
+
+        <template v-else>
+          <div v-if="pg.failed.value" class="card" style="margin-bottom:16px;">
+            <div class="card-body">
+              <div class="panel-err">
+                Postgres stats unavailable — {{ describeApiError(pg.error.value) }}.
+                <span v-if="postgresData">
+                  Everything below is from {{ pg.lastUpdated.value?.toLocaleTimeString() }}.
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <template v-if="postgresData">
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Cache performance</h3>
+                <span class="chip chip-mute">cell-level</span>
+                <span class="muted">{{ postgresData.database }} · {{ stamp(pg) }}</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-grid-4">
+                  <div class="stat">
+                    <div class="stat-label">Database hit ratio</div>
+                    <div class="stat-value font-mono" :class="cacheClass(postgresData.databaseCache?.cacheHitRatio)">
+                      {{ ratio(postgresData.databaseCache?.cacheHitRatio) }}
+                    </div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Table hit ratio</div>
+                    <div class="stat-value font-mono" :class="cacheClass(postgresData.cacheSummary?.tables?.hitRatio)">
+                      {{ ratio(postgresData.cacheSummary?.tables?.hitRatio) }}
+                    </div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Index hit ratio</div>
+                    <div class="stat-value font-mono" :class="cacheClass(postgresData.cacheSummary?.indexes?.hitRatio)">
+                      {{ ratio(postgresData.cacheSummary?.indexes?.hitRatio) }}
+                    </div>
+                  </div>
+                  <div class="stat">
+                    <div class="stat-label">Shared buffers</div>
+                    <div class="stat-value font-mono">
+                      {{ postgresData.bufferConfig?.sharedBuffersSize || '—' }}
+                    </div>
+                  </div>
+                </div>
+                <p class="sys-note">A ratio is “—” when the object has seen no I/O yet — unknown, not zero.</p>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Table cache stats</h3>
+                <span class="muted">hit ratios per table in the queen schema</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-scroll">
+                  <table class="t">
+                    <thead>
+                      <tr>
+                        <th>Table</th>
+                        <th class="right">Disk reads</th>
+                        <th class="right">Cache hits</th>
+                        <th class="right">Hit ratio</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="table in postgresData.tableCache" :key="table.table">
+                        <td class="font-mono" style="font-weight:500;">{{ table.table }}</td>
+                        <td class="right font-mono tabular-nums muted-cell">{{ metric(toNum(table.diskReads)) }}</td>
+                        <td class="right font-mono tabular-nums muted-cell">{{ metric(toNum(table.cacheHits)) }}</td>
+                        <td class="right">
+                          <span class="font-mono tabular-nums" :class="cacheClass(table.cacheHitRatio)">
+                            {{ ratio(table.cacheHitRatio) }}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Index cache stats</h3>
+                <span class="muted">top 20 by disk reads</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-scroll">
+                  <table class="t">
+                    <thead>
+                      <tr>
+                        <th>Index</th>
+                        <th>Table</th>
+                        <th class="right">Disk reads</th>
+                        <th class="right">Cache hits</th>
+                        <th class="right">Hit ratio</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="idx in postgresData.indexCache" :key="idx.index">
+                        <td class="font-mono" style="font-size:12px;">{{ idx.index }}</td>
+                        <td class="muted-cell">{{ idx.table }}</td>
+                        <td class="right font-mono tabular-nums muted-cell">{{ metric(toNum(idx.diskReads)) }}</td>
+                        <td class="right font-mono tabular-nums muted-cell">{{ metric(toNum(idx.cacheHits)) }}</td>
+                        <td class="right">
+                          <span class="font-mono tabular-nums" :class="cacheClass(idx.cacheHitRatio)">
+                            {{ ratio(idx.cacheHitRatio) }}
+                          </span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="postgresData.bufferUsage?.length" class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Buffer cache contents</h3>
+                <span class="muted">what is cached in shared_buffers</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-scroll">
+                  <table class="t">
+                    <thead>
+                      <tr>
+                        <th>Object</th>
+                        <th class="right">Buffered size</th>
+                        <th class="right">% of cache</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="buf in postgresData.bufferUsage" :key="buf.object">
+                        <td class="font-mono" style="font-weight:500;">{{ buf.object }}</td>
+                        <td class="right font-mono tabular-nums muted-cell">{{ buf.bufferedSize }}</td>
+                        <td class="right">
+                          <div class="sys-barcell">
+                            <div class="bar" style="width:64px;">
+                              <i :style="{ width: `${Math.min(toNum(buf.percentOfCache) || 0, 100)}%` }" />
+                            </div>
+                            <span class="font-mono tabular-nums sys-barpct">{{ ratio(buf.percentOfCache) }}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Table sizes</h3>
+                <span class="muted">storage usage per table</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-scroll">
+                  <table class="t">
+                    <thead>
+                      <tr>
+                        <th>Table</th>
+                        <th class="right">Total size</th>
+                        <th class="right">Table size</th>
+                        <th class="right">Index size</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="tbl in postgresData.tableSizes" :key="tbl.table">
+                        <td class="font-mono" style="font-weight:500;">{{ tbl.table }}</td>
+                        <td class="right font-mono tabular-nums" style="font-weight:500;">{{ tbl.totalSize }}</td>
+                        <td class="right font-mono tabular-nums muted-cell">{{ tbl.tableSize }}</td>
+                        <td class="right font-mono tabular-nums">{{ tbl.indexSize }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="sys-grid-2" style="margin-bottom:16px;">
+              <div class="card">
+                <div class="card-header">
+                  <h3>Dead tuples</h3>
+                  <span v-if="postgresData.deadTuples?.length" class="chip chip-warn">
+                    {{ postgresData.deadTuples.length }} tables
+                  </span>
+                  <span v-else class="muted">tables needing vacuum</span>
+                </div>
+                <div class="card-body">
+                  <div v-if="postgresData.deadTuples?.length" class="sys-scroll">
+                    <table class="t">
+                      <thead>
+                        <tr>
+                          <th>Table</th>
+                          <th class="right">Dead</th>
+                          <th class="right">Dead %</th>
+                          <th>Last vacuum</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="tbl in postgresData.deadTuples" :key="tbl.table">
+                          <td class="font-mono" style="font-size:12px;">{{ tbl.table }}</td>
+                          <td class="right font-mono tabular-nums">{{ metric(toNum(tbl.deadTuples)) }}</td>
+                          <td class="right">
+                            <span class="font-mono tabular-nums" :class="deadClass(tbl.deadPercentage)">
+                              {{ ratio(tbl.deadPercentage) }}
+                            </span>
+                          </td>
+                          <td class="sys-age">{{ ageOf(tbl.lastAutovacuum || tbl.lastVacuum) }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-else class="panel-msg" style="color:var(--ok-500);">
+                    No dead tuples — tables are clean
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <h3>HOT update efficiency</h3>
+                  <span class="muted">higher is better</span>
+                </div>
+                <div class="card-body">
+                  <div v-if="postgresData.hotUpdates?.length" class="sys-scroll">
+                    <table class="t">
+                      <thead>
+                        <tr>
+                          <th>Table</th>
+                          <th class="right">Updates</th>
+                          <th class="right">HOT %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="tbl in postgresData.hotUpdates" :key="tbl.table">
+                          <td class="font-mono" style="font-size:12px;">{{ tbl.table }}</td>
+                          <td class="right font-mono tabular-nums muted-cell">{{ metric(toNum(tbl.totalUpdates)) }}</td>
+                          <td class="right">
+                            <span class="font-mono tabular-nums" :class="hotClass(tbl.hotUpdatePercentage)">
+                              {{ ratio(tbl.hotUpdatePercentage) }}
+                            </span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-else class="panel-msg">No updates recorded yet</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Active queries</h3>
+                <span v-if="postgresData.activeQueries?.length" class="chip chip-bad">
+                  {{ postgresData.activeQueries.length }} slow
+                </span>
+                <span v-else class="muted">queries running longer than 1s</span>
+              </div>
+              <div class="card-body">
+                <p class="sys-note">
+                  Every database on this Postgres instance, not only Queen's — a query here
+                  may belong to another application sharing the server.
+                </p>
+                <div v-if="postgresData.activeQueries?.length" class="sys-queries">
+                  <div v-for="query in postgresData.activeQueries" :key="query.pid" class="card sys-query">
+                    <div class="sys-query-head">
+                      <span class="sys-query-pid">PID {{ query.pid }} · {{ query.state }}</span>
+                      <span class="font-mono tabular-nums" :class="durationClass(query.duration)">
+                        {{ formatDurationSeconds(query.duration) }}
+                      </span>
+                    </div>
+                    <code class="font-mono sys-query-sql">{{ query.query }}</code>
+                    <div v-if="query.waitEventType" class="sys-query-wait">
+                      Wait: {{ query.waitEventType }} / {{ query.waitEvent }}
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="panel-msg" style="color:var(--ok-500);">No slow queries running</div>
+              </div>
+            </div>
+
+            <div v-if="postgresData.autovacuumStatus?.length" class="card">
+              <div class="card-header">
+                <h3>Autovacuum status</h3>
+                <span class="chip chip-warn">{{ postgresData.autovacuumStatus.length }} pending</span>
+              </div>
+              <div class="card-body">
+                <div class="sys-scroll">
+                  <table class="t">
+                    <thead>
+                      <tr>
+                        <th>Table</th>
+                        <th class="right">Dead tuples</th>
+                        <th class="right">Vacuum count</th>
+                        <th>Last autovacuum</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="tbl in postgresData.autovacuumStatus" :key="tbl.table">
+                        <td class="font-mono" style="font-weight:500;">{{ tbl.table }}</td>
+                        <td class="right font-mono tabular-nums">{{ metric(toNum(tbl.deadTuples)) }}</td>
+                        <td class="right font-mono tabular-nums muted-cell">{{ tbl.autovacuumCount }}</td>
+                        <td class="sys-age">{{ ageOf(tbl.lastAutovacuum) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </template>
+        </template>
+      </template>
     </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { system } from '@/api'
-import { useRefresh } from '@/composables/useRefresh'
-import BaseChart from '@/components/BaseChart.vue'
+import { computed, ref, watch } from 'vue'
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-const loading = ref(true)
-// Default landed-on tab is 'system'. The third historical option, 'worker',
-// has been promoted to its own page at /operations under Overview, so the
-// Source toggle on this page only switches between Resources and Postgres.
+import BaseChart from '@/components/BaseChart.vue'
+import { describeApiError, operator } from '@/api'
+import { formatNumber, formatRelativeTime, toNum, useApi } from '@/composables/useApi'
+import { chartColor } from '@/composables/useChartTheme'
+import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
+import { useRefresh } from '@/composables/useRefresh'
+import { useIdentity } from '@/stores/identity'
+
+// CELL-LEVEL PAGE — every source is an operator route (queen_proxy
+// is_operator_route): /api/v1/analytics/system-metrics, /api/v1/status/buffers,
+// /api/v1/analytics/postgres-stats and the bare /api/v1/status. None of them is
+// tenant-scopable: host CPU, a disk spool and pg_buffercache belong to the cell.
+// The route already declares requires:'operator'; this guard also stops the
+// calls if the operator session stops being live while the page is open.
+const { can, actingTenantSlug, actingCellSlug } = useIdentity()
+const canOperate = computed(() => can('operator'))
+
 const dataSource = ref('system')
 const viewMode = ref('aggregate')
 const aggregationType = ref('avg')
@@ -632,375 +674,447 @@ const timeRange = ref(60)
 const customMode = ref(false)
 const customFrom = ref('')
 const customTo = ref('')
-
-const systemData = ref(null)
-const postgresData = ref(null)
+const appliedCustom = ref(null)
 
 const timeRanges = [
   { label: '15m', value: 15 },
   { label: '1h', value: 60 },
   { label: '6h', value: 360 },
-  { label: '24h', value: 1440 }
+  { label: '24h', value: 1440 },
 ]
 
 const aggregationTypes = [
   { label: 'Average', value: 'avg' },
   { label: 'Maximum', value: 'max' },
-  { label: 'Minimum', value: 'min' }
+  { label: 'Minimum', value: 'min' },
 ]
 
 // ---------------------------------------------------------------------------
-// Formatters (local copies, intentionally not extracted to a shared util —
-// see the matching block in QueueOperations.vue for the reasoning)
+// Range
 // ---------------------------------------------------------------------------
-const formatDateTimeLocal = (date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  const hours = String(date.getHours()).padStart(2, '0')
-  const minutes = String(date.getMinutes()).padStart(2, '0')
-  return `${year}-${month}-${day}T${hours}:${minutes}`
+function currentRange() {
+  if (customMode.value && appliedCustom.value) return appliedCustom.value
+  const to = new Date()
+  const from = new Date(to.getTime() - timeRange.value * 60_000)
+  return { from, to }
 }
 
-const formatNumber = (num) => {
-  if (num === undefined || num === null) return '0'
-  if (num >= 1e12) return (num / 1e12).toFixed(2) + 'T'
-  if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B'
-  if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M'
-  if (num >= 1e3) return (num / 1e3).toFixed(1) + 'K'
-  return num.toString()
-}
+// Live, not on-click: an invalid range explains itself as it is typed instead
+// of leaving the user with a button that does nothing when pressed.
+const customError = computed(() => validateRange(customFrom.value, customTo.value).error || '')
+const customRangeValid = computed(() => !customError.value)
 
-const formatTimestamp = (ts) => {
-  if (!ts) return 'Never'
-  const date = new Date(ts)
-  const now = new Date()
-  const diffMs = now - date
-  const diffMins = Math.floor(diffMs / 60000)
-  const diffHours = Math.floor(diffMs / 3600000)
-  const diffDays = Math.floor(diffMs / 86400000)
-
-  if (diffMins < 1) return 'Just now'
-  if (diffMins < 60) return `${diffMins}m ago`
-  if (diffHours < 24) return `${diffHours}h ago`
-  if (diffDays < 7) return `${diffDays}d ago`
-  return date.toLocaleDateString()
-}
-
-const formatDurationSeconds = (seconds) => {
-  if (seconds < 60) return `${seconds.toFixed(1)}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
-}
-
-const formatCPU = (value) => {
-  if (value === undefined || value === null) return '0%'
-  return ((value / 100).toFixed(1)) + '%'
-}
-
-const formatMemory = (value) => {
-  if (value === undefined || value === null) return '0 MB'
-  return Math.round(value / 1024 / 1024) + ' MB'
-}
-
-const formatBucketSize = (minutes) => {
-  if (!minutes) return '1 min'
-  if (minutes === 1) return '1 min'
-  if (minutes < 60) return `${minutes} min`
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  if (remainingMinutes === 0) return `${hours}h`
-  return `${hours}h ${remainingMinutes}m`
-}
-
-// ---------------------------------------------------------------------------
-// Time range picker
-// ---------------------------------------------------------------------------
 const selectQuickRange = (value) => {
   customMode.value = false
   timeRange.value = value
-  fetchData()
+  metrics.refresh()
 }
 
 const toggleCustomMode = () => {
   customMode.value = !customMode.value
   if (customMode.value) {
     const now = new Date()
-    const from = new Date(now.getTime() - timeRange.value * 60 * 1000)
     customTo.value = formatDateTimeLocal(now)
-    customFrom.value = formatDateTimeLocal(from)
+    customFrom.value = formatDateTimeLocal(new Date(now.getTime() - timeRange.value * 60_000))
+  } else {
+    appliedCustom.value = null
+    metrics.refresh()
   }
 }
 
 const applyCustomRange = () => {
-  if (!customFrom.value || !customTo.value) return
-  const fromDate = new Date(customFrom.value)
-  const toDate = new Date(customTo.value)
-  if (fromDate >= toDate) return
+  const parsed = validateRange(customFrom.value, customTo.value)
+  if (parsed.error) return
+  appliedCustom.value = { from: parsed.from, to: parsed.to }
+  metrics.refresh()
+}
+
+// ---------------------------------------------------------------------------
+// Fetchers — each panel keeps its own error, so a dead Postgres tab cannot
+// leave the resources tab rendering minutes-old numbers as if they were live.
+// ---------------------------------------------------------------------------
+const metrics = useApi((config) => {
+  const { from, to } = currentRange()
+  return operator.getSystemMetrics({ from: from.toISOString(), to: to.toISOString() }, config)
+}, { immediate: false })
+
+const buffers = useApi((config) => operator.getBuffers(undefined, config), { immediate: false })
+const status = useApi((config) => operator.getStatus(undefined, config), { immediate: false })
+const pg = useApi((config) => operator.getPostgresStats(config), { immediate: false })
+
+const fetchData = () => {
+  if (!canOperate.value) return
+  buffers.refresh()
+  if (dataSource.value === 'postgres') {
+    pg.refresh()
+  } else {
+    metrics.refresh()
+    status.refresh()
+  }
+}
+
+const selectSource = (src) => {
+  dataSource.value = src
   fetchData()
 }
 
-const formatChartLabel = (date, isMultiDayFlag) => {
-  if (isMultiDayFlag) {
-    return date.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    })
+useRefresh(fetchData)
+watch(canOperate, (live) => { if (live) fetchData() }, { immediate: true })
+
+// ---------------------------------------------------------------------------
+// Panel state
+// ---------------------------------------------------------------------------
+const systemData = computed(() => metrics.data.value)
+const postgresData = computed(() => pg.data.value)
+const metricsFirstLoad = computed(() => metrics.loading.value && !metrics.data.value)
+const pgFirstLoad = computed(() => pg.loading.value && !pg.data.value)
+
+const stamp = (panel) => {
+  if (panel.failed.value) {
+    return panel.lastUpdated.value
+      ? `stale · last good ${panel.lastUpdated.value.toLocaleTimeString()}`
+      : 'unavailable'
   }
-  return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+  return panel.lastUpdated.value ? `as of ${panel.lastUpdated.value.toLocaleTimeString()}` : ''
 }
 
-const isMultiDay = (timeSeries) => {
-  if (!timeSeries || timeSeries.length < 2) return false
-  const firstDate = new Date(timeSeries[0].timestamp)
-  const lastDate = new Date(timeSeries[timeSeries.length - 1].timestamp)
-  return firstDate.toDateString() !== lastDate.toDateString()
+/** A number we hold, or an em dash — never a 0 standing in for "unknown". */
+const metric = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
+const pct = (v) => (v === null || v === undefined ? '—' : `${(v / 100).toFixed(1)}%`)
+const mb = (v) => (v === null || v === undefined ? '—' : `${Math.round(v / 1024 / 1024)} MB`)
+const ratio = (v) => (v === null || v === undefined ? '—' : `${v}%`)
+const msOrDash = (v) => {
+  const n = toNum(v)
+  return n === null ? '—' : `${Math.round(n)}ms`
+}
+const ageOf = (ts) => (ts ? formatRelativeTime(ts) : 'Never')
+
+const formatBucketSize = (minutes) => {
+  const n = toNum(minutes)
+  if (!n) return '1 min'
+  if (n < 60) return `${n} min`
+  const hours = Math.floor(n / 60)
+  const rest = n % 60
+  return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`
+}
+
+const formatDurationSeconds = (seconds) => {
+  const s = toNum(seconds)
+  if (s === null) return '—'
+  if (s < 60) return `${s.toFixed(1)}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
 }
 
 // ---------------------------------------------------------------------------
-// Postgres helpers
+// File buffer (disk spool)
 // ---------------------------------------------------------------------------
-const getCacheRatioClass = (ratio) => {
-  if (ratio === undefined || ratio === null) return ''
-  if (ratio >= 99) return 'color-ok'
-  if (ratio >= 95) return 'color-ice'
-  if (ratio >= 90) return 'color-crown'
+const bufferPending = computed(() => toNum(buffers.data.value?.pending))
+const bufferFailed = computed(() => toNum(buffers.data.value?.failed))
+const dbHealthy = computed(() => {
+  const v = buffers.data.value?.dbHealthy
+  return v === undefined || v === null ? null : v === true
+})
+const spoolAlarm = computed(
+  () => dbHealthy.value === false || (bufferFailed.value || 0) > 0 || (bufferPending.value || 0) > 0,
+)
+
+// ---------------------------------------------------------------------------
+// Brokers (bare /api/v1/status — workers seen in the last two minutes)
+// ---------------------------------------------------------------------------
+const workers = computed(() => status.data.value?.workers || [])
+const lifetimeDbErrors = computed(() => toNum(status.data.value?.errors?.dbErrors))
+const lifetimeAckFailed = computed(() => toNum(status.data.value?.errors?.ackFailed))
+
+// The chip states what the payload says, not what we hope. Only the event-loop
+// gauges are actually written by this broker (min_free_slots / db_connections /
+// max_job_queue_size never are), so nothing else is rendered here.
+const workerChip = (w) => {
+  const peak = toNum(w.maxEventLoopLagMs)
+  const avg = toNum(w.avgEventLoopLagMs)
+  if (peak === null && avg === null) return { cls: 'chip-mute', label: 'no lag data' }
+  if ((peak ?? 0) > 500 || (avg ?? 0) > 200) return { cls: 'chip-bad', label: 'event loop stalling' }
+  if ((peak ?? 0) > 100 || (avg ?? 0) > 50) return { cls: 'chip-warn', label: 'event loop busy' }
+  return { cls: 'chip-ok', label: 'responsive' }
+}
+
+// ---------------------------------------------------------------------------
+// Replica time series
+//
+// Replicas do not share a bucket grid: one may start later, restart, or miss a
+// collector tick. Labels therefore come from the UNION of every replica's
+// timestamps and each series is indexed BY timestamp, so a shorter series is a
+// gap in the line rather than a silent shift onto another replica's clock.
+// ---------------------------------------------------------------------------
+const replicas = computed(() => systemData.value?.replicas || [])
+const replicaCountLabel = computed(() => {
+  const n = replicas.value.length
+  return `${n} replica${n === 1 ? '' : 's'}`
+})
+const acrossLabel = computed(() =>
+  replicas.value.length > 1 ? `summed across ${replicaCountLabel.value}` : 'this replica',
+)
+
+const timeline = computed(() => {
+  const seen = new Set()
+  for (const r of replicas.value) {
+    for (const point of r.timeSeries || []) {
+      if (point?.timestamp) seen.add(point.timestamp)
+    }
+  }
+  return [...seen].sort()
+})
+
+const chartLabels = computed(() => {
+  const multiDay = isMultiDay(timeline.value)
+  return timeline.value.map(ts => formatChartLabel(new Date(ts), multiDay))
+})
+
+const pointsByTimestamp = (replica) => {
+  const map = new Map()
+  for (const point of replica.timeSeries || []) {
+    if (point?.timestamp) map.set(point.timestamp, point)
+  }
+  return map
+}
+
+const leaf = (metricsObj, path) => {
+  let node = metricsObj
+  for (const key of path) {
+    node = node?.[key]
+    if (node === undefined || node === null) return null
+  }
+  return node
+}
+
+/** One replica's values aligned to the union timeline; null where it has none. */
+const replicaSeries = (replica, path, scale = v => v) => {
+  const byTs = pointsByTimestamp(replica)
+  return timeline.value.map(ts => {
+    const node = leaf(byTs.get(ts)?.metrics, path)
+    const v = toNum(node?.[aggregationType.value])
+    return v === null ? null : scale(v)
+  })
+}
+
+/** Sum across replicas per bucket; null only when no replica reported it. */
+const summedSeries = (path, scale = v => v) => {
+  const perReplica = replicas.value.map(r => replicaSeries(r, path, scale))
+  return timeline.value.map((_, i) => {
+    let sum = null
+    for (const series of perReplica) {
+      const v = series[i]
+      if (v !== null) sum = (sum || 0) + v
+    }
+    return sum
+  })
+}
+
+const CPU_SCALE = v => v / 100
+const MB_SCALE = v => Math.round(v / 1024 / 1024)
+
+const buildChart = (specs, { perReplicaPath = null, perReplicaScale = v => v, perReplicaSuffix = '' } = {}) => {
+  if (!replicas.value.length || !timeline.value.length) return { labels: [], datasets: [] }
+  if (viewMode.value === 'individual' && perReplicaPath) {
+    return {
+      labels: chartLabels.value,
+      datasets: replicas.value.map((replica, i) => ({
+        label: `${replica.hostname}${perReplicaSuffix}`,
+        data: replicaSeries(replica, perReplicaPath, perReplicaScale),
+        borderColor: chartColor(i).line,
+        fill: false,
+        tension: 0,
+      })),
+    }
+  }
+  return {
+    labels: chartLabels.value,
+    datasets: specs.map((spec, i) => ({
+      label: spec.label,
+      data: summedSeries(spec.path, spec.scale),
+      borderColor: chartColor(i).line,
+      backgroundColor: chartColor(i).fill,
+      fill: true,
+      tension: 0,
+    })),
+  }
+}
+
+const cpuChart = computed(() => buildChart(
+  [
+    { label: 'User CPU (%)', path: ['cpu', 'user_us'], scale: CPU_SCALE },
+    { label: 'System CPU (%)', path: ['cpu', 'system_us'], scale: CPU_SCALE },
+  ],
+  { perReplicaPath: ['cpu', 'user_us'], perReplicaScale: CPU_SCALE, perReplicaSuffix: ' · user' },
+))
+
+const memoryChart = computed(() => buildChart(
+  [{ label: 'RSS (MB)', path: ['memory', 'rss_bytes'], scale: MB_SCALE }],
+  { perReplicaPath: ['memory', 'rss_bytes'], perReplicaScale: MB_SCALE },
+))
+
+const databaseChart = computed(() => buildChart(
+  [
+    { label: 'Active', path: ['database', 'pool_active'] },
+    { label: 'Idle', path: ['database', 'pool_idle'] },
+  ],
+  { perReplicaPath: ['database', 'pool_active'], perReplicaSuffix: ' · active' },
+))
+
+// ---------------------------------------------------------------------------
+// Latest sample. Reduced ACROSS replicas — the old card printed replicas[0]
+// beside a "Replicas: N" counter, which reads as a cell figure and is not one.
+// ---------------------------------------------------------------------------
+const lastOf = (replica, path) => {
+  const series = replica?.timeSeries || []
+  for (let i = series.length - 1; i >= 0; i--) {
+    const v = toNum(leaf(series[i]?.metrics, path)?.last)
+    if (v !== null) return v
+  }
+  return null
+}
+
+const cpuOf = (replica, key) => lastOf(replica, ['cpu', key])
+
+const sumLatest = (path) => {
+  let sum = null
+  for (const replica of replicas.value) {
+    const v = lastOf(replica, path)
+    if (v !== null) sum = (sum || 0) + v
+  }
+  return sum
+}
+
+const latest = computed(() => ({
+  cpuUser: sumLatest(['cpu', 'user_us']),
+  rss: sumLatest(['memory', 'rss_bytes']),
+  dbActive: sumLatest(['database', 'pool_active']),
+}))
+
+// ---------------------------------------------------------------------------
+// Postgres classes. A null ratio has no colour — `getCacheRatioClass(0)` would
+// paint an idle table red at a "0%" it never reported.
+// ---------------------------------------------------------------------------
+const cacheClass = (r) => {
+  const v = toNum(r)
+  if (v === null) return ''
+  if (v >= 99) return 'color-ok'
+  if (v >= 95) return 'color-ice'
+  if (v >= 90) return 'color-crown'
   return 'color-ember'
 }
 
-const getHotRatioClass = (ratio) => {
-  if (ratio === undefined || ratio === null) return ''
-  if (ratio >= 95) return 'color-ok'
-  if (ratio >= 80) return 'color-ice'
-  if (ratio >= 50) return 'color-crown'
+const hotClass = (r) => {
+  const v = toNum(r)
+  if (v === null) return ''
+  if (v >= 95) return 'color-ok'
+  if (v >= 80) return 'color-ice'
+  if (v >= 50) return 'color-crown'
   return 'color-ember'
 }
 
-const getLastMetricForReplica = (replica) => {
-  if (!replica?.timeSeries?.length) return null
-  return replica.timeSeries[replica.timeSeries.length - 1]?.metrics
+const deadClass = (r) => {
+  const v = toNum(r)
+  if (v === null) return ''
+  return v > 10 ? 'color-ember' : 'muted-cell'
 }
 
-// ---------------------------------------------------------------------------
+const durationClass = (seconds) => ((toNum(seconds) || 0) > 10 ? 'color-ember' : 'color-crown')
+
 // Chart options
-// ---------------------------------------------------------------------------
-const cpuChartOptions = {
-  plugins: { legend: { display: false } },
+const cpuOptions = {
+  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 14 } } },
   scales: {
     y: {
       title: { display: true, text: 'CPU %', font: { size: 11 } },
-      ticks: { callback: (value) => value.toFixed(1) + '%' }
-    }
-  }
+      ticks: { callback: (value) => `${Number(value).toFixed(1)}%` },
+    },
+  },
 }
-
-const memoryChartOptions = {
-  plugins: { legend: { display: false } },
-  scales: { y: { title: { display: true, text: 'Memory (MB)', font: { size: 11 } } } }
+const memoryOptions = {
+  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 14 } } },
+  scales: { y: { title: { display: true, text: 'Memory (MB)', font: { size: 11 } } } },
 }
-
-const poolChartOptions = {
-  plugins: { legend: { display: false } },
-  scales: { y: { title: { display: true, text: 'Connections', font: { size: 11 } } } }
+const poolOptions = {
+  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 14 } } },
+  scales: { y: { title: { display: true, text: 'Connections', font: { size: 11 } } } },
 }
-
-const queueChartOptions = {
-  plugins: { legend: { display: false } },
-  scales: { y: { title: { display: true, text: 'Queue Size', font: { size: 11 } } } }
-}
-
-// ---------------------------------------------------------------------------
-// Computed
-// ---------------------------------------------------------------------------
-const lastMetrics = computed(() => {
-  if (!systemData.value?.replicas?.length) return null
-  const firstReplica = systemData.value.replicas[0]
-  if (!firstReplica?.timeSeries?.length) return null
-  return firstReplica.timeSeries[firstReplica.timeSeries.length - 1]?.metrics
-})
-
-const cpuChartData = computed(() => {
-  if (!systemData.value?.replicas?.length) return { labels: [], datasets: [] }
-
-  const agg = aggregationType.value
-
-  if (viewMode.value === 'individual') {
-    const datasets = []
-    const firstReplica = systemData.value.replicas[0]
-    const ts = firstReplica?.timeSeries || []
-    const multiDay = isMultiDay(ts)
-    const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-
-    const colors = ['#e6e6e6', '#8a8a92', '#6a6a6a', '#b8b8b8', '#4a4a4f']
-
-    systemData.value.replicas.forEach((replica, i) => {
-      const color = colors[i % colors.length]
-      datasets.push({
-        label: `${replica.hostname} (User)`,
-        data: (replica.timeSeries || []).map(t => (t.metrics?.cpu?.user_us?.[agg] || 0) / 100),
-        borderColor: color,
-        fill: false,
-        tension: 0
-      })
-    })
-
-    return { labels, datasets }
-  } else {
-    const ts = systemData.value.replicas[0]?.timeSeries || []
-    const multiDay = isMultiDay(ts)
-    const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-
-    return {
-      labels,
-      datasets: [
-        { label: 'User CPU (%)',
-          data: ts.map(t => (t.metrics?.cpu?.user_us?.[agg] || 0) / 100),
-          borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
-          fill: true, tension: 0 },
-        { label: 'System CPU (%)',
-          data: ts.map(t => (t.metrics?.cpu?.system_us?.[agg] || 0) / 100),
-          borderColor: '#8a8a92', backgroundColor: 'rgba(138, 138, 146, 0.12)',
-          fill: true, tension: 0 }
-      ]
-    }
-  }
-})
-
-const memoryChartData = computed(() => {
-  if (!systemData.value?.replicas?.length) return { labels: [], datasets: [] }
-
-  const agg = aggregationType.value
-
-  if (viewMode.value === 'individual') {
-    const datasets = []
-    const firstReplica = systemData.value.replicas[0]
-    const ts = firstReplica?.timeSeries || []
-    const multiDay = isMultiDay(ts)
-    const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-
-    const colors = ['#e6e6e6', '#8a8a92', '#6a6a6a', '#b8b8b8', '#4a4a4f']
-
-    systemData.value.replicas.forEach((replica, i) => {
-      const color = colors[i % colors.length]
-      datasets.push({
-        label: replica.hostname,
-        data: (replica.timeSeries || []).map(t => Math.round((t.metrics?.memory?.rss_bytes?.[agg] || 0) / 1024 / 1024)),
-        borderColor: color,
-        fill: false,
-        tension: 0
-      })
-    })
-
-    return { labels, datasets }
-  } else {
-    const ts = systemData.value.replicas[0]?.timeSeries || []
-    const multiDay = isMultiDay(ts)
-    const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-
-    return {
-      labels,
-      datasets: [
-        { label: 'RSS (MB)',
-          data: ts.map(t => Math.round((t.metrics?.memory?.rss_bytes?.[agg] || 0) / 1024 / 1024)),
-          borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
-          fill: true, tension: 0 }
-      ]
-    }
-  }
-})
-
-const databaseChartData = computed(() => {
-  if (!systemData.value?.replicas?.length) return { labels: [], datasets: [] }
-
-  const agg = aggregationType.value
-  const ts = systemData.value.replicas[0]?.timeSeries || []
-  const multiDay = isMultiDay(ts)
-  const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-
-  return {
-    labels,
-    datasets: [
-      { label: 'Active',
-        data: ts.map(t => t.metrics?.database?.pool_active?.[agg] || 0),
-        borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
-        fill: true, tension: 0 },
-      { label: 'Idle',
-        data: ts.map(t => t.metrics?.database?.pool_idle?.[agg] || 0),
-        borderColor: '#8a8a92', backgroundColor: 'rgba(138, 138, 146, 0.12)',
-        fill: true, tension: 0 }
-    ]
-  }
-})
-
-const threadPoolChartData = computed(() => {
-  if (!systemData.value?.replicas?.length) return { labels: [], datasets: [] }
-
-  const agg = aggregationType.value
-  const ts = systemData.value.replicas[0]?.timeSeries || []
-  const multiDay = isMultiDay(ts)
-  const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-
-  return {
-    labels,
-    datasets: [
-      { label: 'DB Queue',
-        data: ts.map(t => t.metrics?.threadpool?.db?.queue_size?.[agg] || 0),
-        borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
-        fill: true, tension: 0 },
-      { label: 'System Queue',
-        data: ts.map(t => t.metrics?.threadpool?.system?.queue_size?.[agg] || 0),
-        borderColor: '#8a8a92', backgroundColor: 'rgba(138, 138, 146, 0.12)',
-        fill: true, tension: 0 }
-    ]
-  }
-})
-
-// ---------------------------------------------------------------------------
-// Fetcher — only loads what the active source needs. Postgres has no time
-// dimension (it's a one-shot snapshot), so it ignores the range picker.
-// ---------------------------------------------------------------------------
-const fetchData = async () => {
-  const hasData = dataSource.value === 'postgres' ? postgresData.value : systemData.value
-  if (!hasData) loading.value = true
-
-  try {
-    if (dataSource.value === 'postgres') {
-      const res = await system.getPostgresStats()
-      postgresData.value = res.data
-    } else {
-      let from, to
-      if (customMode.value && customFrom.value && customTo.value) {
-        from = new Date(customFrom.value)
-        to = new Date(customTo.value)
-      } else {
-        const now = new Date()
-        from = new Date(now.getTime() - timeRange.value * 60 * 1000)
-        to = now
-      }
-      const params = { from: from.toISOString(), to: to.toISOString() }
-      const res = await system.getSystemMetrics(params)
-      systemData.value = res.data
-    }
-  } catch (err) {
-    console.error('Failed to fetch system metrics:', err)
-  } finally {
-    loading.value = false
-  }
-}
-
-useRefresh(fetchData)
-onMounted(fetchData)
 </script>
 
 <style scoped>
+.scope-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--ink-2);
+  font-size: 11.5px;
+  color: var(--text-mid);
+}
+.scope-strip-cell { border-color: rgba(230, 180, 80, .30); box-shadow: inset 3px 0 0 var(--warn-400); }
+.scope-text strong { color: var(--text-hi); font-weight: 600; }
+.scope-sep { margin: 0 6px; color: var(--text-faint); }
+
+.card-alarm { border-color: rgba(230, 180, 80, .35); }
+
+.sys-controls { padding: 12px 14px; }
+.sys-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.sys-row-sep { padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--bd); }
+.sys-field { display: flex; align-items: center; gap: 8px; }
+.sys-field-right { margin-left: auto; }
+.sys-dt { width: auto; font-size: 13px; }
+.sys-hint { font-size: 11px; color: var(--text-low); }
+.sys-invalid { font-size: 11.5px; color: var(--ember-400); }
+.sys-note { margin-top: 10px; font-size: 11.5px; color: var(--text-low); }
+.sys-scroll { overflow-x: auto; }
+.sys-age { font-size: 12px; color: var(--text-low); }
+.muted-cell { color: var(--text-mid); }
+.right { text-align: right; }
+
+.sys-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.sys-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.sys-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.sys-grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+
+.sys-workers { display: flex; flex-direction: column; gap: 8px; }
+.sys-worker {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--bd); border-radius: 6px;
+}
+.sys-worker-host { font-size: 12px; color: var(--text-hi); font-weight: 500; }
+.sys-worker-meta { font-size: 11px; color: var(--text-mid); }
+
+.sys-barcell { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.sys-barpct { font-size: 12px; color: var(--text-mid); width: 52px; text-align: right; }
+
+.sys-queries { display: flex; flex-direction: column; gap: 12px; }
+.sys-query { padding: 10px 12px; }
+.sys-query-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.sys-query-pid { font-size: 12px; font-weight: 500; color: var(--text-mid); }
+.sys-query-sql { font-size: 12px; color: var(--text-hi); display: block; word-break: break-all; }
+.sys-query-wait { margin-top: 8px; font-size: 12px; color: var(--text-low); }
+
+.panel-msg { padding: 32px 0; text-align: center; font-size: 13px; color: var(--text-mid); }
+.panel-err {
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid rgba(244, 63, 94, .28);
+  border-radius: 6px;
+  background: var(--ember-glow);
+  color: var(--ember-400);
+  font-size: 12.5px;
+}
+
 @media (max-width: 1100px) {
-  div[style*="grid-template-columns:repeat(6"] { grid-template-columns: repeat(3, 1fr) !important; }
-  div[style*="grid-template-columns:repeat(4"] { grid-template-columns: repeat(2, 1fr) !important; }
-  div[style*="grid-template-columns:1fr 1fr"] { grid-template-columns: 1fr !important; }
+  .sys-grid-6 { grid-template-columns: repeat(3, 1fr); }
+  .sys-grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .sys-grid-3 { grid-template-columns: 1fr; }
+  .sys-grid-2 { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
-  div[style*="padding:28px 32px"] { padding: 16px !important; }
+  .sys-grid-6 { grid-template-columns: repeat(2, 1fr); }
 }
 </style>

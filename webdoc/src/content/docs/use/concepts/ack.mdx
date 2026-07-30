@@ -1,0 +1,256 @@
+---
+title: Acknowledgement is an offset commit
+description: "How Queen records consumption: one cursor per partition and consumer group, implicit completion of everything before the acked message, and the two guarantees that keep the offset model honest."
+type: concept
+tier: use
+sidebar:
+  order: 6
+  label: Ack semantics
+sourceOfTruth:
+  - server/sql/procedures/044_log_ack.sql
+  - server/sql/procedures/041_log_schema.sql
+  - server/src/handlers/data.rs
+  - server/src/handlers/mod.rs
+verifiedBy:
+  - clients/client-js/test-v2/semantics.js
+  - clients/client-py/tests/test_ack_commit.py
+  - clients/client-go/tests/ack_commit_test.go
+---
+
+An ack in Queen is not a per-message checkmark. It is a commit of a position.
+
+Consumption state for a partition is a single number per consumer group:
+`queen.log_consumers.committed`, the last offset that group has acknowledged. The next
+message that group wants is `committed + 1`. There is no row, flag, or receipt handle per
+message anywhere in the schema — so acking message N is a statement that everything up to
+and including N is done, whether or not you mentioned the earlier messages.
+
+Everything else on this page follows from that one fact.
+
+## One cursor, no per-message state
+
+`queen.log_consumers` holds one row per `(partition, consumer group)`. The columns that
+decide delivery are `committed` (last acked offset), `batch_end` (the inclusive end of the
+currently leased span, `NULL` when no lease is held), `worker_id` and `lease_expires_at`
+(who holds the lease and until when), and `batch_retry_count` (the retry budget consumed).
+
+Two consequences are worth internalising before you write a consumer:
+
+- **An ack costs the same whether it carries one message or ten thousand.** The write is one
+  `UPDATE` of one row. This is why acking is cheap enough to do per batch at high rates.
+- **"Message 4 failed but message 10 succeeded" is not expressible as durable state.** The
+  store has one number. Queen does not silently pretend otherwise — see
+  [the honesty guarantees](#the-two-honesty-guarantees) below.
+
+Different consumer groups have independent cursors on the same partition, so one group's
+acks never affect another's.
+
+## Acking N completes everything before N
+
+Within the leased span, the broker computes the highest offset you acked `completed` and
+moves the cursor there. Offsets below it that you never mentioned are *implicitly completed*
+and will never be redelivered to that group.
+
+If a pop delivers offsets 100 through 109 and you ack only offset 109 as `completed`, the
+cursor lands on 109 and the batch is finished. This is the offset-commit pattern, and it is
+supported deliberately: "ack the last message" is a legitimate statement that the whole
+batch is done. It is not a shortcut with hidden per-message bookkeeping behind it — the
+earlier messages are complete because the cursor passed them.
+
+The same mechanism explains a less comfortable case: if you ack offset 109 while offset 103
+is still being processed by another thread, 103 is now complete as far as the broker is
+concerned, and a later failure signal on it cannot be honoured.
+
+## How an ack finds its offset
+
+The wire never carries offsets. A client acks by `transactionId`, and the broker resolves it:
+
+1. The broker hashes the transaction id (xxh3-128, 16 bytes). SQL never sees the string.
+2. `queen.log_txns` holds one row per pushed segment carrying the 16-byte hash of every
+   frame in offset order. That row is written on **every** push, whether deduplication is on
+   or off, precisely so acks can be resolved on a dedup-disabled queue.
+3. The hash is looked up against the partition's `log_txns` rows and yields an absolute
+   offset.
+
+The resolution is bounded. Under a lease the broker only considers rows whose
+`base_offset <= batch_end`, and the ackable span is
+`[max(committed + 1, txns_start), batch_end]`. `txns_start` is the partition's hash-purge
+watermark: `log_txns` rows expire on their own clock, so a transaction id older than that
+window can no longer be resolved. Acks for messages outside the span are reported rather
+than assumed — that is the second guarantee below.
+
+## The wire shape
+
+Two routes, both of which always answer HTTP `200`:
+
+```http
+POST /api/v1/ack
+POST /api/v1/ack/batch
+```
+
+A single ack:
+
+```json
+{
+  "transactionId": "order-4711",
+  "partitionId": "8f1c…",
+  "status": "completed",
+  "consumerGroup": "billing",
+  "leaseId": "0191…",
+  "error": null
+}
+```
+
+A batch ack carries `consumerGroup` once and an `acknowledgments` array of
+`{transactionId, partitionId, status, leaseId, error}` items. `partitionId` is required —
+transaction ids are only unique within a partition, so an ack without it cannot be resolved
+safely. `consumerGroup` defaults to the internal queue-mode group when omitted, which is a
+different cursor from any named group.
+
+The response is a **top-level array**, one element per acknowledgement, in request order:
+
+```json
+[
+  {
+    "index": 0,
+    "transactionId": "order-4711",
+    "success": true,
+    "error": null,
+    "leaseReleased": true,
+    "dlq": false,
+    "noop": false
+  }
+]
+```
+
+<Aside type="caution">
+The HTTP status is `200` even when every item failed — including when the broker could not
+get a database connection. The per-item `success` and `error` fields are the result. A
+client that only checks the status code will report acks as landed that never moved a
+cursor.
+</Aside>
+
+Items are internally grouped by `(partitionId, leaseId)`; each group becomes one database
+call. Statuses are normalised before they reach SQL: `completed`, `success`, `acked` and
+`ok` (and an absent status) all mean completed; `retry` and `dlq` keep their meaning;
+**anything else, including a typo, is treated as `failed`**.
+
+## The two honesty guarantees
+
+Because the API looks per-message and the store is a single offset, two situations could be
+silently mishandled. Both are explicit, and both are contract-tested in JavaScript, Python
+and Go.
+
+### An explicit failure is never skipped by a later completed ack
+
+Within one ack call the broker finds the **lowest** offset carrying an explicit
+`failed`, `retry` or `dlq`, and clamps the cursor below it — even if a higher offset in the
+same call was acked `completed`. That lowest signal also decides what happens next. When two
+signals resolve to the same offset, `dlq` beats `failed` beats `retry`.
+
+So this batch ack:
+
+```json
+[
+  { "transactionId": "m1", "status": "completed" },
+  { "transactionId": "m2", "status": "failed" },
+  { "transactionId": "m3", "status": "completed" },
+  { "transactionId": "m4", "status": "completed" }
+]
+```
+
+commits past `m1` only. `m2` is the failure head; `m2`, `m3` and `m4` all redeliver. The
+completed acks above the failure are honoured as far as the model allows, which is not at
+all — they redeliver as at-least-once duplicates. That trade is deliberate: a duplicate
+delivery is recoverable, a swallowed failure is not.
+
+Only *silent gaps* — offsets you never mentioned — are implicitly completed.
+
+### An ack that can no longer act is reported, not swallowed
+
+Three outcomes are reported per item instead of being defaulted to success:
+
+| Situation | Result | Meaning |
+| --- | --- | --- |
+| `completed` for an offset at or below the cursor | `success: true`, `noop: true` | Harmless duplicate commit; nothing changed. |
+| `failed` / `retry` / `dlq` for an offset at or below the cursor | `success: false`, error `already committed: the cursor moved past this message before this ack` | The signal cannot be honoured. You acked out of order. |
+| A transaction id that resolves nowhere in the ackable span | `success: false`, error `unresolvable: transaction not in the ack window (hash purged or never pushed); if leased, the message redelivers` | The `log_txns` row was purged, the message was never pushed, or it sits above the leased span. The cursor did not move; if the message is leased it redelivers. |
+
+The third case is the one that used to be dangerous. An unresolvable hash is counted as *not
+acked* — redelivery over data loss — so reporting it as success would tell a client its ack
+landed while the cursor stood still, and a `failed` signal there would vanish with no retry
+charged and no dead-letter hand-off. Now it comes back as an error.
+
+## Statuses and what each one does
+
+| Status | Effect |
+| --- | --- |
+| `completed` (also `success`, `acked`, `ok`, or absent) | Commit up to this offset. |
+| `failed` | Processing broke. Charges one unit of the retry budget while budget remains; releases the lease so the message and everything after it redeliver. On an exhausted budget it dead-letters (or drops, if dead-lettering is disabled). |
+| `retry` | "Not now." Releases the lease and redelivers without charging the retry budget. |
+| `dlq` | Dead-letter this message immediately, bypassing any remaining retry budget. |
+
+The retry budget, the dead-letter hand-off and lease release are covered in
+[Leases, retries and the dead-letter queue](/use/concepts/leases-retries-dlq).
+
+## Acking with and without a lease
+
+A pop that is not auto-acked returns a `leaseId`. Echo it on the ack and the broker
+validates it under the consumer row lock: a lease that has expired, or that now belongs to
+another worker, is rejected with `invalid or expired lease` and the cursor does not move.
+
+If you send **no** `leaseId` at all, the lease check is skipped entirely and the ack still
+advances the cursor. That is intentional: a consumer that lost its lease to an expiry can
+still commit what it genuinely finished, rather than being locked out. The distinction is
+sharp — omitting the lease id is permitted, sending a stale one is an error.
+
+Lease-less acks resolve against an unbounded window rather than the leased span, so they can
+commit any offset above the cursor that still has a `log_txns` row.
+
+## Fast paths, and one error they introduce
+
+Two optimisations sit in front of the resolution path, and neither can change a verdict.
+An in-memory registry recognises the common case — every item in the call is `completed`,
+a lease id is present, and the acked set exactly covers the leased batch — and turns it into
+a single positional cursor advance. A fusion stage can then coalesce many such advances into
+one database transaction. PostgreSQL re-validates the lease under the consumer row lock in
+both cases, so a stale registry hit is refused there and the call falls back to the full
+hash resolution. Anything else — a nack, a partial ack, a mismatched lease — never enters
+the fast path at all, which is why the honesty guarantees hold by construction.
+
+The one client-visible consequence: if the fused commit itself fails, the items come back
+with `ack flush failed; lease will expire and redeliver`. Nothing was committed; the batch
+returns after the lease expires. The mechanics are in [Internals](/internals).
+
+## Patterns that work
+
+**Sequential processing.** Ack as you go. On a handler error, nack and stop processing the
+rest of the popped batch: the nack already released the lease and clamped the cursor, so the
+tail is guaranteed to redeliver. Continuing would only produce duplicates and rejected acks.
+The JavaScript, Python and Go consumers do this for you.
+
+**Parallel processing of one batch.** Collect every message's outcome and send **one** batch
+ack at the end, carrying a per-message status. Inside a single call the clamp rule protects
+your failures. Do not ack individual messages out of order while others are still in flight —
+anything below your highest completed ack is committed, and a later failure signal on it is
+rejected as already committed.
+
+**Offset-commit style.** Ack only the last message of each batch. Legal, cheap, and a
+statement that everything before it succeeded.
+
+**Idempotent handlers are mandatory** under all three. Redelivery happens on lease expiry,
+on any nack — including a nack of a *different* message below yours in the same batch — and
+after a broker restart.
+
+## How this differs from per-message acking
+
+Systems built on per-message receipt handles let you ack message 10 and leave message 4
+outstanding indefinitely; the price is per-message state, per-message visibility timers, and
+per-message ack cost. Queen made the other choice: one integer per partition and group, an
+ack cost independent of batch size, replayability for free (see
+[Replay and subscription modes](/use/concepts/replay)), and no way to express a durable hole
+in the middle of a partition.
+
+If your workload genuinely needs unbounded out-of-order completion within one partition,
+model it as more partitions — each partition is an independent ordered lane with its own
+cursor per group.

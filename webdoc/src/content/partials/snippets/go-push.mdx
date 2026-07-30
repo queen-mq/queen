@@ -1,0 +1,15 @@
+---
+params: []
+---
+
+{/* GENERATED FILE — do not edit by hand.
+    Extracted from clients/client-go/tests/push_test.go by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```go title="clients/client-go/tests/push_test.go"
+responses, err := client.Queue(queueName).Push(payload).Execute(ctx)
+if err != nil {
+	t.Fatalf("Failed to push message: %v", err)
+}
+```

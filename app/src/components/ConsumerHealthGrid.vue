@@ -90,7 +90,7 @@
             </svg>
           </button>
           <button
-            v-if="g.queueName"
+            v-if="g.queueName && props.canAdmin"
             class="caction"
             title="Move cursor to now (skip pending)"
             @click.stop="$emit('move-now', g)"
@@ -100,7 +100,7 @@
             </svg>
           </button>
           <button
-            v-if="g.queueName"
+            v-if="g.queueName && props.canAdmin"
             class="caction"
             title="Seek to timestamp"
             @click.stop="$emit('seek', g)"
@@ -110,6 +110,7 @@
             </svg>
           </button>
           <button
+            v-if="props.canAdmin"
             class="caction caction-danger"
             title="Delete consumer group"
             @click.stop="$emit('delete', g)"
@@ -140,6 +141,12 @@ const props = defineProps({
   sortBy: { type: String, default: 'health' },
   /** Optional cap on rendered rows. */
   limit: { type: Number, default: null },
+  /**
+   * Whether the caller's role may mutate cursors on this cluster
+   * (identity `can('queueAdmin')`). False hides move-now / seek / delete —
+   * the proxy classifies all three as QueueAdmin and would 403 them.
+   */
+  canAdmin: { type: Boolean, default: true },
 })
 
 defineEmits(['select', 'view', 'move-now', 'seek', 'delete'])

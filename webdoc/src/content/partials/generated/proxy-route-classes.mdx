@@ -1,0 +1,125 @@
+---
+params: []
+---
+
+{/* GENERATED FILE — do not edit by hand.
+    Regenerate with: pnpm --dir webdoc gen
+    Source of truth:
+      - queen_proxy/src/routes.rs (classify, is_operator_route)
+      - server/src/main.rs (Router::new chain)
+*/}
+
+The proxy classifies every broker-bound request into exactly one class, and anything API-shaped that matches no rule is blocked. The table below applies that classifier to the broker's own route list.
+
+| Class | What it means |
+| --- | --- |
+| produce | Counted against the message quota. May create queues and partitions implicitly. |
+| consume | Pop, ack and lease extension. A `wait=true` pop also holds a parked-consumer slot. |
+| queue admin | Configuration, deletions, seeks and subscription changes. |
+| read | Listings, status, analytics, DLQ and message reads — all tenant-scoped. |
+| gated (streams) | Available when the plan enables the streams feature. |
+| gated (traces) | Writing a trace is available when the plan enables the traces feature. |
+| operator | Cell-wide surfaces. Not tenant-scopable, so a tenant credential gets the same 404 a blocked route returns. |
+| blocked | Never exposed to a tenant, whatever the credential. Returns 404. |
+
+### produce
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/v1/push` |
+| `POST` | `/api/v1/transaction` |
+
+### consume
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/v1/ack` |
+| `POST` | `/api/v1/ack/batch` |
+| `POST` | `/api/v1/lease/:leaseId/extend` |
+| `GET` | `/api/v1/pop/queue/:queue` |
+| `GET` | `/api/v1/pop/queue/:queue/partition/:partition` |
+
+### queue admin
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/v1/configure` |
+| `DELETE` | `/api/v1/consumer-groups/:group` |
+| `DELETE` | `/api/v1/consumer-groups/:group/queues/:queue` |
+| `POST` | `/api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek` |
+| `POST` | `/api/v1/consumer-groups/:group/queues/:queue/seek` |
+| `POST` | `/api/v1/consumer-groups/:group/subscription` |
+| `DELETE` | `/api/v1/messages/:partitionId/:transactionId` |
+| `DELETE` | `/api/v1/resources/queues/:queue` |
+
+### read
+
+| Method | Path |
+| --- | --- |
+| `GET` | `/api/v1/analytics/queue-lag` |
+| `GET` | `/api/v1/analytics/queue-ops` |
+| `GET` | `/api/v1/analytics/queue-parked-replicas` |
+| `GET` | `/api/v1/analytics/retention` |
+| `GET` | `/api/v1/consumer-groups` |
+| `GET` | `/api/v1/consumer-groups/:group` |
+| `GET` | `/api/v1/consumer-groups/lagging` |
+| `GET` | `/api/v1/dlq` |
+| `GET` | `/api/v1/messages` |
+| `GET` | `/api/v1/messages/:partitionId/:transactionId` |
+| `POST` | `/api/v1/messages/:partitionId/:transactionId/retry` |
+| `GET` | `/api/v1/resources/namespaces` |
+| `GET` | `/api/v1/resources/overview` |
+| `GET` | `/api/v1/resources/queues` |
+| `GET` | `/api/v1/resources/queues/:queue` |
+| `GET` | `/api/v1/resources/tasks` |
+| `GET` | `/api/v1/status/analytics` |
+| `GET` | `/api/v1/status/queues` |
+| `GET` | `/api/v1/status/queues/:queue` |
+| `GET` | `/api/v1/traces/:partitionId/:transactionId` |
+| `GET` | `/api/v1/traces/by-name/:traceName` |
+| `GET` | `/api/v1/traces/names` |
+| `GET` | `/health` |
+
+### gated (streams)
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/streams/v1/cycle` |
+| `POST` | `/streams/v1/queries` |
+| `POST` | `/streams/v1/state/get` |
+
+### gated (traces)
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/v1/traces` |
+
+### operator
+
+| Method | Path |
+| --- | --- |
+| `GET` | `/api/v1/analytics/postgres-stats` |
+| `GET` | `/api/v1/analytics/system-metrics` |
+| `GET` | `/api/v1/analytics/worker-metrics` |
+| `GET` | `/api/v1/status` |
+| `GET` | `/api/v1/status/buffers` |
+| `GET` | `/api/v1/system/maintenance` |
+| `POST` | `/api/v1/system/maintenance` |
+| `GET` | `/metrics/prometheus` |
+
+### blocked
+
+| Method | Path |
+| --- | --- |
+| `GET` | `/api/v1/pop` |
+| `POST` | `/api/v1/stats/refresh` |
+| `GET` | `/api/v1/system/maintenance/pop` |
+| `POST` | `/api/v1/system/maintenance/pop` |
+| `GET` | `/api/v1/system/shared-state` |
+| `GET` | `/internal/api/inter-instance/stats` |
+| `POST` | `/internal/api/notify` |
+| `GET` | `/internal/api/shared-state/stats` |
+| `GET` | `/metrics` |
+| `GET` | `/status` |
+
+42 of the broker's 60 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

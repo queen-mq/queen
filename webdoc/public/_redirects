@@ -1,0 +1,47 @@
+# Cloudflare Pages redirects.
+#
+# The pages below were indexed under the previous documentation site (flat
+# .html files at the root). Keep them reachable: an indexed URL that 404s costs
+# more than the redirect does.
+/index.html               /                                301
+/quickstart               /start/quickstart                301
+/quickstart.html          /start/quickstart                301
+/concepts                 /use/concepts                    301
+/concepts.html            /use/concepts                    301
+/architecture             /internals                       301
+/architecture.html        /internals                       301
+/clients                  /use/clients                     301
+/clients.html             /use/clients                     301
+/http-api                 /reference/http                  301
+/http-api.html            /reference/http                  301
+/cli                      /reference/queenctl              301
+/cli.html                 /reference/queenctl              301
+/server                   /selfhost                        301
+/server.html              /selfhost                        301
+/dashboard                /selfhost/dashboard              301
+/dashboard.html           /selfhost/dashboard              301
+/sizing                   /selfhost/sizing                 301
+/sizing.html              /selfhost/sizing                 301
+/visual-tour              /start                           301
+/visual-tour.html         /start                           301
+/benchmarks.html          /benchmarks                      301
+/benchmarks-0.16-lag      /benchmarks/archive              301
+/benchmarks-0.16-lag.html /benchmarks/archive              301
+/benchmarks-0.16-matrix   /benchmarks/archive              301
+/benchmarks-0.16-matrix.html /benchmarks/archive           301
+/benchmarks-0.16-soak     /benchmarks/archive              301
+/benchmarks-0.16-soak.html /benchmarks/archive             301
+/benchmarks-2026-04       /benchmarks/archive              301
+/benchmarks-2026-04.html  /benchmarks/archive              301
+/use-cases                /use/examples                    301
+/use-cases.html           /use/examples                    301
+/use-case-pipeline        /use/examples/pipeline           301
+/use-case-pipeline.html   /use/examples/pipeline           301
+/use-case-dedup           /use/examples/dedup              301
+/use-case-dedup.html      /use/examples/dedup              301
+/use-case-replay          /use/examples/replay             301
+/use-case-replay.html     /use/examples/replay             301
+/use-case-aggregations    /use/streams                     301
+/use-case-aggregations.html /use/streams                   301
+/use-case-rate-limiter    /use/streams                     301
+/use-case-rate-limiter.html /use/streams                   301

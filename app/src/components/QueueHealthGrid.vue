@@ -9,6 +9,7 @@
       <div class="h-c">Throughput</div>
       <div class="h-c">Lag p99</div>
       <div class="h-c h-parts">Partitions</div>
+      <div class="h-c h-store">Storage</div>
       <div></div>
     </div>
 
@@ -20,6 +21,7 @@
         <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
         <span v-if="showHot" class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
         <span class="skeleton" style="height: 18px; width: 70px; margin: 0 auto;"></span>
+        <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
         <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
         <span class="skeleton" style="height: 18px; width: 60px; margin: 0 auto;"></span>
         <span></span>
@@ -69,9 +71,14 @@
         <span class="cell-c cc-parts">
           <span class="cc sev-mute">{{ fmt(q.partitions) }}<i>parts</i></span>
         </span>
+        <span class="cell-c cc-store">
+          <span class="cc sev-mute" :title="q.retainedBytes == null ? 'Storage not reported for this queue' : undefined">
+            {{ fmtBytes(q.retainedBytes) }}
+          </span>
+        </span>
         <span class="cell-c qactions">
           <button
-            v-if="$slots.actions || true"
+            v-if="canDelete"
             class="qaction"
             title="Delete queue"
             @click.stop="$emit('delete', q)"
@@ -89,13 +96,16 @@
 <script setup>
 import { computed } from 'vue'
 
+import { formatBytes } from '@/composables/useApi'
+
 const props = defineProps({
   /**
    * Queue rows. Each entry should expose:
    *   { name, namespace, task, partitions, pending, processing, density,
-   *     popPerSec, pushPerSec, avgLagMs, hotCount }
-   * Missing throughput/lag fields default to 0; hotCount may be null
-   * (renders as '—') until the backend exposes a hot-count procedure.
+   *     popPerSec, pushPerSec, avgLagMs, hotCount, retainedBytes }
+   * Missing throughput/lag fields default to 0. `pending`, `hotCount` and
+   * `retainedBytes` may be null — that means NOT REPORTED and renders as '—',
+   * which is not the same claim as 0.
    */
   queues: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
@@ -106,6 +116,13 @@ const props = defineProps({
   /** Render the Hot column. Requires `hotCount` field on each queue (from
    * the queue-hot-counts backend procedure, not yet wired). */
   showHot: { type: Boolean, default: false },
+  /**
+   * Render the per-row delete affordance. The caller passes can('queueAdmin')
+   * — DELETE /api/v1/resources/queues/:name is RouteClass::QueueAdmin at the
+   * proxy, so showing the button to anyone else offers a 403 dressed as a
+   * dead button.
+   */
+  canDelete: { type: Boolean, default: false },
 })
 
 defineEmits(['select', 'delete'])
@@ -157,7 +174,10 @@ function cardSev(q) {
   const l = lagSev(q.avgLagMs)
   if (t === 'bad' || l === 'bad') return 'bad'
   if (t === 'warn' || l === 'warn') return 'warn'
-  if ((q.popPerSec || 0) < 5 && (q.pushPerSec || 0) < 5 && (q.pending || 0) < 1) return 'ice'
+  // Only an explicit 0 proves the queue is drained. `pending == null` means
+  // the backend did not report it, and claiming "idle" from an unknown is how
+  // a backed-up queue ends up painted the same colour as an empty one.
+  if ((q.popPerSec || 0) < 5 && (q.pushPerSec || 0) < 5 && q.pending === 0) return 'ice'
   return 'ok'
 }
 
@@ -169,6 +189,9 @@ function fmt(n) {
   return String(n)
 }
 function fmtRate(n) {
+  // null = the throughput source failed or was never sampled. '0' would read
+  // as "this queue is quiet", which is a different claim.
+  if (n === null || n === undefined) return '—'
   if (!n) return '0'
   if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
   if (n >= 100)  return Math.round(n).toString()
@@ -177,8 +200,14 @@ function fmtRate(n) {
   // so we always cap precision at 2 decimals — never render the raw float.
   return n.toFixed(2)
 }
+function fmtBytes(bytes) {
+  // Unreported storage is '—'; "0 B" would claim an empty queue.
+  if (bytes === null || bytes === undefined) return '—'
+  return formatBytes(bytes)
+}
 function fmtLag(ms) {
-  if (!ms) return '—'
+  if (ms === null || ms === undefined) return '—'
+  if (!ms) return '0'
   if (ms < 1000) return ms + 'ms'
   if (ms < 60_000) return (ms / 1000).toFixed(1) + 's'
   if (ms < 3_600_000) return Math.round(ms / 60000) + 'm'
@@ -241,7 +270,7 @@ const displayed = computed(() => {
 /* column header */
 .qhead {
   display: grid;
-  grid-template-columns: 14px minmax(220px, 1fr) 76px 86px 78px 92px 82px 32px;
+  grid-template-columns: 14px minmax(200px, 1fr) 76px 86px 78px 92px 82px 84px 32px;
   gap: 10px;
   align-items: center;
   padding: 0 12px 0 0;
@@ -261,7 +290,7 @@ const displayed = computed(() => {
 .qrow {
   position: relative;
   display: grid;
-  grid-template-columns: 14px minmax(220px, 1fr) 76px 86px 78px 92px 82px 32px;
+  grid-template-columns: 14px minmax(200px, 1fr) 76px 86px 78px 92px 82px 84px 32px;
   gap: 10px;
   align-items: center;
   padding: 0 12px 0 0;
@@ -275,7 +304,7 @@ const displayed = computed(() => {
 /* without the Hot column */
 .qhg-no-hot .qhead,
 .qhg-no-hot .qrow {
-  grid-template-columns: 14px minmax(220px, 1fr) 76px 78px 92px 82px 32px;
+  grid-template-columns: 14px minmax(200px, 1fr) 76px 78px 92px 82px 84px 32px;
 }
 .qrow:last-child { border-bottom: none; }
 .qrow:hover { background: rgba(255, 255, 255, .025); }
@@ -410,11 +439,21 @@ const displayed = computed(() => {
 }
 
 /* responsive: hide hot/parts at narrow widths */
+@media (max-width: 1000px) {
+  .qhead, .qrow,
+  .qhg-no-hot .qhead, .qhg-no-hot .qrow {
+    grid-template-columns: 14px minmax(180px, 1fr) 76px 78px 92px 82px 32px;
+  }
+  .qrow .cc-hot, .qrow .cc-store,
+  .qhead .h-hot, .qhead .h-store { display: none; }
+}
+
 @media (max-width: 880px) {
-  .qhead, .qrow {
+  .qhead, .qrow,
+  .qhg-no-hot .qhead, .qhg-no-hot .qrow {
     grid-template-columns: 14px minmax(140px, 1fr) 76px 78px 82px 32px;
   }
-  .qrow .cc-hot, .qrow .cc-parts,
-  .qhead .h-hot, .qhead .h-parts { display: none; }
+  .qrow .cc-hot, .qrow .cc-parts, .qrow .cc-store,
+  .qhead .h-hot, .qhead .h-parts, .qhead .h-store { display: none; }
 }
 </style>

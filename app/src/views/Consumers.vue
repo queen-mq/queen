@@ -1,11 +1,24 @@
 <template>
   <div class="view-container">
 
+    <!-- Tenant scope. Consumer groups, lag and cursors below belong to the
+         acting tenant on this cluster; the cell is named so neither is read
+         as the other. -->
+    <div class="scope-strip">
+      <span class="chip chip-mute">tenant scope</span>
+      <span class="scope-text">
+        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
+        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
+        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
+      </span>
+      <span class="scope-fill"></span>
+      <span v-if="!canAdmin" class="scope-meta">read-only role — cursor and delete actions hidden</span>
+    </div>
+
     <!--
       ========================================================================
       Toolbar — same idiom as Queues.vue: search · filters · sort segmented ·
-      legend. Replaces the old 4-stat-card row + separate filter card. The
-      "lagging only" check is the only consumer-specific addition.
+      legend. The "lagging only" check is the only consumer-specific addition.
       ========================================================================
     -->
     <div class="qtoolbar">
@@ -64,11 +77,10 @@
     <!--
       ========================================================================
       Lagging Partitions — placed at the top because it's actionable: the
-      operator wants to know "is anything stuck right now?" before they
-      scan the per-group list. Auto-loaded on mount with the 1h default
-      threshold so the count badge is visible without the user having to
-      open it; collapsed by default so a busy cluster doesn't push the
-      main grid below the fold.
+      operator wants to know "is anything stuck right now?" before they scan
+      the per-group list. The badge has THREE states, never two: a count, a
+      clean bill of health, and "unavailable" — a failed fetch must never
+      render as "none above the threshold".
       ========================================================================
     -->
     <div class="lp-card" :class="{ 'lp-card-warn': laggingPartitions.length > 0 }">
@@ -82,10 +94,14 @@
         </svg>
         <span class="lp-head-title">Lagging partitions</span>
 
-        <!-- Count badge — visible whether collapsed or expanded so the
-             "is anything stuck?" answer is always one glance away. -->
+        <span v-if="laggingLoading" class="lp-head-hint">loading…</span>
         <span
-          v-if="laggingLoaded && laggingPartitions.length > 0"
+          v-else-if="lagging.failed.value"
+          class="lp-head-badge lp-head-badge-bad"
+          :title="laggingErrorText"
+        >unavailable</span>
+        <span
+          v-else-if="laggingLoaded && laggingPartitions.length > 0"
           class="lp-head-badge lp-head-badge-warn"
         >
           {{ laggingPartitions.length }}
@@ -97,14 +113,7 @@
         >
           none above {{ getLagLabel(lagThreshold) }}
         </span>
-        <span
-          v-else-if="laggingLoading"
-          class="lp-head-hint"
-        >loading…</span>
-        <span
-          v-else
-          class="lp-head-hint"
-        >expand to inspect partitions individually</span>
+        <span v-else class="lp-head-hint">expand to inspect partitions individually</span>
 
         <span style="flex:1;"></span>
 
@@ -137,6 +146,11 @@
           Loading lagging partitions…
         </div>
 
+        <div v-else-if="lagging.failed.value" class="lp-error">
+          Lagging partitions could not be loaded — {{ laggingErrorText }}.
+          Nothing here means "unknown", not "nothing is behind".
+        </div>
+
         <div v-else-if="laggingPartitions.length > 0" class="lp-table-wrap">
           <table class="t lp-table">
             <thead>
@@ -148,7 +162,7 @@
                 <th style="text-align:right;">Offset lag</th>
                 <th style="text-align:right;">Time lag</th>
                 <th>Oldest unconsumed</th>
-                <th style="text-align:right;">Action</th>
+                <th v-if="canAdmin" style="text-align:right;">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -169,16 +183,16 @@
                   >{{ formatDuration((p.time_lag_seconds || 0) * 1000) }}</span>
                 </td>
                 <td>
-                  <span class="font-mono" style="font-size:11.5px; color:var(--text-mid);">{{ formatTimestamp(p.oldest_unconsumed_at) }}</span>
+                  <span class="font-mono" style="font-size:11.5px; color:var(--text-mid);">{{ formatDateTime(p.oldest_unconsumed_at) }}</span>
                 </td>
-                <td style="text-align:right;">
+                <td v-if="canAdmin" style="text-align:right;">
                   <button
                     class="btn btn-ghost"
                     style="font-size:11px; padding:3px 8px;"
-                    :disabled="skippingPartition === `${p.consumer_group}-${p.queue_name}-${p.partition_name}`"
-                    @click="handleSkipPartition(p)"
+                    :disabled="skippingPartition === partitionKey(p)"
+                    @click="askSkipPartition(p)"
                   >
-                    {{ skippingPartition === `${p.consumer_group}-${p.queue_name}-${p.partition_name}` ? 'Skipping…' : 'Skip to end' }}
+                    {{ skippingPartition === partitionKey(p) ? 'Skipping…' : 'Skip to end' }}
                   </button>
                 </td>
               </tr>
@@ -195,6 +209,15 @@
       </div>
     </div>
 
+    <!-- A failed list must not look like an empty one: say the grid below is
+         stale (or absent), and how stale. -->
+    <div v-if="groups.failed.value" class="lp-error" style="margin-bottom:12px;">
+      Consumer groups could not be loaded — {{ groupsErrorText }}.
+      <span v-if="consumers.length">
+        The list below is from {{ groups.lastUpdated.value?.toLocaleTimeString() }} and may be out of date.
+      </span>
+    </div>
+
     <!--
       ========================================================================
       Health grid — the main entity list. Click row → detail modal; hover
@@ -203,11 +226,12 @@
     -->
     <ConsumerHealthGrid
       :consumers="filteredConsumers"
-      :loading="loading"
+      :loading="groupsFirstLoad"
       :sort-by="sortBy"
+      :can-admin="canAdmin"
       @select="viewConsumer"
       @view="viewConsumer"
-      @move-now="handleMoveToNow"
+      @move-now="askMoveToNow"
       @seek="openSeekModal"
       @delete="confirmDelete"
     >
@@ -223,12 +247,7 @@
       </template>
     </ConsumerHealthGrid>
 
-    <!--
-      ========================================================================
-      Modals — kept verbatim from the previous design. Functionally
-      unchanged; just live below the new grid in the document.
-      ========================================================================
-    -->
+    <!-- ===================== Detail modal ===================== -->
     <div
       v-if="selectedConsumer"
       class="modal-backdrop"
@@ -244,31 +263,32 @@
           </button>
         </div>
         <div class="card-body" style="overflow-y:auto; max-height:60vh;">
-          <div class="grid-4" style="margin-bottom:24px;">
-            <div class="stat" style="text-align:center; min-height:auto; padding:16px;">
+          <div class="cg-stats">
+            <div class="stat cg-stat">
               <div class="stat-label" style="justify-content:center;">Partitions</div>
-              <div class="stat-value font-mono" style="font-size:24px;">{{ selectedConsumer.members || 0 }}</div>
+              <div class="stat-value font-mono">{{ dash(selectedConsumer.members) }}</div>
             </div>
-            <div class="stat" style="text-align:center; min-height:auto; padding:16px;">
+            <div class="stat cg-stat">
               <div class="stat-label" style="justify-content:center;">State</div>
-              <div
-                style="font-size:18px; font-weight:600; margin-top:8px;"
-                :style="getStatusText(selectedConsumer) === 'Stable'
-                  ? { color: 'var(--ok-500)' }
-                  : getStatusText(selectedConsumer) === 'Lagging'
-                    ? { color: 'var(--warn-400)' }
-                    : { color: 'var(--text-mid)' }"
-              >{{ getStatusText(selectedConsumer) }}</div>
+              <div class="cg-state" :class="stateClass(selectedConsumer)">{{ getStatusText(selectedConsumer) }}</div>
             </div>
-            <div class="stat" style="text-align:center; min-height:auto; padding:16px;">
+            <div class="stat cg-stat">
               <div class="stat-label" style="justify-content:center;">Lag parts</div>
-              <div class="stat-value font-mono" style="font-size:24px;" :style="{ color: (selectedConsumer.partitionsWithLag || 0) > 0 ? 'var(--warn-400)' : 'var(--text-hi)' }">
-                {{ selectedConsumer.partitionsWithLag || 0 }}
-              </div>
+              <div
+                class="stat-value font-mono num"
+                :class="{ warn: (selectedConsumer.partitionsWithLag || 0) > 0 }"
+              >{{ dash(selectedConsumer.partitionsWithLag) }}</div>
             </div>
-            <div class="stat" style="text-align:center; min-height:auto; padding:16px;">
+            <div class="stat cg-stat">
+              <!-- Real message-count backlog from the log engine — the number
+                   operators actually ask for, and it is returned already. -->
+              <div class="stat-label" style="justify-content:center;">Backlog</div>
+              <div class="stat-value font-mono">{{ dash(selectedConsumer.totalLag) }}</div>
+              <div class="stat-foot" style="justify-content:center;">messages behind</div>
+            </div>
+            <div class="stat cg-stat">
               <div class="stat-label" style="justify-content:center;">Time lag</div>
-              <div class="stat-value font-mono" style="font-size:24px; color:var(--text-hi);">
+              <div class="stat-value font-mono">
                 {{ (selectedConsumer.maxTimeLag || 0) > 0 ? formatDuration(selectedConsumer.maxTimeLag * 1000) : '—' }}
               </div>
             </div>
@@ -291,7 +311,11 @@
                 style="display:flex; align-items:center; justify-content:space-between;"
               >
                 <span style="font-weight:500; color:var(--text-hi);">{{ topic }}</span>
-                <button @click="seekQueue(selectedConsumer.name, topic)" class="btn btn-ghost">Seek</button>
+                <button
+                  v-if="canAdmin"
+                  class="btn btn-ghost"
+                  @click="openSeekModal({ ...selectedConsumer, queueName: topic })"
+                >Seek</button>
               </div>
             </div>
           </div>
@@ -299,10 +323,11 @@
       </div>
     </div>
 
+    <!-- ===================== Delete modal ===================== -->
     <div
       v-if="consumerToDelete"
       class="modal-backdrop"
-      @click="consumerToDelete = null"
+      @click="closeDeleteModal"
     >
       <div class="card modal-card" style="padding:24px; max-width:448px;" @click.stop>
         <h3 style="font-size:18px; font-weight:600; color:var(--text-hi); margin-bottom:8px;">
@@ -321,8 +346,10 @@
           Also delete subscription metadata
         </label>
 
+        <div v-if="deleteError" class="lp-error" style="margin-bottom:16px;">{{ deleteError }}</div>
+
         <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px;">
-          <button @click="consumerToDelete = null" class="btn btn-ghost">Cancel</button>
+          <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
           <button @click="deleteConsumer" :disabled="actionLoading" class="btn btn-danger">
             {{ actionLoading ? 'Deleting…' : 'Delete' }}
           </button>
@@ -330,6 +357,7 @@
       </div>
     </div>
 
+    <!-- ===================== Seek modal ===================== -->
     <div
       v-if="showSeekModal"
       class="modal-backdrop"
@@ -351,10 +379,32 @@
           </p>
         </div>
 
+        <div v-if="seekError" class="lp-error" style="margin-bottom:16px;">{{ seekError }}</div>
+
         <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px;">
           <button @click="showSeekModal = false" class="btn btn-ghost">Cancel</button>
           <button @click="handleSeekToTimestamp" :disabled="actionLoading || !seekTimestamp" class="btn btn-primary">
             {{ actionLoading ? 'Seeking…' : 'Seek to timestamp' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== Confirmation modal =====================
+         Replaces the native confirm() that used to guard the two cursor-
+         skipping actions: same modal system the rest of the page uses, and
+         the outcome is reported instead of assumed. -->
+    <div v-if="pendingConfirm" class="modal-backdrop" @click="pendingConfirm = null">
+      <div class="card modal-card" style="padding:24px; max-width:448px;" @click.stop>
+        <h3 style="font-size:18px; font-weight:600; color:var(--text-hi); margin-bottom:8px;">
+          {{ pendingConfirm.title }}
+        </h3>
+        <p style="color:var(--text-mid); margin-bottom:8px;">{{ pendingConfirm.body }}</p>
+        <p style="font-size:13px; color:var(--text-low); margin-bottom:24px;">{{ pendingConfirm.consequence }}</p>
+        <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px;">
+          <button @click="pendingConfirm = null" class="btn btn-ghost">Cancel</button>
+          <button @click="runPendingConfirm" :disabled="actionLoading" class="btn btn-primary">
+            {{ actionLoading ? 'Working…' : pendingConfirm.confirmLabel }}
           </button>
         </div>
       </div>
@@ -365,11 +415,26 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { consumers as consumersApi } from '@/api'
-import { formatNumber, formatDuration } from '@/composables/useApi'
-import { useRefresh } from '@/composables/useRefresh'
-import { useQueuesStore } from '@/stores/queuesStore'
+
 import ConsumerHealthGrid from '@/components/ConsumerHealthGrid.vue'
+import { consumers as consumersApi, describeApiError } from '@/api'
+import {
+  formatDateTime, formatDuration, formatNumber, toNum, useApi,
+} from '@/composables/useApi'
+import { formatDateTimeLocal } from '@/composables/useFormat'
+import { useRefresh } from '@/composables/useRefresh'
+import { useToast } from '@/composables/useToast'
+import { useIdentity } from '@/stores/identity'
+import { useQueuesStore } from '@/stores/queuesStore'
+
+// TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; the
+// mutating routes (delete / seek) are RouteClass::QueueAdmin at the proxy, so
+// their controls are shown only to a role that may actually use them.
+const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+// notifyWarn carries an outcome the interceptor cannot see: a 2xx that did
+// nothing (no partition matched, nothing deleted) is a failure to the user.
+const { notifySuccess, notifyWarn } = useToast()
+const canAdmin = computed(() => can('queueAdmin'))
 
 // Shared queues store. The Queues page populates it; we just consume here.
 // queueMeta gives us the queue → { namespace, task } join we need to scope
@@ -382,8 +447,6 @@ const route = useRoute()
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-const consumers = ref([])
-const loading = ref(true)
 const searchQuery = ref('')
 const showLaggingOnly = ref(false)
 const filterNamespace = ref('')
@@ -394,18 +457,18 @@ const sortBy = ref('health')
 const selectedConsumer = ref(null)
 const consumerToDelete = ref(null)
 const deleteMetadata = ref(true)
+const deleteError = ref('')
 const actionLoading = ref(false)
 
 const showSeekModal = ref(false)
 const seekConsumer = ref(null)
 const seekTimestamp = ref('')
+const seekError = ref('')
+
+const pendingConfirm = ref(null)
 
 const showLaggingSection = ref(false)
-const laggingPartitions = ref([])
-const laggingLoading = ref(false)
-const laggingLoaded = ref(false)  // first fetch completed → drives the count badge
 const lagThreshold = ref(3600)
-
 const skippingPartition = ref(null)
 
 const sortOptions = [
@@ -425,6 +488,42 @@ const lagPresets = [
   { value: 21600, label: '6h'  },
   { value: 86400, label: '24h' },
 ]
+
+// ---------------------------------------------------------------------------
+// Fetchers. Both keep their own error so a failed refresh can never be shown
+// as an empty list or as a clean bill of health.
+// ---------------------------------------------------------------------------
+const groups = useApi((config) => consumersApi.list(config))
+const lagging = useApi((config) => consumersApi.getLagging(lagThreshold.value, config))
+
+const consumers = computed(() => {
+  const d = groups.data.value
+  if (Array.isArray(d)) return d
+  return d?.consumer_groups || []
+})
+const groupsFirstLoad = computed(() => groups.loading.value && !groups.data.value)
+const groupsErrorText = computed(() => describeApiError(groups.error.value))
+
+const laggingPartitions = computed(() => {
+  const d = lagging.data.value
+  return Array.isArray(d) ? d : []
+})
+const laggingLoading = computed(() => lagging.loading.value)
+const laggingLoaded = computed(() => lagging.lastUpdated.value !== null && !lagging.failed.value)
+const laggingErrorText = computed(() => describeApiError(lagging.error.value))
+
+const fetchConsumers = () => groups.refresh()
+const loadLaggingPartitions = () => lagging.refresh()
+
+// Pull queues into the shared store (cache-respecting). If another view
+// already populated it within the TTL window, this is a no-op.
+const ensureQueues = (force = false) => fetchQueues({ force })
+
+// Refresh everything the page shows — including the lagging badge, which used
+// to keep stating its mount-time count while the grid beside it updated.
+const refreshAll = async () => {
+  await Promise.all([fetchConsumers(), ensureQueues(true), loadLaggingPartitions()])
+}
 
 // ---------------------------------------------------------------------------
 // Computed
@@ -478,34 +577,6 @@ const filteredConsumers = computed(() => {
   return result
 })
 
-// ---------------------------------------------------------------------------
-// Methods
-// ---------------------------------------------------------------------------
-const getStatusText = (g) => g.state || 'Unknown'
-
-const fetchConsumers = async () => {
-  if (!consumers.value.length) loading.value = true
-  try {
-    const r = await consumersApi.list()
-    consumers.value = Array.isArray(r.data) ? r.data : (r.data?.consumer_groups || [])
-  } catch (err) {
-    console.error('Failed to fetch consumers:', err)
-  } finally {
-    loading.value = false
-  }
-}
-
-// Pull queues into the shared store (cache-respecting). If another view
-// already populated it within the TTL window, this is a no-op.
-const ensureQueues = (force = false) => fetchQueues({ force })
-
-// Refresh both consumers and queues on each tick. The auto-refresh
-// interval is the right time to force-bust the cache because the user
-// has chosen to receive fresh data.
-const refreshAll = async () => {
-  await Promise.all([fetchConsumers(), ensureQueues(true)])
-}
-
 // Clear queue filter when it falls out of the namespace/task scope, so
 // the user doesn't end up with an empty result set after narrowing.
 watch([filterNamespace, filterTask], () => {
@@ -514,110 +585,22 @@ watch([filterNamespace, filterTask], () => {
   }
 })
 
-const viewConsumer = (g) => { selectedConsumer.value = g }
-const confirmDelete = (g) => { consumerToDelete.value = g }
-
-const deleteConsumer = async () => {
-  if (!consumerToDelete.value) return
-  actionLoading.value = true
-  try {
-    if (consumerToDelete.value.queueName) {
-      await consumersApi.deleteForQueue(
-        consumerToDelete.value.name,
-        consumerToDelete.value.queueName,
-        deleteMetadata.value
-      )
-    } else {
-      await consumersApi.delete(consumerToDelete.value.name, deleteMetadata.value)
-    }
-    consumerToDelete.value = null
-    fetchConsumers()
-  } catch (err) {
-    console.error('Failed to delete consumer:', err)
-  } finally {
-    actionLoading.value = false
-  }
+// ---------------------------------------------------------------------------
+// Presentation helpers
+// ---------------------------------------------------------------------------
+const getStatusText = (g) => g.state || 'Unknown'
+const stateClass = (g) => {
+  const s = getStatusText(g)
+  if (s === 'Stable') return 'cg-state-ok'
+  if (s === 'Lagging') return 'cg-state-warn'
+  return 'cg-state-mute'
 }
-
-const handleMoveToNow = async (g) => {
-  if (!g.queueName) return
-  const groupLabel = g.name === '__QUEUE_MODE__' ? '(queue mode)' : g.name
-  if (!confirm(`Move cursor to now for "${groupLabel}" on queue "${g.queueName}"?\n\nThis will skip all pending messages and start consuming from the latest message.`)) {
-    return
-  }
-  actionLoading.value = true
-  try {
-    await consumersApi.seek(g.name, g.queueName, { toEnd: true })
-    fetchConsumers()
-  } catch (err) {
-    console.error('Failed to move to now:', err)
-  } finally {
-    actionLoading.value = false
-  }
+/** A count we hold, or an em dash — a missing value is not a zero. */
+const dash = (v) => {
+  const n = toNum(v)
+  return n === null ? '—' : formatNumber(n)
 }
-
-const handleSkipPartition = async (p) => {
-  const key = `${p.consumer_group}-${p.queue_name}-${p.partition_name}`
-  if (!confirm(`Skip to end for partition "${p.partition_name}" on queue "${p.queue_name}" (group: ${p.consumer_group})?\n\nThis advances the cursor to the latest message, skipping all pending messages on this partition.`)) {
-    return
-  }
-  skippingPartition.value = key
-  try {
-    await consumersApi.seekPartition(p.consumer_group, p.queue_name, p.partition_name)
-    await loadLaggingPartitions()
-  } catch (err) {
-    console.error('Failed to skip partition:', err)
-    alert('Failed to skip partition: ' + (err.response?.data?.error || err.message))
-  } finally {
-    skippingPartition.value = null
-  }
-}
-
-const openSeekModal = (g) => {
-  seekConsumer.value = g
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
-  seekTimestamp.value = formatDateTimeLocal(oneHourAgo)
-  showSeekModal.value = true
-}
-
-const handleSeekToTimestamp = async () => {
-  if (!seekConsumer.value || !seekTimestamp.value) return
-  actionLoading.value = true
-  try {
-    const isoTimestamp = new Date(seekTimestamp.value).toISOString()
-    await consumersApi.seek(seekConsumer.value.name, seekConsumer.value.queueName, { timestamp: isoTimestamp })
-    showSeekModal.value = false
-    seekTimestamp.value = ''
-    fetchConsumers()
-  } catch (err) {
-    console.error('Failed to seek:', err)
-  } finally {
-    actionLoading.value = false
-  }
-}
-
-const formatDateTimeLocal = (date) => {
-  const y = date.getFullYear()
-  const mo = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  const h = String(date.getHours()).padStart(2, '0')
-  const mi = String(date.getMinutes()).padStart(2, '0')
-  return `${y}-${mo}-${d}T${h}:${mi}`
-}
-
-const loadLaggingPartitions = async () => {
-  laggingLoading.value = true
-  try {
-    const r = await consumersApi.getLagging(lagThreshold.value)
-    laggingPartitions.value = r.data || []
-  } catch (err) {
-    console.error('Failed to load lagging partitions:', err)
-    laggingPartitions.value = []
-  } finally {
-    laggingLoading.value = false
-    laggingLoaded.value = true
-  }
-}
+const partitionKey = (p) => `${p.consumer_group}-${p.queue_name}-${p.partition_name}`
 
 const getLagLabel = (seconds) => {
   if (seconds < 3600) {
@@ -628,14 +611,170 @@ const getLagLabel = (seconds) => {
   const d = Math.round(seconds / 86400); return `${d} day${d !== 1 ? 's' : ''}`
 }
 
-const formatTimestamp = (ts) => {
-  if (!ts) return '—'
+const viewConsumer = (g) => { selectedConsumer.value = g }
+
+// ---------------------------------------------------------------------------
+// Actions
+//
+// Every one of these returns a body the UI has to READ: the seek SPs report
+// `partitionsUpdated`, the deletes report `deletedPartitions`. A 2xx carrying
+// zero of either means nothing happened, and saying "done" there is the same
+// lie as a success toast on a failed call.
+// ---------------------------------------------------------------------------
+
+/** Null when the payload says work was done, else why it wasn't. */
+const seekProblem = (data) => {
+  if (!data || typeof data !== 'object') return 'The broker returned no result.'
+  if (data.success === false) return data.error || 'The broker refused the seek.'
+  const n = toNum(data.partitionsUpdated)
+  if (n !== null && n === 0) return 'No partition matched — the cursor did not move.'
+  return null
+}
+
+const confirmDelete = (g) => {
+  deleteError.value = ''
+  consumerToDelete.value = g
+}
+const closeDeleteModal = () => {
+  consumerToDelete.value = null
+  deleteError.value = ''
+}
+
+const deleteConsumer = async () => {
+  if (!consumerToDelete.value) return
+  const target = consumerToDelete.value
+  const label = target.name === '__QUEUE_MODE__' ? `queue mode on ${target.queueName}` : target.name
+  actionLoading.value = true
+  deleteError.value = ''
   try {
-    return new Date(ts).toLocaleString('en-US', {
-      month: 'short', day: 'numeric',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    })
-  } catch { return ts }
+    const res = target.queueName
+      ? await consumersApi.deleteForQueue(target.name, target.queueName, deleteMetadata.value)
+      : await consumersApi.delete(target.name, deleteMetadata.value)
+    const deleted = toNum(res.data?.deletedPartitions)
+    if (deleted !== null && deleted === 0) {
+      // 200 + nothing removed: the group has no state on this tenant. Keep the
+      // modal open rather than close it as if the delete had landed.
+      deleteError.value = 'Nothing was deleted — no partition state matched this group.'
+      return
+    }
+    consumerToDelete.value = null
+    notifySuccess(
+      `Deleted ${label}`,
+      deleted === null ? null : `${deleted} partition${deleted === 1 ? '' : 's'} cleared`,
+    )
+    fetchConsumers()
+  } catch (err) {
+    // The failure is already on the global surface; this keeps the modal open
+    // and says why, instead of closing as though it had worked.
+    deleteError.value = describeApiError(err)
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+const askMoveToNow = (g) => {
+  if (!g.queueName) return
+  const label = g.name === '__QUEUE_MODE__' ? '(queue mode)' : g.name
+  pendingConfirm.value = {
+    title: 'Move cursor to now',
+    body: `Move the cursor for "${label}" on queue "${g.queueName}" to the latest message?`,
+    consequence: 'Every pending message on that queue is skipped and will never be delivered to this group.',
+    confirmLabel: 'Move cursor',
+    run: () => moveToNow(g, label),
+  }
+}
+
+const moveToNow = async (g, label) => {
+  try {
+    const res = await consumersApi.seek(g.name, g.queueName, { toEnd: true })
+    const problem = seekProblem(res.data)
+    if (problem) {
+      notifyWarn(`Cursor not moved for ${label}`, problem)
+      return
+    }
+    notifySuccess(
+      `Cursor moved to now for ${label}`,
+      `${res.data.partitionsUpdated} partition${res.data.partitionsUpdated === 1 ? '' : 's'} on ${g.queueName}`,
+    )
+    fetchConsumers()
+  } catch {
+    // Already announced by the interceptor with the status and reason.
+  }
+}
+
+const askSkipPartition = (p) => {
+  pendingConfirm.value = {
+    title: 'Skip partition to end',
+    body: `Skip partition "${p.partition_name}" on queue "${p.queue_name}" (group ${p.consumer_group}) to the latest message?`,
+    consequence: 'Every pending message on that partition is skipped and will never be delivered to this group.',
+    confirmLabel: 'Skip to end',
+    run: () => skipPartition(p),
+  }
+}
+
+const skipPartition = async (p) => {
+  skippingPartition.value = partitionKey(p)
+  try {
+    const res = await consumersApi.seekPartition(p.consumer_group, p.queue_name, p.partition_name)
+    const problem = seekProblem(res.data)
+    if (problem) {
+      notifyWarn(`Partition ${p.partition_name} not skipped`, problem)
+      return
+    }
+    notifySuccess(`Skipped ${p.partition_name} to the end`, `${p.queue_name} · ${p.consumer_group}`)
+    await loadLaggingPartitions()
+  } catch {
+    // Already announced by the interceptor.
+  } finally {
+    skippingPartition.value = null
+  }
+}
+
+const runPendingConfirm = async () => {
+  const action = pendingConfirm.value
+  if (!action) return
+  actionLoading.value = true
+  try {
+    await action.run()
+  } finally {
+    actionLoading.value = false
+    pendingConfirm.value = null
+  }
+}
+
+const openSeekModal = (g) => {
+  seekConsumer.value = g
+  seekError.value = ''
+  seekTimestamp.value = formatDateTimeLocal(new Date(Date.now() - 60 * 60 * 1000))
+  showSeekModal.value = true
+}
+
+const handleSeekToTimestamp = async () => {
+  if (!seekConsumer.value || !seekTimestamp.value) return
+  const target = seekConsumer.value
+  const label = target.name === '__QUEUE_MODE__' ? '(queue mode)' : target.name
+  actionLoading.value = true
+  seekError.value = ''
+  try {
+    const isoTimestamp = new Date(seekTimestamp.value).toISOString()
+    const res = await consumersApi.seek(target.name, target.queueName, { timestamp: isoTimestamp })
+    const problem = seekProblem(res.data)
+    if (problem) {
+      seekError.value = problem
+      return
+    }
+    showSeekModal.value = false
+    seekTimestamp.value = ''
+    notifySuccess(
+      `Cursor moved for ${label}`,
+      `${res.data.partitionsUpdated} partition${res.data.partitionsUpdated === 1 ? '' : 's'} on ${target.queueName}`,
+    )
+    fetchConsumers()
+  } catch (err) {
+    seekError.value = describeApiError(err)
+  } finally {
+    actionLoading.value = false
+  }
 }
 
 // When the user expands the section, refresh the lagging list — even if it's
@@ -648,18 +787,32 @@ useRefresh(refreshAll)
 
 onMounted(() => {
   if (route.query.search) searchQuery.value = route.query.search
-  fetchConsumers()
-  // Reuse the shared queue cache when possible — if the Queues page
-  // recently populated it, this returns immediately without a network
-  // round-trip.
+  // Reuse the shared queue cache when possible — if the Queues page recently
+  // populated it, this returns immediately without a network round-trip.
+  // (The consumer and lagging lists are already in flight via useApi.)
   ensureQueues()
-  // Auto-load with the default threshold so the count badge in the header
-  // reflects reality without requiring the user to expand the section.
-  loadLaggingPartitions()
 })
 </script>
 
 <style scoped>
+.scope-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--ink-2);
+  font-size: 11.5px;
+  color: var(--text-mid);
+}
+.scope-text { font-family: 'JetBrains Mono', monospace; }
+.scope-text strong { color: var(--text-hi); font-weight: 600; }
+.scope-sep { margin: 0 5px; color: var(--text-faint); }
+.scope-fill { flex: 1; }
+.scope-meta { font-size: 11px; color: var(--text-low); }
+
 /* Toolbar — same shape and tokens as Queues.vue so the two pages read
    as siblings. The lagging-only checkbox is the only consumer-specific
    addition. */
@@ -760,8 +913,8 @@ onMounted(() => {
 }
 
 /* Always-visible count badge — warn-toned when partitions are behind,
-   muted-ok when none. The badge is the operator's first signal; the
-   expanded body is the detail. */
+   muted-ok when none, ember when the answer is unknown. The badge is the
+   operator's first signal; the expanded body is the detail. */
 .lp-head-badge {
   display: inline-flex;
   align-items: center;
@@ -782,6 +935,11 @@ onMounted(() => {
   color: var(--text-low);
   background: rgba(255, 255, 255, .025);
   border-color: var(--bd);
+}
+.lp-head-badge-bad {
+  color: var(--ember-400);
+  background: var(--ember-glow);
+  border-color: rgba(244, 63, 94, .28);
 }
 
 .lp-head-hint {
@@ -806,6 +964,15 @@ onMounted(() => {
   font-size: 13px;
 }
 .lp-empty-ok { color: var(--text-low); }
+.lp-error {
+  margin: 12px 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(244, 63, 94, .28);
+  border-radius: 6px;
+  background: var(--ember-glow);
+  color: var(--ember-400);
+  font-size: 12.5px;
+}
 .lp-table-wrap {
   overflow-x: auto;
 }
@@ -820,6 +987,23 @@ onMounted(() => {
   background: var(--ink-3);
   border: 1px solid var(--bd);
   color: var(--text-mid);
+}
+
+/* Detail modal stat row — five tiles now that the real backlog is shown. */
+.cg-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin-bottom: 24px;
+}
+.cg-stat { text-align: center; padding: 14px 10px; }
+.cg-stat .stat-value { font-size: 20px; }
+.cg-state { font-size: 16px; font-weight: 600; margin-top: 8px; }
+.cg-state-ok { color: var(--ok-500); }
+.cg-state-warn { color: var(--warn-400); }
+.cg-state-mute { color: var(--text-mid); }
+@media (max-width: 640px) {
+  .cg-stats { grid-template-columns: repeat(2, 1fr); }
 }
 
 /* Modal scaffolding — kept compact so the existing modal contents

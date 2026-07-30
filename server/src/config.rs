@@ -384,7 +384,6 @@ fn env_int(k: &str, def: i64) -> i64 {
 // RUSTFIX item 4: PG_DATABASE (Rust name) → PG_DB (C++ name, config.hpp:86) →
 // "postgres". Uses a non-empty filter independent of `env_str`'s item-6 semantics
 // so an explicitly-empty PG_DATABASE still falls through instead of yielding "".
-// Must match the migration source resolution in handlers/migration.rs.
 pub fn resolve_db_name() -> String {
     std::env::var("PG_DATABASE")
         .ok()

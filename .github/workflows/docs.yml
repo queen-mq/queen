@@ -1,0 +1,67 @@
+name: docs
+
+# Builds the documentation site in webdoc/ and — more importantly — proves that
+# the pages generated from source are not behind that source. The route table,
+# the environment-variable reference, the Prometheus family list, the proxy
+# route classes and every published code snippet are derived by
+# webdoc/scripts/*.mjs, so this job also has to run when the code they read
+# changes, not only when a page changes.
+on:
+  push:
+    paths:
+      - "webdoc/**"
+      - "server/src/**"
+      - "server/sql/**"
+      - "queen_proxy/src/routes.rs"
+      - "clients/client-js/test-v2/**"
+      - "clients/client-py/tests/**"
+      - "clients/client-go/tests/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "webdoc/**"
+      - "server/src/**"
+      - "server/sql/**"
+      - "queen_proxy/src/routes.rs"
+      - "clients/client-js/test-v2/**"
+      - "clients/client-py/tests/**"
+      - "clients/client-go/tests/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: webdoc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: webdoc/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Fails when a generated table or snippet is behind the Rust/SQL/test
+      # source it is derived from, and when one of the mirrored Rust
+      # classifiers changed (the generators keep a fingerprint of each).
+      - name: Generated content is current
+        run: pnpm gen:check
+
+      - name: Lint prose and MDX
+        run: pnpm lint:docs
+
+      - name: Build
+        run: pnpm build

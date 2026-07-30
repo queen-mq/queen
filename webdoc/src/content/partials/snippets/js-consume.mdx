@@ -1,0 +1,19 @@
+---
+params: []
+---
+
+{/* GENERATED FILE — do not edit by hand.
+    Extracted from clients/client-js/test-v2/consume.js by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```js title="clients/client-js/test-v2/consume.js"
+await client
+.queue('test-queue-v2-consume')
+.batch(1)
+.limit(1)
+.each()
+.consume(async msg => {
+    msgToReturn = msg
+})
+```

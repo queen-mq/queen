@@ -8,9 +8,6 @@
 //! needed"). The log engine is greenfield — dev contract, no data migration —
 //! so this module is a stub: it keeps the CLI entry compiling and returns a
 //! clear error WITHOUT touching the DB.
-//!
-//! (The /api/v1/migration/* HTTP handlers in handlers/migration.rs are a
-//! separate pg_dump/pg_restore admin tool and do not go through this module.)
 
 use crate::config::Config;
 

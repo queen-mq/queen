@@ -40,17 +40,14 @@
       <svg style="width:15px; height:15px;" :class="{ 'animate-spin': isRefreshing }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
     </button>
 
-    <div class="maint-group">
+    <!-- CELL-level control: only a live operator sees it, and it is labelled so
+         nobody reads it as affecting their tenant alone. -->
+    <div v-if="isOperator" class="maint-group" title="Cell-level: affects every tenant on this cell">
+      <span class="maint-scope">CELL</span>
       <button @click="togglePushMaintenance" :disabled="pushLoading" class="maint-btn" :class="{ on: pushMaintenanceMode }">
         <svg style="width:14px; height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008z"/></svg>
         Push
         <span v-if="pushMaintenanceMode" class="pulse-amber" style="width:5px; height:5px;" />
-      </button>
-      <div style="width:1px; height:20px; background:var(--bd);" />
-      <button @click="togglePopMaintenance" :disabled="popLoading" class="maint-btn" :class="{ on: popMaintenanceMode }">
-        <svg style="width:14px; height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 01-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 011.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 00-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 01-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 00-3.375-3.375h-1.5a1.125 1.125 0 01-1.125-1.125v-1.5a3.375 3.375 0 00-3.375-3.375H9.75"/></svg>
-        Pop
-        <span v-if="popMaintenanceMode" class="pulse-ember" style="width:5px; height:5px;" />
       </button>
     </div>
 
@@ -96,8 +93,10 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { queues as queuesApi, consumers as consumersApi, system } from '@/api'
+import { queues as queuesApi, consumers as consumersApi, operator } from '@/api'
 import { formatNumber } from '@/composables/useApi'
+import { useIdentity } from '@/stores/identity'
+import { useToast } from '@/composables/useToast'
 
 const route = useRoute()
 const router = useRouter()
@@ -165,58 +164,72 @@ const handleRefresh = async () => {
   setTimeout(() => { isRefreshing.value = false }, 500)
 }
 
+// Maintenance is a CELL-level control on an operator-only route
+// (/api/v1/system/maintenance). Everything below is gated on `can('operator')`:
+// a non-operator neither polls it (it would 404 every 30s) nor sees the toggles.
+const { can } = useIdentity()
+const { notifyError, notifySuccess } = useToast()
+const isOperator = computed(() => can('operator'))
+
 const pushMaintenanceMode = ref(false)
 const popMaintenanceMode = ref(false)
 const bufferedMessages = ref(0)
 const failedCount = ref(0)
 const failedMB = ref(0)
 const pushLoading = ref(false)
-const popLoading = ref(false)
+// `null` until a successful read: the banners below must never claim "no
+// maintenance, 0 buffered" off a FAILED fetch. The refs used to default to
+// false/0 with `|| false` coercions on top, so an unreachable (or, for a
+// non-operator, 404-ing) endpoint rendered as a healthy idle cell.
+const maintenanceKnown = ref(false)
 let maintenanceInterval = null
 
 const showBanners = computed(() =>
-  pushMaintenanceMode.value ||
-  popMaintenanceMode.value ||
-  failedCount.value > 0 ||
-  bufferedMessages.value > 0
+  maintenanceKnown.value && (
+    pushMaintenanceMode.value ||
+    popMaintenanceMode.value ||
+    failedCount.value > 0 ||
+    bufferedMessages.value > 0
+  )
 )
 
 const loadMaintenanceStatus = async () => {
+  if (!isOperator.value) return
   try {
-    const r = await system.getMaintenance()
-    pushMaintenanceMode.value = r.data.maintenanceMode || false
-    popMaintenanceMode.value = r.data.popMaintenanceMode || false
-    bufferedMessages.value = r.data.bufferedMessages || 0
-    failedCount.value = r.data.bufferStats?.failedCount || 0
-    failedMB.value = r.data.bufferStats?.failedFiles?.totalMB || 0
-  } catch {}
+    const r = await operator.getMaintenance()
+    pushMaintenanceMode.value = r.data.maintenanceMode === true
+    popMaintenanceMode.value = r.data.popMaintenanceMode === true
+    bufferedMessages.value = r.data.bufferedMessages ?? 0
+    failedCount.value = r.data.bufferStats?.failedCount ?? 0
+    failedMB.value = r.data.bufferStats?.failedFiles?.totalMB ?? 0
+    maintenanceKnown.value = true
+  } catch {
+    // The interceptor already surfaced the failure; here we only make sure the
+    // banners stop asserting a state we no longer know.
+    maintenanceKnown.value = false
+  }
 }
 
 const togglePushMaintenance = async () => {
-  if (pushLoading.value) return
+  if (pushLoading.value || !isOperator.value) return
   const enable = !pushMaintenanceMode.value
-  if (enable && !confirm('Enable PUSH maintenance mode?\n\nAll PUSH operations will be routed to file buffer.')) return
+  // This is a CELL-wide switch: it stops pushes for every tenant on this cell,
+  // so it stays behind an explicit confirmation that says so.
+  if (enable && !confirm('Enable PUSH maintenance on this CELL?\n\nPushes for EVERY tenant on this cell will be routed to the file buffer.')) return
   if (!enable && bufferedMessages.value > 0 && !confirm(`Disable PUSH maintenance?\n\n${bufferedMessages.value} buffered messages will drain.`)) return
   pushLoading.value = true
   try {
-    const r = await system.setMaintenance(enable)
-    pushMaintenanceMode.value = r.data.maintenanceMode || false
-    bufferedMessages.value = r.data.bufferedMessages || 0
-  } catch (e) { alert(`Failed: ${e.message}`) }
-  finally { pushLoading.value = false }
-}
-
-const togglePopMaintenance = async () => {
-  if (popLoading.value) return
-  const enable = !popMaintenanceMode.value
-  if (enable && !confirm('Enable POP maintenance mode?\n\nConsumers will receive no messages.')) return
-  if (!enable && !confirm('Disable POP maintenance?\n\nConsumers will resume.')) return
-  popLoading.value = true
-  try {
-    const r = await system.setPopMaintenance(enable)
-    popMaintenanceMode.value = r.data.popMaintenanceMode || false
-  } catch (e) { alert(`Failed: ${e.message}`) }
-  finally { popLoading.value = false }
+    const r = await operator.setMaintenance(enable)
+    pushMaintenanceMode.value = r.data.maintenanceMode === true
+    bufferedMessages.value = r.data.bufferedMessages ?? 0
+    maintenanceKnown.value = true
+    notifySuccess(enable ? 'PUSH maintenance enabled on this cell' : 'PUSH maintenance disabled')
+  } catch (e) {
+    notifyError(e, 'Could not change PUSH maintenance')
+    // The cell's real state is now unknown — re-read rather than keep showing
+    // the value the click optimistically implied.
+    await loadMaintenanceStatus()
+  } finally { pushLoading.value = false }
 }
 
 onMounted(() => {

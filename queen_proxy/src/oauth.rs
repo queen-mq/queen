@@ -246,10 +246,11 @@ const ME_USER_SQL: &str = "
 
 /// The clusters a NORMAL user may select, with the role on each.
 const ME_CLUSTERS_SQL: &str = "
-    SELECT c.id::text, c.slug, cr.role, t.slug, t.id::text, c.status
+    SELECT c.id::text, c.slug, cr.role, t.slug, t.id::text, c.status, ce.slug
     FROM queen_proxy.cluster_roles cr
     JOIN queen_proxy.clusters c ON c.id = cr.cluster_id
     JOIN queen_proxy.tenants  t ON t.id = c.tenant_id
+    JOIN queen_proxy.cells    ce ON ce.id = c.cell_id
     WHERE cr.user_id = $1::text::uuid
     ORDER BY t.slug, c.slug";
 
@@ -257,9 +258,10 @@ const ME_CLUSTERS_SQL: &str = "
 /// role acting.rs gives them, membership row or not, so the nav the SPA draws
 /// matches what the data plane will actually allow.
 const ME_CLUSTERS_OPERATOR_SQL: &str = "
-    SELECT c.id::text, c.slug, 'admin'::text, t.slug, t.id::text, c.status
+    SELECT c.id::text, c.slug, 'admin'::text, t.slug, t.id::text, c.status, ce.slug
     FROM queen_proxy.clusters c
     JOIN queen_proxy.tenants t ON t.id = c.tenant_id
+    JOIN queen_proxy.cells   ce ON ce.id = c.cell_id
     ORDER BY t.slug, c.slug";
 
 /// Everything the SPA needs to render itself, in one call: who you are,
@@ -331,6 +333,13 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
                                     "tenant_slug": r.get::<_, String>(3),
                                     "tenant_id": r.get::<_, String>(4),
                                     "status": r.get::<_, String>(5),
+                                    // The CELL backing this cluster. A cluster row
+                                    // names both a tenant and a cell, so one
+                                    // selector picks the tenant to scope by AND the
+                                    // broker to forward to — and the UI can label
+                                    // cell-level numbers as such instead of letting
+                                    // them read as the tenant's own.
+                                    "cell_slug": r.get::<_, String>(6),
                                 })
                             })
                             .collect();

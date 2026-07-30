@@ -10,6 +10,7 @@ export async function testConsumer(client) {
 
     let msgToReturn = null
 
+    // docs:start(js-consume)
     await client
     .queue('test-queue-v2-consume')
     .batch(1)
@@ -18,6 +19,7 @@ export async function testConsumer(client) {
     .consume(async msg => {
         msgToReturn = msg
     })
+    // docs:end
 
     return { success: msgToReturn !== null, message: 'Consumer test completed successfully' }
 }

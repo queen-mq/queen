@@ -90,10 +90,16 @@ function getThemeOptions() {
         grid: { color: gridColor, drawBorder: false },
         ticks: { color: tickColor, font: { family: 'JetBrains Mono', size: 10 }, maxRotation: 0, autoSkipPadding: 20 },
         border: { display: false },
+        // The caller's x options must survive: Chart.js needs `stacked` on the
+        // INDEX scale too, or a stacked bar chart silently renders grouped and
+        // the y-axis title reads as a total it isn't.
+        ...(props.options?.scales?.x || {}),
       },
       y: {
+        // `beginAtZero` anchors a non-negative series without clipping. A hard
+        // `min: 0` here would hide every negative point (push−pop delta,
+        // partition deletions), so signed charts are the caller's to bound.
         beginAtZero: true,
-        min: 0,
         grid: { color: gridColor, drawBorder: false },
         ticks: { color: tickColor, font: { family: 'JetBrains Mono', size: 10 }, padding: 8 },
         border: { display: false },

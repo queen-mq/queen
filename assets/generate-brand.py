@@ -59,7 +59,8 @@ svg = (
     f'href="data:image/png;base64,{b64}"/></mask>'
     '<rect width="160" height="160" fill="currentColor" mask="url(#d)"/></svg>'
 )
-for dest in ('docs/assets/favicon.svg', 'app/public/favicon.svg', 'proxy/public/favicon.svg'):
+for dest in ('docs/assets/favicon.svg', 'app/public/favicon.svg', 'proxy/public/favicon.svg',
+             'webdoc/public/favicon.svg'):
     out = P(dest); open(out, 'w').write(svg)
     print('  ', dest, f'{len(svg)} bytes')
 
@@ -67,13 +68,18 @@ fav32 = contain(WHITE, 32, bg=DARK, pad=0.10)
 save(fav32, 'docs/assets/favicon-32.png')
 save(fav32, 'app/public/favicon-32.png')
 save(fav32, 'proxy/public/favicon-32.png')
-save(contain(WHITE, 180, bg=DARK, pad=0.14), 'docs/assets/apple-touch-icon.png')
+save(fav32, 'webdoc/public/favicon-32.png')
+apple = contain(WHITE, 180, bg=DARK, pad=0.14)
+save(apple, 'docs/assets/apple-touch-icon.png')
+save(apple, 'webdoc/public/apple-touch-icon.png')
 
 print('nav / sidebar / login marks (white, transparent)')
 save(contain(WHITE, 64), 'docs/assets/queen_head_64.png')
+save(contain(WHITE, 64), 'webdoc/public/queen_head_64.png')
 save(WHITE, 'docs/assets/queen-duck-white-linemark.png')
 save(WHITE, 'app/public/queen-duck-white-linemark.png')
 save(WHITE, 'proxy/public/queen-duck-white-linemark.png')
+save(WHITE, 'webdoc/public/queen-duck-white-linemark.png')
 
 print('rainbow-crest variant (warm -> cyan), masked to mohawk + crown')
 # The crest (mohawk + crown) is one connected stroke with the head, so it can't be

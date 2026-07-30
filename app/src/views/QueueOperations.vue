@@ -46,6 +46,7 @@
           @click="applyCustomRange"
           class="btn btn-primary" style="font-size:12px;"
         >Apply</button>
+        <p v-if="rangeError" class="range-error">{{ rangeError }}</p>
       </div>
     </div>
 
@@ -59,485 +60,502 @@
       </div>
     </div>
 
-    <template v-else-if="workerData">
-      <!-- Throughput Chart -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Message Throughput</h3>
-          <span class="muted">{{ workerData.pointCount || 0 }} data points</span>
-        </div>
-        <div class="card-body">
-          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-            <button
-              v-for="metric in throughputMetrics"
-              :key="metric.key"
-              @click="toggleThroughputMetric(metric.key)"
-              style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-              :class="selectedThroughputMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
-            >
-              <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedThroughputMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
-              {{ metric.label }}
-            </button>
-          </div>
-          <BaseChart
-            v-if="throughputChartData.labels.length > 0"
-            type="line"
-            :data="throughputChartData"
-            :options="throughputChartOptions"
-            height="280px"
-          />
-          <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-            No throughput data available
-          </div>
+    <template v-else>
+      <!-- Nothing loaded at all. Without this the page rendered blank and the
+           user had no way to tell a broken cluster from an empty one. -->
+      <div v-if="allFailed" class="card" style="padding:24px;">
+        <p style="font-weight:600; margin-bottom:8px; color:var(--ember-400);">
+          Cannot load queue operations
+        </p>
+        <p style="font-size:13px; color:var(--text-mid);">{{ describeApiError(opsError) }}</p>
+        <div style="margin-top:16px;">
+          <button class="btn btn-ghost" @click="fetchData">Retry</button>
         </div>
       </div>
 
-      <!-- Message Latency -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Message Latency</h3>
-          <span class="muted">time from push to pop</span>
-        </div>
-        <div class="card-body">
-          <BaseChart
-            v-if="latencyChartData.labels.length > 0"
-            type="line"
-            :data="latencyChartData"
-            :options="lagChartOptions"
-            height="240px"
-          />
-          <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-            No latency data available
-          </div>
-        </div>
-      </div>
+      <template v-else>
+        <!-- ==================================================================
+             TENANT. Everything in this block is scoped to the acting cluster's
+             tenant by the proxy — these are your queues and nobody else's.
+             ================================================================== -->
 
-      <!-- Event Loop / Connection Pool / Job Queue Depth -->
-      <div class="three-col-row">
-        <div class="card">
+        <!-- Retention & Eviction Jobs -->
+        <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
-            <h3>Event Loop Latency</h3>
+            <h3>Retention &amp; Eviction Jobs</h3>
+            <span class="muted">messages deleted by retention / eviction workers</span>
           </div>
           <div class="card-body">
-            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-              <button
-                v-for="metric in eventLoopMetrics"
-                :key="metric.key"
-                @click="toggleEventLoopMetric(metric.key)"
-                style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-                :class="selectedEventLoopMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
-              >
-                <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedEventLoopMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
-                {{ metric.label }}
-              </button>
-            </div>
-            <BaseChart
-              v-if="eventLoopChartData.labels.length > 0"
-              type="line"
-              :data="eventLoopChartData"
-              :options="lagChartOptions"
-              height="200px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-              No event loop data available
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-header">
-            <h3>Connection Pool</h3>
-          </div>
-          <div class="card-body">
-            <BaseChart
-              v-if="connectionPoolChartData.labels.length > 0"
-              type="line"
-              :data="connectionPoolChartData"
-              :options="poolChartOptions"
-              height="200px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-              No connection pool data available
-            </div>
-          </div>
-        </div>
-
-        <!-- Job queue depth: backpressure signal that surfaces before
-             event-loop lag does. avg = filled area, max = upper envelope.
-             A growing max with stable avg = bursty; a growing avg = the
-             worker isn't draining its async pipeline fast enough. -->
-        <div class="card">
-          <div class="card-header">
-            <h3>Job Queue Depth</h3>
-            <span class="muted">async work waiting in worker queue</span>
-          </div>
-          <div class="card-body">
-            <BaseChart
-              v-if="jobQueueChartData.labels.length > 0"
-              type="line"
-              :data="jobQueueChartData"
-              :options="jobQueueChartOptions"
-              height="200px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-              No job queue data available
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Errors Chart -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Errors</h3>
-          <span v-if="totalErrors > 0" class="chip chip-bad" style="margin-left:auto;">{{ totalErrors }} in period</span>
-        </div>
-        <div class="card-body">
-          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-            <button
-              v-for="metric in errorMetrics"
-              :key="metric.key"
-              @click="toggleErrorMetric(metric.key)"
-              style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-              :class="selectedErrorMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
-            >
-              <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedErrorMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
-              {{ metric.label }}
-            </button>
-          </div>
-          <BaseChart
-            v-if="errorsChartData.labels.length > 0"
-            type="bar"
-            :data="errorsChartData"
-            :options="errorsChartOptions"
-            height="200px"
-          />
-          <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">
-            No error data available
-          </div>
-        </div>
-      </div>
-
-      <!-- Dead-letter queue rate -->
-      <!-- DLQ messages have already failed retries enough times to be moved
-           aside — they're silent business failures (bad payload, downstream
-           crash) and the response is investigation, not infra fix. That's a
-           different on-call workflow than the generic Errors panel above,
-           which is why this chart is separate. -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Dead Letter Queue</h3>
-          <span v-if="dlqTotal > 0" class="chip chip-bad" style="margin-left:auto;">
-            {{ formatNumber(dlqTotal) }} in period
-          </span>
-          <span v-else class="muted">messages moved to DLQ</span>
-        </div>
-        <div class="card-body">
-          <BaseChart
-            v-if="dlqChartData.labels.length > 0"
-            type="bar"
-            :data="dlqChartData"
-            :options="dlqChartOptions"
-            height="180px"
-          />
-          <div v-else style="text-align:center; padding:32px 0; color:var(--ok-500);">
-            No DLQ events in this period
-          </div>
-        </div>
-      </div>
-
-      <!-- Retention & Eviction Jobs -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Retention &amp; Eviction Jobs</h3>
-          <span class="muted">messages deleted by retention / eviction workers</span>
-        </div>
-        <div class="card-body">
-          <div v-if="retentionChartData.labels.length > 0">
-            <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:14px;">
-              <div class="stat" style="padding:8px 12px;">
-                <div class="stat-label">Retention</div>
-                <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.retentionMsgs || 0) }}</div>
+            <div v-if="retentionError" class="panel-na">{{ describeApiError(retentionError) }}</div>
+            <div v-else-if="retentionChartData.labels.length > 0">
+              <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:14px;">
+                <div class="stat" style="padding:8px 12px;">
+                  <div class="stat-label">Retention</div>
+                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.retentionMsgs || 0) }}</div>
+                </div>
+                <div class="stat" style="padding:8px 12px;">
+                  <div class="stat-label">Completed retention</div>
+                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.completedRetentionMsgs || 0) }}</div>
+                </div>
+                <div class="stat" style="padding:8px 12px;">
+                  <div class="stat-label">Eviction</div>
+                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.evictionMsgs || 0) }}</div>
+                </div>
+                <div class="stat" style="padding:8px 12px;">
+                  <div class="stat-label">Events</div>
+                  <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.eventCount || 0) }}</div>
+                </div>
               </div>
-              <div class="stat" style="padding:8px 12px;">
-                <div class="stat-label">Completed retention</div>
-                <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.completedRetentionMsgs || 0) }}</div>
-              </div>
-              <div class="stat" style="padding:8px 12px;">
-                <div class="stat-label">Eviction</div>
-                <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.evictionMsgs || 0) }}</div>
-              </div>
-              <div class="stat" style="padding:8px 12px;">
-                <div class="stat-label">Events</div>
-                <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.eventCount || 0) }}</div>
-              </div>
-            </div>
-            <BaseChart
-              type="bar"
-              :data="retentionChartData"
-              :options="retentionChartOptions"
-              height="240px"
-            />
-          </div>
-          <div v-else style="text-align:center; padding:32px 0; color:var(--text-low);">
-            No retention / eviction events in this range
-          </div>
-        </div>
-      </div>
-
-      <!-- Top Queues leaderboard (window snapshot) -->
-      <div v-if="hasTopQueueData" class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Top Queues</h3>
-          <span class="muted">averaged across the selected window — what to look at first</span>
-        </div>
-        <div class="card-body">
-          <div class="top-queues-grid">
-            <!-- Push rate -->
-            <div>
-              <h4 class="label-xs" style="margin-bottom:8px;">By Push/s</h4>
-              <table v-if="topQueues.push.length" class="t top-queues">
-                <tbody>
-                  <tr v-for="(row, i) in topQueues.push" :key="`push-${row.queue}`">
-                    <td class="rank">{{ i + 1 }}</td>
-                    <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                    <td class="font-mono tabular-nums val">{{ formatRate(row.push) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-else class="empty-tile">No push activity</div>
-            </div>
-            <!-- Pop rate -->
-            <div>
-              <h4 class="label-xs" style="margin-bottom:8px;">By Pop/s</h4>
-              <table v-if="topQueues.pop.length" class="t top-queues">
-                <tbody>
-                  <tr v-for="(row, i) in topQueues.pop" :key="`pop-${row.queue}`">
-                    <td class="rank">{{ i + 1 }}</td>
-                    <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                    <td class="font-mono tabular-nums val">{{ formatRate(row.pop) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-else class="empty-tile">No pop activity</div>
-            </div>
-            <!-- Parked (waiting consumers) -->
-            <div>
-              <h4 class="label-xs" style="margin-bottom:8px;">By Parked (waiting consumers)</h4>
-              <table v-if="topQueues.parked.length" class="t top-queues">
-                <tbody>
-                  <tr v-for="(row, i) in topQueues.parked" :key="`parked-${row.queue}`">
-                    <td class="rank">{{ i + 1 }}</td>
-                    <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                    <td class="font-mono tabular-nums val">{{ formatParked(row.parked) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-else class="empty-tile">No parked long-polls</div>
-            </div>
-            <!-- Lag -->
-            <div>
-              <h4 class="label-xs" style="margin-bottom:8px;">By Avg Lag</h4>
-              <table v-if="topQueues.lag.length" class="t top-queues">
-                <tbody>
-                  <tr v-for="(row, i) in topQueues.lag" :key="`lag-${row.queue}`">
-                    <td class="rank">{{ i + 1 }}</td>
-                    <td class="qname" :title="row.queue">{{ row.queue }}</td>
-                    <td class="font-mono tabular-nums val">{{ formatDuration(row.lag) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-else class="empty-tile">No measured lag</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Per-Queue Metrics -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Per-Queue Metrics</h3>
-        </div>
-        <div class="card-body">
-          <template v-if="availableQueues.length > 0">
-            <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
-              <span style="font-size:12px; color:var(--text-low); white-space:nowrap;">Filter queues:</span>
-              <MultiSelect
-                v-model="selectedQueues"
-                :options="availableQueues"
-                placeholder="All queues"
-                search-placeholder="Search queues…"
+              <BaseChart
+                type="bar"
+                :data="retentionChartData"
+                :options="retentionChartOptions"
+                height="240px"
               />
-              <span v-if="selectedQueues.length > 0" style="font-size:12px; color:var(--text-low);">
-                {{ selectedQueues.length }} of {{ availableQueues.length }}
-              </span>
-              <!-- Per-queue view-mode toggle: only meaningful for the Parked
-                   tab today (cluster-aggregate vs per-replica). Hidden on
-                   other ops to keep the surface tidy. -->
-              <div v-if="selectedQueueOp === 'parked'" style="display:flex; align-items:center; gap:8px; margin-left:auto;">
-                <span style="font-size:11px; font-weight:500; color:var(--text-low);">View</span>
-                <div class="seg">
+            </div>
+            <!-- queen.retention_history has no writer under the log engine, so
+                 an empty series means NOT REPORTED. Saying "no events" here
+                 would assert nothing was deleted while segments are being
+                 swept — the opposite of what is happening. -->
+            <div v-else class="panel-na">
+              Retention accounting is not recorded by the log engine yet, so this
+              cannot be shown. It is not a claim that nothing was deleted.
+            </div>
+          </div>
+        </div>
+
+        <!-- Top Queues leaderboard (window snapshot) -->
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-header">
+            <h3>Top Queues</h3>
+            <span class="muted">averaged across the selected window — what to look at first</span>
+          </div>
+          <div class="card-body">
+            <div v-if="opsError" class="panel-na">{{ describeApiError(opsError) }}</div>
+            <div v-else-if="hasTopQueueData" class="top-queues-grid">
+              <!-- Push rate -->
+              <div>
+                <h4 class="label-xs" style="margin-bottom:8px;">By Push/s</h4>
+                <table v-if="topQueues.push.length" class="t top-queues">
+                  <tbody>
+                    <tr v-for="(row, i) in topQueues.push" :key="`push-${row.queue}`">
+                      <td class="rank">{{ i + 1 }}</td>
+                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="font-mono tabular-nums val">{{ formatRate(row.push) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="empty-tile">No push activity</div>
+              </div>
+              <!-- Pop rate -->
+              <div>
+                <h4 class="label-xs" style="margin-bottom:8px;">By Pop/s</h4>
+                <table v-if="topQueues.pop.length" class="t top-queues">
+                  <tbody>
+                    <tr v-for="(row, i) in topQueues.pop" :key="`pop-${row.queue}`">
+                      <td class="rank">{{ i + 1 }}</td>
+                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="font-mono tabular-nums val">{{ formatRate(row.pop) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="empty-tile">No pop activity</div>
+              </div>
+              <!-- Parked (waiting consumers) -->
+              <div>
+                <h4 class="label-xs" style="margin-bottom:8px;">By Parked (waiting consumers)</h4>
+                <table v-if="topQueues.parked.length" class="t top-queues">
+                  <tbody>
+                    <tr v-for="(row, i) in topQueues.parked" :key="`parked-${row.queue}`">
+                      <td class="rank">{{ i + 1 }}</td>
+                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="font-mono tabular-nums val">{{ formatParked(row.parked) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="empty-tile">No parked long-polls</div>
+              </div>
+              <!-- Lag -->
+              <div>
+                <h4 class="label-xs" style="margin-bottom:8px;">By Avg Lag</h4>
+                <table v-if="topQueues.lag.length" class="t top-queues">
+                  <tbody>
+                    <tr v-for="(row, i) in topQueues.lag" :key="`lag-${row.queue}`">
+                      <td class="rank">{{ i + 1 }}</td>
+                      <td class="qname" :title="row.queue">{{ row.queue }}</td>
+                      <td class="font-mono tabular-nums val">{{ formatDurationMs(row.lag) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="empty-tile">No measured lag</div>
+              </div>
+            </div>
+            <div v-else class="empty-tile">No queue activity in this range</div>
+          </div>
+        </div>
+
+        <!-- Per-Queue Metrics -->
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-header">
+            <h3>Per-Queue Metrics</h3>
+          </div>
+          <div class="card-body">
+            <div v-if="opsError" class="panel-na">{{ describeApiError(opsError) }}</div>
+            <template v-else-if="availableQueues.length > 0">
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+                <span style="font-size:12px; color:var(--text-low); white-space:nowrap;">Filter queues:</span>
+                <MultiSelect
+                  v-model="selectedQueues"
+                  :options="availableQueues"
+                  placeholder="All queues"
+                  search-placeholder="Search queues…"
+                />
+                <span v-if="selectedQueues.length > 0" style="font-size:12px; color:var(--text-low);">
+                  {{ selectedQueues.length }} of {{ availableQueues.length }}
+                </span>
+                <!-- Per-queue view-mode toggle: only meaningful for the Parked
+                     tab today (cluster-aggregate vs per-replica). Hidden on
+                     other ops to keep the surface tidy. -->
+                <div v-if="selectedQueueOp === 'parked'" style="display:flex; align-items:center; gap:8px; margin-left:auto;">
+                  <span style="font-size:11px; font-weight:500; color:var(--text-low);">View</span>
+                  <div class="seg">
+                    <button
+                      @click="viewMode = 'aggregate'"
+                      :class="{ on: viewMode === 'aggregate' }"
+                    >Cluster</button>
+                    <button
+                      @click="viewMode = 'individual'"
+                      :class="{ on: viewMode === 'individual' }"
+                    >Per Replica</button>
+                  </div>
+                </div>
+              </div>
+              <!-- Op selector: choose which per-queue chart to show -->
+              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <span style="font-size:12px; color:var(--text-low); white-space:nowrap;">Op:</span>
+                <button
+                  v-for="op in queueOpTabs"
+                  :key="op.key"
+                  @click="selectedQueueOp = op.key"
+                  style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                  :class="selectedQueueOp === op.key ? op.activeClass : 'opacity-50'"
+                >
+                  <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedQueueOp === op.key ? op.activeDot : 'var(--text-faint)' }" />
+                  {{ op.label }}
+                </button>
+              </div>
+              <div>
+                <h4 class="label-xs" style="margin-bottom:10px;">
+                  {{ queueOpActive.label }} by Queue<span v-if="isParkedIndividual"> &amp; Replica</span>
+                  <span v-if="queueOpActive.kind === 'rate'" style="color:var(--text-low); font-weight:normal;">(per second)</span>
+                  <span v-else-if="queueOpActive.kind === 'rate-signed'" style="color:var(--text-low); font-weight:normal;">(push − pop messages/s; positive = backlog filling, negative = draining)</span>
+                  <span v-else-if="queueOpActive.kind === 'percent'" style="color:var(--text-low); font-weight:normal;">(long-polls returning a message ÷ all long-poll completions; gaps = quiet bucket)</span>
+                  <span v-else-if="isParkedIndividual" style="color:var(--text-low); font-weight:normal;">(in-flight long-polls, per replica, averaged each minute)</span>
+                  <span v-else-if="queueOpActive.kind === 'gauge'" style="color:var(--text-low); font-weight:normal;">(in-flight long-polls, averaged each minute)</span>
+                </h4>
+                <BaseChart
+                  v-if="perQueueChartData.labels.length > 0"
+                  :key="`per-queue-ops-${queueOpActive.key}-${isParkedIndividual ? 'individual' : 'aggregate'}-${hasExplicitQueueSelection ? 'legend' : 'nolegend'}`"
+                  type="line"
+                  :data="perQueueChartData"
+                  :options="perQueueThroughputOptions"
+                  height="340px"
+                />
+                <div v-else class="empty-tile">No per-queue data for this op yet</div>
+              </div>
+              <div style="margin-top:20px;">
+                <h4 class="label-xs" style="margin-bottom:10px;">
+                  Avg Latency by Queue
+                  <span style="color:var(--text-low); font-weight:normal;">(measured at pop; gaps = buckets with no pops)</span>
+                </h4>
+                <BaseChart
+                  v-if="queueLagChartData.labels.length > 0"
+                  :key="`per-queue-lag-${hasExplicitQueueSelection ? 'legend' : 'nolegend'}`"
+                  type="line"
+                  :data="queueLagChartData"
+                  :options="perQueueLagOptions"
+                  height="340px"
+                />
+                <div v-else class="empty-tile">No pops in this range, so no latency was measured</div>
+              </div>
+            </template>
+            <div v-else class="empty-tile">
+              <p>No per-queue metrics recorded yet.</p>
+              <p style="font-size:12px; margin-top:4px;">Per-queue data is collected as soon as the broker flushes its first minute boundary.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Partitions per queue -->
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-header">
+            <h3>Partitions</h3>
+            <span class="muted">count &amp; creation / deletion rate per queue</span>
+          </div>
+          <div class="card-body">
+            <div v-if="opsError" class="panel-na">{{ describeApiError(opsError) }}</div>
+            <template v-else-if="partitionCountChartData.labels.length > 0 || partitionRateChartData.labels.length > 0">
+              <div>
+                <h4 class="label-xs" style="margin-bottom:10px;">Partition count by Queue</h4>
+                <BaseChart
+                  v-if="partitionCountChartData.labels.length > 0"
+                  :key="`per-queue-partitions-${hasExplicitQueueSelection ? 'legend' : 'nolegend'}`"
+                  type="line"
+                  :data="partitionCountChartData"
+                  :options="perQueuePartitionCountOptions"
+                  height="280px"
+                />
+                <div v-else class="empty-tile">No partition-count snapshots yet</div>
+              </div>
+              <div style="margin-top:20px;">
+                <h4 class="label-xs" style="margin-bottom:10px;">Partition creation / deletion rate (events per bucket, across all queues)</h4>
+                <BaseChart
+                  v-if="partitionRateChartData.labels.length > 0"
+                  type="bar"
+                  :data="partitionRateChartData"
+                  :options="partitionRateChartOptions"
+                  height="240px"
+                />
+                <div v-else class="empty-tile">No partition create/delete events in this range</div>
+              </div>
+            </template>
+            <div v-else class="empty-tile">
+              <p>No partition metrics recorded yet.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ==================================================================
+             CELL · OPERATOR. Everything below comes from
+             /api/v1/analytics/worker-metrics, which is cell-wide by nature
+             (worker lifetime counters across every tenant) and which the proxy
+             answers 404 for any non-operator. It is not this tenant's data and
+             the header says so.
+             ================================================================== -->
+        <template v-if="can('operator')">
+          <div class="cell-section">
+            <span class="cell-tag">CELL · OPERATOR</span>
+            <span>
+              broker-wide worker figures — every tenant on this cell, not just
+              {{ actingTenantSlug || 'this tenant' }}
+            </span>
+          </div>
+
+          <div v-if="workerError" class="card" style="margin-bottom:16px;">
+            <div class="card-body">
+              <div class="panel-na">{{ describeApiError(workerError) }}</div>
+            </div>
+          </div>
+
+          <template v-else>
+            <!-- Throughput Chart -->
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Message Throughput <span class="cell-chip">cell</span></h3>
+                <span class="muted">{{ workerData?.pointCount || 0 }} data points</span>
+              </div>
+              <div class="card-body">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
                   <button
-                    @click="viewMode = 'aggregate'"
-                    :class="{ on: viewMode === 'aggregate' }"
-                  >Cluster</button>
+                    v-for="metric in throughputMetrics"
+                    :key="metric.key"
+                    @click="toggleThroughputMetric(metric.key)"
+                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                    :class="selectedThroughputMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
+                  >
+                    <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedThroughputMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
+                    {{ metric.label }}
+                  </button>
+                </div>
+                <BaseChart
+                  v-if="throughputChartData.labels.length > 0"
+                  type="line"
+                  :data="throughputChartData"
+                  :options="throughputChartOptions"
+                  height="280px"
+                />
+                <div v-else class="empty-tile">No throughput data available</div>
+              </div>
+            </div>
+
+            <!-- Message Latency -->
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Message Latency <span class="cell-chip">cell</span></h3>
+                <span class="muted">time from push to pop</span>
+              </div>
+              <div class="card-body">
+                <BaseChart
+                  v-if="latencyChartData.labels.length > 0"
+                  type="line"
+                  :data="latencyChartData"
+                  :options="lagChartOptions"
+                  height="240px"
+                />
+                <div v-else class="empty-tile">No latency data available</div>
+              </div>
+            </div>
+
+            <!-- Event Loop -->
+            <!-- The Connection Pool and Job Queue Depth panels that used to sit
+                 beside this one are gone: they charted worker_metrics columns
+                 (avg_free_slots / db_connections / avg_job_queue_size) that the
+                 Rust broker never writes, so they were flat zeros presented as
+                 measurements. Real pool numbers live in system_metrics and are
+                 on the Dashboard's DB pool row. -->
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Event Loop Latency <span class="cell-chip">cell</span></h3>
+              </div>
+              <div class="card-body">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
                   <button
-                    @click="viewMode = 'individual'"
-                    :class="{ on: viewMode === 'individual' }"
-                  >Per Replica</button>
+                    v-for="metric in eventLoopMetrics"
+                    :key="metric.key"
+                    @click="toggleEventLoopMetric(metric.key)"
+                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                    :class="selectedEventLoopMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
+                  >
+                    <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedEventLoopMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
+                    {{ metric.label }}
+                  </button>
+                </div>
+                <BaseChart
+                  v-if="eventLoopChartData.labels.length > 0"
+                  type="line"
+                  :data="eventLoopChartData"
+                  :options="lagChartOptions"
+                  height="200px"
+                />
+                <div v-else class="empty-tile">No event loop data available</div>
+              </div>
+            </div>
+
+            <!-- Errors Chart -->
+            <!-- No "DB errors" series: `db_errors` is declared and written but
+                 never incremented anywhere in the broker, so the bar was a
+                 constant zero wearing the name of a real failure mode. -->
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Errors <span class="cell-chip">cell</span></h3>
+                <span v-if="totalErrors > 0" class="chip chip-bad" style="margin-left:auto;">{{ totalErrors }} in period</span>
+              </div>
+              <div class="card-body">
+                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                  <button
+                    v-for="metric in errorMetrics"
+                    :key="metric.key"
+                    @click="toggleErrorMetric(metric.key)"
+                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
+                    :class="selectedErrorMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
+                  >
+                    <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedErrorMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
+                    {{ metric.label }}
+                  </button>
+                </div>
+                <BaseChart
+                  v-if="errorsChartData.labels.length > 0"
+                  type="bar"
+                  :data="errorsChartData"
+                  :options="errorsChartOptions"
+                  height="200px"
+                />
+                <div v-else class="empty-tile">No error data available</div>
+              </div>
+            </div>
+
+            <!-- Dead-letter queue rate -->
+            <!-- DLQ messages have already failed retries enough times to be
+                 moved aside — they're silent business failures (bad payload,
+                 downstream crash) and the response is investigation, not infra
+                 fix. That's a different on-call workflow than the generic
+                 Errors panel above, which is why this chart is separate. -->
+            <div class="card" style="margin-bottom:16px;">
+              <div class="card-header">
+                <h3>Dead Letter Queue <span class="cell-chip">cell</span></h3>
+                <span v-if="dlqTotal > 0" class="chip chip-bad" style="margin-left:auto;">
+                  {{ formatNumber(dlqTotal) }} in period
+                </span>
+                <span v-else class="muted">messages moved to DLQ</span>
+              </div>
+              <div class="card-body">
+                <BaseChart
+                  v-if="dlqChartData.labels.length > 0"
+                  type="bar"
+                  :data="dlqChartData"
+                  :options="dlqChartOptions"
+                  height="180px"
+                />
+                <div v-else class="empty-tile" style="color:var(--ok-500);">
+                  No DLQ events on this cell in this period
                 </div>
               </div>
             </div>
-            <!-- Op selector: choose which per-queue chart to show -->
-            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-              <span style="font-size:12px; color:var(--text-low); white-space:nowrap;">Op:</span>
-              <button
-                v-for="op in queueOpTabs"
-                :key="op.key"
-                @click="selectedQueueOp = op.key"
-                style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-                :class="selectedQueueOp === op.key ? op.activeClass : 'opacity-50'"
-              >
-                <span style="width:6px; height:6px; border-radius:99px;" :style="{ background: selectedQueueOp === op.key ? op.activeDot : 'var(--text-faint)' }" />
-                {{ op.label }}
-              </button>
-            </div>
-            <div>
-              <h4 class="label-xs" style="margin-bottom:10px;">
-                {{ queueOpActive.label }} by Queue<span v-if="isParkedIndividual"> &amp; Replica</span>
-                <span v-if="queueOpActive.kind === 'rate'" style="color:var(--text-low); font-weight:normal;">(per second)</span>
-                <span v-else-if="queueOpActive.kind === 'rate-signed'" style="color:var(--text-low); font-weight:normal;">(push − pop messages/s; positive = backlog filling, negative = draining)</span>
-                <span v-else-if="queueOpActive.kind === 'percent'" style="color:var(--text-low); font-weight:normal;">(long-polls returning a message ÷ all long-poll completions; gaps = quiet bucket)</span>
-                <span v-else-if="isParkedIndividual" style="color:var(--text-low); font-weight:normal;">(in-flight long-polls, per replica, averaged each minute)</span>
-                <span v-else-if="queueOpActive.kind === 'gauge'" style="color:var(--text-low); font-weight:normal;">(in-flight long-polls, averaged each minute)</span>
-              </h4>
-              <BaseChart
-                v-if="perQueueChartData.labels.length > 0"
-                :key="`per-queue-ops-${queueOpActive.key}-${isParkedIndividual ? 'individual' : 'aggregate'}-${hasExplicitQueueSelection ? 'legend' : 'nolegend'}`"
-                type="line"
-                :data="perQueueChartData"
-                :options="perQueueThroughputOptions"
-                height="340px"
-              />
-              <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">No per-queue data for this op yet</div>
-            </div>
-            <div style="margin-top:20px;">
-              <h4 class="label-xs" style="margin-bottom:10px;">Avg Latency by Queue</h4>
-              <BaseChart
-                v-if="queueLagChartData.labels.length > 0"
-                :key="`per-queue-lag-${hasExplicitQueueSelection ? 'legend' : 'nolegend'}`"
-                type="line"
-                :data="queueLagChartData"
-                :options="perQueueLagOptions"
-                height="340px"
-              />
-              <div v-else style="text-align:center; padding:48px 0; color:var(--text-low);">No per-queue data available</div>
+
+            <!-- Workers Status Panel -->
+            <!-- Free Slots / DB Conn / Job Queue columns removed with the panels
+                 above: same never-written worker_metrics columns. -->
+            <div v-if="workerData?.workers?.length" class="card">
+              <div class="card-header">
+                <h3>Workers Status <span class="cell-chip">cell</span></h3>
+                <span class="muted">{{ workerData.workers.length }} workers</span>
+              </div>
+              <div class="card-body">
+                <div style="overflow-x:auto;">
+                  <table class="t">
+                    <thead>
+                      <tr>
+                        <th>Worker ID</th>
+                        <th>Hostname</th>
+                        <th style="text-align:right;">Avg EL</th>
+                        <th style="text-align:right;">Max EL</th>
+                        <th>Last Seen</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr
+                        v-for="worker in workerData.workers"
+                        :key="worker.workerId"
+                      >
+                        <td style="font-weight:500;">{{ worker.workerId }}</td>
+                        <td style="color:var(--text-mid);">{{ worker.hostname }}</td>
+                        <td style="text-align:right;">
+                          <span class="font-mono tabular-nums" :class="{ 'val-warn': worker.avgEventLoopLagMs > 100 }">
+                            {{ worker.avgEventLoopLagMs }}ms
+                          </span>
+                        </td>
+                        <td style="text-align:right;">
+                          <span class="font-mono tabular-nums" :class="{ 'val-bad': worker.maxEventLoopLagMs > 500 }">
+                            {{ worker.maxEventLoopLagMs }}ms
+                          </span>
+                        </td>
+                        <td style="font-size:12px; color:var(--text-low);">{{ formatTime(worker.lastSeen) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </template>
-          <div v-else style="text-align:center; padding:32px 0; color:var(--text-low);">
-            <p>No per-queue metrics recorded yet.</p>
-            <p style="font-size:12px; margin-top:4px;">Per-queue data is collected as soon as libqueen flushes its first minute boundary.</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Partitions per queue -->
-      <div class="card" style="margin-bottom:16px;">
-        <div class="card-header">
-          <h3>Partitions</h3>
-          <span class="muted">count &amp; creation / deletion rate per queue</span>
-        </div>
-        <div class="card-body">
-          <template v-if="partitionCountChartData.labels.length > 0 || partitionRateChartData.labels.length > 0">
-            <div>
-              <h4 class="label-xs" style="margin-bottom:10px;">Partition count by Queue</h4>
-              <BaseChart
-                v-if="partitionCountChartData.labels.length > 0"
-                :key="`per-queue-partitions-${hasExplicitQueueSelection ? 'legend' : 'nolegend'}`"
-                type="line"
-                :data="partitionCountChartData"
-                :options="perQueuePartitionCountOptions"
-                height="280px"
-              />
-              <div v-else style="text-align:center; padding:32px 0; color:var(--text-low);">No partition-count snapshots yet</div>
-            </div>
-            <div style="margin-top:20px;">
-              <h4 class="label-xs" style="margin-bottom:10px;">Partition creation / deletion rate (events per bucket, across all queues)</h4>
-              <BaseChart
-                v-if="partitionRateChartData.labels.length > 0"
-                type="bar"
-                :data="partitionRateChartData"
-                :options="partitionRateChartOptions"
-                height="240px"
-              />
-              <div v-else style="text-align:center; padding:32px 0; color:var(--text-low);">No partition create/delete events in this range</div>
-            </div>
-          </template>
-          <div v-else style="text-align:center; padding:32px 0; color:var(--text-low);">
-            <p>No partition metrics recorded yet.</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Workers Status Panel -->
-      <div v-if="workerData?.workers?.length" class="card">
-        <div class="card-header">
-          <h3>Workers Status</h3>
-          <span class="muted">{{ workerData.workers.length }} workers</span>
-        </div>
-        <div class="card-body">
-          <div style="overflow-x:auto;">
-            <table class="t">
-              <thead>
-                <tr>
-                  <th>Worker ID</th>
-                  <th>Hostname</th>
-                  <th style="text-align:right;">Avg EL</th>
-                  <th style="text-align:right;">Max EL</th>
-                  <th style="text-align:right;">Free Slots</th>
-                  <th style="text-align:right;">DB Conn</th>
-                  <th style="text-align:right;">Job Queue</th>
-                  <th>Last Seen</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="worker in workerData.workers"
-                  :key="worker.workerId"
-                >
-                  <td style="font-weight:500;">{{ worker.workerId }}</td>
-                  <td style="color:var(--text-mid);">{{ worker.hostname }}</td>
-                  <td style="text-align:right;">
-                    <span class="font-mono tabular-nums" :style="{ color: worker.avgEventLoopLagMs > 100 ? 'var(--warn-400)' : 'var(--text-hi)' }">
-                      {{ worker.avgEventLoopLagMs }}ms
-                    </span>
-                  </td>
-                  <td style="text-align:right;">
-                    <span class="font-mono tabular-nums" :style="{ color: worker.maxEventLoopLagMs > 500 ? '#f43f5e' : 'var(--text-hi)' }">
-                      {{ worker.maxEventLoopLagMs }}ms
-                    </span>
-                  </td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">{{ worker.freeSlots }}</td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">{{ worker.dbConnections }}</td>
-                  <td style="text-align:right;" class="font-mono tabular-nums">{{ worker.jobQueueSize }}</td>
-                  <td style="font-size:12px; color:var(--text-low);">{{ formatTime(worker.lastSeen) }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
+        </template>
+      </template>
     </template>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
-import { system } from '@/api'
-import { toNum, trimIncompleteBuckets } from '@/composables/useApi'
-import { useRefresh } from '@/composables/useRefresh'
+import { system, operator as operatorApi, describeApiError } from '@/api'
+import { toNum, trimIncompleteBuckets, formatNumber } from '@/composables/useApi'
+import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
+import { useAutoRefresh } from '@/composables/useRefresh'
+import { useToast } from '@/composables/useToast'
+import { useIdentity } from '@/stores/identity'
 import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
+
+const { can, actingTenantSlug } = useIdentity()
+const { notifyWarn } = useToast()
 
 // ---------------------------------------------------------------------------
 // State
@@ -547,10 +565,18 @@ const timeRange = ref(60)
 const customMode = ref(false)
 const customFrom = ref('')
 const customTo = ref('')
+const rangeError = ref(null)
 
+// CELL-LEVEL. worker-metrics carries broker-wide worker counters with no
+// tenant column; the proxy classifies it Operator and answers 404 to everyone
+// else, so it is fetched only for a live operator and every panel built from
+// it is labelled.
 const workerData = ref(null)
-const queueLagData = ref(null)
+const workerError = ref(null)
+// TENANT-SCOPED.
 const queueOpsData = ref(null)
+const queueOpsError = ref(null)
+const retentionError = ref(null)
 // Per-replica parked breakdown — only fetched when the Parked tab is active
 // and the per-queue view is set to 'individual'. Null otherwise so the
 // aggregate path is unaffected.
@@ -572,32 +598,15 @@ const timeRanges = [
 ]
 
 // ---------------------------------------------------------------------------
-// Formatters (local copies — these are small and we'd rather not couple two
-// pages through a shared util file just for ~30 lines of helpers)
+// Formatters. `formatDurationMs` says its unit in its name — three different
+// `formatDuration`s used to coexist across these views, two taking ms and one
+// taking seconds, which is a live foot-gun for anyone moving code between them.
 // ---------------------------------------------------------------------------
-const formatDateTimeLocal = (date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  const hours = String(date.getHours()).padStart(2, '0')
-  const minutes = String(date.getMinutes()).padStart(2, '0')
-  return `${year}-${month}-${day}T${hours}:${minutes}`
-}
-
-const formatDuration = (ms) => {
-  if (ms === undefined || ms === null) return '0ms'
+const formatDurationMs = (ms) => {
+  if (ms === undefined || ms === null) return '—'
   if (ms < 1000) return `${Math.round(ms)}ms`
   if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
   return `${(ms / 60000).toFixed(1)}m`
-}
-
-const formatNumber = (num) => {
-  if (num === undefined || num === null) return '0'
-  if (num >= 1e12) return (num / 1e12).toFixed(2) + 'T'
-  if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B'
-  if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M'
-  if (num >= 1e3) return (num / 1e3).toFixed(1) + 'K'
-  return num.toString()
 }
 
 const formatTime = (timestamp) => {
@@ -628,12 +637,14 @@ const formatParked = (v) => {
 // ---------------------------------------------------------------------------
 const selectQuickRange = (value) => {
   customMode.value = false
+  rangeError.value = null
   timeRange.value = value
   fetchData()
 }
 
 const toggleCustomMode = () => {
   customMode.value = !customMode.value
+  rangeError.value = null
   if (customMode.value) {
     const now = new Date()
     const from = new Date(now.getTime() - timeRange.value * 60 * 1000)
@@ -643,31 +654,18 @@ const toggleCustomMode = () => {
 }
 
 const applyCustomRange = () => {
-  if (!customFrom.value || !customTo.value) return
-  const fromDate = new Date(customFrom.value)
-  const toDate = new Date(customTo.value)
-  if (fromDate >= toDate) return
+  // Apply used to `return` on a bad range and look like a dead button.
+  const range = validateRange(customFrom.value, customTo.value)
+  if (range.error) {
+    rangeError.value = range.error
+    notifyWarn('Range not applied', range.error)
+    return
+  }
+  rangeError.value = null
   fetchData()
 }
 
-const formatChartLabel = (date, isMultiDay) => {
-  if (isMultiDay) {
-    return date.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    })
-  }
-  return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-}
-
-const isMultiDay = (timeSeries) => {
-  if (!timeSeries || timeSeries.length < 2) return false
-  const firstDate = new Date(timeSeries[0].timestamp)
-  const lastDate = new Date(timeSeries[timeSeries.length - 1].timestamp)
-  return firstDate.toDateString() !== lastDate.toDateString()
-}
+const timestampsOf = (rows) => (rows || []).map(r => r.timestamp)
 
 // ---------------------------------------------------------------------------
 // Throughput / latency / event loop / errors — chip metric toggles
@@ -687,12 +685,14 @@ const eventLoopMetrics = [
 const selectedEventLoopMetrics = reactive({ avg: true, max: true })
 const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !selectedEventLoopMetrics[key] }
 
+// No `dbErrors` entry: server/src/metrics.rs declares the counter and
+// db.rs writes it, but nothing in the broker ever increments it — the series
+// was a guaranteed zero wearing the name of a real failure mode.
 const errorMetrics = [
-  { key: 'dbErrors',  label: 'DB Errors',  activeClass: 'chip-bad',  activeDot: '#fb7185' },
   { key: 'ackFailed', label: 'Ack Failed', activeClass: 'chip-warn', activeDot: '#e6b450' },
   { key: 'dlq',       label: 'DLQ',        activeClass: 'chip-bad',  activeDot: '#fb7185' },
 ]
-const selectedErrorMetrics = reactive({ dbErrors: true, ackFailed: true, dlq: true })
+const selectedErrorMetrics = reactive({ ackFailed: true, dlq: true })
 const toggleErrorMetric = (key) => { selectedErrorMetrics[key] = !selectedErrorMetrics[key] }
 
 // ---------------------------------------------------------------------------
@@ -702,7 +702,7 @@ const lagChartOptions = {
   plugins: {
     legend: { display: false },
     tooltip: {
-      callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatDuration(ctx.parsed.y)}` }
+      callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatDurationMs(ctx.parsed.y)}` }
     }
   },
   scales: {
@@ -710,7 +710,7 @@ const lagChartOptions = {
       beginAtZero: true,
       min: 0,
       title: { display: true, text: 'Latency', font: { size: 11 } },
-      ticks: { callback: (value) => formatDuration(value) }
+      ticks: { callback: (value) => formatDurationMs(value) }
     }
   }
 }
@@ -718,11 +718,6 @@ const lagChartOptions = {
 const throughputChartOptions = {
   plugins: { legend: { display: false } },
   scales: { y: { title: { display: true, text: 'Operations/s', font: { size: 11 } } } }
-}
-
-const poolChartOptions = {
-  plugins: { legend: { display: false } },
-  scales: { y: { title: { display: true, text: 'Connections', font: { size: 11 } } } }
 }
 
 const errorsChartOptions = {
@@ -745,18 +740,6 @@ const dlqChartOptions = {
       beginAtZero: true,
       min: 0,
       title: { display: true, text: 'DLQ messages / bucket', font: { size: 11 } },
-      ticks: { precision: 0 }
-    }
-  }
-}
-
-const jobQueueChartOptions = {
-  plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 12, padding: 8, font: { size: 11 } } } },
-  scales: {
-    y: {
-      beginAtZero: true,
-      min: 0,
-      title: { display: true, text: 'Pending jobs', font: { size: 11 } },
       ticks: { precision: 0 }
     }
   }
@@ -837,7 +820,7 @@ const queueTooltipBase = {
 
 const lagTooltip = {
   ...queueTooltipBase,
-  callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatDuration(ctx.parsed.y)}` }
+  callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatDurationMs(ctx.parsed.y)}` }
 }
 
 const perQueuePartitionCountOptions = computed(() => ({
@@ -927,7 +910,7 @@ const perQueueLagOptions = computed(() => ({
       beginAtZero: true,
       min: 0,
       title: { display: true, text: 'Latency', font: { size: 11 } },
-      ticks: { callback: (value) => formatDuration(value) }
+      ticks: { callback: (value) => formatDurationMs(value) }
     }
   }
 }))
@@ -952,7 +935,7 @@ const queueColors = [
 const totalErrors = computed(() => {
   if (!workerData.value?.timeSeries?.length) return 0
   return workerData.value.timeSeries.reduce((sum, t) => {
-    return sum + (toNum(t.dbErrors) || 0) + (toNum(t.ackFailed) || 0) + (toNum(t.dlqCount) || 0)
+    return sum + (toNum(t.ackFailed) || 0) + (toNum(t.dlqCount) || 0)
   }, 0)
 })
 
@@ -960,7 +943,7 @@ const throughputChartData = computed(() => {
   if (!workerData.value?.timeSeries?.length) return { labels: [], datasets: [] }
 
   const ts = [...workerData.value.timeSeries].reverse()
-  const multiDay = isMultiDay(ts)
+  const multiDay = isMultiDay(timestampsOf(ts))
   const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
 
   const datasets = []
@@ -991,7 +974,7 @@ const throughputChartData = computed(() => {
 const latencyChartData = computed(() => {
   if (!workerData.value?.timeSeries?.length) return { labels: [], datasets: [] }
   const ts = [...workerData.value.timeSeries].reverse()
-  const multiDay = isMultiDay(ts)
+  const multiDay = isMultiDay(timestampsOf(ts))
   const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
   return {
     labels,
@@ -1008,7 +991,7 @@ const latencyChartData = computed(() => {
 const eventLoopChartData = computed(() => {
   if (!workerData.value?.timeSeries?.length) return { labels: [], datasets: [] }
   const ts = [...workerData.value.timeSeries].reverse()
-  const multiDay = isMultiDay(ts)
+  const multiDay = isMultiDay(timestampsOf(ts))
   const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
   const datasets = []
   if (selectedEventLoopMetrics.avg) {
@@ -1028,63 +1011,18 @@ const eventLoopChartData = computed(() => {
   return { labels, datasets }
 })
 
-const connectionPoolChartData = computed(() => {
-  if (!workerData.value?.timeSeries?.length) return { labels: [], datasets: [] }
-  const ts = [...workerData.value.timeSeries].reverse()
-  const multiDay = isMultiDay(ts)
-  const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-  return {
-    labels,
-    datasets: [
-      { label: 'Free Slots', data: ts.map(t => toNum(t.avgFreeSlots)),
-        borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
-        fill: true, tension: 0 },
-      { label: 'DB Connections', data: ts.map(t => toNum(t.dbConnections)),
-        borderColor: '#8a8a92', fill: false, tension: 0 }
-    ]
-  }
-})
-
-// Job queue depth (avg filled, max line). Hidden when both series are flat
-// at zero across the window — keeps the panel quiet on healthy clusters
-// and only attracts attention when something is queueing up.
-const jobQueueChartData = computed(() => {
-  if (!workerData.value?.timeSeries?.length) return { labels: [], datasets: [] }
-  const ts = [...workerData.value.timeSeries].reverse()
-  const avgs = ts.map(t => toNum(t.avgJobQueueSize))
-  const maxes = ts.map(t => toNum(t.maxJobQueueSize))
-  // "Empty" panel = no series has any non-zero finite value. Nulls don't
-  // count as zero — they're simply missing.
-  const allZero = (a) => a.every(v => v === null || v === 0)
-  if (allZero(avgs) && allZero(maxes)) {
-    return { labels: [], datasets: [] }
-  }
-  const multiDay = isMultiDay(ts)
-  const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
-  return {
-    labels,
-    datasets: [
-      { label: 'Avg', data: avgs,
-        borderColor: '#e6e6e6', backgroundColor: 'rgba(230, 230, 230, 0.12)',
-        fill: true, tension: 0 },
-      { label: 'Max', data: maxes,
-        borderColor: '#fb7185', fill: false, tension: 0, borderDash: [4, 3] }
-    ]
-  }
-})
+// The Connection Pool and Job Queue Depth datasets are gone with their panels:
+// avg_free_slots / db_connections / avg_job_queue_size / max_job_queue_size are
+// not in insert_worker_metrics' column list (server/src/db.rs), so they held
+// their DDL default of 0 forever. The real pool gauges live in
+// queen.system_metrics and are charted by the Dashboard's DB pool row.
 
 const errorsChartData = computed(() => {
   if (!workerData.value?.timeSeries?.length) return { labels: [], datasets: [] }
   const ts = [...workerData.value.timeSeries].reverse()
-  const multiDay = isMultiDay(ts)
+  const multiDay = isMultiDay(timestampsOf(ts))
   const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
   const datasets = []
-  if (selectedErrorMetrics.dbErrors) {
-    datasets.push({
-      label: 'DB Errors', data: ts.map(t => toNum(t.dbErrors)),
-      backgroundColor: 'rgba(244, 63, 94, 0.6)', borderColor: '#f43f5e', borderWidth: 1
-    })
-  }
   if (selectedErrorMetrics.ackFailed) {
     datasets.push({
       label: 'Ack Failed', data: ts.map(t => toNum(t.ackFailed)),
@@ -1110,7 +1048,7 @@ const dlqChartData = computed(() => {
   const ts = [...workerData.value.timeSeries].reverse()
   const data = ts.map(t => toNum(t.dlqCount))
   if (data.every(v => v === null || v === 0)) return { labels: [], datasets: [] }
-  const multiDay = isMultiDay(ts)
+  const multiDay = isMultiDay(timestampsOf(ts))
   const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
   return {
     labels,
@@ -1297,60 +1235,22 @@ const partitionRateChartData = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Per-queue chart data (lag stream)
+// Per-queue lag — read off the SAME queue-ops payload as everything else.
+//
+// The old /api/v1/analytics/queue-lag fetch is gone: get_queue_lag_v1 returns
+// raw per-minute rows with no rollup and no LIMIT, so a 7-day custom range
+// over 200 queues answered with millions of objects in one response. queue-ops
+// already carries avgLagMs / maxLagMs per (queue, bucket) at the range's
+// natural rollup, so there is nothing the extra call could add.
 // ---------------------------------------------------------------------------
-// availableQueues is the union of queues seen in the pop-only lag stream
-// (queueLagData) and the per-op stream (queueOpsData). The server returns
-// queueOpsData.queues separately for UI filter convenience.
-const availableQueues = computed(() => {
-  const s = new Set()
-  const lag = queueLagData.value || []
-  for (const r of lag) s.add(r.queueName)
-  const ops = queueOpsData.value?.queues || []
-  for (const q of ops) s.add(q)
-  return [...s].sort()
-})
+const availableQueues = computed(() => [...(queueOpsData.value?.queues || [])].sort())
 
-const queuesToShow = computed(() => {
-  if (selectedQueues.value.length > 0) return [...selectedQueues.value].sort()
-  return availableQueues.value
-})
-
-const buildPerQueueChart = (valueAccessor) => {
-  const raw = queueLagData.value || []
-  if (!raw.length) return { labels: [], datasets: [] }
-
-  const bucketSet = new Set(raw.map(r => r.bucketTime))
-  const buckets = [...bucketSet].sort()
-  const multiDay = buckets.length >= 2 &&
-    new Date(buckets[0]).toDateString() !== new Date(buckets[buckets.length - 1]).toDateString()
-  const labels = buckets.map(b => formatChartLabel(new Date(b), multiDay))
-
-  const lookup = {}
-  raw.forEach(r => { lookup[`${r.queueName}|${r.bucketTime}`] = r })
-
-  const datasets = queuesToShow.value.map((q, i) => {
-    const color = queueColors[i % queueColors.length]
-    return {
-      label: q,
-      // No entry → null (gap), so a queue that didn't report this bucket
-      // doesn't read as "0 lag" / "0 rate" along the bottom of the chart.
-      data: buckets.map(b => {
-        const entry = lookup[`${q}|${b}`]
-        if (!entry) return null
-        const v = valueAccessor(entry)
-        return v === undefined ? null : v
-      }),
-      borderColor: color.border,
-      backgroundColor: color.bg,
-      fill: false,
-      tension: 0
-    }
-  })
-  return { labels, datasets }
-}
-
-const queueLagChartData = computed(() => buildPerQueueChart(entry => toNum(entry.avgLagMs)))
+// Lag is measured AT POP. A bucket with no pops has no measurement — charting
+// its 0 would draw a flat healthy line under a stalled queue.
+const queueLagChartData = computed(() => buildPerQueueOpsChart(e => {
+  const pops = toNum(e.popMessages) || 0
+  return pops > 0 ? toNum(e.avgLagMs) : null
+}))
 
 // ---------------------------------------------------------------------------
 // Top queues leaderboard
@@ -1430,96 +1330,121 @@ const hasTopQueueData = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Fetcher — only the worker / queue-ops endpoints. The per-replica parked
-// fetch is skipped unless we're actually rendering the per-replica view,
-// so the steady-state cost is one round-trip per refresh.
+// Fetcher.
+//
+// Every call is caught individually and every failure has a home in the
+// template. The old version left worker-metrics — the one endpoint the proxy
+// blocks for non-operators — unguarded inside the Promise.all, so its 404
+// rejected the whole batch and the template, which gated on `workerData` with
+// no `v-else`, rendered nothing at all. A blank page is the worst error state
+// there is: it is indistinguishable from an idle cluster.
 // ---------------------------------------------------------------------------
 const fetchData = async () => {
   // Show skeleton only on first fetch; refreshes leave the previous
   // data on screen for a smooth update.
-  if (!workerData.value) loading.value = true
+  if (!queueOpsData.value && !workerData.value) loading.value = true
 
-  try {
-    let from, to
-    if (customMode.value && customFrom.value && customTo.value) {
-      from = new Date(customFrom.value)
-      to = new Date(customTo.value)
-    } else {
-      const now = new Date()
-      from = new Date(now.getTime() - timeRange.value * 60 * 1000)
-      to = now
+  let from, to
+  if (customMode.value && customFrom.value && customTo.value) {
+    const range = validateRange(customFrom.value, customTo.value)
+    if (range.error) {
+      rangeError.value = range.error
+      loading.value = false
+      return
     }
-    const params = { from: from.toISOString(), to: to.toISOString() }
+    from = range.from
+    to = range.to
+  } else {
+    const now = new Date()
+    from = new Date(now.getTime() - timeRange.value * 60 * 1000)
+    to = now
+  }
+  const params = { from: from.toISOString(), to: to.toISOString() }
 
-    const wantParkedReplicas = selectedQueueOp.value === 'parked'
-      && viewMode.value === 'individual'
+  const wantParkedReplicas = selectedQueueOp.value === 'parked'
+    && viewMode.value === 'individual'
 
-    const [workerRes, queueLagRes, queueOpsRes, retentionRes, parkedReplicasRes] = await Promise.all([
-      system.getWorkerMetrics(params),
-      system.getQueueLag(params).catch(e => {
-        console.warn('Failed to fetch per-queue lag metrics:', e.message)
-        return { data: [] }
-      }),
-      system.getQueueOps(params).catch(e => {
-        console.warn('Failed to fetch per-queue ops metrics:', e.message)
-        return { data: { series: [], queues: [] } }
-      }),
-      system.getRetention(params).catch(e => {
-        console.warn('Failed to fetch retention timeseries:', e.message)
-        return { data: { series: [], totals: {} } }
-      }),
-      wantParkedReplicas
-        ? system.getQueueParkedReplicas(params).catch(e => {
-            console.warn('Failed to fetch per-replica parked metrics:', e.message)
-            return { data: { series: [], replicas: [] } }
-          })
-        : Promise.resolve({ data: null })
-    ])
+  const settle = (p) => p.then(
+    res => ({ data: res.data, error: null }),
+    err => ({ data: null, error: err }),
+  )
 
-    // Trim the in-flight current bucket from each time series so the
-    // right edge of every chart isn't dragged towards zero by partial
-    // samples. Worker / per-queue / parked / retention data all share
-    // the same once-per-minute flush cadence.
-    workerData.value = workerRes.data ? {
+  const [workerRes, queueOpsRes, retentionRes, parkedReplicasRes] = await Promise.all([
+    // CELL-LEVEL, operator-only. Asking as a tenant only earns a 404.
+    can('operator')
+      ? settle(operatorApi.getWorkerMetrics(params))
+      : Promise.resolve({ data: null, error: null }),
+    settle(system.getQueueOps(params)),
+    settle(system.getRetention(params)),
+    wantParkedReplicas
+      ? settle(system.getQueueParkedReplicas(params))
+      : Promise.resolve({ data: null, error: null }),
+  ])
+
+  // Trim the in-flight current bucket from each time series so the right edge
+  // of every chart isn't dragged towards zero by partial samples. Worker /
+  // per-queue / parked / retention data share the once-per-minute cadence.
+  workerError.value = workerRes.error
+  if (workerRes.data) {
+    workerData.value = {
       ...workerRes.data,
       timeSeries: trimIncompleteBuckets(workerRes.data.timeSeries || [], {
         bucketKey: 'timestamp',
         bucketMinutes: workerRes.data.bucketMinutes || 1,
       }),
-    } : null
-    queueLagData.value = trimIncompleteBuckets(queueLagRes.data || [], {
-      bucketKey: 'bucketTime',
-      bucketMinutes: 1,
-    })
-    queueOpsData.value = queueOpsRes.data ? {
+    }
+  } else if (workerRes.error) {
+    workerData.value = null
+  }
+
+  queueOpsError.value = queueOpsRes.error
+  if (queueOpsRes.data) {
+    queueOpsData.value = {
       ...queueOpsRes.data,
       series: trimIncompleteBuckets(queueOpsRes.data.series || [], {
         bucketKey: 'bucket',
         bucketMinutes: queueOpsRes.data.bucketMinutes || 1,
       }),
-    } : null
-    queueParkedReplicasData.value = parkedReplicasRes.data ? {
-      ...parkedReplicasRes.data,
-      series: trimIncompleteBuckets(parkedReplicasRes.data.series || [], {
-        bucketKey: 'bucket',
-        bucketMinutes: parkedReplicasRes.data.bucketMinutes || 1,
-      }),
-    } : null
-    retentionData.value = retentionRes.data ? {
+    }
+  } else if (queueOpsRes.error) {
+    queueOpsData.value = null
+  }
+
+  retentionError.value = retentionRes.error
+  if (retentionRes.data) {
+    retentionData.value = {
       ...retentionRes.data,
       series: trimIncompleteBuckets(retentionRes.data.series || [], {
         bucketKey: 'bucket',
         bucketMinutes: retentionRes.data.bucketMinutes || 1,
       }),
-    } : null
-  } catch (err) {
-    console.error('Failed to fetch queue operations metrics:', err)
-  } finally {
-    loading.value = false
+    }
+  } else if (retentionRes.error) {
+    retentionData.value = null
   }
+
+  queueParkedReplicasData.value = parkedReplicasRes.data ? {
+    ...parkedReplicasRes.data,
+    series: trimIncompleteBuckets(parkedReplicasRes.data.series || [], {
+      bucketKey: 'bucket',
+      bucketMinutes: parkedReplicasRes.data.bucketMinutes || 1,
+    }),
+  } : null
+
+  loading.value = false
 }
 
-useRefresh(fetchData)
+// Failure states the template reads. `opsError` is the tenant half of the page
+// and `allFailed` is the only condition under which the page has nothing left
+// to show — everything else degrades panel by panel.
+const opsError = computed(() => queueOpsError.value)
+const allFailed = computed(() =>
+  queueOpsError.value !== null && retentionError.value !== null
+)
+
+// One shared ticker for the whole app, paused while the tab is hidden: under
+// the proxy every poll is rate-limited and metered.
+useAutoRefresh(fetchData)
 onMounted(fetchData)
 
 // When the user lands on Parked + individual after the initial fetch,
@@ -1539,17 +1464,66 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
   div[style*="grid-template-columns:repeat(2"] { grid-template-columns: 1fr !important; }
 }
 
-/* Three-column card row (Event Loop / Connection Pool / Job Queue Depth).
-   Collapses to 1 column under 1100px to match the 2-col responsive
-   behavior used elsewhere on this page. */
-.three-col-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-  margin-bottom: 16px;
+/* A panel whose source failed or does not exist. Deliberately not styled as
+   an empty state: "nothing to show" and "we could not ask" are different
+   answers and must not look the same. */
+.panel-na {
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--text-low);
+  text-align: center;
+  padding: 20px 12px;
+  border: 1px dashed var(--warn-400);
+  border-radius: 6px;
 }
-@media (max-width: 1100px) {
-  .three-col-row { grid-template-columns: 1fr; }
+
+/* CELL · OPERATOR divider — same amber vocabulary as the sidebar's Cell
+   group, so "this is not your tenant's number" reads the same everywhere. */
+.cell-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin: 24px 0 14px;
+  font-size: 12px;
+  color: var(--text-low);
+  border: 1px solid var(--bd);
+  border-left: 3px solid var(--warn-400);
+  border-radius: 6px;
+  background: rgba(230, 180, 80, .05);
+}
+.cell-tag {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  color: var(--warn-400);
+  border: 1px solid var(--warn-400);
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+.cell-chip {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--warn-400);
+  border: 1px solid var(--warn-400);
+  border-radius: 3px;
+  padding: 0 3px;
+  margin-left: 6px;
+  vertical-align: 2px;
+  opacity: .8;
+}
+
+.val-warn { color: var(--warn-400); }
+.val-bad { color: var(--ember-400); }
+
+.range-error {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--warn-400);
 }
 
 /* Top Queues leaderboard — 2x2 grid so each mini-table gets enough

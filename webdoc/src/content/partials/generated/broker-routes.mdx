@@ -1,0 +1,115 @@
+---
+params: []
+---
+
+{/* GENERATED FILE — do not edit by hand.
+    Regenerate with: pnpm --dir webdoc gen
+    Source of truth:
+      - server/src/main.rs (Router::new chain)
+      - server/src/auth.rs (route_access_level)
+      - server/src/handlers/*.rs (Tenant extension)
+*/}
+
+Queen's broker registers **60 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
+
+### Message plane
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/ack` | read-write | yes |
+| `POST` | `/api/v1/ack/batch` | read-write | yes |
+| `POST` | `/api/v1/lease/:leaseId/extend` | read-write | yes |
+| `GET` | `/api/v1/pop` | read-write | yes |
+| `GET` | `/api/v1/pop/queue/:queue` | read-write | yes |
+| `GET` | `/api/v1/pop/queue/:queue/partition/:partition` | read-write | yes |
+| `POST` | `/api/v1/push` | write-only | yes |
+| `POST` | `/api/v1/transaction` | read-write | yes |
+
+### Queues and partitions
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/configure` | read-write | yes |
+| `GET` | `/api/v1/resources/namespaces` | read-only | yes |
+| `GET` | `/api/v1/resources/overview` | read-only | yes |
+| `GET` | `/api/v1/resources/queues` | read-only | yes |
+| `DELETE` | `/api/v1/resources/queues/:queue` | admin | yes |
+| `GET` | `/api/v1/resources/queues/:queue` | read-only | yes |
+| `GET` | `/api/v1/resources/tasks` | read-only | yes |
+
+### Consumer groups
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/consumer-groups` | read-only | yes |
+| `DELETE` | `/api/v1/consumer-groups/:group` | admin | yes |
+| `GET` | `/api/v1/consumer-groups/:group` | read-only | yes |
+| `DELETE` | `/api/v1/consumer-groups/:group/queues/:queue` | admin | yes |
+| `POST` | `/api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek` | read-write | yes |
+| `POST` | `/api/v1/consumer-groups/:group/queues/:queue/seek` | read-write | yes |
+| `POST` | `/api/v1/consumer-groups/:group/subscription` | read-write | yes |
+| `GET` | `/api/v1/consumer-groups/lagging` | read-only | yes |
+
+### Messages, DLQ and traces
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/dlq` | read-only | yes |
+| `GET` | `/api/v1/messages` | read-only | yes |
+| `DELETE` | `/api/v1/messages/:partitionId/:transactionId` | read-write | yes |
+| `GET` | `/api/v1/messages/:partitionId/:transactionId` | read-only | yes |
+| `POST` | `/api/v1/messages/:partitionId/:transactionId/retry` | read-write | yes |
+| `POST` | `/api/v1/traces` | read-write | yes |
+| `GET` | `/api/v1/traces/:partitionId/:transactionId` | read-only | yes |
+| `GET` | `/api/v1/traces/by-name/:traceName` | read-only | yes |
+| `GET` | `/api/v1/traces/names` | read-only | yes |
+
+### Status, metrics and analytics
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/analytics/postgres-stats` | read-only | no |
+| `GET` | `/api/v1/analytics/queue-lag` | read-only | yes |
+| `GET` | `/api/v1/analytics/queue-ops` | read-only | yes |
+| `GET` | `/api/v1/analytics/queue-parked-replicas` | read-only | yes |
+| `GET` | `/api/v1/analytics/retention` | read-only | yes |
+| `GET` | `/api/v1/analytics/system-metrics` | read-only | no |
+| `GET` | `/api/v1/analytics/worker-metrics` | read-only | no |
+| `POST` | `/api/v1/stats/refresh` | admin | no |
+| `GET` | `/api/v1/status` | read-only | no |
+| `GET` | `/api/v1/status/analytics` | read-only | yes |
+| `GET` | `/api/v1/status/buffers` | read-only | no |
+| `GET` | `/api/v1/status/queues` | read-only | yes |
+| `GET` | `/api/v1/status/queues/:queue` | read-only | yes |
+| `GET` | `/health` | public | no |
+| `GET` | `/metrics` | public | no |
+| `GET` | `/metrics/prometheus` | public | no |
+| `GET` | `/status` | read-only | no |
+
+### Streams
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `POST` | `/streams/v1/cycle` | read-write | no |
+| `POST` | `/streams/v1/queries` | read-write | no |
+| `POST` | `/streams/v1/state/get` | read-only | no |
+
+### Operator surfaces
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/system/maintenance` | admin | no |
+| `POST` | `/api/v1/system/maintenance` | admin | no |
+| `GET` | `/api/v1/system/maintenance/pop` | admin | no |
+| `POST` | `/api/v1/system/maintenance/pop` | admin | no |
+| `GET` | `/api/v1/system/shared-state` | admin | no |
+
+### Internal (broker-to-broker)
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/internal/api/inter-instance/stats` | admin | no |
+| `POST` | `/internal/api/notify` | admin | yes |
+| `GET` | `/internal/api/shared-state/stats` | admin | no |
+
+40 of these handlers resolve a tenant from the request; 11 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

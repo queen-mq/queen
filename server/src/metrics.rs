@@ -82,8 +82,12 @@ pub struct Metrics {
     /// the collector can populate worker_metrics.ack_{success,failed}_count.
     pub ack_success: AtomicU64,
     pub ack_failed: AtomicU64,
-    /// DLQ transitions and DB errors observed on the ack path (worker_metrics parity).
+    /// DLQ transitions observed on the ack path (worker_metrics parity).
     pub dlq_moved: AtomicU64,
+    /// Database failures observed on the DATA paths (push/pop/ack/transaction):
+    /// a statement error, a statement timeout, or a pool acquisition failure.
+    /// Bump it ONLY through `record_db_error(s)` — the gauge is charted as
+    /// "DB errors", so a path that fails without counting reads as healthy.
     pub db_errors: AtomicU64,
     /// Pop path split (Phase 2): a woken long-poll that drains a partition hint
     /// issues a targeted single-partition pop (`pop_targeted`) instead of the
@@ -368,6 +372,23 @@ impl Parked {
 }
 
 impl Metrics {
+    /// One database failure on a data path (statement error, statement timeout,
+    /// or pool acquisition failure). Feeds worker_metrics.db_error_count and the
+    /// dashboard "DB errors" series.
+    #[inline]
+    pub fn record_db_error(&self) {
+        self.db_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `n` database failures at once (e.g. every item of a push whose commit
+    /// failed). A no-op for n == 0.
+    #[inline]
+    pub fn record_db_errors(&self, n: u64) {
+        if n > 0 {
+            self.db_errors.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+
     pub fn new() -> Metrics {
         Metrics {
             push: std::sync::Arc::new(OpMetrics::new("push")),

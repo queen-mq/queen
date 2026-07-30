@@ -258,7 +258,21 @@ CREATE OR REPLACE FUNCTION queen.get_queue_lag_v1(
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    v_bucket_minutes INTEGER;
 BEGIN
+    -- Roll the raw per-minute rows up to the SAME duration-derived bucket width
+    -- get_queue_ops_v1 uses. Unrolled, a wide custom range (the QueueOperations
+    -- picker accepts any from/to) returned one object per queue per MINUTE —
+    -- a 7-day window over 200 queues is ~2M objects in a single response.
+    v_bucket_minutes := CASE
+        WHEN EXTRACT(EPOCH FROM (p_to - p_from)) / 60 <= 60 THEN 1
+        WHEN EXTRACT(EPOCH FROM (p_to - p_from)) / 60 <= 360 THEN 5
+        WHEN EXTRACT(EPOCH FROM (p_to - p_from)) / 60 <= 1440 THEN 15
+        WHEN EXTRACT(EPOCH FROM (p_to - p_from)) / 60 <= 10080 THEN 60
+        ELSE 360
+    END;
+
     RETURN (
         SELECT COALESCE(jsonb_agg(
             jsonb_build_object(
@@ -266,14 +280,34 @@ BEGIN
                 'popCount', pop_count,
                 'avgLagMs', avg_lag_ms,
                 'maxLagMs', max_lag_ms,
+                -- Bucket width travels WITH each point (the endpoint's contract
+                -- is a bare array, so there is no envelope to carry it in) —
+                -- a client must not assume 1-minute points.
+                'bucketMinutes', v_bucket_minutes,
                 'bucketTime', to_char(bucket_time, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
             ) ORDER BY bucket_time DESC, queue_name
         ), '[]'::jsonb)
-        FROM queen.queue_lag_metrics
-        WHERE bucket_time >= p_from
-          AND bucket_time <= p_to
-          AND tenant_id = p_tenant
-          AND (p_queue_name IS NULL OR queue_name = p_queue_name)
+        FROM (
+            SELECT queue_name,
+                   date_trunc('minute', bucket_time) -
+                       (EXTRACT(minute FROM bucket_time)::integer % v_bucket_minutes)
+                       * INTERVAL '1 minute' AS bucket_time,
+                   SUM(pop_count) AS pop_count,
+                   -- pop-weighted average; NULL (not 0) when the window held no
+                   -- pop sample at all, so "unmeasured" stays distinct from "zero".
+                   CASE WHEN SUM(pop_count) > 0
+                        THEN SUM(avg_lag_ms * pop_count) / SUM(pop_count)
+                        END AS avg_lag_ms,
+                   CASE WHEN SUM(pop_count) > 0
+                        THEN MAX(max_lag_ms)
+                        END AS max_lag_ms
+            FROM queen.queue_lag_metrics
+            WHERE bucket_time >= p_from
+              AND bucket_time <= p_to
+              AND tenant_id = p_tenant
+              AND (p_queue_name IS NULL OR queue_name = p_queue_name)
+            GROUP BY 1, 2
+        ) rolled
     );
 END;
 $$;
@@ -314,8 +348,8 @@ BEGIN
                 AVG(avg_free_slots)::integer as avg_free,
                 MIN(min_free_slots) as min_free,
                 MAX(db_connections) as db_conns,
-                AVG(avg_job_queue_size)::integer as avg_jq,
-                MAX(max_job_queue_size) as max_jq,
+                NULLIF(AVG(avg_job_queue_size)::integer, 0) as avg_jq,
+                NULLIF(MAX(max_job_queue_size), 0) as max_jq,
                 SUM(db_error_count) as db_errors,
                 MAX(bucket_time) as last_seen
             FROM queen.worker_metrics
@@ -422,6 +456,7 @@ DECLARE
     v_deleted_metrics INTEGER := 0;
     v_deleted_lag INTEGER := 0;
     v_deleted_parked_replica INTEGER := 0;
+    v_deleted_retention INTEGER := 0;
 BEGIN
     DELETE FROM queen.worker_metrics
     WHERE bucket_time < NOW() - (p_retention_days || ' days')::INTERVAL;
@@ -435,10 +470,18 @@ BEGIN
     WHERE bucket_time < NOW() - (p_retention_days || ' days')::INTERVAL;
     GET DIAGNOSTICS v_deleted_parked_replica = ROW_COUNT;
 
+    -- queen.retention_history is written per retention/eviction step (045) and
+    -- has no FK cascade to clean it up, so it ages out on the same window as the
+    -- other metrics tables.
+    DELETE FROM queen.retention_history
+    WHERE executed_at < NOW() - (p_retention_days || ' days')::INTERVAL;
+    GET DIAGNOSTICS v_deleted_retention = ROW_COUNT;
+
     RETURN jsonb_build_object(
         'deletedMetrics', v_deleted_metrics,
         'deletedLagMetrics', v_deleted_lag,
-        'deletedParkedReplica', v_deleted_parked_replica
+        'deletedParkedReplica', v_deleted_parked_replica,
+        'deletedRetentionHistory', v_deleted_retention
     );
 END;
 $$;
@@ -472,6 +515,8 @@ DECLARE
     v_default UUID := '00000000-0000-0000-0000-000000000001';
     v_agg RECORD;
     v_part_count INTEGER;
+    v_push_5m BIGINT;
+    v_ack_5m BIGINT;
 BEGIN
   IF p_tenant = v_default THEN
     -- Get existing system stats (for pending/processing counts)
@@ -495,12 +540,19 @@ BEGIN
     FROM queen.worker_metrics
     WHERE bucket_time >= NOW() - INTERVAL '5 minutes';
     
-    -- Get recent lag from worker_metrics (last 5 minutes for current state)
-    SELECT 
-        CASE WHEN SUM(lag_count) > 0 
-             THEN (SUM(avg_lag_ms * lag_count) / SUM(lag_count) / 1000)::integer 
-             ELSE 0 END as avg_lag_seconds,
-        COALESCE(MAX(max_lag_ms) / 1000, 0)::integer as max_lag_seconds
+    -- Get recent lag from worker_metrics (last 5 minutes for current state).
+    -- worker_metrics lag is only sampled AT POP, so with consumers stopped there
+    -- is no sample at all. Both expressions must yield NULL (never 0) in that
+    -- case, otherwise the COALESCE chain below can never reach the queen.stats
+    -- fallback (oldest-pending age, 048_log_stats) and a stalled backlog reads
+    -- as zero lag.
+    SELECT
+        CASE WHEN SUM(lag_count) > 0
+             THEN (SUM(avg_lag_ms * lag_count) / SUM(lag_count) / 1000)::integer
+             END as avg_lag_seconds,
+        CASE WHEN SUM(lag_count) > 0
+             THEN (MAX(max_lag_ms) / 1000)::integer
+             END as max_lag_seconds
     INTO v_recent_lag
     FROM queen.worker_metrics
     WHERE bucket_time >= NOW() - INTERVAL '5 minutes';
@@ -569,6 +621,18 @@ BEGIN
     JOIN queen.log_queues lq ON lq.id = lp.queue_id
     WHERE lq.tenant_id = p_tenant;
 
+    -- Throughput over the SAME 5-minute window the default-tenant branch uses,
+    -- from the tenant-scoped per-queue counters. queen.stats.ingested_per_second
+    -- cannot serve here: it is a delta of RETAINED frames, so it collapses to 0
+    -- for a full stats cycle after every retention sweep and reads as "ingest
+    -- stopped" — see the semantics note in 048_log_stats.
+    SELECT COALESCE(SUM(qlm.push_message_count), 0),
+           COALESCE(SUM(qlm.ack_success_count + qlm.ack_failed_count), 0)
+    INTO v_push_5m, v_ack_5m
+    FROM queen.queue_lag_metrics qlm
+    WHERE qlm.tenant_id = p_tenant
+      AND qlm.bucket_time >= NOW() - INTERVAL '5 minutes';
+
     -- Message / lag / throughput totals re-derived from the tenant's 'queue'
     -- stat rows (same axes aggregate_system_stats_v2 uses, scoped by tenant).
     SELECT
@@ -612,8 +676,8 @@ BEGIN
             )
         ),
         'throughput', jsonb_build_object(
-            'ingestedPerSecond', ROUND(v_agg.ips, 2),
-            'processedPerSecond', ROUND(v_agg.pps, 2)
+            'ingestedPerSecond', ROUND(v_push_5m::numeric / 300, 2),
+            'processedPerSecond', ROUND(v_ack_5m::numeric / 300, 2)
         ),
         'timestamp', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
         'statsAge', CASE
@@ -650,6 +714,10 @@ DECLARE
     v_errors JSONB;
     v_point_count INTEGER;
     v_summary queen.worker_metrics_summary;
+    v_stats_pending BIGINT;
+    v_stats_processing BIGINT;
+    v_dlq_parts BIGINT;
+    v_dlq_errors JSONB;
 BEGIN
     -- Parse filters
     v_from_ts := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '1 hour');
@@ -860,7 +928,9 @@ BEGIN
             MAX(max_event_loop_lag_ms) as max_el,
             MIN(min_free_slots) as free_slots,
             MAX(db_connections) as db_conns,
-            MAX(max_job_queue_size) as job_queue,
+            -- This broker has no job queue: nothing writes the column, so it
+            -- must read as NULL ("not measured"), never as a confident 0.
+            NULLIF(MAX(max_job_queue_size), 0) as job_queue,
             SUM(push_message_count + ack_message_count) as msgs
         FROM queen.worker_metrics
         WHERE bucket_time >= NOW() - INTERVAL '2 minutes'
@@ -887,12 +957,23 @@ BEGIN
     
     -- Get message counts from summary
     SELECT * INTO v_summary FROM queen.worker_metrics_summary WHERE id = 1;
-    
+
+    -- Live watermarks from queen.stats (the same source get_status_queues_v2 and
+    -- the overview use). NOT from the summary's lifetime push/pop counters:
+    -- pop_message_count can exceed push_message_count whenever a queue has more
+    -- than one consumer group, so (push - pop) goes negative and clamps to 0 —
+    -- reporting "no backlog" on a queue that has one.
+    SELECT COALESCE(SUM(s.pending_messages), 0),
+           COALESCE(SUM(s.processing_messages), 0)
+    INTO v_stats_pending, v_stats_processing
+    FROM queen.stats s
+    WHERE s.stat_type = 'queue';
+
     -- Enhanced messages with request counts
     v_messages := jsonb_build_object(
         'total', COALESCE(v_summary.total_push_messages, 0),
-        'pending', GREATEST(0, COALESCE(v_summary.total_push_messages - v_summary.total_pop_messages, 0)),
-        'processing', 0,
+        'pending', GREATEST(0, v_stats_pending - v_stats_processing),
+        'processing', v_stats_processing,
         'completed', COALESCE(v_summary.total_ack_success, 0),
         'failed', COALESCE(v_summary.total_ack_failed, 0),
         'deadLetter', COALESCE(v_summary.total_dlq, 0),
@@ -922,23 +1003,58 @@ BEGIN
         'dlqMessages', COALESCE(v_summary.total_dlq, 0)
     );
     
-    -- Get active leases (unchanged)
+    -- Active leases. Dual-engine: queen.partition_consumers is the ROWS-engine
+    -- lease table and is empty on a log deployment, where live leases are
+    -- queen.log_consumers rows with a future lease_expires_at. Reading only the
+    -- rows table made this card a permanent 0/0/0/0 next to a live throughput
+    -- chart. Log-engine equivalents of the two counters: the leased span is
+    -- (committed, batch_end] and `committed` is the last acked offset.
     SELECT jsonb_build_object(
-        'active', COUNT(*),
-        'partitionsWithLeases', COUNT(DISTINCT partition_id),
-        'totalBatchSize', COALESCE(SUM(batch_size), 0),
-        'totalAcked', COALESCE(SUM(acked_count), 0)
+        'active', COALESCE(r.active, 0) + COALESCE(l.active, 0),
+        'partitionsWithLeases', COALESCE(r.parts, 0) + COALESCE(l.parts, 0),
+        'totalBatchSize', COALESCE(r.batch, 0) + COALESCE(l.batch, 0),
+        'totalAcked', COALESCE(r.acked, 0) + COALESCE(l.acked, 0)
     ) INTO v_leases
-    FROM queen.partition_consumers
-    WHERE lease_expires_at IS NOT NULL AND lease_expires_at > NOW();
-    
-    -- Get DLQ stats
+    FROM (
+        SELECT COUNT(*) AS active, COUNT(DISTINCT partition_id) AS parts,
+               COALESCE(SUM(batch_size), 0) AS batch,
+               COALESCE(SUM(acked_count), 0) AS acked
+        FROM queen.partition_consumers
+        WHERE lease_expires_at IS NOT NULL AND lease_expires_at > NOW()
+    ) r
+    CROSS JOIN (
+        SELECT COUNT(*) AS active, COUNT(DISTINCT partition_id) AS parts,
+               COALESCE(SUM(GREATEST(COALESCE(batch_end, committed) - committed, 0)), 0) AS batch,
+               0::bigint AS acked
+        FROM queen.log_consumers
+        WHERE lease_expires_at IS NOT NULL AND lease_expires_at > NOW()
+    ) l;
+
+    -- DLQ stats. totalMessages stays the lifetime counter (that is what the
+    -- summary holds); affectedPartitions and topErrors are computed from the
+    -- LIVE dead-letter contents instead of the 0 / [] literals that made two
+    -- panels permanently dead on every deployment.
+    SELECT COUNT(DISTINCT d.partition_id),
+           COALESCE(
+               (SELECT jsonb_agg(t.e)
+                FROM (SELECT jsonb_build_object(
+                                 'error', COALESCE(d2.error, 'unknown'),
+                                 'count', COUNT(*)) AS e
+                      FROM queen.log_dlq d2
+                      GROUP BY COALESCE(d2.error, 'unknown')
+                      ORDER BY COUNT(*) DESC
+                      LIMIT 5) t),
+               '[]'::jsonb)
+    INTO v_dlq_parts, v_dlq_errors
+    FROM queen.log_dlq d;
+
     v_dlq := jsonb_build_object(
         'totalMessages', COALESCE(v_summary.total_dlq, 0),
-        'affectedPartitions', 0,
-        'topErrors', '[]'::jsonb
+        'currentMessages', (SELECT COUNT(*) FROM queen.log_dlq),
+        'affectedPartitions', COALESCE(v_dlq_parts, 0),
+        'topErrors', COALESCE(v_dlq_errors, '[]'::jsonb)
     );
-    
+
     RETURN jsonb_build_object(
         'timeRange', jsonb_build_object(
             'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -1058,9 +1174,10 @@ BEGIN
             ROUND(AVG(avg_free_slots)) as avg_slots,
             MIN(min_free_slots) as min_slots,
             MAX(db_connections) as db_conns,
-            ROUND(AVG(avg_job_queue_size)) as avg_queue,
-            MAX(max_job_queue_size) as max_queue,
-            MAX(backoff_size) as backoff,
+            -- No job queue / backoff ring in this broker: NULL, not 0.
+            NULLIF(ROUND(AVG(avg_job_queue_size)), 0) as avg_queue,
+            NULLIF(MAX(max_job_queue_size), 0) as max_queue,
+            NULLIF(MAX(backoff_size), 0) as backoff,
             -- Lag (weighted average)
             CASE WHEN SUM(lag_count) > 0 
                  THEN ROUND(SUM(avg_lag_ms::numeric * lag_count) / SUM(lag_count))
@@ -1102,8 +1219,9 @@ BEGIN
             MAX(max_event_loop_lag_ms) as max_el,
             MIN(min_free_slots) as free_slots,
             MAX(db_connections) as db_conns,
-            MAX(max_job_queue_size) as job_queue,
-            MAX(backoff_size) as backoff,
+            -- No job queue / backoff ring in this broker: NULL, not 0.
+            NULLIF(MAX(max_job_queue_size), 0) as job_queue,
+            NULLIF(MAX(backoff_size), 0) as backoff,
             SUM(push_message_count + ack_message_count) as msgs,
             to_char(MAX(bucket_time), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_seen
         FROM queen.worker_metrics
@@ -1297,10 +1415,16 @@ BEGIN
             SUM(partitions_created) AS parts_created,
             SUM(partitions_deleted) AS parts_deleted,
             MAX(partition_count)    AS parts_snapshot,
+            -- Lag is sampled AT POP. A bucket with pushes but no pops has NO
+            -- lag sample, which is not the same fact as "lag was zero" — emit
+            -- NULL so the client renders "—" instead of a reassuring 0 for a
+            -- backlogged queue whose consumers are stopped.
             CASE WHEN SUM(pop_count) > 0
                  THEN SUM(avg_lag_ms * pop_count) / SUM(pop_count)
-                 ELSE 0 END AS avg_lag_ms,
-            MAX(max_lag_ms) AS max_lag_ms,
+                 END AS avg_lag_ms,
+            CASE WHEN SUM(pop_count) > 0
+                 THEN MAX(max_lag_ms)
+                 END AS max_lag_ms,
             -- parked_count is a GAUGE (already SUM-aggregated across workers
             -- at insert time). Across time-buckets we AVG to get the typical
             -- in-flight long-poll count for the window.

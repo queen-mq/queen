@@ -114,11 +114,16 @@ fn spawn_cancel(cancel: CancelToken, what: &'static str) {
 /// * `Err(Elapsed)` — broker-side timeout: fire a best-effort server-side cancel and
 ///   DETACH the connection from the pool (never recycle one whose in-flight
 ///   statement we abandoned + cancelled); `None`.
+///
+/// Both failure arms count one db_error: this is the single funnel every pop-path
+/// statement result passes through, so counting here is what keeps the "DB errors"
+/// series from being a structural zero.
 pub fn resolve_query_timeout<T>(
     res: Result<Result<T, tokio_postgres::Error>, tokio::time::error::Elapsed>,
     client: deadpool_postgres::Client,
     cancel: CancelToken,
     what: &'static str,
+    metrics: &crate::metrics::Metrics,
 ) -> Option<T> {
     match res {
         Ok(Ok(v)) => {
@@ -127,10 +132,12 @@ pub fn resolve_query_timeout<T>(
         }
         Ok(Err(_)) => {
             drop(client);
+            metrics.record_db_error();
             None
         }
         Err(_elapsed) => {
             spawn_cancel(cancel, what);
+            metrics.record_db_error();
             // Quarantine: take() removes the object from the pool permanently; the
             // returned ClientWrapper is dropped here, closing the connection so the
             // still-running (now cancelled) statement's connection is not reused.
@@ -1016,7 +1023,9 @@ pub async fn list_messages(
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = "SELECT (queen.list_messages_v1($1::text::jsonb))::text";
     let row = client.query_one(stmt, &[&filters_json]).await?;
-    Ok(row.get(0))
+    Ok(row
+        .get::<_, Option<String>>(0)
+        .unwrap_or_else(|| "{\"messages\":[]}".to_string()))
 }
 
 // DLQ messages (dual-engine 047). queen.log_dlq stores payload SNAPSHOTS, so no
@@ -1028,7 +1037,36 @@ pub async fn get_dlq_messages(
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = "SELECT (queen.get_dlq_messages_v1($1::text::jsonb))::text";
     let row = client.query_one(stmt, &[&filters_json]).await?;
-    Ok(row.get(0))
+    // A NULL body must not panic the handler into killing the connection
+    // (there is no CatchPanicLayer): serve an empty page instead.
+    Ok(row
+        .get::<_, Option<String>>(0)
+        .unwrap_or_else(|| "{\"messages\":[]}".to_string()))
+}
+
+// Resolve a dead-lettered address to (queue name, partition name, payload
+// snapshot JSON) — the three things a replay needs. Returns None when the
+// address has no queen.log_dlq row (a live message: its payload lives in an
+// immutable segment and there is nothing to replay).
+pub async fn dlq_row_for_replay(
+    client: &deadpool_postgres::Client,
+    partition_id: &str,
+    txn: &str,
+) -> Result<Option<(String, String, String)>, tokio_postgres::Error> {
+    let stmt = "SELECT q.name, p.name, COALESCE(d.payload, 'null'::jsonb)::text \
+                FROM queen.log_dlq d \
+                JOIN queen.log_partitions p ON p.id = d.partition_id \
+                JOIN queen.log_queues q ON q.id = p.queue_id \
+                WHERE d.partition_id = $1::text::uuid AND d.transaction_id = $2 \
+                ORDER BY d.failed_at DESC LIMIT 1";
+    let rows = client.query(stmt, &[&partition_id, &txn]).await?;
+    Ok(rows.first().map(|r| {
+        (
+            r.get::<_, String>(0),
+            r.get::<_, String>(1),
+            r.get::<_, String>(2),
+        )
+    }))
 }
 
 // Delete a message addressed by (partition_id, transaction_id). The log engine
@@ -1315,15 +1353,22 @@ pub async fn insert_worker_metrics(
     avg_lag_ms: i64,
     max_lag_ms: i64,
     lag_count: i64,
+    // deadpool gauges at flush time. The Connection Pool panels read
+    // db_connections / *_free_slots; without these they charted the columns'
+    // DDL default of 0 and presented it as a measurement.
+    pool_active: i32,
+    pool_idle: i32,
 ) -> Result<(), tokio_postgres::Error> {
     let stmt = "INSERT INTO queen.worker_metrics (\
             hostname, worker_id, pid, bucket_time, \
             jobs_done, push_request_count, pop_request_count, ack_request_count, transaction_count, \
             push_message_count, pop_message_count, ack_message_count, ack_success_count, ack_failed_count, \
             db_error_count, dlq_count, avg_event_loop_lag_ms, max_event_loop_lag_ms, \
-            avg_lag_ms, max_lag_ms, lag_count) \
+            avg_lag_ms, max_lag_ms, lag_count, \
+            db_connections, avg_free_slots, min_free_slots) \
         VALUES ($1,$2,$3, date_trunc('second', NOW()), \
-            $4,$4,$6,$8,$12, $5,$7,$9,$10,$11, $14,$13, $15,$16, $17,$18,$19) \
+            $4,$4,$6,$8,$12, $5,$7,$9,$10,$11, $14,$13, $15,$16, $17,$18,$19, \
+            $20,$21,$21) \
         ON CONFLICT (hostname, worker_id, pid, bucket_time) DO NOTHING";
     client
         .execute(
@@ -1348,6 +1393,8 @@ pub async fn insert_worker_metrics(
                 &avg_lag_ms,     // $17
                 &max_lag_ms,     // $18
                 &lag_count,      // $19
+                &pool_active,    // $20 (db_connections)
+                &pool_idle,      // $21 (avg_free_slots + min_free_slots)
             ],
         )
         .await?;

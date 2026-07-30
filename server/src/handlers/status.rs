@@ -91,7 +91,9 @@ pub async fn handle_status_queues(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let mut filters = filters_from_query(&params, &["from", "to", "namespace", "task"]);
+    // `queue` is forwarded too — the SP filters on it, so a client asking for one
+    // queue no longer has to download the tenant's whole list and filter locally.
+    let mut filters = filters_from_query(&params, &["from", "to", "queue", "namespace", "task"]);
     // Track B (§5): queen.get_status_queues_v2 reads `_tenant` from the filter JSON
     // and scopes the per-queue status listing to it (default tenant when off).
     filters.insert("_tenant".to_string(), serde_json::json!(tenant.as_str()));

@@ -15,17 +15,20 @@
         />
       </div>
 
+      <!-- ALL is `null`, never '': '' is the DEFAULT namespace server-side
+           (012_configure.sql), so a '' sentinel makes the bucket most queues
+           land in the one bucket you cannot select. -->
       <select v-model="filterNamespace" class="input" style="width:160px;">
-        <option value="">All namespaces</option>
+        <option :value="ALL">All namespaces</option>
         <option v-for="ns in namespaces" :key="ns" :value="ns">
-          {{ ns || '(empty)' }}
+          {{ ns || '(default)' }}
         </option>
       </select>
 
       <select v-model="filterTask" class="input" style="width:160px;">
-        <option value="">All tasks</option>
+        <option :value="ALL">All tasks</option>
         <option v-for="task in tasks" :key="task" :value="task">
-          {{ task || '(empty)' }}
+          {{ task || '(default)' }}
         </option>
       </select>
 
@@ -51,22 +54,56 @@
       </span>
     </div>
 
+    <!-- Stale data presented as live is the failure mode: the store keeps the
+         last-good rows on a failed refresh, so say how old they are. -->
+    <div v-if="queuesStale" class="status-banner banner-bad view-banner">
+      <span>
+        <strong>Queue list did not refresh</strong> ·
+        {{ describeApiError(queuesError) }} — what is below is from
+        {{ lastFetchedText }} and may no longer be true.
+      </span>
+    </div>
+    <!-- Throughput and lag come from a second call. When it fails those columns
+         render '—', and this says why — an unreachable metric must never look
+         like a quiet queue. -->
+    <div v-if="opsError" class="status-banner banner-warn view-banner">
+      <span>
+        <strong>Throughput and lag unavailable</strong> ·
+        {{ describeApiError(opsError) }} — the throughput and lag columns below
+        read '—' rather than zero.
+      </span>
+    </div>
+
     <!-- Health grid -->
     <QueueHealthGrid
       :queues="filteredQueues"
       :loading="loading"
       :sort-by="sortBy"
       :show-hot="false"
+      :can-delete="can('queueAdmin')"
       @select="viewQueue"
       @delete="confirmDelete"
     >
       <template #empty>
-        <h3 style="font-size:13px; font-weight:600; color:var(--text-hi); margin:0 0 4px;">
-          No queues found
-        </h3>
-        <p style="font-size:13px; color:var(--text-mid); margin:0;">
-          {{ searchQuery || filterNamespace || filterTask ? 'Try adjusting your filters' : 'Create a queue to get started' }}
-        </p>
+        <!-- "No queues" is a claim. Only make it when the list actually
+             loaded — a failed fetch has to say so instead. -->
+        <template v-if="queuesError">
+          <h3 style="font-size:13px; font-weight:600; color:var(--ember-400); margin:0 0 4px;">
+            Cannot list queues
+          </h3>
+          <p style="font-size:13px; color:var(--text-mid); margin:0 0 12px;">
+            {{ describeApiError(queuesError) }}
+          </p>
+          <button class="btn btn-ghost" @click="refreshAll">Retry</button>
+        </template>
+        <template v-else>
+          <h3 style="font-size:13px; font-weight:600; color:var(--text-hi); margin:0 0 4px;">
+            No queues found
+          </h3>
+          <p style="font-size:13px; color:var(--text-mid); margin:0;">
+            {{ hasActiveFilter ? 'Try adjusting your filters' : 'Create a queue to get started' }}
+          </p>
+        </template>
       </template>
     </QueueHealthGrid>
 
@@ -84,12 +121,17 @@
         <h3 style="font-size:16px; font-weight:600; color:var(--text-hi); margin-bottom:8px;">
           Delete Queue
         </h3>
-        <p style="color:var(--text-mid); margin-bottom:24px;">
+        <p style="color:var(--text-mid); margin-bottom:16px;">
           Are you sure you want to delete <strong>{{ queueToDelete?.name }}</strong>? This will permanently remove the queue and all its messages. This action cannot be undone.
         </p>
+        <!-- The modal stays open on failure and says what happened. A closed
+             modal plus an unchanged list is indistinguishable from success. -->
+        <p v-if="deleteError" class="qdel-error">{{ deleteError }}</p>
         <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px;">
-          <button @click="showDeleteModal = false" class="btn btn-ghost">Cancel</button>
-          <button @click="deleteQueue" class="btn btn-danger">Delete Queue</button>
+          <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
+          <button @click="deleteQueue" class="btn btn-danger" :disabled="deleting">
+            {{ deleting ? 'Deleting…' : 'Delete Queue' }}
+          </button>
         </div>
       </div>
     </div>
@@ -99,28 +141,48 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { queues as queuesApi, system as systemApi } from '@/api'
-import { useRefresh } from '@/composables/useRefresh'
+import { queues as queuesApi, system as systemApi, describeApiError } from '@/api'
+import { toNum } from '@/composables/useApi'
+import { useAutoRefresh } from '@/composables/useRefresh'
+import { useToast } from '@/composables/useToast'
+import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import QueueHealthGrid from '@/components/QueueHealthGrid.vue'
 
 const router = useRouter()
+const { can } = useIdentity()
+const { notifySuccess } = useToast()
+
+// "All" sentinel. It must not be '' — '' is a real, selectable namespace/task
+// (the server default), and collapsing the two makes it unfilterable.
+const ALL = null
 
 // Shared store — same singleton the Consumers page reads. Calling
 // fetchQueues({ force: true }) on auto-refresh keeps it fresh; navigating
 // to Consumers afterwards returns instantly from cache.
 const queuesStore = useQueuesStore()
-const { queues, loading, namespaces: storeNamespaces, tasks: storeTasks, fetchQueues: fetchQueuesShared, invalidate } = queuesStore
+const {
+  queues, loading, error: queuesError, isStale: queuesStale, lastFetched,
+  namespaces: storeNamespaces, tasks: storeTasks,
+  fetchQueues: fetchQueuesShared, invalidate,
+} = queuesStore
+
+const lastFetchedText = computed(() =>
+  lastFetched.value ? new Date(lastFetched.value).toLocaleTimeString() : 'an earlier load'
+)
 
 const opsByQueue = ref(new Map())
+const opsError = ref(null)
 const searchQuery = ref('')
-const filterNamespace = ref('')
-const filterTask = ref('')
+const filterNamespace = ref(ALL)
+const filterTask = ref(ALL)
 const sortBy = ref('health')
 
 // Modal state
 const showDeleteModal = ref(false)
 const queueToDelete = ref(null)
+const deleteError = ref(null)
+const deleting = ref(false)
 
 const sortOptions = [
   { value: 'health', label: 'Worst first' },
@@ -147,27 +209,39 @@ const tasks = storeTasks
  *   hotCount  = null until backend exposes a hot-count procedure
  */
 const enrichedQueues = computed(() => {
+  // opsByQueue is empty when the queue-ops call failed. Emitting null (not 0)
+  // for the throughput/lag columns is what makes the grid render '—' instead
+  // of painting every queue as idle.
+  const opsAvailable = !opsError.value
   return queues.value.map(q => {
     const partitions = q.partitions || 0
     const total = q.messages?.total || 0
-    const pending = Math.max(0, q.messages?.pending || 0)
     const ops = opsByQueue.value.get(q.name)
     return {
       name: q.name,
       namespace: q.namespace,
       task: q.task,
       partitions,
-      pending,
+      // `pending` is the broker's number verbatim: null when it did not report
+      // one, so the health grid cannot mistake "unknown" for "drained".
+      pending: toNum(q.messages?.pending),
       processing: q.messages?.processing || 0,
       total,
+      retainedBytes: toNum(q.messages?.retainedBytes ?? q.retainedBytes),
       density: partitions > 0 ? total / partitions : 0,
-      pushPerSec: Number(ops?.pushPerSecond) || 0,
-      popPerSec: Number(ops?.popPerSecond) || 0,
-      avgLagMs: Number(ops?.maxLagMs) || 0,
+      pushPerSec: opsAvailable ? (toNum(ops?.pushPerSecond) ?? 0) : null,
+      popPerSec: opsAvailable ? (toNum(ops?.popPerSecond) ?? 0) : null,
+      // Lag is only sampled at pop: a window with no pops has no measurement,
+      // which is not the same as zero lag.
+      avgLagMs: opsAvailable ? (ops?.popMessages > 0 ? toNum(ops.maxLagMs) : null) : null,
       hotCount: null,
     }
   })
 })
+
+const hasActiveFilter = computed(() =>
+  !!searchQuery.value || filterNamespace.value !== ALL || filterTask.value !== ALL
+)
 
 // Filter (sort happens inside QueueHealthGrid)
 const filteredQueues = computed(() => {
@@ -177,11 +251,11 @@ const filteredQueues = computed(() => {
     const query = searchQuery.value.toLowerCase()
     result = result.filter(q => q.name.toLowerCase().includes(query))
   }
-  if (filterNamespace.value !== '') {
-    result = result.filter(q => q.namespace === filterNamespace.value)
+  if (filterNamespace.value !== ALL) {
+    result = result.filter(q => (q.namespace || '') === filterNamespace.value)
   }
-  if (filterTask.value !== '') {
-    result = result.filter(q => q.task === filterTask.value)
+  if (filterTask.value !== ALL) {
+    result = result.filter(q => (q.task || '') === filterTask.value)
   }
   return result
 })
@@ -199,8 +273,8 @@ const fetchQueues = (force = false) => fetchQueuesShared({ force })
  * over the full window and divide by its duration to get an average rate,
  * and take the max of maxLagMs as a p99-like lag indicator.
  *
- * Failure here is non-fatal — the grid renders with throughput/lag = 0
- * (which the severity rules treat as 'mute'). */
+ * Failure is surfaced, not swallowed: `opsError` blanks the throughput / lag
+ * columns to '—' and paints the banner above the grid. */
 const fetchQueueOps = async () => {
   try {
     const now = new Date()
@@ -229,12 +303,15 @@ const fetchQueueOps = async () => {
       result.set(name, {
         pushPerSecond: a.pushMessages / windowSec,
         popPerSecond: a.popMessages / windowSec,
+        popMessages: a.popMessages,
         maxLagMs: a.maxLagMs,
       })
     }
     opsByQueue.value = result
+    opsError.value = null
   } catch (err) {
-    console.error('Failed to fetch queue-ops:', err)
+    // The global surface already announced it; this drives the inline state.
+    opsError.value = err
   }
 }
 
@@ -249,23 +326,42 @@ const viewQueue = (queue) => {
 
 const confirmDelete = (queue) => {
   queueToDelete.value = queue
+  deleteError.value = null
   showDeleteModal.value = true
 }
 
+const closeDeleteModal = () => {
+  showDeleteModal.value = false
+  queueToDelete.value = null
+  deleteError.value = null
+}
+
 const deleteQueue = async () => {
-  if (!queueToDelete.value) return
+  if (!queueToDelete.value || deleting.value) return
+  const name = queueToDelete.value.name
+  deleting.value = true
+  deleteError.value = null
   try {
-    await queuesApi.delete(queueToDelete.value.name)
-    showDeleteModal.value = false
-    queueToDelete.value = null
+    const res = await queuesApi.delete(name)
+    // delete_queue_v1 answers 200 {deleted:true, existed:false} for a queue
+    // that was not there (or not this tenant's). Treating that as success is
+    // how a mistyped name reports "deleted".
+    if (res.data && res.data.existed === false) {
+      deleteError.value = `No queue named "${name}" on this cluster — nothing was deleted.`
+      return
+    }
+    closeDeleteModal()
+    notifySuccess(`Deleted queue ${name}`)
     invalidate()  // mutation happened — bust the cache so other views see it
     refreshAll()
   } catch (err) {
-    console.error('Failed to delete queue:', err)
+    deleteError.value = describeApiError(err)
+  } finally {
+    deleting.value = false
   }
 }
 
-useRefresh(refreshAll)
+useAutoRefresh(refreshAll)
 
 // On mount, hit the cache first. If the data is fresh (e.g. user just came
 // from /consumers), the queue list shows instantly with zero network.
@@ -318,6 +414,23 @@ onMounted(() => {
   width: 7px;
   height: 7px;
   border-radius: 99px;
+}
+
+/* Inline banner used inside a view (the shell's own strip is edge-to-edge). */
+.view-banner {
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.qdel-error {
+  margin: 0 0 16px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--ember-400);
+  border: 1px solid var(--ember-400);
+  background: rgba(244, 63, 94, .08);
 }
 
 @media (max-width: 880px) {

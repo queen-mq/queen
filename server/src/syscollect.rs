@@ -104,6 +104,9 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         let w_lag_avg: i64 = if w_lag_n > 0 { (w_lag_sum / w_lag_n) as i64 } else { 0 };
         let w_lag_max: i64 = lag_max.values().copied().max().unwrap_or(0) as i64;
 
+        // Pool gauges are sampled BEFORE the worker_metrics insert so the row
+        // carries the connection-pool state of the interval it describes.
+        let (pool_size, pool_idle, pool_active) = pool_gauges(&pool);
         if let Err(e) = db::insert_worker_metrics(
             &client,
             &hostname,
@@ -125,6 +128,8 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             w_lag_avg,
             w_lag_max,
             w_lag_n as i64,
+            pool_active as i32,
+            pool_idle as i32,
         )
         .await
         {
@@ -136,7 +141,6 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
 
         // --- system gauges ------------------------------------------------
         let uptime = started.elapsed().as_secs();
-        let (pool_size, pool_idle, pool_active) = pool_gauges(&pool);
         // CPU: delta CPU-µs over the interval -> percent×100 (utilisation of one
         // core = 100%). secs = the wall interval; du/(secs*1e6) is the core-fraction,
         // ×100 -> %, ×100 again -> the centi-percent the frontend expects.
@@ -311,8 +315,13 @@ fn pool_gauges(pool: &Pool) -> (i64, i64, i64) {
     (size, idle, active)
 }
 
-// getrusage(2): cumulative CPU (µs) + peak RSS. ru_maxrss is bytes on macOS,
-// kilobytes on Linux — normalise to bytes.
+// getrusage(2): cumulative CPU (µs) + RSS in bytes.
+//
+// The RSS reported here is the CURRENT resident set, not ru_maxrss. ru_maxrss is
+// the process high-water mark and never decreases, so charting it as "Memory
+// Usage" turns any transient spike into a permanent plateau that reads as a
+// leak. ru_maxrss is kept only as the last-resort fallback when the live figure
+// is unavailable, and it is at least an upper bound then.
 fn rusage() -> (u64, u64, u64) {
     unsafe {
         let mut u: libc::rusage = std::mem::zeroed();
@@ -322,16 +331,58 @@ fn rusage() -> (u64, u64, u64) {
         let user_us = u.ru_utime.tv_sec as u64 * 1_000_000 + u.ru_utime.tv_usec as u64;
         let sys_us = u.ru_stime.tv_sec as u64 * 1_000_000 + u.ru_stime.tv_usec as u64;
         let maxrss = u.ru_maxrss as u64;
-        let rss_bytes = if cfg!(target_os = "macos") { maxrss } else { maxrss.saturating_mul(1024) };
-        (user_us, sys_us, rss_bytes)
+        let peak_bytes =
+            if cfg!(target_os = "macos") { maxrss } else { maxrss.saturating_mul(1024) };
+        (user_us, sys_us, current_rss_bytes().unwrap_or(peak_bytes))
     }
+}
+
+// Live resident-set size in bytes, or None when the platform hook is unavailable.
+#[cfg(target_os = "linux")]
+fn current_rss_bytes() -> Option<u64> {
+    // /proc/self/statm field 2 = resident pages.
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return None;
+    }
+    Some(pages.saturating_mul(page_size as u64))
+}
+
+#[cfg(target_os = "macos")]
+fn current_rss_bytes() -> Option<u64> {
+    // proc_pidinfo(PROC_PIDTASKINFO) -> pti_resident_size (bytes).
+    unsafe {
+        let mut ti: libc::proc_taskinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let n = libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut ti as *mut _ as *mut libc::c_void,
+            size,
+        );
+        if n == size {
+            Some(ti.pti_resident_size)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn current_rss_bytes() -> Option<u64> {
+    None
 }
 
 // Build the metrics JSONB in the exact nested shape queen.get_system_metrics_v1
 // re-aggregates: every numeric leaf is {avg,min,max,last} (all equal for an
-// instantaneous sample). Gauges this broker doesn't have (threadpool queues,
-// cluster sidecar/transport) are present-but-zero so the SP never sees NULLs and
-// the System view renders every panel.
+// instantaneous sample). A gauge this broker genuinely does not have is OMITTED
+// rather than written as zero — the reader then yields NULL, which a chart draws
+// as a gap instead of a confident flat zero line. The cluster sidecar/transport
+// block stays present because `shared_state.enabled:false` already says, in the
+// payload itself, that its numbers are not measurements.
 #[allow(clippy::too_many_arguments)]
 fn build_system_metrics_json(
     uptime: u64,
@@ -356,10 +407,11 @@ fn build_system_metrics_json(
             "pool_idle": m(pool_idle as f64),
             "pool_active": m(pool_active as f64),
         },
-        "threadpool": {
-            "db": { "pool_size": zero(), "queue_size": zero() },
-            "system": { "pool_size": zero(), "queue_size": zero() },
-        },
+        // No "threadpool" family: this broker is async (tokio) and has no worker
+        // thread pool or job queue to measure. Emitting present-but-zero gauges
+        // made the System view plot a permanently flat line as if it were a live
+        // measurement; ABSENT makes the reader fall through to NULL, which is
+        // the truth ("not measured here"), not zero.
         "registries": { "response": zero() },
         "uptime_seconds": uptime,
         "shared_state": {

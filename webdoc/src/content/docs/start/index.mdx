@@ -1,0 +1,88 @@
+---
+title: What Queen MQ is
+description: A partitioned message queue that stores everything in PostgreSQL, gives every entity its own ordered lane, and runs as one stateless binary.
+type: overview
+tier: use
+sidebar:
+  order: 1
+sourceOfTruth:
+  - server/src/main.rs
+  - README.md
+---
+
+Queen MQ is a message queue that keeps its data in PostgreSQL. A queue is split into
+**partitions** — one per entity, created the first time you push to it — and each partition
+is a strictly ordered lane that a consumer group drains independently. Ten thousand
+partitions cost ten thousand index rows, not ten thousand log files or ten thousand
+processes, and a consumer stuck on one lane never blocks another.
+
+Everything else follows from that choice. The broker is one stateless Rust binary that
+holds no cluster membership and no partition assignments, so you scale it by starting
+another copy against the same database. Clients speak plain HTTP and hold no coordination
+state either, which means there is no rebalancing protocol to wait out when a worker
+restarts. The durability, backup and replication story is whatever your PostgreSQL
+already does.
+
+<CardGrid>
+  <LinkCard
+    href="/start/quickstart"
+    title="Quickstart"
+    description="A broker, a queue, and a message you push and consume — in about five minutes."
+  />
+  <LinkCard
+    href="/start/why"
+    title="Why Queen exists"
+    description="The head-of-line problem it was built for, and the eight design choices that follow."
+  />
+  <LinkCard
+    href="/start/limits"
+    title="Limits and non-goals"
+    description="What Queen does not do, what it deliberately refuses to do, and where the sharp edges are."
+  />
+  <LinkCard
+    href="/start/compare"
+    title="Compared to Kafka, RabbitMQ, SQS and pgmq"
+    description="Architectural differences, stated without performance claims we have not measured."
+  />
+</CardGrid>
+
+## Where to go next
+
+The rest of the site is organised by what you are trying to do.
+
+| If you want to | Read |
+| --- | --- |
+| Write an application against Queen | [Use Queen](/use) — the model, six SDKs, the HTTP API, worked examples |
+| Run Queen yourself | [Self-hosting](/selfhost) — deployment, PostgreSQL, high availability, security, operations |
+| Know how it works inside | [Internals](/internals) — segments, offsets, the push and pop paths, the schema |
+| Look one thing up | [Reference](/reference) — routes, environment variables, metrics, client APIs |
+| See what it does under load | [Benchmarks](/benchmarks) — the runs, their configuration, and their raw output |
+
+## What you get
+
+- **One ordered lane per entity, with no preallocation.** Partitions are logical: they are
+  created on first push and cost rows, not files or processes.
+- **Consumer groups with replay.** Each group has its own cursor per partition and can be
+  moved back to a timestamp or forward to the end.
+- **Acknowledgement that is an offset commit.** Acking a message commits the cursor past
+  it, so there is no per-message delivery state to store or clean up.
+- **Transactional handoff.** Acking one message and pushing the next stage's message happen
+  in a single PostgreSQL transaction.
+- **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent
+  within a configurable window, enforced inside the database rather than in a cache.
+- **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
+- **Six client SDKs and a plain HTTP API**, so anything that can make an HTTP request is a
+  first-class client.
+
+## What this documentation promises
+
+Queen's published documentation used to describe an earlier C++ broker; version 1.0 is a
+Rust rewrite on a new storage engine, and this site was written from the current source.
+Three rules hold everywhere on it:
+
+- **Route tables, configuration references and metric lists are generated from the code**
+  at build time, so they cannot drift into describing endpoints that do not exist.
+- **Code samples are extracted from files the test suite executes.** Each one names the
+  file it came from.
+- **Numbers name their run.** A throughput figure without an archived artifact recording
+  the configuration that produced it does not get published here.

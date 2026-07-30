@@ -176,6 +176,19 @@ BEGIN
         v_updated := v_updated + 1;
     END LOOP;
 
+    -- No partition matched: the queue does not exist for this tenant (or has no
+    -- partitions yet). Reporting success with partitionsUpdated=0 makes a
+    -- misdirected seek look like it worked, so fail loudly instead — the route
+    -- layer maps an `error` key to a non-200.
+    IF v_updated = 0 THEN
+        RETURN jsonb_build_object(
+            'success', false,
+            'error', 'Queue not found or has no partitions',
+            'consumerGroup', p_group,
+            'queueName', p_queue,
+            'partitionsUpdated', 0);
+    END IF;
+
     -- Clear the empty-scan watermark so a backward seek re-exposes cold
     -- partitions to the wildcard candidate filter on the next pop.
     DELETE FROM queen.consumer_watermarks
@@ -292,6 +305,7 @@ BEGIN
             JOIN queen.partitions p ON p.id = pc.partition_id
             JOIN queen.queues q ON q.id = p.queue_id
             WHERE q.storage IS DISTINCT FROM 'segments'
+              AND q.tenant_id = p_tenant
         ) sub
         LEFT JOIN queen.consumer_groups_metadata cgm
             ON cgm.consumer_group = sub.consumer_group
@@ -347,6 +361,7 @@ BEGIN
             ON cgm.consumer_group = pc.consumer_group
             AND cgm.queue_name = q.name
         WHERE q.storage IS DISTINCT FROM 'segments'
+          AND q.tenant_id = p_tenant
     ),
     aggregated AS (
         SELECT
@@ -439,6 +454,12 @@ BEGIN
             'topics', jsonb_build_array(queue_name),
             'queueName', queue_name,
             'members', member_count,
+            -- v2_data is one row per (partition, group) CURSOR, so member_count
+            -- is the number of partitions this group has a cursor on, NOT the
+            -- number of consumer processes (one consumer on a 32-partition queue
+            -- counts 32). Exposed under its true name so a reader has something
+            -- accurate to render; `members` is kept for wire compatibility.
+            'partitionCursors', member_count,
             'partitionsWithLag', partitions_with_lag,
             'totalLag', total_lag,
             'maxTimeLag', max_time_lag,
@@ -477,8 +498,9 @@ $$;
 -- seg engine's dedup-only window, and no longer dedup-gated). The entries are
 -- appended AFTER the rows page and independently capped at the same limit (a
 -- combined page can therefore hold up to 2x limit when both engines match the
--- filter — log-queue filters normally isolate one engine). 'mode' detection
--- stays rows-only ('none' for a pure log queue), as in 027.
+-- filter — log-queue filters normally isolate one engine). 'mode' detection is
+-- dual-engine: rows from queen.partition_consumers, log from
+-- queen.log_consumers, merged (a pure-log queue reports its real mode).
 -- ============================================================================
 CREATE OR REPLACE FUNCTION queen.list_messages_v1(p_filters JSONB DEFAULT '{}'::jsonb)
 RETURNS JSONB
@@ -497,6 +519,8 @@ DECLARE
     v_result JSONB;
     v_has_queue_mode BOOLEAN;
     v_total_bus_groups INTEGER;
+    v_log_queue_mode BOOLEAN;
+    v_log_bus_groups INTEGER;
     v_v2 JSONB;
     -- Track B (§5): tenant travels in the filter JSON (`_tenant`), so the (JSONB)
     -- signature is unchanged. Absent ⇒ default tenant.
@@ -525,7 +549,28 @@ BEGIN
     JOIN queen.queues q ON q.id = p.queue_id
     LEFT JOIN queen.partition_consumers pc ON pc.partition_id = p.id
     WHERE m.created_at >= v_from_ts AND m.created_at < v_to_ts
+      AND q.tenant_id = v_tenant
       AND (v_queue IS NULL OR q.name = v_queue);
+
+    -- Same detection over the LOG engine: a segments queue leaves no rows in
+    -- queen.messages, so the rows probe above always reports 'none' for it —
+    -- queen.log_consumers cursors are the mode evidence there. Merged with the
+    -- rows result so mixed deployments still report 'hybrid'.
+    SELECT
+        bool_or(c.consumer_group = '__QUEUE_MODE__'),
+        COUNT(DISTINCT c.consumer_group) FILTER (WHERE c.consumer_group != '__QUEUE_MODE__')
+    INTO v_log_queue_mode, v_log_bus_groups
+    FROM queen.log_consumers c
+    JOIN queen.log_partitions p ON p.id = c.partition_id
+    JOIN queen.log_queues q ON q.id = p.queue_id
+    WHERE q.tenant_id = v_tenant
+      AND (v_queue IS NULL OR q.name = v_queue)
+      AND (v_partition IS NULL OR p.name = v_partition);
+
+    v_has_queue_mode := COALESCE(v_has_queue_mode, false)
+                        OR COALESCE(v_log_queue_mode, false);
+    v_total_bus_groups := COALESCE(v_total_bus_groups, 0)
+                        + COALESCE(v_log_bus_groups, 0);
 
     -- Get messages with computed status, then filter by status if specified
     WITH message_data AS (
@@ -717,7 +762,7 @@ BEGIN
         ) vd
         WHERE (v_status IS NULL OR vd.final_status = v_status)
         ORDER BY vd.created_at DESC, vd.off DESC
-        LIMIT v_limit
+        LIMIT v_limit OFFSET v_offset
     ) v2;
 
     -- Rows-only deployments: v_v2 = '[]' and v_result is returned untouched.
@@ -732,8 +777,8 @@ $$;
 
 -- ============================================================================
 -- queen.get_dlq_messages_v1 — dual-mode redefinition (rows + LOG).
--- The rows branch is the 010/027 body verbatim (same joins, filters, keys and
--- outer LIMIT/OFFSET placement — byte-identical output for rows queues);
+-- The rows branch keeps the 010/027 joins and keys; both branches are tenant-
+-- scoped and LIMIT/OFFSET page the ROWS (inside the union), not the aggregate.
 -- queen.log_dlq rows are UNIONed in with the SAME keys so /api/v1/dlq serves
 -- both engines:
 --   * payload snapshots live in queen.log_dlq itself (payload), no blob
@@ -764,6 +809,10 @@ BEGIN
     v_limit := COALESCE((p_filters->>'limit')::integer, 100);
     v_offset := COALESCE((p_filters->>'offset')::integer, 0);
 
+    -- LIMIT/OFFSET belong INSIDE the union subquery, before jsonb_agg: applied
+    -- outside they page the single aggregate row instead of the DLQ rows —
+    -- offset 0 returned the ENTIRE dead-letter queue and offset>0 returned no
+    -- row at all, i.e. a NULL body the route layer cannot parse.
     RETURN (
         SELECT jsonb_build_object(
             'messages', COALESCE(jsonb_agg(t.msg ORDER BY t.failed_at DESC), '[]'::jsonb),
@@ -773,6 +822,7 @@ BEGIN
             )
         )
         FROM (
+          SELECT * FROM (
             -- rows engine (010 verbatim keys)
             SELECT dlq.failed_at,
                    jsonb_build_object(
@@ -793,7 +843,8 @@ BEGIN
             JOIN queen.messages m ON m.id = dlq.message_id
             JOIN queen.partitions p ON p.id = dlq.partition_id
             JOIN queen.queues q ON q.id = p.queue_id
-            WHERE (v_queue IS NULL OR q.name = v_queue)
+            WHERE q.tenant_id = v_tenant
+              AND (v_queue IS NULL OR q.name = v_queue)
               AND (v_consumer_group IS NULL OR dlq.consumer_group = v_consumer_group)
             UNION ALL
             -- log engine (queen.log_dlq payload snapshots), same keys
@@ -819,8 +870,10 @@ BEGIN
             WHERE q2q.tenant_id = v_tenant
               AND (v_queue IS NULL OR q2q.name = v_queue)
               AND (v_consumer_group IS NULL OR d2.consumer_group = v_consumer_group)
+          ) u
+          ORDER BY u.failed_at DESC
+          LIMIT v_limit OFFSET v_offset
         ) t
-        LIMIT v_limit OFFSET v_offset
     );
 END;
 $$;
@@ -974,6 +1027,7 @@ BEGIN
                     COALESCE(pc.last_consumed_id, '00000000-0000-0000-0000-000000000000'::uuid)
                 )
             )
+        WHERE q.tenant_id = p_tenant
         GROUP BY pc.consumer_group, q.name, p.name, p.id, pc.worker_id, pc.last_consumed_at
     )
     SELECT COALESCE(jsonb_agg(

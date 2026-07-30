@@ -11,7 +11,7 @@
               v-model="searchTraceName"
               @keyup.enter="searchTraces"
               type="text"
-              placeholder="Enter trace name (e.g., tenant-acme, order-flow-123)"
+              placeholder="Enter a trace name"
               class="input"
               style="padding-left:36px;"
             />
@@ -36,9 +36,9 @@
           </button>
         </div>
 
-        <!-- Quick Examples -->
+        <!-- Quick examples: real trace names for this tenant, or nothing. -->
         <div v-if="!currentTraceName && exampleTraceNames.length > 0" style="display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px;">
-          <span style="font-size:12px; color:var(--text-low);">Try:</span>
+          <span style="font-size:12px; color:var(--text-low);">Recent trace names:</span>
           <button
             v-for="example in exampleTraceNames"
             :key="example"
@@ -64,8 +64,18 @@
               Found <span class="font-mono tabular-nums">{{ totalTraces }}</span> trace{{ totalTraces !== 1 ? 's' : '' }} for: <span style="color:var(--text-hi);">{{ currentTraceName }}</span>
             </p>
             <p style="font-size:12px; color:var(--text-mid); margin-top:2px;">
-              <span class="font-mono tabular-nums">{{ uniqueMessages }}</span> unique message{{ uniqueMessages !== 1 ? 's' : '' }} · <span class="font-mono tabular-nums">{{ uniqueQueues }}</span> queue{{ uniqueQueues !== 1 ? 's' : '' }}
+              <span class="font-mono tabular-nums">{{ uniqueMessages }}</span> unique message{{ uniqueMessages !== 1 ? 's' : '' }} ·
+              <template v-if="queueAttributionAvailable">
+                <span class="font-mono tabular-nums">{{ uniqueQueues }}</span> queue{{ uniqueQueues !== 1 ? 's' : '' }}
+              </template>
+              <!-- 0 queues would read as "these traces touched no queue". They
+                   touched queues the broker could not name for these rows. -->
+              <template v-else>queue not recorded for these traces</template>
             </p>
+            <p v-if="!serverPaginates" style="font-size:12px; color:var(--warn-400); margin-top:2px;">
+              This broker returned every trace in one response — the page controls would page nothing, so they are hidden.
+            </p>
+            <p style="font-size:11px; color:var(--text-low); margin-top:2px; font-family:'JetBrains Mono',monospace;">{{ scopeLabel }}</p>
           </div>
         </div>
       </div>
@@ -116,7 +126,7 @@
                 <div style="display:flex; align-items:center; gap:8px;">
                   <span
                     style="width:8px; height:8px; border-radius:99px; flex-shrink:0;"
-                    :class="getEventColor(trace.event_type)"
+                    :style="{ background: eventColor(trace.event_type) }"
                   />
                   <span style="font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--text-hi);">
                     {{ trace.event_type }}
@@ -133,15 +143,22 @@
 
               <!-- Queue -->
               <td>
-                <span style="font-size:13px; font-weight:500; color:var(--text-hi);">
-                  {{ trace.queue_name || '-' }}
+                <span v-if="trace.queue_name" style="font-size:13px; font-weight:500; color:var(--text-hi);">
+                  {{ trace.queue_name }}
+                </span>
+                <span
+                  v-else
+                  class="chip chip-mute"
+                  title="This trace's partition resolves on neither engine, so the broker cannot name its queue."
+                >
+                  not recorded
                 </span>
               </td>
 
               <!-- Partition -->
               <td>
                 <span style="font-size:13px; color:var(--text-mid);">
-                  {{ trace.partition_name || '-' }}
+                  {{ trace.partition_name || (trace.queue_name ? '-' : 'not recorded') }}
                 </span>
               </td>
 
@@ -193,10 +210,11 @@
         </table>
       </div>
 
-      <!-- Pagination -->
-      <div v-if="totalTraces > limit" style="padding:12px 16px; border-top:1px solid var(--bd); display:flex; align-items:center; justify-content:space-between;">
+      <!-- Pagination. The range counts the rows actually rendered — deriving it
+           from `limit` claimed a page size the response never had. -->
+      <div v-if="showPager" style="padding:12px 16px; border-top:1px solid var(--bd); display:flex; align-items:center; justify-content:space-between;">
         <p style="font-size:13px; color:var(--text-mid);">
-          Showing <span class="font-mono tabular-nums">{{ offset + 1 }}</span>–<span class="font-mono tabular-nums">{{ Math.min(offset + limit, totalTraces) }}</span> of <span class="font-mono tabular-nums">{{ totalTraces }}</span>
+          Showing <span class="font-mono tabular-nums">{{ shownFrom }}</span>–<span class="font-mono tabular-nums">{{ shownTo }}</span> of <span class="font-mono tabular-nums">{{ totalTraces }}</span>
         </p>
         <div style="display:flex; gap:8px;">
           <button
@@ -209,7 +227,7 @@
           </button>
           <button
             @click="nextPage"
-            :disabled="offset + limit >= totalTraces"
+            :disabled="shownTo >= totalTraces"
             class="btn btn-ghost"
             style="font-size:12px;"
           >
@@ -243,10 +261,7 @@
 
     <!-- Trace Detail Panel (teleported to body to avoid transform issues) -->
     <Teleport to="body">
-      <div
-        v-if="selectedTrace"
-        style="position:fixed; top:0; right:0; bottom:0; width:100%; max-width:640px; z-index:50; overflow-y:auto; border-left:1px solid var(--bd); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); background:linear-gradient(180deg, rgba(20,20,26,.95), rgba(14,14,18,.97));"
-      >
+      <div v-if="selectedTrace" class="trace-panel">
         <div style="padding:20px 24px;">
           <!-- Header -->
           <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; padding-bottom:16px; border-bottom:1px solid var(--bd);">
@@ -254,7 +269,7 @@
               <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
                 <span
                   style="width:10px; height:10px; border-radius:99px; flex-shrink:0;"
-                  :class="getEventColor(selectedTrace.event_type)"
+                  :style="{ background: eventColor(selectedTrace.event_type) }"
                 />
                 <h3 style="font-size:15px; font-weight:700; color:var(--text-hi); text-transform:uppercase; letter-spacing:.06em;">
                   {{ selectedTrace.event_type }} Trace
@@ -328,14 +343,12 @@
 
               <!-- Text content -->
               <div v-if="selectedTrace.data.text" style="margin-bottom:12px;">
-                <p style="font-size:13px; color:var(--text-hi); background:rgba(255,255,255,.04); border:1px solid var(--bd); border-radius:10px; padding:12px;">
-                  {{ selectedTrace.data.text }}
-                </p>
+                <p class="trace-text">{{ selectedTrace.data.text }}</p>
               </div>
 
               <!-- JSON data (excluding text) -->
               <div v-if="hasAdditionalData(selectedTrace.data)">
-                <div style="background:rgba(0,0,0,.3); border:1px solid var(--bd); border-radius:10px; padding:14px; overflow-x:auto;">
+                <div class="trace-code">
                   <pre class="font-mono" style="font-size:12px; white-space:pre-wrap; color:var(--text-mid); margin:0;">{{ formatTraceData(selectedTrace.data) }}</pre>
                 </div>
               </div>
@@ -362,7 +375,7 @@
       <!-- Backdrop -->
       <div
         v-if="selectedTrace"
-        style="position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.55); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);"
+        class="trace-backdrop"
         @click="selectedTrace = null"
       ></div>
     </Teleport>
@@ -370,26 +383,53 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import { traces as tracesApi } from '@/api'
+import { ref, computed, onMounted } from 'vue'
+import { traces as tracesApi, describeApiError } from '@/api'
+import { useApi, formatDateTime } from '@/composables/useApi'
 import { useRefresh } from '@/composables/useRefresh'
+import { useIdentity } from '@/stores/identity'
+
+const { actingTenantSlug, actingClusterSlug } = useIdentity()
 
 // Search state
 const searchTraceName = ref('')
 const currentTraceName = ref('')
-const traces = ref([])
-const loading = ref(false)
-const error = ref(null)
 const selectedTrace = ref(null)
 const offset = ref(0)
 const limit = ref(50)
 const totalTraces = ref(0)
+// Our own verdict on an unusable page, kept apart from the transport error.
+const pageError = ref(null)
 
-const exampleTraceNames = [
-  'order-flow-123',
-  'tenant-acme',
-  'user-workflow',
-]
+// useApi owns loading/error, aborts on unmount, and discards a response that
+// belongs to a cluster we have since left.
+const {
+  data: traceData,
+  loading,
+  error: apiError,
+  execute: executeTraces,
+} = useApi(
+  (name, params, config) => tracesApi.getByName(name, params, config),
+  { immediate: false },
+)
+
+const traces = computed(() =>
+  Array.isArray(traceData.value?.traces) ? traceData.value.traces : []
+)
+const error = computed(() =>
+  pageError.value || (apiError.value ? describeApiError(apiError.value) : null)
+)
+// Flipped off when a page comes back larger than it was asked for: that broker
+// is not applying the limit, so a page range would be fiction.
+const serverPaginates = ref(true)
+
+// Suggestions are the tenant's real trace names or nothing at all — invented
+// examples send every click into "No traces found".
+const exampleTraceNames = ref([])
+
+const scopeLabel = computed(
+  () => `Tenant-scoped · tenant ${actingTenantSlug.value || '—'} · cluster ${actingClusterSlug.value || '—'}`
+)
 
 // Computed stats
 const uniqueMessages = computed(() => {
@@ -402,51 +442,66 @@ const uniqueQueues = computed(() => {
   return queues.size
 })
 
-// Search traces by name
-async function searchTraces() {
-  if (!searchTraceName.value.trim()) return
-  
-  loading.value = true
-  error.value = null
-  offset.value = 0
-  currentTraceName.value = searchTraceName.value.trim()
-  
+/** A trace whose partition resolves on neither engine carries no queue name. */
+const queueAttributionAvailable = computed(() => traces.value.some(t => t.queue_name))
+
+const shownFrom = computed(() => (traces.value.length ? offset.value + 1 : 0))
+const shownTo = computed(() => offset.value + traces.value.length)
+const showPager = computed(
+  () => serverPaginates.value && (offset.value > 0 || totalTraces.value > traces.value.length)
+)
+
+async function fetchTraces() {
+  pageError.value = null
+  let payload
   try {
-    const response = await tracesApi.getByName(currentTraceName.value, {
+    payload = await executeTraces(currentTraceName.value, {
       limit: limit.value,
       offset: offset.value
     })
-    
-    traces.value = response.data.traces || []
-    totalTraces.value = response.data.total || 0
-  } catch (err) {
-    error.value = err.response?.data?.error || err.message
-    traces.value = []
-    totalTraces.value = 0
-  } finally {
-    loading.value = false
+  } catch {
+    // apiError carries it; `error` renders the canonical sentence.
+    return
   }
+
+  const rows = payload?.traces
+  // A missing array is NOT an empty result: it is a page the broker could not
+  // build. Rendering "No traces found" for it denies traces that exist.
+  if (!Array.isArray(rows)) {
+    pageError.value = `The broker returned no result page at offset ${offset.value}.`
+    return
+  }
+  serverPaginates.value = rows.length <= limit.value
+  totalTraces.value = Number(payload?.total) || rows.length
+}
+
+// Search traces by name
+async function searchTraces() {
+  if (!searchTraceName.value.trim()) return
+
+  offset.value = 0
+  currentTraceName.value = searchTraceName.value.trim()
+  totalTraces.value = 0
+  await fetchTraces()
 }
 
 // Load page of traces
 async function loadPage() {
   if (!currentTraceName.value) return
-  
-  loading.value = true
-  error.value = null
-  
+  await fetchTraces()
+}
+
+async function loadExampleTraceNames() {
   try {
-    const response = await tracesApi.getByName(currentTraceName.value, {
-      limit: limit.value,
-      offset: offset.value
-    })
-    
-    traces.value = response.data.traces || []
-    totalTraces.value = response.data.total || 0
-  } catch (err) {
-    error.value = err.response?.data?.error || err.message
-  } finally {
-    loading.value = false
+    const res = await tracesApi.getAvailableNames({ limit: 8 })
+    exampleTraceNames.value = (res.data?.trace_names || [])
+      .map(n => n?.trace_name)
+      .filter(Boolean)
+      .slice(0, 8)
+  } catch {
+    // No suggestions rather than made-up ones; the failure is already reported
+    // by the interceptor and the search box still works.
+    exampleTraceNames.value = []
   }
 }
 
@@ -458,35 +513,36 @@ function previousPage() {
 }
 
 function nextPage() {
-  if (offset.value + limit.value < totalTraces.value) {
-    offset.value += limit.value
-    loadPage()
-  }
+  if (shownTo.value >= totalTraces.value) return
+  offset.value += traces.value.length || limit.value
+  loadPage()
 }
 
 function clearSearch() {
   searchTraceName.value = ''
   currentTraceName.value = ''
-  traces.value = []
+  traceData.value = null
   totalTraces.value = 0
   offset.value = 0
-  error.value = null
+  pageError.value = null
+  apiError.value = null
 }
 
 function viewTrace(trace) {
   selectedTrace.value = trace
 }
 
-// Event type colors
-function getEventColor(eventType) {
+// Event type colours from the token set, so a trace dot means the same thing
+// here as a chip does anywhere else in the product.
+function eventColor(eventType) {
   const colors = {
-    info: 'bg-blue-500',
-    processing: 'bg-blue-500',
-    step: 'bg-violet-500',
-    error: 'bg-rose-500',
-    warning: 'bg-amber-500',
+    info: 'var(--ice-400)',
+    processing: 'var(--ice-400)',
+    step: 'var(--crown-400)',
+    error: 'var(--ember-400)',
+    warning: 'var(--warn-400)',
   }
-  return colors[eventType] || 'opacity-50'
+  return colors[eventType] || 'var(--text-low)'
 }
 
 function hasAdditionalData(data) {
@@ -501,19 +557,6 @@ function formatTraceData(data) {
   return JSON.stringify(rest, null, 2)
 }
 
-function formatDateTime(timestamp) {
-  if (!timestamp) return ''
-  const date = new Date(timestamp)
-  return date.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  })
-}
-
 // Refresh function — only refreshes when there's an active search
 const refreshCurrentView = async () => {
   if (currentTraceName.value) {
@@ -522,4 +565,45 @@ const refreshCurrentView = async () => {
 }
 
 useRefresh(refreshCurrentView)
+
+onMounted(loadExampleTraceNames)
 </script>
+
+<style scoped>
+/* Teleported, but still this component's DOM — scoped styles apply. Split by
+   theme instead of hardcoding a dark gradient inline. */
+.trace-panel {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 100%; max-width: 640px; z-index: 50;
+  overflow-y: auto;
+  border-left: 1px solid var(--bd);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+}
+html:not(.light) .trace-panel {
+  background: linear-gradient(180deg, rgba(20,20,26,.95), rgba(14,14,18,.97));
+}
+html.light .trace-panel {
+  background: rgba(255,255,255,.97);
+  box-shadow: -10px 0 40px -10px rgba(0,0,0,.1);
+}
+
+.trace-backdrop {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(4,4,6,.55);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+
+.trace-text {
+  font-size: 13px; color: var(--text-hi);
+  border: 1px solid var(--bd); border-radius: 10px; padding: 12px;
+}
+html:not(.light) .trace-text { background: rgba(255,255,255,.04); }
+html.light .trace-text { background: var(--paper-1); }
+
+.trace-code {
+  border: 1px solid var(--bd); border-radius: 10px;
+  padding: 14px; overflow-x: auto;
+}
+html:not(.light) .trace-code { background: var(--ink-0); }
+html.light .trace-code { background: var(--paper-1); }
+</style>

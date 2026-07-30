@@ -29,7 +29,9 @@ async def test_pop_non_empty_queue(client):
     # immediately after push can race past the not-yet-committed lookup
     # row and return empty. Long-poll re-runs the candidate scan and
     # picks up the row once it commits (typically within ms).
+    # docs:start(py-pop)
     res = await client.queue("test-queue-v2-pop-non-empty").batch(1).wait(True).pop()
+    # docs:end
     assert len(res) == 1
 
 

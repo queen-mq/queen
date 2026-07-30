@@ -130,6 +130,10 @@ BEGIN
     WHERE state != 'idle'
       AND query_start < now() - interval '1 second'
       AND pid != pg_backend_pid()
+      -- Same-database only. pg_stat_activity spans the whole PG cluster, so
+      -- without this the panel showed neighbouring databases' full SQL text —
+      -- every other block in this file is already schema-scoped.
+      AND datname = current_database()
     LIMIT 10;
 
     -- Autovacuum status (tables with many dead tuples)

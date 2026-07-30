@@ -147,41 +147,59 @@ BEGIN
                    JOIN queen.queues rq ON rq.id = rp.queue_id
                    WHERE rp.id = mt.partition_id AND rq.tenant_id = p_tenant));
 
-    -- Get traces with pagination
+    -- Get traces with pagination.
+    -- LIMIT/OFFSET must be applied to the ROWS, inside the subquery, BEFORE
+    -- jsonb_agg — an aggregate without GROUP BY yields exactly one row, so a
+    -- trailing LIMIT/OFFSET pages that single row: offset 0 ignored the limit
+    -- and aggregated everything, offset>0 returned no row at all (NULL body).
+    -- Same shape get_available_trace_names_v1 below already uses.
+    -- queue_name/partition_name resolve on EITHER engine: queen.partitions is
+    -- empty under the log engine (queen-seg writes queen.log_partitions only),
+    -- so the rows join alone leaves both columns permanently NULL.
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
-            'id', mt.id,
-            'transaction_id', mt.transaction_id,
-            'partition_id', mt.partition_id,
-            'event_type', mt.event_type,
-            'data', mt.data,
-            'consumer_group', mt.consumer_group,
-            'worker_id', mt.worker_id,
-            'created_at', to_char(mt.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            'queue_name', q.name,
-            'partition_name', p.name,
-            'message_payload', m.payload,
+            'id', s.id,
+            'transaction_id', s.transaction_id,
+            'partition_id', s.partition_id,
+            'event_type', s.event_type,
+            'data', s.data,
+            'consumer_group', s.consumer_group,
+            'worker_id', s.worker_id,
+            'created_at', to_char(s.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'queue_name', s.queue_name,
+            'partition_name', s.partition_name,
+            'message_payload', s.message_payload,
             'trace_names', COALESCE(
-                (SELECT jsonb_agg(mtn2.trace_name ORDER BY mtn2.trace_name) 
-                 FROM queen.message_trace_names mtn2 WHERE mtn2.trace_id = mt.id),
+                (SELECT jsonb_agg(mtn2.trace_name ORDER BY mtn2.trace_name)
+                 FROM queen.message_trace_names mtn2 WHERE mtn2.trace_id = s.id),
                 '[]'::jsonb
             )
-        ) ORDER BY mt.created_at ASC
+        ) ORDER BY s.created_at ASC
     ), '[]'::jsonb) INTO v_traces
-    FROM queen.message_trace_names mtn
-    JOIN queen.message_traces mt ON mtn.trace_id = mt.id
-    LEFT JOIN queen.messages m ON mt.message_id = m.id
-    LEFT JOIN queen.partitions p ON mt.partition_id = p.id
-    LEFT JOIN queen.queues q ON p.queue_id = q.id
-    WHERE mtn.trace_name = p_trace_name
-      AND (EXISTS (SELECT 1 FROM queen.log_partitions lp
-                   JOIN queen.log_queues lq ON lq.id = lp.queue_id
-                   WHERE lp.id = mt.partition_id AND lq.tenant_id = p_tenant)
-        OR EXISTS (SELECT 1 FROM queen.partitions rp
-                   JOIN queen.queues rq ON rq.id = rp.queue_id
-                   WHERE rp.id = mt.partition_id AND rq.tenant_id = p_tenant))
-    LIMIT p_limit OFFSET p_offset;
-    
+    FROM (
+        SELECT mt.id, mt.transaction_id, mt.partition_id, mt.event_type, mt.data,
+               mt.consumer_group, mt.worker_id, mt.created_at,
+               COALESCE(q.name, lq.name)  AS queue_name,
+               COALESCE(p.name, lp.name)  AS partition_name,
+               m.payload                  AS message_payload
+        FROM queen.message_trace_names mtn
+        JOIN queen.message_traces mt ON mtn.trace_id = mt.id
+        LEFT JOIN queen.messages m ON mt.message_id = m.id
+        LEFT JOIN queen.partitions p ON mt.partition_id = p.id
+        LEFT JOIN queen.queues q ON p.queue_id = q.id
+        LEFT JOIN queen.log_partitions lp ON lp.id = mt.partition_id
+        LEFT JOIN queen.log_queues lq ON lq.id = lp.queue_id
+        WHERE mtn.trace_name = p_trace_name
+          AND (EXISTS (SELECT 1 FROM queen.log_partitions lp2
+                       JOIN queen.log_queues lq2 ON lq2.id = lp2.queue_id
+                       WHERE lp2.id = mt.partition_id AND lq2.tenant_id = p_tenant)
+            OR EXISTS (SELECT 1 FROM queen.partitions rp
+                       JOIN queen.queues rq ON rq.id = rp.queue_id
+                       WHERE rp.id = mt.partition_id AND rq.tenant_id = p_tenant))
+        ORDER BY mt.created_at ASC
+        LIMIT p_limit OFFSET p_offset
+    ) s;
+
     RETURN jsonb_build_object(
         'traces', v_traces,
         'total', v_total,

@@ -31,10 +31,11 @@ DECLARE
     v_bucket_minutes INTEGER;
     v_series JSONB;
     v_totals JSONB;
-    -- Track B (§5): tenant travels in the filter JSON (`_tenant`). NOTE:
-    -- queen.retention_history is not written by the log engine (dead table under
-    -- segments), so this endpoint returns an empty series for every tenant; the
-    -- scoping below is future-proofing for when the rows engine populates it.
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`). The log
+    -- engine's retention/eviction steps (045) write queen.retention_history, and
+    -- their partition_id is a queen.log_partitions id, so the queue must resolve
+    -- through BOTH partition tables below or every log row lands in the
+    -- "unresolvable" bucket and escapes the queue/tenant filters.
     v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     v_from_ts := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '1 hour');
@@ -56,9 +57,13 @@ BEGIN
                 (EXTRACT(minute FROM rh.executed_at)::integer % v_bucket_minutes) * INTERVAL '1 minute' AS bucket,
             rh.retention_type,
             rh.messages_deleted,
-            p.queue_id
+            COALESCE(p.queue_id, lqq.id) AS queue_id
         FROM queen.retention_history rh
         LEFT JOIN queen.partitions p ON p.id = rh.partition_id
+        -- log engine: partition -> log_queues -> the (tenant, name) queue row
+        LEFT JOIN queen.log_partitions lp ON lp.id = rh.partition_id
+        LEFT JOIN queen.log_queues lq ON lq.id = lp.queue_id
+        LEFT JOIN queen.queues lqq ON lqq.name = lq.name AND lqq.tenant_id = lq.tenant_id
         WHERE rh.executed_at >= v_from_ts
           AND rh.executed_at <= v_to_ts
           AND rh.retention_type NOT LIKE '\_\_%\_\_' ESCAPE '\'

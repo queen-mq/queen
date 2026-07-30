@@ -1,13 +1,24 @@
 <template>
   <div class="view-container">
 
-    <!-- Page head -->
-    <!-- Filters card -->
-    <div class="card" style="margin-bottom:20px;">
-      <div class="card-body" style="display:flex; flex-direction:column; gap:16px;">
+    <!-- Scope strip. Every number below is this tenant's; the cell it runs on
+         is named too, so a tenant figure is never read as a cell figure. -->
+    <div class="scope-strip">
+      <span class="chip chip-mute">tenant scope</span>
+      <span class="scope-text">
+        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
+        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
+        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
+      </span>
+      <span class="scope-fill"></span>
+      <span class="scope-meta">{{ rangeLabel }}</span>
+    </div>
 
-        <!-- Time range row -->
-        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px;">
+    <!-- Filters -->
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-body an-filters">
+
+        <div class="an-row">
           <span class="label-xs">Time range</span>
           <div class="seg">
             <button
@@ -16,692 +27,619 @@
               :class="{ on: timeRange === range.value && !customMode }"
               @click="selectQuickRange(range.value)"
             >{{ range.label }}</button>
-            <button
-              :class="{ on: customMode }"
-              @click="toggleCustomMode"
-            >Custom</button>
+            <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
           </div>
+          <span class="an-hint">applies to the flow chart, the range totals and the leaderboard</span>
         </div>
 
-        <!-- Custom date/time range -->
-        <div v-if="customMode" style="display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding-top:12px; border-top:1px solid var(--bd);">
-          <div style="display:flex; align-items:center; gap:8px;">
+        <div v-if="customMode" class="an-row an-row-sep">
+          <div class="an-field">
             <span class="label-xs">From</span>
-            <input
-              type="datetime-local"
-              v-model="customFrom"
-              class="input font-mono"
-              style="width:auto; font-size:13px;"
-            />
+            <input v-model="customFrom" type="datetime-local" class="input font-mono an-dt" />
           </div>
-          <div style="display:flex; align-items:center; gap:8px;">
+          <div class="an-field">
             <span class="label-xs">To</span>
-            <input
-              type="datetime-local"
-              v-model="customTo"
-              class="input font-mono"
-              style="width:auto; font-size:13px;"
-            />
+            <input v-model="customTo" type="datetime-local" class="input font-mono an-dt" />
           </div>
-          <button
-            @click="applyCustomRange"
-            class="btn btn-primary"
-          >Apply</button>
+          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+          <span v-if="customError" class="an-invalid">{{ customError }}</span>
         </div>
 
-        <!-- Filters row -->
-        <div style="display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px;">
-          <div style="width:192px;">
-            <span class="label-xs" style="display:block; margin-bottom:6px;">Queue</span>
-            <select v-model="queueFilter" class="input" style="width:100%;">
-              <option value="">All Queues</option>
-              <option v-for="q in allQueues" :key="q.name" :value="q.name">
-                {{ q.name }}
-              </option>
+        <div class="an-row an-row-end">
+          <div class="an-field an-field-col" style="width:192px;">
+            <span class="label-xs">Queue</span>
+            <select v-model="queueFilter" class="input">
+              <option value="">All queues</option>
+              <option v-for="q in queues" :key="q.name" :value="q.name">{{ q.name }}</option>
             </select>
           </div>
 
-          <div style="width:160px;">
-            <span class="label-xs" style="display:block; margin-bottom:6px;">Namespace</span>
-            <select v-model="namespaceFilter" class="input" style="width:100%;">
-              <option value="">All Namespaces</option>
-              <option v-for="ns in namespaces" :key="ns.namespace" :value="ns.namespace">
+          <div class="an-field an-field-col" style="width:160px;">
+            <span class="label-xs">Namespace</span>
+            <select v-model="namespaceFilter" class="input">
+              <option value="">All namespaces</option>
+              <option v-for="ns in namespaceOptions" :key="ns.namespace" :value="ns.namespace">
                 {{ ns.namespace || 'Default' }}
               </option>
             </select>
           </div>
 
-          <div style="width:160px;">
-            <span class="label-xs" style="display:block; margin-bottom:6px;">Task</span>
-            <select v-model="taskFilter" class="input" style="width:100%;">
-              <option value="">All Tasks</option>
-              <option v-for="task in tasks" :key="task.task" :value="task.task">
-                {{ task.task || 'Default' }}
+          <div class="an-field an-field-col" style="width:160px;">
+            <span class="label-xs">Task</span>
+            <select v-model="taskFilter" class="input">
+              <option value="">All tasks</option>
+              <option v-for="t in taskOptions" :key="t.task" :value="t.task">
+                {{ t.task || 'Default' }}
               </option>
             </select>
           </div>
 
-          <button
-            v-if="queueFilter || namespaceFilter || taskFilter"
-            @click="clearFilters"
-            class="btn btn-ghost"
-          >Clear Filters</button>
+          <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
         </div>
-      </div>
 
-      <!-- Active filters display -->
-      <div v-if="queueFilter || namespaceFilter || taskFilter" style="display:flex; flex-wrap:wrap; gap:8px; padding:0 16px 14px; border-top:1px solid var(--bd); padding-top:12px;">
-        <span v-if="queueFilter" class="chip chip-ice">
-          Queue: {{ queueFilter }}
-        </span>
-        <span v-if="namespaceFilter" class="chip chip-ice">
-          Namespace: {{ namespaceFilter }}
-        </span>
-        <span v-if="taskFilter" class="chip chip-ice">
-          Task: {{ taskFilter }}
-        </span>
-      </div>
-    </div>
-
-    <!-- Loading skeleton -->
-    <div v-if="loading" style="display:flex; flex-direction:column; gap:16px;">
-      <div class="card" style="padding:24px;">
-        <div class="skeleton" style="height:256px; width:100%; border-radius:10px;" />
-      </div>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
-        <div class="card" style="padding:24px;">
-          <div class="skeleton" style="height:192px; width:100%; border-radius:10px;" />
+        <!-- A filter the queue list could not be fetched for cannot be applied.
+             Say so instead of showing tenant-wide numbers under a filter chip. -->
+        <div v-if="scopeUnavailable" class="panel-err an-row-sep">
+          Namespace / task filtering needs the queue list, which failed to load
+          ({{ queuesErrorText }}). The panels below are not narrowed to that filter.
         </div>
-        <div class="card" style="padding:24px;">
-          <div class="skeleton" style="height:192px; width:100%; border-radius:10px;" />
+        <div v-else-if="hasActiveFilter" class="an-row an-chips">
+          <span v-if="queueFilter" class="chip chip-ice">queue: {{ queueFilter }}</span>
+          <span v-if="namespaceFilter" class="chip chip-ice">namespace: {{ namespaceFilter }}</span>
+          <span v-if="taskFilter" class="chip chip-ice">task: {{ taskFilter }}</span>
+          <span class="an-hint">{{ scopedQueues.length }} queue{{ scopedQueues.length === 1 ? '' : 's' }} match</span>
         </div>
       </div>
     </div>
 
-    <template v-else-if="statusData">
-      <!-- Message Flow Chart -->
-      <div class="card card-accent" style="margin-bottom:20px;">
+    <!-- ===================== RANGE-BOUNDED PANELS ===================== -->
+
+    <div class="card card-accent" style="margin-bottom:16px;">
+      <div class="card-header">
+        <h3>Message flow over time</h3>
+        <span class="chip chip-mute">selected range</span>
+        <span class="muted">{{ stamp(ops) }}</span>
+      </div>
+      <div class="card-body">
+        <div v-if="opsFirstLoad" class="skeleton" style="height:280px;" />
+        <div v-else-if="opsUnavailable" class="panel-err">{{ opsErrorText }}</div>
+        <BaseChart
+          v-else-if="flowChart.labels.length"
+          type="line"
+          :data="flowChart"
+          :options="flowOptions"
+          height="280px"
+        />
+        <div v-else class="panel-msg">No traffic recorded in this range for the selected scope.</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <h3>Totals for the selected range</h3>
+        <span class="chip chip-mute">selected range</span>
+        <span class="muted">{{ stamp(ops) }}</span>
+      </div>
+      <div class="card-body">
+        <div v-if="opsUnavailable" class="panel-err">{{ opsErrorText }}</div>
+        <div v-else class="an-stats-6">
+          <div class="stat">
+            <div class="stat-label">Ingested</div>
+            <div class="stat-value font-mono">{{ metric(rangeTotals.ingested) }}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Delivered</div>
+            <div class="stat-value font-mono">{{ metric(rangeTotals.delivered) }}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Acked</div>
+            <div class="stat-value font-mono">{{ metric(rangeTotals.acked) }}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Ack failures</div>
+            <div class="stat-value font-mono num" :class="{ bad: rangeTotals.ackFailed > 0 }">
+              {{ metric(rangeTotals.ackFailed) }}
+            </div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Empty polls</div>
+            <div class="stat-value font-mono">{{ metric(rangeTotals.emptyPolls) }}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Peak lag</div>
+            <div class="stat-value font-mono">
+              {{ rangeTotals.maxLagMs === null ? '—' : formatDuration(rangeTotals.maxLagMs) }}
+            </div>
+            <div class="stat-foot">worst pop-to-publish delay in the range</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="an-grid-2">
+      <div class="card">
         <div class="card-header">
-          <h3>Message Flow Over Time</h3>
-          <span v-if="hasActiveFilter" class="muted" style="margin-left:auto;">scoped · processed only</span>
+          <h3>Top queues by volume</h3>
+          <span class="chip chip-mute">selected range</span>
         </div>
         <div class="card-body">
+          <div v-if="opsFirstLoad" class="skeleton" style="height:240px;" />
+          <div v-else-if="opsUnavailable" class="panel-err">{{ opsErrorText }}</div>
           <BaseChart
-            v-if="throughputData.labels.length > 0"
-            type="line"
-            :data="throughputData"
-            :options="chartOptions"
-            height="280px"
+            v-else-if="topQueuesChart.labels.length"
+            type="bar"
+            :data="topQueuesChart"
+            :options="barOptions"
+            height="240px"
           />
-          <div v-else style="text-align:center; padding:48px 0; color:var(--text-mid);">
-            No throughput data available
-          </div>
+          <div v-else class="panel-msg">No queue moved a message in this range.</div>
         </div>
       </div>
 
-      <!-- Charts row -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
-        <!-- Top Queues Chart -->
-        <div class="card">
-          <div class="card-header">
-            <h3>Top Queues by Volume</h3>
-          </div>
-          <div class="card-body">
-            <BaseChart
-              v-if="queueActivityData.labels.length > 0"
-              type="bar"
-              :data="queueActivityData"
-              :options="barChartOptions"
-              height="240px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-mid);">
-              No queue data available
-            </div>
-          </div>
-        </div>
-
-        <!-- Message Distribution Chart -->
-        <div class="card">
-          <div class="card-header">
-            <h3>Message Status Distribution</h3>
-            <span v-if="hasActiveFilter" class="muted" style="margin-left:auto;">scoped (pending / processing)</span>
-          </div>
-          <div class="card-body" style="display:flex; align-items:center; justify-content:center;">
-            <BaseChart
-              v-if="messageDistributionData.labels.length > 0"
-              type="doughnut"
-              :data="messageDistributionData"
-              :options="doughnutOptions"
-              height="240px"
-            />
-            <div v-else style="text-align:center; padding:48px 0; color:var(--text-mid);">
-              No message data available
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Message Counts -->
-      <div class="card" style="margin-bottom:20px;">
+      <div class="card">
         <div class="card-header">
-          <h3>Message Counts</h3>
-          <span v-if="hasActiveFilter" class="muted" style="margin-left:auto;">scoped to filter</span>
+          <h3>Backlog split</h3>
+          <span class="chip chip-mute">now, not the range</span>
         </div>
-        <div class="card-body">
-          <div :style="{ display: 'grid', gridTemplateColumns: `repeat(${hasActiveFilter ? 3 : 6}, 1fr)`, gap: '16px' }">
+        <div class="card-body an-center">
+          <div v-if="queuesFirstLoad" class="skeleton" style="height:240px; width:100%;" />
+          <div v-else-if="queuesFailed" class="panel-err">{{ queuesErrorText }}</div>
+          <BaseChart
+            v-else-if="backlogChart.labels.length"
+            type="doughnut"
+            :data="backlogChart"
+            :options="doughnutOptions"
+            height="240px"
+          />
+          <div v-else class="panel-msg">Nothing pending or in flight right now.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SNAPSHOT PANEL ===================== -->
+
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header">
+        <h3>Backlog right now</h3>
+        <span class="chip chip-mute">live snapshot · the time range does not apply</span>
+        <span class="muted">{{ stamp(queueList) }}</span>
+      </div>
+      <div class="card-body">
+        <div v-if="queuesFailed" class="panel-err">{{ queuesErrorText }}</div>
+        <template v-else>
+          <div class="an-stats-4">
             <div class="stat">
-              <div class="stat-label">Total</div>
-              <div class="stat-value font-mono" style="color:var(--text-hi);">
-                {{ formatNumber(scopedMessages?.total || 0) }}
-              </div>
+              <div class="stat-label">Queues</div>
+              <div class="stat-value font-mono">{{ queuesFirstLoad ? '—' : scopedQueues.length }}</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Total messages</div>
+              <div class="stat-value font-mono">{{ metric(backlog.total) }}</div>
             </div>
             <div class="stat">
               <div class="stat-label">Pending</div>
-              <div class="stat-value font-mono">
-                {{ formatNumber(Math.max(0, scopedMessages?.pending || 0)) }}
-              </div>
+              <div class="stat-value font-mono">{{ metric(backlog.pending) }}</div>
             </div>
             <div class="stat">
               <div class="stat-label">Processing</div>
-              <div class="stat-value font-mono">
-                {{ formatNumber(scopedMessages?.processing || 0) }}
-              </div>
+              <div class="stat-value font-mono">{{ metric(backlog.processing) }}</div>
             </div>
-            <template v-if="!hasActiveFilter">
-              <div class="stat">
-                <div class="stat-label">Completed</div>
-                <div class="stat-value font-mono">
-                  {{ formatNumber(scopedMessages?.completed || 0) }}
-                </div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">Failed</div>
-                <div class="stat-value font-mono num" :class="{ bad: (scopedMessages?.failed || 0) > 0 }">
-                  {{ formatNumber(scopedMessages?.failed || 0) }}
-                </div>
-              </div>
-              <div class="stat">
-                <div class="stat-label">Dead Letter</div>
-                <div class="stat-value font-mono num" :class="{ bad: (scopedMessages?.deadLetter || 0) > 0 }">
-                  {{ formatNumber(scopedMessages?.deadLetter || 0) }}
-                </div>
-              </div>
-            </template>
           </div>
-        </div>
+          <!-- The queue reader pages; the totals above cover the page we hold,
+               so say it rather than understate a large tenant silently. -->
+          <p v-if="queuePageFull" class="an-note">
+            Showing the first {{ QUEUE_PAGE_LIMIT }} queues — this tenant has more, and the
+            four figures above cover only those {{ QUEUE_PAGE_LIMIT }}.
+          </p>
+        </template>
       </div>
-
-      <!-- Detailed Stats -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
-        <!-- Leases Info -->
-        <div class="card">
-          <div class="card-header">
-            <h3>Active Leases</h3>
-            <span v-if="hasActiveFilter" class="muted" style="margin-left:auto;">system-wide</span>
-          </div>
-          <div class="card-body" style="display:flex; flex-direction:column; gap:12px;">
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-              <span style="color:var(--text-mid); font-size:13px;">Active Leases</span>
-              <span class="font-mono tabular-nums" style="font-weight:600; color:var(--text-hi);">{{ statusData?.leases?.active || 0 }}</span>
-            </div>
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-              <span style="color:var(--text-mid); font-size:13px;">Partitions with Leases</span>
-              <span class="font-mono tabular-nums" style="font-weight:600; color:var(--text-hi);">{{ statusData?.leases?.partitionsWithLeases || 0 }}</span>
-            </div>
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-              <span style="color:var(--text-mid); font-size:13px;">Total Batch Size</span>
-              <span class="font-mono tabular-nums" style="font-weight:600; color:var(--text-hi);">{{ statusData?.leases?.totalBatchSize || 0 }}</span>
-            </div>
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-              <span style="color:var(--text-mid); font-size:13px;">Total Acked</span>
-              <span class="font-mono tabular-nums" style="font-weight:600; color:var(--text-hi);">{{ statusData?.leases?.totalAcked || 0 }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Dead Letter Queue -->
-        <div class="card">
-          <div class="card-header">
-            <h3>Dead Letter Queue</h3>
-            <span v-if="hasActiveFilter" class="muted" style="margin-left:auto;">system-wide</span>
-          </div>
-          <div class="card-body" style="display:flex; flex-direction:column; gap:12px;">
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-              <span style="color:var(--text-mid); font-size:13px;">Total Messages</span>
-              <span class="font-mono tabular-nums" style="font-weight:600; color:var(--text-hi);">{{ statusData?.deadLetterQueue?.totalMessages || 0 }}</span>
-            </div>
-            <div style="display:flex; align-items:center; justify-content:space-between;">
-              <span style="color:var(--text-mid); font-size:13px;">Affected Partitions</span>
-              <span class="font-mono tabular-nums" style="font-weight:600; color:var(--text-hi);">{{ statusData?.deadLetterQueue?.affectedPartitions || 0 }}</span>
-            </div>
-
-            <div v-if="statusData?.deadLetterQueue?.topErrors?.length" style="padding-top:12px; border-top:1px solid var(--bd);">
-              <span class="label-xs" style="display:block; margin-bottom:8px;">Top Errors</span>
-              <div style="display:flex; flex-direction:column; gap:8px;">
-                <div
-                  v-for="(errorItem, idx) in statusData.deadLetterQueue.topErrors.slice(0, 3)"
-                  :key="idx"
-                  style="display:flex; align-items:center; justify-content:space-between; font-size:13px;"
-                >
-                  <span style="color:var(--text-mid); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;">{{ errorItem.error }}</span>
-                  <span class="font-mono tabular-nums" style="font-weight:600; color:var(--text-hi); margin-left:8px;">{{ errorItem.count }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Workers Info -->
-      <div v-if="statusData?.workers?.length" class="card">
-        <div class="card-header">
-          <h3>{{ statusData.workers.length }} Workers</h3>
-          <span class="chip chip-ok"><span class="dot"></span>Healthy</span>
-        </div>
-        <div class="card-body">
-          <div class="grid-3">
-            <div class="stat" style="text-align:center;">
-              <div class="stat-label" style="justify-content:center;">Avg Event Loop</div>
-              <div class="stat-value font-mono">
-                {{ Math.round(statusData.workers.reduce((sum, w) => sum + (w.avgEventLoopLagMs || 0), 0) / statusData.workers.length) }}<small>ms</small>
-              </div>
-            </div>
-            <div class="stat" style="text-align:center;">
-              <div class="stat-label" style="justify-content:center;">Connection Pool</div>
-              <div class="stat-value font-mono">
-                {{ statusData.workers.reduce((sum, w) => sum + (w.freeSlots || 0), 0) }}<small>/{{ statusData.workers.reduce((sum, w) => sum + (w.dbConnections || 0), 0) }}</small>
-              </div>
-            </div>
-            <div class="stat" style="text-align:center;">
-              <div class="stat-label" style="justify-content:center;">Max Job Queue</div>
-              <div class="stat-value font-mono">
-                {{ Math.max(...statusData.workers.map(w => w.jobQueueSize || 0)) }}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </template>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
-import { analytics, resources } from '@/api'
-import { formatNumber } from '@/composables/useApi'
-import { useRefresh } from '@/composables/useRefresh'
-import { stateColor, chartColor } from '@/composables/useChartTheme'
+import { computed, ref, watch } from 'vue'
+
 import BaseChart from '@/components/BaseChart.vue'
+import { analytics, describeApiError, resources, system } from '@/api'
+import {
+  formatDuration, formatNumber, toNum, trimIncompleteBuckets, useApi,
+} from '@/composables/useApi'
+import { stateColor } from '@/composables/useChartTheme'
+import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
+import { useRefresh } from '@/composables/useRefresh'
+import { useIdentity } from '@/stores/identity'
 
-// State
-const loading = ref(true)
-const statusData = ref(null)
-const allQueues = ref([])
-const namespaces = ref([])
-const tasks = ref([])
+// TENANT PAGE. Every source here is tenant-scoped broker-side:
+//   /api/v1/analytics/queue-ops  — per (bucket, queue) push/pop/ack in a range
+//   /api/v1/status/queues        — the live backlog watermark per queue
+//   /api/v1/resources/{namespaces,tasks} — filter options
+// The old primary call, bare /api/v1/status, is a cell-level aggregate the
+// proxy blocks and the broker never scopes; nothing on this page may come from
+// it, so its lifetime "messages/leases/DLQ/workers" panels are gone rather
+// than shown as this tenant's.
+const { actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 
-const timeRange = ref('1h')
-const customMode = ref(false)
-const customFrom = ref('')
-const customTo = ref('')
-const queueFilter = ref('')
-const namespaceFilter = ref('')
-const taskFilter = ref('')
+const QUEUE_PAGE_LIMIT = 500
 
 const timeRanges = [
   { label: '1h', value: '1h' },
   { label: '6h', value: '6h' },
   { label: '24h', value: '24h' },
-  { label: '7d', value: '7d' }
+  { label: '7d', value: '7d' },
 ]
 
-// Format date to datetime-local input format
-const formatDateTimeLocal = (date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  const hours = String(date.getHours()).padStart(2, '0')
-  const minutes = String(date.getMinutes()).padStart(2, '0')
-  return `${year}-${month}-${day}T${hours}:${minutes}`
+const timeRange = ref('1h')
+const customMode = ref(false)
+const customFrom = ref('')
+const customTo = ref('')
+// The range the data on screen was actually fetched for — only Apply moves it,
+// so a half-typed custom range never silently re-scopes the panels.
+const appliedCustom = ref(null)
+
+const queueFilter = ref('')
+const namespaceFilter = ref('')
+const taskFilter = ref('')
+
+// ---------------------------------------------------------------------------
+// Range
+// ---------------------------------------------------------------------------
+const QUICK_MINUTES = { '1h': 60, '6h': 360, '24h': 1440, '7d': 10080 }
+
+function currentRange() {
+  if (customMode.value && appliedCustom.value) return appliedCustom.value
+  const to = new Date()
+  const from = new Date(to.getTime() - (QUICK_MINUTES[timeRange.value] || 60) * 60_000)
+  return { from, to }
 }
 
-// Chart Options
-const chartOptions = {
-  plugins: {
-    legend: {
-      display: true,
-      position: 'top',
-      labels: {
-        usePointStyle: true,
-        padding: 20
-      }
-    }
-  },
-  scales: {
-    y: {
-      title: { display: true, text: 'Messages', font: { size: 11 } }
-    }
+const rangeLabel = computed(() => {
+  if (customMode.value && appliedCustom.value) {
+    const { from, to } = appliedCustom.value
+    return `${from.toLocaleString()} → ${to.toLocaleString()}`
   }
-}
-
-const barChartOptions = {
-  plugins: {
-    legend: { display: false }
-  },
-  scales: {
-    x: {
-      stacked: true
-    },
-    y: {
-      stacked: true,
-      beginAtZero: true,
-      title: { display: true, text: 'Messages', font: { size: 11 } }
-    }
-  }
-}
-
-const doughnutOptions = {
-  plugins: {
-    legend: {
-      display: true,
-      position: 'bottom',
-      labels: {
-        usePointStyle: true,
-        padding: 16
-      }
-    }
-  },
-  cutout: '60%'
-}
-
-// Format chart label based on time span
-const formatChartLabel = (date, isMultiDay) => {
-  if (isMultiDay) {
-    return date.toLocaleString('en-US', { 
-      month: 'short', 
-      day: 'numeric', 
-      hour: '2-digit', 
-      minute: '2-digit' 
-    })
-  }
-  return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
-}
-
-// Computed - Chart data
-const throughputData = computed(() => {
-  if (!statusData.value?.throughput || !Array.isArray(statusData.value.throughput)) {
-    return { labels: [], datasets: [] }
-  }
-  
-  // Reverse to get chronological order
-  const history = [...statusData.value.throughput].reverse()
-  
-  // Check if data spans multiple days
-  let isMultiDay = false
-  if (history.length > 1) {
-    const firstDate = new Date(history[0].timestamp)
-    const lastDate = new Date(history[history.length - 1].timestamp)
-    isMultiDay = firstDate.toDateString() !== lastDate.toDateString()
-  }
-  
-  const labels = history.map(h => {
-    const date = new Date(h.timestamp)
-    return formatChartLabel(date, isMultiDay)
-  })
-  
-  return {
-    labels,
-    datasets: [
-      {
-        label: 'Ingested',
-        data: history.map(h => h.ingested || 0),
-        fill: true,
-      },
-      {
-        label: 'Processed',
-        data: history.map(h => h.processed || 0),
-        fill: true,
-      }
-    ]
-  }
+  const r = timeRanges.find(t => t.value === timeRange.value)
+  return `last ${r ? r.label : timeRange.value}`
 })
 
-// Any active filter means we must derive scoped figures from the queues list,
-// because /api/v1/status only scopes throughput (by queue) and the per-queue
-// list — message totals / leases / DLQ / throughput are system-wide.
-const hasActiveFilter = computed(
-  () => !!(queueFilter.value || namespaceFilter.value || taskFilter.value)
-)
+// Live, not on-click: an invalid range explains itself as it is typed instead
+// of leaving the user with a button that does nothing when pressed.
+const customError = computed(() => validateRange(customFrom.value, customTo.value).error || '')
+const customRangeValid = computed(() => !customError.value)
 
-const filteredQueues = computed(() => {
-  let filtered = [...allQueues.value]
-  if (queueFilter.value) {
-    filtered = filtered.filter(q => q.name === queueFilter.value)
-  }
-  if (namespaceFilter.value) {
-    filtered = filtered.filter(q => q.namespace === namespaceFilter.value)
-  }
-  if (taskFilter.value) {
-    filtered = filtered.filter(q => q.task === taskFilter.value)
-  }
-  return filtered
-})
-
-// Message counts scoped to the current filter (falls back to global counts).
-// Note: per-queue data only carries total / pending / processing.
-const scopedMessages = computed(() => {
-  if (!hasActiveFilter.value) {
-    return statusData.value?.messages || {}
-  }
-  return filteredQueues.value.reduce(
-    (acc, q) => {
-      acc.total += q.messages?.total || 0
-      acc.pending += q.messages?.pending || 0
-      acc.processing += q.messages?.processing || 0
-      return acc
-    },
-    { total: 0, pending: 0, processing: 0 }
-  )
-})
-
-const queueActivityData = computed(() => {
-  if (!filteredQueues.value.length) {
-    return { labels: [], datasets: [] }
-  }
-
-  const sorted = [...filteredQueues.value]
-    .sort((a, b) => (b.messages?.total || 0) - (a.messages?.total || 0))
-    .slice(0, 8)
-  
-  return {
-    labels: sorted.map(q => q.name.length > 25 ? q.name.substring(0, 25) + '...' : q.name),
-    datasets: [
-      {
-        label: 'Pending',
-        data: sorted.map(q => q.messages?.pending || 0),
-        backgroundColor: stateColor('Pending').fill,
-      },
-      {
-        label: 'Processing',
-        data: sorted.map(q => q.messages?.processing || 0),
-        backgroundColor: stateColor('Processing').fill,
-      },
-      {
-        label: 'Completed',
-        data: sorted.map(q => q.messages?.completed || 0),
-        backgroundColor: stateColor('Completed').fill,
-      }
-    ]
-  }
-})
-
-const messageDistributionData = computed(() => {
-  const data = scopedMessages.value
-  if (!data) return { labels: [], datasets: [] }
-
-  // When a filter is active we only have pending/processing per queue,
-  // so the full distribution is only meaningful system-wide.
-  const baseEntries = hasActiveFilter.value
-    ? [
-        { label: 'Pending',    value: Math.max(0, data.pending || 0) },
-        { label: 'Processing', value: data.processing || 0 }
-      ]
-    : [
-        { label: 'Pending',     value: Math.max(0, data.pending || 0) },
-        { label: 'Processing',  value: data.processing || 0 },
-        { label: 'Completed',   value: data.completed || 0 },
-        { label: 'Failed',      value: data.failed || 0 },
-        { label: 'Dead Letter', value: data.deadLetter || 0 }
-      ]
-  const entries = baseEntries
-    .filter(e => e.value > 0)
-    .map(e => ({ ...e, color: stateColor(e.label).fill }))
-  
-  // If all zeros, return empty to show "no data" message
-  if (entries.length === 0) {
-    return { labels: [], datasets: [] }
-  }
-  
-  return {
-    labels: entries.map(e => e.label),
-    datasets: [{
-      data: entries.map(e => e.value),
-      backgroundColor: entries.map(e => e.color),
-      borderWidth: 0
-    }]
-  }
-})
-
-// Methods
 const selectQuickRange = (value) => {
   customMode.value = false
   timeRange.value = value
-  fetchAnalytics()
+  fetchAll()
 }
 
 const toggleCustomMode = () => {
   customMode.value = !customMode.value
   if (customMode.value) {
-    // Initialize with current range when entering custom mode
     const now = new Date()
-    const from = new Date(now)
-    
-    switch (timeRange.value) {
-      case '1h':
-        from.setHours(from.getHours() - 1)
-        break
-      case '6h':
-        from.setHours(from.getHours() - 6)
-        break
-      case '24h':
-        from.setHours(from.getHours() - 24)
-        break
-      case '7d':
-        from.setDate(from.getDate() - 7)
-        break
-    }
-    
+    const from = new Date(now.getTime() - (QUICK_MINUTES[timeRange.value] || 60) * 60_000)
     customTo.value = formatDateTimeLocal(now)
     customFrom.value = formatDateTimeLocal(from)
+  } else {
+    appliedCustom.value = null
+    fetchAll()
   }
 }
 
 const applyCustomRange = () => {
-  if (!customFrom.value || !customTo.value) {
-    return
-  }
-  
-  const fromDate = new Date(customFrom.value)
-  const toDate = new Date(customTo.value)
-  
-  if (fromDate >= toDate) {
-    return
-  }
-  
-  fetchAnalytics()
+  const parsed = validateRange(customFrom.value, customTo.value)
+  if (parsed.error) return
+  appliedCustom.value = { from: parsed.from, to: parsed.to }
+  fetchAll()
 }
 
-const fetchAnalytics = async () => {
-  // Only show loading skeleton if we don't have data yet (smooth background refresh)
-  if (!statusData.value) loading.value = true
-  try {
-    let from, to
-    
-    if (customMode.value && customFrom.value && customTo.value) {
-      // Use custom range
-      from = new Date(customFrom.value)
-      to = new Date(customTo.value)
-    } else {
-      // Use quick range
-      const now = new Date()
-      from = new Date(now)
-      
-      switch (timeRange.value) {
-        case '1h':
-          from.setHours(from.getHours() - 1)
-          break
-        case '6h':
-          from.setHours(from.getHours() - 6)
-          break
-        case '24h':
-          from.setHours(from.getHours() - 24)
-          break
-        case '7d':
-          from.setDate(from.getDate() - 7)
-          break
-      }
-      
-      to = now
-    }
-    
-    const params = {
-      from: from.toISOString(),
-      to: to.toISOString()
-    }
-    
-    if (queueFilter.value) params.queue = queueFilter.value
-    if (namespaceFilter.value) params.namespace = namespaceFilter.value
-    if (taskFilter.value) params.task = taskFilter.value
-    
-    // /api/v1/status/queues honors namespace/task filters (and queue),
-    // unlike /api/v1/resources/queues which ignores them.
-    const queueListParams = { limit: 500 }
-    if (namespaceFilter.value) queueListParams.namespace = namespaceFilter.value
-    if (taskFilter.value) queueListParams.task = taskFilter.value
-    if (queueFilter.value) queueListParams.queue = queueFilter.value
+// ---------------------------------------------------------------------------
+// Fetchers. Each panel owns its own state so one failure cannot blank the page.
+// ---------------------------------------------------------------------------
+const ops = useApi((config) => {
+  const { from, to } = currentRange()
+  const params = { from: from.toISOString(), to: to.toISOString() }
+  // queue-ops honours `queue` server-side; namespace/task do not exist on that
+  // SP, so they are applied by name against the (server-filtered) queue list.
+  if (queueFilter.value) params.queue = queueFilter.value
+  return system.getQueueOps(params, config)
+})
 
-    const [statusRes, queuesRes, namespacesRes, tasksRes] = await Promise.all([
-      analytics.getStatus(params),
-      analytics.getQueues(queueListParams),
-      resources.getNamespaces(),
-      resources.getTasks()
-    ])
-    
-    statusData.value = statusRes.data
-    allQueues.value = queuesRes.data?.queues || []
-    namespaces.value = namespacesRes.data?.namespaces || []
-    tasks.value = tasksRes.data?.tasks || []
-  } catch (err) {
-    console.error('Failed to fetch analytics:', err)
-  } finally {
-    loading.value = false
-  }
+const queueList = useApi((config) => {
+  const params = { limit: QUEUE_PAGE_LIMIT }
+  if (namespaceFilter.value) params.namespace = namespaceFilter.value
+  if (taskFilter.value) params.task = taskFilter.value
+  return analytics.getQueues(params, config)
+})
+
+const namespacesApi = useApi((config) => resources.getNamespaces(config))
+const tasksApi = useApi((config) => resources.getTasks(config))
+
+const fetchAll = () => {
+  ops.refresh()
+  queueList.refresh()
+  namespacesApi.refresh()
+  tasksApi.refresh()
 }
+
+useRefresh(fetchAll)
+
+watch([queueFilter, namespaceFilter, taskFilter], () => {
+  ops.refresh()
+  queueList.refresh()
+})
 
 const clearFilters = () => {
   queueFilter.value = ''
   namespaceFilter.value = ''
   taskFilter.value = ''
-  fetchAnalytics()
 }
 
-// Watch for filter changes
-watch([queueFilter, namespaceFilter, taskFilter], () => {
-  fetchAnalytics()
+// ---------------------------------------------------------------------------
+// Scope
+// ---------------------------------------------------------------------------
+const queues = computed(() => queueList.data.value?.queues || [])
+const namespaceOptions = computed(() => namespacesApi.data.value?.namespaces || [])
+const taskOptions = computed(() => tasksApi.data.value?.tasks || [])
+
+const queuePageFull = computed(() => queues.value.length >= QUEUE_PAGE_LIMIT)
+const hasActiveFilter = computed(
+  () => !!(queueFilter.value || namespaceFilter.value || taskFilter.value)
+)
+const groupFilterActive = computed(() => !!(namespaceFilter.value || taskFilter.value))
+// A namespace/task filter is resolved through the queue list. If that list is
+// unavailable the filter cannot be honoured — never quietly widen the scope.
+const scopeUnavailable = computed(() => groupFilterActive.value && queueList.failed.value)
+
+/** Queue names the active filter admits, or null when nothing is narrowed. */
+const allowedQueueNames = computed(() => {
+  if (groupFilterActive.value) {
+    const names = queues.value
+      .map(q => q.name)
+      .filter(n => !queueFilter.value || n === queueFilter.value)
+    return new Set(names)
+  }
+  if (queueFilter.value) return new Set([queueFilter.value])
+  return null
 })
 
-// Register for global refresh
-useRefresh(fetchAnalytics)
+const scopedQueues = computed(() => {
+  const allow = allowedQueueNames.value
+  return allow ? queues.value.filter(q => allow.has(q.name)) : queues.value
+})
 
-onMounted(fetchAnalytics)
+// Drop a queue selection the freshly-narrowed list no longer contains. Keyed on
+// the arrived list, not on the filter change, so it never judges the new scope
+// against the previous scope's queues.
+watch(queues, (list) => {
+  if (queueFilter.value && list.length && !list.some(q => q.name === queueFilter.value)) {
+    queueFilter.value = ''
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Panel state
+// ---------------------------------------------------------------------------
+const opsFirstLoad = computed(() => ops.loading.value && !ops.data.value)
+const queuesFirstLoad = computed(() => queueList.loading.value && !queueList.data.value)
+const queuesFailed = computed(() => queueList.failed.value)
+const queuesErrorText = computed(() => describeApiError(queueList.error.value))
+const opsUnavailable = computed(() => ops.failed.value || scopeUnavailable.value)
+const opsErrorText = computed(() => {
+  if (ops.failed.value) return describeApiError(ops.error.value)
+  return 'Cannot narrow to the selected namespace / task — the queue list is unavailable.'
+})
+
+const stamp = (panel) => {
+  if (panel.failed.value) {
+    return panel.lastUpdated.value
+      ? `stale · last good ${panel.lastUpdated.value.toLocaleTimeString()}`
+      : 'unavailable'
+  }
+  return panel.lastUpdated.value ? `as of ${panel.lastUpdated.value.toLocaleTimeString()}` : ''
+}
+
+/** A number we hold, or an em dash. Never a 0 standing in for "unknown". */
+const metric = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
+
+// ---------------------------------------------------------------------------
+// Derived series
+// ---------------------------------------------------------------------------
+const opsRows = computed(() => {
+  const payload = ops.data.value
+  if (!payload) return []
+  const rows = trimIncompleteBuckets(payload.series || [], {
+    bucketKey: 'bucket',
+    bucketMinutes: payload.bucketMinutes || 1,
+  })
+  const allow = allowedQueueNames.value
+  return allow ? rows.filter(r => allow.has(r.queueName)) : rows
+})
+
+const flowSeries = computed(() => {
+  const byBucket = new Map()
+  for (const r of opsRows.value) {
+    const acc = byBucket.get(r.bucket) || { ingested: 0, delivered: 0, acked: 0 }
+    acc.ingested += toNum(r.pushMessages) || 0
+    acc.delivered += toNum(r.popMessages) || 0
+    acc.acked += toNum(r.ackSuccess) || 0
+    byBucket.set(r.bucket, acc)
+  }
+  return [...byBucket.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([bucket, v]) => ({ bucket, ...v }))
+})
+
+const flowChart = computed(() => {
+  const rows = flowSeries.value
+  if (!rows.length) return { labels: [], datasets: [] }
+  const stamps = rows.map(r => r.bucket)
+  const multiDay = isMultiDay(stamps)
+  return {
+    labels: stamps.map(t => formatChartLabel(new Date(t), multiDay)),
+    datasets: [
+      { label: 'Ingested', data: rows.map(r => r.ingested), fill: true },
+      { label: 'Delivered', data: rows.map(r => r.delivered), fill: false },
+      { label: 'Acked', data: rows.map(r => r.acked), fill: false },
+    ],
+  }
+})
+
+const rangeTotals = computed(() => {
+  const t = { ingested: 0, delivered: 0, acked: 0, ackFailed: 0, emptyPolls: 0, maxLagMs: null }
+  if (opsUnavailable.value || !ops.data.value) {
+    return { ...t, ingested: null, delivered: null, acked: null, ackFailed: null, emptyPolls: null }
+  }
+  for (const r of opsRows.value) {
+    t.ingested += toNum(r.pushMessages) || 0
+    t.delivered += toNum(r.popMessages) || 0
+    t.acked += toNum(r.ackSuccess) || 0
+    t.ackFailed += toNum(r.ackFailed) || 0
+    t.emptyPolls += toNum(r.popEmpty) || 0
+    const lag = toNum(r.maxLagMs)
+    if (lag !== null) t.maxLagMs = t.maxLagMs === null ? lag : Math.max(t.maxLagMs, lag)
+  }
+  return t
+})
+
+const topQueuesChart = computed(() => {
+  const byQueue = new Map()
+  for (const r of opsRows.value) {
+    const acc = byQueue.get(r.queueName) || { ingested: 0, acked: 0 }
+    acc.ingested += toNum(r.pushMessages) || 0
+    acc.acked += toNum(r.ackSuccess) || 0
+    byQueue.set(r.queueName, acc)
+  }
+  const top = [...byQueue.entries()]
+    .filter(([, v]) => v.ingested > 0 || v.acked > 0)
+    .sort((a, b) => (b[1].ingested + b[1].acked) - (a[1].ingested + a[1].acked))
+    .slice(0, 8)
+  if (!top.length) return { labels: [], datasets: [] }
+  return {
+    labels: top.map(([name]) => (name.length > 25 ? `${name.slice(0, 25)}…` : name)),
+    datasets: [
+      {
+        label: 'Ingested',
+        data: top.map(([, v]) => v.ingested),
+        backgroundColor: stateColor('Ingested').fill,
+      },
+      {
+        label: 'Acked',
+        data: top.map(([, v]) => v.acked),
+        backgroundColor: stateColor('Processed').fill,
+      },
+    ],
+  }
+})
+
+const backlog = computed(() => {
+  if (queueList.failed.value || !queueList.data.value) {
+    return { total: null, pending: null, processing: null }
+  }
+  return scopedQueues.value.reduce(
+    (acc, q) => {
+      acc.total += toNum(q.messages?.total) || 0
+      acc.pending += toNum(q.messages?.pending) || 0
+      acc.processing += toNum(q.messages?.processing) || 0
+      return acc
+    },
+    { total: 0, pending: 0, processing: 0 },
+  )
+})
+
+const backlogChart = computed(() => {
+  const b = backlog.value
+  const entries = [
+    { label: 'Pending', value: b.pending },
+    { label: 'Processing', value: b.processing },
+  ].filter(e => (e.value || 0) > 0)
+  if (!entries.length) return { labels: [], datasets: [] }
+  return {
+    labels: entries.map(e => e.label),
+    datasets: [{
+      data: entries.map(e => e.value),
+      backgroundColor: entries.map(e => stateColor(e.label).fill),
+      borderWidth: 0,
+    }],
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Chart options
+// ---------------------------------------------------------------------------
+const flowOptions = {
+  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 20 } } },
+  scales: { y: { title: { display: true, text: 'Messages per bucket', font: { size: 11 } } } },
+}
+
+const barOptions = {
+  plugins: { legend: { display: true, position: 'top', labels: { usePointStyle: true, padding: 16 } } },
+  scales: {
+    x: { stacked: true },
+    y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Messages', font: { size: 11 } } },
+  },
+}
+
+const doughnutOptions = {
+  plugins: { legend: { display: true, position: 'bottom', labels: { usePointStyle: true, padding: 16 } } },
+  cutout: '60%',
+}
 </script>
+
+<style scoped>
+.scope-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  background: var(--ink-2);
+  font-size: 11.5px;
+  color: var(--text-mid);
+}
+.scope-text { font-family: 'JetBrains Mono', monospace; color: var(--text-mid); }
+.scope-text strong { color: var(--text-hi); font-weight: 600; }
+.scope-sep { margin: 0 5px; color: var(--text-faint); }
+.scope-fill { flex: 1; }
+.scope-meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-low); }
+
+.an-filters { display: flex; flex-direction: column; gap: 14px; }
+.an-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.an-row-end { align-items: flex-end; }
+.an-row-sep { padding-top: 12px; border-top: 1px solid var(--bd); }
+.an-field { display: flex; align-items: center; gap: 8px; }
+.an-field-col { flex-direction: column; align-items: stretch; gap: 6px; }
+.an-dt { width: auto; font-size: 13px; }
+.an-hint { font-size: 11px; color: var(--text-low); }
+.an-invalid { font-size: 11.5px; color: var(--ember-400); }
+.an-chips { gap: 8px; }
+.an-note { margin-top: 10px; font-size: 11.5px; color: var(--text-low); }
+.an-center { display: flex; align-items: center; justify-content: center; }
+
+.an-stats-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+.an-stats-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.an-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+/* Failure and emptiness must not look alike: one is "we do not know", the
+   other is "we know, and it is nothing". */
+.panel-msg { padding: 40px 0; text-align: center; font-size: 13px; color: var(--text-mid); }
+.panel-err {
+  padding: 12px 14px;
+  border: 1px solid rgba(244, 63, 94, .28);
+  border-radius: 6px;
+  background: var(--ember-glow);
+  color: var(--ember-400);
+  font-size: 12.5px;
+}
+
+@media (max-width: 1100px) {
+  .an-stats-6 { grid-template-columns: repeat(3, 1fr); }
+  .an-stats-4 { grid-template-columns: repeat(2, 1fr); }
+  .an-grid-2 { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .an-stats-6, .an-stats-4 { grid-template-columns: repeat(2, 1fr); }
+}
+</style>

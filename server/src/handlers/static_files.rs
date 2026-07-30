@@ -48,8 +48,22 @@ fn serve(path: &str) -> Option<Response> {
 /// fallback, so it never shadows an /api/v1 route. When the dashboard wasn't
 /// bundled at build time it 404s. Mirrors the static surface the retired C++
 /// server exposed.
-pub async fn handle_static(uri: Uri) -> Response {
-    let rel = uri.path().trim_start_matches('/');
+///
+/// API paths and non-GET methods are answered with a JSON 404 instead of the
+/// SPA document: the fallback matches ANY method, so a call to an endpoint that
+/// does not exist used to come back 200 text/html — which every JSON client
+/// (and the webapp's axios) reads as SUCCESS. A phantom endpoint must fail
+/// loudly, not look like it worked.
+pub async fn handle_static(method: axum::http::Method, uri: Uri) -> Response {
+    let path = uri.path();
+    let readable = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+    if path.starts_with("/api/") || path == "/api" || !readable {
+        return json(
+            StatusCode::NOT_FOUND,
+            "{\"error\":\"Not Found\",\"code\":\"no_such_route\"}".to_string(),
+        );
+    }
+    let rel = path.trim_start_matches('/');
     if !rel.is_empty() {
         if let Some(resp) = serve(rel) {
             return resp;

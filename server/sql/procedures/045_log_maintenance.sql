@@ -33,6 +33,23 @@
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
+-- queen.retention_history is the table 017_retention_analytics reads and the
+-- webapp's Retention row/panel render. It was written only by the retired rows
+-- engine, so under the log engine those surfaces showed "0 messages evicted"
+-- while segments were being deleted continuously — a dead panel presented as a
+-- measurement. The steps below write it.
+--
+-- Its partition_id FK pointed at queen.partitions (rows engine), which no log
+-- partition has a row in; drop it the same way 047 decoupled message_traces.
+-- The ON DELETE CASCADE it provided is replaced by the age purge in
+-- queen.cleanup_worker_metrics_v1 (014), which also bounds the table's growth.
+-- ----------------------------------------------------------------------------
+ALTER TABLE queen.retention_history
+    DROP CONSTRAINT IF EXISTS retention_history_partition_id_fkey;
+CREATE INDEX IF NOT EXISTS idx_retention_history_executed_at
+    ON queen.retention_history (executed_at DESC);
+
+-- ----------------------------------------------------------------------------
 -- Boundary walk helper: smallest base_offset >= p_from of a segment fresh
 -- enough to keep (created_at >= p_cutoff). created_at is monotone in
 -- base_offset per partition (PUSHSER invariant, stamped under the allocator
@@ -112,17 +129,26 @@ GRANT EXECUTE ON FUNCTION queen.log_retention_boundary_v1(UUID, BIGINT, TIMESTAM
 -- are equi-monotone (disjoint ranges), so everything in that base range is
 -- in the chosen batch.
 -- ----------------------------------------------------------------------------
+-- p_history_type names the rule for the queen.retention_history row this step
+-- writes when it actually deletes something ('retention' / 'completed_retention'
+-- are chosen per-call from the rule that moved the boundary; the eviction
+-- wrapper passes 'max_wait_time_eviction'). DROP the pre-history 4-arg form so
+-- the 4-arg call sites bind to this one unambiguously.
+DROP FUNCTION IF EXISTS queen.log_retention_step_v1(UUID, TIMESTAMPTZ, TIMESTAMPTZ, INT);
 CREATE OR REPLACE FUNCTION queen.log_retention_step_v1(
     p_pid             UUID,
     p_all_cutoff       TIMESTAMPTZ,
     p_completed_cutoff TIMESTAMPTZ,
-    p_max_rows         INT
+    p_max_rows         INT,
+    p_history_type     TEXT DEFAULT NULL
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_from     BIGINT;
     v_boundary BIGINT;
+    v_b_all    BIGINT;
+    v_type     TEXT;
     v_min_next BIGINT;
     v_max_base BIGINT;
     v_max_end  BIGINT;
@@ -142,12 +168,14 @@ BEGIN
     END IF;
 
     v_boundary := v_from;
+    v_type := COALESCE(p_history_type, 'retention');
 
     -- Rule 1: time-based retention over ALL segments.
     IF p_all_cutoff IS NOT NULL THEN
         v_boundary := GREATEST(v_boundary,
             queen.log_retention_boundary_v1(p_pid, v_from, p_all_cutoff));
     END IF;
+    v_b_all := v_boundary;
 
     -- Rule 2: completed retention over CONSUMED offsets only, capped at the
     -- slowest cursor's next wanted offset (MIN(committed)+1).
@@ -160,6 +188,12 @@ BEGIN
                 v_min_next,
                 queen.log_retention_boundary_v1(p_pid, v_from, p_completed_cutoff)));
         END IF;
+    END IF;
+
+    -- Attribute the delete to the rule that actually moved the boundary (the
+    -- caller's explicit type, when given, always wins).
+    IF p_history_type IS NULL AND v_boundary > v_b_all THEN
+        v_type := 'completed_retention';
     END IF;
 
     IF v_boundary <= v_from THEN
@@ -203,6 +237,13 @@ BEGIN
     UPDATE queen.log_partitions SET log_start = v_new
     WHERE id = p_pid AND log_start < v_new;
 
+    -- Audit row for the Retention analytics (017). messages_deleted is the FRAME
+    -- count removed (v_new - v_from), not the segment-row count — the readers
+    -- label it "messages evicted". Written in the step's own transaction, so it
+    -- is committed iff the delete was.
+    INSERT INTO queen.retention_history (partition_id, messages_deleted, retention_type, executed_at)
+    VALUES (p_pid, GREATEST(v_new - v_from, 0)::integer, v_type, NOW());
+
     v_done := NOT EXISTS (
         SELECT 1 FROM queen.log_segments s
         WHERE s.partition_id = p_pid
@@ -214,7 +255,7 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION queen.log_retention_step_v1(UUID, TIMESTAMPTZ, TIMESTAMPTZ, INT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_retention_step_v1(UUID, TIMESTAMPTZ, TIMESTAMPTZ, INT, TEXT) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
 -- log_txns_purge_step_v1: same step pattern over log_txns / txns_start.
@@ -348,7 +389,8 @@ CREATE OR REPLACE FUNCTION queen.log_evict_max_wait_step_v1(
 ) RETURNS JSONB
 LANGUAGE sql
 AS $$
-    SELECT queen.log_retention_step_v1(p_pid, p_cutoff, NULL, p_max_rows)
+    SELECT queen.log_retention_step_v1(p_pid, p_cutoff, NULL, p_max_rows,
+                                      'max_wait_time_eviction')
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.log_evict_max_wait_step_v1(UUID, TIMESTAMPTZ, INT) TO PUBLIC;
