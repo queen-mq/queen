@@ -1,6 +1,6 @@
 ---
 title: Retired objects
-description: "Why the rows-engine tables and procedures are still applied at boot even though nothing calls them, why queen.stats still reports the engine as segments, and what the boot-time apply drops."
+description: "What the rows engine left behind, what was removed on 2026-07-30, and why queen.stats still reports the engine as segments."
 type: reference
 tier: internals
 status: internal
@@ -10,140 +10,79 @@ sourceOfTruth:
   - server/src/schema.rs
   - server/sql/schema.sql
   - server/sql/procedures/040_log_drop_legacy.sql
-  - server/sql/procedures/047_log_admin.sql
-  - server/sql/procedures/048_log_stats.sql
+  - server/sql/procedures/049_drop_rows_message_plane.sql
+  - server/sql/procedures/050_drop_rows_tables.sql
   - server/src/migrate.rs
 ---
 
-If you open a Queen database with `psql` and list what is there, you will find more than the log
-engine. There are tables that are always empty, procedures nothing calls, and a stats row that
-claims the engine is called "segments". None of it is a leftover someone forgot to delete. Each
-piece is there for a reason, and this page exists so that browsing the database does not mislead
-you.
+Open a Queen database with `psql` today and you find the log engine, the shared management tables,
+and nothing else. That was not true until **2026-07-30**, and this page is the record of what was
+there, why it lingered, and what finally removed it.
 
-Two prior storage engines shaped this schema:
+Two storage engines shaped this schema before the current one:
 
-- **The rows engine**: one row per message in `queen.messages`, with coordination in
-  `queen.partition_consumers`. Its DDL and procedures are files `001`–`018`.
+- **The rows engine**: one row per message in `queen.messages`, coordination in
+  `queen.partition_consumers`. Its DDL and procedures were files `001`–`018`.
 - **The `seg_*` engine**: the first segment-based engine, which folded its cursor columns onto the
-  rows engine's coordination table. It is **gone**: dropped from the repository and actively dropped
-  from any database at every boot.
+  rows engine's coordination table. Gone since the log engine landed, and actively dropped from any
+  database at every boot by `040`.
 
-The current engine is the **log engine**, files `040`–`048`. It is a greenfield replacement of the
-`seg_*` engine, not an evolution of it.
+The current engine is the **log engine**, files `040`–`051`.
 
-## Why the rows-engine files are still applied
+## What was removed, and when
 
-`server/src/schema.rs` applies `schema.sql` and then 24 procedure files in **lexical order**. That
-order is the mechanism, not an accident: the `04x` files redefine a set of shared procedures with
-`CREATE OR REPLACE`, and a redefinition must load *after* the definition it supersedes. If the
-`007`–`022` files were not applied, there would be nothing for `047` and `048` to replace, and their
-`CREATE OR REPLACE` statements would install the log branch, but the rows branch they carry
-verbatim references rows-engine objects that would then be missing.
+The rows engine went in two steps, both on 2026-07-30.
 
-This argument only ever covered the files that *hold* a superseded definition. It did not cover the
-rows engine's message plane, which nothing redefined and nothing called; those files are gone (see
-below).
+**Its message plane** — push, the four generations of pop, ack, transaction, lease renewal, the
+pending probe, the two `partition_lookup` maintainers and `streams_cycle_v1`. A call-graph closure
+over `server/src` and the surviving SQL found **zero callers** for all sixteen functions; the only
+references left in the tree were comments. Eleven files and 4,662 lines went, and
+`049_drop_rows_message_plane.sql` removes the functions from databases that had already applied them.
 
-That leads to the second reason: those redefinitions are **dual-mode**. Each one keeps the rows-engine
-body verbatim and adds a log branch guarded on `queen.queues.storage = 'segments'`. A queue whose
-`storage` is `'rows'` gets output byte-identical to the original procedure. The rows path is therefore
-still reachable code, not dead code. It is simply not reached by anything the log engine creates.
-
-The dual-mode procedures are:
-
-| Procedure | Original file | Redefined in |
-| --- | --- | --- |
-| `get_consumer_groups_v4` | `008` | `047` |
-| `list_messages_v1` | `010` | `047` |
-| `get_dlq_messages_v1` | `010` | `044`, then `047` |
-| `record_trace_v1` | `011` | `047` |
-| `get_lagging_partitions_v1` | `008` | `047` |
-| `get_consumer_group_details_v1` | `008` | `047` |
-| `get_queue_detail_v2` | `013` | `048` |
-| `get_queue_v2` | `013` | `048` |
-| `get_analytics_v1` | `009` | `048` |
-
-`get_dlq_messages_v1` is defined three times across the roster. `047` loads last and wins.
-
-## Tables the message plane no longer writes
-
-Created by `schema.sql`, and no longer part of push, pop or ack:
-
-| Table | What it was for | Still written? |
-| --- | --- | --- |
-| `queen.messages` | one row per message, the rows engine's storage | no |
-| `queen.partitions` | rows-engine partitions; log partitions live in `queen.log_partitions`, an independent UUID space | **yes**, see below |
-| `queen.partition_consumers` | rows-engine cursor, lease and retry state | no |
-| `queen.dead_letter_queue` | rows-engine DLQ; the log engine uses `queen.log_dlq` | no, but read |
-| `queen.messages_consumed` | rows-engine per-message consumption records | no |
-| `queen.partition_lookup` | rows-engine per-partition last-message cache, maintained by a trigger on `queen.messages` | no |
-
-Their indexes and the `update_partition_lookup_trigger` function exist too, and cost nothing on an
-empty table.
+**Its tables and its remaining branches.** `queen.messages`, `queen.partitions`,
+`queen.partition_consumers`, `queen.dead_letter_queue`, `queen.messages_consumed` and
+`queen.partition_lookup` are dropped by `050_drop_rows_tables.sql`, and every surviving procedure was
+rewritten to stop referencing them. That was 49 references across 13 files: 6 unreachable
+`storage = 'rows'` branches, 36 joins over tables that were permanently empty, and **6 genuine
+defects** where the empty-or-phantom table changed a number somebody read.
 
 <Aside type="note">
-This is why `queen.messages` being empty is not a symptom. A healthy log-engine database has zero
-rows there. Look at `queen.log_segments` instead.
+Dropping the tables was safe because this broker has no importer and no in-place upgrade: a
+deployment starts from a clean database, so they were empty by construction. See
+[Compatibility](/reference/compatibility). If you point this build at a database that did carry
+rows-engine data, take a dump first — the boot apply removes it.
 </Aside>
 
-<Aside type="caution">
-`queen.partitions` is the exception, and it is not empty on a log-engine deployment.
-`configure_queue_v1` still does an unconditional `INSERT INTO queen.partitions (queue_id, name)
-VALUES (v_queue_id, 'Default')`, so **every `/configure` call adds a row** for a partition the engine
-will never use. Measured on a fresh database: one `/configure` leaves `queen.partitions` holding one
-row while `queen.log_partitions` holds none.
+### The six defects the rows tables were still causing
 
-Two live surfaces read that phantom count. `aggregate_system_stats_v2` computes system `child_count`
-as `COUNT(queen.partitions)`, which is why `log_refresh_all_stats_v1` has to correct the number
-afterwards. And the `trg_partitions_created_counter` / `trg_partitions_deleted_counter` triggers fire
-on this table, so `queue_lag_metrics.partitions_created`, which `get_queue_ops_v1` surfaces and the
-dashboard's Queue Operations view plots, counts `/configure` calls rather than partitions. It is not
-a dead panel; it is a panel reporting a number that means something other than its label.
-</Aside>
+Five of them traced back to one line: `configure_queue_v1` inserted a `Default` row into
+`queen.partitions` on every `/configure`, for a partition the engine never used. It was the only
+writer that table had.
 
-These tables are also not droppable as a cleanup. `get_dlq_messages_v1` unions
-`queen.dead_letter_queue` with `queen.log_dlq`, so on a database upgraded from the rows engine those
-rows are somebody's real dead letters, still listed by the API. Dropping the tables would be a data
-deletion with a behaviour change attached, not a tidy-up.
+| Surface | Reported | Truth |
+| --- | --- | --- |
+| `GET /resources/namespaces` and `/resources/tasks`, field `partitions` | the count of `/configure`-created rows, so **0** for any queue created by push | the live log-partition count |
+| `queue_lag_metrics.partitions_created`, plotted as "Partitions Created" | one event per `/configure` call | partitions actually allocated by push |
+| `queue_lag_metrics.partitions_deleted` | never moved | partitions reclaimed by the retention cleanup |
+| `/configure` response, `partitionId` | a uuid resolving to nothing | `null` — partitions are created by the first push |
+| `queen_dlq_depth` (Prometheus) | **no sample at all**, because it read the empty rows DLQ | the live `queen.log_dlq` depth |
 
-By contrast, several tables in `schema.sql` are **shared** and very much in use: `queen.queues`
-(the configuration row), `consumer_groups_metadata`, `consumer_watermarks`, `stats`,
-`retention_history`, `message_traces`, `message_trace_names`, `system_state`, and the metrics
-tables. Do not assume that anything defined in `schema.sql` is retired.
+The last one is the one to remember: DLQ alerting could never fire, while `GET /api/v1/dlq` listed
+the same rows correctly the whole time.
 
-## Procedures nothing calls
+## Tables the log engine uses
 
-The rows engine's own data-path procedures (the push, pop, ack, transaction, lease-renewal and
-pending-probe families) were **deleted on 2026-07-30**, along with the two `partition_lookup`
-maintenance functions and `streams_cycle_v1`. A call-graph closure over `server/src` and the
-surviving SQL found zero callers for all sixteen; the only references left in the tree are comments.
-Eleven files and 4,662 lines went, and `049_drop_rows_message_plane.sql` removes the functions from
-databases that had already applied them. That is the same job `040` does for the `seg_*` family, without
-`CASCADE` so a surviving dependant would fail the boot loudly instead of being amputated quietly.
+Everything in `schema.sql` today is either the log engine's or genuinely shared: `queen.queues` (the
+configuration row), `consumer_groups_metadata`, `consumer_watermarks`, `stats`, `stats_history`,
+`retention_history`, `message_traces`, `message_trace_names`, `system_state`, `system_metrics`, the
+worker-metrics tables and `queue_lag_metrics`. Do not assume that anything defined there is retired —
+after this change, nothing is.
 
-`streams_cycle_v1` is worth singling out: its replacement is `queen.log_streams_cycle_v1`, a
-**different name**, so unlike the redefinitions above it was never even overwritten. It sat in the
-roster being created at every boot, complete and unreachable.
-
-Two procedures from the retired observability file were deliberately **not** ported to the log engine
-because they have no Rust call site: `get_queue_messages_v1` and `has_pending_messages` (now deleted
-with `006`). The pending check the pop path actually uses is `queen.log_has_pending_v1`.
-`get_prometheus_metrics_v1` is **not** in that category despite living in the same era: `db.rs`
-calls it, and it backs `GET /metrics/prometheus`.
-
-What remains from `001`–`022` is the **management plane**: configure, consumer groups, stats readers,
-worker metrics, traces, and the streams register/state pair. None of it was ever rows-specific: it
-reads `queen.queues`, `queen.stats` and `queen.worker_metrics`, tables both engines share. The log
-engine reuses it directly: `log_refresh_all_stats_v1` calls `013`'s
-`aggregate_namespace_stats_v1`, `aggregate_task_stats_v1` and `aggregate_system_stats_v2` rather than
-reimplementing the rollups.
-
-What is left to clean is inside `013_stats.sql`, not around it: eleven functions
-(`compute_partition_stats_v1`/`v2`/`v3`, `aggregate_queue_stats_v1`/`v2`, `cleanup_orphaned_stats_v1`/
-`v2`, `refresh_all_stats_v1`, `is_stats_leader`, `increment_message_counts_v1`) became unreachable
-when `POST /api/v1/stats/refresh` stopped calling the rows reconciler, but they share a file with
-load-bearing readers, so removing them is surgery inside a live file rather than a file deletion.
+Three of them keep a `partition_id` column that now carries a **`queen.log_partitions` id with no
+foreign key**: `stats`, `retention_history` and `message_traces`. The constraints were dropped
+because a log partition never had a row in the rows table, and they stay dropped because each of
+those rows must be able to outlive its partition — a retention audit row is written by the very step
+that deletes the partition.
 
 ## Why `queen.stats` reports engine "segments"
 
@@ -155,7 +94,8 @@ The chain is:
 1. `POST /api/v1/configure` accepts and returns `storage: "segments"`. That is part of the wire
    contract and did not change when the engine did.
 2. The first push creates the `queen.queues` configuration row with `storage = 'segments'`.
-3. Every dual-mode procedure branches on `storage = 'segments'` to select its log path.
+3. Two admin readers still join on `storage = 'segments'` — not to select an engine (there is only
+   one) but as a queue-existence guard. See the header of `047_log_admin.sql`.
 4. `log_refresh_all_stats_v1` selects the queues to refresh with `WHERE q.storage = 'segments'` and
    labels its summary `engine: "segments"` with a `segPartitions` count, so the label stays aligned
    with the column value. `stats.rs` prints that summary verbatim.
@@ -184,9 +124,10 @@ ordinary or partitioned table, all `CASCADE`. No data is preserved: the log engi
 replacement with no migration.
 
 **Nine columns from `queen.partition_consumers`.** The `seg_*` engine grafted its cursor onto the rows
-engine's coordination table; the log engine keeps its cursor on its own table, so these are dead
-weight and are dropped with `DROP COLUMN IF EXISTS`, taking their dependent indexes and constraints
-with them:
+engine's coordination table. That table is itself gone as of `050`, so on any database this build has
+booted the block is a permanent no-op — it is guarded on the table existing and stays only for a
+database coming straight from the `seg_*` era, where the columns are dropped with
+`DROP COLUMN IF EXISTS`, taking their dependent indexes and constraints with them:
 
 ```text
 next_seq, next_off, batch_end_seq, batch_end_off, batch_positions,
@@ -202,9 +143,9 @@ rows have no counterpart in the rows-engine tables the foreign keys pointed at:
 | Dropped | File | Why |
 | --- | --- | --- |
 | `log_queues_name_key` | `041` | superseded by the composite unique index on `(tenant_id, name)` |
-| `retention_history_partition_id_fkey` | `045` | pointed at `queen.partitions`, where no log partition has a row. Its cascade is replaced by an age purge |
+| `retention_history_partition_id_fkey` | `045` | pointed at `queen.partitions`, where no log partition had a row. Its cascade is replaced by an age purge |
 | `message_traces_partition_id_fkey` and `message_traces_message_id_fkey` | `047` | same reason; otherwise tracing a log message failed |
-| `partition_lookup`'s foreign key to `queen.queues(name)` | `schema.sql` | queue identity is `(tenant_id, name)`, so `name` alone is no longer a referenceable key |
+| `stats_partition_id_fkey` | `050` | same reason, on the last surviving table that still pointed at `queen.partitions` |
 
 ## The migrate subcommand
 
@@ -216,10 +157,8 @@ There is no rows-to-log migration on this tree. The log engine boots its own sch
 
 ## What to do with any of this
 
-Nothing, in normal operation. Two practical rules:
+Nothing, in normal operation. One rule survives the cleanup:
 
-- **Do not drop the rows-engine tables or procedures by hand.** The boot-time apply would recreate
-  the tables, and the dual-mode redefinitions depend on the procedures existing in order to load.
-- **When reading the database, start from the `log_*` tables.** They are the only place the current
-  engine keeps data. Anything else you find is either shared infrastructure or an empty artefact of an
-  engine that is no longer running.
+- **When reading the database, start from the `log_*` tables.** They are the only place the engine
+  keeps data. Everything else you find is shared infrastructure — configuration, stats, metrics,
+  traces — not an artefact of a retired engine. There are no longer any of those.

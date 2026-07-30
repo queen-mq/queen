@@ -36,7 +36,6 @@ DECLARE
     v_max_wait_time_seconds INTEGER;
     v_min_pop_wait_time INTEGER;
     v_queue_id UUID;
-    v_partition_id UUID;
 BEGIN
     -- Parse options with defaults
     v_namespace := COALESCE(p_options->>'namespace', '');
@@ -100,23 +99,16 @@ BEGIN
         min_pop_wait_time = EXCLUDED.min_pop_wait_time
     RETURNING id INTO v_queue_id;
     
-    -- Ensure default partition exists
-    INSERT INTO queen.partitions (queue_id, name)
-    VALUES (v_queue_id, 'Default')
-    ON CONFLICT (queue_id, name) DO NOTHING
-    RETURNING id INTO v_partition_id;
-    
-    -- If partition already existed, get its id
-    IF v_partition_id IS NULL THEN
-        SELECT id INTO v_partition_id
-        FROM queen.partitions
-        WHERE queue_id = v_queue_id AND name = 'Default';
-    END IF;
-    
+    -- The legacy "ensure a Default partition row" write went away with the rows
+    -- message plane: the log engine creates partitions lazily on the first push
+    -- (queen.log_partitions), so /configure created a phantom row nothing read.
+
     RETURN jsonb_build_object(
         'configured', true,
         'queueId', v_queue_id,
-        'partitionId', v_partition_id,
+        -- Key kept for wire compatibility (webdoc reference/http/queues.mdx), but
+        -- always NULL: /configure no longer creates a partition, the first push does.
+        'partitionId', NULL::uuid,
         'queue', p_queue_name,
         'namespace', v_namespace,
         'task', v_task,

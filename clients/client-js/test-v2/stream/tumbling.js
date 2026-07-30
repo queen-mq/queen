@@ -249,12 +249,16 @@ export async function tumblingIdleFlushClosesQuietPartitions(client) {
   await client.queue(src).create()
   await client.queue(sink).create()
 
-  // Push 3 messages then go silent — without idle flush, the window would
-  // stay open forever. With a 700ms flush cadence and 1-second windows,
-  // the flush should close the window within ~2 seconds of the last push.
-  for (let i = 0; i < 3; i++) {
-    await client.queue(src).partition('quiet').push([{ data: { v: 7 } }])
-  }
+  // Push 3 messages IN ONE BATCH then go silent — without idle flush, the
+  // window would stay open forever. One push call = one segment = one
+  // timestamp, so the three messages cannot straddle a 1-second window
+  // boundary. Three sequential pushes could land at x.98s / x+1.01s, splitting
+  // the window: emits[0] then reads {count:2, sum:14} and the FIRST window is
+  // closed by the cycle path instead of the idle flush (flushCyclesTotal 0) —
+  // observed live, ~1 run in 5 under load.
+  await client.queue(src).partition('quiet').push([
+    { data: { v: 7 } }, { data: { v: 7 } }, { data: { v: 7 } }
+  ])
 
   const handle = await Stream
     .from(client.queue(src))

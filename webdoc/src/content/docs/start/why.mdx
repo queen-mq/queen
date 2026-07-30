@@ -210,8 +210,9 @@ grammar, and a sixth language needs no SDK at all.
   content-length on a body the server then elides poisoned strict HTTP/1.1
   clients), but it means an empty pop is a status code, not an empty array on the
   wire.
-- There is no OpenAPI document. The route tables on this site are generated from
-  the router instead.
+- The broker does not serve an OpenAPI document at runtime. The route tables on
+  this site and the [OpenAPI 3.1 documents](/reference/openapi) published with it
+  are generated from the router at documentation build time instead.
 
 ## 7. Multi-tenancy and a dashboard in the tree
 

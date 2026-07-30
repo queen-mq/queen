@@ -922,7 +922,8 @@ pub async fn seg_scan_segments(
 }
 
 // RUSTFIX item 23: the extra management fields for GET /messages/:pid/:txn
-// (010_messages.sql:194-271 parity) — queue/namespace/task, queueConfig, the
+// (ported from the rows-engine get_message_v1, deleted 2026-07-30 — this is now
+// the only implementation) — queue/namespace/task, queueConfig, the
 // per-group consumerGroups + leaseExpiresAt, DLQ error, and the flags to derive
 // `status`. Returns the assembled JSON as text (or None if the partition is
 // gone). Tolerates a missing queen.queues row (item 26) via COALESCE +
@@ -1070,33 +1071,32 @@ pub async fn dlq_row_for_replay(
 }
 
 // Delete a message addressed by (partition_id, transaction_id). The log engine
-// stores live payloads in immutable segments, so the deletable rows here are
-// the DLQ snapshots in queen.log_dlq (the DLQ manual-requeue workflow drops
-// one). Also runs the rows-engine delete_message_v1 for dual-engine parity (a
-// no-op on a log queue). Returns true when either path removed a row.
+// stores live payloads in immutable segments, so the only deletable row is the
+// DLQ snapshot in queen.log_dlq (the DLQ manual-requeue workflow drops one).
+//
+// ONE statement, deliberately. This used to issue a raw DELETE here and THEN
+// call delete_message_v1, back when that SP deleted from the rows engine's
+// queen.messages and was a genuine no-op on a log queue. Once the SP was
+// repointed at queen.log_dlq the pair became the same delete twice — a wasted
+// round trip, and a window in which a snapshot dead-lettered between the two
+// statements would be destroyed by the second one. The SP is the single
+// implementation; its `success` is the answer.
 pub async fn delete_message(
     client: &deadpool_postgres::Client,
     partition_id: &str,
     txn: &str,
 ) -> Result<bool, tokio_postgres::Error> {
-    let seg = client
-        .execute(
-            "DELETE FROM queen.log_dlq WHERE partition_id = $1::text::uuid AND transaction_id = $2",
-            &[&partition_id, &txn],
-        )
-        .await?;
-    let rows_txt: String = client
+    let txt: String = client
         .query_one(
             "SELECT (queen.delete_message_v1($1::text::uuid, $2))::text",
             &[&partition_id, &txn],
         )
         .await?
         .get(0);
-    let rows_deleted = serde_json::from_str::<serde_json::Value>(&rows_txt)
+    Ok(serde_json::from_str::<serde_json::Value>(&txt)
         .ok()
         .and_then(|v| v.get("success").and_then(|x| x.as_bool()))
-        .unwrap_or(false);
-    Ok(seg > 0 || rows_deleted)
+        .unwrap_or(false))
 }
 
 // ------------------------------------------------------------------- traces
@@ -1790,8 +1790,10 @@ pub async fn get_consumer_group_details(
     Ok(row.get(0))
 }
 
-// Rows-side delete: queen.delete_consumer_group_v1 clears queen.partition_consumers,
-// consumer_watermarks, and (when delete_metadata) consumer_groups_metadata.
+// queen.delete_consumer_group_v1 clears consumer_watermarks and (when
+// delete_metadata) consumer_groups_metadata. Its rows-engine leg went with the
+// rows tables on 2026-07-30; the log cursors are cleared by
+// queen.log_delete_consumer_group_v1 (047).
 pub async fn delete_consumer_group_rows(
     client: &deadpool_postgres::Client,
     group: &str,
@@ -1861,7 +1863,7 @@ pub async fn delete_consumer_group_for_queue_seg(
 }
 
 // Rows-side per-queue delete: queen.delete_consumer_group_for_queue_v1 clears
-// queen.partition_consumers for the queue, consumer_watermarks for (queue,group),
+// consumer_watermarks for (queue,group),
 // and (when delete_metadata) consumer_groups_metadata. Returns the SP JSON.
 pub async fn delete_consumer_group_for_queue_rows(
     client: &deadpool_postgres::Client,

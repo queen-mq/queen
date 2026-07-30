@@ -50,10 +50,10 @@
 -- while segments were being deleted continuously — a dead panel presented as a
 -- measurement. The steps below write it.
 --
--- Its partition_id FK pointed at queen.partitions (rows engine), which no log
--- partition has a row in; drop it the same way 047 decoupled message_traces.
--- The ON DELETE CASCADE it provided is replaced by the age purge in
--- queen.cleanup_worker_metrics_v1 (014), which also bounds the table's growth.
+-- Its partition_id carries a queen.log_partitions id and has no foreign key:
+-- the audit row must outlive the partition, which the cleanup phase below
+-- deletes while writing one. Growth is bounded by the age purge in
+-- queen.cleanup_worker_metrics_v1 (014).
 -- ----------------------------------------------------------------------------
 ALTER TABLE queen.retention_history
     DROP CONSTRAINT IF EXISTS retention_history_partition_id_fkey;

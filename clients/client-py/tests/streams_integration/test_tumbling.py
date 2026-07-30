@@ -201,8 +201,14 @@ async def test_tumblingIdleFlushClosesQuietPartitions(client):
     await client.queue(src).create()
     await client.queue(sink).create()
 
-    for _ in range(3):
-        await client.queue(src).partition("quiet").push([{"data": {"v": 7}}])
+    # One batched push = one segment = one timestamp: the three messages cannot
+    # straddle a 1-second window boundary. Sequential pushes could split the
+    # window (count 2 / sum 14, first window closed by the cycle path instead
+    # of the idle flush) — the JS twin of this test failed that way ~1 in 5
+    # under load.
+    await client.queue(src).partition("quiet").push(
+        [{"data": {"v": 7}}, {"data": {"v": 7}}, {"data": {"v": 7}}]
+    )
 
     handle = await (
         Stream.from_(client.queue(src))

@@ -166,10 +166,9 @@ async fn main() {
     // broker accepts pushes (retention.js starts us with RETENTION_INTERVAL=2000).
     retention::spawn(pool.clone(), &cfg);
 
-    // Background stats reconciler: recomputes queen.stats from the segments tables
-    // on a cadence (the v1 reconciler reads the empty queen.messages under segments,
-    // so this segments-native path is what keeps the dashboard's stats-backed pages
-    // from reading zero). Advisory-locked -> one replica refreshes per cycle.
+    // Background stats reconciler: recomputes queen.stats from the log tables on a
+    // cadence, which is what keeps the dashboard's stats-backed pages from reading
+    // zero. Advisory-locked -> one replica refreshes per cycle.
     stats::spawn(pool.clone(), &cfg);
 
     // Background metrics collector: per-minute worker throughput -> queen.worker_metrics

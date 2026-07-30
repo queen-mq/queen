@@ -4,74 +4,12 @@
 -- Async stored procedures for message tracing operations
 -- ============================================================================
 
--- ============================================================================
--- queen.record_trace_v1: Record a trace event for a message
--- ============================================================================
-CREATE OR REPLACE FUNCTION queen.record_trace_v1(p_data JSONB)
-RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_message_id UUID;
-    v_trace_id UUID;
-    v_transaction_id TEXT;
-    v_partition_id UUID;
-    v_consumer_group TEXT;
-    v_event_type TEXT;
-    v_trace_data JSONB;
-    v_worker_id TEXT;
-    v_trace_names TEXT[];
-    v_name TEXT;
-BEGIN
-    -- Extract fields from input
-    v_transaction_id := p_data->>'transactionId';
-    v_partition_id := (p_data->>'partitionId')::uuid;
-    v_consumer_group := COALESCE(p_data->>'consumerGroup', '__QUEUE_MODE__');
-    v_event_type := COALESCE(p_data->>'eventType', 'info');
-    v_trace_data := COALESCE(p_data->'data', '{}'::jsonb);
-    v_worker_id := p_data->>'workerId';
-    
-    -- Parse traceNames array
-    IF p_data->'traceNames' IS NOT NULL AND jsonb_typeof(p_data->'traceNames') = 'array' THEN
-        SELECT array_agg(elem::text) INTO v_trace_names
-        FROM jsonb_array_elements_text(p_data->'traceNames') elem;
-    END IF;
-    
-    -- Get message_id from transaction_id + partition_id
-    SELECT id INTO v_message_id
-    FROM queen.messages 
-    WHERE transaction_id = v_transaction_id AND partition_id = v_partition_id
-    LIMIT 1;
-    
-    IF v_message_id IS NULL THEN
-        RETURN jsonb_build_object(
-            'success', false,
-            'error', 'Message not found'
-        );
-    END IF;
-    
-    -- Insert main trace record
-    INSERT INTO queen.message_traces 
-        (message_id, partition_id, transaction_id, consumer_group, event_type, data, worker_id)
-    VALUES 
-        (v_message_id, v_partition_id, v_transaction_id, v_consumer_group, v_event_type, v_trace_data, v_worker_id)
-    RETURNING id INTO v_trace_id;
-    
-    -- Insert trace names if any
-    IF v_trace_names IS NOT NULL AND array_length(v_trace_names, 1) > 0 THEN
-        FOREACH v_name IN ARRAY v_trace_names LOOP
-            INSERT INTO queen.message_trace_names (trace_id, trace_name)
-            VALUES (v_trace_id, v_name)
-            ON CONFLICT (trace_id, trace_name) DO NOTHING;
-        END LOOP;
-    END IF;
-    
-    RETURN jsonb_build_object(
-        'success', true,
-        'traceId', v_trace_id
-    );
-END;
-$$;
+-- queen.record_trace_v1 used to live here. It resolved the trace's message_id
+-- from the rows engine's message table and BAILED when no such row existed —
+-- which is every message on this broker. 047_log_admin.sql owns the only
+-- definition now (message_id NULL, trace still keyed by
+-- (partition_id, transaction_id)); the shadowed original is gone rather than
+-- being applied and immediately overwritten.
 
 -- ============================================================================
 -- queen.get_message_traces_v1: Get all traces for a message
@@ -112,13 +50,13 @@ $$;
 -- read (no pid in the request), so without it any tenant reads every other
 -- tenant's transaction ids and trace payloads. queen.message_traces carries no
 -- tenant column; ownership resolves through the trace's partition, which lives
--- in queen.log_partitions (log engine) OR queen.partitions (rows engine), so the
--- predicate must cover BOTH to stay correct on either storage. A trace whose
--- partition row is gone (the FKs are dropped in 047, so a queue delete leaves
--- the traces behind) is unattributable and belongs to nobody — it is filtered
--- out rather than shown to everybody. Added LAST with a DEFAULT so old
--- positional call sites keep working; DROP the 3-arg form so the scoped one is
--- unambiguous on re-apply.
+-- in queen.log_partitions -> queen.log_queues (the only engine this broker
+-- ships; the second, rows-engine ownership branch went with the rows tables).
+-- A trace whose partition row is gone (the FKs are dropped in 047, so a queue
+-- delete leaves the traces behind) is unattributable and belongs to nobody — it
+-- is filtered out rather than shown to everybody. Added LAST with a DEFAULT so
+-- old positional call sites keep working; DROP the 3-arg form so the scoped one
+-- is unambiguous on re-apply.
 DROP FUNCTION IF EXISTS queen.get_traces_by_name_v1(TEXT, INTEGER, INTEGER);
 CREATE OR REPLACE FUNCTION queen.get_traces_by_name_v1(
     p_trace_name TEXT,
@@ -140,12 +78,9 @@ BEGIN
     FROM queen.message_trace_names mtn
     JOIN queen.message_traces mt ON mtn.trace_id = mt.id
     WHERE mtn.trace_name = p_trace_name
-      AND (EXISTS (SELECT 1 FROM queen.log_partitions lp
-                   JOIN queen.log_queues lq ON lq.id = lp.queue_id
-                   WHERE lp.id = mt.partition_id AND lq.tenant_id = p_tenant)
-        OR EXISTS (SELECT 1 FROM queen.partitions rp
-                   JOIN queen.queues rq ON rq.id = rp.queue_id
-                   WHERE rp.id = mt.partition_id AND rq.tenant_id = p_tenant));
+      AND EXISTS (SELECT 1 FROM queen.log_partitions lp
+                  JOIN queen.log_queues lq ON lq.id = lp.queue_id
+                  WHERE lp.id = mt.partition_id AND lq.tenant_id = p_tenant);
 
     -- Get traces with pagination.
     -- LIMIT/OFFSET must be applied to the ROWS, inside the subquery, BEFORE
@@ -153,9 +88,13 @@ BEGIN
     -- trailing LIMIT/OFFSET pages that single row: offset 0 ignored the limit
     -- and aggregated everything, offset>0 returned no row at all (NULL body).
     -- Same shape get_available_trace_names_v1 below already uses.
-    -- queue_name/partition_name resolve on EITHER engine: queen.partitions is
-    -- empty under the log engine (queen writes queen.log_partitions only),
-    -- so the rows join alone leaves both columns permanently NULL.
+    -- queue_name/partition_name resolve through queen.log_partitions ->
+    -- queen.log_queues; no hop to queen.queues is needed because log_queues
+    -- already carries the queue's name and tenant_id (identity is
+    -- (tenant_id, name)), and the removed rows join only ever contributed NULLs.
+    -- message_payload is NULL BY CONSTRUCTION and the key is kept so the JSON
+    -- shape is unchanged: log payloads live inside segment blobs, opaque to SQL,
+    -- exactly as this column already read under the log engine.
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
             'id', s.id,
@@ -179,23 +118,17 @@ BEGIN
     FROM (
         SELECT mt.id, mt.transaction_id, mt.partition_id, mt.event_type, mt.data,
                mt.consumer_group, mt.worker_id, mt.created_at,
-               COALESCE(q.name, lq.name)  AS queue_name,
-               COALESCE(p.name, lp.name)  AS partition_name,
-               m.payload                  AS message_payload
+               lq.name       AS queue_name,
+               lp.name       AS partition_name,
+               NULL::JSONB   AS message_payload
         FROM queen.message_trace_names mtn
         JOIN queen.message_traces mt ON mtn.trace_id = mt.id
-        LEFT JOIN queen.messages m ON mt.message_id = m.id
-        LEFT JOIN queen.partitions p ON mt.partition_id = p.id
-        LEFT JOIN queen.queues q ON p.queue_id = q.id
         LEFT JOIN queen.log_partitions lp ON lp.id = mt.partition_id
         LEFT JOIN queen.log_queues lq ON lq.id = lp.queue_id
         WHERE mtn.trace_name = p_trace_name
-          AND (EXISTS (SELECT 1 FROM queen.log_partitions lp2
-                       JOIN queen.log_queues lq2 ON lq2.id = lp2.queue_id
-                       WHERE lp2.id = mt.partition_id AND lq2.tenant_id = p_tenant)
-            OR EXISTS (SELECT 1 FROM queen.partitions rp
-                       JOIN queen.queues rq ON rq.id = rp.queue_id
-                       WHERE rp.id = mt.partition_id AND rq.tenant_id = p_tenant))
+          AND EXISTS (SELECT 1 FROM queen.log_partitions lp2
+                      JOIN queen.log_queues lq2 ON lq2.id = lp2.queue_id
+                      WHERE lp2.id = mt.partition_id AND lq2.tenant_id = p_tenant)
         ORDER BY mt.created_at ASC
         LIMIT p_limit OFFSET p_offset
     ) s;
@@ -218,9 +151,9 @@ $$;
 -- and returned when at least ONE of its traces belongs to p_tenant, and its
 -- counts/last_seen are derived from that tenant's traces alone (the name set is
 -- caller-chosen text, so a global list leaks both the names and the activity
--- times of every other tenant). Same dual-engine ownership resolution as
--- get_traces_by_name_v1 above. DROP the 2-arg form so the scoped one is
--- unambiguous on re-apply.
+-- times of every other tenant). Same log_partitions -> log_queues ownership
+-- resolution as get_traces_by_name_v1 above. DROP the 2-arg form so the scoped
+-- one is unambiguous on re-apply.
 DROP FUNCTION IF EXISTS queen.get_available_trace_names_v1(INTEGER, INTEGER);
 CREATE OR REPLACE FUNCTION queen.get_available_trace_names_v1(
     p_limit INTEGER DEFAULT 50,
@@ -240,10 +173,7 @@ BEGIN
     JOIN queen.message_traces mt ON mtn.trace_id = mt.id
     WHERE EXISTS (SELECT 1 FROM queen.log_partitions lp
                   JOIN queen.log_queues lq ON lq.id = lp.queue_id
-                  WHERE lp.id = mt.partition_id AND lq.tenant_id = p_tenant)
-       OR EXISTS (SELECT 1 FROM queen.partitions rp
-                  JOIN queen.queues rq ON rq.id = rp.queue_id
-                  WHERE rp.id = mt.partition_id AND rq.tenant_id = p_tenant);
+                  WHERE lp.id = mt.partition_id AND lq.tenant_id = p_tenant);
 
     -- Get trace names with stats
     SELECT COALESCE(jsonb_agg(
@@ -265,9 +195,6 @@ BEGIN
         WHERE EXISTS (SELECT 1 FROM queen.log_partitions lp
                       JOIN queen.log_queues lq ON lq.id = lp.queue_id
                       WHERE lp.id = mt.partition_id AND lq.tenant_id = p_tenant)
-           OR EXISTS (SELECT 1 FROM queen.partitions rp
-                      JOIN queen.queues rq ON rq.id = rp.queue_id
-                      WHERE rp.id = mt.partition_id AND rq.tenant_id = p_tenant)
         GROUP BY mtn.trace_name
         ORDER BY MAX(mt.created_at) DESC
         LIMIT p_limit OFFSET p_offset
@@ -284,8 +211,7 @@ BEGIN
 END;
 $$;
 
--- Grant execute permissions
-GRANT EXECUTE ON FUNCTION queen.record_trace_v1(JSONB) TO PUBLIC;
+-- Grant execute permissions (record_trace_v1 is defined AND granted in 047).
 GRANT EXECUTE ON FUNCTION queen.get_message_traces_v1(UUID, TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_traces_by_name_v1(TEXT, INTEGER, INTEGER, UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_available_trace_names_v1(INTEGER, INTEGER, UUID) TO PUBLIC;

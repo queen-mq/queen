@@ -206,9 +206,12 @@ handler finishes loses the message.
 - **The broker needs a session it keeps.** Schema apply and the retention leader
   election both use session-level advisory locks, so a transaction-pooling proxy
   in front of PostgreSQL breaks them.
-- **There is no OpenAPI document**, and no data-migration tool: the binary's
-  `migrate` subcommand is a retired stub that exits non-zero without touching the
-  database. Backup is `pg_dump` and an ordinary PostgreSQL restore.
+- **The broker does not serve an OpenAPI document at runtime.** The
+  [OpenAPI 3.1 documents](/reference/openapi) published with this site are
+  generated from the router at documentation build time, not by the broker.
+  There is also no data-migration tool: the binary's `migrate` subcommand is a
+  retired stub that exits non-zero without touching the database. Backup is
+  `pg_dump` and an ordinary PostgreSQL restore.
 - **SDKs exist for JavaScript, Python, Go, PHP/Laravel and C++**, plus a Go
   operator CLI. There is no Rust, Java or .NET client. Those languages use the
   HTTP API directly.

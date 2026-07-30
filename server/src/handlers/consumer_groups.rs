@@ -87,8 +87,8 @@ pub async fn handle_consumer_group_details(
 }
 
 // DELETE /api/v1/consumer-groups/:group?deleteMetadata= — drop the group. Removes
-// its segment cursors (partition_consumers, all partitions) + consumer_watermarks
-// AND its rows-side coordination state (partition_consumers, consumer_watermarks,
+// its log cursors (queen.log_consumers, all partitions) + consumer_watermarks
+// AND its shared coordination state (consumer_watermarks,
 // consumer_groups_metadata when deleteMetadata). deletedPartitions sums both
 // engines. HTTP 200 with the merged SP JSON (a 204 would make the JS client
 // return null).
@@ -162,7 +162,7 @@ pub async fn handle_delete_consumer_group(
 
 // DELETE /api/v1/consumer-groups/:group/queues/:queue?deleteMetadata= — drop the
 // group FOR ONE QUEUE only. Removes the group's segment cursors for every
-// partition of THAT queue (partition_consumers) + its consumer_watermarks row for
+// partition of THAT queue (queen.log_consumers) + its consumer_watermarks row for
 // (queue, group), AND the rows-side per-queue coordination state via
 // queen.delete_consumer_group_for_queue_v1 (partition_consumers, consumer_watermarks,
 // and consumer_groups_metadata when deleteMetadata). Clearing the empty-scan

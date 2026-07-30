@@ -70,7 +70,7 @@ CREATE INDEX IF NOT EXISTS idx_worker_metrics_created ON queen.worker_metrics(cr
 -- Historically this table only tracked pop_count + lag; it now also tracks
 -- per-queue push / ack / transaction counts (flushed from libqueen's
 -- in-memory WorkerMetrics at minute boundaries) and partition lifecycle
--- events (bumped by statement-level triggers on queen.partitions).
+-- events (bumped by statement-level triggers on queen.log_partitions).
 -- Idempotent ALTERs below let upgrades pick up the new columns safely.
 CREATE TABLE IF NOT EXISTS queen.queue_lag_metrics (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -95,7 +95,7 @@ ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS ack_request_count  
 ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS ack_success_count  BIGINT DEFAULT 0;
 ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS ack_failed_count   BIGINT DEFAULT 0;
 ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS transaction_count  BIGINT DEFAULT 0;
--- Partition lifecycle counters (PR 3b). Bumped by queen.partitions INSERT /
+-- Partition lifecycle counters (PR 3b). Bumped by queen.log_partitions INSERT /
 -- DELETE statement-level triggers. partition_count is a snapshot written once
 -- per minute by StatsService::run_fast_aggregation.
 ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS partitions_created INTEGER DEFAULT 0;
@@ -608,8 +608,8 @@ BEGIN
 
     -- ------------------------------------------------------- per-tenant view
     -- Counts scoped to the tenant's queues; the partition count is the live
-    -- log-partition count for this tenant (queen.partitions is empty under the
-    -- log engine, so we count queen.log_partitions like the 048 refresh does).
+    -- log-partition count for this tenant, counted off queen.log_partitions
+    -- exactly like the 048 stats refresh does.
     SELECT COUNT(*) INTO v_queue_count
     FROM queen.queues WHERE tenant_id = p_tenant AND storage = 'segments';
     SELECT COUNT(DISTINCT namespace) INTO v_namespace_count
@@ -1003,26 +1003,20 @@ BEGIN
         'dlqMessages', COALESCE(v_summary.total_dlq, 0)
     );
     
-    -- Active leases. Dual-engine: queen.partition_consumers is the ROWS-engine
-    -- lease table and is empty on a log deployment, where live leases are
-    -- queen.log_consumers rows with a future lease_expires_at. Reading only the
-    -- rows table made this card a permanent 0/0/0/0 next to a live throughput
-    -- chart. Log-engine equivalents of the two counters: the leased span is
-    -- (committed, batch_end] and `committed` is the last acked offset.
+    -- Active leases: queen.log_consumers rows with a future lease_expires_at.
+    -- The second leg of this expression used to sum in the ROWS-engine lease
+    -- table; it went with that table, and it contributed a structural 0 to every
+    -- field here anyway. The leased span is (committed, batch_end] and
+    -- `committed` is the last acked offset, so there is no per-lease acked
+    -- counter — 'totalAcked' keeps emitting 0, the same value the summed
+    -- expression produced.
     SELECT jsonb_build_object(
-        'active', COALESCE(r.active, 0) + COALESCE(l.active, 0),
-        'partitionsWithLeases', COALESCE(r.parts, 0) + COALESCE(l.parts, 0),
-        'totalBatchSize', COALESCE(r.batch, 0) + COALESCE(l.batch, 0),
-        'totalAcked', COALESCE(r.acked, 0) + COALESCE(l.acked, 0)
+        'active', COALESCE(l.active, 0),
+        'partitionsWithLeases', COALESCE(l.parts, 0),
+        'totalBatchSize', COALESCE(l.batch, 0),
+        'totalAcked', COALESCE(l.acked, 0)
     ) INTO v_leases
     FROM (
-        SELECT COUNT(*) AS active, COUNT(DISTINCT partition_id) AS parts,
-               COALESCE(SUM(batch_size), 0) AS batch,
-               COALESCE(SUM(acked_count), 0) AS acked
-        FROM queen.partition_consumers
-        WHERE lease_expires_at IS NOT NULL AND lease_expires_at > NOW()
-    ) r
-    CROSS JOIN (
         SELECT COUNT(*) AS active, COUNT(DISTINCT partition_id) AS parts,
                COALESCE(SUM(GREATEST(COALESCE(batch_end, committed) - committed, 0)), 0) AS batch,
                0::bigint AS acked
@@ -1292,30 +1286,51 @@ $$;
 -- affected. They aggregate by queue before upserting, so one UPSERT is
 -- issued per distinct queue touched per statement.
 --
--- Hot-path analysis (see PLAN.md):
---   - INSERT side: push_messages_v3 Statement B uses ON CONFLICT DO NOTHING,
---     so the transition table is empty when partitions already exist
---     (common case). The trigger function body therefore short-circuits on
---     an empty CTE input and performs zero DB writes.
+-- 2026-07-30: re-attached from the rows engine's partition table (dropped with
+-- the rest of that message plane) to queen.log_partitions, the table the live
+-- engine actually creates and deletes partitions in. On the old table these
+-- counters had stopped measuring partitions at all: the only writer left was
+-- /configure's phantom row, so partitions_created counted /configure CALLS —
+-- 1 where the truth was 2 real partitions. Real writers now: push provisioning
+-- (042) on the INSERT side, queen.log_partition_cleanup_step_v1 (045) plus
+-- queue-delete CASCADE on the DELETE side.
+--
+-- Hot-path analysis:
+--   - INSERT side: 042 probes for missing partitions first and only runs the
+--     provisioning INSERT when v_missing > 0, so in steady state the statement
+--     never executes and the trigger never fires. When it does fire after an
+--     ON CONFLICT DO NOTHING that inserted nothing, the transition table is
+--     empty, the body's INSERT..SELECT yields no rows and performs zero writes.
 --   - DELETE side: runs from the retention service, off the hot path.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION queen.bump_partitions_created_trigger()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- queue_lag_metrics is keyed by queue NAME, and a log partition reaches its
+    -- queue through log_partitions.queue_id -> queen.log_queues(id). log_queues
+    -- carries both halves of the queue identity (tenant_id, name), so the metric
+    -- row needs no further join to queen.queues.
     -- Track B (§5): carry the queue's tenant_id into the metric row so the
-    -- upsert key matches the (bucket, name, tenant) unique index. (Inert under
-    -- the log engine — queen.partitions is never inserted there — but kept valid
-    -- for the rows engine.)
+    -- upsert key matches the (bucket, name, tenant) unique index.
+    -- ORDER BY is LOAD-BEARING, not cosmetic. This fires from inside 042's
+    -- partition-provisioning INSERT, which sorts its own rows (ORDER BY 1, 2)
+    -- precisely so concurrent bundles touching overlapping queue sets take their
+    -- row locks in one canonical order. An unordered multi-row upsert here would
+    -- reintroduce exactly that deadlock one level down: hash aggregation emits
+    -- groups in an order that depends on the group SET, so two pushes covering
+    -- {q1,q2,q3} and {q1,q3} can lock q1/q3 in opposite orders and deadlock the
+    -- push. Sorting the aggregate on the conflict key restores the total order.
     INSERT INTO queen.queue_lag_metrics (bucket_time, queue_name, tenant_id, partitions_created)
     SELECT
         date_trunc('minute', NOW()),
-        q.name,
-        q.tenant_id,
+        lq.name,
+        lq.tenant_id,
         COUNT(*)
     FROM new_partitions np
-    JOIN queen.queues q ON q.id = np.queue_id
-    GROUP BY q.name, q.tenant_id
+    JOIN queen.log_queues lq ON lq.id = np.queue_id
+    GROUP BY lq.name, lq.tenant_id
+    ORDER BY lq.name, lq.tenant_id
     ON CONFLICT (bucket_time, queue_name, tenant_id) DO UPDATE
     SET partitions_created = queen.queue_lag_metrics.partitions_created + EXCLUDED.partitions_created;
     RETURN NULL;
@@ -1325,41 +1340,41 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION queen.bump_partitions_deleted_trigger()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- On DELETE, the queue row may or may not still exist (CASCADE). We
-    -- resolve queue name via old_partitions.queue_id JOINed against
-    -- queen.queues; partitions deleted because their queue was removed fall
-    -- through to a conservative '__orphaned__' bucket so the count still
-    -- shows up somewhere.
-    -- Track B (§5): tenant_id from the (possibly-cascaded) queue; orphaned
-    -- deletes fall to the default tenant's '__orphaned__' bucket.
+    -- On DELETE the queue row may already be gone: log_partitions.queue_id is
+    -- ON DELETE CASCADE from queen.log_queues (041), so deleting a queue runs
+    -- this statement with the parent removed. Those rows are deliberately NOT
+    -- counted — an INNER JOIN drops them. A partition that disappeared because
+    -- its whole queue was deleted is not a partition-lifecycle event, and
+    -- bucketing it under a placeholder name would be worse than losing it: the
+    -- readers build the dashboard's queue list straight from
+    -- queen.queue_lag_metrics (get_queue_ops_v1, get_queue_lag_v1) without
+    -- joining queen.queues, so a placeholder becomes a phantom queue in the UI,
+    -- and pinning it to a default tenant would show one tenant's deletions to
+    -- another. What this counter measures is the retention cleanup
+    -- (queen.log_partition_cleanup_step_v1, 045), which keeps its queue and so
+    -- always resolves to the real name.
     INSERT INTO queen.queue_lag_metrics (bucket_time, queue_name, tenant_id, partitions_deleted)
     SELECT
         date_trunc('minute', NOW()),
-        COALESCE(q.name, '__orphaned__'),
-        COALESCE(q.tenant_id, '00000000-0000-0000-0000-000000000001'),
+        lq.name,
+        lq.tenant_id,
         COUNT(*)
     FROM old_partitions op
-    LEFT JOIN queen.queues q ON q.id = op.queue_id
-    GROUP BY COALESCE(q.name, '__orphaned__'), COALESCE(q.tenant_id, '00000000-0000-0000-0000-000000000001')
+    JOIN queen.log_queues lq ON lq.id = op.queue_id
+    GROUP BY lq.name, lq.tenant_id
+    ORDER BY lq.name, lq.tenant_id   -- same lock-order discipline as the INSERT side
     ON CONFLICT (bucket_time, queue_name, tenant_id) DO UPDATE
     SET partitions_deleted = queen.queue_lag_metrics.partitions_deleted + EXCLUDED.partitions_deleted;
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
 
-DROP TRIGGER IF EXISTS trg_partitions_created_counter ON queen.partitions;
-CREATE TRIGGER trg_partitions_created_counter
-    AFTER INSERT ON queen.partitions
-    REFERENCING NEW TABLE AS new_partitions
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION queen.bump_partitions_created_trigger();
-
-DROP TRIGGER IF EXISTS trg_partitions_deleted_counter ON queen.partitions;
-CREATE TRIGGER trg_partitions_deleted_counter
-    AFTER DELETE ON queen.partitions
-    REFERENCING OLD TABLE AS old_partitions
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION queen.bump_partitions_deleted_trigger();
+-- The ATTACHMENT lives in 051_log_partition_counters.sql, not here. Two reasons,
+-- both learned the hard way: this file is applied BEFORE 041 creates
+-- queen.log_partitions, so an attachment guarded on the table existing silently
+-- skips the whole first boot of a fresh database; and re-running DROP/CREATE
+-- TRIGGER on every boot takes an ACCESS EXCLUSIVE lock on the engine's hottest
+-- table, stalling every push and pop behind a rolling restart.
 
 -- ============================================================================
 -- queen.get_queue_ops_v1: Per-queue ops time series for the System view

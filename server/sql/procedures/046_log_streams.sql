@@ -9,8 +9,8 @@
 -- per-partition BIGINT message offset:
 --
 --   * source cursor      -> queen.log_consumers (committed/batch_end + lease),
---                            NOT the seg-fold columns on partition_consumers
---                            (dropped by 040).
+--                            NOT the seg-fold cursor columns of the retired
+--                            engines (those tables are gone).
 --   * sink push          -> queen.log_push_one_v1 INLINE (same txn), on
 --                            broker-prepacked segments (hashes + base64 zstd
 --                            blob) — ONE allocator code path shared with 042's
@@ -94,8 +94,8 @@
 -- a second, independent guard — it returns "duplicate" having written NOTHING
 -- — but correctness never depends on it.)
 --
--- Output: JSONB ARRAY mirroring input idx, envelope shape IDENTICAL to
--- queen.streams_cycle_v1 (021) and the retired seg version: [{ "idx": N,
+-- Output: JSONB ARRAY mirroring input idx, envelope shape IDENTICAL to the
+-- retired queen.streams_cycle_v1 (021) and the retired seg version: [{ "idx": N,
 -- "result": { ... } }] with the inner result carrying success / query_id /
 -- partition_id / queueName / state_ops_applied / push_results / ack_result
 -- (+ error only on failure). Per-segment push_results now carry
@@ -424,12 +424,11 @@ BEGIN
                     v_ack_lease_released := false;
                 END IF;
 
-                -- NB: like the seg version, we do NOT write
-                -- queen.messages_consumed here. That ledger FKs
-                -- queen.partitions (rows engine); the log engine tracks
-                -- consumption via log_consumers.total_consumed (advanced
-                -- above), exactly like log_ack_v1 / log_ack_by_hash_v1 which
-                -- never touch it.
+                -- NB: no per-message consumption ledger is written here. The
+                -- rows engine's ledger table went with the rest of that
+                -- engine; the log engine tracks consumption via
+                -- log_consumers.total_consumed (advanced above), exactly like
+                -- log_ack_v1 / log_ack_by_hash_v1.
 
                 v_ack_result := jsonb_build_object(
                     'success',        true,

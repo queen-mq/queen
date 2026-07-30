@@ -162,9 +162,14 @@ func TestTumblingIdleFlushClosesQuietPartitions(t *testing.T) {
 	_, _ = testClient.Queue(src).Create().Execute(context.Background())
 	_, _ = testClient.Queue(sink).Create().Execute(context.Background())
 
-	for i := 0; i < 3; i++ {
-		_, _ = testClient.Queue(src).Partition("quiet").Push(map[string]interface{}{"v": 7}).Execute(context.Background())
-	}
+	// One batched push = one segment = one timestamp: the three messages cannot
+	// straddle a 1-second window boundary. Sequential pushes could split the
+	// window (count 2 / sum 14, first window closed by the cycle path instead
+	// of the idle flush) — the JS twin of this test failed that way ~1 in 5
+	// under load.
+	_, _ = testClient.Queue(src).Partition("quiet").Push([]map[string]interface{}{
+		{"v": 7}, {"v": 7}, {"v": 7},
+	}).Execute(context.Background())
 
 	stream := streams.From(testClient.Queue(src).AsStreamSource()).
 		WindowTumbling(1, streams.WithIdleFlushMs(700)).

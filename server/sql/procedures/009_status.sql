@@ -4,123 +4,13 @@
 -- Async stored procedures for status/dashboard operations
 -- Note: get_status_v1, get_status_queues_v1, get_queue_detail_v1 have been
 --       replaced by v2 versions in 013_stats.sql
+-- Note: get_queue_messages_v1 lived here and was deleted with the rows message
+--       plane — it read the retired rows tables, was never ported to the log
+--       engine (see 047_log_admin.sql) and had no caller.
+-- Note: get_analytics_v1 lived here too; 048_log_stats.sql applies later and
+--       CREATE OR REPLACEs it with the log-native body, so this copy was dead.
+--       The only definition is now the one in 048.
 -- ============================================================================
-
--- ============================================================================
--- queen.get_queue_messages_v1: Messages for a specific queue
--- ============================================================================
-CREATE OR REPLACE FUNCTION queen.get_queue_messages_v1(
-    p_queue_name TEXT,
-    p_limit INTEGER DEFAULT 50,
-    p_offset INTEGER DEFAULT 0
-)
-RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    RETURN (
-        SELECT COALESCE(jsonb_agg(
-            jsonb_build_object(
-                'id', m.id,
-                'transactionId', m.transaction_id,
-                'partitionId', m.partition_id,
-                'queuePath', q.name || '/' || p.name,
-                'queue', q.name,
-                'partition', p.name,
-                -- NOTE: Must use exact timestamp comparison (not DATE_TRUNC) to preserve microsecond precision
-                'status', CASE
-                    WHEN dlq.message_id IS NOT NULL THEN 'dead_letter'
-                    WHEN pc.last_consumed_created_at IS NOT NULL AND 
-                        (m.created_at, m.id) <= (pc.last_consumed_created_at, pc.last_consumed_id)
-                    THEN 'completed'
-                    WHEN pc.lease_expires_at IS NOT NULL AND pc.lease_expires_at > NOW() THEN 'processing'
-                    ELSE 'pending'
-                END,
-                'createdAt', to_char(m.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-            ) ORDER BY m.created_at DESC, m.id DESC
-        ), '[]'::jsonb)
-        FROM queen.messages m
-        JOIN queen.partitions p ON p.id = m.partition_id
-        JOIN queen.queues q ON q.id = p.queue_id
-        LEFT JOIN queen.partition_consumers pc ON pc.partition_id = p.id AND pc.consumer_group = '__QUEUE_MODE__'
-        LEFT JOIN queen.dead_letter_queue dlq ON dlq.message_id = m.id
-        WHERE q.name = p_queue_name
-        LIMIT p_limit OFFSET p_offset
-    );
-END;
-$$;
-
--- ============================================================================
--- queen.get_analytics_v1: Analytics time series data
--- ============================================================================
-CREATE OR REPLACE FUNCTION queen.get_analytics_v1(p_filters JSONB DEFAULT '{}'::jsonb)
-RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_from_ts TIMESTAMPTZ;
-    v_to_ts TIMESTAMPTZ;
-    v_interval TEXT;
-    v_queue TEXT;
-    v_namespace TEXT;
-    v_task TEXT;
-    v_result JSONB;
-    v_bucket_width INTERVAL;
-BEGIN
-    v_from_ts := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '24 hours');
-    v_to_ts := COALESCE((p_filters->>'to')::timestamptz, NOW());
-    v_interval := COALESCE(p_filters->>'interval', 'hour');
-    v_queue := p_filters->>'queue';
-    v_namespace := p_filters->>'namespace';
-    v_task := p_filters->>'task';
-    
-    -- Map interval to bucket width
-    v_bucket_width := CASE v_interval
-        WHEN 'minute' THEN INTERVAL '1 minute'
-        WHEN 'hour' THEN INTERVAL '1 hour'
-        WHEN 'day' THEN INTERVAL '1 day'
-        ELSE INTERVAL '1 hour'
-    END;
-    
-    WITH time_buckets AS (
-        SELECT generate_series(
-            date_trunc(v_interval, v_from_ts),
-            date_trunc(v_interval, v_to_ts),
-            v_bucket_width
-        ) as bucket
-    ),
-    message_buckets AS (
-        SELECT
-            date_trunc(v_interval, m.created_at) as bucket,
-            COUNT(*) as message_count
-        FROM queen.messages m
-        JOIN queen.partitions p ON p.id = m.partition_id
-        JOIN queen.queues q ON q.id = p.queue_id
-        WHERE m.created_at >= v_from_ts AND m.created_at <= v_to_ts
-          AND (v_queue IS NULL OR q.name = v_queue)
-          AND (v_namespace IS NULL OR q.namespace = v_namespace)
-          AND (v_task IS NULL OR q.task = v_task)
-        GROUP BY date_trunc(v_interval, m.created_at)
-    )
-    SELECT jsonb_build_object(
-        'dataPoints', COALESCE((
-            SELECT jsonb_agg(
-                jsonb_build_object(
-                    'timestamp', to_char(tb.bucket, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                    'messages', COALESCE(mb.message_count, 0)
-                ) ORDER BY tb.bucket
-            )
-            FROM time_buckets tb
-            LEFT JOIN message_buckets mb ON mb.bucket = tb.bucket
-        ), '[]'::jsonb),
-        'interval', v_interval,
-        'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-        'to', to_char(v_to_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-    ) INTO v_result;
-    
-    RETURN v_result;
-END;
-$$;
 
 -- ============================================================================
 -- queen.get_system_metrics_v1: System metrics time series
@@ -361,6 +251,6 @@ END;
 $$;
 
 -- Grant execute permissions
-GRANT EXECUTE ON FUNCTION queen.get_queue_messages_v1(TEXT, INTEGER, INTEGER) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION queen.get_analytics_v1(JSONB) TO PUBLIC;
+-- (the grants for get_queue_messages_v1 and get_analytics_v1 went with their
+--  definitions; get_analytics_v1 is granted by 048_log_stats.sql)
 GRANT EXECUTE ON FUNCTION queen.get_system_metrics_v1(JSONB) TO PUBLIC;

@@ -7,7 +7,7 @@
 --     (queen.queue_lag_metrics)
 --   * latest-bucket per-worker event-loop / pool / throughput
 --     (queen.worker_metrics)
---   * dead-letter-queue depth, total + per queue
+--   * dead-letter-queue depth, total + per queue (queen.log_dlq)
 --
 -- Scope is bounded to the last 5 minutes of buckets so the latest-bucket
 -- DISTINCT ON / aggregation never scans the full retention window.
@@ -109,19 +109,35 @@ BEGIN
             ) w
         ), '[]'::jsonb),
 
-        -- DLQ depth: cluster total + per-queue breakdown. Scanned with an
-        -- index-only count on dead_letter_queue.
+        -- DLQ depth: cluster total + per-queue breakdown, counted with an
+        -- index-only scan of queen.log_dlq. Both readings used to come from
+        -- the retired rows-engine dead-letter table, which the log engine
+        -- never writes: the total was pinned at 0 and the per-queue array was
+        -- always empty (no queen_dlq_depth_by_queue series at all, so DLQ
+        -- alerts could not fire) while /api/v1/dlq listed the same rows fine.
+        -- Cluster-wide across tenants, as before: the exposition carries no
+        -- tenant label, so two tenants sharing a queue name must fold into one
+        -- series rather than emit a duplicate label set.
         'dlq', jsonb_build_object(
-            'total', (SELECT COUNT(*) FROM queen.dead_letter_queue),
+            'total', (SELECT COUNT(*) FROM queen.log_dlq),
             'per_queue', COALESCE((
                 SELECT jsonb_agg(row_to_json(d))
                 FROM (
-                    SELECT q.name AS queue, COUNT(*)::bigint AS count
-                    FROM queen.dead_letter_queue dlq
-                    JOIN queen.partitions p ON p.id = dlq.partition_id
-                    JOIN queen.queues q ON q.id = p.queue_id
-                    GROUP BY q.name
-                    ORDER BY q.name
+                    -- Same path as 047's DLQ reader: log_dlq -> log_partitions
+                    -- -> log_queues for identity, then queen.queues joined on
+                    -- (name, tenant_id) — never on name alone, that is a
+                    -- cross-tenant cross product. LEFT so a log queue whose
+                    -- config row is missing keeps its series instead of
+                    -- dropping out of the exposition.
+                    SELECT COALESCE(q.name, lq.name) AS queue,
+                           COUNT(*)::bigint AS count
+                    FROM queen.log_dlq dlq
+                    JOIN queen.log_partitions p ON p.id = dlq.partition_id
+                    JOIN queen.log_queues lq ON lq.id = p.queue_id
+                    LEFT JOIN queen.queues q
+                           ON q.name = lq.name AND q.tenant_id = lq.tenant_id
+                    GROUP BY 1
+                    ORDER BY 1
                 ) d
             ), '[]'::jsonb)
         )

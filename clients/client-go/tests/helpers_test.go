@@ -87,7 +87,15 @@ func cleanupTestData(ctx context.Context) error {
 		return nil
 	}
 
-	patterns := []string{"test-%", "edge-%", "pattern-%", "workflow-%"}
+	// NB: this package runs CONCURRENTLY with ./tests/streams_integration
+	// (the runner entrypoint passes both packages to one `go test` call, which
+	// executes the two binaries in parallel). Its queues are named
+	// `test-stream-...`, so the patterns here must NOT cover `test-%` broadly
+	// or this wipe deletes the streams suite's in-flight queues (observed as
+	// TestGateTokenBucketBasic "expected 60 drained, got 20"). Match only the
+	// prefixes THIS package creates: test-go-*, test-auth-go-*,
+	// test-ackwindow-* (plus the legacy edge/pattern/workflow leftovers).
+	patterns := []string{"test-go-%", "test-auth-go-%", "test-ackwindow-%", "edge-%", "pattern-%", "workflow-%"}
 
 	// Log-engine cleanup, best-effort: a rows-only server without the log
 	// schema errors on the first statement, so we stop and fall through to the

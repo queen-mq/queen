@@ -47,10 +47,11 @@ CREATE TABLE IF NOT EXISTS queen_streams.queries (
 -- partition lease reads/writes state from a tight set of index pages.
 --
 -- Foreign key to queries with ON DELETE CASCADE so dropping a query also
--- drops its state. We do NOT FK partition_id to queen.partitions because
--- that would couple lifecycles: a partition-cleanup must not silently delete
--- still-relevant state. Instead we rely on the application to drop state
--- explicitly when it issues a query reset.
+-- drops its state. partition_id carries a queen.log_partitions id and is
+-- deliberately NOT a foreign key: that would couple lifecycles, and a partition
+-- cleanup must not silently delete still-relevant state. The cleanup phase in
+-- 045 honours this the other way round — a partition holding stream state is
+-- never reclaimed. State is dropped by the application on a query reset.
 -- ----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS queen_streams.state (

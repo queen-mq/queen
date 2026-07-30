@@ -21,19 +21,19 @@ AS $$
 DECLARE
     v_existed BOOLEAN;
 BEGIN
-    -- Delete partition consumers first (scoped to this tenant's queue)
-    DELETE FROM queen.partition_consumers
-    WHERE partition_id IN (
-        SELECT p.id FROM queen.partitions p
-        JOIN queen.queues q ON p.queue_id = q.id
-        WHERE q.name = p_queue_name AND q.tenant_id = p_tenant
-    );
+    -- The rows-engine cleanup that used to open this body (partition consumers,
+    -- reached through the rows partition table) went with the rows message plane:
+    -- both tables are dropped, and only the log engine can produce consumers now.
+    -- This function only ever owned the SHARED rows of a queue; the log-engine
+    -- state (log_txns / log_dlq / log_queues -> log_partitions -> log_segments /
+    -- log_consumers) is dropped by the caller, db::delete_seg_queue in src/db.rs,
+    -- which runs immediately after this call on the delete-queue path.
 
     -- Delete watermarks for this queue to prevent orphaned entries
     DELETE FROM queen.consumer_watermarks
     WHERE queue_name = p_queue_name AND tenant_id = p_tenant;
 
-    -- Delete queue (CASCADE handles partitions and messages)
+    -- Delete queue (CASCADE handles the queen.stats rows keyed on queue_id)
     WITH deleted AS (
         DELETE FROM queen.queues WHERE name = p_queue_name AND tenant_id = p_tenant
         RETURNING id

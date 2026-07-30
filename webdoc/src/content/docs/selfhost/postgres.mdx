@@ -80,7 +80,7 @@ carries from the source tree: `server/sql/schema.sql` first, then every file in
 `server/sql/procedures/` in lexical order. That order is not cosmetic: the
 log-engine files in the `04x` range redefine stored procedures that the earlier
 files create, so applying them out of order leaves the wrong definitions in
-place. `server/src/schema.rs` holds the authoritative list of 24 procedure files
+place. `server/src/schema.rs` holds the authoritative list of 26 procedure files
 in the order they must be applied.
 
 Once the schema exists, the broker's role needs `USAGE` on both schemas, DML
@@ -126,7 +126,7 @@ statement mode. Two reasons, both structural:
 
 **Session-scoped advisory locks.** The boot-time schema apply takes
 `pg_advisory_lock(778120010)` on one pooled connection, runs the entire DDL
-(`schema.sql` plus 24 procedure files, as 25 separate batches) and unlocks. The
+(`schema.sql` plus 26 procedure files, as 27 separate batches) and unlocks. The
 maintenance cycle takes `pg_advisory_lock(737001)` on one pooled connection, runs
 many autocommitting step calls across the cycle, and unlocks at the end; that is
 how exactly one replica sweeps per cycle. Both locks

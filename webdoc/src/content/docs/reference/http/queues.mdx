@@ -144,13 +144,19 @@ the intent.
 {
   "configured": true,
   "queueId": "0198...",
-  "partitionId": "0198...",
+  "partitionId": null,
   "queue": "orders",
   "namespace": "billing",
   "task": "invoice",
   "options": { "leaseTime": 120, "retryLimit": 5 }
 }
 ```
+
+`partitionId` is **always `null`**. Configuring a queue does not create a partition:
+partitions are created by the first push that names one. The key used to carry the id of
+a `Default` partition the engine never used, and it was removed on 2026-07-30 along with
+the rows-engine table that held it. The key itself is kept so the response shape does not
+change.
 
 The `options` object echoes the resolved configuration: the values actually
 stored, after defaulting. Clients assert on `configured === true` and round-trip
@@ -292,6 +298,15 @@ through unchanged.
 | `GET /api/v1/resources/overview` | Counts (`queues`, `partitions`, `namespaces`, `tasks`), a `messages` block (`total`, `pending`, `processing`, `completed`, `failed`, `deadLetter`), a `lag` block (time and offset, avg/median/min/max), a `throughput` block (`ingestedPerSecond`, `processedPerSecond` over the last 5 minutes ÷ 300), `timestamp` and `statsAge`. |
 | `GET /api/v1/resources/namespaces` | `namespaces[]` with `namespace`, `queues`, `partitions`, `messages.total`, `messages.pending`. |
 | `GET /api/v1/resources/tasks` | The same shape on the `task` axis. |
+
+<Aside type="caution">
+Before 2026-07-30 the `partitions` count on the namespaces and tasks routes was wrong, and
+usually **zero**: it counted rows in the retired rows-engine partition table, whose only
+writer was `/configure`. A queue created implicitly by a push contributed nothing to it.
+It now counts live log partitions and agrees with the per-queue `partitions` that
+`/api/v1/resources/queues` has always reported correctly, so expect these two numbers to
+go up on an existing dashboard.
+</Aside>
 
 `statsAge` is the age in seconds of the numbers you are reading, or `-1` when
 nothing has been reconciled yet. Treat a large `statsAge` as "the reconciler is

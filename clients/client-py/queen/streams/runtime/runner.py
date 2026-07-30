@@ -96,6 +96,15 @@ class Runner:
         self._flush_task: Optional[asyncio.Task] = None
         self._flush_in_flight = False
         self._recent_partitions: dict = {}
+        # Per-partition mutex between the pop/cycle loop and the idle-flush
+        # timer. Both paths are read(state) -> compute -> commit against the
+        # same (query_id, partition_id) state rows; the server's advisory
+        # lock only serialises the COMMITS, so an unsynchronised flush can
+        # read a window's acc, have the cycle emit+delete (or re-upsert) it,
+        # and then emit the same acc again — a duplicate emit (or, with the
+        # opposite interleave, drop a freshly-reduced value). Serialising the
+        # two in-process tasks removes the race at its source.
+        self._partition_locks: dict = {}
         self._partition_watermarks: dict = {}
         self._stats = {
             "cyclesTotal": 0,
@@ -262,10 +271,28 @@ class Runner:
         for pid, e in list(self._recent_partitions.items()):
             if e["touchedAt"] < cutoff:
                 del self._recent_partitions[pid]
+                # Only drop the lock if nobody holds it: evicting a held lock
+                # would hand the next cycle a fresh Lock and reopen the race
+                # against a still-running flush on the evicted partition.
+                stale_lock = self._partition_locks.get(pid)
+                if stale_lock is not None and not stale_lock.locked():
+                    del self._partition_locks[pid]
+
+    def _partition_lock(self, partition_id: str) -> asyncio.Lock:
+        lock = self._partition_locks.get(partition_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._partition_locks[partition_id] = lock
+        return lock
 
     # ----------------------------------------------------------- cycle
 
     async def _process_partition_cycle(self, group: dict) -> None:
+        # Mutual exclusion with the idle-flush timer (see _partition_locks).
+        async with self._partition_lock(group["partitionId"]):
+            await self._process_partition_cycle_inner(group)
+
+    async def _process_partition_cycle_inner(self, group: dict) -> None:
         stages = self.stream.stages
         partition_id = group["partitionId"]
         partition_name = group["partitionName"]
@@ -702,6 +729,11 @@ class Runner:
             self._flush_in_flight = False
 
     async def _flush_partition(self, partition_id: str, partition_name: str) -> None:
+        # Mutual exclusion with the pop/cycle loop (see _partition_locks).
+        async with self._partition_lock(partition_id):
+            await self._flush_partition_inner(partition_id, partition_name)
+
+    async def _flush_partition_inner(self, partition_id: str, partition_name: str) -> None:
         stages = self.stream.stages
         window = stages.window
 

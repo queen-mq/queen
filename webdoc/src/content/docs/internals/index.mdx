@@ -79,7 +79,7 @@ Storage is the "log engine": five tables created by `041_log_schema.sql`
 single monotone `BIGINT` offset; a segment is one row holding many messages packed together
 and zstd-compressed. [The storage model](/internals/storage-model) has the row-by-row detail.
 
-`server/sql/schema.sql` and 24 files under `server/sql/procedures/` are embedded in the binary
+`server/sql/schema.sql` and 26 files under `server/sql/procedures/` are embedded in the binary
 with `include_str!` and applied at every boot, in lexical order, under session advisory lock
 `778120010`. Every statement is idempotent, so re-apply is a no-op. `QUEEN_APPLY_SCHEMA=0`
 skips the whole step so a privileged role can pre-apply the DDL and the broker can then run as

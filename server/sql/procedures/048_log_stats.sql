@@ -6,7 +6,7 @@
 --   queen.log_refresh_all_stats_v1   queen.stats reconciler (former 034
 --                                    seg_refresh_all_stats_v1; stats.rs calls
 --                                    it once per cadence under advisory lock)
---   queen.get_queue_detail_v2        dual-mode redefinition (log branch)
+--   queen.get_queue_detail_v2        log-native redefinition (supersedes 013)
 --   queen.get_analytics_v1           log-native redefinition (time-series)
 --   queen.log_queue_message_stats_v1 per-queue (segments, messages) counters
 --                                    (former db.rs::seg_queue_message_stats)
@@ -30,8 +30,8 @@
 -- queen.queues.id (joined by name; storage stays 'segments' — the public
 -- contract keeps that value, §11), so every existing queen.stats reader
 -- (get_status_v3 / get_status_queues_v2 / get_system_overview_v3 /
--- aggregate_*) finds the rows with no change. partition_id stays NULL (log
--- partition uuids are not in queen.partitions).
+-- aggregate_*) finds the rows with no change. partition_id stays NULL: this
+-- file writes 'queue'-type stat rows only, never per-partition ones.
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -274,10 +274,11 @@ BEGIN
     v_task := queen.aggregate_task_stats_v1();
     v_sys  := queen.aggregate_system_stats_v2();
 
-    -- aggregate_system_stats_v2 sets child_count = COUNT(queen.partitions),
-    -- the rows-engine partition count (near-zero here). Overwrite with the
-    -- live log-partition count so the overview 'partitions' tile is correct
-    -- (same fix 034 carried).
+    -- Belt-and-braces, no longer a correction: 013's aggregate_system_stats_v2
+    -- used to count the rows-engine partition table (near-zero here) and this
+    -- overwrite existed to fix the overview 'partitions' tile. 013 now counts
+    -- queen.log_partitions itself, so the two agree; the re-write is kept
+    -- because it is authoritative, cheap, and pins the value at THIS snapshot.
     SELECT COUNT(*) INTO v_log_parts FROM queen.log_partitions;
     UPDATE queen.stats SET child_count = v_log_parts
     WHERE stat_type = 'system' AND stat_key = 'global';
@@ -297,13 +298,15 @@ $$;
 GRANT EXECUTE ON FUNCTION queen.log_refresh_all_stats_v1() TO PUBLIC;
 
 -- ============================================================================
--- queen.get_queue_detail_v2 — dual-mode redefinition (log branch).
+-- queen.get_queue_detail_v2 — log-native redefinition.
 -- ============================================================================
--- Loads after 013 in the boot roster and supersedes it (exactly as 034 did):
--- rows queues keep the 013 body verbatim; storage='segments' queues take an
--- early-return path computing the SAME output shape (queue.config,
+-- Loads after 013 in the boot roster and supersedes it (exactly as 034 did),
+-- computing the same output shape (queue.config,
 -- partitions[].{messages,stats,cursor,...}, totals.messages.*) from the log
--- tables with the watermark math above. Two log-schema honesty notes, keys
+-- tables with the watermark math above. The former dual-mode rows branch
+-- (a verbatim copy of 013's body over the rows-engine tables) is GONE: this
+-- broker only ever creates storage='segments' queues, so it was dead code and
+-- its tables no longer exist. Two log-schema honesty notes, keys
 -- preserved for the webapp:
 --   * cursor.batchesConsumed is 0 — queen.log_consumers does not carry the
 --     old total_batches_consumed counter (deliberate schema diet, 041).
@@ -311,7 +314,8 @@ GRANT EXECUTE ON FUNCTION queen.log_refresh_all_stats_v1() TO PUBLIC;
 --     the log schema keeps (former last_consumed_at is gone).
 -- ============================================================================
 -- Track B (§5): p_tenant scopes the single-queue detail. DROP the pre-tenant
--- (TEXT) form (013 also defines it) so the scoped (TEXT, UUID) is what callers hit.
+-- (TEXT) form (013 no longer defines it, but already-applied databases have
+-- it) so the scoped (TEXT, UUID) is what callers hit.
 DROP FUNCTION IF EXISTS queen.get_queue_detail_v2(TEXT);
 CREATE OR REPLACE FUNCTION queen.get_queue_detail_v2(
     p_queue_name TEXT,
@@ -320,71 +324,18 @@ RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_queue_id UUID;
     v_queue_info JSONB;
     v_partitions JSONB;
     v_totals JSONB;
-    v_is_seg BOOLEAN;
+    v_exists BOOLEAN;
 BEGIN
-    SELECT (q.storage = 'segments') INTO v_is_seg
+    -- Existence probe only (SELECT INTO leaves the target NULL when no row
+    -- matches). The storage discriminator went with the rows branch.
+    SELECT true INTO v_exists
     FROM queen.queues q WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
 
-    IF v_is_seg IS NULL THEN
+    IF v_exists IS NULL THEN
         RETURN jsonb_build_object('error', 'Queue not found');
-    END IF;
-
-    IF NOT v_is_seg THEN
-        -- Non-segments queue: reproduce the 013 rows-engine body verbatim.
-        SELECT q.id, jsonb_build_object(
-            'queue', jsonb_build_object(
-                'id', q.id, 'name', q.name, 'namespace', q.namespace, 'task', q.task,
-                'priority', q.priority,
-                'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                'config', jsonb_build_object(
-                    'leaseTime', q.lease_time, 'retryLimit', q.retry_limit,
-                    'retryDelay', q.retry_delay, 'ttl', q.ttl,
-                    'maxQueueSize', q.max_queue_size, 'deadLetterQueue', q.dead_letter_queue)))
-        INTO v_queue_id, v_queue_info
-        FROM queen.queues q WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
-
-        WITH partition_stats AS (
-            SELECT p.id, p.name, p.created_at,
-                   COALESCE(MAX(s.total_messages), 0) AS total,
-                   COALESCE(MAX(s.pending_messages), 0) AS pending,
-                   COALESCE(MAX(s.processing_messages), 0) AS processing,
-                   COALESCE(MAX(s.completed_messages), 0) AS completed,
-                   0 AS failed,
-                   COALESCE(MAX(s.dead_letter_messages), 0) AS dead_letter,
-                   MAX(s.oldest_pending_at) AS oldest_message,
-                   MAX(s.newest_message_at) AS newest_message,
-                   COALESCE(SUM(pc.total_messages_consumed), 0) AS total_consumed,
-                   COALESCE(SUM(pc.total_batches_consumed), 0) AS batches_consumed,
-                   MAX(pc.last_consumed_at) AS last_activity
-            FROM queen.partitions p
-            LEFT JOIN queen.stats s ON s.stat_type = 'partition' AND s.partition_id = p.id
-            LEFT JOIN queen.partition_consumers pc ON pc.partition_id = p.id
-            WHERE p.queue_id = v_queue_id
-            GROUP BY p.id, p.name, p.created_at
-        )
-        SELECT COALESCE(jsonb_agg(jsonb_build_object(
-                    'id', id, 'name', name,
-                    'createdAt', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                    'messages', jsonb_build_object('total', total, 'pending', pending,
-                        'processing', processing, 'completed', completed, 'failed', failed, 'deadLetter', dead_letter),
-                    'stats', jsonb_build_object('total', total, 'pending', pending,
-                        'processing', processing, 'completed', completed, 'failed', failed, 'deadLetter', dead_letter),
-                    'cursor', jsonb_build_object('totalConsumed', total_consumed, 'batchesConsumed', batches_consumed),
-                    'lastActivity', CASE WHEN last_activity IS NOT NULL THEN to_char(last_activity, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
-                    'oldestMessage', CASE WHEN oldest_message IS NOT NULL THEN to_char(oldest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
-                    'newestMessage', CASE WHEN newest_message IS NOT NULL THEN to_char(newest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
-                ) ORDER BY name), '[]'::jsonb),
-               jsonb_build_object('messages', jsonb_build_object(
-                    'total', COALESCE(SUM(total),0), 'pending', COALESCE(SUM(pending),0),
-                    'processing', COALESCE(SUM(processing),0), 'completed', COALESCE(SUM(completed),0),
-                    'failed', COALESCE(SUM(failed),0), 'deadLetter', COALESCE(SUM(dead_letter),0)))
-        INTO v_partitions, v_totals FROM partition_stats;
-
-        RETURN v_queue_info || jsonb_build_object('partitions', v_partitions, 'totals', v_totals);
     END IF;
 
     -- --------------------------------------------------------------- log queue
@@ -495,117 +446,24 @@ $$;
 GRANT EXECUTE ON FUNCTION queen.get_queue_detail_v2(TEXT, UUID) TO PUBLIC;
 
 -- ============================================================================
--- queen.get_queue_v2 — dual-mode redefinition (rows + LOG).
+-- queen.get_queue_v2 — log-native redefinition.
 -- ============================================================================
--- 013's body reads queen.partitions + the 'partition' stat rows, both of which
--- are EMPTY under the log engine (048 writes only 'queue'-type stat rows, and
--- log partitions live in queen.log_partitions). It therefore described every
--- healthy log queue as "0 partitions / 0 messages" at HTTP 200 — the shape a
--- caller cannot distinguish from a real empty queue. This redefinition keeps
--- 013's body verbatim for rows queues and computes the SAME output shape from
--- the log tables (same watermark arithmetic as get_queue_detail_v2 above) for
--- storage='segments'. `failed` is NULL, not 0: the log engine keeps no
--- per-partition failure counter.
+-- 013's body drilled through the rows-engine partition table + the 'partition'
+-- stat rows, both of which are EMPTY under the log engine (048 writes only
+-- 'queue'-type stat rows, and log partitions live in queen.log_partitions). It
+-- therefore described every healthy log queue as "0 partitions / 0 messages" at
+-- HTTP 200 — the shape a caller cannot distinguish from a real empty queue.
+-- This redefinition computes the output shape from the log tables (same
+-- watermark arithmetic as get_queue_detail_v2 above). `failed` is NULL, not 0:
+-- the log engine keeps no per-partition failure counter.
+-- The rows companion (queen.get_queue_v2_rows, a verbatim copy of 013's body
+-- that this entry point used to delegate to for storage <> 'segments') is
+-- DELETED along with its GRANT: no route can create such a queue, so the
+-- delegation was unreachable and its tables are gone.
 -- ============================================================================
--- 013's rows-engine body, verbatim, under its own name so the dual-mode
--- entry point below can delegate to it without duplicating it here.
-CREATE OR REPLACE FUNCTION queen.get_queue_v2_rows(
-    p_queue_name TEXT,
-    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
-RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_queue_id UUID;
-    v_queue_info JSONB;
-    v_partitions JSONB;
-    v_totals JSONB;
-BEGIN
-    -- Get queue info
-    SELECT q.id, jsonb_build_object(
-        'id', q.id,
-        'name', q.name,
-        'namespace', q.namespace,
-        'task', q.task,
-        'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-    )
-    INTO v_queue_id, v_queue_info
-    FROM queen.queues q
-    WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
-    
-    IF v_queue_id IS NULL THEN
-        RETURN jsonb_build_object('error', 'Queue not found');
-    END IF;
-    
-    -- Get partitions with pre-computed stats
-    -- Aggregate across ALL consumer groups per partition (MAX for totals since they're the same)
-    WITH partition_stats AS (
-        SELECT 
-            p.id,
-            p.name,
-            p.created_at,
-            -- Use MAX to get the message counts (same for all consumer groups)
-            COALESCE(MAX(s.total_messages), 0) as total,
-            -- Pending/processing may differ per consumer group - use MAX for queue view
-            COALESCE(MAX(s.pending_messages), 0) as pending,
-            COALESCE(MAX(s.processing_messages), 0) as processing,
-            COALESCE(MAX(s.completed_messages), 0) as completed,
-            0 as failed,
-            COALESCE(MAX(s.dead_letter_messages), 0) as dead_letter,
-            MAX(s.oldest_pending_at) as oldest_message,
-            MAX(s.newest_message_at) as newest_message
-        FROM queen.partitions p
-        LEFT JOIN queen.stats s ON s.stat_type = 'partition' 
-            AND s.partition_id = p.id
-        WHERE p.queue_id = v_queue_id
-        GROUP BY p.id, p.name, p.created_at
-    )
-    SELECT 
-        COALESCE(jsonb_agg(
-            jsonb_build_object(
-                'id', id,
-                'name', name,
-                'createdAt', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                'stats', jsonb_build_object(
-                    'total', total,
-                    'pending', pending,
-                    'processing', processing,
-                    'completed', completed,
-                    'failed', failed,
-                    'deadLetter', dead_letter
-                ),
-                'oldestMessage', CASE WHEN oldest_message IS NOT NULL 
-                    THEN to_char(oldest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
-                'newestMessage', CASE WHEN newest_message IS NOT NULL 
-                    THEN to_char(newest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
-            ) ORDER BY name
-        ), '[]'::jsonb),
-        jsonb_build_object(
-            'total', COALESCE(SUM(total), 0),
-            'pending', COALESCE(SUM(pending), 0),
-            'processing', COALESCE(SUM(processing), 0),
-            'completed', COALESCE(SUM(completed), 0),
-            'failed', COALESCE(SUM(failed), 0),
-            'deadLetter', COALESCE(SUM(dead_letter), 0)
-        )
-    INTO v_partitions, v_totals
-    FROM partition_stats;
-    
-    RETURN v_queue_info || jsonb_build_object(
-        'partitions', v_partitions,
-        'totals', v_totals,
-        -- Storage quota (§6.1): retained payload bytes for this queue, from the
-        -- queue's stat row (refreshed at the stats cadence). Scoped implicitly:
-        -- v_queue_id was resolved WHERE tenant_id = p_tenant above.
-        'retainedBytes', COALESCE((SELECT retained_bytes FROM queen.stats
-                                   WHERE stat_type = 'queue' AND queue_id = v_queue_id), 0)
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION queen.get_queue_v2_rows(TEXT, UUID) TO PUBLIC;
-
 DROP FUNCTION IF EXISTS queen.get_queue_v2(TEXT);
+-- Drop the extracted rows-engine body from databases that already applied it.
+DROP FUNCTION IF EXISTS queen.get_queue_v2_rows(TEXT, UUID);
 CREATE OR REPLACE FUNCTION queen.get_queue_v2(
     p_queue_name TEXT,
     p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
@@ -614,20 +472,17 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_queue_id UUID;
-    v_is_seg BOOLEAN;
     v_queue_info JSONB;
     v_partitions JSONB;
     v_totals JSONB;
 BEGIN
-    SELECT q.id, (q.storage = 'segments') INTO v_queue_id, v_is_seg
+    -- Resolve + existence check; the storage discriminator went with the
+    -- deleted rows delegation.
+    SELECT q.id INTO v_queue_id
     FROM queen.queues q WHERE q.name = p_queue_name AND q.tenant_id = p_tenant;
 
     IF v_queue_id IS NULL THEN
         RETURN jsonb_build_object('error', 'Queue not found');
-    END IF;
-
-    IF NOT v_is_seg THEN
-        RETURN queen.get_queue_v2_rows(p_queue_name, p_tenant);
     END IF;
 
     SELECT jsonb_build_object(

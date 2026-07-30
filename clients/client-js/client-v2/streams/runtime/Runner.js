@@ -78,6 +78,17 @@ export class Runner {
     this._loopPromise          = null
     this._flushTimers          = []          // setInterval handles
     this._flushInFlight        = false
+    // Per-partition mutex between the pop/cycle loop and the idle-flush
+    // timer. Both paths are read(state) -> compute -> commit against the
+    // same (query_id, partition_id) state rows; the server's advisory
+    // lock only serialises the COMMITS, so an unsynchronised flush can
+    // read a window's acc, have the cycle emit+delete (or re-upsert) it,
+    // and then emit the same acc again — a duplicate emit (or, with the
+    // opposite interleave, drop a freshly-reduced value). Node is
+    // single-threaded but both paths interleave at await points, which is
+    // exactly where the read->compute->commit race bites. Serialising the
+    // two in-process paths removes the race at its source.
+    this._partitionMutexes     = new Map()   // partitionId -> tail promise
     this._recentPartitions     = new Map()   // partitionId -> { partitionName, touchedAt }
     this._partitionWatermarks  = new Map()   // partitionId -> wmMs (cache; PG is source of truth)
     this._stats = {
@@ -253,9 +264,38 @@ export class Runner {
     }
   }
 
+  // ------------------------------------------------- per-partition mutex
+
+  /**
+   * Run `fn` with the per-partition mutex held (see _partitionMutexes in
+   * the constructor). Implemented as a promise chain per partitionId: each
+   * entrant waits on the previous tail, so the cycle path and the
+   * idle-flush path can never interleave their read->compute->commit
+   * sections for the same partition. The returned promise settles like
+   * `fn()` (errors propagate to the caller); the stored tail never
+   * rejects, so a failed cycle doesn't poison the chain.
+   */
+  _withPartitionLock(partitionId, fn) {
+    const key = partitionId || 'unknown'
+    const tail = this._partitionMutexes.get(key) || Promise.resolve()
+    const run = tail.then(fn)
+    const next = run.then(() => {}, () => {})
+    this._partitionMutexes.set(key, next)
+    next.then(() => {
+      // GC: drop the entry once the chain drains.
+      if (this._partitionMutexes.get(key) === next) this._partitionMutexes.delete(key)
+    })
+    return run
+  }
+
   // ----------------------------------------------------------- cycle
 
   async _processPartitionCycle(group) {
+    // Mutual exclusion with the idle-flush timer (see _partitionMutexes).
+    return this._withPartitionLock(group.partitionId, () => this._processPartitionCycleInner(group))
+  }
+
+  async _processPartitionCycleInner(group) {
     const stages = this.stream.stages
     const partitionId = group.partitionId
     const partitionName = group.partitionName
@@ -787,6 +827,11 @@ export class Runner {
   }
 
   async _flushPartition(partitionId, partitionName) {
+    // Mutual exclusion with the pop/cycle loop (see _partitionMutexes).
+    return this._withPartitionLock(partitionId, () => this._flushPartitionInner(partitionId, partitionName))
+  }
+
+  async _flushPartitionInner(partitionId, partitionName) {
     const stages = this.stream.stages
     const window = stages.window
 

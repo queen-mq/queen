@@ -139,8 +139,9 @@ ALTER TABLE queen.log_txns SET (
 -- Coordination: cursor / lease / retry state per (partition, group). committed
 -- is the single source of truth for consumption ("everything <= committed is
 -- done"); a leased batch is the span (committed, batch_end]. Replaces the
--- seg-era fold onto queen.partition_consumers (unfolded by 040) — the log
--- engine keys on log_partitions ids, an independent UUID space.
+-- seg-era fold onto the rows engine's coordination table (unfolded by 040,
+-- and that table is gone as of 050) — the log engine keys on log_partitions
+-- ids, an independent UUID space.
 CREATE TABLE IF NOT EXISTS queen.log_consumers (
     partition_id UUID NOT NULL REFERENCES queen.log_partitions(id) ON DELETE CASCADE,
     consumer_group TEXT NOT NULL DEFAULT '__QUEUE_MODE__',

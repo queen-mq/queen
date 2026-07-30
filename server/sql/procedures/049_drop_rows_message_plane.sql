@@ -18,24 +18,23 @@
 -- dynamic over pg_proc, so overloads each get their own DROP and a database that
 -- never had them is a no-op.
 --
--- What is deliberately NOT dropped:
---   * The rows TABLES (queen.messages, queen.partitions, queen.partition_lookup,
---     queen.dead_letter_queue, queen.partition_consumers). Management readers
---     still consult them — the DLQ listing unions the old dead-letter table with
---     the log engine's own — and reference/compatibility documents them as
---     surviving with their contents intact. Dropping data is not a cleanup.
---   * The rows MANAGEMENT plane (007-015, 017-020, 022): configure, consumer
---     groups, stats readers, worker metrics, traces, streams register/state. It
---     was never rows-specific — it reads queen.queues / queen.stats /
---     queen.worker_metrics, which both engines share.
---   * The dead stats-aggregation functions inside 013_stats.sql
---     (compute_partition_stats_v1/v2/v3, aggregate_queue_stats_v1/v2,
---     cleanup_orphaned_stats_v1/v2, refresh_all_stats_v1, is_stats_leader,
---     increment_message_counts_v1). They became unreachable when
---     POST /api/v1/stats/refresh stopped calling the rows reconciler, but they
---     live in a file whose OTHER functions are load-bearing, so removing them is
---     surgery inside a live file rather than a file deletion. Left for a
---     follow-up so this change stays mechanical.
+-- The follow-up this file's first version deferred has landed in the same
+-- change, so the roster below is larger than the eleven deleted files: it also
+-- covers the functions that were removed from files that SURVIVE. Deleting a
+-- definition from a file only stops fresh databases from getting it; a database
+-- that already applied the old file keeps the function, with a body that now
+-- references tables 050 is about to drop. Those orphans are boot-safe (plpgsql
+-- bodies are not tracked dependencies) but they are exactly the kind of thing
+-- that greets someone with a 42P01 a year from now, so they go here too:
+--   * the twelve unreachable stats functions from 013_stats.sql, dead since
+--     POST /api/v1/stats/refresh stopped calling the rows reconciler;
+--   * get_message_v1 (010) and get_queue_messages_v1 (009), both zero-caller.
+--
+-- What is deliberately NOT dropped: the rows MANAGEMENT plane (007-015, 017-020,
+-- 022) — configure, consumer groups, stats readers, worker metrics, traces,
+-- streams register/state. None of it was rows-specific: it reads queen.queues /
+-- queen.stats / queen.worker_metrics, tables the log engine owns outright now.
+-- The rows TABLES are dropped, by 050, which runs after this file.
 --
 -- NO CASCADE, unlike 040. There is nothing left that legitimately depends on
 -- these, so a dependency error here is information: it means the closure was
@@ -70,7 +69,20 @@ BEGIN
           'update_partition_lookup_v1', 'reconcile_partition_lookup_v1',
           -- 021_streams_cycle_v1.sql (queen.streams_cycle_v1; the live one is
           -- queen.log_streams_cycle_v1 in 046, a different name)
-          'streams_cycle_v1'
+          'streams_cycle_v1',
+          -- Removed from files that survive (see the header). 013_stats.sql:
+          -- the rows stats reconciler and everything only it called.
+          'refresh_all_stats_v1', 'is_stats_leader', 'increment_message_counts_v1',
+          'compute_partition_stats_v1', 'compute_partition_stats_v2',
+          'compute_partition_stats_v3', 'compute_partition_stats_chunk_v1',
+          'aggregate_queue_stats_v1', 'aggregate_queue_stats_v2',
+          'aggregate_system_stats_v1',
+          'cleanup_orphaned_stats_v1', 'cleanup_orphaned_stats_v2',
+          -- 010_messages.sql / 009_status.sql: zero-caller readers.
+          -- NB: list_messages_v1, get_dlq_messages_v1, get_analytics_v1 and the
+          -- other names 047/048 redefine are NOT here — those are LIVE, owned by
+          -- the log files, and dropping them would take the live definition out.
+          'get_message_v1', 'get_queue_messages_v1'
       ]);
 
     IF v_drops IS NOT NULL THEN

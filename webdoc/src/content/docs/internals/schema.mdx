@@ -17,21 +17,24 @@ sourceOfTruth:
   - server/sql/procedures/047_log_admin.sql
   - server/sql/procedures/048_log_stats.sql
   - server/sql/procedures/049_drop_rows_message_plane.sql
+  - server/sql/procedures/050_drop_rows_tables.sql
+  - server/sql/procedures/051_log_partition_counters.sql
   - server/src/schema.rs
 ---
 
 Everything here lives in the PostgreSQL schema `queen`, created by `server/sql/schema.sql`. That
-file plus 24 files under `server/sql/procedures/` are embedded in the binary with `include_str!` and
+file plus 26 files under `server/sql/procedures/` are embedded in the binary with `include_str!` and
 applied at every boot in lexical order under session advisory lock `778120010`. All of it is
 idempotent, so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the step entirely.
 
 The engine needs `CREATE SCHEMA` and **no extensions**.
 
-The files numbered `040`–`048` are the log engine, and `049` drops what the rows engine left behind.
-The surviving files in the `007`–`022` range are the shared management plane: configure, consumer
-groups, stats readers, metrics, traces, streams. A subset of their procedures is superseded by later
-redefinitions, which is why they are still applied. The rows engine's own message plane (`001`–`006`,
-`016`, `021`) was deleted. See [Retired objects](/internals/legacy).
+The files numbered `040`–`048` are the log engine. `049` and `050` drop what the rows engine left
+behind — its functions and then its tables — and `051` attaches the partition-lifecycle counters to
+`queen.log_partitions` once both have run. The surviving files in the `007`–`022` range are the
+shared management plane: configure, consumer groups, stats readers, metrics, traces, streams. A
+subset of their procedures is superseded by later redefinitions, which is why they are still applied.
+The rows engine is gone entirely as of 2026-07-30. See [Retired objects](/internals/legacy).
 
 <Aside type="note">
 The SQL is `include_str!`-embedded at compile time. Editing a `.sql` file and restarting is not
@@ -312,7 +315,30 @@ applied the files before they were deleted; on a fresh database it is a no-op.
 
 Unlike `040` it uses **no `CASCADE`**. Nothing should depend on these any more, so a dependency error
 is information rather than an obstacle. Better a loud boot failure than a silently amputated
-dependant. The rows *tables* are deliberately left alone.
+dependant.
+
+### 050_drop_rows_tables.sql (teardown)
+
+Defines no functions. Drops the six rows-engine tables — `messages`, `partitions`,
+`partition_consumers`, `dead_letter_queue`, `messages_consumed`, `partition_lookup` — after first
+detaching every foreign key that pointed at them from a table that SURVIVES (`stats`,
+`retention_history`, `message_traces`), by name and then by a `pg_constraint` sweep so an
+older schema's differently-named constraint cannot block the drop. Those three keep their
+`partition_id` / `message_id` COLUMNS, which now carry log-engine ids. `CASCADE` is used on the
+`DROP TABLE`s themselves, deliberately: the six reference each other, so dropping the set in full
+with `CASCADE` is exact rather than lazy.
+
+### 051_log_partition_counters.sql (triggers)
+
+Defines no functions; attaches `trg_partitions_created_counter` and
+`trg_partitions_deleted_counter` to `queen.log_partitions`. It is a separate file for two reasons.
+`014`, where the trigger functions live, is applied *before* `041` creates the table, so an
+attachment there is skipped on the whole first boot of a fresh database. And the attachment is
+**conditional on the trigger being absent**: `DROP TRIGGER` takes `ACCESS EXCLUSIVE` and
+`CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on the engine's hottest table, so re-running the pair
+every boot would stall every push and pop behind each rolling restart. The trade-off is that
+changing a trigger *definition* needs a manual drop; changing the *function body* still takes effect
+on restart, since `CREATE OR REPLACE FUNCTION` rebinds it without touching the table.
 
 ## Advisory locks
 

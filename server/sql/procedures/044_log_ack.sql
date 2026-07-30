@@ -6,8 +6,12 @@
 --   queen.log_ack_by_hash_v1       hash-resolved ack (port of seg_ack_by_txn_v1)
 --   queen.log_renew_lease_v1       renew every live lease of a worker
 --   queen.log_dlq_head_v1          file the poison frame + advance past it
---   queen.get_dlq_messages_v1      DLQ browsing (broker: db::get_dlq_messages)
 --   queen.log_transaction_wire_v1  atomic push+ack (port of seg_transaction_wire_v1)
+--
+-- get_dlq_messages_v1 used to be defined here too; it is gone. 047_log_admin.sql
+-- applies AFTER this file and CREATE OR REPLACEs the same (JSONB) signature, so
+-- this copy was overwritten at every boot and never ran. 047 owns it (and its
+-- GRANT) now.
 --
 -- Positions are single per-partition BIGINT offsets. The consumer cursor is
 -- queen.log_consumers.committed = LAST ACKED offset (next wanted = committed+1);
@@ -833,68 +837,12 @@ BEGIN
 END;
 $$;
 
--- ============================================================================
--- get_dlq_messages_v1 — DLQ browsing for /api/v1/dlq (broker:
--- db::get_dlq_messages). Port of the 099 (segments-only) redefinition over
--- queen.log_dlq: payload snapshots live in the DLQ row itself (no segment
--- join); retryCount is the snapshot taken at dead-letter time; createdAt: the
--- original enqueue time is not recoverable per frame from an opaque blob →
--- failed_at (the DLQ event time); producerSub: not tracked → null. Same JSON
--- keys as the rows-era 010 version — the wire contract (§11) is unchanged.
--- Defined here (not 047) because it is part of the broker's DLQ workflow:
--- dlq list → re-push → delete the snapshot.
--- ============================================================================
-CREATE OR REPLACE FUNCTION queen.get_dlq_messages_v1(p_filters JSONB DEFAULT '{}'::jsonb)
-RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_queue TEXT;
-    v_consumer_group TEXT;
-    v_limit INTEGER;
-    v_offset INTEGER;
-BEGIN
-    v_queue := p_filters->>'queue';
-    v_consumer_group := p_filters->>'consumerGroup';
-    v_limit := COALESCE((p_filters->>'limit')::integer, 100);
-    v_offset := COALESCE((p_filters->>'offset')::integer, 0);
-
-    RETURN (
-        SELECT jsonb_build_object(
-            'messages', COALESCE(jsonb_agg(t.msg ORDER BY t.failed_at DESC), '[]'::jsonb),
-            'pagination', jsonb_build_object(
-                'limit', v_limit,
-                'offset', v_offset
-            )
-        )
-        FROM (
-            SELECT d.failed_at,
-                   jsonb_build_object(
-                       'id', d.id,
-                       'transactionId', d.transaction_id,
-                       'partitionId', d.partition_id,
-                       'queue', lq.name,
-                       'partition', lp.name,
-                       'consumerGroup', d.consumer_group,
-                       'errorMessage', d.error,
-                       'retryCount', COALESCE(d.retry_count, 0),
-                       'data', d.payload,
-                       'producerSub', NULL,
-                       'createdAt', to_char(d.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                       'failedAt', to_char(d.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                   ) AS msg
-            FROM queen.log_dlq d
-            JOIN queen.log_partitions lp ON lp.id = d.partition_id
-            JOIN queen.log_queues lq ON lq.id = lp.queue_id
-            WHERE (v_queue IS NULL OR lq.name = v_queue)
-              AND (v_consumer_group IS NULL OR d.consumer_group = v_consumer_group)
-        ) t
-        LIMIT v_limit OFFSET v_offset
-    );
-END;
-$$;
-
-GRANT EXECUTE ON FUNCTION queen.get_dlq_messages_v1(JSONB) TO PUBLIC;
+-- get_dlq_messages_v1 (DLQ browsing for /api/v1/dlq) was defined here, between
+-- log_dlq_head_v1 and the transaction wire, because it is part of the broker's
+-- DLQ workflow. It is DELETED: 047_log_admin.sql applies later in the boot
+-- sequence (server/src/schema.rs) and CREATE OR REPLACEs the identical (JSONB)
+-- signature, so this body was dead on arrival every boot. 047 carries the live
+-- definition and the GRANT (dropped here with it).
 
 -- ============================================================================
 -- log_transaction_wire_v1 — atomic push+ack for log queues (wire form: blobs
@@ -944,10 +892,12 @@ GRANT EXECUTE ON FUNCTION queen.get_dlq_messages_v1(JSONB) TO PUBLIC;
 --      lock spaces can never form a cross-space cycle.
 --
 -- Mixed-engine guard: a queue that exists in queen.queues with
--- storage <> 'segments' may not appear here (its data lives in queen.messages;
--- combining engines in one atomic batch is a broker bug). The /configure
--- contract keeps the value 'segments' for log queues (§11). Queues absent from
--- queen.queues are allowed — the log side provisions lazily like push does.
+-- storage <> 'segments' may not appear here (combining engines in one atomic
+-- batch was a broker bug). The rows engine and its message plane are gone, so
+-- every queue is 'segments' and the /configure contract keeps it that way
+-- (§11) — the guard survives only as a cheap assertion, it can no longer fire.
+-- Queues absent from queen.queues are allowed — the log side provisions lazily
+-- like push does.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION queen.log_transaction_wire_v1(p JSONB)
 RETURNS JSONB
@@ -968,8 +918,8 @@ DECLARE
     v_hashes BYTEA[];
     v_statuses TEXT[];
     -- Track B (§5): the tenant travels inside the wire payload (`_tenant` key), so
-    -- the (JSONB) signature is unchanged and 047's get_dlq redefinition still
-    -- supersedes 044's. Absent ⇒ default tenant (byte-identical to pre-Track-B).
+    -- the (JSONB) signature is unchanged (the broker binds by signature).
+    -- Absent ⇒ default tenant (byte-identical to pre-Track-B).
     v_tenant UUID := COALESCE((p->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
 BEGIN
     -- Guard: no push may target a rows-engine queue (of THIS tenant).

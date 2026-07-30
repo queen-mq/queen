@@ -137,6 +137,13 @@ type Runner struct {
 	flushDone       chan struct{}
 	watermarks      map[string]int64
 	recent          map[string]string
+	// partLocks serialises the pop/cycle loop against the idle-flush goroutine
+	// per partition. Both paths do read(state) -> compute -> commit against the
+	// same (query_id, partition_id) rows; the server's advisory lock only
+	// serialises the COMMITS, so an unsynchronised flush can re-emit a window
+	// the cycle just emitted+deleted (duplicate) or clobber a freshly-reduced
+	// accumulator (drop). Guarded by mu.
+	partLocks map[string]*sync.Mutex
 }
 
 // NewRunner constructs a Runner around a compiled stream.
@@ -165,6 +172,7 @@ func NewRunner(stream *CompiledStream, opts RunOptions) *Runner {
 		consumerGroup: cg,
 		watermarks:    map[string]int64{},
 		recent:        map[string]string{},
+		partLocks:     map[string]*sync.Mutex{},
 	}
 }
 
@@ -258,7 +266,12 @@ func (r *Runner) loop(ctx context.Context) {
 				return
 			}
 			r.touchPartition(g.PartitionID, g.PartitionName)
-			if err := r.processCycle(ctx, g); err != nil {
+			// Mutual exclusion with the idle-flush goroutine (see partLocks).
+			l := r.partitionLock(g.PartitionID)
+			l.Lock()
+			err := r.processCycle(ctx, g)
+			l.Unlock()
+			if err != nil {
 				r.reportError(err, "cycle")
 			} else {
 				r.mu.Lock()
@@ -342,6 +355,35 @@ func (r *Runner) groupByPartition(messages []Message) []partitionGroup {
 		out = append(out, *g)
 	}
 	return out
+}
+
+// partitionLock returns the mutex serialising cycle vs idle-flush work for one
+// partition, creating it on first use.
+func (r *Runner) partitionLock(pid string) *sync.Mutex {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l, ok := r.partLocks[pid]
+	if !ok {
+		l = &sync.Mutex{}
+		r.partLocks[pid] = l
+	}
+	return l
+}
+
+// getWatermark / setWatermark guard the watermarks map, which is touched by
+// both the cycle goroutine and the flush goroutine (possibly for different
+// partitions at once — a per-partition lock does not make the shared map safe).
+func (r *Runner) getWatermark(pid string) (int64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v, ok := r.watermarks[pid]
+	return v, ok
+}
+
+func (r *Runner) setWatermark(pid string, v int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.watermarks[pid] = v
 }
 
 func (r *Runner) touchPartition(pid, pname string) {
@@ -608,13 +650,13 @@ func (r *Runner) processStatelessWindow(ctx context.Context, stages Stages, envs
 	if w.EventTime() != nil {
 		if row, ok := loaded[watermarkStateKey].(map[string]interface{}); ok {
 			if v, ok := row["eventTimeMs"].(float64); ok {
-				r.watermarks[pid] = int64(v)
+				r.setWatermark(pid, int64(v))
 			}
 		}
 	}
 
 	var annotated []operators.Envelope
-	wmExisting := r.watermarks[pid]
+	wmExisting, _ := r.getWatermark(pid)
 	maxObserved := int64(-1 << 62)
 	dropped := int64(0)
 
@@ -662,7 +704,7 @@ func (r *Runner) processStatelessWindow(ctx context.Context, stages Stages, envs
 				advanced = cand
 			}
 		}
-		r.watermarks[pid] = advanced
+		r.setWatermark(pid, advanced)
 		clock = advanced
 	} else {
 		var pt int64 = -1 << 62
@@ -679,7 +721,7 @@ func (r *Runner) processStatelessWindow(ctx context.Context, stages Stages, envs
 	res := reducer.Run(annotated, loaded, clock, w.OperatorTag(), w.GraceMs())
 
 	if w.EventTime() != nil {
-		if wm, ok := r.watermarks[pid]; ok && wm > int64(-1<<62) {
+		if wm, ok := r.getWatermark(pid); ok && wm > int64(-1<<62) {
 			res.StateOps = append(res.StateOps, operators.StateOp{
 				Type: "upsert", Key: watermarkStateKey,
 				Value: map[string]interface{}{"eventTimeMs": wm},
@@ -739,7 +781,7 @@ func (r *Runner) processSession(ctx context.Context, stages Stages, envs []opera
 	res := w.RunSession(enriched, state, reducer.Fn, initial, now)
 
 	if w.EventTime() != nil {
-		if wm, ok := r.watermarks[pid]; ok && wm > int64(-1<<62) {
+		if wm, ok := r.getWatermark(pid); ok && wm > int64(-1<<62) {
 			res.StateOps = append(res.StateOps, operators.StateOp{
 				Type: "upsert", Key: watermarkStateKey,
 				Value: map[string]interface{}{"eventTimeMs": wm},
@@ -885,7 +927,11 @@ func (r *Runner) flushTick(ctx context.Context) {
 	}
 	r.mu.Unlock()
 	for pid, pname := range partitions {
+		// Mutual exclusion with the pop/cycle loop (see partLocks).
+		l := r.partitionLock(pid)
+		l.Lock()
 		_ = r.flushPartition(ctx, pid, pname)
+		l.Unlock()
 	}
 }
 
@@ -895,7 +941,7 @@ func (r *Runner) flushPartition(ctx context.Context, pid, pname string) error {
 
 	var clock int64
 	if w.EventTime() != nil {
-		clock = r.watermarks[pid]
+		clock, _ = r.getWatermark(pid)
 	} else {
 		clock = time.Now().UnixMilli()
 	}

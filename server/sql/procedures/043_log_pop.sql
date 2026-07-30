@@ -1213,9 +1213,19 @@ $$;
 -- (§7 — the lease_expires_at is already on the consumer row the claim read):
 --
 --   took   — log_pop_v1 returned >0 frames (segments in `meta`, blobs aligned);
---   empty  — 0 frames AND no live foreign lease → the broker CAS-clears the
---            ring entry (epoch-guarded, §4), or on a deferral queue schedules a
---            revisit instead (the broker knows the queue config, never clears);
+--   empty  — 0 frames AND no live foreign lease AND no pending backlog in this
+--            snapshot → the broker CAS-clears the ring entry (epoch-guarded,
+--            §4), or on a deferral queue schedules a revisit instead (the
+--            broker knows the queue config, never clears). A 0-frame candidate
+--            whose snapshot STILL shows pending rows is NOT empty: the claim
+--            was lock-skipped by a concurrent pop transaction (SKIP LOCKED /
+--            advisory guard) — an autoAck winner exposes no lease, so this
+--            snapshot check is the only discriminator. Reporting 'empty' there
+--            let the broker clear a backlogged partition (the epoch-CAS passes
+--            whenever every push predates the group ring, e.g. push-then-drain)
+--            and strand it until the reseed floor — the 2026-07-30 bench-smoke
+--            25-message tail stall. Such a candidate reports 'leased' with a
+--            short horizon instead → bounded re-probe, never a clear;
 --   leased — 0 frames because ANOTHER worker holds a live lease until T → the
 --            broker parks the entry in the wheel at T + pad (NEVER cleared, §7).
 --
@@ -1269,6 +1279,7 @@ DECLARE
     v_pid UUID;
     v_last_off BIGINT;
     v_lease TIMESTAMPTZ;
+    v_pending BOOLEAN;
 BEGIN
     SELECT id INTO v_qid FROM queen.log_queues WHERE name = p_queue AND tenant_id = p_tenant;
     IF v_qid IS NULL THEN
@@ -1338,7 +1349,30 @@ BEGIN
                     'p', v_name, 's', 'leased',
                     'until', to_char(v_lease, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
             ELSE
-                v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
+                -- 0 frames, no visible foreign lease. If this snapshot still
+                -- shows pending backlog, the claim was lock-skipped by a
+                -- concurrent pop transaction (SKIP LOCKED at the consumer-row
+                -- claim, or the advisory creation guard) — with autoAck the
+                -- winner holds no visible lease, so the snapshot is the ONLY
+                -- discriminator. 'empty' here would let the broker CAS-clear a
+                -- backlogged ring entry (every push that predates the group
+                -- ring leaves epoch untouched, so the CAS passes) and strand
+                -- the partition until the reseed floor (~30s) — the bench-smoke
+                -- "25 short" tail stall. Report a short-horizon 'leased'
+                -- instead: the broker wheels a bounded re-probe (<=1s cap).
+                SELECT (p.last_offset > COALESCE(c.committed, -1)) INTO v_pending
+                FROM queen.log_partitions p
+                LEFT JOIN queen.log_consumers c
+                  ON c.partition_id = p.id AND c.consumer_group = p_group
+                WHERE p.queue_id = v_qid AND p.name = v_name;
+                IF COALESCE(v_pending, FALSE) THEN
+                    v_states := v_states || jsonb_build_object(
+                        'p', v_name, 's', 'leased',
+                        'until', to_char(v_now + interval '250 milliseconds',
+                                         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                ELSE
+                    v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
+                END IF;
             END IF;
         END IF;
     END LOOP;
