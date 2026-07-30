@@ -49,6 +49,11 @@
         Push
         <span v-if="pushMaintenanceMode" class="pulse-amber" style="width:5px; height:5px;" />
       </button>
+      <button @click="togglePopMaintenance" :disabled="popLoading" class="maint-btn" :class="{ on: popMaintenanceMode }">
+        <svg style="width:14px; height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5"/></svg>
+        Pop
+        <span v-if="popMaintenanceMode" class="pulse-ember" style="width:5px; height:5px;" />
+      </button>
     </div>
 
   </header>
@@ -177,6 +182,7 @@ const bufferedMessages = ref(0)
 const failedCount = ref(0)
 const failedMB = ref(0)
 const pushLoading = ref(false)
+const popLoading = ref(false)
 // `null` until a successful read: the banners below must never claim "no
 // maintenance, 0 buffered" off a FAILED fetch. The refs used to default to
 // false/0 with `|| false` coercions on top, so an unreachable (or, for a
@@ -230,6 +236,33 @@ const togglePushMaintenance = async () => {
     // the value the click optimistically implied.
     await loadMaintenanceStatus()
   } finally { pushLoading.value = false }
+}
+
+// The other half of the same switch. The GET above already reports
+// `popMaintenanceMode`, so this state was VISIBLE in the banner long before it
+// was operable — the proxy classified the push endpoint as operator-reachable
+// and its pop sibling as blocked, which left an operator able to watch pop
+// maintenance and unable to leave it. Both are on the operator list now
+// (queen_proxy/src/routes.rs is_operator_route).
+//
+// Pop maintenance is the harsher of the two: pushes under push maintenance are
+// spooled to disk and drain later, but a paused pop returns nothing to a
+// consumer that is asking, on every tenant on this cell. Hence the blunter
+// confirmation.
+const togglePopMaintenance = async () => {
+  if (popLoading.value || !isOperator.value) return
+  const enable = !popMaintenanceMode.value
+  if (enable && !confirm('Enable POP maintenance on this CELL?\n\nConsumers for EVERY tenant on this cell will stop receiving messages. Nothing is lost — nothing is delivered until this is turned off.')) return
+  popLoading.value = true
+  try {
+    const r = await operator.setPopMaintenance(enable)
+    popMaintenanceMode.value = r.data.popMaintenanceMode === true
+    maintenanceKnown.value = true
+    notifySuccess(enable ? 'POP maintenance enabled on this cell' : 'POP maintenance disabled')
+  } catch (e) {
+    notifyError(e, 'Could not change POP maintenance')
+    await loadMaintenanceStatus()
+  } finally { popLoading.value = false }
 }
 
 onMounted(() => {

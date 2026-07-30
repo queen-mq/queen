@@ -47,10 +47,21 @@ fn is_operator_route(p: &str) -> bool {
             | "/api/v1/analytics/system-metrics"
             | "/api/v1/analytics/worker-metrics"
             | "/api/v1/analytics/postgres-stats"
-            // GET reads the flag, POST flips it; both are the same operator
-            // page. `/system/maintenance/pop` and `/system/shared-state` are
-            // NOT here and stay blocked.
+            // The two maintenance kill switches. GET reads the flag, POST flips
+            // it; both halves of both switches are the same operator page.
+            //
+            // `/maintenance/pop` was blocked here while `/maintenance` was not,
+            // which left the console able to SEE pop maintenance — the push
+            // endpoint reports `popMaintenanceMode` too, so the banner lit —
+            // and unable to turn it off. Same blast radius as the push switch
+            // (cell-wide, every tenant), same gate in front of it: a live
+            // operator principal AND `QUEEN_PROXY_OPERATOR_ENABLED` on the cell.
+            // Splitting them protected nothing and stranded an operator inside
+            // a state they could watch but not leave.
+            //
+            // `/system/shared-state` is still NOT here and stays blocked.
             | "/api/v1/system/maintenance"
+            | "/api/v1/system/maintenance/pop"
             | "/metrics/prometheus"
     )
 }
@@ -222,9 +233,9 @@ mod tests {
 
     /// The operator subset is a CLOSED list. Anything not on it that used to
     /// be blocked must still be blocked — the whole point of the per-cell flag
-    /// is that turning it on widens the surface by exactly these seven paths.
+    /// is that turning it on widens the surface by exactly these eight paths.
     #[test]
-    fn operator_subset_is_exactly_the_agreed_seven() {
+    fn operator_subset_is_exactly_the_agreed_eight() {
         for p in [
             "/api/v1/status",
             "/api/v1/status/buffers",
@@ -232,14 +243,36 @@ mod tests {
             "/api/v1/analytics/worker-metrics",
             "/api/v1/analytics/postgres-stats",
             "/api/v1/system/maintenance",
+            "/api/v1/system/maintenance/pop",
             "/metrics/prometheus",
         ] {
             assert_eq!(classify(&Method::GET, p), RouteClass::Operator, "{p}");
         }
-        // POST /api/v1/system/maintenance is the same page's write half.
+        // Both switches' write halves belong to the same operator page.
+        for p in ["/api/v1/system/maintenance", "/api/v1/system/maintenance/pop"] {
+            assert_eq!(classify(&Method::POST, p), RouteClass::Operator, "POST {p}");
+        }
+    }
+
+    /// The pop switch is reachable, but only on the same terms as the push one:
+    /// an operator on a cell with the flag on. Nothing here says a TENANT may
+    /// touch it — that is `auth::authorize`'s job, and `RouteClass::Operator`
+    /// is what makes it ask.
+    #[test]
+    fn pop_maintenance_is_operator_not_open() {
+        for m in [Method::GET, Method::POST] {
+            assert_eq!(
+                classify(&m, "/api/v1/system/maintenance/pop"),
+                RouteClass::Operator,
+                "{m} pop maintenance"
+            );
+            assert_ne!(classify(&m, "/api/v1/system/maintenance/pop"), RouteClass::Read);
+            assert_ne!(classify(&m, "/api/v1/system/maintenance/pop"), RouteClass::QueueAdmin);
+        }
+        // Its neighbour did not come along for the ride.
         assert_eq!(
-            classify(&Method::POST, "/api/v1/system/maintenance"),
-            RouteClass::Operator
+            classify(&Method::GET, "/api/v1/system/shared-state"),
+            RouteClass::Blocked
         );
     }
 
@@ -255,8 +288,7 @@ mod tests {
             "/api/v1/pop/",
             "/metrics",
             "/status",
-            // neighbours of the one allowed /system path
-            "/api/v1/system/maintenance/pop",
+            // neighbour of the two allowed /system paths
             "/api/v1/system/shared-state",
         ] {
             assert_eq!(classify(&Method::GET, p), RouteClass::Blocked, "{p}");

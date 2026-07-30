@@ -14,9 +14,8 @@ import client from './client'
 //
 // Routes the proxy blocks for EVERY principal — /api/v1/stats/refresh,
 // /internal/*, discovery GET /api/v1/pop, bare /metrics,
-// /api/v1/system/maintenance/pop, /api/v1/system/shared-state — are not
-// declared here at all. Declaring one only produces a 404 the UI has to
-// explain away.
+// /api/v1/system/shared-state — are not declared here at all. Declaring one
+// only produces a 404 the UI has to explain away.
 // ===========================================================================
 
 // ============================================
@@ -145,10 +144,19 @@ export const operator = {
   getWorkerMetrics: (params, config) =>
     client.get('/api/v1/analytics/worker-metrics', { params, ...config }),
   getPostgresStats: (config) => client.get('/api/v1/analytics/postgres-stats', config),
-  /** Push maintenance: GET reads the flag, POST flips it. Cell-wide kill switch. */
+  /**
+   * The two maintenance kill switches, both cell-wide (every tenant on the
+   * cell, not just yours). GET reads a flag, POST flips it.
+   *
+   * `getMaintenance` reports BOTH flags — `maintenanceMode` and
+   * `popMaintenanceMode` — so the header banners need only this one call;
+   * `setPopMaintenance` is the pop switch's write half.
+   */
   getMaintenance: (config) => client.get('/api/v1/system/maintenance', config),
   setMaintenance: (enabled, config) =>
     client.post('/api/v1/system/maintenance', { enabled }, config),
+  setPopMaintenance: (enabled, config) =>
+    client.post('/api/v1/system/maintenance/pop', { enabled }, config),
   getPrometheus: (config) =>
     client.get('/metrics/prometheus', { responseType: 'text', ...config }),
 }
