@@ -109,7 +109,7 @@ practice a deployment sets variables from these groups only.
 Two conventions in that list are worth stating explicitly.
 
 `LOG_LEVEL` accepts the full `EnvFilter` syntax, not just a bare level:
-`info,queen_seg::pop=debug` works. `RUST_LOG` takes precedence over it, and an
+`info,queen::pop=debug` works. `RUST_LOG` takes precedence over it, and an
 unparseable filter falls back to `info`.
 
 `PG_DATABASE` resolves through a non-empty chain (`PG_DATABASE`, then the

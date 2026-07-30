@@ -29,7 +29,7 @@ services:
       retries: 40
 
   broker:
-    image: queen-seg:test
+    image: queen:test
     depends_on:
       pg:
         condition: service_healthy

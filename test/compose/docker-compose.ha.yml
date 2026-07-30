@@ -30,7 +30,7 @@ services:
       retries: 40
 
   queen-a:
-    image: queen-seg:test
+    image: queen:test
     depends_on:
       pg:
         condition: service_healthy
@@ -53,7 +53,7 @@ services:
       - /var/lib/queen/buffers
 
   queen-b:
-    image: queen-seg:test
+    image: queen:test
     depends_on:
       pg:
         condition: service_healthy

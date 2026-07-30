@@ -171,7 +171,7 @@ interpreted.
 The previous Queen broker was a C++ implementation on a different storage engine.
 Version 1.0 is not an update of it, and **there is no data migration**.
 
-- The `queen-seg migrate` subcommand exists only to say so. It logs that migration
+- The `queen migrate` subcommand exists only to say so. It logs that migration
   is not supported on the log engine and exits 1 without opening a database
   connection.
 - The current engine's data lives in `queen.log_queues`, `log_partitions`,

@@ -210,7 +210,7 @@ pub async fn handle_delete_queue(
             o.insert("deleted".to_string(), serde_json::json!(false));
             o.insert(
                 "message".to_string(),
-                serde_json::json!("Queue not found — nothing was deleted"),
+                serde_json::json!("Queue not found, nothing was deleted"),
             );
             return json(StatusCode::OK, v.to_string());
         }

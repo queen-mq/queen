@@ -1,18 +1,18 @@
 ---
 title: Credentials and authorization
-description: "Two credential kinds — cluster API keys and proxy-minted user sessions — the OAuth login flow, and the authorization matrix."
+description: "Two credential kinds (cluster API keys and proxy-minted user sessions), the OAuth login flow, and the authorization matrix."
 type: reference
 tier: operate
 sidebar:
   order: 22
   label: Credentials
 sourceOfTruth:
-  - queen_proxy/src/auth.rs
-  - queen_proxy/src/oauth.rs
-  - queen_proxy/src/acting.rs
-  - queen_proxy/src/routes.rs
-  - queen_proxy/src/webapp.rs
-  - queen_proxy/migrations/001_init.sql
+  - proxy/src/auth.rs
+  - proxy/src/oauth.rs
+  - proxy/src/acting.rs
+  - proxy/src/routes.rs
+  - proxy/src/webapp.rs
+  - proxy/migrations/001_init.sql
 ---
 
 The proxy accepts exactly two kinds of credential, and they are not interchangeable.
@@ -22,12 +22,12 @@ from logging in: a proxy-minted JWT, not bound to any cluster, whose permissions
 resolved per cluster at request time.
 
 The credential is spent at the proxy. It is stripped before the request is forwarded,
-and the broker sees only the cell secret — see
+and the broker sees only the cell secret. See
 [Deploying queen_proxy](/selfhost/multi-tenant/proxy).
 
 ## How a credential is read
 
-From the `Authorization` header first, then — for some surfaces — from the session
+From the `Authorization` header first, then, for some surfaces, from the session
 cookie:
 
 <Steps>
@@ -70,7 +70,7 @@ replaces the expired positive one.
 
 An API key can never be an operator, and it can never be retargeted:
 `x-queen-act-cluster` is refused for API keys with a `403` rather than being silently
-ignored — a producer that believes it is writing to cluster B while the proxy routes it
+ignored. A producer that believes it is writing to cluster B while the proxy routes it
 to A is the worse failure.
 
 ## User sessions
@@ -98,7 +98,7 @@ today; the check exists so a future scoped token cannot be retargeted.
 
 Three caches bound how fast a revocation lands: the deny-list at 60 seconds, the
 per-cluster role at 30 seconds, and the operator bit at 30 seconds. When the deny-list
-lookup itself errors — a pool or query failure, not a clean miss — the default is to
+lookup itself errors (a pool or query failure, not a clean miss), the default is to
 **fail open**: a transient pxdb blip must not `401` every session, and the token still
 passed signature and expiry. `QUEEN_PROXY_REVOCATION_STRICT=true` inverts that for
 deployments that would rather lose availability.
@@ -119,7 +119,7 @@ gap: on API paths, a request whose `Sec-Fetch-Mode` is `navigate` is treated as 
 **no** credential. Without it, a hostile page could navigate a logged-in browser to
 `GET /api/v1/pop/queue/orders` and lease a tenant's messages on the cookie alone.
 
-The document surface — the dashboard shell itself — does accept the cookie on a
+The document surface (the dashboard shell itself) does accept the cookie on a
 navigation, because serving static bytes has no state to forge. Non-browser clients
 send no `Sec-Fetch-*` headers and are unaffected either way, as is any request carrying
 an `Authorization` header.
@@ -152,14 +152,14 @@ routes have nothing to redirect to.
 
 What the flow enforces:
 
-- **Signed `state`.** A compact HMAC-SHA256 token — not a JWT — carrying the nonce, the
+- **Signed `state`.** A compact HMAC-SHA256 token, not a JWT, carrying the nonce, the
   validated `next` and a 300-second expiry. The key comes from
   `QUEEN_PROXY_OAUTH_STATE_SECRET`, falling back to the JWT HS secret, falling back to
   a random per-process key. That last fallback works for a single instance and breaks
   behind a load balancer: two processes cannot verify each other's `state`. Set the
   variable on any auth host that is not a single process.
 - **`next` is validated, not trusted.** It must start with a single `/`, must not start
-  with `//` or `/\`, must not contain `://`, and must contain no control characters —
+  with `//` or `/\`, must not contain `://`, and must contain no control characters,
   so a callback cannot be turned into an open redirect.
 - **Verified email only.** Google's `email_verified` and GitHub's primary-and-verified
   email are the only addresses that can link to an existing user. An unverified address
@@ -179,7 +179,7 @@ What the flow enforces:
 2. Otherwise, a verified email matching an existing `users` row → link the identity to
    that user and log in.
 
-3. Otherwise, auto-provision — **only** when `QUEEN_PROXY_AUTOPROVISION=true`. The new
+3. Otherwise, auto-provision, but **only** when `QUEEN_PROXY_AUTOPROVISION=true`. The new
    user is created under the tenant named by `QUEEN_PROXY_AUTOPROVISION_TENANT` (a
    slug), with the `users` and `identities` rows written in one transaction. With
    auto-provision on and no valid tenant slug, the callback answers `500`.
@@ -207,7 +207,7 @@ matched against the principal. This table is the whole policy:
 | `operator` | never | only a **live operator** |
 | `blocked` | never | never |
 
-Refusals are `403 {"code":"forbidden"}` — except for the operator class, which answers
+Refusals are `403 {"code":"forbidden"}`, except for the operator class, which answers
 the same `404` a blocked route gives, so a tenant admin is never told there is a
 capability to go looking for.
 
@@ -223,7 +223,7 @@ Feature gating happens *before* authorization: a plan without `features.streams`
 
 An operator is a `users.is_operator` row **and** `QUEEN_PROXY_OPERATOR_ENABLED=true`
 on the cell. Both, resolved per request. With the flag off, an operator-class route
-`404`s before authentication runs at all — the same answer a hard block gives, with no
+`404`s before authentication runs at all, the same answer a hard block gives, with no
 lookup and no way in.
 
 A live operator is `admin` on every cluster on that cell, membership row or not, and is
@@ -233,7 +233,7 @@ access is logged, sampled to one line per minute with a suppressed count, becaus
 dashboard polls those routes.
 
 Granting it is a `psql` call to `queen_proxy.set_operator(email, true)`. There is
-deliberately no HTTP path — see
+deliberately no HTTP path. See
 [Tenants, clusters and cells](/selfhost/multi-tenant/tenants).
 
 <Aside type="caution">
@@ -245,7 +245,7 @@ code path to them, so there is no bug that can open one.
 ## Acting on a cluster the Host header does not name
 
 The dashboard is served from one hostname for every cluster, so a browser has no DNS
-label to route by. `x-queen-act-cluster` supplies the cluster explicitly — a slug or a
+label to route by. `x-queen-act-cluster` supplies the cluster explicitly, as a slug or a
 cluster UUID:
 
 | Credential | Result |
@@ -272,14 +272,14 @@ into a way to enumerate every tenant's cluster slugs.
 | 404 | `route_blocked` | Blocked route, or an operator route without a live operator |
 | 421 | `cluster_unknown` | The `Host` label matched no cluster |
 
-Bodies are `{"error": "<human>", "code": "<machine>"}`. The codes are load-bearing —
+Bodies are `{"error": "<human>", "code": "<machine>"}`. The codes are load-bearing:
 the SDKs branch on them rather than on message text.
 
 ## Related
 
-- [Quotas and rate limits](/selfhost/multi-tenant/quotas) — the `429` contract and
+- [Quotas and rate limits](/selfhost/multi-tenant/quotas): the `429` contract and
   what the SDKs do with it.
-- [Isolation](/selfhost/multi-tenant/isolation) — why the operator surfaces are gated
+- [Isolation](/selfhost/multi-tenant/isolation): why the operator surfaces are gated
   the way they are.
-- [Broker authentication](/selfhost/security/jwt) — the broker's own JWT, which is a
+- [Broker authentication](/selfhost/security/jwt): the broker's own JWT, which is a
   different mechanism from this one and lives on the other side of the proxy.

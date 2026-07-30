@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Two-tenant isolation over the HA pair, driven DIRECTLY at the brokers with the
 # trusted `x-queen-tenant` header (no proxy in the picture — the proxy's own
-# end-to-end check is queen_proxy/scripts/isolation-smoke.sh).
+# end-to-end check is proxy/scripts/isolation-smoke.sh).
 #
 # Why this exists: every cloud cell runs the broker with QUEEN_TENANCY_HEADER=true
 # behind a mesh pair, so the in-memory discovery layer — the hot-list ring

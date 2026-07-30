@@ -60,7 +60,7 @@ options when they are non-empty strings.
 }
 ```
 
-An empty string is a valid queue name — `queen.configure_queue_v1` creates a row
+An empty string is a valid queue name: `queen.configure_queue_v1` creates a row
 named `''`, and the JavaScript client's own load test relies on it. A missing or
 non-string `queue` is a `400`.
 
@@ -72,7 +72,7 @@ their defaults**, not left as they were.
 <Aside type="danger">
 `/configure` is not a patch. A queue configured with `retentionEnabled: true`
 and then reconfigured with only `leaseTime` loses retention. The same applies to
-`dedupWindowSeconds`, which falls back to **3600** — omitting it on a queue that
+`dedupWindowSeconds`, which falls back to **3600**. Omitting it on a queue that
 had dedup disabled silently re-enables a one-hour dedup window. Always send the
 complete option set you want the queue to have.
 </Aside>
@@ -94,7 +94,7 @@ can predict the behaviour change from setting it.
 | `leaseTime` | `300` (seconds) | Written to `queen.log_queues.lease_time`; the pop path uses `COALESCE(request leaseSeconds, queue lease_time, 60)` for the lease it takes. |
 | `retryLimit` | `3` | The per-(partition, group) retry budget charged by an explicit `failed` ack (`044_log_ack.sql`). Below the limit the batch redelivers; at the limit the head frame is dead-lettered or dropped. |
 | `deadLetterQueue` | `true` | With `dlqAfterMaxRetries`, decides whether an exhausted retry budget writes `queen.log_dlq`. |
-| `dlqAfterMaxRetries` | `true` | See the note below — the two flags are OR-ed. |
+| `dlqAfterMaxRetries` | `true` | See the note below: the two flags are OR-ed. |
 | `delayedProcessing` | `0` (seconds) | Pop visibility: only segments at least this old are delivered. In-flight backlog is bounded by rate × delay. |
 | `windowBuffer` | `0` (seconds) | Pop visibility: if the partition received a segment within this window, the pop delivers **nothing** from that partition. Trades latency for larger batches. |
 | `minPopWaitTime` | `0` (ms, off) | How long a non-empty pop may hold an under-full batch before claiming it, so one commit carries more messages. Clamped by SQL to `[0, 60000]`. |
@@ -122,7 +122,7 @@ and the `/configure` defaults agree.
 `044_log_ack.sql` computes the DLQ switch as
 `COALESCE(dead_letter_queue, true) OR COALESCE(dlq_after_max_retries, true)`.
 Setting only one of them to `false` leaves dead-lettering on. Send both as
-`false` to turn it off — at which point an exhausted retry budget drops the
+`false` to turn it off, at which point an exhausted retry budget drops the
 poison frame instead of quarantining it.
 
 #### maxWaitTimeSeconds deletes messages
@@ -152,15 +152,15 @@ the intent.
 }
 ```
 
-The `options` object echoes the resolved configuration — the values actually
+The `options` object echoes the resolved configuration: the values actually
 stored, after defaulting. Clients assert on `configured === true` and round-trip
 the option keys, so the body is never reshaped by the broker.
 
 After the stored procedure returns, the handler does three more things, in order:
 pins `queen.queues.storage = 'segments'`, upserts the `queen.log_queues` row with
 the resolved `leaseTime`, `retentionSeconds` and `dedupWindowSeconds`, and drops
-this queue's cached lease time — locally, and on mesh peers via a
-`QUEUE_CONFIG_SET` frame — so a `leaseTime` change is visible on the next pop. If
+this queue's cached lease time (locally, and on mesh peers via a
+`QUEUE_CONFIG_SET` frame), so a `leaseTime` change is visible on the next pop. If
 the stored procedure returns a body carrying an `error` key, the handler
 short-circuits before those writes.
 
@@ -250,8 +250,8 @@ on the stats cadence. A queue with no `queen.queues` row answers `404` with
 
 Access level **admin**. Removes, in order, the queue's `queen.log_txns` and
 `queen.log_dlq` rows (neither carries a foreign key, so they are deleted
-explicitly while the partitions still resolve), then the `queen.log_queues` row —
-which cascades to `log_partitions`, `log_segments` and `log_consumers` — plus the
+explicitly while the partitions still resolve), then the `queen.log_queues` row
+(which cascades to `log_partitions`, `log_segments` and `log_consumers`), plus the
 rows-side coordination state and consumer watermarks via
 `queen.delete_queue_v1`.
 
@@ -270,7 +270,7 @@ self-consistent rather than misleading:
   "deleted": false,
   "queue": "nope",
   "existed": false,
-  "message": "Queue not found — nothing was deleted"
+  "message": "Queue not found, nothing was deleted"
 }
 ```
 
@@ -280,7 +280,7 @@ not the status code.
 
 Message traces are **not** deleted. `queen.message_traces` had its foreign keys
 dropped so it could hold traces for both engines, so a queue delete leaves its
-traces behind — see [Traces](/reference/http/traces).
+traces behind. See [Traces](/reference/http/traces).
 
 ## Aggregate listings
 
@@ -298,8 +298,8 @@ nothing has been reconciled yet. Treat a large `statsAge` as "the reconciler is
 not running", not as "the queue is idle".
 
 <Aside type="note">
-`GET /api/v1/resources/overview` has two bodies. For the **default tenant** — which
-is every request when `QUEEN_TENANCY_HEADER` is off — it blends cluster-wide
+`GET /api/v1/resources/overview` has two bodies. For the **default tenant** (which
+is every request when `QUEEN_TENANCY_HEADER` is off), it blends cluster-wide
 lifetime counters from `queen.worker_metrics_summary` and counts
 `queen.queues` without a tenant predicate, so on a shared cell the default-tenant
 overview is cell-wide. For a specific tenant it is re-derived from that tenant's

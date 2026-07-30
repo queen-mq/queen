@@ -541,13 +541,13 @@ function subRouter(file) {
 }
 
 function proxySpec(handlers, structs) {
-  const mainText = repoRead("queen_proxy/src/main.rs");
+  const mainText = repoRead("proxy/src/main.rs");
   const chain = sliceBlock(mainText, "let app = Router::new()", ";");
   const own = parseRouterChain(chain);
 
   const nested = [
-    ...subRouter("queen_proxy/src/oauth.rs").map((r) => ({ ...r, path: `/auth${r.path}` })),
-    ...subRouter("queen_proxy/src/console.rs").map((r) => ({ ...r, path: `/api/console${r.path}` })),
+    ...subRouter("proxy/src/oauth.rs").map((r) => ({ ...r, path: `/auth${r.path}` })),
+    ...subRouter("proxy/src/console.rs").map((r) => ({ ...r, path: `/api/console${r.path}` })),
   ];
 
   const routes = dropTrailingSlashTwins(
@@ -590,7 +590,7 @@ function proxySpec(handlers, structs) {
         version: VERSION,
         summary: "The proxy's own surface: service endpoints, login, and the cluster console.",
         description: [
-          "Generated from `queen_proxy/`'s router at documentation build time.",
+          "Generated from `proxy/`'s router at documentation build time.",
           "",
           "This document covers only the endpoints the proxy *serves*. Every other path is",
           "forwarded to the broker of the cluster addressed by the request's first DNS label,",
@@ -667,7 +667,7 @@ function validate(label, doc) {
 function main() {
   const check = isCheck();
   const brokerFiles = rustFiles("server/src");
-  const proxyFiles = rustFiles("queen_proxy/src");
+  const proxyFiles = rustFiles("proxy/src");
   const handlers = indexHandlers([...brokerFiles, ...proxyFiles]);
   const structs = indexStructs([...brokerFiles, ...proxyFiles]);
 
@@ -713,7 +713,7 @@ function main() {
     description: "How many operations each generated OpenAPI document covers, and how much of each was derived from a Rust type.",
     sources: [
       "server/src/main.rs, server/src/handlers/*.rs (broker)",
-      "queen_proxy/src/{main,console,oauth}.rs (proxy)",
+      "proxy/src/{main,console,oauth}.rs (proxy)",
     ],
     body: lines,
     check,

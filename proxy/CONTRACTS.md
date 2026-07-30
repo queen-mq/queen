@@ -10,7 +10,7 @@ agents work inside this crate. **Read both before writing code.**
    `config.rs`, `CONTRACTS.md`. If your module needs a new AppState field, a
    new config knob, new wiring in main.rs, or a change to the route matrix:
    put the EXACT diff you want in your final report — do not apply it.
-2. **The crate must compile when you finish**: `cargo build` in `queen_proxy/`
+2. **The crate must compile when you finish**: `cargo build` in `proxy/`
    green (dev profile). If you must add a dependency, it must be
    rustls/ring-compatible and cmake-free (no reqwest, no openssl, no aws-lc);
    list it prominently in your report.

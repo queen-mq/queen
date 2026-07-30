@@ -34,7 +34,7 @@ try session advisory lock 737001
   → phase 1: retention rules 1 and 2, per partition, looped until done
   → phase 2: log_txns hash-sidecar purge, per partition, looped until done
   → phase 3: maxWaitTimeSeconds eviction, per eligible partition
-  → phase 4: empty-partition cleanup, batched — at most once a minute
+  → phase 4: empty-partition cleanup, batched, at most once a minute
   → phase 5: metrics purge
 release advisory lock 737001 on every exit path
 ```

@@ -15,7 +15,7 @@ sourceOfTruth:
 ---
 
 A Queen deployment is one process and one database. The broker is a single
-stateless Rust binary (crate `queen-seg-rust`, binary `queen-seg`) that serves
+stateless Rust binary (crate `queen`, binary `queen`) that serves
 HTTP on port 6632 and keeps every byte of state in PostgreSQL. There is no
 broker-local data directory to back up, no coordination service, no sidecar, and
 no message file format on disk.
@@ -27,7 +27,7 @@ and each optional piece is off or inert until you configure it.
 
 | Piece | Required? | What it is |
 | --- | --- | --- |
-| `queen-seg` broker | Yes | One process. Stateless. Scales to 1–3 identical replicas. |
+| `queen` broker | Yes | One process. Stateless. Scales to 1–3 identical replicas. |
 | PostgreSQL | Yes | The only source of truth: messages, offsets, dedup index, queue config, DLQ. |
 | Schema | Applied for you | The DDL and 34 stored-procedure files are compiled into the binary and re-applied idempotently at every boot, under an advisory lock. No migration step, no extensions. |
 | Dashboard | Bundled | The SPA is compiled into the binary with `rust_embed` and served from the router's fallback. There is no static-directory override. |

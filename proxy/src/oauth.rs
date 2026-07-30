@@ -1336,7 +1336,7 @@ fn esc(s: &str) -> String {
 ///
 /// A provider missing here is a provider this deployment did not configure —
 /// `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID` +
-/// `GITHUB_CLIENT_SECRET` (queen_proxy/src/config.rs). Nothing is hidden by
+/// `GITHUB_CLIENT_SECRET` (proxy/src/config.rs). Nothing is hidden by
 /// accident: with neither set, the page is local login only, which is what a
 /// dev cell looks like.
 fn configured_providers(st: &St) -> Vec<(&'static str, &'static str)> {

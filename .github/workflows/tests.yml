@@ -20,19 +20,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build queen-seg:test
+      - name: Build queen:test
         uses: docker/build-push-action@v6
         with:
           context: ./server
           file: ./server/Dockerfile
-          tags: queen-seg:test
-          outputs: type=docker,dest=/tmp/queen-seg-test.tar
+          tags: queen:test
+          outputs: type=docker,dest=/tmp/queen-test.tar
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - uses: actions/upload-artifact@v4
         with:
-          name: queen-seg-test-image
-          path: /tmp/queen-seg-test.tar
+          name: queen-test-image
+          path: /tmp/queen-test.tar
           retention-days: 1
 
   # One cell per suite; each runs its applicable topologies via test/run.sh.
@@ -48,9 +48,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: queen-seg-test-image
+          name: queen-test-image
           path: /tmp
-      - run: docker load -i /tmp/queen-seg-test.tar
+      - run: docker load -i /tmp/queen-test.tar
       - name: ${{ matrix.suite }}
         run: test/run.sh --suite ${{ matrix.suite }} --no-build-broker -j 1
 

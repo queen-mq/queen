@@ -18,7 +18,7 @@ One call, one PostgreSQL transaction, all or nothing. This is how a pipeline sta
 forward: acknowledge the message you just processed **and** write the next stage's message so
 that either both are durable or neither is. Access level **read-write**.
 
-The route exists because the alternative — ack then push, or push then ack — always has a window.
+The route exists because the alternative (ack then push, or push then ack) always has a window.
 Ack first and a crash loses the work; push first and a crash duplicates it. Here both operations
 are inside one commit, so there is no window.
 
@@ -72,7 +72,7 @@ operation object *is* the item:
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `queue` | string | empty string — supply it |
+| `queue` | string | empty string. Supply it |
 | `partition` | string | `"Default"` |
 | `payload` | any JSON value | `{}` when neither `payload` nor `data` is present |
 | `data` | any JSON value | an accepted alias for `payload` |
@@ -96,7 +96,7 @@ rather than failing the parse, and here `traceId` is honoured instead of ignored
 
 `status` is normalised exactly as on the [ack route](/reference/http/ack): `completed`, `retry`
 and `dlq` survive to SQL, anything unrecognised becomes `failed`. `retry` and `dlq` behave
-identically inside a transaction — they are not collapsed to a boolean.
+identically inside a transaction: they are not collapsed to a boolean.
 
 ### How the lease for an ack is found
 
@@ -105,8 +105,8 @@ Acks are validated against the live lease, and the SDK builders put the lease id
 this order:
 
 1. a `leaseId` on the operation itself, if you sent one;
-2. the current lease holder for that `(partition, consumerGroup)`, read from the consumer row —
-   authoritative, because exactly one live lease exists per pair;
+2. the current lease holder for that `(partition, consumerGroup)`, read from the consumer row,
+   which is authoritative because exactly one live lease exists per pair;
 3. the single unambiguous entry in `requiredLeases`, if there is exactly one distinct value.
 
 If no lease information appears anywhere in the request, every ack is treated as a lease-less
@@ -134,8 +134,8 @@ items with the same `transactionId` in the same `(queue, partition)` inside one 
 first-wins. The second is echoed as a result with `duplicate: true`, produces no frame, and does
 **not** roll the transaction back.
 
-Deadlock safety comes from a fixed lock order — partitions ascending, then consumer rows
-ascending — shared with the ordinary push path, so concurrent transactions touching overlapping
+Deadlock safety comes from a fixed lock order (partitions ascending, then consumer rows
+ascending) shared with the ordinary push path, so concurrent transactions touching overlapping
 sets can never form a cycle.
 
 ## Response
@@ -164,7 +164,7 @@ used), `messageId` and `queueName`, plus `duplicate: true` for an intra-bundle d
 results carry `index`, `type: "ack"`, `success`, `transactionId`, `error` and `dlq`.
 
 Because the transaction is all-or-nothing, every element of a successful `results` array says
-`success: true`. Per-operation failure does not exist here — read the top-level `success` first,
+`success: true`. Per-operation failure does not exist here. Read the top-level `success` first,
 and treat `results` as an echo that tells you which message ids were assigned.
 
 Failure keeps the same shape, with the reason at the top level:
@@ -182,7 +182,7 @@ Failure keeps the same shape, with the reason at the top level:
 
 | Code | When |
 | --- | --- |
-| `200` | the call was processed — **including a rollback**, which is `success: false` with an `error` |
+| `200` | the call was processed, **including a rollback**, which is `success: false` with an `error` |
 | `400` | the body is not JSON, `operations` is missing or not an array, or an operation has an unrecognised `type` |
 | `403` | authentication is on and the token has no `read-write` role |
 | `413` | the body exceeds 64 MiB |
@@ -192,13 +192,13 @@ A rolled-back transaction is a `200`. Check `success`, not the status code.
 
 ## It is not exactly-once end to end
 
-The commit is atomic; the round trip is not. If the response is lost — a dropped connection, a
-timeout on your side — you do not know whether the transaction committed. Retrying duplicates the
+The commit is atomic; the round trip is not. If the response is lost (a dropped connection, a
+timeout on your side), you do not know whether the transaction committed. Retrying duplicates the
 pushes **unless** their `transactionId`s are deterministic and the retry arrives inside the
 queue's deduplication window.
 
 The pattern that makes this safe is to derive each pushed `transactionId` from the input you are
-processing rather than generating a fresh UUID — `invoice-for-order-8891`, not `crypto.randomUUID()`.
+processing rather than generating a fresh UUID: `invoice-for-order-8891`, not `crypto.randomUUID()`.
 Then a retried transaction either commits once or aborts on the duplicate, and both end states
 are the same one. With random ids, a retry after a lost response writes the message twice.
 

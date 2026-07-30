@@ -14,9 +14,9 @@ sourceOfTruth:
   - server/src/schema.rs
   - server/src/handlers/static_files.rs
   - app/vite.config.js
-  - queen_proxy/Cargo.toml
-  - queen_proxy/src/webapp.rs
-  - queen_proxy/scripts/dev-cell.sh
+  - proxy/Cargo.toml
+  - proxy/src/webapp.rs
+  - proxy/scripts/dev-cell.sh
   - go.work
   - .gitignore
 ---
@@ -44,7 +44,7 @@ project's is not. That is the main thing this page is for.
   - server.json
   - build.rs
   - Dockerfile
-- queen_proxy/
+- proxy/
   - src/
   - migrations/
   - console/
@@ -73,12 +73,12 @@ project's is not. That is the main thing this page is for.
 
 | Path | What it is |
 | --- | --- |
-| `server/` | The broker. Crate `queen-seg-rust`, binary `queen-seg`. Axum 0.7 + tokio + deadpool-postgres. |
+| `server/` | The broker. Crate `queen`, binary `queen`. Axum 0.7 + tokio + deadpool-postgres. |
 | `server/sql/` | `schema.sql` plus 34 `procedures/*.sql` files. All queue semantics live here, and all of it is embedded in the binary. |
 | `server/webapp/dist/` | The built dashboard the binary embeds. Gitignored, so a clean clone does not have it. |
 | `server/server.json` | Name and version. The single source of the version string. |
-| `queen_proxy/` | The multi-tenant gateway, one per cell. Binary `queen-proxy`, its own PostgreSQL schema under `migrations/`. |
-| `queen_proxy/console/` | The operator console SPA. Unlike the dashboard, its `dist/` **is** committed. |
+| `proxy/` | The multi-tenant gateway, one per cell. Binary `queen-proxy`, its own PostgreSQL schema under `migrations/`. |
+| `proxy/console/` | The operator console SPA. Unlike the dashboard, its `dist/` **is** committed. |
 | `app/` | Vue 3 + Vite dashboard. Builds into `server/webapp/dist`. |
 | `clients/` | Five client SDKs: JavaScript (npm `queen-mq`), Python (PyPI `queen-mq`), Go, PHP/Laravel (Packagist `smartpricing/queen-mq`) and a header-only C++ client. Also `queenctl`, the operator CLI. |
 | `test/` | The Docker Compose test matrix. One entry point, `run.sh`. |
@@ -113,7 +113,7 @@ struct Assets;
 `server/webapp/dist` is gitignored, and `rust_embed` fails at compile time when the folder is
 missing. `app/vite.config.js` sets `outDir` to `../server/webapp/dist`, so building the
 dashboard is what puts it there. The proxy embeds the same directory through
-`queen_proxy/src/webapp.rs` (`#[folder = "../server/webapp/dist"]`) rather than keeping a
+`proxy/src/webapp.rs` (`#[folder = "../server/webapp/dist"]`) rather than keeping a
 second copy, so one dashboard build serves both binaries.
 
 <Steps>
@@ -134,9 +134,9 @@ second copy, so one dashboard build serves both binaries.
    cargo build --release
    ```
 
-   The binary lands at `server/target/release/queen-seg`.
+   The binary lands at `server/target/release/queen`.
 
-3. Build the proxy, if you are touching it. From `queen_proxy/`:
+3. Build the proxy, if you are touching it. From `proxy/`:
 
    ```bash
    cargo build --release
@@ -186,7 +186,7 @@ SQL is always frozen at compile time, in both profiles.
 ## The development loop
 
 For broker work, a container for PostgreSQL and the binary on the host is enough. Give it a
-port that is not one of the reserved ones (`queen_proxy/CONTRACTS.md` reserves 5432, 5455,
+port that is not one of the reserved ones (`proxy/CONTRACTS.md` reserves 5432, 5455,
 5457, 5460, 5464, 6632, 6682, 6690 and 6702 for other local stacks).
 
 <Steps>
@@ -201,7 +201,7 @@ port that is not one of the reserved ones (`queen_proxy/CONTRACTS.md` reserves 5
 2. Run the broker against it. It applies the schema, then binds `PORT` (default 6632).
 
    ```bash
-   PG_HOST=localhost PG_PORT=5433 PG_PASSWORD=postgres ./target/release/queen-seg
+   PG_HOST=localhost PG_PORT=5433 PG_PASSWORD=postgres ./target/release/queen
    ```
 
 3. Confirm. `/health` does a real database round-trip, so a 200 means broker plus PostgreSQL
@@ -214,16 +214,16 @@ port that is not one of the reserved ones (`queen_proxy/CONTRACTS.md` reserves 5
 </Steps>
 
 For anything that involves authentication, tenancy, quotas or 429s, use the proxy's
-development cell instead. `queen_proxy/scripts/dev-cell.sh up` builds both binaries in debug,
+development cell instead. `proxy/scripts/dev-cell.sh up` builds both binaries in debug,
 starts two PostgreSQL containers (the proxy's own state database on 5465 and a cell database
 on 5466), starts the broker on 6710 with `QUEEN_TENANCY_HEADER=true`, starts the proxy on
 6711, and seeds a development tenant, cluster and API key. It writes logs and pid files under
-`queen_proxy/.devcell/`, which is gitignored. The proxy comes up in shadow mode by default;
+`proxy/.devcell/`, which is gitignored. The proxy comes up in shadow mode by default;
 `QUEEN_PROXY_ENFORCE=true scripts/dev-cell.sh up` turns real rate-limit responses on, which
 is what the 429 checks need.
 
 ```bash
-queen_proxy/scripts/dev-cell.sh up
+proxy/scripts/dev-cell.sh up
 ```
 
 The dashboard's own dev server (`npm run dev` in `app/`) listens on 4000 and proxies `/api`,
@@ -238,7 +238,7 @@ There are two Dockerfiles and they are not interchangeable.
 
 | File | Contents | Used by |
 | --- | --- | --- |
-| `server/Dockerfile` | Broker only. Copies `src`, `sql` and a pre-built `webapp` into a `rust:1-bookworm` stage, runs on `debian:bookworm-slim`. | `test/run.sh` and the `tests` CI workflow, tagged `queen-seg:test` |
+| `server/Dockerfile` | Broker only. Copies `src`, `sql` and a pre-built `webapp` into a `rust:1-bookworm` stage, runs on `debian:bookworm-slim`. | `test/run.sh` and the `tests` CI workflow, tagged `queen:test` |
 | `Dockerfile` (root) | Four stages: Node builds the dashboard, Rust builds the broker, Go builds `queenctl`, and an `ubuntu:24.04` runtime carries all three plus the PostgreSQL 18 client tools. | the published image |
 
 `server/Dockerfile` expects `server/webapp/` to already exist in its build context, so it is

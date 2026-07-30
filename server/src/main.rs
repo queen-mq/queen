@@ -70,7 +70,7 @@ async fn main() {
     obs::install_panic_hook();
     let cfg = config::load();
 
-    // Subcommand dispatch: `queen-seg migrate ...` runs the offline rows→segments
+    // Subcommand dispatch: `queen migrate ...` runs the offline rows→segments
     // migration and exits, without ever starting the HTTP server. Kept minimal so
     // the server path below is untouched.
     let args: Vec<String> = std::env::args().collect();
@@ -561,7 +561,7 @@ async fn main() {
                 target: "mesh",
                 port = cfg.sync.mesh_port,
                 error = %e,
-                "TCP mesh bind failed — continuing with local waker only"
+                "TCP mesh bind failed, continuing with local waker only"
             ),
         }
     } else if cfg.sync.enabled {

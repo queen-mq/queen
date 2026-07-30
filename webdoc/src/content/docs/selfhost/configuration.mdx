@@ -46,7 +46,7 @@ while a strict parser with a silent fallback turned `JWT_ENABLED=1` into a broke
 running with authentication **off** and nothing in the log. Refusing to guess is
 the only outcome that is safe in both directions.
 
-Three booleans are read outside `config.rs` and are consulted lazily —
+Three booleans are read outside `config.rs` and are consulted lazily:
 `QUEEN_LOG_JSON`, `QUEEN_APPLY_SCHEMA`, `QUEEN_V2_BUNDLE_LOG`. They are validated
 eagerly at the same moment as everything else, so every boolean mistake in a
 deployment surfaces on the same boot with the same message rather than hours
@@ -54,7 +54,7 @@ later.
 
 <Aside type="caution">
 **Numbers are not strict.** An unparseable integer or float silently resolves to
-its default. `DB_POOL_SIZE=16O` — with a letter O — yields 160, not an error.
+its default. `DB_POOL_SIZE=16O` (with a letter O) yields 160, not an error.
 Several numeric knobs are also clamped after parsing: interval and size knobs are
 floored at 1, and `STATS_INTERVAL_MS` and `METRICS_FLUSH_MS` are floored at
 1000 ms, with a below-floor value raised silently. The protection against a typo
@@ -64,8 +64,8 @@ in a number is the boot block below, not the parser.
 Strings behave differently again: a present-but-empty string is kept verbatim
 rather than treated as unset. That is deliberate, and it is how
 `JWT_SKIP_PATHS=""` clears the default skip list instead of restoring it. The one
-exception is `PG_DATABASE`, which resolves through a non-empty chain —
-`PG_DATABASE`, then the legacy `PG_DB`, then `postgres` — so an explicitly empty
+exception is `PG_DATABASE`, which resolves through a non-empty chain
+(`PG_DATABASE`, then the legacy `PG_DB`, then `postgres`), so an explicitly empty
 value falls through instead of naming a database called `""`.
 
 ## The broker prints its effective configuration
@@ -87,7 +87,7 @@ old value. All three are invisible if you only look at behaviour.
 
 Secrets are masked, never printed. `JWT_SECRET`, `PG_PASSWORD`,
 `QUEEN_ENCRYPTION_KEY` and `QUEEN_SYNC_SECRET` render as `<unset>` or
-`<set:64 chars>` — enough to tell "I forgot to mount the secret" from "I mounted
+`<set:64 chars>`, enough to tell "I forgot to mount the secret" from "I mounted
 the wrong one" without putting key material into a log shipper.
 
 ```bash
@@ -106,7 +106,7 @@ Four things exit 1:
 2. `JWT_ENABLED=true` with no usable key material for the configured algorithm,
    or an algorithm the validator does not recognise. The message names the
    missing credential.
-3. A schema apply failure — unless `QUEEN_APPLY_SCHEMA=0`, which skips the apply
+3. A schema apply failure, unless `QUEEN_APPLY_SCHEMA=0`, which skips the apply
    entirely.
 4. Failure to bind `0.0.0.0:$PORT`.
 
@@ -125,8 +125,8 @@ Note also what a *release* build does with a panic: `Cargo.toml` sets
 `panic = "abort"`, so a panic in any of the broker's detached background loops
 aborts the whole process rather than silently losing one subsystem. A panic hook
 emits a structured `ERROR` on the `panic` target first. Operationally that is the
-behaviour you want — the supervisor restarts the process, and startup recovery
-drains any spooled pushes — but it means "the broker is up" and "every background
+behaviour you want (the supervisor restarts the process, and startup recovery
+drains any spooled pushes), but it means "the broker is up" and "every background
 job is running" are the same statement.
 
 ## The knobs that matter
@@ -143,7 +143,7 @@ In practice a deployment touches variables from these groups only.
 | Accept larger bodies | `QUEEN_MAX_BODY_BYTES` |
 | Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
 | Run more than one broker | `QUEEN_MESH_PEERS`, `QUEEN_MESH_PORT`, `QUEEN_SYNC_SECRET`, `QUEEN_SERVER_ID` |
-| Survive a database outage | `FILE_BUFFER_DIR` — must be writable and persistent |
+| Survive a database outage | `FILE_BUFFER_DIR`, which must be writable and persistent |
 | Change the maintenance cadence | `RETENTION_INTERVAL`, `RETENTION_BATCH_SIZE` |
 | Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY` |
 | Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS`, `QUEEN_LOG_TOPN_QUEUES` |
@@ -151,7 +151,7 @@ In practice a deployment touches variables from these groups only.
 | Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER` |
 
 `LOG_LEVEL` accepts the full `EnvFilter` syntax, not only a bare level:
-`info,queen_seg::pop=debug` works. `RUST_LOG` takes precedence over it, and an
+`info,queen::pop=debug` works. `RUST_LOG` takes precedence over it, and an
 unparseable filter falls back to `info`.
 
 `QUEEN_SERVER_ID` names this instance in mesh heartbeats and peer statistics.
@@ -189,12 +189,12 @@ blog post as a tuning recommendation is not.
 **Read but inert.** `RETENTION_PARALLELISM` is parsed and printed in the boot
 `config: jobs` line, but the log engine's maintenance cycle has no work for it:
 retention runs one bounded step at a time. It is kept for configuration
-compatibility. `PARTITION_CLEANUP_DAYS` used to be in this list and is now live —
-see [Retention and disk](/selfhost/retention).
+compatibility. `PARTITION_CLEANUP_DAYS` used to be in this list and is now live.
+See [Retention and disk](/selfhost/retention).
 
 **Not read at all.** `QUEEN_STATIC_DIR` configures nothing. The dashboard is
 compiled into the binary with `rust_embed` and there is no runtime static-directory
-override, so the published image deliberately does not set the variable — an
+override, so the published image deliberately does not set the variable. An
 environment variable that configures nothing is worse than an absent one.
 
 The full list of every variable with the default the code applies is generated

@@ -66,18 +66,18 @@ The dual-mode procedures are:
 
 `get_dlq_messages_v1` is defined three times across the roster. `047` loads last and wins.
 
-## Tables that stay empty
+## Tables the message plane no longer writes
 
-Created by `schema.sql`, never written by the log engine:
+Created by `schema.sql`, and no longer part of push, pop or ack:
 
-| Table | What it was for |
-| --- | --- |
-| `queen.messages` | one row per message, the rows engine's storage |
-| `queen.partitions` | rows-engine partitions; log partitions live in `queen.log_partitions`, an independent UUID space |
-| `queen.partition_consumers` | rows-engine cursor, lease and retry state |
-| `queen.dead_letter_queue` | rows-engine DLQ; the log engine uses `queen.log_dlq` |
-| `queen.messages_consumed` | rows-engine per-message consumption records |
-| `queen.partition_lookup` | rows-engine per-partition last-message cache, maintained by a trigger on `queen.messages` |
+| Table | What it was for | Still written? |
+| --- | --- | --- |
+| `queen.messages` | one row per message, the rows engine's storage | no |
+| `queen.partitions` | rows-engine partitions; log partitions live in `queen.log_partitions`, an independent UUID space | **yes**, see below |
+| `queen.partition_consumers` | rows-engine cursor, lease and retry state | no |
+| `queen.dead_letter_queue` | rows-engine DLQ; the log engine uses `queen.log_dlq` | no, but read |
+| `queen.messages_consumed` | rows-engine per-message consumption records | no |
+| `queen.partition_lookup` | rows-engine per-partition last-message cache, maintained by a trigger on `queen.messages` | no |
 
 Their indexes and the `update_partition_lookup_trigger` function exist too, and cost nothing on an
 empty table.
@@ -86,6 +86,26 @@ empty table.
 This is why `queen.messages` being empty is not a symptom. A healthy log-engine database has zero
 rows there. Look at `queen.log_segments` instead.
 </Aside>
+
+<Aside type="caution">
+`queen.partitions` is the exception, and it is not empty on a log-engine deployment.
+`configure_queue_v1` still does an unconditional `INSERT INTO queen.partitions (queue_id, name)
+VALUES (v_queue_id, 'Default')`, so **every `/configure` call adds a row** for a partition the engine
+will never use. Measured on a fresh database: one `/configure` leaves `queen.partitions` holding one
+row while `queen.log_partitions` holds none.
+
+Two live surfaces read that phantom count. `aggregate_system_stats_v2` computes system `child_count`
+as `COUNT(queen.partitions)`, which is why `log_refresh_all_stats_v1` has to correct the number
+afterwards. And the `trg_partitions_created_counter` / `trg_partitions_deleted_counter` triggers fire
+on this table, so `queue_lag_metrics.partitions_created`, which `get_queue_ops_v1` surfaces and the
+dashboard's Queue Operations view plots, counts `/configure` calls rather than partitions. It is not
+a dead panel; it is a panel reporting a number that means something other than its label.
+</Aside>
+
+These tables are also not droppable as a cleanup. `get_dlq_messages_v1` unions
+`queen.dead_letter_queue` with `queen.log_dlq`, so on a database upgraded from the rows engine those
+rows are somebody's real dead letters, still listed by the API. Dropping the tables would be a data
+deletion with a behaviour change attached, not a tidy-up.
 
 By contrast, several tables in `schema.sql` are **shared** and very much in use: `queen.queues`
 (the configuration row), `consumer_groups_metadata`, `consumer_watermarks`, `stats`,
@@ -188,7 +208,7 @@ rows have no counterpart in the rows-engine tables the foreign keys pointed at:
 
 ## The migrate subcommand
 
-`queen-seg migrate ...` still exists as a CLI entry point and is a **stub**. It logs that migration is
+`queen migrate ...` still exists as a CLI entry point and is a **stub**. It logs that migration is
 not supported on the log engine and exits non-zero **without opening a database connection**. The
 rows-to-segments migration it used to run was built on SQL that was deleted with the `seg_*` engine.
 

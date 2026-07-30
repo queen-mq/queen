@@ -30,7 +30,7 @@
 #   test/run.sh --suite py --topo single
 #   test/run.sh --suite js --topo tenanted     # flag-ON default-tenant lane
 #   test/run.sh --suite tenancy        # two-tenant isolation over the HA pair
-#   test/run.sh --no-build-broker      # reuse an existing queen-seg:test
+#   test/run.sh --no-build-broker      # reuse an existing queen:test
 #   test/run.sh -j 3                   # cap parallelism (default: 4)
 #   test/run.sh --keep                 # leave stacks up for debugging
 #
@@ -102,8 +102,8 @@ needs_broker=0
 for s in $SUITES; do want_suite "$s" && [ "$s" != "rust" ] && needs_broker=1; done
 
 if [ "$BUILD_BROKER" = 1 ] && [ "$needs_broker" = 1 ]; then
-  echo ">> build queen-seg:test (broker)"
-  ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f server/Dockerfile -t queen-seg:test server ) \
+  echo ">> build queen:test (broker)"
+  ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f server/Dockerfile -t queen:test server ) \
     || { echo "!! broker image build failed"; exit 1; }
 fi
 

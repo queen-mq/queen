@@ -75,10 +75,10 @@ Dockerfiles:
 | Image | Dockerfile | Version from |
 | --- | --- | --- |
 | `ghcr.io/queen-mq/queen` | `Dockerfile` | `server/server.json` |
-| `ghcr.io/queen-mq/queen-proxy` | `queen_proxy/Dockerfile` | `queen_proxy/Cargo.toml` |
+| `ghcr.io/queen-mq/queen-proxy` | `proxy/Dockerfile` | `proxy/Cargo.toml` |
 
 Both build for `linux/amd64` and `linux/arm64` from the repository root: the proxy crate embeds
-`../server/webapp/dist`, so its context cannot be `queen_proxy/`. Each gets three tags: its own
+`../server/webapp/dist`, so its context cannot be `proxy/`. Each gets three tags: its own
 version, `sha-<short>`, and `latest`. The broker also receives `QUEENCTL_VERSION` and
 `QUEENCTL_COMMIT` as build arguments so that `queenctl version` inside the container matches what
 the broker reports.

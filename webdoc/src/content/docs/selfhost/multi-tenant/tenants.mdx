@@ -7,18 +7,18 @@ sidebar:
   order: 21
   label: Data model
 sourceOfTruth:
-  - queen_proxy/migrations/001_init.sql
-  - queen_proxy/migrations/002_functions.sql
-  - queen_proxy/migrations/003_limit_override.sql
-  - queen_proxy/migrations/004_lifecycle.sql
-  - queen_proxy/migrations/006_operator.sql
-  - queen_proxy/src/auth.rs
-  - queen_proxy/src/registry.rs
+  - proxy/migrations/001_init.sql
+  - proxy/migrations/002_functions.sql
+  - proxy/migrations/003_limit_override.sql
+  - proxy/migrations/004_lifecycle.sql
+  - proxy/migrations/006_operator.sql
+  - proxy/src/auth.rs
+  - proxy/src/registry.rs
 ---
 
 Everything the proxy needs to route, authorize, limit and bill a request lives in the
 `queen_proxy` schema of its own PostgreSQL. The proxy reads those tables through a
-30-second cache and never writes the lifecycle ones — mutations go through SQL
+30-second cache and never writes the lifecycle ones: mutations go through SQL
 functions, which is what keeps the audit trail and the cache invalidation from being
 optional.
 
@@ -42,8 +42,8 @@ optional.
 
 `queues` deserves the emphasis on *cache*. The broker owns queue existence; this table
 exists so the proxy can answer "how many queues does this cluster have" without a
-round trip per push. It stores a partition **count**, never partition names — neither
-this table nor the broker's own listing exposes them — which is why the proxy keeps
+round trip per push. It stores a partition **count**, never partition names (neither
+this table nor the broker's own listing exposes them), which is why the proxy keeps
 the exact pairs it admitted in memory and treats the stored count as a floor after a
 restart.
 
@@ -55,8 +55,8 @@ adding a state is a one-line migration.
 | `tenants.status` | `clusters.status` | Effect the proxy applies |
 | --- | --- | --- |
 | `active` | `active` | Everything allowed |
-| `grace` | — | Pushes blocked, consumes allowed |
-| — | `push_blocked` | Pushes blocked, consumes allowed |
+| `grace` | n/a | Pushes blocked, consumes allowed |
+| n/a | `push_blocked` | Pushes blocked, consumes allowed |
 | `suspended` | `suspended` | Whole data plane `403 cluster_suspended` |
 | `deleting` | `deleting` | Same as suspended |
 
@@ -89,7 +89,7 @@ enforces, `NULL` meaning unlimited:
 | `features` | none | none | streams, traces | streams, traces |
 | `monthly_msgs_quota` | `NULL` | `NULL` | `NULL` | `NULL` |
 
-These are the seeds shipped in the migration, not a recommendation — `plans.code` is
+These are the seeds shipped in the migration, not a recommendation. `plans.code` is
 an open catalog key with only a format check, so add your own rows rather than
 reshaping these.
 
@@ -104,7 +104,7 @@ the plan column names one-to-one. The merge has exactly three cases:
 | Key in `limit_overrides` | Effective value |
 | --- | --- |
 | Absent | The plan's value |
-| Present as JSON `null` | Unlimited — this *overrides* a plan cap, it does not fall back to it |
+| Present as JSON `null` | Unlimited. This *overrides* a plan cap, it does not fall back to it |
 | Present as a number | That number |
 | Present as something else | The plan's value (a non-numeric override is ignored, never a silent zero) |
 
@@ -122,7 +122,7 @@ customer is therefore a row update, not a forked plan.
 
 The control-plane contract is: **write only through `queen_proxy.*` functions.** Each
 one validates its input, writes its tables, then calls `record_operation`, which
-appends the audit row and — when a cluster is involved — fires
+appends the audit row and, when a cluster is involved, fires
 `pg_notify('queen_proxy_inval', <cluster_id>)` so every proxy drops that cluster's
 cached entries immediately.
 
@@ -142,14 +142,14 @@ SELECT queen_proxy.bootstrap_tenant(
 ```
 
 It returns `{tenant_id, cluster_id, user_id, api_key}` and composes the individual
-functions, so a `RAISE` anywhere unwinds the whole thing — there is no half-created
+functions, so a `RAISE` anywhere unwinds the whole thing: there is no half-created
 tenant. The `api_key` field is the **plaintext key, shown exactly once**; only its
 sha256 hash is stored.
 
 It is idempotent on the slugs: a re-run returns the existing ids with `api_key` set to
 `null`, because the plaintext cannot be recovered. It still re-asserts the admin role.
-Two collisions are refusals rather than repeats — a cluster slug owned by another
-tenant, and an email that already belongs to another tenant — because both columns are
+Two collisions are refusals rather than repeats: a cluster slug owned by another
+tenant, and an email that already belongs to another tenant. Both columns are
 globally unique.
 
 A password passed here is bcrypt-hashed in the database with `pgcrypto`, at cost 10,
@@ -160,7 +160,7 @@ in a form the login path accepts.
 | Function | Notes |
 | --- | --- |
 | `create_tenant(slug, name)` → uuid | |
-| `create_user(tenant, email, password_hash, provider)` → uuid | Writes `users` only. It does **not** write `identities` — the OAuth login path is what creates those rows, and local password login does not consult them |
+| `create_user(tenant, email, password_hash, provider)` → uuid | Writes `users` only. It does **not** write `identities`: the OAuth login path is what creates those rows, and local password login does not consult them |
 | `create_cluster(tenant, slug, plan_code, cell_id)` → uuid | `broker_tenant_uuid` comes from the column default |
 | `assign_plan(cluster, plan_code)` | |
 | `set_limit_override(cluster, overrides)` | |
@@ -181,7 +181,7 @@ in a form the login path accepts.
 
 `set_operator` has no HTTP path on purpose. The routes an operator may open are
 cell-wide and not tenant-scopable, so if any console endpoint could set that bit, a
-cluster admin could escalate to reading — and pausing — every other tenant on the
+cluster admin could escalate to reading (and pausing) every other tenant on the
 cell. Granting it requires a `psql` session on pxdb.
 
 ## API keys
@@ -191,7 +191,7 @@ CSPRNG. Only `sha256(key)` in lowercase hex is stored, in `api_keys.key_hash`, w
 carries a `CHECK` for that shape. The plaintext exists once, in the response of the
 call that created it.
 
-The `<env>` segment — `live`, `test`, whatever you choose — is **informational**.
+The `<env>` segment (`live`, `test`, whatever you choose) is **informational**.
 Authentication routes on the `qk_` prefix and then matches on the hash alone; nothing
 parses the environment out.
 
@@ -212,7 +212,7 @@ INSERT INTO queen_proxy.cells (slug, region, base_url, class, cell_secret)
 VALUES ('eu1-shared-a', 'eu1', 'http://10.0.3.11:6632', 'shared', '…');
 ```
 
-`base_url` must be `http://` — the registry reconciler refuses anything else, as an
+`base_url` must be `http://`: the registry reconciler refuses anything else, as an
 assertion that broker traffic is cell-internal. `cell_secret` is the bearer token the
 proxy presents upstream, stored in plaintext; see
 [Deploying queen_proxy](/selfhost/multi-tenant/proxy).
@@ -222,7 +222,7 @@ proxy presents upstream, stored in plaintext; see
 Two limitations to plan around, both verifiable by what the code does not read:
 
 - **`create_cluster` takes the cell id as an argument.** Nothing chooses a cell for
-  you — no capacity check, no balancing, no affinity rule. Whoever calls it decides,
+  you: no capacity check, no balancing, no affinity rule. Whoever calls it decides,
   and getting it wrong means a cluster on a cell that cannot carry it.
 - **`cells.status`, `cells.capacity_slots` and `cells.used_slots` are never read by
   any code in the tree.** Setting a cell to `draining` changes nothing: new clusters
@@ -251,9 +251,9 @@ restricts, which is another way of saying: this design expresses tenant lifecycl
 
 ## Related
 
-- [Credentials and authorization](/selfhost/multi-tenant/auth) — what a key or a
+- [Credentials and authorization](/selfhost/multi-tenant/auth): what a key or a
   session can actually do with these rows.
-- [Quotas and rate limits](/selfhost/multi-tenant/quotas) — how each plan column is
+- [Quotas and rate limits](/selfhost/multi-tenant/quotas): how each plan column is
   enforced, and which ones ignore shadow mode.
-- [Usage metering](/selfhost/multi-tenant/metering) — how `usage_minutes` is filled
+- [Usage metering](/selfhost/multi-tenant/metering): how `usage_minutes` is filled
   and rolled up.

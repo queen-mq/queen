@@ -7,12 +7,12 @@ sidebar:
   order: 25
   label: Metering
 sourceOfTruth:
-  - queen_proxy/src/meter.rs
-  - queen_proxy/src/gateway.rs
-  - queen_proxy/src/spool.rs
-  - queen_proxy/migrations/001_init.sql
-  - queen_proxy/migrations/004_lifecycle.sql
-  - queen_proxy/migrations/005_usage_prune.sql
+  - proxy/src/meter.rs
+  - proxy/src/gateway.rs
+  - proxy/src/spool.rs
+  - proxy/migrations/001_init.sql
+  - proxy/migrations/004_lifecycle.sql
+  - proxy/migrations/005_usage_prune.sql
 ---
 
 Usage is counted **after** the response, from what the broker actually did, not from

@@ -202,7 +202,7 @@ from cycle start, Sampler-gated errors, idle cycles at DEBUG, no shutdown hook.
 ## 5. S3 client — hand-rolled SigV4, not a crate (decided by repo policy)
 
 The repo's dependency philosophy is explicit in three places (`server/Cargo.toml:23-26`,
-`:41-44`, `queen_proxy/Cargo.toml:8-10`): cmake-free, rustls-only, no reqwest, no second
+`:41-44`, `proxy/Cargo.toml:8-10`): cmake-free, rustls-only, no reqwest, no second
 TLS backend. That rules out `object_store` (pulls reqwest), `aws-sdk-s3` (aws-lc-rs/cmake,
 huge tree) and `rust-s3` (native-tls leakage, weak maintenance). Meanwhile the SigV4
 toolkit is **already** in the direct deps: `hmac`, `sha2`, `hex`.

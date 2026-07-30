@@ -38,7 +38,7 @@ use std::sync::Arc;
 /// Install the process-wide `tracing` subscriber. Call ONCE, first thing in
 /// `main`, before any `info!/warn!/error!`. Verbosity is resolved from
 /// `RUST_LOG`, else the Helm-injected `LOG_LEVEL`, else `info`; both accept the
-/// full `EnvFilter` syntax (`info,queen_seg::pop=debug`). `QUEEN_LOG_JSON=1`
+/// full `EnvFilter` syntax (`info,queen::pop=debug`). `QUEEN_LOG_JSON=1`
 /// switches to a one-object-per-line JSON formatter for structured shippers.
 pub fn init() {
     use tracing_subscriber::fmt::time::UtcTime;
@@ -186,7 +186,7 @@ pub async fn shutdown_signal() {
         _ = ctrl_c => {}
         _ = terminate => {}
     }
-    tracing::info!(target: "shutdown", "signal received — draining in-flight requests");
+    tracing::info!(target: "shutdown", "signal received, draining in-flight requests");
 }
 
 // ---------------------------------------------------------------------------

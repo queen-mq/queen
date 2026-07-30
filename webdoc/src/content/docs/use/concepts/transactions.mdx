@@ -56,12 +56,12 @@ Chain that across stages and no hop can lose work or emit an orphan: a stage's o
 exactly when its input was consumed, because the commit that records the consumption is the
 commit that records the production. A failed attempt rolls back both halves, so the input
 redelivers and the output is produced by whichever attempt succeeds. The duplicate risk that
-remains is a client retry after a lost response — see [the limit](#the-limit-this-is-not-end-to-end-exactly-once).
+remains is a client retry after a lost response. See [the limit](#the-limit-this-is-not-end-to-end-exactly-once).
 
 ## What rolls a transaction back
 
 The stored procedure raises on every failure path, and a raise takes down every other
-operation in the call — including pushes that already ran earlier in the same procedure.
+operation in the call, including pushes that already ran earlier in the same procedure.
 
 - **A duplicate push.** On a queue with deduplication enabled, a `transactionId` that already
   exists inside the deduplication window makes the whole transaction fail with a `QDUP`
@@ -103,13 +103,13 @@ earlier item of the same call), ack entries carry `transactionId` and `dlq`.
 <Aside type="caution">
 `success` is in the body, not the status line. The JavaScript transaction builder raises on
 `success: false` for you; a raw HTTP caller must read the field. `transactionId` at the top
-level is a per-call identifier minted by the broker — it is not one of your message ids.
+level is a per-call identifier minted by the broker. It is not one of your message ids.
 </Aside>
 
 Two details of the ack entries are worth knowing before you rely on them:
 
 - They are always reported as successful when the transaction commits. The per-item honesty
-  reporting of the plain ack routes — `noop`, `already committed`, `unresolvable` — is not
+  reporting of the plain ack routes (`noop`, `already committed`, `unresolvable`) is not
   surfaced here. An ack for a position already below the cursor therefore commits the
   transaction and moves nothing. If you need that signal, ack outside a transaction.
 - A repeated `transactionId` among the *pushes* of one call is first-wins within the call: the
@@ -125,7 +125,7 @@ current lease holder read from the consumer row, then the single unambiguous ent
 
 If the request carries no lease information anywhere, every ack in it is treated as
 lease-less: the ownership check is skipped and the cursor still advances. That mirrors the
-plain ack route. Sending a lease id that has since expired is *not* the same thing — it is
+plain ack route. Sending a lease id that has since expired is *not* the same thing: it is
 validated, rejected, and rolls the transaction back.
 
 ## Ordering and locks inside the call
@@ -138,14 +138,14 @@ other, against a plain push, or against retention.
 
 The practical consequence: you can bundle acks and pushes across many partitions and queues
 in one call without thinking about lock order. What you cannot do is assume the `results`
-array reflects execution order for acks — it is stamped back to your operation indices.
+array reflects execution order for acks: it is stamped back to your operation indices.
 
 ## The limit: this is not end-to-end exactly-once
 
 Atomicity covers the broker's state. It does not cover the network.
 
-If the response to a transaction is lost — a timeout, a dropped connection, a client crash
-after the commit — the client does not know whether the transaction committed. Retrying it
+If the response to a transaction is lost (a timeout, a dropped connection, a client crash
+after the commit), the client does not know whether the transaction committed. Retrying it
 blindly can duplicate the pushed messages, because the retry is a new set of messages as far
 as the broker is concerned.
 
@@ -156,12 +156,12 @@ long enough to cover your retry horizon. Then the retry behaves predictably:
 - If the first attempt never committed, the retry commits normally.
 - If the first attempt did commit, the retried push is a duplicate inside the window, so the
   transaction is rejected with a `QDUP` error and **nothing is written twice**. The error means
-  "already applied" — but only if your ids really are deterministic and the window really did
+  "already applied", but only if your ids really are deterministic and the window really did
   cover the gap.
 
 Both conditions are yours to guarantee. Outside the deduplication window, a repeat is
 accepted as a new message. And note that the JavaScript transaction builder sends only
-`queue`, `partition` and `payload` per item — to set a deterministic id inside a transaction,
+`queue`, `partition` and `payload` per item. To set a deterministic id inside a transaction,
 call the HTTP route directly.
 
 The deduplication mechanism, and what "exact" means for it, is on

@@ -4,7 +4,7 @@
 # goload is driven separately from the LOADER VM against the private IP.
 set -uo pipefail
 NET=qbench; PG=qbench-pg
-CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen-seg-rust:latest}"
+CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen:latest}"
 Q="${QUEUE:-segbench}"; DEDUP="${DEDUP:-0}"
 RPORT="${RPORT:-6682}"
 MON_STEP="${MON_STEP:-30}"; MON_N="${MON_N:-14}"

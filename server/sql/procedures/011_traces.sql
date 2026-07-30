@@ -154,7 +154,7 @@ BEGIN
     -- and aggregated everything, offset>0 returned no row at all (NULL body).
     -- Same shape get_available_trace_names_v1 below already uses.
     -- queue_name/partition_name resolve on EITHER engine: queen.partitions is
-    -- empty under the log engine (queen-seg writes queen.log_partitions only),
+    -- empty under the log engine (queen writes queen.log_partitions only),
     -- so the rows join alone leaves both columns permanently NULL.
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(

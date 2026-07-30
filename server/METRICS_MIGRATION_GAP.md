@@ -91,7 +91,7 @@ Stats-leader-gated reconcile every `partition_lookup_reconcile_interval_ms=5000`
 4. Register and implement the seven `/api/v1/analytics/*` routes (new `handlers/analytics.rs`): `system-metrics`, `worker-metrics`, `queue-lag`, `queue-ops`, `queue-parked-replicas`, `postgres-stats`, `retention`. The SPs already exist (`sql/procedures/007,014,015,017`); they just need `db.rs` wrappers + route wiring in `main.rs`. `postgres-stats` (`get_postgres_stats_v1`, reads `pg_stat_*`) works immediately once routed.
 
 **P2 — migration, retention-history, partition-lookup.**
-5. Port the migration surface: 5 routes (`handlers/migration.rs`) + the pg_dump/restore driver (from `migration.cpp`), or explicitly retire the Migration page if segments migration is handled by the `queen-seg migrate` subcommand (`main.rs:37`).
+5. Port the migration surface: 5 routes (`handlers/migration.rs`) + the pg_dump/restore driver (from `migration.cpp`), or explicitly retire the Migration page if segments migration is handled by the `queen migrate` subcommand (`main.rs:37`).
 6. Make the retention loop write `queen.retention_history` (extend `seg_retention_sweep_v1`/`seg_evict_v1` in `retention.rs`/`sql/procedures`) so `get_retention_timeseries_v1` has data once its route is added in step 4.
 7. Add a **partition-lookup reconcile task** (calls `reconcile_partition_lookup_v1`, cadence 5 s, leader-gated) if any consumer still depends on `queen.partition_lookup`; otherwise drop the table and its reader.
 

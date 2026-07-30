@@ -77,7 +77,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: queen-seg\r\n\
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: queen\r\n\
          Accept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream

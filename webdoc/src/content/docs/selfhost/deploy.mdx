@@ -30,7 +30,7 @@ rather than starting in a half-working state.
 ## Run the published image
 
 The image is `ghcr.io/queen-mq/queen`. Its runtime stage is `ubuntu:24.04`,
-its working directory is `/app`, and its command is `./bin/queen-seg`.
+its working directory is `/app`, and its command is `./bin/queen`.
 
 <Steps>
 
@@ -85,7 +85,7 @@ this list and leaves the rest alone. The full generated table lives in
 | `JWT_ENABLED` | `false` | Turn authentication on. Off means every route is open. |
 | `QUEEN_MESH_PEERS` | unset | Running more than one replica. |
 | `QUEEN_SYNC_SECRET` | unset | Always, when the mesh is on. |
-| `LOG_LEVEL` | `info` | Accepts full `EnvFilter` syntax, e.g. `info,queen_seg::pop=debug`. `RUST_LOG` overrides it. |
+| `LOG_LEVEL` | `info` | Accepts full `EnvFilter` syntax, e.g. `info,queen::pop=debug`. `RUST_LOG` overrides it. |
 
 <Aside type="caution">
 Booleans are strict. `true/false`, `1/0`, `yes/no`, `on/off` are accepted
@@ -149,13 +149,13 @@ DOCKER_BUILDKIT=1 docker build -t queen-mq .
 
 It defaults to `ghcr.io/queen-mq` (override with `--registry` or `$QUEEN_REGISTRY`)
 and builds `queen` from the root `Dockerfile`, `queen-proxy` from
-`queen_proxy/Dockerfile`. Without `--multiarch` it builds for the host
+`proxy/Dockerfile`. Without `--multiarch` it builds for the host
 architecture only and loads the result locally instead of pushing; `--multiarch`
 implies `--push` and needs a `docker-container` buildx builder, which the script
 checks for before starting rather than failing halfway through a Rust build.
 
 Each image takes its tag from its own manifest: the broker from
-`server/server.json`, the proxy from `queen_proxy/Cargo.toml`. The version in
+`server/server.json`, the proxy from `proxy/Cargo.toml`. The version in
 `server/server.json` is therefore the single source of truth for the broker's
 image tag, for what `/health` reports, and for what `queenctl version` reports.
 `server/build.rs` embeds it into the binary as `QUEEN_VERSION`, and `build.sh`
@@ -167,7 +167,7 @@ To build only the binary:
 cargo build --release --manifest-path server/Cargo.toml
 ```
 
-The result is `server/target/release/queen-seg`. Two build-time couplings are
+The result is `server/target/release/queen`. Two build-time couplings are
 worth knowing before you start.
 
 <Aside type="caution">

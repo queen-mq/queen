@@ -12,7 +12,7 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/handlers/mod.rs
   - server/src/db.rs
-  - queen_proxy/src/gateway.rs
+  - proxy/src/gateway.rs
 ---
 
 The broker can scope queue identity to a tenant itself, in SQL, on every operation. One
@@ -32,7 +32,7 @@ Everything below follows from that.
 
 ## What the flag does
 
-With `QUEEN_TENANCY_HEADER=false` — the default — a middleware stamps the default tenant
+With `QUEEN_TENANCY_HEADER=false` (the default), a middleware stamps the default tenant
 into every request without reading any header at all, the ownership gate short-circuits
 to "owned" with no database round trip, and the broker behaves exactly as a broker with
 no notion of tenants. That equivalence is deliberate and load-bearing: the open-source
@@ -40,24 +40,24 @@ single-tenant path is byte-identical to what it was before tenancy existed.
 
 With it on, one middleware resolves the header once per request and stamps a tenant into
 the request extensions. Every handler that resolves a queue by name reads it and threads
-it into the SQL name-resolution functions — for several stored procedures, as a
+it into the SQL name-resolution functions. For several stored procedures it travels as a
 `_tenant` key inside the JSON argument, which is why the SQL layer needs no signature
 change to be tenant-aware.
 
 The boot log says so:
 
 ```text
-QUEEN_TENANCY_HEADER on — native tenant scoping ENABLED
+QUEEN_TENANCY_HEADER on, native tenant scoping ENABLED
 ```
 
 ## Header semantics
 
 | Header | Resolved tenant |
 | --- | --- |
-| Absent | `00000000-0000-0000-0000-000000000001` — the default tenant |
+| Absent | `00000000-0000-0000-0000-000000000001`, the default tenant |
 | Present but empty or whitespace | The default tenant |
 | A canonical 8-4-4-4-12 hex UUID | That UUID, lowercased |
-| Anything else — wrong length, missing dashes, non-hex, non-ASCII | `400 {"error":"invalid x-queen-tenant header (must be a UUID)"}` |
+| Anything else (wrong length, missing dashes, non-hex, non-ASCII) | `400 {"error":"invalid x-queen-tenant header (must be a UUID)"}` |
 
 The value is **opaque**. It is checked for shape and for nothing else: there is no
 registry of tenants inside the broker, no list to be a member of, no signature. Shape
@@ -76,7 +76,7 @@ flag is switched on.
   trace lookup that names a partition id verifies that the partition belongs to the
   request's tenant before the stored procedure runs. See
   [Isolation](/selfhost/multi-tenant/isolation) for the gate's properties.
-- **In-process caches are keyed by `(tenant, queue)`** — lease times, encryption flags,
+- **In-process caches are keyed by `(tenant, queue)`**: lease times, encryption flags,
   hot-list rings, long-poll wake gates, per-queue metric counters, parked gauges.
 - **Mesh frames carry the tenant**, so a cross-broker invalidation or wake targets one
   tenant's queue rather than every queue with that name.
@@ -97,7 +97,7 @@ admin token plus an arbitrary header value is full access to an arbitrary tenant
 This is not a defect to be fixed at the broker. The trust boundary is drawn one hop out:
 
 - The gateway sets the header from the cluster it resolved out of the `Host` label,
-  using `clusters.broker_tenant_uuid` — a value the tenant never sees and cannot
+  using `clusters.broker_tenant_uuid`, a value the tenant never sees and cannot
   influence.
 - The gateway strips the client's `Authorization` header and substitutes the cell
   secret, so the credential a tenant holds has no meaning to the broker.
@@ -122,15 +122,15 @@ turn it off. Two paths send it:
 - The data plane, on every forwarded request, with the resolved cluster's
   `broker_tenant_uuid`.
 - The registry reconciler, when it polls each cell's `GET /api/v1/resources/queues` to
-  count queues and sum retained bytes — otherwise it would read the default tenant's
+  count queues and sum retained bytes. Otherwise it would read the default tenant's
   inventory for every cluster.
 
 `GET /healthz` on the proxy reports the live value of the switch as `tenant_header`, so
 a check can assert on the running process rather than on a boot log that outlives it.
 
 The two flags have to agree. A proxy injecting the header at a broker with tenancy off
-means every cluster shares the default tenant's namespace — the header is simply never
-read. A broker with tenancy on behind a proxy with injection off means the same thing by
+means every cluster shares the default tenant's namespace, because the header is simply
+never read. A broker with tenancy on behind a proxy with injection off means the same thing by
 the other route. Verify both, on the running processes.
 
 ## Enabling it on a broker that already holds data
@@ -140,14 +140,14 @@ is absent, so **every row that already exists belongs to the default tenant**. T
 the flag on does not hide or move existing data.
 
 What it does mean is that a cluster whose `broker_tenant_uuid` is a freshly generated
-UUID — which is what `create_cluster` produces — sees an empty broker. Converting an
+UUID, which is what `create_cluster` produces, sees an empty broker. Converting an
 existing single-tenant deployment into the first cluster of a cell therefore needs one
 of two things:
 
 - The first cluster's `broker_tenant_uuid` set to the default constant, so it inherits
   the existing queues. There is no control-plane function that changes that column; it
-  is a direct `UPDATE` on `queen_proxy.clusters`, and it invalidates nothing on its own —
-  call `queen_proxy.record_operation` for that cluster afterwards, or restart the proxy,
+  is a direct `UPDATE` on `queen_proxy.clusters`, and it invalidates nothing on its own.
+  Call `queen_proxy.record_operation` for that cluster afterwards, or restart the proxy,
   or wait out the 30-second cache TTL.
 - Or the data re-pushed under the new tenant. There is no in-broker facility for
   re-tenanting existing rows.

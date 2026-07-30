@@ -46,7 +46,7 @@ npm run dev
 
 The app will be available at `http://localhost:4000`, proxying `/api`, `/auth`,
 `/health` and `/metrics` to the queen-proxy dev cell on `:6711`
-(`queen_proxy/scripts/dev-cell.sh up`). Set `QUEEN_DEV_UPSTREAM=http://localhost:6632`
+(`proxy/scripts/dev-cell.sh up`). Set `QUEEN_DEV_UPSTREAM=http://localhost:6632`
 to talk to a broker directly instead — that mode exercises no auth, no tenancy,
 no role checks and no 429s, so do not develop against it by default.
 
@@ -60,7 +60,7 @@ The output goes straight to `server/webapp/dist` — the ONE artifact both Rust
 binaries embed at compile time:
 
 * `server/src/handlers/static_files.rs` — `#[folder = "webapp/dist"]`
-* `queen_proxy/src/webapp.rs` — `#[folder = "../server/webapp/dist"]`
+* `proxy/src/webapp.rs` — `#[folder = "../server/webapp/dist"]`
 
 Because the bytes are baked in, **a source change ships only after
 `npm run build` AND a `cargo build` of whichever binary serves it.** Debug

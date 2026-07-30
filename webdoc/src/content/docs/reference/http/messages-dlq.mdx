@@ -17,7 +17,7 @@ sourceOfTruth:
   - server/sql/procedures/047_log_admin.sql
 verifiedBy:
   - clients/client-js/test-v2/dlq.js
-  - queen_proxy/scripts/isolation-smoke.sh
+  - proxy/scripts/isolation-smoke.sh
 ---
 
 These are inspection routes, not a consumption path. Live payloads live inside
@@ -208,7 +208,7 @@ ignores the body must not read a no-op as a deletion:
   "partitionId": "0198...",
   "transactionId": "order-4471",
   "error": "Message not found",
-  "message": "No dead-letter row for this address — live messages live in immutable segments and cannot be deleted"
+  "message": "No dead-letter row for this address. Live messages live in immutable segments and cannot be deleted"
 }
 ```
 

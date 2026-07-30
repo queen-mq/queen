@@ -233,7 +233,7 @@ pub async fn handle_delete_message(
                 "partitionId": partition_id,
                 "transactionId": transaction_id,
                 "error": "Message not found",
-                "message": "No dead-letter row for this address — live messages live in immutable segments and cannot be deleted",
+                "message": "No dead-letter row for this address. Live messages live in immutable segments and cannot be deleted",
             })
             .to_string(),
         )
@@ -290,7 +290,7 @@ pub async fn handle_retry_message(
                 "partitionId": partition_id,
                 "transactionId": transaction_id,
                 "error": "Message not found",
-                "message": "No dead-letter row for this address — only dead-lettered messages can be replayed",
+                "message": "No dead-letter row for this address. Only dead-lettered messages can be replayed",
             })
             .to_string(),
         )

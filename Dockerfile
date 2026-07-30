@@ -57,10 +57,10 @@ COPY --from=frontend-builder /app/server/webapp/dist ./webapp/dist
 # the (non-persisted) target cache so it lands in the image layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/build/server/target \
-    cargo build --release && cp target/release/queen-seg /queen-seg
+    cargo build --release && cp target/release/queen /queen
 
 # Verify
-RUN test -f /queen-seg && echo "Build successful"
+RUN test -f /queen && echo "Build successful"
 
 # Stage 3: Build queenctl (Go operator CLI)
 FROM golang:1.24-alpine AS cli-builder
@@ -124,7 +124,7 @@ RUN sed -i -e 's|security.ubuntu.com|mirrors.edge.kernel.org|g' -e 's|archive.ub
 WORKDIR /app
 
 # Rust broker binary (SQL schema is compiled in — no schema files to copy).
-COPY --from=server-builder /queen-seg ./bin/queen-seg
+COPY --from=server-builder /queen ./bin/queen
 
 # The same dashboard bytes the binary already embeds, on disk for inspection.
 # The binary does not read them: nothing in server/src implements a
@@ -145,4 +145,4 @@ ENV QUEEN_SERVER=http://localhost:6632
 EXPOSE 6632
 
 # Run the Rust broker
-CMD ["./bin/queen-seg"]
+CMD ["./bin/queen"]

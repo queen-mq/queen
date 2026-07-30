@@ -243,7 +243,7 @@ const togglePushMaintenance = async () => {
 // was operable — the proxy classified the push endpoint as operator-reachable
 // and its pop sibling as blocked, which left an operator able to watch pop
 // maintenance and unable to leave it. Both are on the operator list now
-// (queen_proxy/src/routes.rs is_operator_route).
+// (proxy/src/routes.rs is_operator_route).
 //
 // Pop maintenance is the harsher of the two: pushes under push maintenance are
 // spooled to disk and drain later, but a paused pop returns nothing to a

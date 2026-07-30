@@ -15,11 +15,25 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { WEBDOC } from "./lib/source.mjs";
 
+/**
+ * Scope: text a reader reads, and the files we author that carry copy.
+ *
+ * Deliberately NOT the whole of `src/`. Most files there came from the Nimbus
+ * scaffolder or from `nimbus-docs add`, and `nimbus-docs diff` compares them
+ * against upstream to offer updates. Rewriting their doc comments to satisfy a
+ * house style would register as permanent drift and bury every real upstream
+ * change. Source comments are not prose anyway.
+ */
 const TARGETS = [
   { dir: join(WEBDOC, "src", "content", "docs"), exts: [".mdx", ".md"] },
-  { dir: join(WEBDOC, "src", "pages"), exts: [".astro", ".ts"] },
-  { dir: join(WEBDOC, "src", "components"), exts: [".astro"] },
   { dir: join(WEBDOC, "public", "openapi"), exts: [".json"] },
+];
+
+/** Authored here, and carrying copy rather than only code. */
+const FILES = [
+  join(WEBDOC, "src", "pages", "index.astro"),
+  join(WEBDOC, "src", "components", "Chart.astro"),
+  join(WEBDOC, "src", "components", "Header.astro"),
 ];
 
 const BANNED = [
@@ -46,8 +60,9 @@ function walk(dir, exts, out = []) {
 }
 
 const findings = [];
-for (const { dir, exts } of TARGETS) {
-  for (const file of walk(dir, exts)) {
+const targets = [...TARGETS.flatMap(({ dir, exts }) => walk(dir, exts)), ...FILES];
+{
+  for (const file of targets) {
     const lines = readFileSync(file, "utf8").split("\n");
     lines.forEach((line, i) => {
       for (const b of BANNED) {

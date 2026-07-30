@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PROXY_DIR="$ROOT/queen_proxy"
+PROXY_DIR="$ROOT/proxy"
 RUN_DIR="$PROXY_DIR/.devcell"
 mkdir -p "$RUN_DIR"
 
@@ -34,8 +34,8 @@ up() {
     [ -f "$RUN_DIR/$f.pid" ] && kill "$(cat "$RUN_DIR/$f.pid")" 2>/dev/null || true
     rm -f "$RUN_DIR/$f.pid"
   done
-  pkill -f "server/target/debug/queen-seg" 2>/dev/null || true
-  pkill -f "queen_proxy/target/debug/queen-proxy" 2>/dev/null || true
+  pkill -f "server/target/debug/queen" 2>/dev/null || true
+  pkill -f "proxy/target/debug/queen-proxy" 2>/dev/null || true
   sleep 0.5
   docker rm -f $PXPG $CELLPG >/dev/null 2>&1 || true
   docker run -d --name $PXPG  -p 5465:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=queen_proxy postgres:16 >/dev/null
@@ -49,7 +49,7 @@ up() {
   echo "== starting broker :$BROKER_PORT (tenancy header ON)"
   ( PORT=$BROKER_PORT PG_HOST=127.0.0.1 PG_PORT=5466 PG_USER=postgres PG_PASSWORD=postgres \
     PG_DATABASE=queen QUEEN_TENANCY_HEADER=true \
-    "$ROOT/server/target/debug/queen-seg" >"$RUN_DIR/broker.log" 2>&1 & echo $! >"$RUN_DIR/broker.pid" )
+    "$ROOT/server/target/debug/queen" >"$RUN_DIR/broker.log" 2>&1 & echo $! >"$RUN_DIR/broker.pid" )
 
   # Shadow by default (proxy default), so the cell mirrors a stock deployment.
   # QUEEN_PROXY_ENFORCE=true dev-cell.sh up flips real 429s on, which is what

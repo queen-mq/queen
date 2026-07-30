@@ -1,10 +1,10 @@
 [package]
-name = "queen-seg-rust"
+name = "queen"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "queen-seg"
+name = "queen"
 path = "src/main.rs"
 
 [dependencies]

@@ -4,7 +4,7 @@
     "title": "Queen MQ proxy API",
     "version": "1.0.0",
     "summary": "The proxy's own surface: service endpoints, login, and the cluster console.",
-    "description": "Generated from `queen_proxy/`'s router at documentation build time.\n\nThis document covers only the endpoints the proxy *serves*. Every other path is\nforwarded to the broker of the cluster addressed by the request's first DNS label,\nafter classification, authentication, quota and rate-limit checks. For the broker's\nown surface use the broker document; for which of those routes a tenant credential\ncan reach, see the route-class table in the documentation.\n\nResponse shapes are not derivable here: console handlers build their JSON inline.\nOnly paths, methods, path parameters and the credential kind are asserted.",
+    "description": "Generated from `proxy/`'s router at documentation build time.\n\nThis document covers only the endpoints the proxy *serves*. Every other path is\nforwarded to the broker of the cluster addressed by the request's first DNS label,\nafter classification, authentication, quota and rate-limit checks. For the broker's\nown surface use the broker document; for which of those routes a tenant credential\ncan reach, see the route-class table in the documentation.\n\nResponse shapes are not derivable here: console handlers build their JSON inline.\nOnly paths, methods, path parameters and the credential kind are asserted.",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"

@@ -194,10 +194,10 @@ All of them speak the same HTTP API, which is documented in full and published a
 | Path | What it is |
 | --- | --- |
 | `server/` | The broker. Rust, crate `queen-seg-rust`, binary `queen-seg`. Schema and stored procedures in `server/sql/`, embedded at compile time. |
-| `queen_proxy/` | Multi-tenant gateway: API keys, quotas, rate limits, metering, console. Its own PostgreSQL. |
+| `proxy/` | Multi-tenant gateway: API keys, quotas, rate limits, metering, console. Its own PostgreSQL. |
 | `app/` | The Vue dashboard, compiled into the broker binary. |
 | `clients/` | The five SDKs and the `queenctl` CLI. |
-| `webdoc/` | This project's documentation site (Astro). Large parts of it are generated from the source in `server/` and `queen_proxy/`. |
+| `webdoc/` | This project's documentation site (Astro). Large parts of it are generated from the source in `server/` and `proxy/`. |
 | `test/` | The Docker test harness: every client suite against a freshly built broker. |
 | `benchmark-queen/` | Benchmark sessions with their raw artifacts. Every number on the website comes from here. |
 | `examples/`, `streams/` | JavaScript examples. |

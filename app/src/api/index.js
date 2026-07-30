@@ -8,7 +8,7 @@ import client from './client'
 //  * `operator` is CELL-LEVEL: unscopable by nature (host CPU, PG internals,
 //    cell maintenance, the file buffer). It answers 200 only for a live
 //    operator and 404 `route_blocked` for everyone else
-//    (queen_proxy/src/routes.rs is_operator_route). A view that renders one of
+//    (proxy/src/routes.rs is_operator_route). A view that renders one of
 //    those numbers MUST label it cell-level, or a tenant reads a cell figure
 //    as their own.
 //

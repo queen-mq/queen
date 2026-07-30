@@ -16,7 +16,7 @@ sourceOfTruth:
 
 Consuming a message does not remove it. A segment stays until retention deletes it, and a
 consumer group's progress is one number per partition. Replay is therefore not a special
-feature with its own storage — it is moving that number.
+feature with its own storage: it is moving that number.
 
 Two mechanisms exist. **Subscription modes** decide where a group starts when it first meets a
 partition. **Seek** moves an existing cursor, forwards or backwards, at any time.
@@ -37,11 +37,11 @@ neither does removing it. If you need to move an existing cursor, that is what s
 
 What each mode writes:
 
-- `all` — the cursor lands just below the oldest retained offset, so the next message wanted
+- `all`: the cursor lands just below the oldest retained offset, so the next message wanted
   is the oldest one still stored.
-- `new` or `subscriptionFrom=now` — the cursor lands on the partition's current last offset,
+- `new` or `subscriptionFrom=now`: the cursor lands on the partition's current last offset,
   so only messages pushed after this moment are delivered.
-- A timestamp — the cursor lands just below the first segment whose commit time is at or after
+- A timestamp: the cursor lands just below the first segment whose commit time is at or after
   that timestamp. If nothing that recent exists yet, it lands on the current last offset,
   which makes it a future-only cursor.
 
@@ -50,7 +50,7 @@ An unparsable timestamp is treated as registration-time `new` rather than failin
 ## The durable subscription record
 
 The first time a consumer group pops a queue, the broker writes a durable record of that
-group's subscription — the mode it registered with and the timestamp it registered at — and
+group's subscription (the mode it registered with and the timestamp it registered at) and
 seeds the cursor of **every** partition of the queue in one set-based statement.
 
 That record matters for a partition created *later*. When the group first meets a new
@@ -101,7 +101,7 @@ per-queue route does not.
 
 The per-queue form applies to every partition of the queue and answers with
 `partitionsUpdated`. A queue that does not exist, or that has no partitions yet, is reported as
-a failure (`Queue not found or has no partitions`) rather than as a successful no-op — a
+a failure (`Queue not found or has no partitions`) rather than as a successful no-op. A
 misdirected seek should not look like it worked. The per-partition form answers with
 `updated: true`, or a not-found error.
 
@@ -118,7 +118,7 @@ cursor position immediately after a successful seek, so a backward seek does not
 periodic rescan.
 
 A seek affects exactly one consumer group. Every other group's cursor on the same partitions
-is untouched — that independence is the point of keeping messages after consumption.
+is untouched. That independence is the point of keeping messages after consumption.
 
 ## A timestamp seek is segment-granular
 
@@ -128,7 +128,7 @@ not messages: the cursor is set to `base_offset - 1` of the first segment whose 
 at or after your timestamp.
 
 You therefore land on a **segment boundary**, at the start of the segment that contains your
-timestamp — which means you will receive some messages committed slightly *before* it. The
+timestamp, which means you will receive some messages committed slightly *before* it. The
 overshoot is bounded by one segment's frame count. Never treat a timestamp seek as an exact
 cut: if your replay must start precisely at an instant, seek a little early and filter in the
 consumer.
@@ -139,7 +139,7 @@ walk.
 ## Why commit-ordered timestamps make this work
 
 A segment's `created_at` is stamped while the pushing transaction holds the partition's row
-lock — the same lock that allocates offsets. A later pusher can only stamp after that
+lock, the same lock that allocates offsets. A later pusher can only stamp after that
 transaction commits and releases the lock, so within one partition `created_at` is **monotone
 in offset**, in commit order.
 
@@ -150,7 +150,7 @@ scanning. Time-based retention relies on the same invariant.
 
 Across partitions there is no such relationship. A timestamp seek on a queue positions each
 partition independently, and there is no global instant at which all partitions were "at" the
-same point — the ordering guarantee is per partition, as described on
+same point: the ordering guarantee is per partition, as described on
 [Guarantees](/use/concepts/guarantees).
 
 ## The floor: you can only replay what is retained
@@ -161,7 +161,7 @@ Every walk starts at the partition's retention watermark. Consequences:
   everything still stored, and no error telling you the earlier data was already deleted.
 - Data that retention has deleted cannot be replayed by any means. The retained window *is*
   the replay window.
-- A cursor left below the watermark — after retention removed segments it had not reached —
+- A cursor left below the watermark (after retention removed segments it had not reached)
   resumes at the next offset that still exists. The pop scan tolerates the gap.
 
 Which window you get, and how to choose it, is on [Retention](/use/concepts/retention).
@@ -172,7 +172,7 @@ Which window you get, and how to choose it, is on [Retention](/use/concepts/rete
   back. Other groups keep their positions.
 - **Skip a backlog you no longer care about.** Seek the queue with `{"toEnd": true}`.
 - **Bring up a new consumer that must not see history.** Pop with `subscriptionMode=new` on
-  first contact — cheaper and simpler than seeking afterwards.
+  first contact, cheaper and simpler than seeking afterwards.
 - **Re-run a pipeline from scratch.** Use a *new* consumer group name. A fresh group with
   `subscriptionMode=all` reads the whole retained log without disturbing the existing one.
 - **Give up on a stuck batch.** A seek releases the lease, so seeking is also the way to

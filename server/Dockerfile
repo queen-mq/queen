@@ -10,7 +10,7 @@ COPY webapp ./webapp
 RUN cargo build --release
 
 FROM debian:bookworm-slim
-COPY --from=build /src/target/release/queen-seg /queen-seg
+COPY --from=build /src/target/release/queen /queen
 EXPOSE 6632
 ENV PORT=6632
-ENTRYPOINT ["/queen-seg"]
+ENTRYPOINT ["/queen"]

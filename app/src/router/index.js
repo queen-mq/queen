@@ -8,7 +8,7 @@ import { notifyError } from '@/stores/ui'
 //
 //   requires : capability the identity store must grant. One of
 //              'read' | 'produce' | 'consume' | 'queueAdmin' | 'operator'.
-//              Mirrors queen_proxy/src/routes.rs RouteClass one-for-one.
+//              Mirrors proxy/src/routes.rs RouteClass one-for-one.
 //   scope    : 'tenant' (numbers are for the acting tenant) or 'cell'
 //              (numbers cover the whole cell, every tenant on it). A cell-level
 //              page MUST say so on screen; a cell number read as a tenant

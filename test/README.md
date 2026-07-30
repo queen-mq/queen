@@ -115,7 +115,7 @@ test/run.sh --suite js --topo single,tenanted   # the tenancy parity pair
 test/run.sh --suite mesh                # HA mesh assertion only
 test/run.sh --suite tenancy             # two-tenant isolation over the HA pair
 test/run.sh -j 6                        # more parallelism (default 4)
-test/run.sh --no-build-broker           # reuse an existing queen-seg:test image
+test/run.sh --no-build-broker           # reuse an existing queen:test image
 test/run.sh --keep                      # leave stacks up to poke at them
 ```
 
@@ -123,12 +123,12 @@ test/run.sh --keep                      # leave stacks up to poke at them
 `tenancy` always bring their own topology, as `mesh` already did.
 
 Requirements: Docker + Compose v2. The broker image builds from
-[`server/Dockerfile`](../server/Dockerfile) (~100 MB, `queen-seg:test`); runner
+[`server/Dockerfile`](../server/Dockerfile) (~100 MB, `queen:test`); runner
 images build from `test/runners/<suite>/Dockerfile`.
 
 ## How readiness works
 
-The runtime broker image is `debian:slim` with only the `queen-seg` binary (no
+The runtime broker image is `debian:slim` with only the `queen` binary (no
 shell tools), so readiness is gated from the runner side: every runner waits on
 the broker's `GET /health`, which returns 200 only after Postgres is connected
 **and** the schema is applied (the broker binds its HTTP listener after applying
@@ -169,7 +169,7 @@ own debug binary and drives two brokers on localhost. Run it directly for that.
 
 ## Tenancy baseline on branch `rustproxy` (2026-07-29)
 
-First run of the two new lanes, against a freshly built `queen-seg:test`.
+First run of the two new lanes, against a freshly built `queen:test`.
 
 | lane | result |
 |------|--------|

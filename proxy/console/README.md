@@ -11,7 +11,7 @@ console" — not the account/billing console). Served by `queen-proxy` itself at
 npm. After changing anything under `console/src`, rebuild it:
 
 ```sh
-cd queen_proxy/console
+cd proxy/console
 npm install
 npm run build
 ```
@@ -24,7 +24,7 @@ change — `cargo build` embeds whatever is on disk at compile time, so a stale
 ## Local dev (hot reload, no embed)
 
 ```sh
-cd queen_proxy/console
+cd proxy/console
 npm install
 npm run dev
 ```

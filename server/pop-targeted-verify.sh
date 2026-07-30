@@ -25,7 +25,7 @@ export PG_DATABASE="${PG_DATABASE:-postgres}"
 
 PORT=6642
 Q="pop_targeted_$RANDOM"
-BIN=target/debug/queen-seg
+BIN=target/debug/queen
 PID=""; LOG="$(mktemp)"; CONS_OUT="$(mktemp)"
 
 log(){ echo "[pop-targeted] $*"; }

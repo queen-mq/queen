@@ -1,4 +1,4 @@
-module github.com/smartpricing/queen/queen_proxy/scripts/sdk-smoke/go
+module github.com/smartpricing/queen/proxy/scripts/sdk-smoke/go
 
 go 1.24.0
 

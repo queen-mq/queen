@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 NET=qbench; PG=qbench-pg
-CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen-seg-rust:latest}"
+CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen:latest}"
 q(){ docker exec "$PG" psql -U postgres -tAc "$1" </dev/null 2>/dev/null; }
 
 docker rm -fv "$PG" >/dev/null 2>&1 || true

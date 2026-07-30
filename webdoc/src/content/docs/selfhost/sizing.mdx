@@ -46,7 +46,7 @@ idle a push fires immediately on its own, and when it is busy the next segment
 accumulates for exactly one in-flight flush round trip. Disjoint partitions are
 additionally bundled into a single multi-segment transaction, so commit rate
 decouples from partition count under load. `QUEEN_V2_FUSION_FRAMES` is retained
-for compatibility and is no longer a flush trigger — there is no frame threshold
+for compatibility and is no longer a flush trigger. There is no frame threshold
 to tune.
 
 **Ack fusion.** Cursor advances are coalesced the same way, one commit per flush
@@ -78,7 +78,7 @@ traffic:
 
 - **Retention**, every `RETENTION_INTERVAL` (5000 ms). It builds a work list of
   every partition of every queue, and its hash-sidecar purge phase runs for
-  **every** partition on **every** cycle — the sidecar is written by every push
+  **every** partition on **every** cycle: the sidecar is written by every push
   whether deduplication is on or off, and expires on its own clock.
 - **The stats reconciler**, every `STATS_INTERVAL_MS` (10000 ms), recomputing
   `queen.stats` with arithmetic that is O(partitions).
@@ -88,7 +88,7 @@ traffic:
 An idle deployment with 100 partitions and one with 100,000 differ in steady-state
 PostgreSQL CPU by three orders of magnitude while both move zero messages. If a
 cluster is burning CPU with no traffic, this is why, and the levers are the three
-intervals above — lengthening them costs freshness in the dashboard and slower
+intervals above. Lengthening them costs freshness in the dashboard and slower
 retention, nothing else.
 
 Two aggravating factors:
@@ -96,7 +96,7 @@ Two aggravating factors:
 - **Partitions are reclaimed only after 30 days of being empty and idle**
   (`PARTITION_CLEANUP_DAYS`). A partition is created by the first push that names
   it, and a design that mints one per user or per order carries its background
-  cost for the whole retention window plus that month — and forever if the lane
+  cost for the whole retention window plus that month, and forever if the lane
   keeps receiving the occasional message, or holds a dead-letter row.
 - **Every message costs 16 bytes in the hash sidecar** for the length of the purge
   window (`GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900s)`), on top
@@ -124,7 +124,7 @@ adaptive concurrency limiters (visible as `vegas_push` and `vegas_pop` in the
 Broker memory is dominated by two explicitly budgeted caches:
 `QUEEN_DEDUP_CACHE_MB` (default 512) and `QUEEN_ACK_REGISTRY_MB` (default 64).
 Both report their occupancy in the `sizes` log block, and neither affects
-correctness — the deduplication probe in SQL is authoritative, and an ack-registry
+correctness: the deduplication probe in SQL is authoritative, and an ack-registry
 miss falls back to the SQL path.
 
 ## What the published runs mean
@@ -136,7 +136,7 @@ without its row.
 | Result | Conditions it was measured under |
 | --- | --- |
 | 24-hour soak: 51,820,403,100 messages, roughly 600k msg/s per side, error rate 0.00012%, zero restarts, broker RSS flat at about 6.3 GB | **explicit acks** (`manualAck=true`, `ackAsync=true`), a 32 vCPU / 62 GiB VM, commit `615efdc` |
-| 1M msg/s per side, sustained for 600 s | **`autoAck`** (`manualAck=false`) and **deduplication off**; 99.914 % delivered — about 500,000 messages were never accepted (`pushErr=3032`) |
+| 1M msg/s per side, sustained for 600 s | **`autoAck`** (`manualAck=false`) and **deduplication off**; 99.914 % delivered: about 500,000 messages were never accepted (`pushErr=3032`) |
 | A 4-stage pipeline over 1000 partitions at 25k events/s for 600 s: 88,503,408 messages verified, 0 duplicates, 0 gaps, 0 order violations | `dedupWindow=300s`, echoed by the loader. This is the ordering result, not a throughput result |
 | A 2-core cell holding more than 2400 msg/s through the proxy, 12 tenants for 1 hour, 0 cross-tenant deliveries | **deduplication off** (`dedupWindowSeconds: 0`) and **429 retry disabled** (`retry429Attempts: 1`); the raw sampler also recorded 818 HTTP 502 and 4,392 connection-refused errors against the proxy, and the roughly 1 % gap between pushes and deliveries is redelivery volume |
 
@@ -187,8 +187,8 @@ Full artifacts, methodology and the raw output for each run are in
    the broker.
 
 5. Size retention before you go live. An unbounded queue is a full disk on a
-   schedule you did not choose, and dead-letter rows are never reclaimed at all —
-   see [Operating retention](/selfhost/retention).
+   schedule you did not choose, and dead-letter rows are never reclaimed at all.
+   See [Operating retention](/selfhost/retention).
 
 </Steps>
 

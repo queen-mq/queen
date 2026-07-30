@@ -24,7 +24,7 @@ creates both, inside the same transaction that stores the message.
 ## A queue is created in one of two ways
 
 **By a push.** The first push to a name provisions the engine-side queue row, a configuration
-row, and the partition named in the request. Nothing else happens — no schema change, no file,
+row, and the partition named in the request. Nothing else happens: no schema change, no file,
 no background job.
 
 **By `POST /api/v1/configure`.** This creates the queue if it is missing and rewrites its
@@ -41,7 +41,7 @@ paths resolve their default from different places:
 
 <Aside type="caution">
 `/configure` is a **full replace**, not a patch. Every option you omit is reset to its
-default — including `dedupWindowSeconds`, which returns to 3600, and `namespace` and `task`,
+default. That includes `dedupWindowSeconds`, which returns to 3600, and `namespace` and `task`,
 which return to empty. Always send the complete configuration.
 </Aside>
 
@@ -61,7 +61,7 @@ Partition names are opaque strings; a partition's identity is the pair (queue, n
 
 That request creates two partitions of `orders`: `cust-42` and `Default`. There is no
 preallocation step and no fixed partition count to choose up front, so the natural choice is
-to partition by the entity whose order you care about — a customer, a device, a document —
+to partition by the entity whose order you care about (a customer, a device, a document)
 and let the set grow as entities appear.
 
 An entity that goes quiet leaves an empty lane behind, and that lane is reclaimed: once a partition
@@ -95,7 +95,7 @@ Two details of that layout are worth knowing because they show up as behaviour:
 
 Thousands per queue are ordinary. The archived ordering benchmark drove a four-stage pipeline
 over **1000 partitions at 25,000 events/s for 600 s** with `dedupWindow=300s`, verifying
-88,503,408 messages with 0 duplicates, 0 gaps and 0 order violations — see
+88,503,408 messages with 0 duplicates, 0 gaps and 0 order violations. See
 [benchmarks](/benchmarks) for the run and its raw output.
 
 What bounds the useful count is discovery, not storage. A wildcard pop does not scan the whole
@@ -113,8 +113,8 @@ partition set:
   re-walk of the partition set runs every 30 s, in keyset pages of 10,000 rows, at most 200 pages
   per walk.
 
-So the cost of a large partition count is paid on cold discovery — a group with nothing in its
-ring has to walk rows to find work — and in the per-group cursor rows described above. Tens of
+So the cost of a large partition count is paid on cold discovery (a group with nothing in its
+ring has to walk rows to find work) and in the per-group cursor rows described above. Tens of
 thousands of partitions per queue work; a partition per message does not, because each one
 still costs a row that nothing ever deletes.
 
@@ -129,8 +129,8 @@ GET /api/v1/pop?task=email
 ```
 
 A discovery pop resolves every queue whose configuration row matches the namespace and/or task
-and wildcard-pops across their partitions in one call. At least one of the two must be present
-— a request with neither is rejected with `400`.
+and wildcard-pops across their partitions in one call. At least one of the two must be present:
+a request with neither is rejected with `400`.
 
 The labels are set in two different ways, and the interaction between them is the sharpest
 edge on this page.
@@ -143,8 +143,8 @@ edge on this page.
   configure is a full replace, omitting them writes empty strings.
 
 <Aside type="caution">
-Creating a queue with `/configure` and no `namespace` or `task` — which is what the SDK
-`create()` helpers do unless you call `.namespace()` / `.task()` — leaves both labels empty.
+Creating a queue with `/configure` and no `namespace` or `task` (which is what the SDK
+`create()` helpers do unless you call `.namespace()` / `.task()`) leaves both labels empty.
 A discovery pop will never match that queue, and it will not appear in the namespace or task
 listings. Running `/configure` on a queue that a push created with a dotted name also wipes
 the derived labels.
@@ -164,7 +164,7 @@ Three honest caveats about those numbers:
 
 - The queue list **accepts `namespace` and `task` query parameters and does not apply them**.
   You get the full list either way; filter client-side.
-- In the queue list, `messages.total` is the **retained** frame count — everything still stored,
+- In the queue list, `messages.total` is the **retained** frame count: everything still stored,
   acked or not. `pending` and `processing` come from the periodically refreshed statistics
   table, so they are the backlog reading and they lag slightly.
 - The namespace and task listings count partitions from the configuration-side catalog, which
@@ -175,10 +175,10 @@ Three honest caveats about those numbers:
 
 `DELETE /api/v1/resources/queues/:queue` requires admin access and removes the queue's
 partitions, its segments, its deduplication sidecar, its consumer cursors, and its dead-letter
-rows. Retention never touches DLQ rows, so deleting the queue — or deleting/replaying one
-dead-lettered address — is the only way they go away.
+rows. Retention never touches DLQ rows, so deleting the queue (or deleting/replaying one
+dead-lettered address) is the only way they go away.
 
 The response is always `200`. `deleted` is `true` only if a queue was actually removed; for a
-name that did not exist you get `deleted: false` with the message `Queue not found — nothing
+name that did not exist you get `deleted: false` with the message `Queue not found, nothing
 was deleted`. Delete is deliberately idempotent because the SDKs use delete-then-create as a
 test cleanup idiom.

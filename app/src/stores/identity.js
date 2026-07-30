@@ -1,7 +1,7 @@
 // Identity store — module singleton, the ONE source of truth for who the user
 // is, what they may do, and which cluster the UI is acting on.
 //
-// Hydrated from GET /auth/me (queen_proxy/src/oauth.rs), which is
+// Hydrated from GET /auth/me (proxy/src/oauth.rs), which is
 // cookie-authenticated and deliberately needs no cluster of its own. No view
 // may re-derive a permission from anything else: not from a role string it
 // parsed itself, not from whether a call happened to 403.
@@ -20,7 +20,7 @@ import { computed, ref } from 'vue'
 import { notifyWarn } from '@/stores/ui'
 
 // Fallback only. The live name always comes from /auth/me's act_cluster_header
-// (queen_proxy/src/config.rs ACT_CLUSTER_HEADER); this is what we send if the
+// (proxy/src/config.rs ACT_CLUSTER_HEADER); this is what we send if the
 // payload predates that field.
 const DEFAULT_ACT_HEADER = 'x-queen-act-cluster'
 const STORAGE_PREFIX = 'queen.acting_cluster.'
@@ -226,7 +226,7 @@ const actingCellSlug = computed(() => acting.value?.cell_slug || null)
 
 /**
  * Effective role on the acting cluster. A live operator acts as admin on ANY
- * cluster (queen_proxy/src/acting.rs); everyone else gets the role on their
+ * cluster (proxy/src/acting.rs); everyone else gets the role on their
  * cluster_roles row, which /auth/me already resolved.
  */
 const role = computed(() => {
@@ -234,7 +234,7 @@ const role = computed(() => {
   return operatorLive.value ? 'admin' : acting.value.role || null
 })
 
-// Capability names mirror the proxy's RouteClass (queen_proxy/src/routes.rs)
+// Capability names mirror the proxy's RouteClass (proxy/src/routes.rs)
 // one-for-one, so "may I show this?" and "will the call be authorized?" cannot
 // drift apart.
 const CAPABILITIES = {

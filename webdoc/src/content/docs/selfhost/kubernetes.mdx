@@ -21,7 +21,7 @@ There is **no official Helm chart** for Queen today. What follows is a complete
 reference manifest you can apply as-is, written against this broker's actual
 behaviour rather than adapted from a generic message-queue template. Every
 non-obvious field is explained below the YAML, and the two fields most commonly
-got wrong — the liveness probe and the mesh port — are explained at length,
+got wrong (the liveness probe and the mesh port) are explained at length,
 because getting either wrong produces failures that look like something else.
 
 Assumptions: PostgreSQL already exists and is reachable at `queen-pg` in the same
@@ -35,7 +35,7 @@ to this broker:
 
 - **The mesh peer list is static hostnames.** `QUEEN_MESH_PEERS` is parsed once at
   boot into `(host, port)` pairs. A `StatefulSet` with a headless Service gives
-  every pod a stable DNS name — `queen-0.queen-mesh`, `queen-1.queen-mesh` — that
+  every pod a stable DNS name (`queen-0.queen-mesh`, `queen-1.queen-mesh`) that
   you can write into that variable. Pods behind a `Deployment` have neither
   stable names nor stable addresses, so there is nothing to put there.
 - **The disk spool wants to follow the pod.** `FILE_BUFFER_DIR` holds pushes the
@@ -144,7 +144,7 @@ spec:
         - name: queen
           image: ghcr.io/queen-mq/queen:1.0.0-alpha-01
           # The image's own default command, spelled out. WORKDIR is /app.
-          command: ["/app/bin/queen-seg"]
+          command: ["/app/bin/queen"]
           ports:
             - name: http
               containerPort: 6632
@@ -257,7 +257,7 @@ spec:
 ### NetworkPolicy
 
 The mesh port must not be reachable from anywhere except the other brokers. This
-is a requirement, not hardening — see [High availability](/selfhost/ha) for why.
+is a requirement, not hardening. See [High availability](/selfhost/ha) for why.
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -338,8 +338,8 @@ your probes will start collecting 401s.
 give each ordinal a different value, so the simplest correct configuration lists
 all three names everywhere. This is safe: an inbound frame's effect is applied to
 local state and **never re-broadcast**, so a self-connection cannot amplify
-anything. The cost is one extra connection pair per pod. The alternative — an
-init script that removes the pod's own name from the list — buys you two TCP
+anything. The cost is one extra connection pair per pod. The alternative, an
+init script that removes the pod's own name from the list, buys you two TCP
 connections.
 
 **The mesh port is TCP.** It looks like it should be UDP because the environment
@@ -347,7 +347,7 @@ variables `QUEEN_UDP_PEERS` and `QUEEN_UDP_NOTIFY_PORT` still work as aliases.
 They are the only survivors of the retired UDP transport; the wire is
 length-prefixed frames over TCP. A Service or NetworkPolicy declaring
 `protocol: UDP` for 6633 silently blocks all mesh traffic, and the failure mode is
-subtle — brokers keep serving correctly, only with pop wakes arriving one backoff
+subtle: brokers keep serving correctly, only with pop wakes arriving one backoff
 interval late.
 
 **`podManagementPolicy: Parallel`** is safe here and much faster to roll. Brokers
@@ -357,7 +357,7 @@ that lock rather than racing through the DDL.
 
 **`QUEEN_APPLY_SCHEMA` is left at its default** so each broker applies the schema
 at boot. If your policy forbids DDL from an application role, set it to `"0"` and
-pre-apply the DDL — see [PostgreSQL](/selfhost/postgres) — and read the
+pre-apply the DDL (see [PostgreSQL](/selfhost/postgres)), and read the
 mixed-version note in [Upgrades](/selfhost/upgrade) before you roll a version
 change that way.
 
@@ -365,7 +365,7 @@ change that way.
 thread pool from the core count it can see, and it does **not** read the cgroup
 `cpu.max` quota. A `limits.cpu` of `2` on a 16-core node is a quota, not a
 narrower CPU set, so the broker still spawns 16 worker threads and oversubscribes
-its quota 8× — which shows up as scheduler contention, not as a clean throttle. If
+its quota 8×, which shows up as scheduler contention, not as a clean throttle. If
 your platform requires a CPU limit, set it close to the node's core count, or
 schedule brokers onto nodes sized for them. A memory limit has no such caveat and
 is set above.

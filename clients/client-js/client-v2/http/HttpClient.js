@@ -6,7 +6,7 @@ import * as logger from '../utils/logger.js'
 
 // --------------------------------------------------------------------------
 // Host-routed proxy support (queen_proxy selects the tenant cluster from the
-// first DNS label of the Host header -- queen_proxy/src/cache.rs
+// first DNS label of the Host header -- proxy/src/cache.rs
 // slug_from_host).
 //
 // `fetch()` refuses to send a caller-supplied Host header: `host` is on the

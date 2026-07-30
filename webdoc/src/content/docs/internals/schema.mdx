@@ -16,6 +16,7 @@ sourceOfTruth:
   - server/sql/procedures/046_log_streams.sql
   - server/sql/procedures/047_log_admin.sql
   - server/sql/procedures/048_log_stats.sql
+  - server/sql/procedures/049_drop_rows_message_plane.sql
   - server/src/schema.rs
 ---
 
@@ -73,6 +74,12 @@ Index: `idx_log_partitions_queue_write (queue_id, last_write_at)`, the wildcard 
 hot filter. Storage parameters: `fillfactor = 70`, `autovacuum_vacuum_scale_factor = 0`,
 `autovacuum_vacuum_threshold = 500`, `autovacuum_vacuum_cost_delay = 0`, `vacuum_truncate = off`.
 
+The row is deleted only by the cleanup phase, and only once the partition is empty and both its
+timestamps are older than `PARTITION_CLEANUP_DAYS`. Deleting it cascades to `log_segments` (none, by
+definition) and `log_consumers`, so the group cursors go with it; a later push recreates the
+partition under a new `id`, allocating from `last_offset = -1` again. See
+[Retention internals](/internals/retention).
+
 ### queen.log_segments (`041`)
 
 The messages.
@@ -101,6 +108,11 @@ ack-by-`transactionId` resolves through it.
 | `end_offset` | `BIGINT` | inclusive, same range as the segment |
 | `created_at` | `TIMESTAMPTZ` | same timestamp as the segment |
 | `hashes` | `BYTEA` | `16 × msg_count` bytes: `xxh3_128` big-endian, frame order |
+
+The missing foreign key keeps FK-trigger cost off the purge path, at the price of one obligation:
+whatever deletes a partition must delete these rows itself. The purge phase walks live partitions, so
+a row orphaned by a partition delete would be unreachable forever. `log_partition_cleanup_step_v1` is
+the only other thing that deletes partitions, and it deletes the sidecar explicitly.
 
 ### queen.log_consumers (`041`)
 
@@ -143,7 +155,10 @@ Dead-lettered frames, as snapshots.
 
 Index: `idx_log_dlq_partition_failed_at (partition_id, failed_at DESC)`.
 
-Nothing in the retention cycle purges this table.
+Nothing in the retention cycle purges this table. Because these rows have no foreign key either, a
+partition that still holds one is never reclaimed by the cleanup phase: dropping the partition would
+leave the snapshots unreachable rather than clean them up, since every DLQ reader joins through
+`log_partitions`.
 
 ## Shared tables the log engine uses
 
@@ -155,7 +170,7 @@ These are created by `schema.sql` and are not engine-specific.
 | `queen.consumer_groups_metadata` | durable subscription registration (mode + timestamp) and the group-first-contact seed marker |
 | `queen.consumer_watermarks` | the per-`(queue, group)` empty-scan watermark and its verification time |
 | `queen.stats` | output of the stats reconciler: `queue`, `namespace`, `task` and `system` rows |
-| `queen.retention_history` | one audit row per retention step that deleted something |
+| `queen.retention_history` | one audit row per retention step that deleted something, plus one `__partition_deleted__` row per partition the cleanup phase reclaimed. The `__%__` prefix keeps partition events out of the messages-evicted timeseries |
 | `queen.message_traces`, `queen.message_trace_names` | tracing; the `partition_id` FK is decoupled because log partitions have no row in `queen.partitions` |
 | `queen.system_state` | the two maintenance flags, as `{"enabled": bool}` JSONB rows |
 | `queen.worker_metrics`, `queen.worker_metrics_summary`, `queen.system_metrics`, `queen.queue_lag_metrics` | the metrics collector's output |
@@ -163,7 +178,9 @@ These are created by `schema.sql` and are not engine-specific.
 
 <Aside type="caution">
 `queen_streams.queries` and `queen_streams.state` are `GRANT`ed to `PUBLIC`, and nothing purges
-stream state.
+stream state. `state.partition_id` carries no foreign key on purpose, with the schema comment saying
+a partition cleanup must not silently delete still-relevant state, so a partition holding stream
+state is never reclaimed either.
 </Aside>
 
 ## Procedures, file by file
@@ -318,5 +335,10 @@ construction:
 
 Consumer-row locks are only ever taken after all partition-row locks, so the two lock spaces cannot
 form a cross-space cycle. The ack path takes only consumer locks and never a partition lock; the
-retention steps take exactly one partition lock each, so they cannot deadlock against a
+per-partition retention steps take exactly one partition lock each, so they cannot deadlock against a
 multi-partition locker regardless of iteration order.
+
+`log_partition_cleanup_step_v1` is the one maintenance step that holds **many** partition locks at
+once, so it is bound by rule 2 like any other multi-partition writer: it takes them ascending by `id`
+in a single statement, with `SKIP LOCKED` so it steps over a partition a pusher is holding instead of
+queueing in front of the write path.

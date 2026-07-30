@@ -1,7 +1,7 @@
 // The single error shape every API failure arrives as.
 //
 // The proxy answers `{error, code}` with a meaningful status on every non-2xx
-// (queen_proxy/src/errors.rs), and those three facts are the only way a view
+// (proxy/src/errors.rs), and those three facts are the only way a view
 // can tell "you may not" (403) from "not on this cell" (404 route_blocked)
 // from "slow down" (429) from "the broker is gone" (0/502). Nothing may drop
 // them: a bare `new Error(message)` makes every one of those look identical.

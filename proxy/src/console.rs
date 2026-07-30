@@ -838,7 +838,7 @@ fn err_not_configured() -> Response {
 // ---------------------------------------------------------------------------
 
 /// Vite build output, `base: "/console/"` (console/vite.config.js). Path is
-/// relative to this crate's manifest dir (queen_proxy/), matching
+/// relative to this crate's manifest dir (proxy/), matching
 /// server/src/handlers/static_files.rs's `#[folder = "webapp/dist"]`.
 #[derive(RustEmbed)]
 #[folder = "console/dist"]

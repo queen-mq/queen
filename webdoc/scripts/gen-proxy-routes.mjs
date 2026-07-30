@@ -1,7 +1,7 @@
 /**
  * Generate the "what can a tenant call through the proxy" table.
  *
- * `queen_proxy/src/routes.rs` is the enforcement spec: every broker-bound
+ * `proxy/src/routes.rs` is the enforcement spec: every broker-bound
  * request is classified into exactly one class, and anything API-shaped that
  * matches nothing is blocked. This script applies the same classification to
  * the broker's real route list, so the table is a join of two derived facts
@@ -21,7 +21,7 @@ import {
   sliceBlock,
 } from "./lib/source.mjs";
 
-const PROXY_ROUTES = "queen_proxy/src/routes.rs";
+const PROXY_ROUTES = "proxy/src/routes.rs";
 const MAIN = "server/src/main.rs";
 
 // Bump after re-reading the Rust when a guard trips.

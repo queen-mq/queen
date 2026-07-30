@@ -1,7 +1,7 @@
 /**
  * Host-routed proxy support: selecting a tenant cluster at a queen_proxy
  * deployment (PLAN_QUEEN_PROXY_CLOUD.md §2 -- the proxy resolves the cluster
- * from the Host header's first DNS label, queen_proxy/src/cache.rs
+ * from the Host header's first DNS label, proxy/src/cache.rs
  * slug_from_host).
  *
  * The defect these tests lock down: `fetch()` silently drops a caller-supplied

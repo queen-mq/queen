@@ -21,7 +21,7 @@ export default defineConfig({
   },
   build: {
     // The artifact BOTH binaries embed: server/src/handlers/static_files.rs
-    // (#[folder = "webapp/dist"]) and queen_proxy/src/webapp.rs
+    // (#[folder = "webapp/dist"]) and proxy/src/webapp.rs
     // (#[folder = "../server/webapp/dist"]). Building anywhere else means the
     // source edit silently does not ship — the bytes are baked in at compile
     // time, so a Rust rebuild is required after every `npm run build`.

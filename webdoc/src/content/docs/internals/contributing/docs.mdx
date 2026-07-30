@@ -162,7 +162,7 @@ naming the sources it read and the command to regenerate.
 | `gen-routes.mjs` | `generated/broker-routes` | the `Router::new()` chain in `server/src/main.rs`, the access table in `server/src/auth.rs`, and whether each handler takes the `Tenant` extension |
 | `gen-config.mjs` | `generated/broker-config` | every `env_bool` / `env_int` / `env_f64` / `env_str` call site in `server/src/config.rs`, plus the raw `std::env::var` reads in `server/src/fusion.rs` |
 | `gen-metrics.mjs` | `generated/broker-metrics` | the Prometheus exposition assembled in `server/src/metrics.rs` and `server/src/handlers/status.rs` |
-| `gen-proxy-routes.mjs` | `generated/proxy-route-classes` | the request classifier in `queen_proxy/src/routes.rs`, applied to the broker's real route list |
+| `gen-proxy-routes.mjs` | `generated/proxy-route-classes` | the request classifier in `proxy/src/routes.rs`, applied to the broker's real route list |
 | `gen-openapi.mjs` | `generated/openapi-coverage`, plus `public/openapi/queen-{broker,proxy}.json` | both routers, each handler's `Query<T>` extractor and body struct, the `StatusCode` variants each handler can return, and the access table |
 | `gen-charts.mjs` | `public/charts/*.svg` | the archived CSV and stdout artifacts under `benchmark-queen/`, plotted by `charts.py` |
 | `gen-snippets.mjs` | `snippets/*` and `snippets/index` | marked regions of the client test suites |
@@ -213,7 +213,7 @@ never a missing one. Fewer than 25 families is a hard error.
 ### Proxy route classes
 
 The proxy is the enforcement point for what a tenant may call, and
-`queen_proxy/src/routes.rs` classifies every broker-bound request into exactly one class, with
+`proxy/src/routes.rs` classifies every broker-bound request into exactly one class, with
 anything API-shaped that matches no rule blocked. This generator applies that same
 classification to the broker's real route list, so the published table is a join of two derived
 facts rather than a hand-maintained list.
@@ -311,8 +311,8 @@ new fingerprint in.
 | Mirrored function | Guarded in |
 | --- | --- |
 | `route_access_level` in `server/src/auth.rs` | `gen-routes.mjs` (and re-derived in `gen-openapi.mjs`) |
-| `classify` in `queen_proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
-| `is_operator_route` in `queen_proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
+| `classify` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
+| `is_operator_route` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
 
 When a guard trips, the generator refuses to run at all. That is the intended behaviour: the
 build stops until a human has compared the two implementations.

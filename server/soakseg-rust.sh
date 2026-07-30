@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# soakseg-rust.sh — soak the RUST segments broker (queen-seg-rust) on a fresh PG.
+# soakseg-rust.sh — soak the RUST segments broker (queen) on a fresh PG.
 # Flow: fresh Postgres -> boot C++ segments broker once (auto-inits queen.seg_*
 # schema) + /configure the queue (storage=segments, dedup=0) -> stop C++ ->
 # start Rust broker on same PG -> goload bp-100 soak -> monitor -> teardown.
 set -uo pipefail
 NET=qbench; PG=qbench-pg; GOLOAD=/root/goload
 DUR="${DUR:-300}"; STEP="${STEP:-30}"
-CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen-seg-rust:latest}"
+CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen:latest}"
 DEDUP="${DEDUP:-0}"
 
 log(){ echo "[$(date -u +%FT%TZ)] $*"; }

@@ -8,7 +8,7 @@
 #   ./build.sh all --push --multiarch --latest
 #
 # Both images build from the repo root: the proxy crate embeds the broker's
-# dashboard from ../server/webapp/dist, so its context cannot be queen_proxy/.
+# dashboard from ../server/webapp/dist, so its context cannot be proxy/.
 #
 # Publishing needs a token with the `write:packages` scope. The GitHub CLI is
 # the least painful source of one (GHCR does not accept fine-grained PATs):
@@ -135,8 +135,8 @@ build_broker() {
 build_proxy() {
     local version
     version=$(awk -F'"' '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' \
-        queen_proxy/Cargo.toml)
-    build_image queen-proxy ./queen_proxy/Dockerfile "$version"
+        proxy/Cargo.toml)
+    build_image queen-proxy ./proxy/Dockerfile "$version"
 }
 
 case "$TARGET" in

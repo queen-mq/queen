@@ -14,7 +14,7 @@ sourceOfTruth:
   - server/sql/procedures/041_log_schema.sql
 ---
 
-Queen is one stateless Rust binary (crate `queen-seg-rust`, binary `queen-seg`) and one
+Queen is one stateless Rust binary (crate `queen`, binary `queen`) and one
 PostgreSQL database. The binary holds no durable state. Every offset, cursor, lease and
 segment lives in PostgreSQL, and every in-memory structure in the broker is a cache or a
 scheduler over it. That single fact is the key to reading this section: when an in-memory

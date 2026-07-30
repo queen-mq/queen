@@ -1,4 +1,4 @@
-//! `queen-seg migrate ...` subcommand — RETIRED on the log engine.
+//! `queen migrate ...` subcommand — RETIRED on the log engine.
 //!
 //! The seg-era big-bang OFFLINE rows→segments migration was built on the
 //! `028_storage_v2_migrate.sql` SQL family (seg_migration_progress bookkeeping,
@@ -14,7 +14,7 @@ use crate::config::Config;
 /// Human-readable reason the subcommand is unavailable.
 pub const MIGRATION_UNSUPPORTED: &str = "migration is not supported on the log engine";
 
-/// Entry point for `queen-seg migrate ...` (main.rs subcommand dispatch).
+/// Entry point for `queen migrate ...` (main.rs subcommand dispatch).
 /// Reports the retirement and exits non-zero. Never opens a DB connection.
 pub async fn run(_cfg: Config, _args: Vec<String>) {
     tracing::error!(target: "migrate", reason = %MIGRATION_UNSUPPORTED, "migrate subcommand unsupported on log engine");

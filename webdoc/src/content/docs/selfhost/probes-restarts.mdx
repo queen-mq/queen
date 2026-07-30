@@ -76,7 +76,7 @@ The HTTP server is wrapped in a graceful shutdown driven by SIGTERM or Ctrl-C.
 On the signal the broker logs
 
 ```text
-INFO shutdown  signal received — draining in-flight requests
+INFO shutdown  signal received, draining in-flight requests
 ```
 
 stops accepting new connections, and waits for in-flight requests to finish.

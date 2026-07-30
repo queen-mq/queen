@@ -8,9 +8,9 @@ sourceOfTruth:
   - webdoc/scripts/gen-openapi.mjs
   - server/src/main.rs
   - server/src/handlers
-  - queen_proxy/src/main.rs
-  - queen_proxy/src/console.rs
-  - queen_proxy/src/oauth.rs
+  - proxy/src/main.rs
+  - proxy/src/console.rs
+  - proxy/src/oauth.rs
 ---
 
 Two OpenAPI 3.1 documents are published with this site. Neither is written by hand: both are
@@ -39,7 +39,7 @@ changes, the document changes with it.
 
 | Element | Derived from |
 | --- | --- |
-| Paths and methods | the `Router::new()` chain: the broker's in `server/src/main.rs`, the proxy's in `queen_proxy/src/main.rs` plus the nested console and auth routers |
+| Paths and methods | the `Router::new()` chain: the broker's in `server/src/main.rs`, the proxy's in `proxy/src/main.rs` plus the nested console and auth routers |
 | Path parameters | the `:name` segments of the registered path |
 | Query parameters | the handler's `Query<T>` extractor: the fields of `T` with their serde renames and optionality. For a handler taking `Query<HashMap<..>>`, the literal keys it reads out of the map |
 | Request bodies | the struct the handler passes to `serde_json::from_slice`, walked recursively into nested structs |

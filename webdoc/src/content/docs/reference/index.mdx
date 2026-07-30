@@ -24,7 +24,7 @@ at that number.
 | Every route, with its access level and whether it resolves a tenant | the axum router in `server/src/main.rs` plus the access-level map in `server/src/auth.rs` | [HTTP conventions](/reference/http) and [Route table](/reference/http/routes) |
 | Every environment variable with the default the code applies | `server/src/config.rs`, plus `server/src/fusion.rs` for the experiment-only overrides | the configuration page in this section |
 | Every Prometheus metric family | the broker's metrics module | the Prometheus page in this section |
-| What a tenant may call through the multi-tenant gateway | `queen_proxy/` | the proxy pages in [Self-hosting](/selfhost) |
+| What a tenant may call through the multi-tenant gateway | `proxy/` | the proxy pages in [Self-hosting](/selfhost) |
 
 A generated table cannot drift into documenting a route that does not exist. Hand-written
 prose can, which is why the pages around those tables stay short and mechanical.

@@ -1,4 +1,4 @@
-# queen-seg — Queen Rust broker
+# queen — Queen Rust broker
 
 The Queen message broker: an async Rust server (`tokio` + `axum` +
 `deadpool-postgres`) on top of the **segments** storage engine in PostgreSQL.
@@ -21,7 +21,7 @@ the running binary is fully self-contained — no schema files are needed at run
 ```bash
 cd server
 cargo build --release
-# binary: target/release/queen-seg
+# binary: target/release/queen
 ```
 
 Behind an offline cache, add `CARGO_NET_OFFLINE=true`.
@@ -37,14 +37,14 @@ Point it at a Postgres and start it. On boot it applies the schema (under a
 
 ```bash
 PG_HOST=localhost PG_PORT=5432 PG_USER=postgres PG_PASSWORD=postgres PG_DATABASE=postgres \
-  ./target/release/queen-seg
+  ./target/release/queen
 ```
 
 Boot log:
 
 ```
 schema: applied schema.sql + 37 procedures
-queen-seg-rust v1.0.0-alpha-01 listening on 0.0.0.0:6632 (...)
+queen v1.0.0-alpha-01 listening on 0.0.0.0:6632 (...)
 ```
 
 Quick check:
@@ -148,7 +148,7 @@ The binary carries an offline migration subcommand for moving data from the reti
 rows engine into segments:
 
 ```bash
-./target/release/queen-seg migrate --mode {all|unconsumed|window} [--since <mins>] ...
+./target/release/queen migrate --mode {all|unconsumed|window} [--since <mins>] ...
 ```
 
 Only relevant when upgrading an old rows-engine deployment; new deployments are
@@ -159,8 +159,8 @@ segments-only from the start.
 The crate's own image (broker only):
 
 ```bash
-docker build -t queen-seg server/
-docker run -p 6632:6632 -e PG_HOST=your-db queen-seg
+docker build -t queen server/
+docker run -p 6632:6632 -e PG_HOST=your-db queen
 ```
 
 The repo-root `Dockerfile` builds the full stack (broker + dashboard + `queenctl`
@@ -170,7 +170,7 @@ CLI); `build.sh <registry>` tags it `name:version` from `server.json`.
 
 ```
 server/
-├── Cargo.toml        # crate: queen-seg-rust, bin: queen-seg
+├── Cargo.toml        # crate: queen, bin: queen
 ├── build.rs          # embeds server.json's version as QUEEN_VERSION
 ├── server.json       # { name, version } — source of truth for the version + image tag
 ├── Dockerfile        # broker-only image
@@ -188,7 +188,7 @@ server/
     ├── udp.rs        # inter-instance UDP sync
     ├── notify.rs     # long-poll waker
     ├── retention.rs  # retention / eviction service
-    ├── migrate.rs    # `queen-seg migrate` subcommand
+    ├── migrate.rs    # `queen migrate` subcommand
     └── metrics.rs
 ```
 

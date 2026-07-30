@@ -37,11 +37,11 @@ using locally.
 
 ## What it builds
 
-The broker image is built from `server/Dockerfile` and tagged `queen-seg:test`. Because that
+The broker image is built from `server/Dockerfile` and tagged `queen:test`. Because that
 Dockerfile copies `server/webapp` into the build context rather than building the dashboard,
 the dashboard has to exist first. See
 [Building and developing](/internals/contributing). Runner images come from
-`test/runners/<suite>/Dockerfile`. `--no-build-broker` reuses an existing `queen-seg:test`,
+`test/runners/<suite>/Dockerfile`. `--no-build-broker` reuses an existing `queen:test`,
 and `--no-build` reuses everything.
 
 ## Suites
@@ -98,7 +98,7 @@ other's results. Parallelism is therefore per stack, four at a time by default (
 
 ## How readiness is gated
 
-The runtime broker image is `debian:bookworm-slim` carrying only the `queen-seg` binary and none
+The runtime broker image is `debian:bookworm-slim` carrying only the `queen` binary and none
 of the tooling a healthcheck would need, in particular no `curl`. So readiness cannot be a
 Compose healthcheck on the broker; it lives in the runner, which does have `curl`. Every runner
 entrypoint calls
@@ -193,7 +193,7 @@ Two counts in the tree are stale and will mislead you. `test/run.sh`'s header co
 `test/README.md` both say the `rust` suite is "50 in-process unit tests"; counting `#[test]`
 and `#[tokio::test]` attributes under `server/src` gives 169 today. `queen_proxy`'s suite is a
 similar size but is **not** part of `test/run.sh` at all. Run it with `cargo test` inside
-`queen_proxy/`.
+`proxy/`.
 </Aside>
 
 ## A defect in the harness
@@ -239,10 +239,10 @@ targets that no longer exist. It is dead and cannot pass.
 - `server/mesh-verify.sh` builds its own debug binary and drives two brokers on localhost to
   check cross-replica wake latency, dead-peer detection and reconnection. The `mesh` suite only
   asserts the pair is connected; this is the behavioural gate.
-- `queen_proxy/scripts/isolation-smoke.sh` runs two-tenant isolation *through* the proxy
+- `proxy/scripts/isolation-smoke.sh` runs two-tenant isolation *through* the proxy
   against the development cell, asserting on response content rather than status codes, and
   covering blocked operator surfaces, API-key scopes, revocation, storage quota and meters.
   With `QUEEN_PROXY_ENFORCE=true` it adds live 429 checks; in shadow mode those are reported as
   counted skips, never as silent passes.
-- `queen_proxy/scripts/sdk-smoke/run.sh` drives the JavaScript, Python and Go SDKs through the
+- `proxy/scripts/sdk-smoke/run.sh` drives the JavaScript, Python and Go SDKs through the
   proxy.

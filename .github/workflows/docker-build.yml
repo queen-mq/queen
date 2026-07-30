@@ -40,7 +40,7 @@ jobs:
           - image: queen
             dockerfile: ./Dockerfile
           - image: queen-proxy
-            dockerfile: ./queen_proxy/Dockerfile
+            dockerfile: ./proxy/Dockerfile
 
     steps:
     - uses: actions/checkout@v4
@@ -63,7 +63,7 @@ jobs:
             ;;
           queen-proxy)
             VERSION=$(awk -F'"' '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{print $2; exit}' \
-              queen_proxy/Cargo.toml)
+              proxy/Cargo.toml)
             ;;
         esac
         test -n "$VERSION" || { echo "could not resolve version for ${{ matrix.image }}"; exit 1; }
@@ -83,7 +83,7 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         # Both Dockerfiles build from the repo root — the proxy crate embeds
-        # ../server/webapp/dist, which is outside queen_proxy/.
+        # ../server/webapp/dist, which is outside proxy/.
         context: .
         file: ${{ matrix.dockerfile }}
         platforms: linux/amd64,linux/arm64

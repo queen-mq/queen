@@ -38,7 +38,7 @@ is what makes tens of thousands of partitions cheap.
 ### Elsewhere
 
 - **Multi-tenancy.** Native tenant scoping in the broker behind `QUEEN_TENANCY_HEADER`
-  (off by default), plus `queen_proxy`, a separate Apache-2.0 gateway with API keys, plans,
+  (off by default), plus `queen-proxy`, a separate Apache-2.0 gateway with API keys, plans,
   quotas, rate limiting, metering and a console. Documented under
   [Self-hosting](https://queenmq.com/selfhost).
 - **Multi-broker coordination is framed TCP**, not UDP. The old `QUEEN_UDP_*` variables are

@@ -7,13 +7,13 @@ sidebar:
   order: 20
   label: Deploying the proxy
 sourceOfTruth:
-  - queen_proxy/src/main.rs
-  - queen_proxy/src/config.rs
-  - queen_proxy/src/db.rs
-  - queen_proxy/src/cache.rs
-  - queen_proxy/src/gateway.rs
-  - queen_proxy/src/registry.rs
-  - queen_proxy/CONTRACTS.md
+  - proxy/src/main.rs
+  - proxy/src/config.rs
+  - proxy/src/db.rs
+  - proxy/src/cache.rs
+  - proxy/src/gateway.rs
+  - proxy/src/registry.rs
+  - proxy/CONTRACTS.md
 ---
 
 `queen_proxy` is a separate Rust binary. One instance fronts one cell, and it needs
@@ -88,7 +88,7 @@ needs that privilege. This is the one place the proxy differs from the broker, w
 requires no extensions at all.
 
 <Aside type="caution">
-The SQL is embedded at compile time. Editing a file under `queen_proxy/migrations/`
+The SQL is embedded at compile time. Editing a file under `proxy/migrations/`
 changes nothing until you rebuild the binary.
 </Aside>
 

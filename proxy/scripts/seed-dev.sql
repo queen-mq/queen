@@ -2,7 +2,7 @@
 -- registered in db::migrations(), not applied automatically at boot).
 -- Run by hand against a dev pxdb that has already had 001_init.sql and
 -- 002_functions.sql applied, e.g.:
---   psql "$PXDB_URL" -f queen_proxy/scripts/seed-dev.sql
+--   psql "$PXDB_URL" -f proxy/scripts/seed-dev.sql
 --
 -- Creates the local dev fixture referenced by CONTRACTS.md's dev cell ports
 -- (pxdb :5465, cell PG :5466, broker :6710, proxy :6711):

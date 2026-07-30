@@ -4,7 +4,7 @@
 # partitions -> wildcard autoack pop -> print what went in and what came out.
 set -uo pipefail
 NET=qbench; PG=qbench-pg
-CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen-seg-rust:latest}"
+CIMG="${CIMG:-queen-mq:segments}"; RIMG="${RIMG:-queen:latest}"
 
 log(){ echo "[smoke] $*"; }
 q(){ docker exec "$PG" psql -U postgres -tAc "$1" </dev/null 2>/dev/null; }

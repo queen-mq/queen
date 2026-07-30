@@ -7,12 +7,12 @@ sidebar:
   order: 19
   label: Multi-tenant
 sourceOfTruth:
-  - queen_proxy/src/main.rs
-  - queen_proxy/src/cache.rs
-  - queen_proxy/src/gateway.rs
-  - queen_proxy/src/state.rs
-  - queen_proxy/migrations/001_init.sql
-  - queen_proxy/CONTRACTS.md
+  - proxy/src/main.rs
+  - proxy/src/cache.rs
+  - proxy/src/gateway.rs
+  - proxy/src/state.rs
+  - proxy/migrations/001_init.sql
+  - proxy/CONTRACTS.md
 ---
 
 The broker and the gateway in front of it are both Apache-2.0. Nothing in this
@@ -22,7 +22,7 @@ built on top. This section documents how that system is put together, what it
 enforces, and where its edges are.
 
 It is not a description of a commercial offering. It is the design of
-`queen_proxy/`, read out of the code.
+`proxy/`, read out of the code.
 
 ## Three nouns
 
@@ -163,12 +163,12 @@ The order is load-bearing, and it is the order in the gateway:
 
 ## The pieces
 
-| File in `queen_proxy/` | Responsibility |
+| File in `proxy/` | Responsibility |
 | --- | --- |
 | `src/main.rs` | Listener, optional TLS, the background pumps, graceful shutdown |
 | `src/cache.rs` | Host → cluster and API-key-hash → cluster, with `LISTEN` invalidation |
 | `src/gateway.rs` | The request pipeline above |
-| `src/routes.rs` | Route classification — the enforcement spec |
+| `src/routes.rs` | Route classification: the enforcement spec |
 | `src/auth.rs` | Credential verification, JWT mint and verify, the authorization matrix |
 | `src/limits.rs` | Token buckets, parked-slot gauges, push-block flags |
 | `src/registry.rs` | Queue/partition admission and the per-cell inventory reconciler |
@@ -189,7 +189,7 @@ The order is load-bearing, and it is the order in the gateway:
   <LinkCard
     href="/selfhost/multi-tenant/tenants"
     title="Tenants, clusters and cells"
-    description="The data model and the SQL functions that provision it — including what is not implemented."
+    description="The data model and the SQL functions that provision it, including what is not implemented."
   />
   <LinkCard
     href="/selfhost/multi-tenant/auth"

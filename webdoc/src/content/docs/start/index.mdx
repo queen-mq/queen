@@ -11,7 +11,7 @@ sourceOfTruth:
 ---
 
 Queen MQ is a message queue that keeps its data in PostgreSQL. A queue is split into
-**partitions** — one per entity, created the first time you push to it — and each partition
+**partitions** (one per entity, created the first time you push to it), and each partition
 is a strictly ordered lane that a consumer group drains independently. Ten thousand
 partitions cost ten thousand index rows, not ten thousand log files or ten thousand
 processes, and a consumer stuck on one lane never blocks another.
@@ -27,7 +27,7 @@ already does.
   <LinkCard
     href="/start/quickstart"
     title="Quickstart"
-    description="A broker, a queue, and a message you push and consume — in about five minutes."
+    description="A broker, a queue, and a message you push and consume, in about five minutes."
   />
   <LinkCard
     href="/start/why"
@@ -52,11 +52,11 @@ The rest of the site is organised by what you are trying to do.
 
 | If you want to | Read |
 | --- | --- |
-| Write an application against Queen | [Use Queen](/use) — the model, the SDKs, the HTTP API, worked examples |
-| Run Queen yourself | [Self-hosting](/selfhost) — deployment, PostgreSQL, high availability, security, operations |
-| Know how it works inside | [Internals](/internals) — segments, offsets, the push and pop paths, the schema |
-| Look one thing up | [Reference](/reference) — routes, environment variables, metrics, client APIs |
-| See what it does under load | [Benchmarks](/benchmarks) — the runs, their configuration, and their raw output |
+| Write an application against Queen | [Use Queen](/use): the model, the SDKs, the HTTP API, worked examples |
+| Run Queen yourself | [Self-hosting](/selfhost): deployment, PostgreSQL, high availability, security, operations |
+| Know how it works inside | [Internals](/internals): segments, offsets, the push and pop paths, the schema |
+| Look one thing up | [Reference](/reference): routes, environment variables, metrics, client APIs |
+| See what it does under load | [Benchmarks](/benchmarks): the runs, their configuration, and their raw output |
 
 ## What you get
 

@@ -1,14 +1,14 @@
 # Multi-stage Dockerfile for the Queen proxy (gateway + operator console)
 #
-# IMPORTANT: the build context is the REPO ROOT, not queen_proxy/.
-#   Build: DOCKER_BUILDKIT=1 docker build -f queen_proxy/Dockerfile -t queen-proxy .
+# IMPORTANT: the build context is the REPO ROOT, not proxy/.
+#   Build: DOCKER_BUILDKIT=1 docker build -f proxy/Dockerfile -t queen-proxy .
 #   Run:   docker run -p 6711:6711 -e QUEEN_PROXY_PG_URL=... queen-proxy
 #
-# The context cannot be queen_proxy/ because the crate embeds TWO Vite builds,
+# The context cannot be proxy/ because the crate embeds TWO Vite builds,
 # one of which lives outside its own directory:
 #
 #   src/webapp.rs   #[folder = "../server/webapp/dist"]   <- app/, the broker's dashboard
-#   src/console.rs  #[folder = "console/dist"]            <- queen_proxy/console/
+#   src/console.rs  #[folder = "console/dist"]            <- proxy/console/
 #
 # rust-embed resolves both relative to the crate manifest dir and hard-errors at
 # compile time when a folder is missing, so the two frontend stages below are
@@ -34,15 +34,15 @@ COPY app/ ./
 # Same artifact the broker image builds — the proxy serves it on the public leg.
 RUN npm run build
 
-# Stage 2: Build the operator console (queen_proxy/console/)
+# Stage 2: Build the operator console (proxy/console/)
 FROM node:22-alpine AS console-builder
 
 WORKDIR /build/console
 
-COPY queen_proxy/console/package*.json ./
+COPY proxy/console/package*.json ./
 RUN npm ci
 
-COPY queen_proxy/console/ ./
+COPY proxy/console/ ./
 
 # outDir 'dist' with base '/console/' (console/vite.config.js) -> /build/console/dist.
 RUN npm run build
@@ -50,18 +50,18 @@ RUN npm run build
 # Stage 3: Build the Rust proxy
 FROM rust:1-bookworm AS proxy-builder
 
-# The crate sits at /usr/build/queen_proxy so that its `../server/webapp/dist`
+# The crate sits at /usr/build/proxy so that its `../server/webapp/dist`
 # embed resolves to /usr/build/server/webapp/dist. Moving either path breaks the
 # build at compile time rather than at runtime, which is the point.
-WORKDIR /usr/build/queen_proxy
+WORKDIR /usr/build/proxy
 
 # Layer 1: manifests, so dependency compilation caches independently of src.
-COPY queen_proxy/Cargo.toml queen_proxy/Cargo.lock ./
+COPY proxy/Cargo.toml proxy/Cargo.lock ./
 
 # Layer 2: source + migrations (embedded with include_str! from src/db.rs, so
 # they are compiled into the binary — there is nothing to copy at runtime).
-COPY queen_proxy/src ./src
-COPY queen_proxy/migrations ./migrations
+COPY proxy/src ./src
+COPY proxy/migrations ./migrations
 
 # Layer 3: the two embedded frontends, in the positions rust-embed expects.
 COPY --from=console-builder /build/console/dist ./console/dist
@@ -70,7 +70,7 @@ COPY --from=webapp-builder /app/server/webapp/dist /usr/build/server/webapp/dist
 # Build. Cargo registry + target dirs are BuildKit caches; copy the binary out of
 # the (non-persisted) target cache so it lands in the image layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/build/queen_proxy/target \
+    --mount=type=cache,target=/usr/build/proxy/target \
     cargo build --release && cp target/release/queen-proxy /queen-proxy
 
 RUN test -f /queen-proxy && echo "Build successful"

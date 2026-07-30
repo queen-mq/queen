@@ -37,7 +37,7 @@ log(){ echo "[mesh-verify] $*"; }
 now_ms(){ python3 -c 'import time;print(int(time.time()*1000))'; }
 fail(){ log "FAIL: $*"; cleanup; exit 1; }
 
-BIN=target/debug/queen-seg
+BIN=target/debug/queen
 A_PID=""; B_PID=""; CONS_PID=""
 A_LOG="$(mktemp)"; B_LOG="$(mktemp)"; CONS_OUT="$(mktemp)"
 
