@@ -62,43 +62,130 @@ pub fn key_hash_hex(key: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// credential extraction
+// ---------------------------------------------------------------------------
+
+/// What a request presents as its credential, before any verification.
+///
+/// `Session` covers BOTH forms a human session arrives in: the `Authorization:
+/// Bearer` the console SPA and the SDKs send, and the httpOnly session cookie
+/// a browser sends on its own. Accepting the cookie here is what lets the
+/// webapp call `/api/v1/*` with plain same-origin XHR and no token plumbing;
+/// it is safe against cross-site writes because the cookie is `SameSite=Lax`
+/// (oauth.rs::session_cookie), which browsers do not attach to cross-site
+/// fetch/XHR at all.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Credential {
+    ApiKey(String),
+    Session(String),
+    None,
+}
+
+/// Read the credential out of an API request. Authorization wins over the
+/// cookie when both are present (an explicit token is a deliberate act; the
+/// cookie merely rides along). Pure — `cookie_name` instead of `&St` — so the
+/// precedence rules are unit-testable without an AppState.
+///
+/// A cookie is NOT accepted on a cross-document navigation here; see
+/// `is_navigation`.
+pub fn read_credential(cookie_name: &str, headers: &HeaderMap) -> Credential {
+    read_credential_inner(cookie_name, headers, false)
+}
+
+/// The same, for the DOCUMENT surface (the webapp shell in webapp.rs), where a
+/// navigation is the normal and only way the page is ever loaded. Serving the
+/// SPA is a read of static bytes: there is no state to forge, so the rule that
+/// protects the API would only break the app.
+pub fn read_credential_for_document(cookie_name: &str, headers: &HeaderMap) -> Credential {
+    read_credential_inner(cookie_name, headers, true)
+}
+
+fn read_credential_inner(
+    cookie_name: &str,
+    headers: &HeaderMap,
+    cookie_on_navigation: bool,
+) -> Credential {
+    if let Some(raw) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        let token = raw.strip_prefix("Bearer ").unwrap_or(raw).trim();
+        if !token.is_empty() {
+            return if token.starts_with(API_KEY_PREFIX) {
+                Credential::ApiKey(token.to_string())
+            } else {
+                Credential::Session(token.to_string())
+            };
+        }
+    }
+    if !cookie_on_navigation && is_navigation(headers) {
+        return Credential::None;
+    }
+    match read_cookie(cookie_name, headers) {
+        // A cookie is only ever a HUMAN session. A `qk_` value sitting in one
+        // is nonsense (nothing mints that) and is dropped rather than promoted
+        // to a data-plane credential — a cookie is attached by the browser,
+        // not chosen per request, so it must never widen what a caller can do.
+        Some(t) if !t.is_empty() && !t.starts_with(API_KEY_PREFIX) => Credential::Session(t),
+        _ => Credential::None,
+    }
+}
+
+/// Is this a cross-document NAVIGATION (a link, a form, a redirect, the
+/// address bar) rather than a script-initiated fetch?
+///
+/// It matters because accepting the session cookie on the API is what lets the
+/// webapp use plain same-origin XHR, and the cookie is `SameSite=Lax`:
+/// browsers withhold it from cross-site subresource and fetch/XHR requests but
+/// DO attach it to a top-level navigation. Without this check a hostile page
+/// could navigate a logged-in browser to `GET /api/v1/pop/queue/orders` and
+/// lease a tenant's messages on the cookie alone — the one CSRF shape Lax does
+/// not already cover.
+///
+/// Everything the SPA issues is `Sec-Fetch-Mode: cors|same-origin|no-cors`,
+/// never `navigate`. Non-browser clients (the SDKs, curl) send no `Sec-Fetch-*`
+/// at all and are unaffected, as is any request carrying an Authorization
+/// header — that is chosen per request and cannot be attached by a third party.
+fn is_navigation(headers: &HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-mode")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("navigate"))
+        .unwrap_or(false)
+}
+
+/// Minimal cookie parse: exact name match, first wins.
+fn read_cookie(name: &str, headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    for kv in raw.split(';') {
+        if let Some((k, v)) = kv.split_once('=') {
+            if k.trim() == name {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // authenticate / authorize
 // ---------------------------------------------------------------------------
 
-/// Authenticate a data-plane request. Returns the Principal, or the ready
-/// error Response. The cluster was already resolved from Host by the caller;
-/// Agent C also cross-checks key->cluster binding (key of another cluster on
-/// this Host -> 403) and, for JWTs, cluster claim / cluster_roles membership.
-pub async fn authenticate(
-    st: &St,
-    headers: &HeaderMap,
-    cluster_id: uuid::Uuid,
-) -> Result<Principal, Response> {
-    if st.cfg.dev_insecure {
-        return Ok(Principal::ApiKey { key_id: uuid::Uuid::nil(), scopes: Scopes::all() });
-    }
-    let bearer = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v).trim().to_string());
-    let Some(token) = bearer else {
-        return Err(errors::err_401("missing bearer credential"));
-    };
+/// A verified human session: the token's claims plus whether the operator
+/// capability is LIVE for this user on this cell (`cfg.operator_enabled` AND
+/// `users.is_operator`). Handed to `role_on_cluster`, which is the one place
+/// that turns a session into a per-cluster role.
+pub struct Session {
+    pub claims: VerifiedClaims,
+    pub operator: bool,
+}
 
-    // --- API key path (opaque, hashed lookup) ---
-    if token.starts_with(API_KEY_PREFIX) {
-        let hash = key_hash_hex(&token);
-        return match st.cache.by_key_hash(&hash).await {
-            Some((ctx, key_id, scopes)) if ctx.cluster_id == cluster_id => {
-                Ok(Principal::ApiKey { key_id, scopes })
-            }
-            Some(_) => Err(errors::err_403(errors::CODE_FORBIDDEN, "key/cluster mismatch")),
-            None => Err(errors::err_401("unknown or revoked api key")),
-        };
-    }
-
-    // --- JWT path (EdDSA / HS256) ---
-    let claims = match st.keys.verify_jwt_claims(&token) {
+/// Verify a session token end to end: signature + issuer + exp (pure crypto),
+/// then the revocation deny-list, then the operator capability. Shared by the
+/// Host path (`authenticate`) and the act-as-cluster path (acting.rs), so a
+/// session is never accepted by one and rejected by the other.
+pub async fn verify_session(st: &St, token: &str) -> Result<Session, Response> {
+    let claims = match st.keys.verify_jwt_claims(token) {
         Ok(c) => c,
         Err(reason) => {
             // Distinct reason in the log, generic 401 to the client.
@@ -114,30 +201,84 @@ pub async fn authenticate(
         return Err(errors::err_401("invalid credential"));
     }
 
+    // The per-cell gate is checked BEFORE the row lookup, not after: on a cell
+    // where the capability is off, no request ever asks pxdb about it.
+    let operator = st.cfg.operator_enabled && st.keys.is_operator(&st.db, claims.user_id).await;
+    Ok(Session { claims, operator })
+}
+
+/// The session's effective role on one cluster.
+///
+/// A live operator is Admin on EVERY cluster, membership row or not — that is
+/// what "super-admin" means here, and resolving it in one place keeps the Host
+/// path and the act-as path from disagreeing. Everyone else needs a real
+/// `cluster_roles` row; a missing one is fail-closed.
+pub async fn role_on_cluster(
+    st: &St,
+    session: &Session,
+    cluster_id: Uuid,
+) -> Result<Role, Response> {
+    if session.operator {
+        return Ok(Role::Admin);
+    }
+    match st.keys.cluster_role(&st.db, session.claims.user_id, cluster_id).await {
+        Some(role) => Ok(role),
+        None => {
+            // Distinguish "user exists but has no role here" (a real 403)
+            // from "the session's user no longer exists" — a stale JWT
+            // after user deletion (or a dev pxdb reset): that session is
+            // dead, and 401 lets the SPA bounce to login instead of
+            // leaving a 403 dead-end.
+            if !st.keys.user_exists(&st.db, session.claims.user_id).await {
+                return Err(errors::err_401("session no longer valid"));
+            }
+            Err(errors::err_403(errors::CODE_FORBIDDEN, "no role on this cluster"))
+        }
+    }
+}
+
+/// Authenticate a data-plane request against the cluster the caller resolved
+/// from Host. Returns the Principal, or the ready error Response. Also
+/// cross-checks key->cluster binding (key of another cluster on this Host ->
+/// 403) and, for sessions, cluster claim / cluster_roles membership.
+pub async fn authenticate(
+    st: &St,
+    headers: &HeaderMap,
+    cluster_id: uuid::Uuid,
+) -> Result<Principal, Response> {
+    if st.cfg.dev_insecure {
+        return Ok(Principal::ApiKey { key_id: uuid::Uuid::nil(), scopes: Scopes::all() });
+    }
+    let token = match read_credential(&st.cfg.cookie_name, headers) {
+        // --- API key path (opaque, hashed lookup) ---
+        Credential::ApiKey(key) => {
+            let hash = key_hash_hex(&key);
+            return match st.cache.by_key_hash(&hash).await {
+                Some((ctx, key_id, scopes)) if ctx.cluster_id == cluster_id => {
+                    Ok(Principal::ApiKey { key_id, scopes })
+                }
+                Some(_) => Err(errors::err_403(errors::CODE_FORBIDDEN, "key/cluster mismatch")),
+                None => Err(errors::err_401("unknown or revoked api key")),
+            };
+        }
+        Credential::Session(t) => t,
+        Credential::None => return Err(errors::err_401("missing bearer credential")),
+    };
+
+    // --- session path (EdDSA / HS256) ---
+    let session = verify_session(st, &token).await?;
+
     // Cluster binding. A cluster-scoped token is trusted verbatim; an unscoped
     // token has its per-cluster role resolved live from cluster_roles.
-    let role = match bind_cluster(claims.cluster, claims.role, cluster_id) {
+    let role = match bind_cluster(session.claims.cluster, session.claims.role, cluster_id) {
         ClusterBinding::Trust(role) => role,
         ClusterBinding::Mismatch => {
             return Err(errors::err_403(errors::CODE_FORBIDDEN, "token not valid for this cluster"));
         }
-        ClusterBinding::Lookup => match st.keys.cluster_role(&st.db, claims.user_id, cluster_id).await {
-            Some(role) => role,
-            None => {
-                // Distinguish "user exists but has no role here" (a real 403)
-                // from "the session's user no longer exists" — a stale JWT
-                // after user deletion (or a dev pxdb reset): that session is
-                // dead, and 401 lets the SPA bounce to login instead of
-                // leaving a 403 dead-end.
-                if !st.keys.user_exists(&st.db, claims.user_id).await {
-                    return Err(errors::err_401("session no longer valid"));
-                }
-                return Err(errors::err_403(errors::CODE_FORBIDDEN, "no role on this cluster"));
-            }
-        },
+        ClusterBinding::Lookup => role_on_cluster(st, &session, cluster_id).await?,
     };
 
-    Ok(Principal::User { user_id: claims.user_id, role })
+    Ok(Principal::User { user_id: session.claims.user_id, role, operator: session.operator })
 }
 
 /// Outcome of matching a token's optional `cluster` claim against the request's
@@ -164,6 +305,11 @@ fn bind_cluster(claim_cluster: Option<Uuid>, claim_role: Role, request_cluster: 
 pub fn authorize(p: &Principal, class: RouteClass) -> Result<(), Response> {
     let ok = match (&p, class) {
         (_, RouteClass::Blocked) => false,
+        // Cell-wide surfaces: a LIVE operator only. `operator` already folds in
+        // the per-cell flag (see Principal::User), so an api key — which can
+        // never be one — and every tenant role fall to the same false.
+        (Principal::User { operator: true, .. }, RouteClass::Operator) => true,
+        (_, RouteClass::Operator) => false,
         (Principal::ApiKey { scopes, .. }, RouteClass::Produce) => scopes.produce,
         (Principal::ApiKey { scopes, .. }, RouteClass::Consume) => scopes.consume,
         (Principal::ApiKey { scopes, .. }, RouteClass::QueueAdmin) => scopes.admin,
@@ -323,6 +469,13 @@ pub struct Keys {
     revoked_cache: Mutex<HashMap<String, (bool, Instant)>>,
     /// (user, cluster) -> (role, checked_at). 30s TTL; positive memberships only.
     role_cache: Mutex<HashMap<(Uuid, Uuid), (Role, Instant)>>,
+    /// user -> (is_operator, checked_at). 30s TTL, BOTH answers cached: unlike
+    /// role_cache this is read on every request of an operator-enabled cell,
+    /// and the common answer is `false`. The TTL is therefore also the bound
+    /// on how long a `set_operator(..., false)` takes to bite on a running
+    /// proxy — set_operator writes no cluster_id, so there is no NOTIFY to
+    /// shorten it.
+    operator_cache: Mutex<HashMap<Uuid, (bool, Instant)>>,
     /// Deny-list policy when the lookup is UNAVAILABLE — see `is_revoked`.
     /// false (default) = fail open, true = fail closed.
     revocation_strict: bool,
@@ -431,6 +584,7 @@ impl Keys {
             issuer,
             revoked_cache: Mutex::new(HashMap::new()),
             role_cache: Mutex::new(HashMap::new()),
+            operator_cache: Mutex::new(HashMap::new()),
             revocation_strict: crate::config::revocation_strict(),
             revoked_warn: Mutex::new(WarnSampler::default()),
         }
@@ -690,6 +844,51 @@ impl Keys {
             cache.insert(key, (r, Instant::now()));
         }
         role
+    }
+
+    /// Does this user hold the operator bit (`queen_proxy.users.is_operator`)?
+    /// Cached `ROLE_TTL`, both answers.
+    ///
+    /// Fail-CLOSED on every unknown: no pxdb, an unavailable pool, a query
+    /// error, or a column a pre-006 pxdb does not have yet all answer `false`.
+    /// This is the opposite stance from `is_revoked`'s default fail-open, and
+    /// deliberately so — a degraded control plane must never GRANT cell-wide
+    /// access it cannot confirm, whereas failing open there only means a
+    /// revocation is late.
+    pub async fn is_operator(&self, db: &Option<deadpool_postgres::Pool>, user_id: Uuid) -> bool {
+        if let Some((flag, at)) = self.operator_cache.lock().unwrap().get(&user_id) {
+            if at.elapsed() < ROLE_TTL {
+                return *flag;
+            }
+        }
+        let Some(pool) = db.as_ref() else { return false };
+        let Ok(client) = pool.get().await else {
+            tracing::warn!(target: "auth", "pxdb unavailable for is_operator; denying");
+            return false;
+        };
+        let flag = match client
+            .query_opt(
+                "SELECT is_operator FROM queen_proxy.users WHERE id = $1::text::uuid",
+                &[&user_id.to_string()],
+            )
+            .await
+        {
+            Ok(Some(row)) => row.get::<_, bool>(0),
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(target: "auth", err = %e, "is_operator query failed; denying");
+                // Never cached: an answer pxdb did not give is not worth
+                // remembering, and recovery must be immediate.
+                return false;
+            }
+        };
+
+        let mut cache = self.operator_cache.lock().unwrap();
+        if cache.len() >= AUTH_CACHE_CAP {
+            cache.retain(|_, (_, at)| at.elapsed() < ROLE_TTL);
+        }
+        cache.insert(user_id, (flag, Instant::now()));
+        flag
     }
 
     /// The JWKS document served at `/.well-known/jwks.json`. EdDSA => a real
@@ -1158,6 +1357,168 @@ mod tests {
         let vc = keys.verify_jwt_claims(&token).unwrap();
         assert!(vc.exp >= before + 3600 && vc.exp <= now_secs() + 3600);
         assert!(!vc.jti.is_empty());
+    }
+
+    // ---- operator gate (F3): the authorize half of the capability ----------
+
+    fn user(role: Role, operator: bool) -> Principal {
+        Principal::User { user_id: Uuid::new_v4(), role, operator }
+    }
+
+    #[test]
+    fn only_a_live_operator_opens_the_operator_class() {
+        assert!(authorize(&user(Role::Admin, true), RouteClass::Operator).is_ok());
+        // The bit, not the role: an admin without it is refused, an operator
+        // is admitted whatever role the cluster gave them.
+        assert!(authorize(&user(Role::Admin, false), RouteClass::Operator).is_err());
+        for r in [Role::Producer, Role::Consumer, Role::Viewer] {
+            assert!(authorize(&user(r, false), RouteClass::Operator).is_err());
+            assert!(authorize(&user(r, true), RouteClass::Operator).is_ok());
+        }
+        // An api key can never be an operator — not even one with every scope.
+        let key = Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes::all() };
+        assert!(authorize(&key, RouteClass::Operator).is_err());
+    }
+
+    #[test]
+    fn operator_bit_opens_nothing_that_is_hard_blocked() {
+        // `Blocked` is checked before any principal arm and stays absolute:
+        // migration/internal/stats-refresh/discovery-pop are not dashboard
+        // data, and the capability must not become a general skeleton key.
+        assert!(authorize(&user(Role::Admin, true), RouteClass::Blocked).is_err());
+        let key = Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes::all() };
+        assert!(authorize(&key, RouteClass::Blocked).is_err());
+    }
+
+    #[test]
+    fn operator_does_not_change_the_ordinary_matrix() {
+        // The capability adds a class; it does not relax the existing rows.
+        // (An operator's role is Admin anyway — this pins that the flag alone
+        // is not what grants produce/consume.)
+        assert!(authorize(&user(Role::Viewer, true), RouteClass::Produce).is_err());
+        assert!(authorize(&user(Role::Viewer, true), RouteClass::QueueAdmin).is_err());
+        assert!(authorize(&user(Role::Viewer, false), RouteClass::Read).is_ok());
+    }
+
+    // ---- credential extraction ---------------------------------------------
+
+    fn headers_with(cookie: Option<&str>, auth: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(c) = cookie {
+            h.insert(axum::http::header::COOKIE, axum::http::HeaderValue::from_str(c).unwrap());
+        }
+        if let Some(a) = auth {
+            h.insert(axum::http::header::AUTHORIZATION, axum::http::HeaderValue::from_str(a).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn credential_prefers_authorization_over_cookie() {
+        let h = headers_with(Some("queen_session=cookietoken"), Some("Bearer explicit"));
+        assert_eq!(
+            read_credential("queen_session", &h),
+            Credential::Session("explicit".to_string())
+        );
+    }
+
+    #[test]
+    fn credential_falls_back_to_the_session_cookie() {
+        let h = headers_with(Some("other=1; queen_session=abc123; another=2"), None);
+        assert_eq!(
+            read_credential("queen_session", &h),
+            Credential::Session("abc123".to_string())
+        );
+        // exact name match only
+        let h2 = headers_with(Some("queen_session_v2=wrong; queen_session=right"), None);
+        assert_eq!(
+            read_credential("queen_session", &h2),
+            Credential::Session("right".to_string())
+        );
+    }
+
+    #[test]
+    fn credential_recognises_api_keys_by_prefix() {
+        let h = headers_with(None, Some("Bearer qk_live_abc"));
+        assert_eq!(read_credential("queen_session", &h), Credential::ApiKey("qk_live_abc".to_string()));
+        // a bare (non-Bearer) Authorization value is accepted verbatim, as the
+        // old bearer parse did
+        let h2 = headers_with(None, Some("qk_live_abc"));
+        assert_eq!(read_credential("queen_session", &h2), Credential::ApiKey("qk_live_abc".to_string()));
+    }
+
+    #[test]
+    fn an_api_key_in_a_cookie_is_not_a_credential() {
+        // A cookie is attached by the browser, not chosen per request: it must
+        // never be able to widen a caller into a data-plane key.
+        let h = headers_with(Some("queen_session=qk_live_abc"), None);
+        assert_eq!(read_credential("queen_session", &h), Credential::None);
+    }
+
+    #[test]
+    fn a_cookie_is_refused_on_a_cross_document_navigation() {
+        // The one CSRF shape SameSite=Lax lets through: a hostile page
+        // top-level-navigating a logged-in browser to a mutating GET
+        // (/api/v1/pop leases messages). Script-issued calls never carry
+        // Sec-Fetch-Mode: navigate.
+        let mut h = headers_with(Some("queen_session=abc123"), None);
+        h.insert("sec-fetch-mode", axum::http::HeaderValue::from_static("navigate"));
+        assert_eq!(read_credential("queen_session", &h), Credential::None);
+        // ... but the app shell itself IS loaded by navigation, and serving
+        // static bytes forges nothing.
+        assert_eq!(
+            read_credential_for_document("queen_session", &h),
+            Credential::Session("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn navigation_does_not_affect_explicit_credentials_or_normal_fetches() {
+        // An Authorization header is chosen per request; a third-party page
+        // cannot attach one, so the navigation rule never applies to it.
+        let mut h = headers_with(None, Some("Bearer qk_live_abc"));
+        h.insert("sec-fetch-mode", axum::http::HeaderValue::from_static("navigate"));
+        assert_eq!(read_credential("queen_session", &h), Credential::ApiKey("qk_live_abc".to_string()));
+
+        // The SPA's own XHR, and any non-browser client (no Sec-Fetch-* at all).
+        for mode in ["cors", "same-origin", "no-cors"] {
+            let mut h = headers_with(Some("queen_session=abc123"), None);
+            h.insert("sec-fetch-mode", axum::http::HeaderValue::from_str(mode).unwrap());
+            assert_eq!(
+                read_credential("queen_session", &h),
+                Credential::Session("abc123".to_string()),
+                "mode {mode}"
+            );
+        }
+        let bare = headers_with(Some("queen_session=abc123"), None);
+        assert_eq!(read_credential("queen_session", &bare), Credential::Session("abc123".to_string()));
+    }
+
+    #[test]
+    fn credential_none_when_nothing_usable_is_present() {
+        assert_eq!(read_credential("queen_session", &headers_with(None, None)), Credential::None);
+        // empty Authorization falls through to the (absent) cookie
+        assert_eq!(
+            read_credential("queen_session", &headers_with(None, Some("Bearer   "))),
+            Credential::None
+        );
+        assert_eq!(
+            read_credential("queen_session", &headers_with(Some("queen_session="), None)),
+            Credential::None
+        );
+    }
+
+    #[tokio::test]
+    async fn is_operator_fails_closed_without_a_control_plane() {
+        let keys = hs_keys("queen-proxy");
+        let uid = Uuid::new_v4();
+        // no pxdb at all (dev-static), and an unreachable one: both deny.
+        assert!(!keys.is_operator(&None, uid).await);
+        assert!(!keys.is_operator(&Some(unreachable_pool()), uid).await);
+        assert!(
+            keys.operator_cache.lock().unwrap().is_empty(),
+            "a non-answer must not be cached as a grant or a denial"
+        );
     }
 
     #[test]

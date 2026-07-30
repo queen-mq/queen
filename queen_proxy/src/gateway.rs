@@ -64,15 +64,15 @@ const HOP_BY_HOP: &[&str] = &[
 const RESP_BUFFER_CAP: usize = 64 * 1024 * 1024;
 
 pub async fn handle(State(st): State<St>, req: Request) -> Response {
-    // ----- 1. resolve cluster from Host -----
-    let host = req
-        .headers()
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let Some(ctx) = st.cache.resolve_host(&host).await else {
-        return errors::err_421("no cluster for this host");
+    // ----- 1. resolve the cluster this request acts on -----
+    // Host by default; `x-queen-act-cluster` when a human session names one
+    // (acting.rs owns that policy). Everything downstream — the status gate,
+    // the plan limits, the injected X-Queen-Tenant, the meter attribution —
+    // then follows the cluster picked here, which is the whole point of one
+    // webapp hostname fronting every cluster.
+    let ctx = match crate::acting::resolve_ctx(&st, req.headers()).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
 
     // ----- 2. cluster status gate -----
@@ -86,6 +86,13 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     // ----- 3. classify + feature gate + authn/authz -----
     let class = classify(req.method(), req.uri().path());
     if class == RouteClass::Blocked {
+        return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
+    }
+    if class == RouteClass::Operator && !st.cfg.operator_enabled {
+        // The per-cell gate, answered BEFORE authentication so a cell with the
+        // capability off behaves exactly as it did when these routes were hard
+        // Blocked: same 404, same code, no lookup, no way in. Turning the flag
+        // on is the only thing that makes the class reachable at all.
         return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
     }
     if let RouteClass::Gated(f) = class {
@@ -133,12 +140,25 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         }
     }
 
-    let principal = match crate::auth::authenticate(&st, req.headers(), ctx.cluster_id).await {
+    let principal = match crate::acting::authenticate_for(&st, req.headers(), &ctx).await {
         Ok(p) => p,
         Err(resp) => return resp,
     };
     if let Err(resp) = crate::auth::authorize(&principal, class) {
+        // An operator route refused is answered as if it did not exist — the
+        // same 404 the flag-off cell gives — rather than a 403 that tells a
+        // tenant admin there is a capability to go looking for.
+        if class == RouteClass::Operator {
+            return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
+        }
         return resp;
+    }
+    if class == RouteClass::Operator {
+        if let crate::state::Principal::User { user_id, .. } = &principal {
+            // Sampled: a dashboard polls these every few seconds, so one line
+            // per minute carrying the suppressed count, not one per request.
+            crate::acting::note_operator_access(*user_id, &ctx.slug, req.uri().path());
+        }
     }
 
     // One request id threads the whole pipeline (logs + upstream + response).
@@ -977,6 +997,11 @@ fn op_for(path: &str, class: RouteClass) -> OpClass {
         RouteClass::QueueAdmin => OpClass::Configure,
         RouteClass::Read => OpClass::Read,
         RouteClass::Gated(_) => OpClass::Read,
+        // Operator surfaces are reqs-only reads like any other GET. They still
+        // meter — against the cluster the operator is acting on — because the
+        // request really did cost the cell something; the volume is a
+        // dashboard's poll rate, not a tenant's workload.
+        RouteClass::Operator => OpClass::Read,
         RouteClass::Blocked => OpClass::Read,
     }
 }

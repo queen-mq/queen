@@ -1,6 +1,7 @@
 //! queen-proxy — multi-tenant data-plane gateway for QueenMQ cells.
 //! Spec: PLAN_QUEEN_PROXY_CLOUD.md (repo root). Module ownership: CONTRACTS.md.
 
+mod acting;
 mod auth;
 mod cache;
 mod config;
@@ -18,6 +19,7 @@ mod registry;
 mod routes;
 mod spool;
 mod state;
+mod webapp;
 
 use std::sync::Arc;
 
@@ -215,7 +217,12 @@ async fn async_main(worker_threads: usize) {
         .route("/console", get(console::spa))
         .route("/console/", get(console::spa))
         .route("/console/*path", get(console::spa))
-        .fallback(gateway::handle)
+        // Everything else: broker-bound paths to the data-plane pipeline, the
+        // rest to the auth-gated dashboard at `/`. The fallback used to be
+        // `gateway::handle` alone, which sent unknown paths upstream and let
+        // the BROKER's own embedded webapp answer — unauthenticated and
+        // tenant-unaware. See webapp.rs.
+        .fallback(webapp::route_fallback)
         .with_state(st.clone());
 
     // OPTIONAL HTTPS (PLAN §11 Phase 1 "TLS (CF origin)"): only when both

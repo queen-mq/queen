@@ -86,6 +86,11 @@ pub fn tls_material() -> Result<Option<TlsMaterial>, String> {
 /// (Track B). Trusted only inside the cell network.
 pub const TENANT_HEADER: &str = "x-queen-tenant";
 pub const REQUEST_ID_HEADER: &str = "x-queen-request-id";
+/// Header a HUMAN SESSION uses to say which cluster the request acts on, when
+/// the Host header cannot (one webapp hostname fronting every cluster). Never
+/// honoured for an API key: a data-plane credential stays bound to the cluster
+/// it was issued on. See acting.rs for the full matrix.
+pub const ACT_CLUSTER_HEADER: &str = "x-queen-act-cluster";
 /// Fixed default tenant UUID — must match the broker's Track B constant.
 pub const DEFAULT_TENANT_UUID: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -138,6 +143,19 @@ pub struct Config {
     pub cookie_domain: Option<String>,
     pub auth_host_mode: bool,
     pub public_base_url: Option<String>,
+    /// PER-CELL gate for the operator (super-admin) capability. Default FALSE,
+    /// and meant to stay false forever on customer/shared cells.
+    ///
+    /// The routes an operator may open are blocked at the proxy because they
+    /// are not tenant-scopable (cell-wide status, PG internals, host metrics,
+    /// maintenance). Today no role can reach them at all, which is a
+    /// STRUCTURAL guarantee — there is no code path, so there is no bug that
+    /// can open one. `queen_proxy.users.is_operator` converts that into a
+    /// runtime check, and this flag is what keeps the structural version on
+    /// every cell that has no business serving an internal dashboard: with it
+    /// off, `classify`'s operator class 404s before authentication even runs,
+    /// exactly as a hard block does.
+    pub operator_enabled: bool,
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
     pub github_client_id: Option<String>,
@@ -186,6 +204,7 @@ impl Config {
             cookie_domain: env_opt("QUEEN_PROXY_COOKIE_DOMAIN"),
             auth_host_mode: env_bool("QUEEN_PROXY_AUTH_HOST", false),
             public_base_url: env_opt("QUEEN_PROXY_PUBLIC_URL"),
+            operator_enabled: env_bool("QUEEN_PROXY_OPERATOR_ENABLED", false),
             google_client_id: env_opt("GOOGLE_CLIENT_ID"),
             google_client_secret: env_opt("GOOGLE_CLIENT_SECRET"),
             github_client_id: env_opt("GITHUB_CLIENT_ID"),

@@ -651,18 +651,6 @@ async fn main() {
             "/api/v1/analytics/postgres-stats",
             get(handlers::handle_postgres_stats),
         )
-        // ------------------------------------------------------------ migration
-        .route(
-            "/api/v1/migration/test-connection",
-            post(handlers::handle_migration_test),
-        )
-        .route("/api/v1/migration/start", post(handlers::handle_migration_start))
-        .route("/api/v1/migration/status", get(handlers::handle_migration_status))
-        .route(
-            "/api/v1/migration/validate",
-            post(handlers::handle_migration_validate),
-        )
-        .route("/api/v1/migration/reset", post(handlers::handle_migration_reset))
         // ------------------------------------------------ consumer groups
         .route(
             "/api/v1/consumer-groups",

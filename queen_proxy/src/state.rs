@@ -81,7 +81,11 @@ pub enum Role {
 #[derive(Clone, Debug)]
 pub enum Principal {
     ApiKey { key_id: Uuid, scopes: Scopes },
-    User { user_id: Uuid, role: Role },
+    /// A human session. `operator` is the capability LIVE, not the stored bit:
+    /// it is `cfg.operator_enabled && users.is_operator`, resolved once per
+    /// request in auth.rs, so no consumer has to remember the per-cell gate.
+    /// An operator's effective `role` is always Admin, on every cluster.
+    User { user_id: Uuid, role: Role, operator: bool },
 }
 
 /// Operation classes metered into usage_minutes.op_class.

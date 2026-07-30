@@ -651,6 +651,7 @@ mod tests {
             cookie_domain: None,
             auth_host_mode: false,
             public_base_url: None,
+            operator_enabled: false,
             google_client_id: None,
             google_client_secret: None,
             github_client_id: None,

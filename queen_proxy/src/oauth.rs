@@ -234,30 +234,144 @@ async fn revoke_presented_session(st: &St, headers: &HeaderMap) {
     }
 }
 
+/// The user's own row. `is_operator` is the STORED bit; whether the capability
+/// is live also depends on this cell's `QUEEN_PROXY_OPERATOR_ENABLED`, and
+/// `/auth/me` reports both so the SPA can tell "you are not an operator" from
+/// "not on this cell" without guessing.
+const ME_USER_SQL: &str = "
+    SELECT u.email, u.is_operator, t.slug
+    FROM queen_proxy.users u
+    JOIN queen_proxy.tenants t ON t.id = u.tenant_id
+    WHERE u.id = $1::text::uuid";
+
+/// The clusters a NORMAL user may select, with the role on each.
+const ME_CLUSTERS_SQL: &str = "
+    SELECT c.id::text, c.slug, cr.role, t.slug, t.id::text, c.status
+    FROM queen_proxy.cluster_roles cr
+    JOIN queen_proxy.clusters c ON c.id = cr.cluster_id
+    JOIN queen_proxy.tenants  t ON t.id = c.tenant_id
+    WHERE cr.user_id = $1::text::uuid
+    ORDER BY t.slug, c.slug";
+
+/// The clusters an OPERATOR may select: all of them, as admin — the effective
+/// role acting.rs gives them, membership row or not, so the nav the SPA draws
+/// matches what the data plane will actually allow.
+const ME_CLUSTERS_OPERATOR_SQL: &str = "
+    SELECT c.id::text, c.slug, 'admin'::text, t.slug, t.id::text, c.status
+    FROM queen_proxy.clusters c
+    JOIN queen_proxy.tenants t ON t.id = c.tenant_id
+    ORDER BY t.slug, c.slug";
+
+/// Everything the SPA needs to render itself, in one call: who you are,
+/// whether you are an operator (and whether that means anything on this cell),
+/// which cluster you are acting on, and the list you may switch to. The single
+/// source of truth for the nav and the tenant selector — the SPA must never
+/// infer a permission.
+///
+/// Deliberately NOT under `/api/console/*`: those endpoints resolve a cluster
+/// from Host and 421 when it names none, which is exactly the situation one
+/// webapp hostname puts every request in. This one needs no cluster at all.
 async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
+    // Cookie only: `/auth/me` describes the BROWSER's session. A bearer would
+    // answer the same, but the SPA boots from the cookie and keeping one
+    // source here avoids reporting a session the browser does not hold.
     let Some(tok) = read_cookie(&headers, &st.cfg.cookie_name) else {
         return errors::err_401("no session");
     };
-    match st.keys.verify_jwt_claims(&tok) {
-        Ok(c) => {
-            // A signature-valid session is not necessarily a live one: logout
-            // deny-lists the jti, so the deny-list has to be consulted here too
-            // or a copied cookie keeps reporting a healthy session after its
-            // owner signed out.
-            if st.keys.is_revoked(&st.db, &c.jti).await {
-                return errors::err_401("invalid session");
-            }
-            json_response(
-                StatusCode::OK,
-                json!({
-                    "user_id": c.user_id.to_string(),
-                    "role": role_str(c.role),
-                    "cluster": c.cluster.map(|u| u.to_string()),
-                }),
-            )
-        }
-        Err(_) => errors::err_401("invalid session"),
+    let claims = match st.keys.verify_jwt_claims(&tok) {
+        Ok(c) => c,
+        Err(_) => return errors::err_401("invalid session"),
+    };
+    // A signature-valid session is not necessarily a live one: logout
+    // deny-lists the jti, so the deny-list has to be consulted here too
+    // or a copied cookie keeps reporting a healthy session after its
+    // owner signed out.
+    if st.keys.is_revoked(&st.db, &claims.jti).await {
+        return errors::err_401("invalid session");
     }
+
+    let is_operator = st.keys.is_operator(&st.db, claims.user_id).await;
+    let operator_live = st.cfg.operator_enabled && is_operator;
+
+    let mut email: Option<String> = None;
+    let mut tenant_slug: Option<String> = None;
+    let mut clusters: Vec<Value> = Vec::new();
+    if let Some(pool) = st.db.as_ref() {
+        match pool.get().await {
+            Ok(client) => {
+                let uid = claims.user_id.to_string();
+                match client.query_opt(ME_USER_SQL, &[&uid]).await {
+                    Ok(Some(row)) => {
+                        email = Some(row.get::<_, String>(0));
+                        tenant_slug = Some(row.get::<_, String>(2));
+                    }
+                    Ok(None) => {
+                        // The session outlived its user row (deleted, or a dev
+                        // pxdb reset). Nothing to render — send the SPA to
+                        // login rather than an identity with no owner.
+                        return errors::err_401("session no longer valid");
+                    }
+                    Err(e) => tracing::warn!(target: "oauth", err = %e, "me: user lookup failed"),
+                }
+                let (sql, params): (&str, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
+                    if operator_live {
+                        (ME_CLUSTERS_OPERATOR_SQL, vec![])
+                    } else {
+                        (ME_CLUSTERS_SQL, vec![&uid])
+                    };
+                match client.query(sql, &params).await {
+                    Ok(rows) => {
+                        clusters = rows
+                            .iter()
+                            .map(|r| {
+                                json!({
+                                    "id": r.get::<_, String>(0),
+                                    "slug": r.get::<_, String>(1),
+                                    "role": r.get::<_, String>(2),
+                                    "tenant_slug": r.get::<_, String>(3),
+                                    "tenant_id": r.get::<_, String>(4),
+                                    "status": r.get::<_, String>(5),
+                                })
+                            })
+                            .collect();
+                    }
+                    Err(e) => tracing::warn!(target: "oauth", err = %e, "me: cluster list failed"),
+                }
+            }
+            Err(e) => tracing::warn!(target: "oauth", err = %e, "me: pool.get failed"),
+        }
+    }
+
+    // The cluster this very request would act on, resolved by the same code
+    // the data plane uses (act-as header, else Host). A failure is reported as
+    // `null`, never as an error: /auth/me must still answer so the SPA can
+    // draw the selector and let the user pick a cluster that DOES work.
+    let acting = crate::acting::resolve_ctx(&st, &headers)
+        .await
+        .ok()
+        .map(|ctx| json!({ "id": ctx.cluster_id.to_string(), "slug": ctx.slug }));
+
+    json_response(
+        StatusCode::OK,
+        json!({
+            "user_id": claims.user_id.to_string(),
+            "email": email,
+            "tenant_slug": tenant_slug,
+            // The stored bit vs. what it grants HERE. Both, because a cell
+            // with the flag off must render as a plain tenant dashboard.
+            "is_operator": is_operator,
+            "operator_enabled": st.cfg.operator_enabled,
+            "operator_live": operator_live,
+            "acting_cluster": acting,
+            "clusters": clusters,
+            "act_cluster_header": crate::config::ACT_CLUSTER_HEADER,
+            // Kept from the original shape. `role` is the session token's
+            // PLACEHOLDER claim, not a permission — the per-cluster roles in
+            // `clusters` above are the real ones.
+            "role": role_str(claims.role),
+            "cluster": claims.cluster.map(|u| u.to_string()),
+        }),
+    )
 }
 
 async fn session_token(State(st): State<St>, headers: HeaderMap) -> Response {
@@ -972,7 +1086,9 @@ fn safe_next(next: Option<&str>) -> String {
     }
 }
 
-fn is_safe(n: &str) -> bool {
+/// `pub(crate)` for webapp.rs, which validates its own `next` before building
+/// the login redirect — same rule, one implementation.
+pub(crate) fn is_safe(n: &str) -> bool {
     n.starts_with('/')
         && !n.starts_with("//")
         && !n.starts_with("/\\")
@@ -1155,7 +1271,8 @@ fn redirect(status: StatusCode, location: &str, set_cookie: Option<&str>) -> Res
 }
 
 /// Percent-encode one query/form component (unreserved chars pass through).
-fn pct(s: &str) -> String {
+/// `pub(crate)` for webapp.rs's login redirect.
+pub(crate) fn pct(s: &str) -> String {
     let mut out = String::new();
     for &b in s.as_bytes() {
         match b {

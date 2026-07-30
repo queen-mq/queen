@@ -98,13 +98,16 @@ async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, U
     };
     require_db(st)?;
 
-    let auth_headers = headers_with_bearer(&st.cfg.cookie_name, headers);
-    let principal = auth::authenticate(st, &auth_headers, ctx.cluster_id).await?;
+    // `auth::authenticate` reads the session cookie itself now
+    // (auth::read_credential), so the console no longer lifts it into a
+    // synthetic Authorization header of its own — one implementation of
+    // "which credential is this", shared with the data plane.
+    let principal = auth::authenticate(st, headers, ctx.cluster_id).await?;
     match principal {
         Principal::ApiKey { .. } => {
             Err(errors::err_403(errors::CODE_FORBIDDEN, "api keys cannot access the console (human session required)"))
         }
-        Principal::User { user_id, role } => Ok((ctx, user_id, role)),
+        Principal::User { user_id, role, .. } => Ok((ctx, user_id, role)),
     }
 }
 
@@ -122,42 +125,6 @@ fn require_admin(role: Role) -> Result<(), Response> {
     } else {
         Err(errors::err_403(errors::CODE_FORBIDDEN, "admin role required"))
     }
-}
-
-/// If the request already carries an Authorization header, use it verbatim
-/// (the SPA's own calls, which always send `Bearer <session-token>`).
-/// Otherwise lift the session cookie into a synthetic `Authorization: Bearer`
-/// header so `auth::authenticate` — which only ever looks at Authorization —
-/// can verify it. Covers a plain cookie-only call (e.g. curl -b) with no
-/// Authorization header of its own. Pure (`cookie_name` instead of `&St`) so
-/// it's unit-testable without constructing an AppState.
-fn headers_with_bearer(cookie_name: &str, headers: &HeaderMap) -> HeaderMap {
-    if headers.get(header::AUTHORIZATION).is_some() {
-        return headers.clone();
-    }
-    let Some(token) = read_session_cookie(cookie_name, headers) else {
-        return headers.clone();
-    };
-    let mut h = headers.clone();
-    if let Ok(v) = HeaderValue::from_str(&format!("Bearer {token}")) {
-        h.insert(header::AUTHORIZATION, v);
-    }
-    h
-}
-
-/// Minimal cookie parse (mirrors oauth.rs's private `read_cookie` — not
-/// `pub(crate)` there, so duplicated here rather than reaching across
-/// modules for ~6 lines).
-fn read_session_cookie(cookie_name: &str, headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for kv in raw.split(';') {
-        if let Some((k, v)) = kv.split_once('=') {
-            if k.trim() == cookie_name {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,45 +1030,8 @@ mod tests {
         assert!(!would_orphan_admins(None, 0, Some("viewer")), "brand new member, no admins yet");
     }
 
-    // --- cookie-to-bearer lift --------------------------------------------------
-
-    fn headers_with(cookie: Option<&str>, auth: Option<&str>) -> HeaderMap {
-        let mut h = HeaderMap::new();
-        if let Some(c) = cookie {
-            h.insert(header::COOKIE, HeaderValue::from_str(c).unwrap());
-        }
-        if let Some(a) = auth {
-            h.insert(header::AUTHORIZATION, HeaderValue::from_str(a).unwrap());
-        }
-        h
-    }
-
-    #[test]
-    fn existing_authorization_header_wins_over_cookie() {
-        let h = headers_with(Some("queen_session=cookietoken"), Some("Bearer explicit"));
-        let out = headers_with_bearer("queen_session", &h);
-        assert_eq!(out.get(header::AUTHORIZATION).unwrap().to_str().unwrap(), "Bearer explicit");
-    }
-
-    #[test]
-    fn cookie_lifted_to_bearer_when_no_authorization_header() {
-        let h = headers_with(Some("other=1; queen_session=abc123; another=2"), None);
-        let out = headers_with_bearer("queen_session", &h);
-        assert_eq!(out.get(header::AUTHORIZATION).unwrap().to_str().unwrap(), "Bearer abc123");
-    }
-
-    #[test]
-    fn no_cookie_no_authorization_passthrough() {
-        let h = headers_with(None, None);
-        let out = headers_with_bearer("queen_session", &h);
-        assert!(out.get(header::AUTHORIZATION).is_none());
-    }
-
-    #[test]
-    fn read_session_cookie_matches_exact_name_only() {
-        let h = headers_with(Some("queen_session_v2=wrong; queen_session=right"), None);
-        assert_eq!(read_session_cookie("queen_session", &h).as_deref(), Some("right"));
-    }
+    // (the cookie-to-bearer lift moved to auth::read_credential, with its
+    // precedence tests, when the data plane started accepting cookies too)
 
     // --- SPA path mapping --------------------------------------------------------
 

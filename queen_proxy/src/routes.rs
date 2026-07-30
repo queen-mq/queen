@@ -24,8 +24,35 @@ pub enum RouteClass {
     Read,
     /// plan-gated feature surfaces
     Gated(Feature),
+    /// Cell-wide surfaces a live OPERATOR principal may open (F3). Not
+    /// tenant-scopable, so they are unreachable for every tenant credential —
+    /// a non-operator gets the same 404 a `Blocked` route gives, and on a cell
+    /// with `QUEEN_PROXY_OPERATOR_ENABLED` off the 404 is returned before
+    /// authentication runs at all.
+    Operator,
     /// operator-only broker surfaces — never exposed to tenants
     Blocked,
+}
+
+/// The EXACT set of otherwise-blocked broker surfaces a live operator may
+/// open. Everything else `classify` blocks stays blocked for EVERY principal:
+/// `/api/v1/migration/*`, `/internal/*`, `/api/v1/stats/refresh`, the
+/// discovery `GET /api/v1/pop`, bare `/metrics`, the broker's own `/status`
+/// and the rest of `/api/v1/system/*` are not dashboard data.
+fn is_operator_route(p: &str) -> bool {
+    matches!(
+        p,
+        "/api/v1/status"
+            | "/api/v1/status/buffers"
+            | "/api/v1/analytics/system-metrics"
+            | "/api/v1/analytics/worker-metrics"
+            | "/api/v1/analytics/postgres-stats"
+            // GET reads the flag, POST flips it; both are the same operator
+            // page. `/system/maintenance/pop` and `/system/shared-state` are
+            // NOT here and stay blocked.
+            | "/api/v1/system/maintenance"
+            | "/metrics/prometheus"
+    )
 }
 
 /// Classify a broker-bound request. `path` is the URL path only (no query).
@@ -34,13 +61,20 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     let m = method;
     let p = path;
 
+    // --- operator-eligible, checked FIRST: the prefix blocks below would
+    //     otherwise swallow /api/v1/system/maintenance and /metrics/prometheus.
+    //     Reaching one of these still requires a live operator principal (see
+    //     RouteClass::Operator); classification alone opens nothing.
+    if is_operator_route(p) {
+        return RouteClass::Operator;
+    }
+
     // --- operator-only, always blocked at the proxy (all cells) ---
     if p.starts_with("/api/v1/migration")
         || p.starts_with("/api/v1/system")
         || p.starts_with("/internal")
         || p == "/api/v1/stats/refresh"
         || p == "/metrics"
-        || p == "/metrics/prometheus"
         || p == "/status"
     {
         return RouteClass::Blocked;
@@ -49,19 +83,12 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     if p == "/api/v1/pop" || p == "/api/v1/pop/" {
         return RouteClass::Blocked;
     }
-    // Operator-only system aggregates — not tenant-scopable by nature (host
-    // CPU, PG internals, worker lifetime counters). Everything queue-shaped
-    // (namespaces/tasks/overview, queue-lag/ops/parked, retention, status/
-    // analytics) is tenant-scoped broker-side since Track B2 and falls
+    // System aggregates are not tenant-scopable by nature (host CPU, PG
+    // internals, worker lifetime counters, cell maintenance) — they are the
+    // `Operator` set above, reachable by nobody else. Everything queue-shaped
+    // (namespaces/tasks/overview, queue-lag/ops/parked, retention,
+    // status/analytics) IS tenant-scoped broker-side since Track B2 and falls
     // through to Read below.
-    if p == "/api/v1/status"
-        || p == "/api/v1/status/buffers"
-        || p == "/api/v1/analytics/system-metrics"
-        || p == "/api/v1/analytics/worker-metrics"
-        || p == "/api/v1/analytics/postgres-stats"
-    {
-        return RouteClass::Blocked;
-    }
 
     // --- data plane ---
     if p == "/api/v1/push" {
@@ -166,13 +193,13 @@ mod tests {
             classify(&Method::GET, "/api/v1/resources/queues"),
             RouteClass::Read
         );
-        assert_eq!(classify(&Method::GET, "/metrics/prometheus"), RouteClass::Blocked);
         assert_eq!(classify(&Method::POST, "/api/v1/unknown"), RouteClass::Blocked);
-        // operator-only system aggregates stay closed
-        assert_eq!(classify(&Method::GET, "/api/v1/status"), RouteClass::Blocked);
+        // system aggregates are operator-class: closed to every tenant
+        // credential, openable only by a live operator principal
+        assert_eq!(classify(&Method::GET, "/api/v1/status"), RouteClass::Operator);
         assert_eq!(
             classify(&Method::GET, "/api/v1/analytics/system-metrics"),
-            RouteClass::Blocked
+            RouteClass::Operator
         );
         // tenant-scoped aggregates (Track B2) are open reads
         assert_eq!(classify(&Method::GET, "/api/v1/analytics/queue-lag"), RouteClass::Read);
@@ -191,6 +218,49 @@ mod tests {
             RouteClass::Gated(Feature::Streams)
         );
         assert_eq!(classify(&Method::GET, "/"), RouteClass::Read);
+    }
+
+    /// The operator subset is a CLOSED list. Anything not on it that used to
+    /// be blocked must still be blocked — the whole point of the per-cell flag
+    /// is that turning it on widens the surface by exactly these seven paths.
+    #[test]
+    fn operator_subset_is_exactly_the_agreed_seven() {
+        for p in [
+            "/api/v1/status",
+            "/api/v1/status/buffers",
+            "/api/v1/analytics/system-metrics",
+            "/api/v1/analytics/worker-metrics",
+            "/api/v1/analytics/postgres-stats",
+            "/api/v1/system/maintenance",
+            "/metrics/prometheus",
+        ] {
+            assert_eq!(classify(&Method::GET, p), RouteClass::Operator, "{p}");
+        }
+        // POST /api/v1/system/maintenance is the same page's write half.
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/system/maintenance"),
+            RouteClass::Operator
+        );
+    }
+
+    #[test]
+    fn hard_blocked_routes_are_not_operator_openable() {
+        for p in [
+            "/api/v1/migration/start",
+            "/api/v1/migration/status",
+            "/internal/api/notify",
+            "/internal/api/shared-state/stats",
+            "/api/v1/stats/refresh",
+            "/api/v1/pop",
+            "/api/v1/pop/",
+            "/metrics",
+            "/status",
+            // neighbours of the one allowed /system path
+            "/api/v1/system/maintenance/pop",
+            "/api/v1/system/shared-state",
+        ] {
+            assert_eq!(classify(&Method::GET, p), RouteClass::Blocked, "{p}");
+        }
     }
 
     #[test]

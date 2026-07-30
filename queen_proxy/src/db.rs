@@ -68,6 +68,7 @@ pub fn migrations() -> Vec<(&'static str, &'static str)> {
         ("003_limit_override", include_str!("../migrations/003_limit_override.sql")),
         ("004_lifecycle", include_str!("../migrations/004_lifecycle.sql")),
         ("005_usage_prune", include_str!("../migrations/005_usage_prune.sql")),
+        ("006_operator", include_str!("../migrations/006_operator.sql")),
     ]
 }
 

@@ -421,7 +421,6 @@ mod maintenance;
 mod streams;
 mod static_files;
 mod analytics;
-mod migration;
 
 pub use data::*;
 pub use queues::*;
@@ -433,7 +432,6 @@ pub use maintenance::*;
 pub use streams::*;
 pub use static_files::*;
 pub use analytics::*;
-pub use migration::*;
 
 pub(crate) fn status_is_ok(s: Option<&str>) -> bool {
     // The JS/Go/etc clients send "completed" for success and "failed" for a nack.

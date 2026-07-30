@@ -376,12 +376,6 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     }
 
     // -------- ADMIN --------
-    // RUSTFIX item 9: all migration routes require ADMIN (C++ guarded each inline
-    // with REQUIRE_AUTH(ADMIN); the Rust port centralizes auth here). Prefix (no
-    // trailing slash) so GET /api/v1/migration/status is covered too.
-    if path.starts_with("/api/v1/migration") {
-        return Admin;
-    }
     if path.starts_with("/api/v1/system/") || path.starts_with("/internal/") {
         return Admin;
     }

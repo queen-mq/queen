@@ -178,7 +178,40 @@ impl ClusterCache {
         self.resolve_slug(d).await
     }
 
+    /// Resolve a cluster named EXPLICITLY (act-as-cluster, acting.rs): a slug
+    /// or a cluster uuid. Deliberately does NOT honour dev-static or
+    /// `default_cluster` — those exist to guess a cluster when Host cannot
+    /// name one, and a caller that named one must get that one or nothing.
+    pub async fn resolve_ref(&self, reference: &str) -> Option<Arc<ClusterCtx>> {
+        let reference = reference.trim();
+        if reference.is_empty() {
+            return None;
+        }
+        match Uuid::parse_str(reference) {
+            // Cache key is namespaced so `id:<uuid>` can never collide with a
+            // slug entry; invalidation retains by cluster_id, so both shapes
+            // are dropped together on NOTIFY.
+            Ok(id) => {
+                let key = format!("id:{id}");
+                self.resolve_keyed(key, RESOLVE_BY_ID_SQL, id.to_string()).await
+            }
+            Err(_) => self.resolve_slug(reference.to_ascii_lowercase()).await,
+        }
+    }
+
     async fn resolve_slug(&self, slug: String) -> Option<Arc<ClusterCtx>> {
+        self.resolve_keyed(slug.clone(), RESOLVE_HOST_SQL, slug).await
+    }
+
+    /// The shared TTL + fail-open body behind both lookups: `cache_key` names
+    /// the entry, `sql`/`param` name the row.
+    async fn resolve_keyed(
+        &self,
+        cache_key: String,
+        sql: &'static str,
+        param: String,
+    ) -> Option<Arc<ClusterCtx>> {
+        let slug = cache_key;
         let pool = self.db.as_ref()?;
 
         // An expired entry is kept in hand, not dropped: should pxdb turn out
@@ -194,7 +227,7 @@ impl ClusterCache {
             }
         };
 
-        let miss = match lookup_host(pool, &slug).await {
+        let miss = match lookup_host(pool, sql, &param).await {
             Lookup::Found(ctx) => {
                 let mut cache = self.host_cache.write().unwrap();
                 cache.insert(slug, HostEntry { ctx: ctx.clone(), expires_at: Instant::now() + HOST_TTL });
@@ -319,7 +352,11 @@ impl ClusterCache {
 // its answer (schema drift, a column that went NULL). Classifying that as
 // `Absent` would let one bad row deny a live cluster.
 
-async fn lookup_host(pool: &deadpool_postgres::Pool, slug: &str) -> Lookup<Arc<ClusterCtx>> {
+async fn lookup_host(
+    pool: &deadpool_postgres::Pool,
+    sql: &str,
+    param: &str,
+) -> Lookup<Arc<ClusterCtx>> {
     let client = match pool.get().await {
         Ok(c) => c,
         Err(e) => {
@@ -327,10 +364,10 @@ async fn lookup_host(pool: &deadpool_postgres::Pool, slug: &str) -> Lookup<Arc<C
             return Lookup::Unavailable;
         }
     };
-    let row_opt = match client.query_opt(RESOLVE_HOST_SQL, &[&slug]).await {
+    let row_opt = match client.query_opt(sql, &[&param]).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, slug = %slug, "resolve_host: query failed");
+            tracing::warn!(error = %e, cluster = %param, "resolve_host: query failed");
             return Lookup::Unavailable;
         }
     };
@@ -338,7 +375,7 @@ async fn lookup_host(pool: &deadpool_postgres::Pool, slug: &str) -> Lookup<Arc<C
     match ctx_from_row(&row) {
         Ok(c) => Lookup::Found(Arc::new(c)),
         Err(e) => {
-            tracing::error!(error = %e, slug = %slug, "resolve_host: malformed row");
+            tracing::error!(error = %e, cluster = %param, "resolve_host: malformed row");
             Lookup::Unavailable
         }
     }
@@ -511,7 +548,12 @@ fn handle_notification(n: &tokio_postgres::Notification, host_cache: &Arc<HostMa
 
 // -------------------------------------------------------------- row -> ctx
 
-const RESOLVE_HOST_SQL: &str = "
+/// The projection `ctx_from_row` reads, shared by every cluster lookup keyed
+/// on the clusters table. A macro (not a const) so `concat!` can glue a WHERE
+/// onto it at compile time and the two queries cannot drift apart.
+macro_rules! cluster_select {
+    () => {
+        "
     SELECT c.id::text                  AS cluster_id,
            c.tenant_id::text           AS tenant_id,
            c.broker_tenant_uuid::text  AS broker_tenant,
@@ -529,7 +571,15 @@ const RESOLVE_HOST_SQL: &str = "
     JOIN queen_proxy.tenants t ON t.id = c.tenant_id
     JOIN queen_proxy.cells   ce ON ce.id = c.cell_id
     JOIN queen_proxy.plans   p  ON p.id = c.plan_id
-    WHERE c.slug = $1";
+    "
+    };
+}
+
+const RESOLVE_HOST_SQL: &str = concat!(cluster_select!(), "WHERE c.slug = $1");
+
+/// Act-as-cluster by uuid. `$1::text::uuid` for the same reason every other
+/// query in this crate does it: no uuid feature on tokio-postgres.
+const RESOLVE_BY_ID_SQL: &str = concat!(cluster_select!(), "WHERE c.id = $1::text::uuid");
 
 const BY_KEY_HASH_SQL: &str = "
     SELECT ak.id::text                 AS key_id,
