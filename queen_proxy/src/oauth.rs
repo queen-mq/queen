@@ -422,9 +422,15 @@ async fn google_start(
     headers: HeaderMap,
     Query(q): Query<StartQuery>,
 ) -> Response {
+    // Both halves, checked HERE and not only in the callback: without the
+    // secret this flow cannot complete, and sending the caller out to Google
+    // first turns a configuration error into a mystery round trip.
     let Some(cid) = st.cfg.google_client_id.clone() else {
         return errors::err_404("not_configured", "google login not configured");
     };
+    if st.cfg.google_client_secret.is_none() {
+        return errors::err_404("not_configured", "google login not configured");
+    }
     let redirect_uri = match redirect_uri(&st, &headers, "google") {
         Some(u) => u,
         None => return err_500("public base url required (auth-host mode)"),
@@ -642,9 +648,13 @@ async fn github_start(
     headers: HeaderMap,
     Query(q): Query<StartQuery>,
 ) -> Response {
+    // Both halves — see google_start.
     let Some(cid) = st.cfg.github_client_id.clone() else {
         return errors::err_404("not_configured", "github login not configured");
     };
+    if st.cfg.github_client_secret.is_none() {
+        return errors::err_404("not_configured", "github login not configured");
+    }
     let redirect_uri = match redirect_uri(&st, &headers, "github") {
         Some(u) => u,
         None => return err_500("public base url required (auth-host mode)"),
@@ -1314,6 +1324,48 @@ fn esc(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+/// Which OAuth providers this instance can actually complete a login with, in
+/// the order the sign-in page lists them.
+///
+/// BOTH halves of the credential are required, not just the client id. The
+/// callback needs the secret to exchange the code (`google_callback` /
+/// `github_callback` 404 `not_configured` without it), so an instance with an
+/// id and no secret would otherwise render a button that sends the user all
+/// the way out to the provider and 404s them on the way back. A provider we
+/// cannot finish is a provider we do not offer.
+///
+/// A provider missing here is a provider this deployment did not configure —
+/// `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID` +
+/// `GITHUB_CLIENT_SECRET` (queen_proxy/src/config.rs). Nothing is hidden by
+/// accident: with neither set, the page is local login only, which is what a
+/// dev cell looks like.
+fn configured_providers(st: &St) -> Vec<(&'static str, &'static str)> {
+    provider_list(
+        st.cfg.google_client_id.is_some(),
+        st.cfg.google_client_secret.is_some(),
+        st.cfg.github_client_id.is_some(),
+        st.cfg.github_client_secret.is_some(),
+    )
+}
+
+/// The rule on its own, so it can be tested without building a `Config` and a
+/// connection pool.
+fn provider_list(
+    google_id: bool,
+    google_secret: bool,
+    github_id: bool,
+    github_secret: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut out = Vec::new();
+    if google_id && google_secret {
+        out.push(("google", "Google"));
+    }
+    if github_id && github_secret {
+        out.push(("github", "GitHub"));
+    }
+    out
+}
+
 /// Minimal self-contained login page: email/password form, provider buttons
 /// when configured, sober inline CSS. `next` is carried through as a hidden
 /// field and on the provider links.
@@ -1325,14 +1377,9 @@ fn render_login(st: &St, next: &str, error: Option<&str>) -> String {
         None => String::new(),
     };
     let mut providers = String::new();
-    if st.cfg.google_client_id.is_some() {
+    for (slug, label) in configured_providers(st) {
         providers.push_str(&format!(
-            "<a class=\"oauth\" href=\"/auth/google?next={next_q}\">Continue with Google</a>"
-        ));
-    }
-    if st.cfg.github_client_id.is_some() {
-        providers.push_str(&format!(
-            "<a class=\"oauth\" href=\"/auth/github?next={next_q}\">Continue with GitHub</a>"
+            "<a class=\"oauth\" href=\"/auth/{slug}?next={next_q}\">Continue with {label}</a>"
         ));
     }
     let divider = if providers.is_empty() {
@@ -1641,6 +1688,36 @@ mod tests {
     fn qs_encodes_reserved() {
         let s = qs(&[("scope", "openid email profile"), ("redirect_uri", "https://a/b?x=1")]);
         assert_eq!(s, "scope=openid%20email%20profile&redirect_uri=https%3A%2F%2Fa%2Fb%3Fx%3D1");
+    }
+
+    // --- sign-in providers --------------------------------------------------
+
+    #[test]
+    fn google_is_offered_whenever_it_is_fully_configured() {
+        // The regression this guards: the sign-in page used to list a provider
+        // on its client id alone, while the callback also needs the secret —
+        // so a half-configured instance showed a Google button that walked the
+        // user out to Google and 404'd them on return.
+        assert_eq!(provider_list(true, true, false, false), vec![("google", "Google")]);
+        assert_eq!(provider_list(true, false, false, false), vec![]);
+        assert_eq!(provider_list(false, true, false, false), vec![]);
+    }
+
+    #[test]
+    fn github_is_offered_on_the_same_terms_and_comes_second() {
+        assert_eq!(provider_list(false, false, true, true), vec![("github", "GitHub")]);
+        assert_eq!(provider_list(false, false, true, false), vec![]);
+        assert_eq!(
+            provider_list(true, true, true, true),
+            vec![("google", "Google"), ("github", "GitHub")]
+        );
+    }
+
+    #[test]
+    fn no_providers_configured_is_local_login_only() {
+        // What a dev cell looks like — and it must not be mistaken for a
+        // provider having gone missing.
+        assert!(provider_list(false, false, false, false).is_empty());
     }
 
     // --- sign-in page brand -------------------------------------------------
