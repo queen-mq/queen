@@ -27,6 +27,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use base64::engine::general_purpose::STANDARD as B64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64_URL;
 use base64::Engine;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
@@ -1339,43 +1340,116 @@ fn render_login(st: &St, next: &str, error: Option<&str>) -> String {
     } else {
         format!("{providers}<div class=\"sep\">or</div>")
     };
+    let favicon = favicon_data_uri();
+    let badge = brand_badge_data_uri();
+    let mark = if badge.is_empty() {
+        String::new()
+    } else {
+        format!("<img class=\"mark\" src=\"{badge}\" alt=\"\">")
+    };
+    // The sign-in page is plain server-rendered HTML: it exists BEFORE the SPA
+    // (and, under mandatory auth, before any of its assets are reachable), so it
+    // cannot import the webapp's stylesheet. It therefore restates the app's
+    // design tokens inline — surfaces ink-0/2/3, border bd, text hi/mid/low,
+    // white primary accent, ember for errors, Inter — and the brand block copies
+    // .brand / .brand-mark / .brand-word from the sidebar so the two read as one
+    // product. Keep these values in step with app/src/style.css; they are a copy
+    // by necessity, not by choice.
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-<title>Sign in · queen-proxy</title><style>\
-:root{{color-scheme:light dark}}\
+<title>Sign in · Queen</title>\
+<link rel=\"icon\" type=\"image/svg+xml\" href=\"{favicon}\">\
+<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\
+<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\
+<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap\" rel=\"stylesheet\">\
+<style>\
+:root{{color-scheme:dark}}\
 *{{box-sizing:border-box}}\
-body{{font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;\
-min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f4f5f7;color:#111}}\
-.card{{width:100%;max-width:360px;background:#fff;border:1px solid #e3e5e8;border-radius:12px;\
-padding:28px 26px;box-shadow:0 1px 3px rgba(0,0,0,.06)}}\
-h1{{font-size:19px;margin:0 0 18px;font-weight:600}}\
-label{{display:block;font-size:13px;color:#555;margin:12px 0 4px}}\
-input{{width:100%;padding:9px 10px;border:1px solid #ccd0d5;border-radius:7px;font-size:14px;background:#fff;color:#111}}\
-input:focus{{outline:2px solid #4c6ef5;outline-offset:0;border-color:#4c6ef5}}\
-button{{width:100%;margin-top:18px;padding:10px;border:0;border-radius:7px;background:#4c6ef5;color:#fff;\
-font-size:14px;font-weight:600;cursor:pointer}}\
-button:hover{{background:#3b5bdb}}\
-.oauth{{display:block;text-align:center;margin-top:10px;padding:9px;border:1px solid #ccd0d5;border-radius:7px;\
-text-decoration:none;color:#111;background:#fff}}\
-.oauth:hover{{background:#f0f1f3}}\
-.sep{{text-align:center;color:#999;font-size:12px;margin:16px 0 4px;text-transform:uppercase;letter-spacing:.05em}}\
-.err{{background:#fdecec;border:1px solid #f5c2c2;color:#a12; padding:8px 10px;border-radius:7px;font-size:13px;margin-bottom:6px}}\
-@media(prefers-color-scheme:dark){{body{{background:#16181d;color:#e8eaed}}\
-.card{{background:#1e2126;border-color:#2c3038}}h1{{color:#f1f3f5}}label{{color:#aab}}\
-input{{background:#111318;border-color:#333;color:#e8eaed}}\
-.oauth{{background:#1e2126;border-color:#333;color:#e8eaed}}.oauth:hover{{background:#262a31}}\
-.err{{background:#2a1719;border-color:#5a2a2e;color:#f1a9ad}}}}\
-</style></head><body><div class=\"card\"><h1>Sign in</h1>{err_html}{divider}\
+body{{font:15px/1.5 'Inter',ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:-.005em;\
+margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
+background:#141415;color:#e6e6e6;padding:24px}}\
+.card{{width:100%;max-width:340px}}\
+.brand{{display:flex;align-items:center;gap:9px;margin-bottom:20px}}\
+.mark{{width:28px;height:28px;flex:none;object-fit:contain}}\
+.word{{font-size:15px;font-weight:600;line-height:1;color:#e6e6e6;letter-spacing:-.015em}}\
+.word b{{font-weight:500;font-size:11px;letter-spacing:.06em;margin-left:3px;color:#9a9a9a}}\
+.panel{{background:#1d1d1f;border:1px solid #26262a;border-radius:10px;padding:22px 20px}}\
+h1{{font-size:14px;margin:0 0 16px;font-weight:600;letter-spacing:-.01em;color:#e6e6e6}}\
+label{{display:block;font-size:11px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;\
+color:#6a6a6a;margin:14px 0 5px}}\
+input{{width:100%;padding:9px 10px;border:1px solid #26262a;border-radius:7px;font-size:14px;\
+font-family:inherit;background:#232325;color:#e6e6e6}}\
+input:hover{{border-color:#35353a}}\
+input:focus{{outline:none;border-color:#6a6a6a;background:#252527}}\
+button{{width:100%;margin-top:18px;padding:9px;border:0;border-radius:7px;background:#fff;color:#141415;\
+font-family:inherit;font-size:14px;font-weight:600;letter-spacing:-.005em;cursor:pointer}}\
+button:hover{{background:#d4d4d4}}\
+.oauth{{display:block;text-align:center;margin-bottom:8px;padding:9px;border:1px solid #26262a;\
+border-radius:7px;text-decoration:none;color:#e6e6e6;background:#1d1d1f;font-size:14px;font-weight:500}}\
+.oauth:hover{{background:#232325;border-color:#35353a}}\
+.sep{{display:flex;align-items:center;gap:10px;color:#464649;font-size:10px;margin:14px 0 2px;\
+text-transform:uppercase;letter-spacing:.08em}}\
+.sep:before,.sep:after{{content:'';flex:1;height:1px;background:#26262a}}\
+.err{{background:rgba(244,63,94,.10);border:1px solid rgba(244,63,94,.35);color:#fb7185;\
+padding:8px 10px;border-radius:7px;font-size:13px;margin-bottom:14px}}\
+</style></head><body><div class=\"card\">\
+<div class=\"brand\">{mark}<span class=\"word\">Queen<b>MQ</b></span></div>\
+<div class=\"panel\"><h1>Sign in</h1>{err_html}{divider}\
 <form method=\"post\" action=\"/auth/login\">\
 <input type=\"hidden\" name=\"next\" value=\"{next_e}\">\
 <label for=\"email\">Email</label>\
 <input id=\"email\" name=\"email\" type=\"email\" autocomplete=\"username\" required autofocus>\
 <label for=\"password\">Password</label>\
 <input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required>\
-<button type=\"submit\">Sign in</button></form></div></body></html>"
+<button type=\"submit\">Sign in</button></form></div></div></body></html>"
     )
 }
+
+/// The brand badge as a `data:` URI — the SAME built asset the sidebar shows
+/// (`app/public/queen-badge-open.svg`), pulled out of the embedded webapp so
+/// the sign-in page and the app it fronts can never drift apart, and so
+/// regenerating the brand (assets/generate-brand.py + `npm run build`) updates
+/// this page too.
+///
+/// It is inlined rather than linked because webapp.rs's gate is deliberately
+/// absolute — not one byte without a live session — so a plain
+/// `<img src="/queen-badge-open.svg">` here would 302 back to this very page.
+/// Encoded once: the bytes are fixed for the life of the process.
+///
+/// Empty when the webapp is not built. The page then renders without a mark
+/// rather than with a broken one; `the_login_brand_is_embedded` fails the build
+/// long before that reaches anyone.
+fn brand_badge_data_uri() -> &'static str {
+    static URI: OnceLock<String> = OnceLock::new();
+    URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_BADGE) {
+        Some(bytes) => format!("data:image/svg+xml;base64,{}", B64.encode(bytes)),
+        None => String::new(),
+    })
+}
+
+/// The tab icon, from the monochrome line-art mark rather than the badge above.
+///
+/// Deliberately the SMALL asset: at 16px the badge's detail is mush, and the
+/// data URI would otherwise be repeated in full — the page carries it twice,
+/// once here and once in `<img>`. `currentColor` has to be resolved first: a
+/// favicon inherits no colour, so it would fall back to black and disappear
+/// into a dark tab strip.
+fn favicon_data_uri() -> &'static str {
+    static URI: OnceLock<String> = OnceLock::new();
+    URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_MARK) {
+        Some(bytes) => {
+            let svg = String::from_utf8_lossy(&bytes).replace("currentColor", "#e6e6e6");
+            format!("data:image/svg+xml;base64,{}", B64.encode(svg))
+        }
+        None => String::new(),
+    })
+}
+
+/// Brand art inside the built webapp (`app/public/` is copied to the Vite
+/// output root): the colour badge the sidebar shows, and the line-art mark.
+const BRAND_BADGE: &str = "queen-badge-open.svg";
+const BRAND_MARK: &str = "queen-mark.svg";
 
 #[cfg(test)]
 mod tests {
@@ -1563,5 +1637,28 @@ mod tests {
     fn qs_encodes_reserved() {
         let s = qs(&[("scope", "openid email profile"), ("redirect_uri", "https://a/b?x=1")]);
         assert_eq!(s, "scope=openid%20email%20profile&redirect_uri=https%3A%2F%2Fa%2Fb%3Fx%3D1");
+    }
+
+    // --- sign-in page brand -------------------------------------------------
+
+    #[test]
+    fn the_login_brand_is_embedded() {
+        // The sign-in page can only inline what the build actually embedded.
+        // If `app/public/queen-badge-open.svg` is renamed or the webapp is not
+        // built, fail HERE rather than shipping a login page with no mark.
+        let uri = brand_badge_data_uri();
+        let b64 = uri.strip_prefix("data:image/svg+xml;base64,").expect("svg data URI");
+        let svg = String::from_utf8(B64.decode(b64).expect("valid base64")).unwrap();
+        assert!(svg.contains("<svg"), "decodes back to the badge the sidebar shows");
+        // Inlining is pointless if the art then reaches for a URL of its own:
+        // webapp.rs would answer that with a 302 back to this page.
+        assert!(!svg.contains("xlink:href"), "no external refs inside the badge");
+
+        let icon = favicon_data_uri();
+        let b64 = icon.strip_prefix("data:image/svg+xml;base64,").expect("svg data URI");
+        let svg = String::from_utf8(B64.decode(b64).expect("valid base64")).unwrap();
+        assert!(svg.contains("<svg"), "decodes back to the mark");
+        assert!(!svg.contains("currentColor"), "a favicon has no colour to inherit");
+        assert!(svg.contains("#e6e6e6"), "resolved to the app's high-contrast ink");
     }
 }

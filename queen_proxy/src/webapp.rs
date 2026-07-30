@@ -146,6 +146,18 @@ fn serve_asset(path: &str) -> Response {
     }
 }
 
+/// One built asset, for the surfaces that must INLINE it rather than link it.
+///
+/// The sign-in page is the only such surface. It renders before any session
+/// exists, so every same-origin URL on it — brand mark, favicon — would come
+/// straight back here and be answered with a 302 to the sign-in page itself.
+/// oauth.rs base64s these bytes into the page instead, which keeps the gate
+/// above absolute AND keeps the login brand on the same artifact the sidebar
+/// shows, with no second copy of the art in the source.
+pub fn embedded_asset(path: &str) -> Option<Vec<u8>> {
+    WebappAssets::get(path).map(|f| f.data.into_owned())
+}
+
 fn embedded(path: &str) -> Option<Response> {
     let file = WebappAssets::get(path)?;
     let mut resp = ([(header::CONTENT_TYPE, content_type(path))], file.data.into_owned()).into_response();

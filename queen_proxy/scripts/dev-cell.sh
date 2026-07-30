@@ -61,6 +61,7 @@ up() {
     QUEEN_PROXY_SPOOL_DIR="$RUN_DIR/spool" \
     QUEEN_PROXY_JWT_SECRET="${QUEEN_PROXY_JWT_SECRET:-dev-only-hs256-secret}" \
     QUEEN_PROXY_ENFORCE="$ENFORCE" \
+    QUEEN_PROXY_OPERATOR_ENABLED="${QUEEN_PROXY_OPERATOR_ENABLED:-false}" \
     QUEEN_PROXY_DEFAULT_CLUSTER=dev QUEEN_PROXY_RECONCILE_MS=10000 \
     "$PROXY_DIR/target/debug/queen-proxy" >"$RUN_DIR/proxy.log" 2>&1 & echo $! >"$RUN_DIR/proxy.pid" )
 
