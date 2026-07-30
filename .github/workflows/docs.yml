@@ -13,6 +13,10 @@ on:
       - "server/src/**"
       - "server/sql/**"
       - "queen_proxy/src/routes.rs"
+      - "queen_proxy/src/main.rs"
+      - "queen_proxy/src/console.rs"
+      - "queen_proxy/src/oauth.rs"
+      - "benchmark-queen/**"
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
@@ -23,6 +27,10 @@ on:
       - "server/src/**"
       - "server/sql/**"
       - "queen_proxy/src/routes.rs"
+      - "queen_proxy/src/main.rs"
+      - "queen_proxy/src/console.rs"
+      - "queen_proxy/src/oauth.rs"
+      - "benchmark-queen/**"
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
@@ -54,14 +62,26 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      # The benchmark figures are rendered from the archived artifacts by
+      # scripts/charts.py, so the drift check needs matplotlib present.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install matplotlib
+        run: pip install "matplotlib==3.10.*"
+
       # Fails when a generated table or snippet is behind the Rust/SQL/test
       # source it is derived from, and when one of the mirrored Rust
       # classifiers changed (the generators keep a fingerprint of each).
       - name: Generated content is current
         run: pnpm gen:check
 
-      - name: Lint prose and MDX
-        run: pnpm lint:docs
-
+      # Build before lint, not after: the `nimbus/internal-link` rule resolves
+      # links against `.nimbus/routes.json`, which Astro materializes at
+      # `astro:build:done`. Linting first checks links against a stale route
+      # map — or none at all on a clean checkout.
       - name: Build
         run: pnpm build
+
+      - name: Lint prose and MDX
+        run: pnpm lint:docs

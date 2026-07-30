@@ -1,0 +1,209 @@
+---
+title: "POST /api/v1/push"
+description: "Produce messages: the request body field by field, the per-item response array, all four item statuses, and exactly how deduplication decides."
+type: reference
+sidebar:
+  order: 4
+  label: push
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/src/fusion.rs
+  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/012_configure.sql
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+  - clients/client-py/tests/test_push.py
+  - clients/client-go/tests/push_test.go
+---
+
+One call writes one or more messages to one or more queues. Access level **write-only**, which
+is the only route a `write-only` token can reach. The response is always a top-level array with
+one element per request item, in request order.
+
+## Request
+
+```json
+{
+  "items": [
+    {
+      "queue": "orders.created",
+      "partition": "customer-42",
+      "transactionId": "order-8891-created",
+      "payload": { "orderId": 8891, "total": 4200 }
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Default |
+| --- | --- | --- | --- |
+| `items` | array of objects | yes | n/a |
+| `items[].queue` | string | yes | n/a |
+| `items[].partition` | string | no | `"Default"` |
+| `items[].payload` | any JSON value | yes | n/a |
+| `items[].transactionId` | string | no | the message id the broker mints for this item |
+
+Notes that change behaviour:
+
+- **`payload` is the wire field name.** The JavaScript and Python clients also accept `data` on
+  an item and rename it to `payload` before sending; the Go client's field is `Payload`. On raw
+  HTTP, `data` is not recognised, and because unknown keys are ignored an item carrying `data`
+  but no `payload` fails the body parse with a 400: `payload` is required.
+- `payload` may be any JSON value: object, array, string, number, boolean or `null`. It is
+  stored verbatim and spliced back into the pop response without re-serialization.
+- **`traceId` is silently ignored on this route.** The push path always stores a null trace id,
+  so every message produced through `/api/v1/push` comes back from a pop with `traceId: null`.
+  A trace id can only be attached at write time through
+  [`POST /api/v1/transaction`](/reference/http/transaction).
+- Items in one call may target different queues and different partitions.
+- `"items": []` is accepted and returns `201` with an empty array.
+- When authentication is enabled, the validated token's `sub` is stamped onto every frame and
+  echoed by pops as `producerSub`. A `producerSub` supplied in the request body is never
+  honoured.
+
+### Queues and partitions are created by pushing
+
+If the queue does not exist, the first push creates it, together with its configuration row and
+its first partition. `namespace` and `task` are derived from a dotted name (`orders.created`
+becomes namespace `orders`, task `created`), so a queue that was never explicitly configured is
+still discoverable by a namespace or task pop. Queue options keep their defaults, which is where
+the two-valued `leaseTime` comes from: a queue created implicitly by a push leases for **60
+seconds**, while a queue created or updated through `/api/v1/configure` leases for **300
+seconds**.
+
+Partitions are created on first push to that partition name, and deleted automatically only
+once they are empty and have been idle for `PARTITION_CLEANUP_DAYS` (30). A push to a name
+whose partition was reclaimed simply creates it again, with a new id and offsets from 0.
+
+## Response
+
+`201 Created`, `Content-Type: application/json`, a top-level array:
+
+```json
+[
+  {
+    "index": 0,
+    "message_id": "0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83",
+    "transaction_id": "order-8891-created",
+    "queueName": "orders.created",
+    "status": "queued"
+  }
+]
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `index` | integer | the item's position in the request array |
+| `message_id` | string (UUIDv7) | the stored message's id; for a duplicate, the id of the **original** message |
+| `transaction_id` | string | the deduplication key actually used: your `transactionId`, or the minted message id when you omitted it |
+| `queueName` | string | the queue the item targeted |
+| `status` | string | one of the four values below |
+
+The mixed casing (`message_id` and `transaction_id` snake_case, `queueName` camelCase) is the
+wire contract, not a typo, and clients depend on it.
+
+There is no `partition`, no `partitionId`, no offset and no `createdAt` in a push result. The
+offset a message landed on is never returned to a producer; positions are internal to the
+storage engine and are only ever used through cursors.
+
+### Item statuses
+
+| `status` | What happened | What to do |
+| --- | --- | --- |
+| `queued` | stored and committed | nothing |
+| `duplicate` | an earlier message with the same `transactionId` already exists in this partition, inside the deduplication window; **nothing was written** | nothing. This is the idempotent outcome |
+| `buffered` | the message went to the broker's on-disk spool instead of PostgreSQL, and a background drain will replay it: either because the database transaction failed, or because the broker is in maintenance mode, which diverts **every** push to the spool | treat as accepted; if maintenance mode is off, investigate the database |
+| `failed` | the write did not reach PostgreSQL **and** the spool write also failed; the message exists nowhere | retry it |
+
+Replay from the spool preserves the `transactionId`, so deduplication makes it idempotent: a
+message that was both buffered and (by your own retry) pushed again lands once.
+
+<Aside type="caution">
+`buffered` and `failed` come back with HTTP **201**. A client that checks only the status code
+cannot tell a healthy push from one that lost every message. Inspect each element's `status`.
+</Aside>
+
+### Status codes
+
+| Code | When |
+| --- | --- |
+| `201` | the normal path, whatever the per-item statuses; also the maintenance-mode path when every item spooled |
+| `400` | the body is not JSON, or `items` / `queue` / `payload` is missing: `{"error":"bad body: …"}` |
+| `403` | authentication is on and the token has no writer role |
+| `413` | the body exceeds 64 MiB |
+| `500` | maintenance mode is on and at least one spool write failed |
+
+## Atomicity
+
+Items are grouped by `(queue, partition)`, and each group becomes one segment. **The commit
+boundary is the group, not the request.** A push spanning three partitions can have one group
+committed and another `failed`, which is exactly what the per-item statuses report. If you need
+several writes to land together, use
+[`POST /api/v1/transaction`](/reference/http/transaction), which runs the whole bundle in one
+PostgreSQL transaction.
+
+The handler does not answer until every group has resolved, so the call's latency includes the
+broker's write-coalescing hold window: concurrent pushes to different partitions are bundled
+into a single database transaction, which is what makes one commit carry many messages.
+
+## Deduplication
+
+Deduplication is **on by default**, exact, and scoped to one partition. The key is the item's
+`transactionId`; the bound is the queue's `dedupWindowSeconds`, whose default is **3600**.
+Setting it to `0` disables deduplication for that queue.
+
+Two layers run, in this order:
+
+1. **Within one request.** The first item for a given `(queue, partition, transactionId)` wins.
+   Later items in the same body produce no frame and come back `duplicate`, carrying the
+   winner's `message_id`.
+2. **In the database.** Before allocating an offset, the push probes the partition's transaction
+   index for the incoming hashes while holding the partition's row lock. A hit returns
+   `duplicate` having written nothing at all: there is no insert to roll back, and no
+   subtransaction. A clean probe proceeds to allocate.
+
+Because the probe happens under the same row lock that serializes writes to the partition, two
+concurrent pushes of the same `transactionId` cannot both succeed.
+
+<Render file="snippets/js-push-dedup" />
+
+What you get back for a duplicate is the **original** message's id, resolved from the stored
+segment. If the original can no longer be read (retention removed its segment, for instance),
+the id comes back as the all-zeros UUID `00000000-0000-0000-0000-000000000000`, the
+"original unknown" sentinel. The `status` is still `duplicate`.
+
+<Aside type="note">
+Deduplication is what makes a push retry safe. The window is a time bound, not a memory of
+everything ever written: a retry that arrives after `dedupWindowSeconds` will be accepted as a
+new message. Choose the window to cover your worst-case retry horizon, and remember that
+`/api/v1/configure` is a **full replace**: omitting `dedupWindowSeconds` on a later configure
+call resets it to 3600.
+</Aside>
+
+## Examples
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/js-push" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/py-push" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/go-push" />
+  </TabItem>
+</Tabs>
+
+Raw HTTP, with an explicit deduplication key:
+
+```bash
+curl -sS -X POST http://localhost:6632/api/v1/push -H 'content-type: application/json' -d '{"items":[{"queue":"orders.created","partition":"customer-42","transactionId":"order-8891-created","payload":{"orderId":8891}}]}'
+```
+
+## Encryption at rest
+
+If the queue has `encryptionEnabled` and the broker has a valid `QUEEN_ENCRYPTION_KEY`, payloads
+are encrypted before they are packed into a segment, and pops decrypt them transparently. A
+malformed or wrong-length key **disables encryption and stores plaintext** with only a warning
+in the log. It is not a boot failure and not a push failure. [Self-hosting](/selfhost) covers
+key handling.

@@ -295,15 +295,24 @@ pub struct Config {
     // config.hpp:286-329). `retention_batch_size` bounds each metrics-purge DELETE;
     // `metrics_retention_days` is the worker/system-metrics purge window (default
     // 90, matching the C++ RetentionService, not the old hardcoded 7). Under the
-    // segments engine `retention_parallelism` and `partition_cleanup_days` have no
-    // work to do (the sweep is a single advisory-locked txn, no partitioned message
-    // table to drop) — read for config-compat and documented inert.
+    // segments engine `retention_parallelism` has no work to do (retention runs one
+    // bounded step at a time) — read for config-compat and documented inert.
+    //
+    // `partition_cleanup_days` IS live again (2026-07-30): retention phase 4 deletes
+    // empty, inactive-for-that-long partitions via
+    // queen.log_partition_cleanup_step_v1, restoring the C++
+    // RetentionService::cleanup_inactive_partitions() the log engine had dropped.
+    // Floor of 1 day is the C++ clamp; the off switch is the enabled flag, so 0 does
+    // not silently mean "delete everything quiet since a second ago".
     pub retention_batch_size: usize,
-    #[allow(dead_code)]
+    /// Inert (retention runs one bounded step at a time), but printed in the boot
+    /// `config: jobs` line: the docs promise every knob's EFFECTIVE value is
+    /// visible there, and an operator who sets this deserves to see it read back
+    /// rather than infer from behaviour that it did nothing.
     pub retention_parallelism: usize,
     pub metrics_retention_days: i32,
-    #[allow(dead_code)]
     pub partition_cleanup_days: i32,
+    pub partition_cleanup_enabled: bool,
     // stats reconciler cadence (ms) — segments-native queen.stats refresh
     // (server/src/stats.rs). Mirrors the C++ StatsService STATS_INTERVAL_MS.
     pub stats_interval_ms: u64,
@@ -560,7 +569,10 @@ pub fn log_effective(cfg: &Config) {
         target: "boot",
         retention_interval_ms = cfg.retention_interval_ms,
         retention_batch_size = cfg.retention_batch_size,
+        retention_parallelism = cfg.retention_parallelism,
         metrics_retention_days = cfg.metrics_retention_days,
+        partition_cleanup = cfg.partition_cleanup_enabled,
+        partition_cleanup_days = cfg.partition_cleanup_days,
         stats_interval_ms = cfg.stats_interval_ms,
         metrics_flush_ms = cfg.metrics_flush_ms,
         apply_schema = env_bool("QUEEN_APPLY_SCHEMA", true),
@@ -665,6 +677,7 @@ pub fn load() -> Config {
         retention_parallelism: env_int("RETENTION_PARALLELISM", 1).max(1) as usize,
         metrics_retention_days: env_int("METRICS_RETENTION_DAYS", 90).max(1) as i32,
         partition_cleanup_days: env_int("PARTITION_CLEANUP_DAYS", 30).max(1) as i32,
+        partition_cleanup_enabled: env_bool("QUEEN_PARTITION_CLEANUP_ENABLED", true),
         stats_interval_ms: env_int("STATS_INTERVAL_MS", 10000).max(1000) as u64,
         metrics_flush_ms: env_int("METRICS_FLUSH_MS", 60000).max(1000) as u64,
         auth: AuthConfig::from_env(),

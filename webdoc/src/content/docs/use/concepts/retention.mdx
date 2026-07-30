@@ -1,0 +1,179 @@
+---
+title: Retention
+description: "Retention is opt-in, whole-segment and time-based. What that means for how long a message survives, how big your replay window really is, and which knob deletes data out from under a live consumer."
+type: concept
+tier: use
+sidebar:
+  order: 10
+sourceOfTruth:
+  - server/sql/procedures/045_log_maintenance.sql
+  - server/src/retention.rs
+  - server/sql/procedures/012_configure.sql
+  - server/sql/schema.sql
+  - server/sql/procedures/041_log_schema.sql
+---
+
+Consuming a message does not delete it. Nothing deletes it until you configure retention, and
+by default no queue has any. That is a deliberate default for a store whose replay window is
+its retained data, but it means an unattended queue grows until you decide otherwise.
+
+## Nothing is deleted until you ask
+
+A queue created by a push, or configured without retention keys, carries
+`retentionEnabled: false`, `retentionSeconds: 0`, `completedRetentionSeconds: 0` and
+`maxWaitTimeSeconds: 0`. In that state segments accumulate for as long as PostgreSQL has room.
+
+Retention is expressed as queue options and evaluated in the background, partition by
+partition, as small bounded deletes. From an application author's point of view there are three
+independent switches, and one of them can take data away from a running consumer.
+
+## The two consumption-aware rules
+
+Both require `retentionEnabled: true` *and* a positive window. Setting the window without
+enabling retention does nothing, and so does enabling retention with both windows at zero.
+
+| Option | Deletes | Bounded by consumption |
+| --- | --- | --- |
+| `retentionSeconds` | Segments older than the window | No (deletes whether or not anyone consumed them) |
+| `completedRetentionSeconds` | Segments older than the window | Yes (never past the slowest group's cursor) |
+
+`retentionSeconds` is the honest "I do not care after N seconds" knob. Data leaves on age
+alone; a consumer that was down longer than the window comes back to a shorter log.
+
+`completedRetentionSeconds` is the safe one. Its boundary is capped at the *lowest* `committed`
+cursor across every consumer group on that partition, plus one. Three things follow from that
+cap, and all three surprise people:
+
+- Unconsumed backlog is never deleted by this rule, however old it is.
+- A partition that no consumer group has ever popped has, by definition, nothing consumed, so
+  this rule deletes nothing there at all.
+- One lagging or abandoned consumer group holds data for every other group. Deleting a group
+  you no longer use is what releases its floor.
+
+When both rules apply, the further boundary wins.
+
+## Deletion is whole-segment, so windows are approximate
+
+Messages are stored in segments: one row holding many frames, compressed together, carrying
+one commit timestamp for the whole row. Retention only deletes segments that lie **entirely**
+below the computed boundary.
+
+A segment that straddles the boundary survives with everything in it. So the effective
+retention of an individual message is "your window, plus up to the age span of the segment it
+happens to share". Treat a retention window as a floor on what is kept, not a ceiling on what
+is deleted.
+
+The consumption cap of `completedRetentionSeconds` is a message offset and can fall in the
+middle of a segment; the covering segment then stays, because its unconsumed tail is still
+needed.
+
+## maxWaitTimeSeconds deletes segments on age alone, in-flight leases included
+
+This is the sharpest edge in the retention surface, so it goes in the heading rather than a
+footnote.
+
+`maxWaitTimeSeconds` deletes whole segments older than its cutoff **for every consumer group,
+whether or not they have been consumed, and whether or not they are currently leased to a
+running worker**. The SQL that implements it calls this data loss by design. It also:
+
+- applies regardless of `retentionEnabled`, so a queue configured with only this option is still
+  swept;
+- does **not** dead-letter anything. Messages that age out are gone, not quarantined;
+- leaves cursors below the new watermark, which then resume at the next offset that still
+  exists.
+
+Use it when staleness itself makes a message worthless: a market tick, a sensor sample, a
+cache invalidation. Do not use it as a backstop for slow consumers: it will silently remove
+work a worker is holding a lease on.
+
+## The dead-letter queue is never purged
+
+Retention never touches `queen.log_dlq`. Dead-letter rows survive every rule above and are
+removed only by deleting them one at a time, replaying them, or deleting the whole queue. That
+is what makes the dead-letter queue trustworthy for debugging, and it also means an unattended
+one grows without bound. See
+[Leases, retries and the dead-letter queue](/use/concepts/leases-retries-dlq).
+
+## Empty partitions are removed after 30 days; queues never are
+
+Retention advances a per-partition watermark and deletes segments below it. The partition row itself
+stays, with its offset counter intact, for as long as it holds anything or is being used. Offsets are
+never reused and never renumbered while it lives.
+
+A separate cleanup phase then deletes partitions that are **empty and have been untouched for
+`PARTITION_CLEANUP_DAYS`**, 30 days by default. "Untouched" means no push and no consumer-group
+activity in that window, and "empty" means no segments *and* no dead-letter rows, no streaming-query
+state, and no in-flight lease. Any one of those keeps the partition alive indefinitely.
+
+Deleting the partition drops the consumer cursors with it. That costs a group its `total_consumed`
+counter, not its position: there is nothing left in the partition to re-read, and a group's
+subscription record is per queue, not per partition, so if a later push recreates the partition the
+group seeds into it exactly as it would into a brand-new one. What you must not assume is offset
+continuity: a recreated partition is a new partition, with a new id, starting at offset 0.
+
+Set `QUEEN_PARTITION_CLEANUP_ENABLED=false` to keep every partition row forever, which is what
+versions before this one did.
+
+Removing a queue is always an explicit administrative action.
+
+## Retention is the replay window
+
+Every position lookup (a timestamp seek, a timestamp subscription, the retention boundary walk
+itself) starts at the partition's watermark. So:
+
+- The retained window *is* the replay window. A timestamp older than the oldest retained
+  segment resolves to that oldest segment, with no error to tell you the rest is gone.
+- A dead-letter hand-off needs the segment covering the poison message. If retention already
+  removed it, the ack comes back with `dlq rejected` and the cursor does not advance.
+- Sizing your retention window is therefore also sizing how far back an incident can be
+  replayed. Decide it from the recovery you want, not from disk alone.
+
+Details of both position mechanisms are on
+[Replay and subscription modes](/use/concepts/replay).
+
+## The ack window is separate
+
+Transaction ids are resolved to offsets through a hash sidecar with its **own** expiry:
+`max(dedupWindowSeconds, completedRetentionSeconds, 900 seconds)`. It is purged on its own
+watermark, independently of segments.
+
+That independence is visible in two directions. A message can still be stored after its hash
+row expired. A late ack for it then comes back as `unresolvable` and the message redelivers.
+And a hash row can outlive its message, which is harmless. If your consumers can be down longer
+than an hour, raise `dedupWindowSeconds` deliberately rather than discovering the boundary
+through rejected acks. The reporting behaviour is described on
+[Acknowledgement is an offset commit](/use/concepts/ack).
+
+## Configuring it
+
+```json
+{
+  "queue": "orders.created",
+  "options": {
+    "retentionEnabled": true,
+    "retentionSeconds": 604800,
+    "completedRetentionSeconds": 3600,
+    "maxWaitTimeSeconds": 0,
+    "dedupWindowSeconds": 3600,
+    "leaseTime": 300,
+    "retryLimit": 3
+  }
+}
+```
+
+<Aside type="caution">
+`/configure` is a **full replace**. Every option you omit is reset to its default:
+`retentionEnabled` back to `false`, `dedupWindowSeconds` back to 3600, `leaseTime` back to 300.
+Always send the complete intended configuration, and re-send it in full when you change one
+value.
+</Aside>
+
+## What you can see afterwards
+
+Each deleting step records a row describing what it removed and under which rule
+(`retention`, `completed_retention` or `max_wait_time_eviction`), and the number of message
+offsets it dropped. That is what the retention view in the dashboard reads, so a queue with
+retention configured but nothing to delete shows nothing rather than an error.
+
+How often the sweep runs, how much it deletes per step, which replica performs it, and how to
+tune all of that is operator territory. See [Self-hosting](/selfhost).

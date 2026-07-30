@@ -1,0 +1,167 @@
+---
+title: Defaults
+description: "Every default that matters in one place: environment variables, queue options, request parameters, and the values where two numbers circulate."
+type: reference
+tier: use
+sidebar:
+  order: 19
+sourceOfTruth:
+  - server/src/config.rs
+  - server/src/main.rs
+  - server/src/handlers/mod.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/queues.rs
+  - server/sql/schema.sql
+  - server/sql/procedures/012_configure.sql
+  - server/sql/procedures/041_log_schema.sql
+---
+
+A default reaches a message through one of three layers, and the layers are
+resolved in a fixed order:
+
+1. **Request parameter** — a query parameter or body field on one call.
+2. **Queue configuration** — a column on the queue's configuration rows, written
+   by `POST /api/v1/configure` or created implicitly by the first push.
+3. **Environment** — process-wide, read once at boot.
+
+Where the same setting exists at two layers, the more specific one wins, but only
+when it is present *and positive*. That qualifier matters: a pop asking for
+`leaseSeconds=0` does not get a zero-second lease, it falls through to the queue's
+value.
+
+## Values where two numbers circulate
+
+These four are the ones worth memorising, because a plausible-looking wrong
+number exists for each.
+
+| Setting | Effective default | The other number, and why |
+| --- | --- | --- |
+| Lease time | **60 s** on a queue created implicitly by a push; **300 s** after an explicit `/configure` | Two different rows. `queen.log_queues.lease_time` defaults to 60; `/configure` computes `leaseTime` with a default of 300 and writes it into that same column. So the value depends on how the queue came into existence. |
+| Deduplication window | **3600 s, on** | Deduplication is not opt-in. `queen.log_queues.dedup_window_seconds` defaults to 3600 and `/configure` re-applies 3600 whenever `dedupWindowSeconds` is omitted. Only an explicit `0` disables it. |
+| `RETENTION_INTERVAL` | **5000 ms** | 300000 was the retired engine's monolithic five-minute sweep. The log engine runs bounded autocommitting steps, so the cadence is 5 s. |
+| Pop long-poll timeout | **30000 ms** | Read from `DEFAULT_TIMEOUT` first, then `POP_DEFAULT_TIMEOUT_MS`, then 30000. Both names exist; `DEFAULT_TIMEOUT` takes precedence, so setting only `POP_DEFAULT_TIMEOUT_MS` while `DEFAULT_TIMEOUT` is also set has no effect. |
+
+One more that is often assumed off: **`QUEEN_HOTLIST` defaults to on**. The
+broker selects wildcard-pop candidates in memory rather than by scanning
+PostgreSQL. `QUEEN_HOTLIST=0` reverts to the SQL candidate scan.
+
+## Environment defaults that shape behaviour
+
+The full list, with every variable, is in
+[Environment variables](/reference/config). These are the ones whose default
+changes what a client observes.
+
+| Variable | Default | Effect of the default |
+| --- | --- | --- |
+| `PORT` | `6632` | HTTP listener, bound on `0.0.0.0`. |
+| `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | Larger request bodies are rejected with 413 before any handler runs. |
+| `DB_POOL_SIZE` | `160` | Upper bound on concurrent PostgreSQL work. A request that cannot get a pooled connection at all answers 500 with `{"error":"pool"}`. |
+| `QUEEN_STMT_TIMEOUT_MS` | `30000` | A statement past this is abandoned, cancelled server-side, and its pooled connection is quarantined. |
+| `DEFAULT_TIMEOUT` / `POP_DEFAULT_TIMEOUT_MS` | `30000` | How long a `wait=true` pop parks when the client sends no `timeout`. |
+| `POP_WAIT_INITIAL_INTERVAL_MS` | `100` | First re-query interval of a parked pop; grows past `POP_WAIT_BACKOFF_THRESHOLD` (3) by `POP_WAIT_BACKOFF_MULTIPLIER` (2.0) up to `POP_WAIT_MAX_INTERVAL_MS` (1000). A push-wake resets it. |
+| `RETENTION_INTERVAL` | `5000` | Maintenance cycle cadence, leader-gated by one advisory lock, so only one instance sweeps per cycle. |
+| `RETENTION_BATCH_SIZE` | `1000` | Maximum segment rows deleted per bounded step, and partitions deleted per cleanup batch. |
+| `PARTITION_CLEANUP_DAYS` | `30` | How long a partition must be empty *and* idle before the cleanup phase deletes the row. `QUEEN_PARTITION_CLEANUP_ENABLED=false` keeps every partition forever. |
+| `METRICS_FLUSH_MS` | `60000` | How often per-queue counters reach PostgreSQL, and therefore how stale a per-queue Prometheus series can be. |
+| `STATS_INTERVAL_MS` | `10000` | Cadence of the stats reconciler that feeds the dashboard's pending and total counts. |
+| `QUEEN_CACHE_REFRESH_INTERVAL_MS` | `60000` | How long a lost peer notification can leave a stale per-queue cache in place. |
+| `QUEEN_HOTLIST` | on | Broker-side candidate selection for wildcard pops. |
+| `QUEEN_ACK_FUSION` | on | Coalesces full-batch acks into one commit per flush. |
+| `QUEEN_DEDUP_CACHE` | on, `512` MB | Broker-side dedup cache. Correctness never depends on it; disabled, SQL probes the full window. |
+| `JWT_ENABLED` | `false` | No authentication. Every route is open, including admin ones. |
+| `QUEEN_TENANCY_HEADER` | `false` | Every request resolves to the default tenant `00000000-0000-0000-0000-000000000001`. |
+| `QUEEN_APPLY_SCHEMA` | `true` | The broker applies the schema and all stored procedures on every boot. |
+| `QUEEN_SYNC_ENABLED` | `true` | Enabled, but inert with no `QUEEN_MESH_PEERS`: a single broker binds nothing. |
+| `QUEEN_ENCRYPTION_KEY` | unset | At-rest payload encryption is off, and a queue flagged `encryptionEnabled` stores plaintext. |
+| `FILE_BUFFER_DIR` | `/var/lib/queen/buffers` | Where pushes spool during a database outage. Must be writable and persistent, or the durability spool silently has nowhere to go. |
+| `LOG_LEVEL` | `info` | `RUST_LOG` overrides it; both accept full filter syntax. |
+
+## Queue option defaults
+
+Applied by `POST /api/v1/configure`, and by the column defaults for a queue
+created implicitly by a push. `/configure` is a **full replace** — an omitted key
+is reset to the value in this table, not left alone. See
+[Queue options](/reference/queue-options) for what each one does.
+
+| Option | Default | Note |
+| --- | --- | --- |
+| `namespace` | `""` | For a push-created queue, derived from the queue name before the first `.`. |
+| `task` | `""` | For a push-created queue, derived from the name between the first and second `.`. |
+| `leaseTime` | `300` (configure) / `60` (push-created) | Seconds. |
+| `retryLimit` | `3` | Explicit `failed` acks charged before dead-lettering. |
+| `deadLetterQueue` | `true` | Dead-lettering is on for an unconfigured queue. |
+| `dlqAfterMaxRetries` | `true` | Combined with the previous flag by `OR` — both must be `false` to disable dead-lettering. |
+| `delayedProcessing` | `0` | Seconds of visibility delay; 0 is off. |
+| `windowBuffer` | `0` | Seconds of quiet before a partition is delivered; 0 is off. |
+| `retentionEnabled` | `false` | Retention is opt-in. |
+| `retentionSeconds` | `0` | Needs `retentionEnabled` and a positive value to do anything. |
+| `completedRetentionSeconds` | `0` | Same gate. |
+| `maxWaitTimeSeconds` | `0` | Age eviction. Runs whether or not `retentionEnabled` is set. |
+| `minPopWaitTime` | `0` | Milliseconds a non-empty under-full pop may wait to fatten. Clamped to 0–60000. |
+| `encryptionEnabled` | `false` | Requires a valid `QUEEN_ENCRYPTION_KEY` to have any effect. |
+| `dedupWindowSeconds` | `3600` | Segments-only, stored on the engine's queue row. Not echoed in the `/configure` response. |
+
+## Request parameter defaults
+
+| Endpoint | Parameter | Default |
+| --- | --- | --- |
+| `GET /api/v1/pop/queue/:queue` | `batch` | `200` |
+| | `partitions` | `1` |
+| | `autoAck` | `false` |
+| | `wait` | `false` |
+| | `timeout` | the configured pop timeout (30000 ms) |
+| | `consumerGroup` | `__QUEUE_MODE__` |
+| | `subscriptionMode` | `all` |
+| | `leaseSeconds` | queue `leaseTime`, else 60 |
+| `GET /api/v1/pop/queue/:queue/partition/:partition` | same, except `partitions` | ignored — a specific pop is one partition |
+| `GET /api/v1/pop` (discovery) | `namespace` / `task` | none — a call with neither is a 400 |
+| `POST /api/v1/lease/:leaseId/extend` | `seconds` | `60`, also for an empty body |
+| `POST /api/v1/ack`, `/ack/batch` | `consumerGroup` | `__QUEUE_MODE__` |
+| | `status` | `completed` when absent; an unrecognised value is treated as `failed` |
+| `GET /api/v1/messages` | `limit` / `offset` | `200` / `0` |
+| `GET /api/v1/dlq` | `limit` / `offset` | `100` / `0` |
+| `GET /api/v1/status/queues` | `limit` / `offset` | `100` / `0` |
+| `GET /api/v1/traces/by-name/:traceName` | `limit` / `offset` | `100` / `0` |
+| `GET /api/v1/traces/names` | `limit` / `offset` | `50` / `0` |
+| `GET /api/v1/consumer-groups/lagging` | `minLagSeconds` | `3600` |
+| `DELETE /api/v1/consumer-groups/:group` | `deleteMetadata` | `true` |
+| `POST …/queues/:queue/partitions/:partition/seek` | body | an empty body means `toEnd: true` |
+| `POST …/queues/:queue/seek` | body | required — `toEnd: true` or a `timestamp`, else 400 |
+
+<Aside type="note">
+The queue-level seek and the partition-level seek differ here on purpose: the
+dashboard's per-partition "skip to end" button sends no body, so an empty body is
+accepted there and rejected on the queue-wide form.
+</Aside>
+
+## Fixed values that are not configurable
+
+| Value | What it is |
+| --- | --- |
+| `Default` | The partition name used when a push names none. |
+| `__QUEUE_MODE__` | The consumer group used when a pop or ack names none. Its cursor is real state, like any other group's. |
+| `00000000-0000-0000-0000-000000000001` | The default tenant. Used for every request when `QUEEN_TENANCY_HEADER` is off, and when it is on but the header is absent or empty. |
+| `60` s | The lease floor used when the queue has no engine row yet, or the lookup could not reach the database. |
+| `30` s | How long the broker caches a queue's `delayedProcessing`, `windowBuffer` and `minPopWaitTime` for its in-memory scheduler, so a `/configure` change to those three takes effect within that window rather than instantly. |
+| `737001` | The advisory lock that elects one instance per maintenance cycle. |
+| `778120010` | The advisory lock that serialises the boot-time schema apply across instances. |
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/reference/queue-options"
+    title="Queue options"
+    description="Every option /configure accepts, its effect, and what changing it does to existing data."
+  />
+  <LinkCard
+    href="/reference/config"
+    title="Environment variables"
+    description="The full variable list and how the broker parses it."
+  />
+  <LinkCard
+    href="/reference/errors"
+    title="Status codes and error bodies"
+    description="What happens when a value is rejected."
+  />
+</CardGrid>

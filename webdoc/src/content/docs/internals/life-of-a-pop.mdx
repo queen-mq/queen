@@ -1,0 +1,322 @@
+---
+title: Life of a pop
+description: "Candidate selection, the claim under FOR UPDATE SKIP LOCKED, the head probe and forward scan, and the choice between an auto-ack and a lease."
+type: concept
+tier: internals
+sidebar:
+  order: 4
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/sql/procedures/043_log_pop.sql
+  - server/src/db.rs
+verifiedBy:
+  - clients/client-js/test-v2/pop.js
+---
+
+A pop answers one question: *which offsets may this consumer group take from this partition
+right now*. It answers that under a row lock, in SQL. Everything around that decision is
+scheduling: choosing which partitions to ask about, and deciding whether to wait.
+
+The client side looks like this:
+
+<Render file="snippets/js-pop" />
+
+## The three shapes of a pop
+
+| Route | Scope | Stored procedure |
+| --- | --- | --- |
+| `GET /api/v1/pop/queue/:queue` | across the queue's partitions | `log_pop_wildcard_bin_v1` or `log_pop_list_v1` |
+| `GET /api/v1/pop/queue/:queue/partition/:partition` | one named partition | `log_pop_v1` |
+| `GET /api/v1/pop?namespace=&task=` | across every matching queue | `log_pop_discover_wire_v1` |
+
+All three funnel into `queen.log_pop_v1`, once per partition. The claim algorithm below is
+therefore the same in all cases; only candidate selection differs. A discovery pop requires at
+least one of `namespace` or `task`: a bare `GET /api/v1/pop` is a `400` rather than an
+unbounded scan of every queue.
+
+The request parameters and their defaults: `batch` 200, `partitions` 1, `autoAck` false,
+`wait` false, `timeout` from `DEFAULT_TIMEOUT` (30000 ms), `consumerGroup` defaulting to the
+sentinel group `__QUEUE_MODE__`, `subscriptionMode` `all`, `subscriptionFrom` empty. The lease
+length is `COALESCE(leaseSeconds, the queue's lease_time, 60)`. The worker id is a freshly minted
+UUIDv7 per request, and on a leased pop it is what the client gets back as `leaseId`.
+
+When pop maintenance mode is on, every pop answers `204` immediately with no work done.
+
+## Step 1: picking candidates
+
+There are two candidate paths, and which one runs depends on `QUEEN_HOTLIST` (default **on**).
+
+### With the hot-list (default)
+
+The broker keeps, per `(tenant, queue, group)`, an in-memory ring of partitions it believes have
+pending data, and asks SQL only about those. The full mechanism is on
+[The hot-list](/internals/hotlist); what matters here is the ordering of the serve path, because
+it is deliberate:
+
+1. **A cheap in-memory check first.** If no reseed is due, the deferral config is fresh, and the
+   ring has nothing ready, the pop returns empty **without taking a Vegas permit or a pooled
+   connection**. This ordering exists because a quiet re-poll rate is proportional to the number
+   of parked consumers: acquiring the shared serving limiter on every empty re-poll let that storm
+   saturate the limiter, so a freshly woken real delivery queued behind thousands of empty polls.
+2. Only if there is real work does the pop take a permit and a connection.
+3. It takes up to `k = clamp(partitions × 8, 16, 256)` candidate names from the ring and calls
+   `queen.log_pop_list_v1(queue, group, names[], ...)`.
+4. It checks a per-candidate verdict back into the ring.
+
+A first-ever pop for a `(queue, group)` is routed through the SQL wildcard procedure instead,
+because that one carries the group-first-contact bulk seed. After the seed marker exists, every
+subsequent pop uses the ring.
+
+### Without the hot-list
+
+`QUEEN_HOTLIST=0` reverts to the SQL candidate scan, which is worth understanding because it is
+what the hot-list replaces:
+
+```sql
+SELECT p.id, p.name
+FROM queen.log_partitions p
+LEFT JOIN queen.log_consumers c
+  ON c.partition_id = p.id AND c.consumer_group = p_group
+WHERE p.queue_id = v_qid
+  AND p.last_write_at >= v_watermark - interval '2 minutes'
+  AND (c.partition_id IS NULL OR p.last_offset > c.committed)
+  AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
+ORDER BY random()
+LIMIT v_cand_cap
+```
+
+Four things in that query carry their own reasoning:
+
+- **The write watermark** (`p.last_write_at >= watermark - 2 minutes`) keeps a caught-up consumer
+  from scanning the whole partition set on every long-poll. It is decisive at ten to twenty
+  thousand partitions per queue. The two minutes of slack absorb the one-second quantization of
+  `last_write_at` on the push side.
+- **The filter is coarse on purpose.** "No consumer row, or `last_offset > committed`" can be
+  stale; `log_pop_v1` re-verifies under the row lock, so a stale candidate simply yields zero
+  rows.
+- **`ORDER BY random()`** spreads two hundred consumers across partitions instead of convoying
+  them all onto the lowest-named one.
+- **The candidate cap** is 512 when `partitions >= 128`, otherwise `clamp(partitions × 4, 64, 512)`.
+  More candidates are fetched than requested, because some will be claimed by concurrent pops or
+  turn out empty.
+
+The legacy path also does the cheap `queen.log_has_pending_v1` probe before taking a permit, for
+the same starvation reason as above: `false` means definitively nothing to deliver, so skip the
+scan and park.
+
+Two pieces of per-`(queue, group)` bookkeeping live only on this path:
+
+**The group-first-contact bulk seed.** On the very first pop of a `(queue, group)`, one insert
+into `queen.consumer_groups_metadata` elects a single seeder (it is the first insertion that
+returns a row count), and that seeder seeds the cursor of *every* partition of the queue in one
+set-based statement. Without it, `log_pop_v1`'s per-partition lazy row creation convoys: many
+concurrent consumers of a fresh queue each block on another's transaction id, and because each
+holds several such pending inserts across randomly ordered partitions, the waits form chains.
+Chains, unlike cycles, are never broken by the deadlock detector.
+
+**The empty-scan watermark.** When a scan claims nothing, the watermark is not advanced blindly:
+a partition may have been skipped only because someone else held its lease. Throttled to once
+every 30 seconds, the procedure re-checks for pending data *ignoring* the lease filter, and
+advances the watermark only if the queue is genuinely empty. Otherwise it records the check time
+and keeps the floor, so a lease-held backlog is never stranded.
+
+## Step 2: visibility gates
+
+Before touching the consumer row, `log_pop_v1` reads `delayed_processing` and `window_buffer`
+from the `queen.queues` configuration row.
+
+**`windowBuffer` (seconds)** is a quiet-period debounce: if the partition received a segment
+within the last `W` seconds, deliver nothing at all. The check is one backward primary-key step
+to the newest segment, which works because `created_at` is monotone in `base_offset`. On the
+hot-list path this SQL debounce can be bypassed (`p_skip_window_debounce`) so that the broker's
+revisit wheel is the single authority on the hold; the SQL debounce remains the safe floor
+whenever the broker does not know the queue's config.
+
+**`delayedProcessing` (seconds)** makes only segments at least `D` seconds old visible. It is
+never bypassed: it stays SQL-enforced, and the wheel only schedules revisits for it. Because
+`created_at` is monotone, the filter cuts a contiguous suffix, so the scan hits the budget before
+ever reaching the filtered tail.
+
+## Step 3: subscription seeding, on first contact only
+
+If this is the first time a `(partition, group)` pair is seen, the cursor has to be seeded, and
+an existing cursor is *never* re-seeded. The order of preference is:
+
+1. **The durable subscription record.** `queen.consumer_groups_metadata.subscription_timestamp`
+   for this `(group, queue)`. The cursor lands just before the first segment at or after that
+   timestamp (a forward walk starting at the retention watermark, never at offset 0). If nothing
+   that recent exists, the cursor becomes `last_offset` (future-only). This is what makes a
+   partition created *after* a group subscribed deliver its whole backlog rather than skip it.
+2. **The pop-carried intent**, for a direct single-partition pop that never went through
+   registration: `subscriptionFrom` as a timestamp, or `subscriptionMode=new` /
+   `subscriptionFrom=now`, which seed `committed = last_offset` and skip the entire existing
+   backlog.
+3. Otherwise `committed = -1`: deliver everything retained.
+
+`__QUEUE_MODE__` is excluded from step 1 and 2 deliberately: a queue-mode pop carrying
+`subscriptionMode=new` must never skip backlog.
+
+## Step 4: the claim
+
+```sql
+SELECT c.committed INTO v_committed
+FROM queen.log_consumers c
+WHERE c.partition_id = v_pid AND c.consumer_group = p_group
+  AND (c.worker_id IS NULL OR c.lease_expires_at IS NULL OR c.lease_expires_at < v_now)
+FOR UPDATE SKIP LOCKED;
+```
+
+`SKIP LOCKED` keeps concurrent pops non-blocking: another worker's live lease, or another pop
+mid-flight on the same row, means this partition is simply skipped this cycle.
+
+What the procedure does **not** do is unconditionally `INSERT ... ON CONFLICT DO NOTHING` the
+consumer row on every pop. That single line is the difference between a working broker and a
+stalling one, and the history is recorded in the source: a per-pop insert makes concurrent pops
+serialize on the inserter's transaction id, and because a wildcard pop claims several partitions
+per transaction in random order, those waits form cycles: deadlock storms that grew *more*
+frequent as the broker got faster.
+
+So the claim is claim-first, and only a genuinely missing row takes the creation path:
+
+1. Re-probe without the lease filter, to distinguish "row missing" from "present but
+   leased or locked". Present means return, non-blocking.
+2. Missing means try a transaction-scoped advisory lock on
+   `hashtextextended(partition_id || '/' || group, 42)`. **Try**, not take: `ON CONFLICT DO NOTHING`
+   against a key another open transaction is inserting waits on that transaction until it commits,
+   and a wildcard pop's transaction lives for its whole candidate loop, so those waits chain into
+   a livelock with no cycle for the detector to break. The non-blocking try means exactly one pop
+   creates the row and every concurrent pop skips this partition for one cycle. A hash collision
+   false-skips an unrelated partition for one cycle, which is harmless.
+3. Insert the row seeded per step 3, then re-claim.
+
+## Step 5: the head probe and the forward scan
+
+With `wanted = committed + 1`, the scan is two queries.
+
+**The head probe** is one backward primary-key step for the greatest `base_offset <= wanted`:
+
+```sql
+SELECT s.base_offset, s.end_offset, s.created_at, s.blob
+FROM queen.log_segments s
+WHERE s.partition_id = v_pid AND s.base_offset <= v_wanted
+ORDER BY s.base_offset DESC LIMIT 1
+```
+
+If that segment covers `wanted`, the scan starts mid-segment at `start_idx = wanted - base_offset`
+and takes `min(end_offset - wanted + 1, budget)` messages. If it does not cover `wanted` (a fully
+consumed head, or the cursor sitting in a retention gap), then no earlier segment can either,
+because ranges are disjoint. The probe is written as a bare `LIMIT 1` with the covering test
+applied afterwards, precisely so that a miss cannot walk the whole partition head.
+
+**The forward scan** then takes segments with `base_offset > wanted` in ascending order, each
+starting at frame 0, until the budget is spent. The `plpgsql` `FOR` loop is a cursor, so exiting
+at the budget stops the index walk: a deep backlog costs only the rows actually delivered.
+
+The procedure returns raw rows of `(base_offset, start_idx, take, msg_count, created_at, blob)`,
+and the broker decompresses each blob and slices frames `[start_idx, start_idx + take)`.
+PostgreSQL never looks inside a blob.
+
+### The empty-partition cursor seal
+
+If the scan takes nothing and the partition holds **no segments at all** while `last_offset >
+committed`, the procedure seals the cursor to the `last_offset` it snapshotted. Without this, a
+partition whose segments were all removed by retention stays "phantom pending" forever: a
+permanent wildcard candidate that also pins the empty-scan watermark at the epoch, forcing full
+partition-set scans on every long-poll.
+
+The guard conditions are narrow and worth stating. It fires only when the partition is *entirely*
+empty and unfiltered: `take = 0` also happens when segments exist but are deferred by
+`delayedProcessing`, and sealing past those would skip live messages. A race with a concurrent
+push is safe because offsets are monotone: anything pushed after the snapshot stays above the seal
+and remains pending. And it is a cursor seal, not a claim: no lease or attempt field is touched.
+
+## Step 6: auto-ack or lease
+
+This is the only branch that changes the delivery contract.
+
+**`autoAck=true`** commits inside the pop transaction:
+
+```sql
+UPDATE queen.log_consumers SET
+    committed = v_last, worker_id = NULL, lease_expires_at = NULL,
+    lease_acquired_at = NULL, batch_end = NULL,
+    total_consumed = total_consumed + v_taken
+```
+
+No lease, and `leaseId` comes back as an empty string. If the consumer dies after the response is
+written but before the work is done, those messages are gone. This is at-most-once.
+
+**Otherwise the batch is leased:**
+
+```sql
+UPDATE queen.log_consumers SET
+    worker_id = p_worker,
+    lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
+    lease_acquired_at = v_now,
+    batch_end = v_last,
+    attempt_count = CASE WHEN attempt_offset IS NOT DISTINCT FROM v_start
+                         THEN attempt_count + 1 ELSE 1 END,
+    attempt_offset = v_start
+```
+
+The lease covers the span `(committed, batch_end]`. The cursor does not move. Only an ack moves
+it. Redelivery detection is the `attempt_offset` comparison: a batch starting at the same offset
+as the previous delivery means the cursor did not move in between (a nack, or a lease expiry), so
+`attempt_count` increments; a batch starting anywhere else is fresh work and resets it to 1.
+`attempt_count` is telemetry and never spends the retry budget, which is charged only by an
+explicit `failed` ack.
+
+Because one consumer row holds at most one lease, exactly one in-flight leased batch exists per
+`(partition, group)`. A single-partition queue cannot be consumed in parallel by one group, no
+matter how many consumers you start. Parallelism comes from partitions.
+
+## Step 7: rendering, and waiting
+
+The broker renders the per-message JSON, records per-queue metrics and delivery lag, and, on a
+leased pop, registers the batch in the [ack registry](/internals/ack-internals) so the eventual
+full-batch ack becomes one positional cursor advance.
+
+`count == 0` answers **`204` with no body at all**. Not an empty JSON object: announcing a
+content length on a body that is then elided poisoned Node/undici connections badly enough to
+produce reset storms under empty-poll load, and clients read nothing from that body anyway.
+
+If the batch is empty, `wait=true`, and the deadline has not passed, the pop parks:
+
+- It releases the permit and the pooled connection first. A parked pop never pins a connection.
+- It waits on the queue's wake gate, which a local push, a peer's mesh hint, an ack-promote or
+  the background wheel tick can open.
+- The wait is bounded by a backoff: `POP_WAIT_INITIAL_INTERVAL_MS` (100 ms) for the first
+  `POP_WAIT_BACKOFF_THRESHOLD` (3) attempts, then `initial × attempt × POP_WAIT_BACKOFF_MULTIPLIER`
+  capped at `POP_WAIT_MAX_INTERVAL_MS` (1000 ms). A successful wake resets the count. The backoff
+  is the correctness floor: a lost wake costs at most one interval.
+- On the legacy path, a wake also drains the pushed-partition hints and tries a targeted
+  single-partition pop for each, which is cheaper than another candidate scan. If every hinted partition
+  comes back empty it falls through to the wildcard pop, which is the backstop for missed wakes and
+  pre-existing backlog.
+
+## The minimum pop wait, and where it lives
+
+`queen.queues.min_pop_wait_time` (milliseconds, 0 = off) lets an under-full claim be held back so
+one commit carries more messages. It is unrelated to long-poll waiting: long-poll waits on an
+*empty* queue, this waits only when the queue is *non-empty* and the batch is *under-full*, and it
+ends at the first of batch full, window elapsed, or the caller's deadline.
+
+The design decision worth recording is where the wait happens. It is in Rust, before the permit
+and the connection are taken, never inside the stored procedure. A `pg_sleep` inside
+`log_pop_list_v1` would hold, for the whole window, a pooled connection, a serving permit, a
+PostgreSQL backend, and (after the first partition claim) the claimed rows' locks. That trades
+one cheap commit for a scarce connection and a held lock. Waiting in the broker costs a timer.
+
+The feature is also gated by a relaxed atomic that is false on every broker where no queue has
+ever configured it, so the default path pays one atomic load rather than a per-queue map lookup.
+
+## What to expect when things go wrong
+
+| Situation | Result |
+| --- | --- |
+| Another worker holds the lease | that partition is skipped this cycle; other partitions still serve |
+| Cursor sits in a retention gap | the forward scan takes the next existing segment; not an error |
+| Partition emptied entirely by retention | the cursor is sealed to `last_offset`; it stops being a candidate |
+| Statement timeout | the statement is cancelled server-side, the connection quarantined, `500` returned |
+| Client disconnects mid-pop | checked-out ring candidates are re-appended by a drop guard; the SQL claim either committed (and the lease will expire) or rolled back |
+| Pool exhausted | `500` with `{"error":"pool"}` |

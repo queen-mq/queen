@@ -15,63 +15,87 @@
       <span v-if="!canAdmin" class="scope-meta">read-only role — cursor and delete actions hidden</span>
     </div>
 
+    <!-- A failed list must not look like an empty one: say the grid below is
+         stale (or absent), and how stale. Page-level fact, so it is a page
+         banner — the same container Queues uses for the same event, not a
+         loose .panel-err, which belongs inside the panel it describes. -->
+    <div v-if="groups.failed.value" class="status-banner banner-bad view-banner">
+      <span>
+        <strong>Could not load consumer groups</strong> · {{ groupsErrorText }}<template v-if="consumers.length"> · showing the last rows that loaded{{ groups.lastUpdated.value ? ` (${groups.lastUpdated.value.toLocaleTimeString()})` : '' }}</template>
+      </span>
+    </div>
+
     <!--
       ========================================================================
-      Toolbar — same idiom as Queues.vue: search · filters · sort segmented ·
-      legend. The "lagging only" check is the only consumer-specific addition.
+      Filter card — the app-wide control container: a card with no header,
+      one row of fields, sort last and right-aligned. This page owns no time
+      window, so the row's first field is the search box, not a range picker.
       ========================================================================
     -->
-    <div class="qtoolbar">
-      <div class="qtoolbar-search">
-        <svg class="qtoolbar-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-        </svg>
-        <input
-          v-model="searchQuery"
-          type="text"
-          placeholder="Search consumer groups..."
-          class="input"
-        />
+    <div class="card filters">
+      <div class="card-body filter-rows">
+        <div class="filter-row">
+          <div class="filter-search">
+            <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <input
+              v-model="searchQuery"
+              type="text"
+              placeholder="Search consumer groups..."
+              class="input"
+            />
+          </div>
+
+          <div class="filter-field-col">
+            <label class="label-xs">Namespace</label>
+            <select v-model="filterNamespace" class="input">
+              <option value="">All namespaces</option>
+              <option v-for="ns in namespaces" :key="ns" :value="ns">{{ ns || '(empty)' }}</option>
+            </select>
+          </div>
+
+          <div class="filter-field-col">
+            <label class="label-xs">Task</label>
+            <select v-model="filterTask" class="input">
+              <option value="">All tasks</option>
+              <option v-for="t in tasks" :key="t" :value="t">{{ t || '(empty)' }}</option>
+            </select>
+          </div>
+
+          <div class="filter-field-col">
+            <label class="label-xs">Queue</label>
+            <select v-model="filterQueue" class="input">
+              <option value="">All queues</option>
+              <option v-for="q in scopedQueueNames" :key="q" :value="q">{{ q }}</option>
+            </select>
+          </div>
+
+          <label class="filter-check">
+            <input v-model="showLaggingOnly" type="checkbox" />
+            <span>Lagging only</span>
+          </label>
+
+          <div class="filter-field">
+            <span class="label-xs">Sort</span>
+            <div class="seg">
+              <button
+                v-for="opt in sortOptions"
+                :key="opt.value"
+                :class="{ on: sortBy === opt.value }"
+                @click="sortBy = opt.value"
+              >{{ opt.label }}</button>
+            </div>
+          </div>
+
+          <span class="qhg-legend">
+            <span class="ld" style="background:var(--ok-500);"></span> stable
+            <span class="ld" style="background:var(--warn-400);"></span> lagging
+            <span class="ld" style="background:var(--ember-400);"></span> stuck
+            <span class="ld" style="background:var(--bd-hi);"></span> dead
+          </span>
+        </div>
       </div>
-
-      <select v-model="filterNamespace" class="input" style="width:140px;">
-        <option value="">All namespaces</option>
-        <option v-for="ns in namespaces" :key="ns" :value="ns">{{ ns || '(empty)' }}</option>
-      </select>
-
-      <select v-model="filterTask" class="input" style="width:140px;">
-        <option value="">All tasks</option>
-        <option v-for="t in tasks" :key="t" :value="t">{{ t || '(empty)' }}</option>
-      </select>
-
-      <select v-model="filterQueue" class="input" style="width:160px;">
-        <option value="">All queues</option>
-        <option v-for="q in scopedQueueNames" :key="q" :value="q">{{ q }}</option>
-      </select>
-
-      <label class="qtoolbar-check">
-        <input v-model="showLaggingOnly" type="checkbox" />
-        <span>Lagging only</span>
-      </label>
-
-      <span style="flex:1;"></span>
-
-      <span class="label-xs" style="color:var(--text-low);">Sort</span>
-      <div class="seg">
-        <button
-          v-for="opt in sortOptions"
-          :key="opt.value"
-          :class="{ on: sortBy === opt.value }"
-          @click="sortBy = opt.value"
-        >{{ opt.label }}</button>
-      </div>
-
-      <span class="qhg-legend">
-        <span class="ld" style="background:var(--ok-500);"></span> stable
-        <span class="ld" style="background:var(--warn-400);"></span> lagging
-        <span class="ld" style="background:var(--ember-400);"></span> stuck
-        <span class="ld" style="background:var(--bd-hi);"></span> dead
-      </span>
     </div>
 
     <!--
@@ -94,9 +118,11 @@
         </svg>
         <span class="lp-head-title">Lagging partitions</span>
 
-        <span v-if="laggingLoading" class="lp-head-hint">loading…</span>
+        <!-- One loading treatment, not four: the Refresh button says it is
+             working, the body shows a table-shaped skeleton on first paint,
+             and the badge keeps stating the last answer it actually has. -->
         <span
-          v-else-if="lagging.failed.value"
+          v-if="lagging.failed.value"
           class="lp-head-badge lp-head-badge-bad"
           :title="laggingErrorText"
         >unavailable</span>
@@ -141,12 +167,13 @@
       </button>
 
       <div v-if="showLaggingSection" class="lp-body">
-        <div v-if="laggingLoading" class="lp-empty">
-          <span class="spinner" style="margin-right:10px;" />
-          Loading lagging partitions…
+        <!-- First paint only, and shaped like the table it stands in for: a
+             refresh leaves the rows that are already on screen alone. -->
+        <div v-if="laggingFirstLoad" class="lp-table-wrap lp-skel">
+          <span v-for="i in 3" :key="`lp-skel-${i}`" class="skeleton" style="height:28px;"></span>
         </div>
 
-        <div v-else-if="lagging.failed.value" class="lp-error">
+        <div v-else-if="lagging.failed.value" class="panel-err">
           Lagging partitions could not be loaded — {{ laggingErrorText }}.
           Nothing here means "unknown", not "nothing is behind".
         </div>
@@ -209,15 +236,6 @@
       </div>
     </div>
 
-    <!-- A failed list must not look like an empty one: say the grid below is
-         stale (or absent), and how stale. -->
-    <div v-if="groups.failed.value" class="lp-error" style="margin-bottom:12px;">
-      Consumer groups could not be loaded — {{ groupsErrorText }}.
-      <span v-if="consumers.length">
-        The list below is from {{ groups.lastUpdated.value?.toLocaleTimeString() }} and may be out of date.
-      </span>
-    </div>
-
     <!--
       ========================================================================
       Health grid — the main entity list. Click row → detail modal; hover
@@ -236,179 +254,203 @@
       @delete="confirmDelete"
     >
       <template #empty>
-        <h3 style="font-size:13px; font-weight:600; color:var(--text-hi); margin:0 0 4px;">
-          {{ consumers.length === 0 ? 'No consumer groups found' : 'No groups match your filters' }}
-        </h3>
-        <p style="font-size:13px; color:var(--text-mid); margin:0;">
-          {{ consumers.length === 0
-            ? 'Consumer groups will appear here when clients connect.'
-            : 'Try adjusting your search or filter.' }}
-        </p>
+        <!-- "No consumer groups" is a claim. Only make it when the list
+             actually loaded — a failed fetch has to say so instead, and
+             offer the retry the page otherwise hides. -->
+        <div v-if="groups.failed.value" class="empty-state empty-state-failed">
+          <h3>Cannot list consumer groups</h3>
+          <p>{{ groupsErrorText }}</p>
+          <button class="btn btn-ghost" @click="refreshAll">Retry</button>
+        </div>
+        <div v-else class="empty-state">
+          <!-- Same block, same 40px glyph, as every other empty state in the
+               app (Queues · Messages · DeadLetter · Traces). -->
+          <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
+          </svg>
+          <h3>{{ consumers.length === 0 ? 'No consumer groups found' : 'No groups match your filters' }}</h3>
+          <p>
+            {{ consumers.length === 0
+              ? 'Consumer groups will appear here when clients connect.'
+              : 'Try adjusting your search or filter.' }}
+          </p>
+        </div>
       </template>
     </ConsumerHealthGrid>
 
     <!-- ===================== Detail modal ===================== -->
-    <div
-      v-if="selectedConsumer"
-      class="modal-backdrop"
-      @click="selectedConsumer = null"
-    >
-      <div class="card modal-card" style="max-width:672px;" @click.stop>
-        <div class="card-header" style="justify-content:space-between;">
-          <h3>{{ selectedConsumer.name === '__QUEUE_MODE__' ? selectedConsumer.queueName : selectedConsumer.name }}</h3>
-          <button @click="selectedConsumer = null" class="btn btn-ghost btn-icon">
-            <svg style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-        <div class="card-body" style="overflow-y:auto; max-height:60vh;">
-          <div class="cg-stats">
-            <div class="stat cg-stat">
-              <div class="stat-label" style="justify-content:center;">Partitions</div>
-              <div class="stat-value font-mono">{{ dash(selectedConsumer.members) }}</div>
-            </div>
-            <div class="stat cg-stat">
-              <div class="stat-label" style="justify-content:center;">State</div>
-              <div class="cg-state" :class="stateClass(selectedConsumer)">{{ getStatusText(selectedConsumer) }}</div>
-            </div>
-            <div class="stat cg-stat">
-              <div class="stat-label" style="justify-content:center;">Lag parts</div>
-              <div
-                class="stat-value font-mono num"
-                :class="{ warn: (selectedConsumer.partitionsWithLag || 0) > 0 }"
-              >{{ dash(selectedConsumer.partitionsWithLag) }}</div>
-            </div>
-            <div class="stat cg-stat">
-              <!-- Real message-count backlog from the log engine — the number
-                   operators actually ask for, and it is returned already. -->
-              <div class="stat-label" style="justify-content:center;">Backlog</div>
-              <div class="stat-value font-mono">{{ dash(selectedConsumer.totalLag) }}</div>
-              <div class="stat-foot" style="justify-content:center;">messages behind</div>
-            </div>
-            <div class="stat cg-stat">
-              <div class="stat-label" style="justify-content:center;">Time lag</div>
-              <div class="stat-value font-mono">
-                {{ (selectedConsumer.maxTimeLag || 0) > 0 ? formatDuration(selectedConsumer.maxTimeLag * 1000) : '—' }}
+    <Teleport to="body">
+      <div
+        v-if="selectedConsumer"
+        class="modal-backdrop"
+        @click.self="selectedConsumer = null"
+      >
+        <!-- Wider than the shared 480px: five tiles at the shared tile size
+             is what this modal is for. -->
+        <div class="card modal-card" style="max-width:672px;">
+          <div class="card-header">
+            <h3>{{ selectedConsumer.name === '__QUEUE_MODE__' ? selectedConsumer.queueName : selectedConsumer.name }}</h3>
+            <button @click="selectedConsumer = null" class="btn btn-ghost btn-icon modal-close">
+              <svg style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="stat-grid stat-grid-5 stat-grid-center" style="margin-bottom:24px;">
+              <div class="stat">
+                <div class="stat-label">Partitions</div>
+                <div class="stat-value font-mono">{{ dash(selectedConsumer.members) }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">State</div>
+                <div class="cg-state" :class="stateClass(selectedConsumer)">{{ getStatusText(selectedConsumer) }}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Lag parts</div>
+                <div
+                  class="stat-value font-mono num"
+                  :class="{ warn: (selectedConsumer.partitionsWithLag || 0) > 0 }"
+                >{{ dash(selectedConsumer.partitionsWithLag) }}</div>
+              </div>
+              <div class="stat">
+                <!-- Real message-count backlog from the log engine — the number
+                     operators actually ask for, and it is returned already. -->
+                <div class="stat-label">Backlog</div>
+                <div class="stat-value font-mono">{{ dash(selectedConsumer.totalLag) }}</div>
+                <div class="stat-foot" style="justify-content:center;">messages behind</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Time lag</div>
+                <div class="stat-value font-mono">
+                  {{ (selectedConsumer.maxTimeLag || 0) > 0 ? formatDuration(selectedConsumer.maxTimeLag * 1000) : '—' }}
+                </div>
               </div>
             </div>
-          </div>
 
-          <div style="margin-bottom:16px;">
-            <span class="label-xs" style="display:block; margin-bottom:8px;">Queue</span>
-            <div class="modal-queue-pill">
-              <span style="font-weight:500; color:var(--text-hi);">{{ selectedConsumer.queueName || '—' }}</span>
+            <div style="margin-bottom:16px;">
+              <span class="label-xs" style="display:block; margin-bottom:8px;">Queue</span>
+              <div class="modal-queue-pill">
+                <span style="font-weight:500; color:var(--text-hi);">{{ selectedConsumer.queueName || '—' }}</span>
+              </div>
             </div>
-          </div>
 
-          <div v-if="selectedConsumer.topics?.length > 0">
-            <span class="label-xs" style="display:block; margin-bottom:12px;">Topics</span>
-            <div style="display:flex; flex-direction:column; gap:8px;">
-              <div
-                v-for="topic in selectedConsumer.topics"
-                :key="topic"
-                class="modal-queue-pill"
-                style="display:flex; align-items:center; justify-content:space-between;"
-              >
-                <span style="font-weight:500; color:var(--text-hi);">{{ topic }}</span>
-                <button
-                  v-if="canAdmin"
-                  class="btn btn-ghost"
-                  @click="openSeekModal({ ...selectedConsumer, queueName: topic })"
-                >Seek</button>
+            <div v-if="selectedConsumer.topics?.length > 0">
+              <span class="label-xs" style="display:block; margin-bottom:12px;">Topics</span>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <div
+                  v-for="topic in selectedConsumer.topics"
+                  :key="topic"
+                  class="modal-queue-pill"
+                  style="display:flex; align-items:center; justify-content:space-between;"
+                >
+                  <span style="font-weight:500; color:var(--text-hi);">{{ topic }}</span>
+                  <button
+                    v-if="canAdmin"
+                    class="btn btn-ghost"
+                    @click="openSeekModal({ ...selectedConsumer, queueName: topic })"
+                  >Seek</button>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
+    </Teleport>
 
     <!-- ===================== Delete modal ===================== -->
-    <div
-      v-if="consumerToDelete"
-      class="modal-backdrop"
-      @click="closeDeleteModal"
-    >
-      <div class="card modal-card" style="padding:24px; max-width:448px;" @click.stop>
-        <h3 style="font-size:18px; font-weight:600; color:var(--text-hi); margin-bottom:8px;">
-          Delete consumer group
-        </h3>
-        <p style="color:var(--text-mid); margin-bottom:16px;">
-          Are you sure you want to delete <strong>{{ consumerToDelete.name === '__QUEUE_MODE__' ? '(queue mode)' : consumerToDelete.name }}</strong>
-          <span v-if="consumerToDelete.queueName"> for queue <strong>{{ consumerToDelete.queueName }}</strong></span>?
-        </p>
-        <p style="font-size:13px; color:var(--text-low); margin-bottom:24px;">
-          This will remove partition consumer state{{ consumerToDelete.queueName ? ' for this queue only' : '' }}.
-        </p>
+    <Teleport to="body">
+      <div
+        v-if="consumerToDelete"
+        class="modal-backdrop"
+        @click.self="closeDeleteModal"
+      >
+        <div class="card modal-card">
+          <div class="card-header"><h3>Delete consumer group</h3></div>
+          <div class="card-body">
+            <div v-if="deleteError" class="panel-err">{{ deleteError }}</div>
 
-        <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-mid); margin-bottom:24px; cursor:pointer;">
-          <input v-model="deleteMetadata" type="checkbox" style="width:16px; height:16px; accent-color:var(--accent);" />
-          Also delete subscription metadata
-        </label>
+            <p style="color:var(--text-mid); margin-bottom:16px;">
+              Are you sure you want to delete <strong>{{ consumerToDelete.name === '__QUEUE_MODE__' ? '(queue mode)' : consumerToDelete.name }}</strong>
+              <span v-if="consumerToDelete.queueName"> for queue <strong>{{ consumerToDelete.queueName }}</strong></span>?
+            </p>
+            <p style="font-size:13px; color:var(--text-low); margin-bottom:16px;">
+              This will remove partition consumer state{{ consumerToDelete.queueName ? ' for this queue only' : '' }}.
+            </p>
 
-        <div v-if="deleteError" class="lp-error" style="margin-bottom:16px;">{{ deleteError }}</div>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; color:var(--text-mid); cursor:pointer;">
+              <input v-model="deleteMetadata" type="checkbox" style="width:16px; height:16px; accent-color:var(--accent);" />
+              Also delete subscription metadata
+            </label>
+          </div>
 
-        <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px;">
-          <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
-          <button @click="deleteConsumer" :disabled="actionLoading" class="btn btn-danger">
-            {{ actionLoading ? 'Deleting…' : 'Delete' }}
-          </button>
+          <div class="modal-foot">
+            <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
+            <button @click="deleteConsumer" :disabled="actionLoading" class="btn btn-danger">
+              {{ actionLoading ? 'Deleting…' : 'Delete' }}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
 
     <!-- ===================== Seek modal ===================== -->
-    <div
-      v-if="showSeekModal"
-      class="modal-backdrop"
-      @click="showSeekModal = false"
-    >
-      <div class="card modal-card" style="padding:24px; max-width:448px;" @click.stop>
-        <h3 style="font-size:18px; font-weight:600; color:var(--text-hi); margin-bottom:8px;">
-          Seek cursor position
-        </h3>
-        <p style="color:var(--text-mid); margin-bottom:16px;">
-          {{ seekConsumer?.name === '__QUEUE_MODE__' ? '(queue mode)' : seekConsumer?.name }} / {{ seekConsumer?.queueName }}
-        </p>
+    <Teleport to="body">
+      <div
+        v-if="showSeekModal"
+        class="modal-backdrop"
+        @click.self="showSeekModal = false"
+      >
+        <div class="card modal-card">
+          <div class="card-header"><h3>Seek cursor position</h3></div>
+          <div class="card-body">
+            <div v-if="seekError" class="panel-err">{{ seekError }}</div>
 
-        <div style="margin-bottom:16px;">
-          <span class="label-xs" style="display:block; margin-bottom:8px;">Target timestamp</span>
-          <input v-model="seekTimestamp" type="datetime-local" class="input" />
-          <p style="font-size:12px; color:var(--text-low); margin-top:8px;">
-            The cursor will move to the last message at or before this timestamp. Messages after this point will be re-consumed.
-          </p>
-        </div>
+            <p style="color:var(--text-mid); margin-bottom:16px;">
+              {{ seekConsumer?.name === '__QUEUE_MODE__' ? '(queue mode)' : seekConsumer?.name }} / {{ seekConsumer?.queueName }}
+            </p>
 
-        <div v-if="seekError" class="lp-error" style="margin-bottom:16px;">{{ seekError }}</div>
+            <div>
+              <span class="label-xs" style="display:block; margin-bottom:8px;">Target timestamp</span>
+              <input v-model="seekTimestamp" type="datetime-local" class="input" />
+              <p style="font-size:12px; color:var(--text-low); margin-top:8px;">
+                The cursor will move to the last message at or before this timestamp. Messages after this point will be re-consumed.
+              </p>
+            </div>
+          </div>
 
-        <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px;">
-          <button @click="showSeekModal = false" class="btn btn-ghost">Cancel</button>
-          <button @click="handleSeekToTimestamp" :disabled="actionLoading || !seekTimestamp" class="btn btn-primary">
-            {{ actionLoading ? 'Seeking…' : 'Seek to timestamp' }}
-          </button>
+          <div class="modal-foot">
+            <button @click="showSeekModal = false" class="btn btn-ghost">Cancel</button>
+            <button @click="handleSeekToTimestamp" :disabled="actionLoading || !seekTimestamp" class="btn btn-primary">
+              {{ actionLoading ? 'Seeking…' : 'Seek to timestamp' }}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
 
     <!-- ===================== Confirmation modal =====================
          Replaces the native confirm() that used to guard the two cursor-
          skipping actions: same modal system the rest of the page uses, and
          the outcome is reported instead of assumed. -->
-    <div v-if="pendingConfirm" class="modal-backdrop" @click="pendingConfirm = null">
-      <div class="card modal-card" style="padding:24px; max-width:448px;" @click.stop>
-        <h3 style="font-size:18px; font-weight:600; color:var(--text-hi); margin-bottom:8px;">
-          {{ pendingConfirm.title }}
-        </h3>
-        <p style="color:var(--text-mid); margin-bottom:8px;">{{ pendingConfirm.body }}</p>
-        <p style="font-size:13px; color:var(--text-low); margin-bottom:24px;">{{ pendingConfirm.consequence }}</p>
-        <div style="display:flex; align-items:center; justify-content:flex-end; gap:12px;">
-          <button @click="pendingConfirm = null" class="btn btn-ghost">Cancel</button>
-          <button @click="runPendingConfirm" :disabled="actionLoading" class="btn btn-primary">
-            {{ actionLoading ? 'Working…' : pendingConfirm.confirmLabel }}
-          </button>
+    <Teleport to="body">
+      <div v-if="pendingConfirm" class="modal-backdrop" @click.self="pendingConfirm = null">
+        <div class="card modal-card">
+          <div class="card-header"><h3>{{ pendingConfirm.title }}</h3></div>
+          <div class="card-body">
+            <p style="color:var(--text-mid); margin-bottom:8px;">{{ pendingConfirm.body }}</p>
+            <p style="font-size:13px; color:var(--text-low);">{{ pendingConfirm.consequence }}</p>
+          </div>
+
+          <div class="modal-foot">
+            <button @click="pendingConfirm = null" class="btn btn-ghost">Cancel</button>
+            <button @click="runPendingConfirm" :disabled="actionLoading" class="btn btn-primary">
+              {{ actionLoading ? 'Working…' : pendingConfirm.confirmLabel }}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -509,6 +551,9 @@ const laggingPartitions = computed(() => {
   return Array.isArray(d) ? d : []
 })
 const laggingLoading = computed(() => lagging.loading.value)
+// First paint only: a refresh must leave the rows that are already on screen
+// where they are, so the skeleton is gated on "loading AND nothing yet".
+const laggingFirstLoad = computed(() => lagging.loading.value && !lagging.data.value)
 const laggingLoaded = computed(() => lagging.lastUpdated.value !== null && !lagging.failed.value)
 const laggingErrorText = computed(() => describeApiError(lagging.error.value))
 
@@ -795,64 +840,9 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.scope-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  margin-bottom: 12px;
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-  background: var(--ink-2);
-  font-size: 11.5px;
-  color: var(--text-mid);
-}
-.scope-text { font-family: 'JetBrains Mono', monospace; }
-.scope-text strong { color: var(--text-hi); font-weight: 600; }
-.scope-sep { margin: 0 5px; color: var(--text-faint); }
-.scope-fill { flex: 1; }
-.scope-meta { font-size: 11px; color: var(--text-low); }
-
-/* Toolbar — same shape and tokens as Queues.vue so the two pages read
-   as siblings. The lagging-only checkbox is the only consumer-specific
-   addition. */
-.qtoolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 10px 14px;
-  margin-bottom: 12px;
-  background: var(--ink-2);
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-}
-.qtoolbar-search {
-  position: relative;
-  flex: 1;
-  min-width: 220px;
-  max-width: 360px;
-}
-.qtoolbar-search .input { padding-left: 32px; width: 100%; }
-.qtoolbar-search-icon {
-  position: absolute;
-  left: 10px; top: 50%;
-  transform: translateY(-50%);
-  width: 14px; height: 14px;
-  color: var(--text-low);
-  pointer-events: none;
-}
-.qtoolbar-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-mid);
-  cursor: pointer;
-  padding: 0 4px;
-  white-space: nowrap;
-}
-.qtoolbar-check input { width: 14px; height: 14px; accent-color: var(--accent); }
+/* The scope strip, the filter card, the ember panel-err, the stat grid and
+   the modal shell now live in style.css — this file keeps only what is
+   genuinely local to the Consumers page. */
 .qhg-legend {
   display: inline-flex;
   align-items: center;
@@ -866,16 +856,17 @@ onMounted(() => {
   .qhg-legend { display: none; }
 }
 
-/* Lagging Partitions card — placed at the top, collapsible. Shares the
-   toolbar's surface tokens. When any partition is above threshold, the
-   card carries a subtle warn tint along the left edge so the operator
-   sees something is off without having to read the badge. */
+/* Lagging Partitions card — placed at the top, collapsible. Same surface
+   tokens as the filter card above it, and the 16px top-level block rhythm.
+   When any partition is above threshold, the card carries a subtle warn
+   tint along the left edge so the operator sees something is off without
+   having to read the badge. */
 .lp-card {
   background: var(--ink-2);
   border: 1px solid var(--bd);
   border-radius: var(--r-card);
   overflow: hidden;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
   transition: border-color .15s var(--ease);
 }
 .lp-card-warn {
@@ -964,17 +955,19 @@ onMounted(() => {
   font-size: 13px;
 }
 .lp-empty-ok { color: var(--text-low); }
-.lp-error {
-  margin: 12px 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--ember-bd);
-  border-radius: var(--r-card);
-  background: var(--ember-glow);
-  color: var(--ember-400);
-  font-size: 12.5px;
-}
+/* The shared ember box is full-bleed by default; this card's body is
+   flush to its edges (the table spans it), so inset it here. */
+.lp-body > .panel-err { margin: 12px 14px; }
 .lp-table-wrap {
   overflow-x: auto;
+}
+/* Skeleton shaped like the table it stands in for: three rows at row height,
+   inset to the table's own padding. */
+.lp-skel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
 }
 .lp-table { width: 100%; }
 .lp-cell-strong { color: var(--text-hi); font-weight: 500; }
@@ -989,43 +982,13 @@ onMounted(() => {
   color: var(--text-mid);
 }
 
-/* Detail modal stat row — five tiles now that the real backlog is shown. */
-.cg-stats {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 10px;
-  margin-bottom: 24px;
-}
-.cg-stat { text-align: center; padding: 14px 10px; }
-.cg-stat .stat-value { font-size: 20px; }
+/* The State tile shows a word, not a figure — its own scale and its own
+   three colours, which is a meaning, not a chrome variant. */
 .cg-state { font-size: 16px; font-weight: 600; margin-top: 8px; }
 .cg-state-ok { color: var(--ok-500); }
 .cg-state-warn { color: var(--warn-400); }
 .cg-state-mute { color: var(--text-mid); }
-@media (max-width: 640px) {
-  .cg-stats { grid-template-columns: repeat(2, 1fr); }
-}
 
-/* Modal scaffolding — kept compact so the existing modal contents
-   render the same way as before. */
-.modal-backdrop {
-  position: fixed; inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  /* A scrim has to sit BELOW what it dims. The old blue-cast near-black was
-     mixed against the old, much lighter page; over --ink-0 it composites
-     ABOVE the page — a scrim that lifts. Neutral black, same opacity. */
-  background: rgba(0, 0, 0, .6);
-  backdrop-filter: blur(12px);
-}
-.modal-card {
-  width: 100%;
-  max-height: 80vh;
-  overflow: hidden;
-}
 .modal-queue-pill {
   padding: 12px;
   border-radius: var(--r-card);

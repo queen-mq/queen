@@ -1,0 +1,238 @@
+---
+title: Status codes and error bodies
+description: "The shapes a failure can take: the generic error envelope, the responses that do not use it, how stored-procedure errors map to HTTP, and the 429 contract behind the proxy."
+type: reference
+tier: use
+sidebar:
+  order: 18
+  label: Errors
+sourceOfTruth:
+  - server/src/handlers/mod.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/status.rs
+  - server/src/handlers/static_files.rs
+  - server/src/handlers/streams.rs
+  - server/src/auth.rs
+  - server/src/tenant.rs
+  - queen_proxy/src/errors.rs
+  - queen_proxy/src/limits.rs
+verifiedBy:
+  - clients/client-js/test-v2/http-unit/retry429.test.js
+---
+
+Most broker failures are one JSON object with one key:
+
+```json
+{"error":"invalid x-queen-tenant header (must be a UUID)"}
+```
+
+Content type is `application/json`. The message is JSON-escaped while the
+structural quotes are preserved, so the body always parses and always carries the
+real error text, including a raw PostgreSQL message, behind a short prefix such
+as `configure failed: `, when the failure came from the database.
+
+There is no `code` field, no machine-readable enum and no request id in broker
+errors. Match on the status code; treat `error` as text for a human or a log. The
+proxy adds a `code` field, described at the end of this page.
+
+## 204 carries no body at all
+
+Every `204 No Content` response (an empty pop, a pop rejected by pop
+maintenance) is built with **no body at all**, and the handler discards the
+body it would otherwise have sent. This is deliberate. Announcing a content
+length on a body that the HTTP layer then elides made strict HTTP/1.1 clients
+(Node's undici and llhttp) treat the connection as poisoned and drop it, which
+under empty-poll load snowballed into `ECONNRESET` storms.
+
+Consequence for a client: branch on the status before parsing. A pop that
+returns 204 has no `{"messages":[]}` to read, and no `paused` flag either, even
+though pop maintenance is what produced it.
+
+## Status codes
+
+| Code | When |
+| --- | --- |
+| `200` | Every successful read and management call; also acks, lease extension and completed transactions, including ones that failed logically (see below). |
+| `201` | `POST /api/v1/push` (even for an empty item list, which returns `[]`) and a recorded trace. |
+| `204` | A pop with no messages, and any pop while pop maintenance is on. |
+| `400` | A body that is not valid JSON; a missing required field; a transaction with no operations array or with an operation that is not a push or an ack; a discovery pop with neither `namespace` nor `task`; a malformed `x-queen-tenant` header when tenancy is on; a streams state read whose inner result reports `success:false`. |
+| `401` | Authentication is enabled and the token is absent, unparseable, badly signed, expired, not yet valid, issued in the future, or carries a rejected issuer, audience, algorithm or key id. |
+| `403` | A valid token whose roles do not satisfy the route's required level. |
+| `404` | Any unmatched path under `/api/`, and any non-`GET`/`HEAD` request that reaches the fallback; a message, queue or trace that does not exist; a stored procedure whose error text contains "not found". |
+| `409` | `POST /streams/v1/queries` with a `config_hash` that does not match the registered query, and no `reset`. |
+| `413` | A request body larger than `QUEEN_MAX_BODY_BYTES` (64 MiB by default). |
+| `500` | A pool acquisition failure (`{"error":"pool"}`); a statement error or statement timeout; a stored-procedure error that is not a "not found"; a push diverted to the spool during maintenance whose spool write failed; a JWT configuration fault discovered per-request, such as an `HS256` token with no configured secret or an unparseable public-key PEM. |
+| `503` | `GET /health` only, when the database round trip fails. |
+
+Two codes are conspicuously absent. There is no `429` from the broker: it has no
+rate limiter. There is no `502` or `504`: it proxies nothing.
+
+## Responses that are not the generic envelope
+
+<Aside type="caution">
+A 2xx does not mean the operation succeeded. Push, ack and transaction all report
+their real outcome inside the body of a 200 or a 201.
+</Aside>
+
+**Push** returns `201` with one object per submitted item:
+
+```json
+[{"index":0,"message_id":"019...","transaction_id":"t-1","queueName":"orders","status":"queued"}]
+```
+
+`status` is `queued` for an accepted message, `duplicate` when deduplication
+matched (and `message_id` is then the original message's id), `error` when the
+write failed, `buffered` when the message was written to the disk spool instead
+of PostgreSQL, and `failed` when even the spool write failed. A push whose
+database write failed and whose items spooled still returns **201**: the status
+code alone cannot tell you the data reached PostgreSQL.
+
+**Ack** and **ack batch** always return `200` with one object per
+acknowledgement:
+
+```json
+[{"index":0,"transactionId":"t-1","success":true,"error":null,"leaseReleased":true,"dlq":false,"noop":false}]
+```
+
+An ack that resolved to nothing is *reported*, not silently accepted:
+`noop:true` for a duplicate commit, and `success:false` with an explanatory
+`error` for one that landed below the cursor ("already committed") or outside the
+hash window ("unresolvable"). See [Use Queen](/use) for what those mean for a
+consumer.
+
+**Transaction** failures use their own envelope, and after the stored procedure
+has run they arrive at HTTP `200`:
+
+```json
+{"transactionId":"019...","success":false,"error":"...","results":[]}
+```
+
+Only the pre-flight validation failures (bad body, no operations array, an
+unsupported operation) come back as `400` with that same shape.
+
+**Lease extension** always returns `200`. A lease that does not exist, has
+expired, or belongs to another tenant is reported as `{"renewed":0,...}`. An
+unknown lease and a foreign lease are deliberately indistinguishable.
+
+**Queue deletion** returns `200` even when nothing was deleted, with
+`deleted:false` and a `message` field saying the queue was not found. `DELETE`
+is idempotent here because the SDKs use delete-before-create as a cleanup idiom.
+
+**Health** returns its own document at both `200` and `503`:
+`{"status":"unhealthy","database":"disconnected","engine":"segments-rust","version":"…"}`.
+There is no `error` key to read.
+
+**Unknown API routes** return `404` with an extra field:
+`{"error":"Not Found","code":"no_such_route"}`. This exists because the SPA
+fallback matches any method, so a call to an endpoint that does not exist used to
+come back as `200 text/html`, which every JSON client reads as success.
+
+**413** is produced by the body-limit layer before any handler runs, so it does
+not pass through the helper that builds every other error body. Do not expect the
+`{"error":...}` shape there.
+
+## How a stored-procedure error becomes a status code
+
+Many management routes pass a stored procedure's JSON through verbatim. When that
+JSON carries a non-null top-level `error`, the broker maps it:
+
+- the error text contains `not found`, case-insensitive → **404**;
+- any other error text → **500**;
+- no `error` key → **200**;
+- the body is not JSON at all → **200** with the body unchanged.
+
+The original bytes are preserved either way, so the client-visible message is the
+procedure's own. The practical consequence is that a status code on a management
+route is derived from an error *string*: a database failure whose message happens
+to contain "not found" is reported as a 404.
+
+## Authentication and authorization errors
+
+With `JWT_ENABLED=false` (the default) the middleware is a pass-through and
+neither code occurs.
+
+`401` bodies carry a fixed short message: `Authentication required`,
+`Bad token header`, `Invalid token signature`, `Token has expired`,
+`Token not yet valid`, `Token issued in the future`, `Invalid token issuer`,
+`Invalid token audience`, `Unsupported token algorithm`, `Unknown key ID`.
+
+`403` is always `{"error":"Insufficient permissions"}`. The route's required
+level is compared against the token's role *set*, not a numeric ladder, and
+`WriteOnly` is not below `ReadOnly`: a write-only role passes `POST /api/v1/push`
+and is rejected with 403 on every read and consume route, including pop and ack.
+
+Three endpoints can never return either code: `/health`, `/metrics` and
+`/metrics/prometheus` are `public` in the route table, and the level check
+short-circuits before any token is examined. The dashboard's own root and asset
+paths are public for the same reason.
+
+## Behind the proxy
+
+`queen_proxy` wraps the same routes and adds a machine-readable `code` to every
+error it generates itself:
+
+```json
+{"error":"request rate limit exceeded","code":"rate_limited"}
+```
+
+The codes are a stable contract that clients switch on: `unauthorized`,
+`forbidden`, `rate_limited`, `quota_exceeded`, `storage_quota_exceeded`,
+`cluster_suspended`, `push_blocked`, `feature_gated`, `route_blocked`,
+`cluster_unknown`, `scope_unknown`, `payload_too_large`, `bad_gateway`,
+`upstream_timeout`.
+
+### The 429 contract
+
+A `429` from the proxy always carries a `Retry-After` header in **seconds**. On
+the data plane it has one of three causes:
+
+| Cause | `code` | `Retry-After` |
+| --- | --- | --- |
+| Request rate limit (per-cluster token bucket) | `rate_limited` | Time to refill the deficit, computed from the plan's sustained rate, clamped to 1–60 s |
+| Message rate limit (push and transaction items) | `rate_limited` | Same computation |
+| Too many parked consumers (a `wait=true` pop over the cell or cluster cap) | `rate_limited` | 5 s |
+
+A denied request never debits the bucket, so a client that backs off correctly is
+not punished for having been throttled.
+
+`403` with `quota_exceeded`, `storage_quota_exceeded` or `push_blocked` is the
+other family a producer must handle: those are not retryable on a timescale that
+backoff can fix. `404` with `route_blocked` means the route is not exposed to
+tenant credentials at all. See the route classes in [Reference](/reference).
+
+### What the clients do with a 429
+
+The JavaScript SDK retries `429` in place, against the same backend, and treats
+no other status as retryable at that layer:
+
+- ordinary requests: up to **10 attempts**;
+- long-poll pops: **unbounded** by default, because the loop is meant to keep
+  waiting through transient throttling;
+- delay: `Retry-After` when present, otherwise exponential backoff from 500 ms
+  capped at 30 s;
+- either way jittered ±20 % so a fleet does not resynchronise into a herd.
+
+`retry429: { maxAttempts, baseMs, capMs }` overrides all of it, and setting
+`maxAttempts` explicitly applies it to pops too. Setting `maxAttempts: 1`
+disables retrying and surfaces the 429 to your code, which is what a load
+generator wants and an application usually does not.
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/reference/defaults"
+    title="Defaults"
+    description="Every default that matters, including the ones where two values circulate."
+  />
+  <LinkCard
+    href="/reference/queue-options"
+    title="Queue options"
+    description="What /configure accepts, and what changing each option does to existing data."
+  />
+  <LinkCard
+    href="/use"
+    title="Use Queen"
+    description="Push, pop, ack and the delivery guarantees behind these responses."
+  />
+</CardGrid>

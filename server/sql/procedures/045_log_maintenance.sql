@@ -8,6 +8,11 @@
 --   queen.log_txns_purge_step_v1      same pattern over log_txns / txns_start
 --   queen.log_evict_max_wait_step_v1  max_wait_time_seconds eviction (former
 --                                     db.rs::seg_evict_max_wait, now in SQL)
+--   queen.log_partition_dead_v1       eligibility predicate for the below
+--   queen.log_partition_cleanup_step_v1
+--                                     delete EMPTY, long-inactive partitions
+--                                     (PARTITION_CLEANUP_DAYS — the C++
+--                                     cleanup_inactive_partitions, restored)
 --
 -- STEP functions, not sweeps: the old seg_retention_sweep_v1 was one call =
 -- one transaction over EVERY partition, so a big backlog held one giant
@@ -17,14 +22,20 @@
 -- retention.rs (§8) loops each step until {"done":true}, each call
 -- autocommitting, under the cycle-level advisory lock 737001.
 --
--- LOCK ORDER (deadlock discipline, ported from 026's header): every step
--- takes exactly ONE queen.log_partitions row lock (SELECT .. FOR UPDATE — the
--- same per-partition serializer the push allocator uses) and holds it only
--- for its own bounded transaction. Because no call ever holds two partition
--- locks, the steps cannot deadlock with the multi-partition lockers
--- (log_push_multi_v1 / log_transaction_wire_v1 pre-lock ascending by id) no
--- matter the iteration order; retention.rs still iterates partitions in
+-- LOCK ORDER (deadlock discipline, ported from 026's header): every per-
+-- partition step takes exactly ONE queen.log_partitions row lock (SELECT ..
+-- FOR UPDATE — the same per-partition serializer the push allocator uses) and
+-- holds it only for its own bounded transaction. Because those calls never
+-- hold two partition locks, they cannot deadlock with the multi-partition
+-- lockers (log_push_multi_v1 / log_transaction_wire_v1 pre-lock ascending by
+-- id) no matter the iteration order; retention.rs still iterates partitions in
 -- ascending id order to keep the one global total order everywhere.
+--
+-- log_partition_cleanup_step_v1 is the one step that locks MANY partitions in
+-- a call (it deletes whole partition rows in batches). It takes them in the
+-- SAME ascending-id order as those two writers, in one statement, with SKIP
+-- LOCKED — so it never waits on a pusher and never inverts the order, and the
+-- global total order still holds.
 --
 -- CUTOFFS are computed by the CALLER (retention.rs) and passed as absolute
 -- timestamps: SQL stays policy-free, and one cycle uses one consistent
@@ -394,3 +405,185 @@ AS $$
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.log_evict_max_wait_step_v1(UUID, TIMESTAMPTZ, INT) TO PUBLIC;
+
+-- ----------------------------------------------------------------------------
+-- log_partition_dead_v1: the eligibility predicate for partition cleanup, in
+-- ONE place so the candidate scan and the under-lock re-check below cannot
+-- drift apart. TRUE = this partition holds nothing and nobody has touched it
+-- since p_cutoff. NULL (no such partition) is not TRUE, so a row that vanished
+-- between the two passes is simply not deleted twice.
+--
+-- "Empty" is decided by log_segments, not by a message count: either nothing
+-- was ever pushed, or retention already dropped everything.
+--
+-- Three of the legs veto a delete because their table is keyed by partition_id
+-- with NO foreign key — cancelling the partition would make them permanently
+-- unreachable rather than cleaning them up:
+--   * queen.log_dlq        dead-lettered payloads. Retention never purges them
+--                          (only DELETE /messages/:pid/:txn does), so a
+--                          partition still holding DLQ rows is NOT empty.
+--   * queen_streams.state  019 declines the FK on purpose — "a partition-
+--                          cleanup must not silently delete still-relevant
+--                          state". This honours that.
+--   * a live lease         batch_end IS NOT NULL with the lease still unexpired:
+--                          someone is mid-batch, whatever the timestamps say.
+--                          An EXPIRED lease is deliberately not a veto — the
+--                          engine treats expiry as "the batch is up for grabs",
+--                          and on an empty partition no pop will ever come to
+--                          clear a batch_end left behind by a dead worker, so
+--                          vetoing on it would pin the row forever. The
+--                          lease_expires_at >= p_cutoff leg still spares any
+--                          lease that expired inside the window. A NULL expiry
+--                          under a set batch_end is a broken invariant (044
+--                          rejects acks on it), so it counts as live.
+--
+-- INACTIVITY mirrors the retired C++ predicate (GREATEST of the partition's own
+-- age and every consumer group's activity — retention_service.cpp:380) on the
+-- columns this engine actually has: p.created_at, p.last_write_at (quantized to
+-- one real bump per second by push — 041), and per group c.created_at /
+-- c.lease_acquired_at / c.lease_expires_at.
+--
+-- 043 NULLs lease_acquired_at on an AUTO-ACK pop, so an auto-ack-only group
+-- leaves no activity trace. That is harmless here rather than unhandled:
+-- last_write_at < p_cutoff means nothing was pushed for the whole window, so
+-- such a group drained the partition long ago and its cursor addresses no data.
+-- What a delete can cost it is total_consumed, not a position — a group's
+-- durable subscription record is per (queue, group), not per partition, so a
+-- partition recreated by a later push re-seeds from it exactly as a brand-new
+-- partition does.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION queen.log_partition_dead_v1(
+    p_pid    UUID,
+    p_cutoff TIMESTAMPTZ
+) RETURNS BOOLEAN
+LANGUAGE sql STABLE
+AS $$
+    SELECT p.created_at    < p_cutoff
+       AND p.last_write_at < p_cutoff
+       AND NOT EXISTS (SELECT 1 FROM queen.log_segments s   WHERE s.partition_id = p.id)
+       AND NOT EXISTS (SELECT 1 FROM queen.log_dlq d        WHERE d.partition_id = p.id)
+       AND NOT EXISTS (SELECT 1 FROM queen_streams.state st WHERE st.partition_id = p.id)
+       AND NOT EXISTS (
+               SELECT 1 FROM queen.log_consumers c
+               WHERE c.partition_id = p.id
+                 AND ((c.batch_end IS NOT NULL
+                       AND (c.lease_expires_at IS NULL OR c.lease_expires_at > now()))
+                      OR c.lease_expires_at  >= p_cutoff
+                      OR c.lease_acquired_at >= p_cutoff
+                      OR c.created_at        >= p_cutoff))
+    FROM queen.log_partitions p
+    WHERE p.id = p_pid
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.log_partition_dead_v1(UUID, TIMESTAMPTZ) TO PUBLIC;
+
+-- ----------------------------------------------------------------------------
+-- log_partition_cleanup_step_v1: delete EMPTY, long-inactive partitions — the
+-- log-engine successor of the retired C++ RetentionService::
+-- cleanup_inactive_partitions() (retention_service.cpp:356), which this engine
+-- dropped: PARTITION_CLEANUP_DAYS was parsed and then ignored, so partitions
+-- accumulated forever. One call deletes at most p_max_rows partitions in ONE
+-- bounded transaction; retention.rs loops it to {"done":true} like every other
+-- step here, and gates the phase to its own slow sub-cadence (a 30-day window
+-- does not need 5-second resolution, and the candidate scan is O(partitions) —
+-- the one cost class this engine keeps off the 5s cycle).
+--
+-- Deleting the row CASCADES to log_consumers (the cursors) and log_segments
+-- (none, by definition). queen.log_txns has NO FK (041, deliberately — the
+-- purge path must not pay FK-trigger cost), so this deletes it EXPLICITLY:
+-- nothing else ever would, because the phase-2 sidecar purge is driven by the
+-- log_partitions work list, and an orphaned sidecar row would leak forever.
+--
+-- RACE with a push, and why the lock is not decoration: the candidate scan
+-- takes each partition's row lock with SKIP LOCKED — a partition a pusher holds
+-- is active by definition, and skipping keeps retention off the push
+-- serializer's critical path instead of queueing behind it. The predicate is
+-- then RE-EVALUATED under the held locks, and THAT pass is the authoritative
+-- one: a push must take the same row lock before it can insert a segment or
+-- bump last_write_at, so nothing slips in between check and delete. (PG's
+-- EvalPlanQual recheck covers the locked row's own columns, not the NOT EXISTS
+-- legs, which is exactly why one pass is not enough.)
+--
+-- What remains is a window on the OTHER side: a push that resolved this
+-- partition id just before the delete committed. It fails LOUDLY — 042 raises
+-- 'QMULTI resolved N of M segments', or the segment insert trips the
+-- log_segments FK — and the client's retry re-provisions the partition under a
+-- new id. No write is silently lost, and reaching it takes a push landing in
+-- the same instant as the delete after the partition has been silent for the
+-- whole cleanup window.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION queen.log_partition_cleanup_step_v1(
+    p_cutoff   TIMESTAMPTZ,
+    p_max_rows INT
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_rows INT := GREATEST(COALESCE(p_max_rows, 1000), 1);
+    v_cand UUID[];
+    v_kill UUID[];
+    v_deleted INT := 0;
+BEGIN
+    -- NULL cutoff = rule disabled for this call (header contract, same as the
+    -- retention steps above).
+    IF p_cutoff IS NULL THEN
+        RETURN jsonb_build_object('deleted', 0, 'done', true);
+    END IF;
+
+    -- Candidates, ascending id (the one global lock order). The two cheap
+    -- timestamp quals are stated inline so the planner prunes on them BEFORE
+    -- the predicate function — its default cost sorts it last — which keeps the
+    -- steady-state cost at one scan of a small table with ZERO subquery
+    -- executions.
+    SELECT array_agg(c.id ORDER BY c.id) INTO v_cand
+    FROM (
+        SELECT p.id
+        FROM queen.log_partitions p
+        WHERE p.created_at    < p_cutoff
+          AND p.last_write_at < p_cutoff
+          AND queen.log_partition_dead_v1(p.id, p_cutoff)
+        ORDER BY p.id
+        LIMIT v_rows
+        FOR UPDATE OF p SKIP LOCKED
+    ) c;
+
+    IF v_cand IS NULL THEN
+        RETURN jsonb_build_object('deleted', 0, 'done', true);
+    END IF;
+
+    -- Authoritative re-check under the held row locks (see header).
+    SELECT array_agg(u ORDER BY u) INTO v_kill
+    FROM unnest(v_cand) u
+    WHERE queen.log_partition_dead_v1(u, p_cutoff);
+
+    IF v_kill IS NULL THEN
+        -- Every candidate was disqualified after locking. Report done so the
+        -- caller's loop stops instead of re-selecting the same rows.
+        RETURN jsonb_build_object('deleted', 0, 'done', true);
+    END IF;
+
+    -- No FK (041): explicit, or the sidecar outlives its partition with nothing
+    -- left able to reach it.
+    DELETE FROM queen.log_txns t WHERE t.partition_id = ANY(v_kill);
+
+    -- Audit trail, in the same transaction as the delete. '__partition_deleted__'
+    -- is the reserved event shape 017's header names: the __%__ prefix keeps
+    -- these OUT of the messages-evicted timeseries, which counts deleted
+    -- MESSAGES and would otherwise gain zero-valued events.
+    INSERT INTO queen.retention_history (partition_id, messages_deleted, retention_type, executed_at)
+    SELECT u, 0, '__partition_deleted__', NOW() FROM unnest(v_kill) u;
+
+    -- CASCADEs to log_consumers + log_segments (041).
+    DELETE FROM queen.log_partitions p WHERE p.id = ANY(v_kill);
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+
+    -- done when the candidate scan itself came up short: a full batch means
+    -- there may be more eligible partitions behind it. deleted < candidates is
+    -- NOT a stop condition (the re-check may have spared some) but the caller
+    -- also stops on deleted = 0, so a batch that is entirely spared terminates.
+    RETURN jsonb_build_object('deleted', v_deleted,
+                              'done', COALESCE(array_length(v_cand, 1), 0) < v_rows);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.log_partition_cleanup_step_v1(TIMESTAMPTZ, INT) TO PUBLIC;

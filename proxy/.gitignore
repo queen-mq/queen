@@ -1,7 +1,0 @@
-node_modules/
-helm
-.env
-*.log
-.DS_Store
-upgrade.sh
-

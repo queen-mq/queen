@@ -1,0 +1,187 @@
+---
+title: Producer and consumer
+description: "The smallest complete loop (create a queue, push a message, consume it under a group, acknowledge it) and the four rules that decide what happens when something goes wrong."
+type: example
+tier: use
+sidebar:
+  order: 20
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/src/handlers/queues.rs
+  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/044_log_ack.sql
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+  - clients/client-js/test-v2/pop.js
+  - clients/client-js/test-v2/consume.js
+  - clients/client-py/tests/test_push.py
+  - clients/client-py/tests/test_pop.py
+  - clients/client-go/tests/push_test.go
+---
+
+One producer, one consumer, one queue. This is the loop everything else on the site is built out of, so it is worth reading the mechanism and not only the code: four broker rules decide what a failure looks like, and all four are visible in this example.
+
+## Creating the queue
+
+You do not have to. A push to an unknown queue provisions the queue, its `Default` partition and its configuration row inside the same transaction that writes the message.
+
+`POST /api/v1/configure` is the explicit path, and the one to use when you want non-default settings. It is a **full replace**: every key you omit is reset to its default, including `dedupWindowSeconds`, which reverts to 3600. Send the complete option set every time you configure a queue, not a patch.
+
+```js
+// Illustrative, not extracted from a test.
+await client.queue('orders').create()
+```
+
+## Pushing
+
+A push takes an array of items. Each item carries a payload and, optionally, a `transactionId` and a `partition`; the client SDKs generate a `transactionId` for you when you leave it out.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/js-push" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/py-push" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/go-push" />
+  </TabItem>
+</Tabs>
+
+The response is one result per item, in request order, at HTTP 201:
+
+```json
+[{"index":0,"message_id":"0198...","transaction_id":"0198...","queueName":"orders","status":"queued"}]
+```
+
+`status` is `queued` for a message that was written, `duplicate` for one the deduplication window rejected (see [Idempotent producers](/use/examples/dedup)), and `buffered` when the broker is in maintenance mode and diverted the push to its disk spool.
+
+## Consuming
+
+A pop **claims a span, it does not remove rows**. The broker takes a lease on the offset range `(committed, batch_end]` for one `(partition, consumer group)` pair, hands you the frames, and waits for an ack.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/js-pop" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/py-pop" />
+  </TabItem>
+</Tabs>
+
+`wait(true)` is a long poll: the request parks on the queue's wake gate and a push wakes it immediately, so an idle consumer costs the broker a timer rather than a spin loop. An empty result comes back as HTTP 204 with **no body at all**. The SDKs turn that into an empty array.
+
+Each message in the response carries everything the ack needs:
+
+```json
+{
+  "id": "0198...",
+  "transactionId": "0198...",
+  "traceId": null,
+  "data": {"message": "Hello, world!"},
+  "producerSub": null,
+  "createdAt": "2026-07-30T09:12:41.118Z",
+  "partitionId": "6f1c...",
+  "partition": "Default",
+  "leaseId": "0198...",
+  "consumerGroup": "__QUEUE_MODE__"
+}
+```
+
+`consumerGroup` reports `__QUEUE_MODE__` when the request named no group. That is the literal group name the broker uses for the unnamed default, and it is a real cursor like any other.
+
+### The consume loop
+
+The SDKs wrap pop, dispatch and ack into one call. `each()` invokes the handler per message; without it the handler receives the batch. The handler returning normally acks; the handler throwing nacks.
+
+<Render file="snippets/js-consume" />
+
+Add a group and the consume loop becomes a named cursor that survives restarts:
+
+```js
+// Illustrative, not extracted from a test.
+await client
+  .queue('orders')
+  .group('billing')
+  .batch(50)
+  .consume(async messages => {
+    for (const msg of messages) await handle(msg)
+  })
+```
+
+## Acknowledging
+
+Ack is a **cursor commit**, not a per-message flag. There is one integer per `(partition, consumer group)`: `queen.log_consumers.committed`, the last acknowledged offset. Four consequences follow, and they are the whole model:
+
+<Steps>
+
+1. **Acking message N completes every earlier unacked message in that partition for that group.** The cursor moves to the highest acked-ok offset in the batch; anything below it is done and will never be redelivered. "Ack the last message of the batch" is a complete batch ack.
+
+2. **An explicit failure is never skipped by a later success.** If one call acks message 5 as `failed` and message 9 as `completed`, the cursor clamps below 5. Messages 6 to 9 redeliver. That is an at-least-once duplicate, which the design prefers to a silently swallowed nack. At the same offset, `dlq` beats `failed` beats `retry`.
+
+3. **An ack that can no longer do anything is reported, not faked.** An ack whose offset is at or below the cursor comes back `noop: true` for a completion, or rejected with `already committed` for a failure signal. An ack the broker cannot resolve at all (the transaction id fell out of the hash window, or never existed) is rejected with `unresolvable`. The cursor did not move in either case, so the frames redeliver.
+
+4. **Exactly one leased batch exists per `(partition, group)` at a time.** A second consumer in the same group popping the same partition gets nothing until the first lease is acked or expires. A single-partition queue therefore cannot be consumed in parallel by one group; parallelism comes from partitions.
+
+</Steps>
+
+The wire response is one item per acknowledgment, in request order, at HTTP 200:
+
+```json
+[{"index":0,"transactionId":"0198...","success":true,"error":null,"leaseReleased":true,"dlq":false,"noop":false}]
+```
+
+<Aside type="caution">
+A rejected ack still arrives as HTTP 200. `success` on the item is the only signal that the broker accepted it. A caller that checks only the status code will treat an expired lease as a successful ack and then be surprised by the redelivery.
+</Aside>
+
+### Leases and expiry
+
+The lease has a deadline. It is 60 seconds on a queue that a push created implicitly, and 300 seconds after an explicit `/configure` (the configure default for `leaseTime`); `?leaseSeconds=N` on the pop overrides both.
+
+When the deadline passes with no ack, the lease is simply gone: the cursor stays where it was and the whole span redelivers. **Lease expiry never charges the retry budget**: only an explicit `failed` ack does. A handler that is slow rather than broken can therefore loop forever without ever reaching the dead-letter queue, so extend the lease instead of relying on expiry:
+
+```http
+POST /api/v1/lease/{leaseId}/extend
+Content-Type: application/json
+
+{"seconds": 120}
+```
+
+The call renews every live lease held by that lease id (a multi-partition pop shares one), never shortens one, and always answers HTTP 200: renewal is best-effort, so read the response rather than the status.
+
+### At-most-once, if you want it
+
+`?autoAck=true` commits the cursor inside the pop transaction. There is no lease and no ack round trip, and a crash after the response leaves the message consumed and unprocessed. That is at-most-once, and it is the right choice only when losing a message is cheaper than handling it twice.
+
+## What to expect when things break
+
+| Situation | What the broker does | What you see |
+| --- | --- | --- |
+| Consumer crashes before acking | Lease expires, cursor unchanged | The whole span redelivers; retry budget untouched |
+| Handler throws, SDK nacks | Cursor clamps below the failed offset, lease released, budget charged once | Redelivery of the failed message and everything after it in the batch |
+| Ack arrives after the lease expired | Rejected under the consumer row lock | HTTP 200 with `success: false`, `invalid or expired lease` |
+| Two consumers, one group, one partition | Second pop finds the row leased and skips it | Empty result until the lease clears |
+| PostgreSQL unreachable during a push | Push is appended to the disk spool and replayed later | HTTP 201 with `status: "buffered"` |
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    href="/use/examples/fanout"
+    title="Two groups, one copy"
+    description="Why a second consumer group costs a cursor row, not a second write."
+  />
+  <LinkCard
+    href="/use/examples/dlq"
+    title="When the handler keeps failing"
+    description="The retry budget, the dead-letter queue, and how to get a message back out of it."
+  />
+  <LinkCard
+    href="/use/errors"
+    title="Errors and backpressure"
+    description="Status codes, the 429 contract, and what the SDKs retry."
+  />
+</CardGrid>

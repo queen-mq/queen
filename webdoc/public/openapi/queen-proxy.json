@@ -1,0 +1,483 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Queen MQ proxy API",
+    "version": "1.0.0",
+    "summary": "The proxy's own surface: service endpoints, login, and the cluster console.",
+    "description": "Generated from `queen_proxy/`'s router at documentation build time.\n\nThis document covers only the endpoints the proxy *serves*. Every other path is\nforwarded to the broker of the cluster addressed by the request's first DNS label,\nafter classification, authentication, quota and rate-limit checks. For the broker's\nown surface use the broker document; for which of those routes a tenant credential\ncan reach, see the route-class table in the documentation.\n\nResponse shapes are not derivable here: console handlers build their JSON inline.\nOnly paths, methods, path parameters and the credential kind are asserted.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://{cluster}.example.com",
+      "variables": {
+        "cluster": {
+          "default": "my-cluster"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "Service"
+    },
+    {
+      "name": "Authentication"
+    },
+    {
+      "name": "Console"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A cluster API key (`qk_<env>_...`) or a proxy-minted user JWT."
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "queen_session",
+        "description": "The httpOnly session cookie the proxy sets at login."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "get_healthz",
+        "tags": [
+          "Service"
+        ],
+        "summary": "GET /healthz",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "healthz"
+      }
+    },
+    "/console": {
+      "get": {
+        "operationId": "get_console",
+        "tags": [
+          "Service"
+        ],
+        "summary": "GET /console",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "spa"
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "operationId": "get_auth_me",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "GET /auth/me",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "me"
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "operationId": "get_auth_login",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "GET /auth/login",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "login_page"
+      },
+      "post": {
+        "operationId": "post_auth_login",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "POST /auth/login",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "login_post"
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "post_auth_logout",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "POST /auth/logout",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "logout"
+      }
+    },
+    "/auth/google": {
+      "get": {
+        "operationId": "get_auth_google",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "GET /auth/google",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "google_start"
+      }
+    },
+    "/auth/github": {
+      "get": {
+        "operationId": "get_auth_github",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "GET /auth/github",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "github_start"
+      }
+    },
+    "/console/{path}": {
+      "get": {
+        "operationId": "get_console_path",
+        "tags": [
+          "Service"
+        ],
+        "summary": "GET /console/*path",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "spa",
+        "x-queen-note": "Registered in axum as a catch-all segment: every path below this prefix resolves here."
+      }
+    },
+    "/api/console/keys": {
+      "get": {
+        "operationId": "get_api_console_keys",
+        "tags": [
+          "Console"
+        ],
+        "summary": "GET /api/console/keys",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "list_keys",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      },
+      "post": {
+        "operationId": "post_api_console_keys",
+        "tags": [
+          "Console"
+        ],
+        "summary": "POST /api/console/keys",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "create_key",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
+    "/api/console/usage": {
+      "get": {
+        "operationId": "get_api_console_usage",
+        "tags": [
+          "Console"
+        ],
+        "summary": "GET /api/console/usage",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "usage",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
+    "/auth/session-token": {
+      "get": {
+        "operationId": "get_auth_session_token",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "GET /auth/session-token",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "session_token"
+      }
+    },
+    "/api/console/members": {
+      "get": {
+        "operationId": "get_api_console_members",
+        "tags": [
+          "Console"
+        ],
+        "summary": "GET /api/console/members",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "list_members",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      },
+      "post": {
+        "operationId": "post_api_console_members",
+        "tags": [
+          "Console"
+        ],
+        "summary": "POST /api/console/members",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "grant_member",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      },
+      "delete": {
+        "operationId": "delete_api_console_members",
+        "tags": [
+          "Console"
+        ],
+        "summary": "DELETE /api/console/members",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "revoke_member",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
+    "/auth/google/callback": {
+      "get": {
+        "operationId": "get_auth_google_callback",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "GET /auth/google/callback",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "google_callback"
+      }
+    },
+    "/auth/github/callback": {
+      "get": {
+        "operationId": "get_auth_github_callback",
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "GET /auth/github/callback",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "github_callback"
+      }
+    },
+    "/api/console/overview": {
+      "get": {
+        "operationId": "get_api_console_overview",
+        "tags": [
+          "Console"
+        ],
+        "summary": "GET /api/console/overview",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "overview",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
+    "/api/console/keys/{id}": {
+      "delete": {
+        "operationId": "delete_api_console_keys_id",
+        "tags": [
+          "Console"
+        ],
+        "summary": "DELETE /api/console/keys/:id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "delete_key",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerAuth": []
+          }
+        ],
+        "description": "Console API. Requires a proxy-minted user session (cookie or bearer token); a cluster API key is not a console credential."
+      }
+    },
+    "/.well-known/jwks.json": {
+      "get": {
+        "operationId": "get_well_known_jwks_json",
+        "tags": [
+          "Service"
+        ],
+        "summary": "GET /.well-known/jwks.json",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-handler": "jwks"
+      }
+    }
+  }
+}

@@ -1,0 +1,563 @@
+---
+title: JavaScript client
+description: "Complete surface of the queen-mq package: constructor options with defaults, every builder method, the Admin methods that reach a route that exists, and the streaming SDK."
+type: reference
+sidebar:
+  order: 22
+  label: JavaScript
+sourceOfTruth:
+  - clients/client-js/client-v2/index.js
+  - clients/client-js/client-v2/Queen.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-js/client-v2/builders/TransactionBuilder.js
+  - clients/client-js/client-v2/admin/Admin.js
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/buffer/BufferManager.js
+  - clients/client-js/client-v2/buffer/MessageBuffer.js
+  - clients/client-js/client-v2/http/HttpClient.js
+  - clients/client-js/client-v2/http/LoadBalancer.js
+  - clients/client-js/client-v2/utils/defaults.js
+  - clients/client-js/client-v2/utils/logger.js
+  - clients/client-js/client-v2/streams/Stream.js
+  - clients/client-js/client-v2/streams/runtime/Runner.js
+  - clients/client-js/package.json
+  - server/src/main.rs
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+  - clients/client-js/test-v2/pop.js
+  - clients/client-js/test-v2/consume.js
+  - clients/client-js/test-v2/transaction.js
+---
+
+One npm package, `queen-mq`, carries both the broker client and the streaming SDK. It is
+ESM-only (`"type": "module"`), requires Node 22 or newer, and depends on `undici` for its own
+HTTP dispatcher so `close()` can release keep-alive sockets deterministically. Version 1.0.0,
+aligned with the broker.
+
+```js
+import { Queen, Admin, Stream, tokenBucketGate, slidingWindowGate } from 'queen-mq'
+```
+
+The package also exports the default objects themselves (`CLIENT_DEFAULTS`, `QUEUE_DEFAULTS`,
+`CONSUME_DEFAULTS`, `POP_DEFAULTS`, `BUFFER_DEFAULTS`), so an application can read a default
+rather than restate it.
+
+## Constructor
+
+```js
+new Queen(config)
+```
+
+`config` is a URL string, an array of URL strings, or an options object. A string or array is
+equivalent to passing `{ url }` / `{ urls }`; everything else takes the default below. URLs are
+validated at construction, and an object with neither `url` nor `urls` throws
+`Must provide urls or url in configuration`.
+
+| Option | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `url` | string | none | Single broker URL. Ignored when `urls` is present. |
+| `urls` | string[] | none | Multiple brokers. More than one entry activates the load balancer. |
+| `timeoutMillis` | number | `30000` | Per-request abort deadline. |
+| `retryAttempts` | number | `3` | Attempts for 5xx and network failures. A 4xx is never retried by this counter. |
+| `retryDelayMillis` | number | `1000` | First retry delay; doubles per attempt. |
+| `loadBalancingStrategy` | `'affinity'` \| `'round-robin'` \| `'session'` | `'affinity'` | Only consulted when `urls.length > 1`. |
+| `affinityHashRing` | number | `128` | Virtual nodes per backend on the consistent-hash ring. |
+| `enableFailover` | boolean | `true` | On a 5xx or network error, try the next backend. |
+| `healthRetryAfterMillis` | number | `5000` | How long a backend stays marked unhealthy. |
+| `bearerToken` | string \| null | `null` | Sent as `Authorization: Bearer <token>` on every request. |
+| `headers` | object | `{}` | Extra headers on every request. |
+| `hostHeader` | string \| null | `null` | Bare authority to advertise as `Host`, independent of the address dialled. |
+| `handleSignals` | boolean | `true` | Register `SIGINT`/`SIGTERM` handlers that flush buffers and exit. |
+| `logger` | object \| null | `null` | Custom logger implementing `info`/`warn`/`error`. |
+| `structuredLogs` | boolean | `false` | Call the custom logger pino-style, `info(fields, message)`. |
+| `retry429` | object | `undefined` | HTTP 429 backoff policy. See below. |
+
+Three consequences worth knowing before you tune anything:
+
+- **`loadBalancingStrategy`, `affinityHashRing`, `enableFailover` and `healthRetryAfterMillis`
+  are inert with a single URL.** The load balancer is only constructed when `urls` has more than
+  one entry; a single-URL client goes straight to one `HttpClient`.
+- **`handleSignals: true` installs `process.exit()`.** The handler flushes buffers and then
+  exits the process. Set it to `false` when the client is embedded in an application that owns
+  its own shutdown, and call `close()` yourself.
+- **`headers: { Host }` cannot work.** `fetch()` treats `host` as a forbidden header name and
+  drops it silently. The client detects it, maps it onto `hostHeader`, and warns on `console.warn`
+  regardless of the log setting, because a wrong `Host` at a multi-tenant proxy does not fail
+  loudly: it lands your traffic on the wrong cluster.
+- **`retryAttempts` and failover are mutually exclusive paths.** With one URL, or with
+  `enableFailover: false`, a call makes up to `retryAttempts` attempts against the same backend
+  (3 total by default). With several URLs and failover on, `retryAttempts` is not consulted at all:
+  the call walks the backend list, trying each at most once.
+
+### `retry429`
+
+Separate from `retryAttempts`, which covers 5xx and network faults. This policy covers only
+HTTP 429 from a proxy.
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `maxAttempts` | `10` for ordinary requests; unbounded for a long-poll pop | Total attempts including the first. Setting it explicitly applies the same bound to both kinds. |
+| `baseMs` | `500` | First delay when the response carries no `Retry-After`. Doubles per attempt. |
+| `capMs` | `30000` | Ceiling for the exponential delay. |
+
+A `Retry-After` header (seconds) always wins over the computed delay. Every delay gets ±20%
+jitter. A 429 is retried against the *same* backend and never triggers failover, because rate
+limiting is not a health signal.
+
+### `hostHeader`
+
+A `queen_proxy` deployment picks the tenant cluster from the first DNS label of the `Host`
+header. When the base URL points at a shared address (an IP, a cell endpoint, a local rig),
+`hostHeader` rewrites the request authority (and TLS SNI) while the socket still dials the
+configured address, the same contract as `curl --resolve`. Accepts a bare authority only
+(`'acme.eu1.example'`, `'acme.local:6711'`); anything URL-shaped throws at construction.
+
+<Aside type="caution">
+`hostHeader` requires undici. In a browser, or after `close()` has destroyed the dispatchers,
+the client **refuses to send** rather than fall back to advertising the dialled address, which
+at a proxy with a default cluster would write to another tenant.
+</Aside>
+
+## `Queen`
+
+| Member | Signature | Returns |
+| --- | --- | --- |
+| `queue` | `queue(name = null)` | `QueueBuilder` |
+| `admin` | getter | `Admin`, lazily created, one per client |
+| `transaction` | `transaction()` | `TransactionBuilder` |
+| `ack` | `async ack(message, status = true, context = {})` | single: one ack result object; batch: `{ success, processed, results }` or `{ success: false, error, results }` |
+| `renew` | `async renew(messageOrLeaseId)` | one `{ leaseId, success, newExpiresAt }` for a single input, an array for an array input |
+| `flushAllBuffers` | `async flushAllBuffers()` | `undefined` |
+| `getBufferStats` | `getBufferStats()` | `{ activeBuffers, totalBufferedMessages, oldestBufferAge, flushesPerformed }` |
+| `deleteConsumerGroup` | `async deleteConsumerGroup(group, deleteMetadata = true)` | the broker's response body |
+| `updateConsumerGroupTimestamp` | `async updateConsumerGroupTimestamp(group, timestamp)` | the broker's response body |
+| `enableGracefulShutdown` | `enableGracefulShutdown()` | `this`. No-op if handlers are already installed |
+| `disableGracefulShutdown` | `disableGracefulShutdown()` | `this` |
+| `close` | `async close()` | `undefined`. Flushes buffers, cleans the buffer manager, removes signal handlers, destroys the HTTP dispatchers |
+
+### `ack(message, status, context)`
+
+`message` is one message object, one transaction-id string, or an array of either. `status` is
+`true` → `completed`, `false` → `failed`, or a status string passed through verbatim
+(`'retry'`, `'dlq'`). `context` accepts `{ group, error }`.
+
+`partitionId` is mandatory on every message object. Without it the call fails
+(`Message must have partitionId property to ensure message uniqueness`): for a single message
+as a returned `{ success: false, error }`, for a batch as a thrown `Error`. A `leaseId` on the
+message is forwarded when present.
+
+Per-message statuses inside a batch work by tagging items with `_status` and `_error`. If any
+item in the array carries either key, the client switches to per-item mode for the whole batch
+and the `status` argument becomes only the fallback.
+
+<Aside type="caution">
+A rejected ack still arrives as HTTP 200 with `success: false` on the item, so the per-item flag
+is the only signal the broker accepted it. The client asserts that the response array length
+equals the number of acks sent and throws otherwise, so a truncated response can never be
+misattributed to the wrong message.
+</Aside>
+
+### `renew(messageOrLeaseId)`
+
+Accepts a lease-id string, a message object, or an array of either. Lease ids are deduplicated
+first: with multi-partition pop every message in one batch shares a single `leaseId`, and one
+extend call renews every claimed partition, so passing the whole message array issues one HTTP
+call, not N.
+
+## `QueueBuilder`
+
+`queen.queue(name)` returns a fresh builder. Every configuration method returns `this`; the
+terminal methods are `push()`, `pop()`, `consume()`, `create()`, `delete()`, `dlq()` and
+`flushBuffer()`.
+
+### Addressing
+
+| Method | Default | Notes |
+| --- | --- | --- |
+| `name` (getter) | n/a | The queue name this builder was created with. |
+| `partition(name)` | `'Default'` | The ordered lane. A partition other than `Default` switches `pop()`/`consume()` to the partition-scoped route. |
+| `namespace(name)` | `null` | Grouping label, set at create time; also a pop filter. |
+| `task(name)` | `null` | Second grouping label; same dual role. |
+| `group(name)` | `null` | Consumer group. Absent, the broker uses the queue-mode group `__QUEUE_MODE__`. |
+
+### Queue lifecycle
+
+| Method | Wire call | Returns |
+| --- | --- | --- |
+| `config(options)` | none | `this`. Merges `options` over `QUEUE_DEFAULTS`. |
+| `create()` | `POST /api/v1/configure` | `OperationBuilder` |
+| `delete()` | `DELETE /api/v1/resources/queues/:queue` | `OperationBuilder`. Throws immediately if the builder has no queue name. |
+
+`QUEUE_DEFAULTS`, the object `config()` merges into:
+
+| Key | Default | Unit |
+| --- | --- | --- |
+| `leaseTime` | `300` | seconds |
+| `retryLimit` | `3` | attempts |
+| `delayedProcessing` | `0` | seconds |
+| `windowBuffer` | `0` | seconds |
+| `retentionSeconds` | `0` | seconds |
+| `completedRetentionSeconds` | `0` | seconds |
+| `encryptionEnabled` | `false` | n/a |
+
+Keys you add to `config()` are sent verbatim, so any option `/configure` accepts can be set
+even though it is not in the defaults object. Two things follow:
+
+- **`/configure` is a full replace.** Keys absent from the body reset to the broker's own
+  defaults, not to whatever the queue had before. Send the complete intended configuration every
+  time. The full option list lives in [Reference](/reference).
+- Calling `create()` without `config()` sends `QUEUE_DEFAULTS` as-is, which means
+  `leaseTime: 300`, whereas a queue created implicitly by a first push gets a 60-second lease.
+
+### Producing
+
+| Method | Default | Notes |
+| --- | --- | --- |
+| `buffer(options)` | off | `{ messageCount, timeMillis }`, defaults `100` / `1000`. Turns `push()` into an enqueue. |
+| `push(payload)` | n/a | Returns a `PushBuilder`. `payload` is one item or an array. |
+
+Each item may be `{ data }`, `{ payload }`, or a bare object used as the payload itself. The
+client mints a UUIDv7 `transactionId` when the item does not carry one, and forwards `traceId`
+only when it is a valid UUID. The wire field is always `payload`; `data` is a client-side alias.
+
+<Render file="snippets/js-push" />
+
+Deduplication is keyed on `transactionId` and enforced in SQL before an offset is allocated, so
+a duplicate writes nothing:
+
+<Render file="snippets/js-push-dedup" />
+
+#### `PushBuilder`
+
+Thenable: awaiting it executes the push. `then()` is idempotent: a second `await` on the same
+builder resolves without re-sending.
+
+| Method | Callback signature |
+| --- | --- |
+| `onSuccess(cb)` | `cb(successfulItems)` |
+| `onError(cb)` | `cb(failedItems, error)` |
+| `onDuplicate(cb)` | `cb(duplicateItems, error)` |
+
+Awaiting a non-buffered push resolves to the broker's per-item array. The four possible item
+statuses are described in [Reference](/reference). With no `onError` callback registered, at
+least one `failed` item makes the await throw; with one registered, it does not throw. Awaiting a
+buffered push resolves to `{ buffered: true, count }` immediately. The messages have not been
+sent yet.
+
+### Consuming
+
+Both `pop()` and `consume()` read these; the defaults differ between the two.
+
+| Method | `pop()` default | `consume()` default | Notes |
+| --- | --- | --- | --- |
+| `batch(size)` | `1` | `1` | Clamped to `≥ 1`. With `partitions(n)`, this is the total message budget across all claimed partitions. |
+| `partitions(n)` | `1` | `1` | Claim up to N partitions in one call. All share one `leaseId`. Sent only when `> 1`. |
+| `wait(enabled)` | `false` | `true` | Long-poll. |
+| `timeoutMillis(ms)` | `30000` | `30000` | Server-side long-poll deadline. The HTTP layer adds 5 s of slack so the server times out first. Clamped to `≥ 1`. |
+| `autoAck(enabled)` | `false` | `true` | See the warning below: the two mean different things. |
+| `subscriptionMode(mode)` | `null` | `null` | `all` \| `new`. |
+| `subscriptionFrom(from)` | `null` | `null` | `'now'` or an ISO timestamp. |
+| `concurrency(count)` | n/a | `1` | `consume()` only. Number of worker loops. Clamped to `≥ 1`. |
+| `limit(count)` | n/a | `null` | `consume()` only. Stop after N messages per worker. |
+| `idleMillis(ms)` | n/a | `null` | `consume()` only. Stop after N ms without a message. |
+| `renewLease(enabled, intervalMillis)` | n/a | `false` | `consume()` only. Renews on an interval while the handler runs. |
+| `each()` | n/a | batch mode | `consume()` only. Deliver one message per handler call. |
+
+<Aside type="danger">
+`autoAck` means two different things depending on the method. On `pop()` it is sent to the
+broker as `autoAck=true`, which commits the cursor inside the pop transaction: at-most-once
+delivery, the message is gone whether or not you process it. On `consume()` it is never sent to
+the broker: the client acks after the handler resolves and nacks when it throws. The
+`ConsumerManager` explicitly does not forward the parameter.
+</Aside>
+
+#### `pop()`
+
+`async pop()` → array of message objects, `[]` when there is nothing to return.
+
+<Render file="snippets/js-pop" />
+
+Route selection: a queue name with a non-`Default` partition uses
+`/api/v1/pop/queue/:queue/partition/:partition`; a queue name alone uses
+`/api/v1/pop/queue/:queue`; namespace or task without a queue uses `/api/v1/pop`. No queue,
+namespace or task throws.
+
+<Aside type="caution">
+`pop()` never throws. Every error path (a 4xx, an exhausted 429 budget, a terminal 403 such as
+`cluster_suspended`, a network failure) is logged and returns `[]`. An empty array does not
+distinguish "queue is empty" from "your credentials were revoked". If you need that distinction,
+watch the logs or call the route yourself.
+</Aside>
+
+#### `consume(handler, options)`
+
+Returns a `ConsumeBuilder`, thenable like the others. `options.signal` accepts an `AbortSignal`
+that stops every worker at the top of its next iteration.
+
+<Render file="snippets/js-consume" />
+
+| `ConsumeBuilder` method | Callback signature |
+| --- | --- |
+| `onSuccess(cb)` | `cb(msgOrMsgs, handlerResult)` |
+| `onError(cb)` | `cb(msgOrMsgs, error)` |
+
+**Registering either callback forces `autoAck` to `false`** for the run, to prevent a
+double-ack when the callback acks by hand.
+
+Worker loop behaviour, all of it observable:
+
+- A handler throw with `autoAck` on nacks the message and does **not** rethrow, so the worker
+  keeps going.
+- In `each()` mode, a nack aborts the rest of the popped batch. The nack releases the lease and
+  clamps the broker cursor at the failed message, so everything after it will be redelivered;
+  continuing would only produce duplicates and rejected acks.
+- A 429 that escapes the HTTP layer's own retry sleeps for `Retry-After` (or 1 s) and continues.
+- A network error sleeps 1 s and continues.
+- A **403 stops the worker and rethrows**. `cluster_suspended` cannot resolve itself, and none
+  of the other proxy 403 codes are worth hot-looping.
+- Any other error is rethrown.
+
+#### `message.trace(config)`
+
+Messages delivered through `consume()` are given a `trace()` method that posts to
+`/api/v1/traces`:
+
+```js
+await msg.trace({
+  traceName: ['tenant-acme', 'room-123'],
+  eventType: 'info',
+  data: { text: 'started processing' }
+})
+```
+
+`data` is required; `traceName` accepts a string or an array of strings; `eventType` defaults to
+`'info'`. It never throws: failures return `{ success: false, error }`.
+
+<Aside type="note">
+`trace()` is attached by the consumer loop only. Messages returned by `pop()` do not have it.
+Post to the traces route directly if you need tracing on a manual pop.
+</Aside>
+
+### Buffering
+
+| Method | Notes |
+| --- | --- |
+| `buffer(options)` | Enable per-`queue/partition` buffering for this builder's pushes. |
+| `flushBuffer()` | `async`. Flush this builder's `queue/partition` buffer and wait for in-flight flushes. Throws with no queue name. |
+
+A buffer flushes when it reaches `messageCount` messages or `timeMillis` elapses since its first
+message, whichever comes first. `flushBuffer()` cancels the timer and drains in `messageCount`-sized
+batches. Buffers are keyed on `"<queue>/<partition>"`, so two builders on the same
+queue and partition share one buffer.
+
+<Aside type="caution">
+A buffered push resolves before the data leaves the process. If the process dies before the
+flush, those messages were never sent: nothing on disk, nothing to replay. `close()` and the
+signal handlers flush first, which is why disabling `handleSignals` without calling `close()`
+loses buffered messages on `SIGTERM`.
+</Aside>
+
+### Dead-letter queue
+
+`dlq(consumerGroup = null)` returns a `DLQBuilder`. Throws with no queue name. The builder's
+`partition` is inherited from the queue builder unless it is `Default`.
+
+| Method | Default |
+| --- | --- |
+| `limit(count)` | `100`, clamped to `≥ 1` |
+| `offset(count)` | `0`, clamped to `≥ 0` |
+| `from(timestamp)` | none |
+| `to(timestamp)` | none |
+| `get()` | `async` → `{ messages, total }`; `{ messages: [], total: 0 }` on any error |
+
+The DLQ is read-only through this builder. Replay lives on the admin façade:
+`admin.retryMessage(partitionId, transactionId)`.
+
+## `TransactionBuilder`
+
+`queen.transaction()`. Pushes and acks bundled into one PostgreSQL transaction, all-or-nothing.
+
+| Method | Notes |
+| --- | --- |
+| `ack(messages, status = 'completed', context = {})` | `messages` is one message or an array. `context.consumerGroup` sets the group. Requires `transactionId` and `partitionId` on every message; a `leaseId` is collected into `requiredLeases`. Returns `this`. |
+| `queue(queueName)` | Returns a sub-builder with `.partition(key)` and `.push(items)`. `push()` returns the parent builder, so chains continue. |
+| `commit()` | `async`. Throws `Transaction has no operations to commit` on an empty bundle, and throws the broker's error when the response is not `success: true`. |
+
+<Render file="snippets/js-transaction" />
+
+Lease ids are deduplicated before `requiredLeases` is sent. Item payloads follow the same
+`data` / `payload` / bare-object rule as `push()`, but the transaction path does **not** mint a
+`transactionId` for you. Omit it and the broker mints one.
+
+<Aside type="note">
+A transaction is atomic, not exactly-once end to end. A lost response plus a client retry still
+duplicates unless the `transactionId` is deterministic and inside the dedup window.
+</Aside>
+
+## `Admin`
+
+`queen.admin` (getter) or `new Admin(httpClient)`. Every method is `async` and returns the
+broker's JSON body verbatim. Methods that take a `params` object turn it into a query string,
+dropping `null` and `undefined`.
+
+### Resources
+
+| Method | Route |
+| --- | --- |
+| `getOverview()` | `GET /api/v1/resources/overview` |
+| `getNamespaces()` | `GET /api/v1/resources/namespaces` |
+| `getTasks()` | `GET /api/v1/resources/tasks` |
+| `listQueues(params = {})` | `GET /api/v1/resources/queues` |
+| `getQueue(name)` | `GET /api/v1/resources/queues/:name` |
+
+### Messages and traces
+
+| Method | Route |
+| --- | --- |
+| `listMessages(params = {})` | `GET /api/v1/messages` |
+| `getMessage(partitionId, transactionId)` | `GET /api/v1/messages/:partitionId/:transactionId` |
+| `deleteMessage(partitionId, transactionId)` | `DELETE /api/v1/messages/:partitionId/:transactionId` |
+| `retryMessage(partitionId, transactionId)` | `POST /api/v1/messages/:partitionId/:transactionId/retry` |
+| `getTraceNames(params = {})` | `GET /api/v1/traces/names` |
+| `getTracesByName(traceName, params = {})` | `GET /api/v1/traces/by-name/:traceName` |
+| `getTracesForMessage(partitionId, transactionId)` | `GET /api/v1/traces/:partitionId/:transactionId` |
+
+### Status and analytics
+
+| Method | Route |
+| --- | --- |
+| `getStatus(params = {})` | `GET /api/v1/status` |
+| `getQueueStats(params = {})` | `GET /api/v1/status/queues` |
+| `getQueueDetail(name, params = {})` | `GET /api/v1/status/queues/:name` |
+| `getAnalytics(params = {})` | `GET /api/v1/status/analytics` |
+| `getSystemMetrics(params = {})` | `GET /api/v1/analytics/system-metrics` |
+| `getWorkerMetrics(params = {})` | `GET /api/v1/analytics/worker-metrics` |
+| `getPostgresStats()` | `GET /api/v1/analytics/postgres-stats` |
+
+### Consumer groups
+
+| Method | Route |
+| --- | --- |
+| `listConsumerGroups()` | `GET /api/v1/consumer-groups` |
+| `getConsumerGroup(name)` | `GET /api/v1/consumer-groups/:name` |
+| `getLaggingConsumers(minLagSeconds = 60)` | `GET /api/v1/consumer-groups/lagging?minLagSeconds=` |
+| `deleteConsumerGroupForQueue(group, queue, deleteMetadata = true)` | `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
+| `seekConsumerGroup(group, queue, options = {})` | `POST /api/v1/consumer-groups/:group/queues/:queue/seek` |
+| `refreshConsumerStats()` | `POST /api/v1/stats/refresh` |
+
+`seekConsumerGroup` posts `options` as the body verbatim: `{ toEnd: true }` or
+`{ timestamp: '<RFC3339>' }`.
+
+### System
+
+| Method | Route |
+| --- | --- |
+| `health()` | `GET /health` |
+| `metrics()` | `GET /metrics` |
+| `getMaintenanceMode()` | `GET /api/v1/system/maintenance` |
+| `setMaintenanceMode(enabled)` | `POST /api/v1/system/maintenance` |
+| `getPopMaintenanceMode()` | `GET /api/v1/system/maintenance/pop` |
+| `setPopMaintenanceMode(enabled)` | `POST /api/v1/system/maintenance/pop` |
+
+## Streaming SDK
+
+`Stream` builds an immutable operator chain over a queue and runs it against the broker's
+`/streams/v1/*` endpoints. Every combinator returns a new `Stream`.
+
+```js
+Stream.from(queen.queue('orders'), options?) // → Stream
+```
+
+| Group | Methods |
+| --- | --- |
+| Stateless | `map(fn)`, `filter(predicate)`, `flatMap(fn)` |
+| Keying | `keyBy(fn)` (at most one per stream, must precede window / reduce / gate) |
+| Windows | `windowTumbling(opts)`, `windowSliding(opts)`, `windowSession(opts)`, `windowCron(opts)` (at most one per stream) |
+| Reduce | `reduce(fn, initial)`, `aggregate(extractors)` (require a preceding window; at most one per stream) |
+| Gate | `gate(fn)` (at most one per stream, incompatible with windowing and reduce) |
+| Sink | `to(sinkQueueBuilder, opts)`, `foreach(fn)` (must be the last operator in the chain) |
+| Terminal | `run(runOptions)` |
+
+Window option objects share `gracePeriod`, `idleFlushMs`, `eventTime`, `allowedLateness` and
+`onLate` (`'drop'` \| `'include'`); the size argument differs per window:
+`windowTumbling({ seconds })`, `windowSliding({ size, slide })`, `windowSession({ gap })`,
+`windowCron({ every })` where `every` is one of `'second' | 'minute' | 'hour' | 'day' | 'week'`.
+
+`gate(fn)` receives `(value, ctx)` with `ctx.state` (per-key, persisted only on ALLOW),
+`ctx.streamTimeMs` and `ctx.partitionId`. Returning `false` halts the batch: the runner acks the
+allowed prefix and does not release the source lease, so the denied message and its successors
+are redelivered in their original order when the lease expires.
+
+Two ready-made gate functions ship with the package:
+`tokenBucketGate({ capacity, refillPerSec, costFn?, allowZeroCost? })` and
+`slidingWindowGate({ limit, windowSec, costFn? })`.
+
+### `run(runOptions)`
+
+`async`, resolves to a `Runner`.
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `queryId` | required | Durable identity. Missing it throws `run({ queryId }) is required`. |
+| `url` | required | Broker base URL for the `/streams/v1/*` calls. Missing it throws. |
+| `bearerToken` | none | Auth for the streams calls. |
+| `batchSize` | `200` | Messages per cycle. |
+| `maxPartitions` | `4` | Partitions leased per cycle. |
+| `maxWaitMillis` | `1000` | Long-poll wait on the source pop. |
+| `subscriptionMode` | none | `'all'` \| `'new'`. |
+| `subscriptionFrom` | none | ISO timestamp or `'now'`. |
+| `consumerGroup` | `streams.<queryId>` | Override the source group. |
+| `reset` | `false` | Wipe state when the chain's config hash no longer matches. |
+| `onError` | none | `(err, ctx)` per-cycle error hook. |
+| `abortSignal` | none | External cancellation. |
+| `logger` | none | Custom logger. |
+
+The chain's shape is fingerprinted into a config hash. Re-deploying a different chain under the
+same `queryId` is rejected at registration unless `reset: true` is passed. Only the operator
+kinds and their structural config are hashed: user closures cannot be serialised stably, so
+changing the *body* of a `map` does not change the hash.
+
+`Runner` exposes `stop()` (graceful drain) and `metrics()`, which returns `queryId`,
+`serverQueryId`, and the counters `cyclesTotal`, `flushCyclesTotal`, `messagesTotal`,
+`pushItemsTotal`, `stateOpsTotal`, `lateEventsTotal`, `errorsTotal`, `lastCycleAt`,
+`lastFlushAt`, `lastError`.
+
+<Aside type="caution">
+`keyBy` with a key that differs from the partition lets workers holding different partition
+leases write the same logical state row, which contends on `(query_id, partition_id, key)`. Push
+to a co-keyed intermediate queue and process that instead.
+</Aside>
+
+## Logging
+
+With no `logger` configured, logging is off unless `QUEEN_CLIENT_LOG=true` is set in the
+environment (Node) or `window.QUEEN_CLIENT_LOG === true` (browser). Output goes to `console` as
+`[timestamp] [LEVEL] [operation] {json}`.
+
+A custom `logger` is always active, env var or not. It must implement `info`, `warn` and `error`;
+`debug` falls back to `info`. By default it is called with one formatted string. With
+`structuredLogs: true` it is called pino-style (`info(fields, message)`), where `fields` is the
+detail object plus an `operation` key. Use that only with a logger that accepts a leading merge
+object.
+
+## Errors
+
+Failures throw an `Error` with `.status` (HTTP status) and, when the body carried one, `.code`.
+The message is the body's `error` string when present. A 429 also carries
+`.retryAfterSeconds`. Proxy codes: `rate_limited`, `quota_exceeded` on 429;
+`cluster_suspended`, `storage_quota_exceeded`, `feature_gated`, `forbidden` on 403. A timeout
+throws with `name === 'AbortError'` and a `.timeout` field. Network faults from undici arrive as
+`fetch failed (ECONNREFUSED)`. The underlying cause is unwrapped into the message rather than
+left in `error.cause`.
+
+A `204` response resolves to `null`; the broker sends no body at all on `204`.
+
+## Same surface, other languages
+
+<CardGrid>
+  <LinkCard href="/reference/sdk/python" title="Python" description="Async client with the same builder chain, snake_case." />
+  <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute()." />
+  <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
+  <LinkCard href="/reference/sdk/cpp" title="C++" description="Single-header, thread-pool consumers." />
+  <LinkCard href="/reference/queenctl" title="queenctl" description="The same operations from a shell." />
+</CardGrid>

@@ -1,0 +1,469 @@
+---
+title: Python client
+description: "Complete surface of the queen-mq package for Python: constructor arguments with defaults, every builder method, the Admin methods that reach a route that exists, and the streaming SDK."
+type: reference
+sidebar:
+  order: 23
+  label: Python
+sourceOfTruth:
+  - clients/client-py/queen/__init__.py
+  - clients/client-py/queen/client.py
+  - clients/client-py/queen/types.py
+  - clients/client-py/queen/builders/queue_builder.py
+  - clients/client-py/queen/builders/push_builder.py
+  - clients/client-py/queen/builders/transaction_builder.py
+  - clients/client-py/queen/builders/consume_builder.py
+  - clients/client-py/queen/builders/dlq_builder.py
+  - clients/client-py/queen/builders/operation_builder.py
+  - clients/client-py/queen/admin/admin.py
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/buffer/buffer_manager.py
+  - clients/client-py/queen/http/http_client.py
+  - clients/client-py/queen/utils/defaults.py
+  - clients/client-py/queen/utils/logger.py
+  - clients/client-py/queen/streams/stream.py
+  - clients/client-py/queen/streams/runtime/runner.py
+  - clients/client-py/pyproject.toml
+  - server/src/main.rs
+verifiedBy:
+  - clients/client-py/tests/test_push.py
+  - clients/client-py/tests/test_pop.py
+---
+
+The PyPI package is `queen-mq`; the import name is `queen`. It is fully async, built on `httpx`,
+and ships a `py.typed` marker. Version 1.0.0, aligned with the broker.
+
+```python
+from queen import Queen, Admin, Stream, token_bucket_gate, sliding_window_gate
+```
+
+The package also exports the typed dicts `Message`, `AckResponse`, `BufferStats`, `DLQResponse`,
+`TransactionResponse`, and the default dicts `CLIENT_DEFAULTS`, `QUEUE_DEFAULTS`,
+`CONSUME_DEFAULTS`, `POP_DEFAULTS`, `BUFFER_DEFAULTS`.
+
+## Constructor
+
+```python
+Queen(config=None, *, urls=None, url=None, timeout_millis=None, retry_attempts=None,
+      retry_delay_millis=None, load_balancing_strategy=None, affinity_hash_ring=None,
+      enable_failover=None, health_retry_after_millis=None, bearer_token=None,
+      headers=None, retry_429=None, transport=None)
+```
+
+`config` may be a URL string, a list of URL strings, or a dict. Keyword arguments override
+whatever `config` supplied; a `None` keyword is ignored rather than treated as an override. URLs
+are validated. Neither `url` nor `urls` raises `ValueError("Must provide urls or url in configuration")`.
+
+| Argument | Default | Effect |
+| --- | --- | --- |
+| `url` | none | Single broker URL. |
+| `urls` | none | Multiple brokers. More than one entry activates the load balancer. |
+| `timeout_millis` | `30000` | Per-request deadline. |
+| `retry_attempts` | `3` | Attempts for 5xx and network failures. |
+| `retry_delay_millis` | `1000` | First retry delay; doubles per attempt. |
+| `load_balancing_strategy` | `"affinity"` | `"affinity"`, `"round-robin"` or `"session"`. |
+| `affinity_hash_ring` | `128` | Virtual nodes per backend on the hash ring. |
+| `enable_failover` | `True` | On a 5xx or network error, try the next backend. |
+| `health_retry_after_millis` | `5000` | How long a backend stays marked unhealthy. |
+| `bearer_token` | `None` | Sent as `Authorization: Bearer <token>`. |
+| `headers` | `{}` | Extra headers on every request. |
+| `retry_429` | `None` | HTTP 429 backoff policy. See below. |
+| `transport` | `None` | `httpx.BaseTransport` override, e.g. `httpx.MockTransport`, so tests need no broker. |
+
+The load-balancing arguments are inert with a single URL: the `LoadBalancer` is only constructed
+when `urls` has more than one entry.
+
+`retry_attempts` and failover are mutually exclusive paths. With one URL, or with
+`enable_failover=False`, a call makes up to `retry_attempts` attempts against the same backend
+(3 by default). With several URLs and failover on, `retry_attempts` is not consulted at all: the
+call walks the backend list, trying each at most once.
+
+<Aside type="caution">
+The Python client **always** installs `SIGINT` and `SIGTERM` handlers, with no way to opt out.
+The handler flushes buffers and calls `sys.exit()`. `signal.signal` also raises `ValueError` when
+called off the main thread, so constructing a `Queen` in a worker thread fails. Construct it on
+the main thread, or on the loop that owns the process.
+</Aside>
+
+### `retry_429`
+
+A plain dict; see `queen.types.Retry429Config`. Separate from `retry_attempts`, which covers 5xx
+and network faults.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `max_attempts` | `10` for ordinary requests; unbounded for a long-poll pop | Total attempts including the first. Setting it applies the same bound to both kinds. |
+| `base_ms` | `500` | First delay absent a `Retry-After` header. Doubles per attempt. |
+| `cap_ms` | `30000` | Ceiling for the exponential delay. |
+
+A `Retry-After` header (seconds) wins over the computed delay. Every delay gets ±20% jitter. A
+429 is retried against the same backend and never triggers failover.
+
+## `Queen`
+
+| Member | Signature | Returns |
+| --- | --- | --- |
+| `queue` | `queue(name=None)` | `QueueBuilder` |
+| `admin` | property | `Admin`, lazily created, one per client |
+| `transaction` | `transaction()` | `TransactionBuilder` |
+| `ack` | `async ack(message, status=True, context=None)` | dict (see below) |
+| `renew` | `async renew(message_or_lease_id)` | one dict for a scalar input, a list for a list input |
+| `flush_all_buffers` | `async flush_all_buffers()` | `None` |
+| `get_buffer_stats` | `get_buffer_stats()` | `{"activeBuffers", "totalBufferedMessages", "oldestBufferAge", "flushesPerformed"}` |
+| `delete_consumer_group` | `async delete_consumer_group(consumer_group, delete_metadata=True)` | broker body, or `{"success": True}` on a `204` |
+| `update_consumer_group_timestamp` | `async update_consumer_group_timestamp(consumer_group, timestamp)` | broker body, or `{"success": True}` |
+| `close` | `async close()` | `None`. Flushes buffers, cleans up, closes the HTTP client, removes signal handlers |
+
+`Queen` is an async context manager: `async with Queen(url) as client:` closes on exit.
+
+### `ack(message, status, context)`
+
+`message` is a message dict, a transaction-id string, or a list of either. `status` is `True` →
+`completed`, `False` → `failed`, or a status string passed through verbatim. `context` accepts
+`{"group": ..., "error": ...}`.
+
+`partitionId` is mandatory on every message dict. Without it a single ack returns
+`{"success": False, "error": "Message must have partitionId property to ensure message uniqueness"}`
+and a batch raises `ValueError`. A `leaseId` on the message is forwarded when present. Per-message
+statuses inside a batch work by tagging items with `_status` and `_error`; if any item carries
+either key the whole batch switches to per-item mode.
+
+Return shapes differ between the two paths:
+
+| Call | Success | Rejection |
+| --- | --- | --- |
+| single | `{"success": True, **first_result}` | `{"success": False, "error": ...}` |
+| batch | `{"success": True, "results": <broker array>}` | `{"success": False, "error": ...}` |
+| empty list | `{"processed": 0, "results": []}` | none |
+
+<Aside type="caution">
+The batch path reports `success: True` as soon as the HTTP call returned an array. It does not
+inspect the per-item `success` flags, and it does not check that the array length matches the
+number of acks sent. A rejected ack arrives as HTTP 200 with `success: false` on its item, so read
+`results` yourself when you need to know that each ack landed.
+</Aside>
+
+### `renew(message_or_lease_id)`
+
+Accepts a lease-id string, a message dict, or a list of either. Lease ids are deduplicated in
+insertion order: with multi-partition pop, every message in a batch shares one `leaseId` and one
+extend call renews every claimed partition, so passing the whole list issues one HTTP call.
+
+## `QueueBuilder`
+
+`client.queue(name)` returns a fresh builder. Configuration methods return `self`; terminal
+methods are `push()`, `pop()`, `consume()`, `create()`, `delete()`, `dlq()` and `flush_buffer()`.
+
+### Addressing
+
+| Method | Default | Notes |
+| --- | --- | --- |
+| `partition(name)` | `"Default"` | The ordered lane. Anything other than `Default` switches pop to the partition-scoped route. |
+| `namespace(name)` | `None` | Grouping label at create time; also a pop filter. |
+| `task(name)` | `None` | Second grouping label; same dual role. |
+| `group(name)` | `None` | Consumer group. Absent, the broker uses `__QUEUE_MODE__`. |
+
+### Queue lifecycle
+
+| Method | Wire call | Returns |
+| --- | --- | --- |
+| `config(options)` | none | `self`. Merges `options` over `QUEUE_DEFAULTS`. |
+| `create()` | `POST /api/v1/configure` | `OperationBuilder` |
+| `delete()` | `DELETE /api/v1/resources/queues/:queue` | `OperationBuilder`; raises `ValueError` with no queue name |
+
+`QUEUE_DEFAULTS` uses snake_case keys and the builder converts them to the wire's camelCase
+before sending:
+
+| Key | Default | Sent as | Unit |
+| --- | --- | --- | --- |
+| `lease_time` | `300` | `leaseTime` | seconds |
+| `retry_limit` | `3` | `retryLimit` | attempts |
+| `delayed_processing` | `0` | `delayedProcessing` | seconds |
+| `window_buffer` | `0` | `windowBuffer` | seconds |
+| `retention_seconds` | `0` | `retentionSeconds` | seconds |
+| `completed_retention_seconds` | `0` | `completedRetentionSeconds` | seconds |
+| `encryption_enabled` | `False` | `encryptionEnabled` | none |
+
+Any extra key you pass to `config()` is converted the same way and sent, so options absent from
+the defaults dict are still reachable. **`/configure` is a full replace**: keys absent from the
+body reset to the broker's defaults, so send the complete intended configuration every time. The
+full option list is in [Reference](/reference).
+
+### Producing
+
+| Method | Default | Notes |
+| --- | --- | --- |
+| `buffer(options)` | off | `{"message_count": 100, "time_millis": 1000}`. Turns `push()` into an enqueue. |
+| `push(payload)` | none | Returns a `PushBuilder`; `payload` is one dict or a list of dicts. Raises `ValueError` with no queue name. |
+
+Each item may carry `data`, `payload`, or be used as the payload itself. The client mints a
+UUIDv7 `transactionId` when the item does not supply one, and forwards `traceId` only when it is
+a valid UUID.
+
+<Render file="snippets/py-push" />
+
+#### `PushBuilder`
+
+Awaitable: `await` executes the push. `on_success(cb)`, `on_error(cb)` and `on_duplicate(cb)`
+register callbacks and return the builder. Awaiting a non-buffered push resolves to the broker's
+per-item array; a buffered push resolves immediately to a buffered marker without sending
+anything.
+
+### Consuming
+
+| Method | `pop()` default | `consume()` default | Notes |
+| --- | --- | --- | --- |
+| `batch(size)` | `1` | `1` | Clamped to `≥ 1`. With `partitions(n)` it is the total budget across all claimed partitions. |
+| `partitions(n)` | `1` | `1` | Claim up to N partitions per call; all share one `leaseId`. Sent only when `> 1`. |
+| `wait(enabled)` | `False` | `True` | Long-poll. |
+| `timeout_millis(ms)` | `30000` | `30000` | Server-side long-poll deadline. The HTTP call adds 5 s of slack so the server times out first. |
+| `auto_ack(enabled)` | `False` | `True` | The two meanings differ. See the warning. |
+| `subscription_mode(mode)` | `None` | `None` | `all` \| `new`. |
+| `subscription_from(from_)` | `None` | `None` | `"now"` or an ISO timestamp. |
+| `concurrency(count)` | n/a | `1` | `consume()` only. Worker tasks. Clamped to `≥ 1`. |
+| `limit(count)` | n/a | `None` | `consume()` only. Stop after N messages per worker. |
+| `idle_millis(ms)` | n/a | `None` | `consume()` only. Stop after N ms without a message. |
+| `renew_lease(enabled, interval_millis=None)` | n/a | `False` | `consume()` only. |
+| `each()` | n/a | batch mode | `consume()` only. One message per handler call. |
+
+<Aside type="danger">
+`auto_ack` means two different things. On `pop()` it is sent to the broker as `autoAck=true`,
+which commits the cursor inside the pop transaction. That is at-most-once: the message is gone
+whether or not you process it. On `consume()` it is never sent: the client acks after the
+handler returns and nacks when it raises.
+</Aside>
+
+#### `pop()`
+
+`async pop()` → `list[dict]`, `[]` when there is nothing to return.
+
+<Render file="snippets/py-pop" />
+
+Route selection: queue plus non-`Default` partition uses
+`/api/v1/pop/queue/:queue/partition/:partition`; queue alone uses `/api/v1/pop/queue/:queue`;
+namespace or task without a queue uses `/api/v1/pop`. None of the three raises `ValueError`.
+
+<Aside type="caution">
+`pop()` never raises. Every failure (a 4xx, an exhausted 429 budget, a terminal 403 such as
+`cluster_suspended`, a network error) is logged, **printed to stdout as `Pop failed: ...`**, and
+returns `[]`. An empty list does not distinguish an empty queue from revoked credentials.
+</Aside>
+
+#### `consume(handler, *, signal=None)`
+
+Returns a `ConsumeBuilder`, awaitable. `signal` is an `asyncio.Event`; setting it stops every
+worker at the top of its next iteration. `on_success(cb)` and `on_error(cb)` register callbacks.
+
+```python
+await client.queue("orders").group("workers").batch(20).each().consume(handle)
+```
+
+Worker loop behaviour:
+
+- A handler exception with `auto_ack` on nacks the message and does not re-raise, so the worker
+  continues.
+- In `each()` mode a nack abandons the rest of the popped batch: the nack released the lease and
+  clamped the broker cursor, so the remainder will be redelivered anyway.
+- A 429 that escapes the HTTP layer's own retry sleeps for `Retry-After` (or 1 s) and continues.
+- A network error sleeps and continues.
+- A **403 stops the worker and re-raises**.
+
+#### `message["trace"]`
+
+Messages delivered through `consume()` gain a `trace` coroutine that posts to `/api/v1/traces`:
+
+```python
+await msg["trace"]({"traceName": ["tenant-acme"], "eventType": "info", "data": {"step": 1}})
+```
+
+`data` is required, `traceName` accepts a string or list of strings, `eventType` defaults to
+`"info"`. It never raises; failures return `{"success": False, "error": ...}`.
+
+<Aside type="note">
+`trace` is attached by the consumer loop only. Messages returned by `pop()` do not have it.
+</Aside>
+
+### Buffering
+
+| Method | Notes |
+| --- | --- |
+| `buffer(options)` | Enable per-`queue/partition` buffering for this builder's pushes. |
+| `flush_buffer()` | `async`. Flush this builder's buffer. Raises `ValueError` with no queue name. |
+
+A buffer flushes at `message_count` messages or `time_millis` after its first message, whichever
+comes first. Buffers are keyed on `"<queue>/<partition>"`, so builders addressing the same queue
+and partition share one.
+
+<Aside type="caution">
+A buffered push returns before the data leaves the process. If the process dies before the flush,
+those messages were never sent.
+</Aside>
+
+### Dead-letter queue
+
+`dlq(consumer_group=None)` returns a `DLQBuilder`. Raises `ValueError` with no queue name.
+
+| Method | Default |
+| --- | --- |
+| `limit(count)` | `100` |
+| `offset(count)` | `0` |
+| `from_(timestamp)` | none (trailing underscore, `from` is a keyword) |
+| `to(timestamp)` | none |
+| `get()` | `async` → `{"messages": [...], "total": n}` |
+
+Read-only. Replay lives on the admin façade: `admin.retry_message(partition_id, transaction_id)`.
+
+## `TransactionBuilder`
+
+`client.transaction()`. Pushes and acks in one PostgreSQL transaction, all-or-nothing.
+
+| Method | Notes |
+| --- | --- |
+| `ack(messages, status="completed", context=None)` | One message or a list. Requires `transactionId` and `partitionId`; a `leaseId` is collected into `requiredLeases`. Returns `self`. |
+| `queue(queue_name)` | Returns a `TransactionQueueBuilder` with `.partition(key)` and `.push(items)`; `push()` returns the parent builder. |
+| `commit()` | `async`. Raises on an empty bundle and on a non-success response. |
+
+```python
+await (client.transaction()
+       .ack(msg)
+       .queue("orders.enriched").push([{"data": {"id": 1}}])
+       .commit())
+```
+
+<Aside type="note">
+Atomic is not exactly-once end to end. A lost response plus a client retry still duplicates
+unless the `transactionId` is deterministic and inside the dedup window.
+</Aside>
+
+## `Admin`
+
+`client.admin` (property) or `Admin(http_client)`. Every method is `async` and returns the
+broker's JSON body verbatim. Methods taking `**params` build a query string, dropping `None`.
+
+### Resources
+
+| Method | Route |
+| --- | --- |
+| `get_overview()` | `GET /api/v1/resources/overview` |
+| `get_namespaces()` | `GET /api/v1/resources/namespaces` |
+| `get_tasks()` | `GET /api/v1/resources/tasks` |
+| `list_queues(**params)` | `GET /api/v1/resources/queues` |
+| `get_queue(name)` | `GET /api/v1/resources/queues/:name` |
+
+### Messages and traces
+
+| Method | Route |
+| --- | --- |
+| `list_messages(**params)` | `GET /api/v1/messages` |
+| `get_message(partition_id, transaction_id)` | `GET /api/v1/messages/:partitionId/:transactionId` |
+| `delete_message(partition_id, transaction_id)` | `DELETE /api/v1/messages/:partitionId/:transactionId` |
+| `retry_message(partition_id, transaction_id)` | `POST /api/v1/messages/:partitionId/:transactionId/retry` |
+| `get_trace_names(**params)` | `GET /api/v1/traces/names` |
+| `get_traces_by_name(trace_name, **params)` | `GET /api/v1/traces/by-name/:traceName` |
+| `get_traces_for_message(partition_id, transaction_id)` | `GET /api/v1/traces/:partitionId/:transactionId` |
+
+### Status and analytics
+
+| Method | Route |
+| --- | --- |
+| `get_status(**params)` | `GET /api/v1/status` |
+| `get_queue_stats(**params)` | `GET /api/v1/status/queues` |
+| `get_queue_detail(name, **params)` | `GET /api/v1/status/queues/:name` |
+| `get_analytics(**params)` | `GET /api/v1/status/analytics` |
+| `get_system_metrics(**params)` | `GET /api/v1/analytics/system-metrics` |
+| `get_worker_metrics(**params)` | `GET /api/v1/analytics/worker-metrics` |
+| `get_postgres_stats()` | `GET /api/v1/analytics/postgres-stats` |
+
+### Consumer groups
+
+| Method | Route |
+| --- | --- |
+| `list_consumer_groups()` | `GET /api/v1/consumer-groups` |
+| `get_consumer_group(name)` | `GET /api/v1/consumer-groups/:name` |
+| `get_lagging_consumers(min_lag_seconds=60)` | `GET /api/v1/consumer-groups/lagging?minLagSeconds=` |
+| `delete_consumer_group_for_queue(consumer_group, queue_name, delete_metadata=True)` | `DELETE /api/v1/consumer-groups/:group/queues/:queue` |
+| `seek_consumer_group(consumer_group, queue_name, options)` | `POST /api/v1/consumer-groups/:group/queues/:queue/seek` |
+| `refresh_consumer_stats()` | `POST /api/v1/stats/refresh` |
+
+`seek_consumer_group` posts `options` verbatim: `{"toEnd": True}` or `{"timestamp": "<RFC3339>"}`.
+
+### System
+
+| Method | Route |
+| --- | --- |
+| `health()` | `GET /health` |
+| `metrics()` | `GET /metrics` |
+| `get_maintenance_mode()` | `GET /api/v1/system/maintenance` |
+| `set_maintenance_mode(enabled)` | `POST /api/v1/system/maintenance` |
+| `get_pop_maintenance_mode()` | `GET /api/v1/system/maintenance/pop` |
+| `set_pop_maintenance_mode(enabled)` | `POST /api/v1/system/maintenance/pop` |
+
+## Streaming SDK
+
+`Stream` builds an immutable operator chain over a queue and runs it against `/streams/v1/*`.
+Every combinator returns a new `Stream`.
+
+```python
+Stream.from_(client.queue("orders"), **options)   # or Stream.from_queue(...)
+```
+
+| Group | Methods |
+| --- | --- |
+| Stateless | `map(fn)`, `filter(predicate)`, `flat_map(fn)` |
+| Keying | `key_by(fn)` (at most one, must precede window / reduce / gate) |
+| Windows | `window_tumbling(**opts)`, `window_sliding(**opts)`, `window_session(**opts)`, `window_cron(**opts)` (at most one) |
+| Reduce | `reduce(fn, initial=None)`, `aggregate(extractors)` (require a preceding window; at most one) |
+| Gate | `gate(fn)` (at most one, incompatible with windowing and reduce) |
+| Sink | `to(sink_queue_builder, partition=None)`, `foreach(fn)` (must be last in the chain) |
+| Terminal | `run(query_id, url, **opts)` |
+
+Window keyword arguments mirror the JavaScript names in snake_case and are converted before
+they reach the wire. `token_bucket_gate(...)` and `sliding_window_gate(...)` return ready-made
+gate functions.
+
+### `run(query_id, url, **opts)`
+
+`async`, returns a `Runner`. `query_id` and `url` are positional-or-keyword and both required.
+An empty `query_id` raises `ValueError("run requires query_id=...")`.
+
+| Option | Default |
+| --- | --- |
+| `batch_size` | `200` |
+| `max_partitions` | `4` |
+| `max_wait_millis` | `1000` |
+| `subscription_mode` | `None` (`'all'` \| `'new'`) |
+| `subscription_from` | `None` (ISO timestamp or `'now'`) |
+| `consumer_group` | `streams.<query_id>` |
+| `reset` | `False` (wipe state on a config-hash mismatch) |
+| `on_error` | `None` (`callable(err, ctx)`) |
+| `bearer_token` | `None` |
+| `logger` | `None` |
+
+Options are passed as snake_case and mapped onto the runner's camelCase keys internally. The
+chain shape is fingerprinted into a config hash; re-deploying a different chain under the same
+`query_id` is rejected at registration unless `reset=True`. Only operator kinds and their
+structural config are hashed, not the bodies of your functions.
+
+`Runner` exposes `await stop()` and `metrics()`.
+
+## Logging
+
+Off unless `QUEEN_CLIENT_LOG=true` is set in the environment. Levels are emitted through the
+module logger in `queen.utils.logger`.
+
+## Errors
+
+HTTP failures raise `httpx` exceptions; the client attaches the parsed body's `code` to the
+exception when present. The proxy codes are `rate_limited` and `quota_exceeded` on 429, and
+`cluster_suspended`, `storage_quota_exceeded`, `feature_gated`, `forbidden` on 403. A `204`
+response yields `None`: the broker sends no body at all on `204`.
+
+## Same surface, other languages
+
+<CardGrid>
+  <LinkCard href="/reference/sdk/javascript" title="JavaScript" description="Same builder chain, camelCase, plus a hostHeader option." />
+  <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute()." />
+  <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
+  <LinkCard href="/reference/sdk/cpp" title="C++" description="Single-header, thread-pool consumers." />
+  <LinkCard href="/reference/queenctl" title="queenctl" description="The same operations from a shell." />
+</CardGrid>

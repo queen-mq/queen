@@ -1,0 +1,222 @@
+---
+title: Configuration
+description: "How the broker reads its environment: one strict boolean parser, four fatal boot errors, the effective-config block it prints at startup, and the handful of knobs worth touching."
+type: how-to
+tier: operate
+sidebar:
+  order: 4
+sourceOfTruth:
+  - server/src/config.rs
+  - server/src/main.rs
+  - server/src/obs.rs
+  - server/src/schema.rs
+  - server/src/fusion.rs
+  - server/src/migrate.rs
+  - server/src/handlers/static_files.rs
+---
+
+There is no configuration file and there are no command-line flags. Every knob is
+an environment variable, read once by `config::load()` before the HTTP listener
+binds. There is no reload: changing a variable means restarting the process.
+
+The binary accepts exactly one argument, the subcommand `migrate`, and it exists
+only to tell you that offline migration was retired with the previous storage
+engine. It logs two errors and exits 1 without opening a database connection.
+
+The design goal of the configuration layer is that a broker never runs in a state
+you did not ask for. That produces two behaviours worth understanding before you
+write a deployment manifest: a strict parser for booleans, and a startup block
+that prints what was actually understood.
+
+## One boolean parser, three outcomes
+
+Every boolean in the broker resolves through the same function, so `=on`, `=1`
+and `=true` mean the same thing everywhere. Accepted spellings are `true/false`,
+`1/0`, `yes/no`, `on/off`, case-insensitive, with surrounding whitespace trimmed.
+
+| Value | Result |
+| --- | --- |
+| A recognised spelling | Used. |
+| Unset, or present but empty or whitespace-only | The documented default. `JWT_ENABLED=` in a Compose file means "leave it alone", not `false`. |
+| Anything else | **Fatal.** The process logs `FATAL: JWT_ENABLED="maybe" is not a boolean (expected true/false, 1/0, yes/no, on/off)` and exits 1. |
+
+That third row is the whole point. The alternative failed in both directions: a
+permissive parser could turn a typo into an accidental authentication *enable*,
+while a strict parser with a silent fallback turned `JWT_ENABLED=1` into a broker
+running with authentication **off** and nothing in the log. Refusing to guess is
+the only outcome that is safe in both directions.
+
+Three booleans are read outside `config.rs` and are consulted lazily —
+`QUEEN_LOG_JSON`, `QUEEN_APPLY_SCHEMA`, `QUEEN_V2_BUNDLE_LOG`. They are validated
+eagerly at the same moment as everything else, so every boolean mistake in a
+deployment surfaces on the same boot with the same message rather than hours
+later.
+
+<Aside type="caution">
+**Numbers are not strict.** An unparseable integer or float silently resolves to
+its default. `DB_POOL_SIZE=16O` — with a letter O — yields 160, not an error.
+Several numeric knobs are also clamped after parsing: interval and size knobs are
+floored at 1, and `STATS_INTERVAL_MS` and `METRICS_FLUSH_MS` are floored at
+1000 ms, with a below-floor value raised silently. The protection against a typo
+in a number is the boot block below, not the parser.
+</Aside>
+
+Strings behave differently again: a present-but-empty string is kept verbatim
+rather than treated as unset. That is deliberate, and it is how
+`JWT_SKIP_PATHS=""` clears the default skip list instead of restoring it. The one
+exception is `PG_DATABASE`, which resolves through a non-empty chain —
+`PG_DATABASE`, then the legacy `PG_DB`, then `postgres` — so an explicitly empty
+value falls through instead of naming a database called `""`.
+
+## The broker prints its effective configuration
+
+After the JWT configuration is validated and before any background service
+starts, the broker emits one block per subsystem on the `boot` target, carrying
+the values it resolved rather than the values you wrote:
+
+```text
+config: server    config: postgres    config: auth       config: sync
+config: engine    config: flow        config: jobs       config: file_buffer
+config: security  config: logging
+```
+
+Read that block first whenever a setting appears not to have taken effect. A
+misspelled variable shows up as a default; a value that arrived through a legacy
+alias shows up under the new name; a knob you thought you set shows up with the
+old value. All three are invisible if you only look at behaviour.
+
+Secrets are masked, never printed. `JWT_SECRET`, `PG_PASSWORD`,
+`QUEEN_ENCRYPTION_KEY` and `QUEEN_SYNC_SECRET` render as `<unset>` or
+`<set:64 chars>` — enough to tell "I forgot to mount the secret" from "I mounted
+the wrong one" without putting key material into a log shipper.
+
+```bash
+docker logs queen 2>&1 | grep 'config:'
+```
+
+Set `QUEEN_LOG_JSON=1` to get the same content as one JSON object per line for a
+structured log shipper.
+
+## What kills the boot
+
+The broker prefers to die at startup over serving in a state you did not ask for.
+Four things exit 1:
+
+1. An unparseable boolean, as above.
+2. `JWT_ENABLED=true` with no usable key material for the configured algorithm,
+   or an algorithm the validator does not recognise. The message names the
+   missing credential.
+3. A schema apply failure — unless `QUEEN_APPLY_SCHEMA=0`, which skips the apply
+   entirely.
+4. Failure to bind `0.0.0.0:$PORT`.
+
+And one thing that does **not**:
+
+<Aside type="danger">
+A `QUEEN_ENCRYPTION_KEY` that is not exactly 64 hex characters logs a single
+warning and **disables encryption**. Queues flagged `encryptionEnabled` then
+store plaintext, and their pushes still return success. There is no error, no
+non-zero exit, and no per-request signal. Before you rely on at-rest encryption,
+confirm the boot line reads `encryption_key=<set:64 chars>` in the
+`config: security` block.
+</Aside>
+
+Note also what a *release* build does with a panic: `Cargo.toml` sets
+`panic = "abort"`, so a panic in any of the broker's detached background loops
+aborts the whole process rather than silently losing one subsystem. A panic hook
+emits a structured `ERROR` on the `panic` target first. Operationally that is the
+behaviour you want — the supervisor restarts the process, and startup recovery
+drains any spooled pushes — but it means "the broker is up" and "every background
+job is running" are the same statement.
+
+## The knobs that matter
+
+Most environment variables are measured engine tuning that should be left alone.
+In practice a deployment touches variables from these groups only.
+
+| Purpose | Variables |
+| --- | --- |
+| Reach PostgreSQL | `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` |
+| Size the pool, bound statements | `DB_POOL_SIZE`, `QUEEN_STMT_TIMEOUT_MS` |
+| Encrypt broker-to-PostgreSQL traffic | `PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED` |
+| Serve on a different port | `PORT` |
+| Accept larger bodies | `QUEEN_MAX_BODY_BYTES` |
+| Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
+| Run more than one broker | `QUEEN_MESH_PEERS`, `QUEEN_MESH_PORT`, `QUEEN_SYNC_SECRET`, `QUEEN_SERVER_ID` |
+| Survive a database outage | `FILE_BUFFER_DIR` — must be writable and persistent |
+| Change the maintenance cadence | `RETENTION_INTERVAL`, `RETENTION_BATCH_SIZE` |
+| Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY` |
+| Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS`, `QUEEN_LOG_TOPN_QUEUES` |
+| Let a privileged role own the DDL | `QUEEN_APPLY_SCHEMA` |
+| Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER` |
+
+`LOG_LEVEL` accepts the full `EnvFilter` syntax, not only a bare level:
+`info,queen_seg::pop=debug` works. `RUST_LOG` takes precedence over it, and an
+unparseable filter falls back to `info`.
+
+`QUEEN_SERVER_ID` names this instance in mesh heartbeats and peer statistics.
+Unset, the broker uses `HOSTNAME`; with neither, it generates `queen-<8 hex>`.
+Nothing routes on the value, but it is what makes a peer list readable.
+
+## Names with a history
+
+Several settings are reachable under two names. Both read the same value; the
+precedence is fixed and not always the newer name.
+
+| Setting | Names | Precedence |
+| --- | --- | --- |
+| Mesh peer list | `QUEEN_MESH_PEERS`, `QUEEN_UDP_PEERS` | `QUEEN_MESH_PEERS` wins when non-empty. The transport is framed TCP; only the variable name is a survivor of the UDP era. |
+| Mesh port | `QUEEN_MESH_PORT`, `QUEEN_UDP_NOTIFY_PORT` | `QUEEN_MESH_PORT` wins. Default 6633. |
+| Database name | `PG_DATABASE`, `PG_DB` | `PG_DATABASE`, then `PG_DB`, then `postgres`. |
+| Pop long-poll timeout | `DEFAULT_TIMEOUT`, `POP_DEFAULT_TIMEOUT_MS` | **`DEFAULT_TIMEOUT` wins.** Setting only `POP_DEFAULT_TIMEOUT_MS` has no effect if `DEFAULT_TIMEOUT` is also set. Default 30000 ms. |
+
+## Variables that do nothing
+
+Three categories, and the difference between them matters when you inherit a
+manifest from an older deployment.
+
+**Experiment-only overrides.** The fusion and adaptive-concurrency engine
+self-tunes; its knobs exist so a benchmark can pin a value, and the source states
+explicitly that they are not part of the product contract:
+`QUEEN_V2_FUSION_SHARDS`, `QUEEN_V2_FUSION_FRAMES`, `QUEEN_V2_FUSION_HOLD_MS`,
+`QUEEN_V2_FUSION_MAX_INFLIGHT`, `QUEEN_V2_BUNDLE_MAX`, `QUEEN_V2_BUNDLE_LOG`,
+`QUEEN_V2_FUSION_MIN_FRAMES`, `QUEEN_V2_FUSION_MIN_WAIT_MS`,
+`QUEEN_V2_ZSTD_LEVEL`, and the Vegas bounds
+`QUEEN_SEG_{PUSH,POP}_{MIN,INIT,MAX}` with `QUEEN_VEGAS_ALPHA` /
+`QUEEN_VEGAS_BETA`. Setting them is supported; treating a value you found in a
+blog post as a tuning recommendation is not.
+
+**Read but inert.** `RETENTION_PARALLELISM` is parsed and printed in the boot
+`config: jobs` line, but the log engine's maintenance cycle has no work for it:
+retention runs one bounded step at a time. It is kept for configuration
+compatibility. `PARTITION_CLEANUP_DAYS` used to be in this list and is now live —
+see [Retention and disk](/selfhost/retention).
+
+**Not read at all.** `QUEEN_STATIC_DIR` configures nothing. The dashboard is
+compiled into the binary with `rust_embed` and there is no runtime static-directory
+override, so the published image deliberately does not set the variable — an
+environment variable that configures nothing is worse than an absent one.
+
+The full list of every variable with the default the code applies is generated
+from `config.rs` at build time; see [Reference](/reference). If a variable is not
+in that table and not in the three categories above, the broker does not read it.
+
+## Related
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/postgres"
+    title="PostgreSQL"
+    description="Pool sizing against max_connections, the statement-timeout mechanism, and running with QUEEN_APPLY_SCHEMA=0."
+  />
+  <LinkCard
+    href="/selfhost/ha"
+    title="High availability"
+    description="The mesh variables, what a lost frame costs, and why the mesh port must be firewalled."
+  />
+  <LinkCard
+    href="/reference"
+    title="Reference"
+    description="The generated variable table, the route table, and the defaults page for values where two numbers circulate."
+  />
+</CardGrid>

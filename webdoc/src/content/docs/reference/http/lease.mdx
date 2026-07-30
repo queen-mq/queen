@@ -1,0 +1,117 @@
+---
+title: "POST /api/v1/lease/:leaseId/extend"
+description: "Extending a lease while a handler is still working: the body, the response's three expiry keys, and what a failed extension means for the batch."
+type: reference
+sidebar:
+  order: 8
+  label: lease extend
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/sql/procedures/044_log_ack.sql
+verifiedBy:
+  - clients/client-js/test-v2/consume.js
+---
+
+A pop hands out a lease with a fixed lifetime. When the lease expires without an ack, the batch
+becomes claimable again and redelivers, which is correct for a dead consumer and wrong for a slow
+one. This route pushes the deadline out while the handler is still working. Access level
+**read-write**.
+
+The `:leaseId` in the path is the `leaseId` the pop returned. It is minted by the broker, never
+supplied by a client.
+
+## Request
+
+```json
+{ "seconds": 120 }
+```
+
+| Field | Type | Required | Default |
+| --- | --- | --- | --- |
+| `seconds` | integer | no | `60` |
+
+An empty body, a body that is not JSON, and a body without `seconds` all fall back to **60
+seconds**. There is no 400 for a malformed body on this route.
+
+The new expiry is `now + seconds`, and renewal takes the **later** of that and the current
+expiry: extending never shortens a lease. Values below 1 are clamped to 1 second.
+
+A multi-partition pop returns one lease id covering every partition it claimed, so one call
+renews all of them: the renewal updates every live lease held by that id.
+
+```bash
+curl -sS -X POST http://localhost:6632/api/v1/lease/0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90/extend -H 'content-type: application/json' -d '{"seconds":120}'
+```
+
+## Response
+
+`200 OK`:
+
+```json
+{
+  "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
+  "success": true,
+  "renewed": 1,
+  "newExpiresAt": "2026-07-30T11:06:44.512873Z",
+  "expiresAt": "2026-07-30T11:06:44.512873Z",
+  "lease_expires_at": "2026-07-30T11:06:44.512873Z"
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `leaseId` | string | echoed from the path |
+| `success` | boolean | `true` when `renewed > 0` |
+| `renewed` | integer | how many `(partition, group)` leases this call extended |
+| `newExpiresAt` | string or `null` | the **earliest** expiry among the renewed leases |
+| `expiresAt` | string or `null` | the same value |
+| `lease_expires_at` | string or `null` | the same value again |
+
+The three expiry keys carry one identical value. They exist because different clients read
+different key names; use whichever you like, and do not read a difference into them. The
+timestamp reports the earliest deadline across the renewed leases, which is exactly what you need
+to schedule the next renewal.
+
+Only **live** leases are renewed: rows whose expiry is in the future and whose holder is this
+lease id. An expired lease is not resurrected.
+
+### Status codes
+
+| Code | When |
+| --- | --- |
+| `200` | the renewal ran, whether or not it renewed anything |
+| `403` | authentication is on and the token has no `read-write` role |
+| `500` | no database connection was available (`{"error":"pool"}`), or the renewal query failed (`{"error":"renew failed: …"}`) |
+
+<Aside type="caution">
+HTTP 200 does **not** mean the lease was extended. An unknown, expired or foreign lease id
+returns `200` with `success: false`, `renewed: 0` and all three timestamps `null`. Some client
+helpers report their own success on the HTTP status alone; the authoritative signal is `renewed`.
+</Aside>
+
+## What a failed extension means
+
+`renewed: 0` means no live lease with that id exists any more. Concretely:
+
+- The lease already expired. The batch is claimable again, and another worker in the group may
+  already have it.
+- The lease was released by an ack, including a nack, which releases it too.
+- The lease id belongs to another tenant, in a multi-tenant deployment. That case is deliberately
+  indistinguishable from an expired lease, so a leaked lease id cannot be used to probe for
+  existence.
+
+What to do about it depends on where your handler is:
+
+- **Still working?** Stop. Whatever you produce now may be produced again by the worker that
+  re-claimed the batch. If your side effects are idempotent, finishing is harmless; if they are
+  not, abandon the work and let the redelivery own it.
+- **Finished and about to ack?** Acking with that `leaseId` returns `success: false` and
+  `invalid or expired lease`, and the cursor does not move. Acking *without* a `leaseId` skips
+  lease validation and can advance the cursor while another worker holds the batch. Occasionally
+  that is what you want, usually it is a way to lose the other worker's progress. Prefer letting
+  the redelivery happen.
+
+Extending is cheap; discovering a lost lease after an hour of work is not. Renew on a timer at a
+fraction of the lease duration rather than once near the end, and size `leaseSeconds` on the
+[pop](/reference/http/pop) to your realistic worst-case handler time so renewal is an exception
+rather than the mechanism.

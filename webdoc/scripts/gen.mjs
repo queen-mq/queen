@@ -16,6 +16,8 @@ const GENERATORS = [
   "gen-config.mjs",
   "gen-metrics.mjs",
   "gen-proxy-routes.mjs",
+  "gen-openapi.mjs",
+  "gen-charts.mjs",
   "gen-snippets.mjs",
 ];
 

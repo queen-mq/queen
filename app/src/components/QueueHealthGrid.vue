@@ -29,9 +29,14 @@
     </template>
 
     <!-- empty state -->
-    <div v-else-if="!queues.length" class="qhg-empty">
+    <div v-else-if="!queues.length">
+      <!-- The slot owns the whole block, `.empty-state` padding included: a
+           wrapper that padded too meant the host view's empty state sat in
+           96px of air while every other empty state in the app sat in 48. -->
       <slot name="empty">
-        <p>No queues match your filters.</p>
+        <div class="empty-state">
+          <h3>No queues match your filters</h3>
+        </div>
       </slot>
     </div>
 
@@ -432,13 +437,9 @@ const displayed = computed(() => {
 }
 .qaction svg { width: 12px; height: 12px; }
 
-/* empty state */
-.qhg-empty {
-  padding: 48px 16px;
-  text-align: center;
-  color: var(--text-mid);
-  font-size: 13px;
-}
+/* Empty state: shared `.empty-state` block from style.css, supplied by the
+   host view through the #empty slot. Nothing local — the wrapper must not
+   pad, or the block pads twice. */
 
 /* responsive: hide hot/parts at narrow widths */
 @media (max-width: 1000px) {

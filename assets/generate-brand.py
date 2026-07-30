@@ -73,6 +73,16 @@ apple = contain(WHITE, 180, bg=DARK, pad=0.14)
 save(apple, 'docs/assets/apple-touch-icon.png')
 save(apple, 'webdoc/public/apple-touch-icon.png')
 
+print('badge (hand-made master, copied verbatim to every surface that shows it)')
+# Not derived from the line-marks: this is its own master. It is copied rather
+# than regenerated so the dashboard sidebar, the docs header and assets/ can
+# never drift apart — they were three hand-kept copies before.
+import shutil
+for dest in ('app/public/queen-badge-open.svg', 'webdoc/public/queen-badge-open.svg'):
+    out = P(dest); os.makedirs(os.path.dirname(out), exist_ok=True)
+    shutil.copyfile(P('assets/queen-badge-open.svg'), out)
+    print('  ', dest)
+
 print('nav / sidebar / login marks (white, transparent)')
 save(contain(WHITE, 64), 'docs/assets/queen_head_64.png')
 save(contain(WHITE, 64), 'webdoc/public/queen_head_64.png')

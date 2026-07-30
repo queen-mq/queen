@@ -1,111 +1,307 @@
 ---
+import { Code } from "astro:components";
 import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
 import { config } from "virtual:nimbus/config";
+import pushRaw from "../content/partials/snippets/js-push.mdx?raw";
+import popRaw from "../content/partials/snippets/js-pop.mdx?raw";
 
-const tiers = [
+/**
+ * The landing page.
+ *
+ * The code samples are pulled out of the generated snippet partials rather than
+ * retyped, so the front page cannot drift from the test suite either. Imported
+ * `?raw` so Vite resolves them at build time and tracks them for hot reload.
+ * Reading the file at runtime would look in the bundled output, not the source.
+ * See webdoc/scripts/gen-snippets.mjs.
+ */
+function snippet(raw: string, id: string): string {
+  const fenced = raw.match(/```[a-z]*[^\n]*\n([\s\S]*?)```/);
+  if (!fenced) throw new Error(`snippet ${id} has no fenced block`);
+  return fenced[1].trimEnd();
+}
+
+// The same pair Nimbus configures for MDX code blocks, with defaultColor off:
+// each span then carries the light colour plus a `--shiki-dark` custom
+// property, and globals.css flips it under [data-mode="dark"]. Using Astro's
+// default here would give the landing page a second, mismatched code theme.
+const SHIKI = { light: "github-light", dark: "github-dark" } as const;
+
+const produce = snippet(pushRaw, "js-push");
+const consume = snippet(popRaw, "js-pop");
+
+const differentiators = [
   {
-    href: "/start",
-    eyebrow: "Start here",
-    title: "What Queen is, and whether you want it",
-    body: "The problem it was built for, the eight things it does differently, and an honest list of what it does not do.",
+    title: "One ordered lane per entity",
+    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. Ten thousand ordered lanes is a normal number here, and a consumer stuck on one never blocks another.",
   },
   {
-    href: "/use",
-    eyebrow: "Use Queen",
-    title: "Build on it",
-    body: "The model in one page, then six client SDKs, the plain HTTP API, and examples extracted from the test suites that run them.",
+    title: "No rebalancing, because there is nothing to rebalance",
+    body: "The broker holds no cluster membership and no partition assignments; clients hold no coordination state. You scale by starting another copy against the same database, and a restarting worker costs nobody a pause.",
   },
   {
-    href: "/selfhost",
-    eyebrow: "Self-hosting",
-    title: "Run it yourself",
-    body: "One binary and one PostgreSQL. Configuration, high availability, security, observability, retention — and how to run it multi-tenant.",
+    title: "PostgreSQL is the storage engine",
+    body: "Durability, replication, backup, point-in-time recovery and SQL introspection are the ones you already operate. There is no second data system to learn, size, or lose.",
   },
   {
-    href: "/internals",
-    eyebrow: "Internals",
-    title: "Understand how it works",
-    body: "Segments, offsets, the life of a push and of a pop, deduplication, flow control, and the schema underneath.",
+    title: "Acknowledgement is an offset commit",
+    body: "Consumption state is one cursor per partition and consumer group. There is no per-message delivery record to store, scan or clean up, which is why ten thousand partitions stay cheap.",
+  },
+  {
+    title: "Exactly the semantics you already know",
+    body: "Offsets, consumer groups and replay from Kafka; leases, nacks and a dead-letter queue from RabbitMQ. Deliberately both, because real pipelines need both.",
+  },
+  {
+    title: "Plain HTTP, five SDKs, one binary",
+    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client, and the dashboard ships inside the same executable.",
   },
 ];
 
 const proof = [
-  { figure: "51.8B", label: "messages in a 24-hour soak, explicit acks, zero restarts" },
-  { figure: "1000", label: "FIFO partitions consumed in order, zero order violations" },
-  { figure: "1", label: "stateless binary next to the PostgreSQL you already run" },
+  {
+    figure: "51.8B",
+    unit: "messages",
+    body: "24 hours of continuous load at ~600k msg/s per side with explicit acknowledgement, 0.00012% errors, zero restarts, broker memory flat.",
+    href: "/benchmarks/soak-24h",
+  },
+  {
+    figure: "0",
+    unit: "order violations",
+    body: "1,000 partitions through a four-stage pipeline at 25k events/s: 88,503,408 messages verified, zero duplicates, zero gaps.",
+    href: "/benchmarks/ordered-pipeline",
+  },
+  {
+    figure: "1M",
+    unit: "msg/s per side",
+    body: "The ceiling, measured with auto-ack and deduplication off, 99.914% of what was offered. A lab number, published with its conditions.",
+    href: "/benchmarks/peak",
+  },
+];
+
+const notFor = [
+  "Global total ordering. Order is per partition, in commit order, never across a queue.",
+  "Priority or deadline scheduling. Nothing overtakes anything inside a partition.",
+  "Unbounded parallelism inside one consumer group. One in-flight leased batch per partition, so the partition count is the ceiling.",
+  "Surviving a long database outage. The disk spool absorbs a blip, not an afternoon. PostgreSQL is one failure domain.",
 ];
 ---
 
 <BaseLayout title={config.title} description={config.description}>
   <div class="flex flex-col min-h-screen">
     <Header />
-    <main class="flex-1 mx-auto max-w-4xl w-full px-6 py-20">
-      <p class="text-sm font-medium text-muted-foreground">Queen MQ 1.0</p>
-      <h1
-        class="mt-2 text-foreground leading-tight"
-        style="font-size: var(--nb-h1-size); font-weight: var(--nb-h1-weight); letter-spacing: var(--nb-h1-tracking);"
-      >
-        Ordered partitions, on Postgres.
-      </h1>
-      <p class="mt-4 max-w-2xl text-[1.0625rem] text-muted-foreground leading-relaxed">
-        Queen gives you as many FIFO partitions as you have entities — created on first
-        push, so a slow consumer on one never stalls another — plus consumer groups with
-        replay and transactional delivery. Clients and broker are stateless: no
-        rebalancing, no cluster, no JVM. Storage is the database you already operate.
-      </p>
 
-      <div class="mt-8 flex flex-wrap gap-3">
-        <a
-          href="/start/quickstart"
-          class="rounded-lg bg-foreground px-4 py-2 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
+    <main class="flex-1 w-full">
+      {/* Hero */}
+      <section class="mx-auto max-w-5xl w-full px-6 pt-20 pb-16">
+        <p class="text-sm font-medium text-muted-foreground">
+          Queen MQ 1.0 · Apache 2.0
+        </p>
+        <h1
+          class="mt-3 max-w-3xl text-foreground leading-[1.05]"
+          style="font-size: clamp(2.25rem, 5vw, 3.5rem); font-weight: var(--nb-h1-weight); letter-spacing: -0.02em;"
         >
-          Quickstart
-        </a>
-        <a
-          href="/start"
-          class="rounded-lg border border-border px-4 py-2 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
-        >
-          Why Queen exists
-        </a>
-      </div>
+          Ordered partitions, on the Postgres you already run.
+        </h1>
+        <p class="mt-6 max-w-2xl text-lg text-muted-foreground leading-relaxed">
+          Queen is a message queue that gives every entity its own FIFO lane, created on
+          first push, so a slow consumer on one never stalls another. Consumer groups,
+          replay, transactional handoff and a dead-letter queue come with it. One stateless binary next to
+          your database. No cluster, no rebalancing, no JVM.
+        </p>
 
-      <div class="mt-14 grid grid-cols-1 gap-6 sm:grid-cols-3">
-        {
-          proof.map((p) => (
-            <div>
-              <div class="text-2xl font-semibold text-foreground">{p.figure}</div>
-              <div class="mt-1 text-sm text-muted-foreground leading-relaxed">{p.label}</div>
+        <div class="mt-9 flex flex-wrap items-center gap-3">
+          <a
+            href="/start/quickstart"
+            class="rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
+          >
+            Push your first message
+          </a>
+          <a
+            href="/start/why"
+            class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
+          >
+            Why it exists
+          </a>
+          <a
+            href="https://github.com/queen-mq/queen"
+            class="px-2 py-2.5 text-sm text-muted-foreground no-underline transition-colors hover:text-foreground"
+          >
+            Source on GitHub →
+          </a>
+        </div>
+      </section>
+
+      {/* The shape of the thing */}
+      <section class="mx-auto max-w-5xl w-full px-6 pb-16">
+        <div class="rounded-xl border border-border bg-[#141415] p-4 sm:p-6">
+          <img
+            src="/queen-partitions.svg"
+            alt="Producers push to one queue, agent-tasks, split into ordered partitions, one per agent session. Two consumer groups, an agent runner and a tracer, each receive every message. One slow session stalls only its own partition."
+            class="w-full h-auto"
+            width="1280"
+            height="680"
+            loading="lazy"
+            decoding="async"
+          />
+        </div>
+        <p class="mt-3 text-sm text-muted-foreground">
+          One queue, one ordered lane per session, two consumer groups reading independently.
+          The slow lane stalls by itself.
+        </p>
+      </section>
+
+      {/* Code */}
+      <section class="mx-auto max-w-5xl w-full px-6 pb-20">
+        <h2 class="text-xl font-semibold text-foreground">It looks like this</h2>
+        <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
+          Queues and partitions are created on first use, so there is nothing to provision
+          before the first line runs.
+        </p>
+
+        <div class="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div class="rounded-lg border border-border overflow-hidden">
+            <div class="border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground">
+              Produce
             </div>
-          ))
-        }
-      </div>
-      <p class="mt-4 text-sm text-muted-foreground">
-        Every number on this site names the run that produced it — see{" "}
-        <a href="/benchmarks">benchmarks</a>.
-      </p>
+            <div class="p-4 text-sm overflow-x-auto">
+              <Code code={produce} lang="js" themes={SHIKI} defaultColor={false} />
+            </div>
+          </div>
+          <div class="rounded-lg border border-border overflow-hidden">
+            <div class="border-b border-border px-4 py-2 text-xs font-medium text-muted-foreground">
+              Consume
+            </div>
+            <div class="p-4 text-sm overflow-x-auto">
+              <Code code={consume} lang="js" themes={SHIKI} defaultColor={false} />
+            </div>
+          </div>
+        </div>
 
-      <div class="mt-14 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {
-          tiers.map((t) => (
+        <p class="mt-3 text-sm text-muted-foreground">
+          Both blocks are extracted from files the test suite executes, not retyped.
+          <a href="/use/examples">Here is how that works</a>. There are SDKs for JavaScript, Python,
+          Go, PHP and C++, an operator CLI, and a
+          <a href="/reference/http">plain HTTP API</a> for everything else.
+        </p>
+      </section>
+
+      {/* Differentiators */}
+      <section class="border-t border-border">
+        <div class="mx-auto max-w-5xl w-full px-6 py-16">
+          <h2 class="text-xl font-semibold text-foreground">What makes it different</h2>
+          <div class="mt-8 grid grid-cols-1 gap-x-10 gap-y-8 sm:grid-cols-2">
+            {
+              differentiators.map((d) => (
+                <div>
+                  <h3 class="font-medium text-foreground">{d.title}</h3>
+                  <p class="mt-1.5 text-sm text-muted-foreground leading-relaxed">{d.body}</p>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      {/* Proof */}
+      <section class="border-t border-border">
+        <div class="mx-auto max-w-5xl w-full px-6 py-16">
+          <h2 class="text-xl font-semibold text-foreground">Measured, with the conditions attached</h2>
+          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
+            Every number on this site names the run that produced it. A figure without an
+            archived artifact recording its configuration does not get published here.
+          </p>
+
+          <div class="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-3">
+            {
+              proof.map((p) => (
+                <a
+                  href={p.href}
+                  class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
+                >
+                  <div class="text-3xl font-semibold text-foreground">{p.figure}</div>
+                  <div class="mt-0.5 text-xs uppercase tracking-wide text-muted-foreground">
+                    {p.unit}
+                  </div>
+                  <p class="mt-3 text-sm text-muted-foreground leading-relaxed">{p.body}</p>
+                </a>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      {/* Honesty */}
+      <section class="border-t border-border">
+        <div class="mx-auto max-w-5xl w-full px-6 py-16">
+          <h2 class="text-xl font-semibold text-foreground">What Queen is not</h2>
+          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
+            The fastest way to waste a week is to discover a limit after you have built on it.
+            These are the load-bearing ones.
+          </p>
+          <ul class="mt-6 max-w-3xl space-y-3">
+            {
+              notFor.map((n) => (
+                <li class="flex gap-3 text-sm text-muted-foreground leading-relaxed">
+                  <span class="mt-2 h-1 w-1 shrink-0 rounded-full bg-muted-foreground" />
+                  <span>{n}</span>
+                </li>
+              ))
+            }
+          </ul>
+          <p class="mt-6 text-sm">
+            <a href="/start/limits">The full list, including the sharp edges →</a>
+          </p>
+        </div>
+      </section>
+
+      {/* Start */}
+      <section class="border-t border-border">
+        <div class="mx-auto max-w-5xl w-full px-6 py-16">
+          <h2 class="text-xl font-semibold text-foreground">Start</h2>
+          <div class="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <a
-              href={t.href}
-              class="block rounded-lg border border-border p-5 transition-colors hover:border-border-strong no-underline"
+              href="/start/quickstart"
+              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
             >
-              <div class="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                {t.eyebrow}
-              </div>
-              <div class="mt-1.5 font-medium text-foreground">{t.title}</div>
-              <div class="mt-1 text-sm text-muted-foreground leading-relaxed">{t.body}</div>
+              <div class="font-medium text-foreground">Use it</div>
+              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
+                The model in one page, the SDKs, and worked examples.
+              </p>
             </a>
-          ))
-        }
-      </div>
+            <a
+              href="/selfhost"
+              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
+            >
+              <div class="font-medium text-foreground">Host it</div>
+              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
+                Deployment, PostgreSQL, high availability, security, operations.
+              </p>
+            </a>
+            <a
+              href="/internals"
+              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
+            >
+              <div class="font-medium text-foreground">Understand it</div>
+              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
+                Segments, offsets, the push and pop paths, the schema underneath.
+              </p>
+            </a>
+          </div>
+        </div>
+      </section>
 
-      <div class="mt-14 border-t border-border pt-6 text-sm text-muted-foreground">
-        Apache 2.0 · <a href="https://github.com/queen-mq/queen">source on GitHub</a> ·{" "}
-        <a href="/reference">API reference</a>
-      </div>
+      <footer class="border-t border-border">
+        <div
+          class="mx-auto max-w-5xl w-full px-6 py-8 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground"
+        >
+          <span>Apache 2.0</span>
+          <a href="https://github.com/queen-mq/queen">GitHub</a>
+          <a href="/reference">Reference</a>
+          <a href="/benchmarks">Benchmarks</a>
+          <a href="/reference/openapi">OpenAPI</a>
+          <span class="ml-auto">Built at Smartness.</span>
+        </div>
+      </footer>
     </main>
   </div>
 </BaseLayout>

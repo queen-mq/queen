@@ -15,47 +15,36 @@
     </div>
 
     <!-- Filters -->
-    <div class="card" style="margin-bottom:16px;">
-      <div class="card-body an-filters">
+    <div class="card filters">
+      <div class="card-body filter-rows">
 
-        <div class="an-row">
-          <span class="label-xs">Time range</span>
-          <div class="seg">
-            <button
-              v-for="range in timeRanges"
-              :key="range.value"
-              :class="{ on: timeRange === range.value && !customMode }"
-              @click="selectQuickRange(range.value)"
-            >{{ range.label }}</button>
-            <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
+        <div class="filter-row">
+          <div class="filter-field">
+            <span class="label-xs">Range</span>
+            <div class="seg">
+              <button
+                v-for="r in timeRanges"
+                :key="r.value"
+                :class="{ on: selectedRange === r.value && !customMode }"
+                @click="selectQuickRange(r.value)"
+              >{{ r.label }}</button>
+              <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
+            </div>
           </div>
-          <span class="an-hint">applies to the flow chart, the range totals and the leaderboard</span>
+          <span class="filter-hint">applies to the flow chart, the range totals and the leaderboard</span>
         </div>
 
-        <div v-if="customMode" class="an-row an-row-sep">
-          <div class="an-field">
-            <span class="label-xs">From</span>
-            <input v-model="customFrom" type="datetime-local" class="input font-mono an-dt" />
-          </div>
-          <div class="an-field">
-            <span class="label-xs">To</span>
-            <input v-model="customTo" type="datetime-local" class="input font-mono an-dt" />
-          </div>
-          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
-          <span v-if="customError" class="an-invalid">{{ customError }}</span>
-        </div>
-
-        <div class="an-row an-row-end">
-          <div class="an-field an-field-col" style="width:192px;">
-            <span class="label-xs">Queue</span>
+        <div class="filter-row">
+          <div class="filter-field-col">
+            <label class="label-xs">Queue</label>
             <select v-model="queueFilter" class="input">
               <option value="">All queues</option>
               <option v-for="q in queues" :key="q.name" :value="q.name">{{ q.name }}</option>
             </select>
           </div>
 
-          <div class="an-field an-field-col" style="width:160px;">
-            <span class="label-xs">Namespace</span>
+          <div class="filter-field-col">
+            <label class="label-xs">Namespace</label>
             <select v-model="namespaceFilter" class="input">
               <option value="">All namespaces</option>
               <option v-for="ns in namespaceOptions" :key="ns.namespace" :value="ns.namespace">
@@ -64,8 +53,8 @@
             </select>
           </div>
 
-          <div class="an-field an-field-col" style="width:160px;">
-            <span class="label-xs">Task</span>
+          <div class="filter-field-col">
+            <label class="label-xs">Task</label>
             <select v-model="taskFilter" class="input">
               <option value="">All tasks</option>
               <option v-for="t in taskOptions" :key="t.task" :value="t.task">
@@ -77,42 +66,35 @@
           <button v-if="hasActiveFilter" class="btn btn-ghost" @click="clearFilters">Clear filters</button>
         </div>
 
+        <div v-if="customMode" class="filter-row filter-row-sep">
+          <div class="filter-field">
+            <span class="label-xs">From</span>
+            <input v-model="customFrom" type="datetime-local" class="input" />
+          </div>
+          <div class="filter-field">
+            <span class="label-xs">To</span>
+            <input v-model="customTo" type="datetime-local" class="input" />
+          </div>
+          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+          <span v-if="customError" class="filter-invalid">{{ customError }}</span>
+        </div>
+
         <!-- A filter the queue list could not be fetched for cannot be applied.
              Say so instead of showing tenant-wide numbers under a filter chip. -->
-        <div v-if="scopeUnavailable" class="panel-err an-row-sep">
+        <div v-if="scopeUnavailable" class="panel-err filter-row-sep">
           Namespace / task filtering needs the queue list, which failed to load
           ({{ queuesErrorText }}). The panels below are not narrowed to that filter.
         </div>
-        <div v-else-if="hasActiveFilter" class="an-row an-chips">
+        <div v-else-if="hasActiveFilter" class="filter-row an-chips">
           <span v-if="queueFilter" class="chip chip-ice">queue: {{ queueFilter }}</span>
           <span v-if="namespaceFilter" class="chip chip-ice">namespace: {{ namespaceFilter }}</span>
           <span v-if="taskFilter" class="chip chip-ice">task: {{ taskFilter }}</span>
-          <span class="an-hint">{{ scopedQueues.length }} queue{{ scopedQueues.length === 1 ? '' : 's' }} match</span>
+          <span class="filter-hint">{{ scopedQueues.length }} queue{{ scopedQueues.length === 1 ? '' : 's' }} match</span>
         </div>
       </div>
     </div>
 
     <!-- ===================== RANGE-BOUNDED PANELS ===================== -->
-
-    <div class="card card-accent" style="margin-bottom:16px;">
-      <div class="card-header">
-        <h3>Message flow over time</h3>
-        <span class="chip chip-mute">selected range</span>
-        <span class="muted">{{ stamp(ops) }}</span>
-      </div>
-      <div class="card-body">
-        <div v-if="opsFirstLoad" class="skeleton" style="height:280px;" />
-        <div v-else-if="opsUnavailable" class="panel-err">{{ opsErrorText }}</div>
-        <BaseChart
-          v-else-if="flowChart.labels.length"
-          type="line"
-          :data="flowChart"
-          :options="flowOptions"
-          height="280px"
-        />
-        <div v-else class="panel-msg">No traffic recorded in this range for the selected scope.</div>
-      </div>
-    </div>
 
     <div class="card" style="margin-bottom:16px;">
       <div class="card-header">
@@ -122,7 +104,7 @@
       </div>
       <div class="card-body">
         <div v-if="opsUnavailable" class="panel-err">{{ opsErrorText }}</div>
-        <div v-else class="an-stats-6">
+        <div v-else class="stat-grid stat-grid-6">
           <div class="stat">
             <div class="stat-label">Ingested</div>
             <div class="stat-value font-mono">{{ metric(rangeTotals.ingested) }}</div>
@@ -156,11 +138,32 @@
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <h3>Message flow over time</h3>
+        <span class="chip chip-mute">selected range</span>
+        <span class="muted">{{ stamp(ops) }}</span>
+      </div>
+      <div class="card-body">
+        <div v-if="opsFirstLoad" class="skeleton" style="height:280px;" />
+        <div v-else-if="opsUnavailable" class="panel-err">{{ opsErrorText }}</div>
+        <BaseChart
+          v-else-if="flowChart.labels.length"
+          type="line"
+          :data="flowChart"
+          :options="flowOptions"
+          height="280px"
+        />
+        <div v-else class="panel-msg">No traffic recorded in this range for the selected scope.</div>
+      </div>
+    </div>
+
     <div class="an-grid-2">
       <div class="card">
         <div class="card-header">
           <h3>Top queues by volume</h3>
           <span class="chip chip-mute">selected range</span>
+          <span class="muted">{{ stamp(ops) }}</span>
         </div>
         <div class="card-body">
           <div v-if="opsFirstLoad" class="skeleton" style="height:240px;" />
@@ -179,7 +182,9 @@
       <div class="card">
         <div class="card-header">
           <h3>Backlog split</h3>
-          <span class="chip chip-mute">now, not the range</span>
+          <span class="card-sub">the time range does not apply to these</span>
+          <span class="chip chip-mute">now</span>
+          <span class="muted">{{ stamp(queueList) }}</span>
         </div>
         <div class="card-body an-center">
           <div v-if="queuesFirstLoad" class="skeleton" style="height:240px; width:100%;" />
@@ -198,16 +203,17 @@
 
     <!-- ===================== SNAPSHOT PANEL ===================== -->
 
-    <div class="card" style="margin-top:16px;">
+    <div class="card">
       <div class="card-header">
         <h3>Backlog right now</h3>
-        <span class="chip chip-mute">live snapshot · the time range does not apply</span>
+        <span class="card-sub">the time range does not apply to these</span>
+        <span class="chip chip-mute">now</span>
         <span class="muted">{{ stamp(queueList) }}</span>
       </div>
       <div class="card-body">
         <div v-if="queuesFailed" class="panel-err">{{ queuesErrorText }}</div>
         <template v-else>
-          <div class="an-stats-4">
+          <div class="stat-grid stat-grid-4">
             <div class="stat">
               <div class="stat-label">Queues</div>
               <div class="stat-value font-mono">{{ queuesFirstLoad ? '—' : scopedQueues.length }}</div>
@@ -248,6 +254,7 @@ import {
 import { stateColor } from '@/composables/useChartTheme'
 import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
+import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
 
 // TENANT PAGE. Every source here is tenant-scoped broker-side:
@@ -269,7 +276,7 @@ const timeRanges = [
   { label: '7d', value: '7d' },
 ]
 
-const timeRange = ref('1h')
+const selectedRange = ref('1h')
 const customMode = ref(false)
 const customFrom = ref('')
 const customTo = ref('')
@@ -289,7 +296,7 @@ const QUICK_MINUTES = { '1h': 60, '6h': 360, '24h': 1440, '7d': 10080 }
 function currentRange() {
   if (customMode.value && appliedCustom.value) return appliedCustom.value
   const to = new Date()
-  const from = new Date(to.getTime() - (QUICK_MINUTES[timeRange.value] || 60) * 60_000)
+  const from = new Date(to.getTime() - (QUICK_MINUTES[selectedRange.value] || 60) * 60_000)
   return { from, to }
 }
 
@@ -298,8 +305,8 @@ const rangeLabel = computed(() => {
     const { from, to } = appliedCustom.value
     return `${from.toLocaleString()} → ${to.toLocaleString()}`
   }
-  const r = timeRanges.find(t => t.value === timeRange.value)
-  return `last ${r ? r.label : timeRange.value}`
+  const r = timeRanges.find(t => t.value === selectedRange.value)
+  return `last ${r ? r.label : selectedRange.value}`
 })
 
 // Live, not on-click: an invalid range explains itself as it is typed instead
@@ -309,7 +316,7 @@ const customRangeValid = computed(() => !customError.value)
 
 const selectQuickRange = (value) => {
   customMode.value = false
-  timeRange.value = value
+  selectedRange.value = value
   fetchAll()
 }
 
@@ -317,7 +324,7 @@ const toggleCustomMode = () => {
   customMode.value = !customMode.value
   if (customMode.value) {
     const now = new Date()
-    const from = new Date(now.getTime() - (QUICK_MINUTES[timeRange.value] || 60) * 60_000)
+    const from = new Date(now.getTime() - (QUICK_MINUTES[selectedRange.value] || 60) * 60_000)
     customTo.value = formatDateTimeLocal(now)
     customFrom.value = formatDateTimeLocal(from)
   } else {
@@ -429,15 +436,6 @@ const opsErrorText = computed(() => {
   if (ops.failed.value) return describeApiError(ops.error.value)
   return 'Cannot narrow to the selected namespace / task — the queue list is unavailable.'
 })
-
-const stamp = (panel) => {
-  if (panel.failed.value) {
-    return panel.lastUpdated.value
-      ? `stale · last good ${panel.lastUpdated.value.toLocaleTimeString()}`
-      : 'unavailable'
-  }
-  return panel.lastUpdated.value ? `as of ${panel.lastUpdated.value.toLocaleTimeString()}` : ''
-}
 
 /** A number we hold, or an em dash. Never a 0 standing in for "unknown". */
 const metric = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
@@ -587,59 +585,19 @@ const doughnutOptions = {
 </script>
 
 <style scoped>
-.scope-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  margin-bottom: 12px;
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-  background: var(--ink-2);
-  font-size: 11.5px;
-  color: var(--text-mid);
-}
-.scope-text { font-family: 'JetBrains Mono', monospace; color: var(--text-mid); }
-.scope-text strong { color: var(--text-hi); font-weight: 600; }
-.scope-sep { margin: 0 5px; color: var(--text-faint); }
-.scope-fill { flex: 1; }
-.scope-meta { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-low); }
+/* Everything shared with the other nine views now lives in style.css:
+   .scope-strip*, the .filter-* card family, .stat-grid*, .panel-err and
+   .panel-msg. What is left below is Analytics' own layout. */
 
-.an-filters { display: flex; flex-direction: column; gap: 14px; }
-.an-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.an-row-end { align-items: flex-end; }
-.an-row-sep { padding-top: 12px; border-top: 1px solid var(--bd); }
-.an-field { display: flex; align-items: center; gap: 8px; }
-.an-field-col { flex-direction: column; align-items: stretch; gap: 6px; }
-.an-dt { width: auto; font-size: 13px; }
-.an-hint { font-size: 11px; color: var(--text-low); }
-.an-invalid { font-size: 11.5px; color: var(--ember-400); }
+/* The secondary panel pair. Carries the 16px rhythm to the snapshot card
+   below it — separation is always a margin-bottom on the preceding block. */
+.an-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+
 .an-chips { gap: 8px; }
 .an-note { margin-top: 10px; font-size: 11.5px; color: var(--text-low); }
 .an-center { display: flex; align-items: center; justify-content: center; }
 
-.an-stats-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
-.an-stats-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-.an-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-
-/* Failure and emptiness must not look alike: one is "we do not know", the
-   other is "we know, and it is nothing". */
-.panel-msg { padding: 40px 0; text-align: center; font-size: 13px; color: var(--text-mid); }
-.panel-err {
-  padding: 12px 14px;
-  border: 1px solid var(--ember-bd);
-  border-radius: var(--r-card);
-  background: var(--ember-glow);
-  color: var(--ember-400);
-  font-size: 12.5px;
-}
-
 @media (max-width: 1100px) {
-  .an-stats-6 { grid-template-columns: repeat(3, 1fr); }
-  .an-stats-4 { grid-template-columns: repeat(2, 1fr); }
   .an-grid-2 { grid-template-columns: 1fr; }
-}
-@media (max-width: 640px) {
-  .an-stats-6, .an-stats-4 { grid-template-columns: repeat(2, 1fr); }
 }
 </style>

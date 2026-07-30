@@ -1,0 +1,335 @@
+---
+title: Messages and the dead-letter queue
+description: "Browsing messages, reading or deleting one by (partitionId, transactionId), replaying a dead-lettered message, and listing the DLQ."
+type: reference
+tier: use
+sidebar:
+  order: 11
+  label: Messages and DLQ
+sourceOfTruth:
+  - server/src/handlers/messages.rs
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/db.rs
+  - server/src/handlers/mod.rs
+  - server/sql/procedures/044_log_ack.sql
+  - server/sql/procedures/045_log_maintenance.sql
+  - server/sql/procedures/047_log_admin.sql
+verifiedBy:
+  - clients/client-js/test-v2/dlq.js
+  - queen_proxy/scripts/isolation-smoke.sh
+---
+
+These are inspection routes, not a consumption path. Live payloads live inside
+immutable, zstd-compressed segments, so reading one message means resolving an
+address to an offset, fetching the covering segment and decoding one frame. Plan
+for them to be used by an operator or a dashboard, not by a hot loop.
+
+Every per-message route is addressed by **two** path segments,
+`:partitionId/:transactionId`. The `partitionId` is the partition UUID echoed by
+push, pop and ack responses.
+
+<Aside type="caution">
+There is no single-segment `/api/v1/messages/:transactionId` route. A transaction
+id is only unique within a partition, so the broker has never exposed one; earlier
+documentation described a path that does not exist. Requests to it fall through to
+the SPA fallback handler, which answers a JSON `404` for anything under `/api/`.
+</Aside>
+
+## GET /api/v1/messages
+
+Browse messages with filters. All filters are optional.
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `queue` | none | Exact queue name. |
+| `partition` | none | Exact partition name. |
+| `namespace` (alias `ns`) | none | `ns` is folded into `namespace` when `namespace` is absent. |
+| `task` | none | Exact task. |
+| `status` | none | One of `pending`, `processing`, `completed`, `dead_letter`. |
+| `from` | `now() - 1 hour` | Inclusive of the exact timestamp. |
+| `to` | `now()` | Truncated to the minute, then `+1 minute`, compared with `<`, so the whole minute you name is included. |
+| `limit` | `200` | |
+| `offset` | `0` | |
+
+<Aside type="note">
+The default window is **the last hour**. A queue that has been quiet for two hours
+returns an empty list even though it holds a large backlog. Pass `from` explicitly
+whenever you are not looking at live traffic.
+</Aside>
+
+```json
+{
+  "messages": [
+    {
+      "id": "0198...",
+      "transactionId": "order-4471",
+      "txnHash": "9f2c...",
+      "partitionId": "0198...",
+      "queuePath": "orders/eu-1",
+      "queue": "orders",
+      "partition": "eu-1",
+      "namespace": "billing",
+      "task": "invoice",
+      "status": "pending",
+      "queueStatus": "pending",
+      "busStatus": { "consumedBy": 0, "totalGroups": 2 },
+      "traceId": null,
+      "producerSub": null,
+      "payloadAvailable": true,
+      "segment": { "seq": 8192, "frameIdx": 44 },
+      "createdAt": "2026-07-30T10:41:02.010Z",
+      "leaseExpiresAt": null,
+      "data": { "amount": 41 },
+      "payload": { "amount": 41 }
+    }
+  ],
+  "mode": { "hasQueueMode": true, "busGroupsCount": 2, "type": "hybrid" },
+  "total": 1
+}
+```
+
+How that body is produced, and what it implies:
+
+- **Per-message metadata comes from the hash sidecar.** SQL cannot see inside a
+  segment blob, so the listing is built from `queen.log_txns` exploded to frames.
+  `segment.seq` carries the covering segment's base offset and `segment.frameIdx`
+  carries `offset - base_offset`. Treat both as opaque.
+- **The broker fills in the payload.** Rows come back from SQL with
+  `payloadAvailable: false`, `id: null` and `transactionId: null`; the handler then
+  fetches each referenced segment once (cached per `(partitionId, seq)` so a page
+  inside one segment decodes it exactly once), decodes the frame, decrypts it if a
+  key is configured, and fills `data`, `payload`, `id`, `transactionId`, `traceId`,
+  `producerSub` and `isEncrypted`, flipping `payloadAvailable` to `true`. If the
+  segment has since been deleted by retention, the entry stays at
+  `payloadAvailable: false` with those fields null.
+- **Entries expire from the listing before the messages do.** A frame is listed
+  only while its `queen.log_txns` row survives, which is
+  `GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900)` seconds after the
+  push. Older messages are still stored, still consumable, and no longer
+  browsable here.
+- **`total` is the size of the page, not of the result set.** The handler sets it
+  to the length of the returned array. There is no total count; page with
+  `offset` until you get a short page.
+- **`status` is derived per frame:** `dead_letter` when a `queen.log_dlq` row
+  exists at that offset, else `completed` when the queue-mode cursor has passed it,
+  else `processing` when a lease is live, else `pending`.
+- `mode.type` is `queue`, `bus`, `hybrid` or `none`, detected from which consumer
+  groups have cursors on the partition.
+
+On a deployment that also holds legacy rows-engine queues, the log entries are
+appended after the rows page and capped at `limit` independently, so a combined
+page can hold up to twice `limit`.
+
+## GET /api/v1/messages/:partitionId/:transactionId
+
+Resolves one message and returns it with its management detail.
+
+Resolution order:
+
+1. Hash the transaction id (xxh3-128, big-endian; SQL never hashes) and probe
+   `queen.log_txns` for the offset.
+2. Find the covering segment for that offset, decode frame
+   `offset - base_offset`.
+3. If the `queen.log_txns` rows have been purged, fall back to a newest-first scan
+   of up to **5000** of the partition's segment blobs, decoding each until the
+   transaction id matches.
+
+The fallback is why an old message still resolves; it is also why this route can be
+expensive on a large partition. A message whose covering segment has been deleted
+by retention is a `404`: resolvable position, unrecoverable frame.
+
+```json
+{
+  "id": "0198...",
+  "transactionId": "order-4471",
+  "data": { "amount": 41 },
+  "payload": { "amount": 41 },
+  "traceId": null,
+  "producerSub": "svc-billing",
+  "createdAt": "2026-07-30T10:41:02.010Z",
+  "partitionId": "0198...",
+  "partition": "eu-1",
+  "isEncrypted": false,
+  "queue": "orders",
+  "queuePath": "orders/eu-1",
+  "namespace": "billing",
+  "task": "invoice",
+  "status": "processing",
+  "errorMessage": null,
+  "retryCount": 0,
+  "leaseExpiresAt": "2026-07-30T10:46:02.010Z",
+  "consumerGroups": [
+    { "name": "invoicer", "group": "invoicer", "consumed": false, "leaseExpiresAt": null }
+  ],
+  "mode": { "hasQueueMode": true, "busGroupsCount": 1, "type": "bus" }
+}
+```
+
+Details worth knowing:
+
+- `data` and `payload` are the same value, decoded from the frame. The broker
+  decrypts by sniffing the envelope shape whenever a key is configured, regardless
+  of the queue's stored `encryptionEnabled` flag, so messages written before the
+  flag was set still decode. `isEncrypted` reports the flag stored on the frame.
+- `retryCount` is `0` for any live message. The log engine counts retries per
+  (partition, group), not per message; the only per-message value that exists is
+  the counter snapshotted onto the DLQ row at dead-letter time, which is what this
+  field reports for a dead-lettered address.
+- `leaseExpiresAt` is the queue-mode group's lease. Per-group state is in
+  `consumerGroups`, where `consumed` is `committed >= offset` for that group.
+- `namespace` and `task` fall back to the dot-split of the queue name when the
+  queue row carries empty values.
+- The response also carries a `queueConfig` object with configuration read off the
+  queue row, including `leaseTime` and `retryLimit`.
+- `payload` is `null` for an empty frame; a frame that fails to decode is a `500`
+  (`frame decode failed`).
+
+## DELETE /api/v1/messages/:partitionId/:transactionId
+
+Access level `read-write`. This deletes a **dead-letter row**, nothing else. Live
+payloads are in immutable segments and cannot be deleted individually.
+
+```json
+{
+  "success": true,
+  "partitionId": "0198...",
+  "transactionId": "order-4471",
+  "message": "Message deleted successfully"
+}
+```
+
+Nothing matched is a `404`, not a `200` carrying `success: false`. A caller that
+ignores the body must not read a no-op as a deletion:
+
+```json
+{
+  "success": false,
+  "partitionId": "0198...",
+  "transactionId": "order-4471",
+  "error": "Message not found",
+  "message": "No dead-letter row for this address — live messages live in immutable segments and cannot be deleted"
+}
+```
+
+## POST /api/v1/messages/:partitionId/:transactionId/retry
+
+Access level `read-write`. Replays a dead-lettered message: re-pushes the
+`queen.log_dlq` payload snapshot to its own queue and partition, then drops the DLQ
+row. It works **only** for dead-lettered addresses; a live message has nothing to
+replay and returns the same `404` shape as `DELETE`.
+
+Two properties of the implementation you should rely on:
+
+- **The replay gets a fresh transaction id.** Reusing the original would be seen as
+  a duplicate by the dedup window and silently dropped, so the push path mints a
+  new one from the new message id. The replayed message is a new message; it will
+  not deduplicate against the original.
+- **The DLQ row is deleted only after the push is accepted.** A failed push leaves
+  the message dead-lettered rather than losing it.
+
+```json
+{
+  "success": true,
+  "queue": "orders",
+  "partition": "eu-1",
+  "replayedAs": {
+    "index": 0,
+    "message_id": "0198...",
+    "transaction_id": "0198...",
+    "queueName": "orders",
+    "status": "queued"
+  },
+  "dlqRowRemoved": true
+}
+```
+
+Failure modes are reported rather than swallowed. If the push is rejected the body
+carries `success: false` and `pushResult`, and says the message is still in the
+dead-letter queue. If the push succeeded but the DLQ cleanup failed, the body is
+`success: false` with `replayed: true` and `dlqRowRemoved: false`. The message now
+exists twice, once replayed and once still dead-lettered.
+
+On an encryption-enabled queue the snapshot is stored verbatim, so it is the
+encrypted envelope; the handler decrypts it before re-pushing and lets the push
+path re-encrypt, rather than double-encrypting.
+
+## GET /api/v1/dlq
+
+Lists dead-lettered messages. Payloads are stored as snapshots on the DLQ row, so
+no segment decode is involved.
+
+| Parameter | Default |
+| --- | --- |
+| `queue` | none |
+| `consumerGroup` | none |
+| `limit` | `100` |
+| `offset` | `0` |
+
+```json
+{
+  "messages": [
+    {
+      "id": "0198...",
+      "transactionId": "order-4471",
+      "partitionId": "0198...",
+      "queue": "orders",
+      "partition": "eu-1",
+      "consumerGroup": "invoicer",
+      "errorMessage": "Test error",
+      "retryCount": 3,
+      "data": { "amount": 41 },
+      "producerSub": null,
+      "createdAt": "2026-07-30T10:52:11.400Z",
+      "failedAt": "2026-07-30T10:52:11.400Z"
+    }
+  ],
+  "pagination": { "limit": 100, "offset": 0 },
+  "total": 1
+}
+```
+
+- Ordered by `failedAt` descending; `limit`/`offset` page the rows inside the query,
+  not the aggregate.
+- `createdAt` equals `failedAt`. The original enqueue time of a frame is not
+  recoverable from SQL, because blobs are opaque to it.
+- `producerSub` is always `null` for log-engine rows: it is not tracked on the DLQ
+  snapshot.
+- `retryCount` is the retry budget consumed at dead-letter time, falling back to
+  the queue's `retryLimit` for rows written before that snapshot existed.
+- `data` is decrypted on read when a key is configured. A payload that does not
+  sniff as an envelope, or fails to decrypt with the current key, is returned
+  exactly as stored (showing the envelope beats inventing a payload), and a
+  decrypted row is flagged with `isEncrypted: true`.
+- `total`, again, is the length of this page.
+
+Retention never purges `queen.log_dlq`. Dead-lettered messages stay until you
+delete or replay them, or the queue is deleted.
+
+## Ownership gating
+
+`GET`, `DELETE` and `POST .../retry` are addressed by a raw partition UUID, and the
+resolver queries carry no tenant. With `QUEEN_TENANCY_HEADER` enabled the broker
+therefore checks partition ownership **before** reading any payload, and a
+partition belonging to another tenant gets exactly the same `404` as a partition
+that does not exist. A distinct `403` would confirm that the partition exists under
+some other tenant, so it is deliberately not used. Confirmed ownership is cached in
+memory, so repeated reads of your own partition skip the check round-trip. With
+tenancy off the gate is a no-op and costs no queries.
+
+`GET /api/v1/messages` and `GET /api/v1/dlq` are name-addressed: the tenant travels
+into the stored procedure inside the filter JSON.
+
+## Access levels
+
+| Route | Level |
+| --- | --- |
+| `GET /api/v1/messages` | read-only |
+| `GET /api/v1/messages/:partitionId/:transactionId` | read-only |
+| `DELETE /api/v1/messages/:partitionId/:transactionId` | read-write |
+| `POST /api/v1/messages/:partitionId/:transactionId/retry` | read-write |
+| `GET /api/v1/dlq` | read-only |
+
+Related: [consumer groups](/reference/http/consumer-groups) for the cursors these
+statuses are computed against, and [traces](/reference/http/traces) for per-message
+event history.

@@ -1,0 +1,211 @@
+---
+title: "POST /api/v1/transaction"
+description: "Pushes and acks in a single PostgreSQL transaction: the bundle shape, every rollback cause, the result array, and why it is not exactly-once end to end."
+type: reference
+sidebar:
+  order: 7
+  label: transaction
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/sql/procedures/044_log_ack.sql
+  - server/sql/procedures/042_log_push.sql
+verifiedBy:
+  - clients/client-js/test-v2/transaction.js
+  - clients/client-js/test-v2/semantics.js
+---
+
+One call, one PostgreSQL transaction, all or nothing. This is how a pipeline stage hands work
+forward: acknowledge the message you just processed **and** write the next stage's message so
+that either both are durable or neither is. Access level **read-write**.
+
+The route exists because the alternative — ack then push, or push then ack — always has a window.
+Ack first and a crash loses the work; push first and a crash duplicates it. Here both operations
+are inside one commit, so there is no window.
+
+<Render file="snippets/js-transaction" />
+
+## Request
+
+```json
+{
+  "operations": [
+    {
+      "type": "ack",
+      "transactionId": "order-8891-created",
+      "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+      "consumerGroup": "billing",
+      "status": "completed"
+    },
+    {
+      "type": "push",
+      "items": [
+        {
+          "queue": "invoices.requested",
+          "partition": "customer-42",
+          "transactionId": "invoice-for-order-8891",
+          "payload": { "orderId": 8891 }
+        }
+      ]
+    }
+  ],
+  "requiredLeases": ["0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90"]
+}
+```
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `operations` | array | yes | the operations, in order; a missing or non-array value is a `400` |
+| `requiredLeases` | array of strings | no | lease ids the acks belong to; this is where the SDK builders put the popped `leaseId` |
+
+Only two operation types exist: `push` and `ack`. **Any other `type` fails the whole call with a
+`400`** and nothing is written, including a type the broker does not recognise. The check runs
+before any database work.
+
+### push operations
+
+A push operation takes either the nested form with an `items` array, or a flat form where the
+operation object *is* the item:
+
+```json
+{ "type": "push", "queue": "invoices.requested", "payload": { "orderId": 8891 } }
+```
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `queue` | string | empty string — supply it |
+| `partition` | string | `"Default"` |
+| `payload` | any JSON value | `{}` when neither `payload` nor `data` is present |
+| `data` | any JSON value | an accepted alias for `payload` |
+| `transactionId` | string | the message id the broker mints |
+| `traceId` | string (UUID) | absent; **this is the only write path that stores a trace id** |
+
+Two differences from [`POST /api/v1/push`](/reference/http/push) are worth internalising: here
+`data` is accepted as an alias for `payload` and a missing payload defaults to an empty object
+rather than failing the parse, and here `traceId` is honoured instead of ignored.
+
+### ack operations
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `transactionId` | string | empty |
+| `partitionId` | string (UUID) | empty |
+| `status` | string | `completed` |
+| `consumerGroup` | string | `__QUEUE_MODE__` |
+| `leaseId` | string | absent; falls back to the resolution order below |
+| `error` | string | absent; the reason recorded if this ack dead-letters |
+
+`status` is normalised exactly as on the [ack route](/reference/http/ack): `completed`, `retry`
+and `dlq` survive to SQL, anything unrecognised becomes `failed`. `retry` and `dlq` behave
+identically inside a transaction — they are not collapsed to a boolean.
+
+### How the lease for an ack is found
+
+Acks are validated against the live lease, and the SDK builders put the lease id in
+`requiredLeases` rather than on each operation. The broker resolves each ack group's lease in
+this order:
+
+1. a `leaseId` on the operation itself, if you sent one;
+2. the current lease holder for that `(partition, consumerGroup)`, read from the consumer row —
+   authoritative, because exactly one live lease exists per pair;
+3. the single unambiguous entry in `requiredLeases`, if there is exactly one distinct value.
+
+If no lease information appears anywhere in the request, every ack is treated as a lease-less
+ack: the lease check is skipped and the cursor still advances, matching the direct ack route. If
+you *did* supply a lease and it is expired or wrong, the ack fails and the transaction rolls
+back.
+
+## Atomicity
+
+The whole bundle runs inside one call to one stored procedure, which is one transaction. Every
+failure path raises, so any single failure takes every other operation down with it.
+
+A transaction rolls back when:
+
+| Cause | Detail |
+| --- | --- |
+| a **duplicate push** | any pushed `transactionId` that already exists in its partition inside the deduplication window aborts the bundle with a `QDUP` error. Unlike `/api/v1/push`, where a duplicate is a per-item `duplicate` status, here it is a rollback |
+| an **ack the broker cannot resolve** | the broker checks up front that every acked `transactionId` resolves in its partition's index; one that does not fails the call with `QTXN ack references unknown transactionId; transaction rolled back` before the writing transaction runs at all, so nothing is written |
+| a **rejected ack** | an invalid or expired lease, or a position beyond the leased batch |
+| **mixed storage engines** | a push or ack that names a queue not on the segment engine |
+| a **foreign partition** | multi-tenant deployments: an acked `partitionId` that belongs to another tenant |
+
+Intra-bundle duplicate pushes are the one exception, and they are resolved before SQL: two push
+items with the same `transactionId` in the same `(queue, partition)` inside one transaction are
+first-wins. The second is echoed as a result with `duplicate: true`, produces no frame, and does
+**not** roll the transaction back.
+
+Deadlock safety comes from a fixed lock order — partitions ascending, then consumer rows
+ascending — shared with the ordinary push path, so concurrent transactions touching overlapping
+sets can never form a cycle.
+
+## Response
+
+`200 OK` on success:
+
+```json
+{
+  "transactionId": "0198f2c1-b0c1-7e40-8a52-9d0e1f2a3b4c",
+  "success": true,
+  "results": [
+    { "index": 0, "type": "ack", "success": true, "transactionId": "order-8891-created", "error": null, "dlq": false },
+    { "index": 1, "type": "push", "success": true, "transactionId": "invoice-for-order-8891", "messageId": "0198f2c1-…", "queueName": "invoices.requested" }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `transactionId` | string | an id the broker mints for **this call**; it is not any message's deduplication key |
+| `success` | boolean | whether the transaction committed |
+| `results` | array | one element per flattened operation, indexed in request order; empty on failure |
+
+Push results carry `index`, `type: "push"`, `success`, `transactionId` (the deduplication key
+used), `messageId` and `queueName`, plus `duplicate: true` for an intra-bundle duplicate. Ack
+results carry `index`, `type: "ack"`, `success`, `transactionId`, `error` and `dlq`.
+
+Because the transaction is all-or-nothing, every element of a successful `results` array says
+`success: true`. Per-operation failure does not exist here — read the top-level `success` first,
+and treat `results` as an echo that tells you which message ids were assigned.
+
+Failure keeps the same shape, with the reason at the top level:
+
+```json
+{
+  "transactionId": "0198f2c1-b0c1-7e40-8a52-9d0e1f2a3b4c",
+  "success": false,
+  "error": "QDUP duplicate messages in queue \"invoices.requested\" partition \"customer-42\"; transaction rolled back",
+  "results": []
+}
+```
+
+### Status codes
+
+| Code | When |
+| --- | --- |
+| `200` | the call was processed — **including a rollback**, which is `success: false` with an `error` |
+| `400` | the body is not JSON, `operations` is missing or not an array, or an operation has an unrecognised `type` |
+| `403` | authentication is on and the token has no `read-write` role |
+| `413` | the body exceeds 64 MiB |
+| `500` | no database connection was available |
+
+A rolled-back transaction is a `200`. Check `success`, not the status code.
+
+## It is not exactly-once end to end
+
+The commit is atomic; the round trip is not. If the response is lost — a dropped connection, a
+timeout on your side — you do not know whether the transaction committed. Retrying duplicates the
+pushes **unless** their `transactionId`s are deterministic and the retry arrives inside the
+queue's deduplication window.
+
+The pattern that makes this safe is to derive each pushed `transactionId` from the input you are
+processing rather than generating a fresh UUID — `invoice-for-order-8891`, not `crypto.randomUUID()`.
+Then a retried transaction either commits once or aborts on the duplicate, and both end states
+are the same one. With random ids, a retry after a lost response writes the message twice.
+
+That does mean a retry of an already-committed transaction comes back `success: false` with a
+`QDUP` error. It is not a new failure to act on: the duplicate proves the message is already
+stored, and the acks of the original attempt committed with it. Distinguish `QDUP` from the other
+rollback causes before you retry again.
+
+The ack side of the retry is safe on its own: a second attempt at the same ack resolves at or
+below the cursor and is reported as already committed rather than double-committing.

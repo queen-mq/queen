@@ -1,0 +1,243 @@
+---
+title: Consuming
+description: "Consumer groups and their cursors, the three shapes of pop, subscription modes, long-poll, and the one-leased-batch limit that bounds parallelism inside a group."
+type: concept
+tier: use
+sidebar:
+  order: 5
+  label: Consuming
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/sql/procedures/043_log_pop.sql
+  - server/src/config.rs
+verifiedBy:
+  - clients/client-js/test-v2/pop.js
+  - clients/client-js/test-v2/consume.js
+  - clients/client-py/tests/test_pop.py
+  - clients/client-js/test-v2/subscription.js
+---
+
+Consuming is a pop that claims a batch and takes a lease on it, followed by acks that move the
+group's cursor past what you finished. A pop is a plain `GET` with query parameters; there is no
+subscribe call, no assignment handed down by the broker, and no membership to join.
+
+## Consumer groups
+
+A consumer group is a name. Each group holds one cursor per partition, so two groups read the
+same messages independently, at their own pace, and one group falling behind does not affect the
+other. Nothing has to be created first: the group's rows appear on its first pop.
+
+Omitting `consumerGroup` puts you in the implicit group `__QUEUE_MODE__`. That is the
+competing-consumers shape: every consumer that omits the group shares one set of cursors, so a
+message is delivered to exactly one of them.
+
+<Aside type="note">
+Queue mode always reads from the beginning of the retained log. A pop with no `consumerGroup`
+that also carries `subscriptionMode=new` does **not** skip the backlog: the subscription
+seeding path deliberately ignores subscription intent for `__QUEUE_MODE__`.
+</Aside>
+
+## Three shapes of pop
+
+| Route | Claims from |
+| --- | --- |
+| `GET /api/v1/pop/queue/:queue` | Any partitions of one queue (the wildcard pop) |
+| `GET /api/v1/pop/queue/:queue/partition/:partition` | Exactly one named partition |
+| `GET /api/v1/pop?namespace=&task=` | Every queue whose labels match (the discovery pop) |
+
+The **wildcard pop** is the normal one. The broker picks candidate partitions of the queue that
+probably have work and are not leased, claims from them until the batch budget runs out or the
+partition cap is reached, and returns everything in one response. Candidate selection is
+approximate on purpose: a stale candidate simply yields nothing, because the cursor and the
+lease are re-verified under the partition's row lock.
+
+The **targeted pop** names one partition and skips candidate selection entirely. Use it when a
+worker owns a specific lane by construction. It is the cheaper call, but it is also the only
+one that does not seed the group's cursors across the whole queue, so its subscription
+behaviour differs (see below).
+
+The **discovery pop** spans queues. At least one of `namespace` or `task` must be present; a
+request with neither is rejected with `400`. Because the response can mix queues, its top-level
+`queue` field is empty: each message carries its own `partitionId`, so acks still work.
+
+## Parameters
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `batch` | `200` | Maximum messages to return. A budget, not a promise; when several partitions are claimed they share it. |
+| `partitions` | `1` | Maximum number of partitions one wildcard or discovery pop may claim from. |
+| `consumerGroup` | `__QUEUE_MODE__` | The reading group. |
+| `autoAck` | `false` | Commit the cursor inside the pop transaction instead of taking a lease. |
+| `wait` | `false` | Long-poll instead of returning immediately when there is nothing to deliver. |
+| `timeout` | `30000` ms | How long `wait=true` may block. The broker default comes from `DEFAULT_TIMEOUT`, falling back to `POP_DEFAULT_TIMEOUT_MS`, then to 30000. |
+| `leaseSeconds` | queue's `leaseTime` | Per-request lease override. A positive value wins over the queue configuration; the fallback when a queue has none is 60 seconds. |
+| `subscriptionMode` | `all` | `all` or `new`. Only consulted on a group's first contact. |
+| `subscriptionFrom` | empty | `now`, or an ISO 8601 timestamp. Only consulted on a group's first contact. |
+
+Those are the values the **broker** applies when a parameter is absent. The SDKs layer their own
+defaults on top: the JavaScript client's `pop()` and `consume()` both default to a batch of 1,
+and `consume()` sets `wait=true`.
+
+## What comes back
+
+A pop that delivered something returns `200` with:
+
+```json
+{
+  "success": true,
+  "queue": "orders",
+  "partition": "cust-42",
+  "partitionId": "0198e4c1-...",
+  "leaseId": "0198e4c2-...",
+  "consumerGroup": "billing",
+  "messages": [
+    {
+      "id": "0198e4c0-...",
+      "transactionId": "order-91-created",
+      "traceId": null,
+      "data": { "orderId": 91, "total": 4200 },
+      "producerSub": null,
+      "createdAt": "2026-07-30T09:12:44.881Z",
+      "partitionId": "0198e4c1-...",
+      "partition": "cust-42",
+      "leaseId": "0198e4c2-...",
+      "consumerGroup": "billing"
+    }
+  ],
+  "partitionsClaimed": 1
+}
+```
+
+Two things about that envelope:
+
+- **The top-level `partition` and `partitionId` are the first claimed partition's.** With
+  `partitions` greater than 1 they are not the whole story. Always ack using the `partitionId`
+  on the individual message.
+- **`createdAt` is the segment's timestamp**, so all messages written by the same push share it
+  to the microsecond. It is the commit time of their segment, not a per-message clock reading.
+
+A pop that delivered nothing returns **`204` with no body at all**, not an empty JSON envelope.
+That is deliberate: announcing a content length on a body the server then elides poisoned
+Node/undici connections, which snowballed into connection-reset storms under empty-poll load.
+Treat `204` as "no messages" and do not try to parse it. The same bodiless `204` is what a pop
+gets while pop maintenance mode is on.
+
+## Popping from a client
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/js-pop" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/py-pop" />
+  </TabItem>
+</Tabs>
+
+The SDK consume loops wrap the same pop and then ack after your handler returns:
+
+<Render file="snippets/js-consume" />
+
+<Aside type="note">
+The JavaScript client's `autoAck` consume option is **not** the server's `autoAck` parameter, and
+it is never sent to the broker. It means "ack for me after the handler resolves, nack if it
+throws". That is still a leased, at-least-once pop. The server-side `autoAck=true` is a different
+choice, described below.
+</Aside>
+
+## Long-poll
+
+With `wait=true` a pop that finds nothing parks instead of returning. It releases its PostgreSQL
+connection first, so a parked consumer holds no database resource, and it waits on the queue's
+wake gate: a push to that queue wakes it. With the default candidate ring those local wakes are
+coalesced onto a 5 ms tick, so a hot queue costs a bounded number of wake-ups per second rather
+than one per push. If no push arrives the pop re-checks on an exponentially backing-off interval
+(a wake resets the backoff) and gives up at `timeout`, returning the bodiless `204`.
+
+Long-poll is therefore how you get low delivery latency without polling hard. A consumer with
+`wait=true` and a 30-second timeout issues about two requests a minute while idle, and is woken
+in milliseconds when work arrives.
+
+## Subscription modes are decided once
+
+A group's starting position is chosen on its **first contact with the queue** and stored
+durably. On that first wildcard or discovery pop the broker writes the group's subscription
+record and seeds a cursor for every partition of the queue in one statement:
+
+| Mode | Where the cursor starts |
+| --- | --- |
+| `all` (default) | The oldest retained offset: the whole backlog is delivered |
+| `new`, or `subscriptionFrom=now` | The partition's current end: the entire existing backlog is skipped |
+| `subscriptionFrom=<ISO timestamp>` | Just before the first segment written at or after that timestamp; if nothing is that recent, the current end |
+
+<Aside type="caution">
+Sending `subscriptionMode` on later pops has no effect. The stored record wins, so a group that
+first connected with the default `all` will keep reading history no matter what subsequent pops
+ask for. To change where a group reads from, move it explicitly with the seek routes
+(`POST /api/v1/consumer-groups/:group/queues/:queue/seek`) or use a new group name.
+</Aside>
+
+Two consequences worth planning around:
+
+- **Partitions created later inherit the stored subscription.** A partition that appears after
+  the group subscribed is seeded from the stored timestamp, which means a `new` group receives
+  everything ever pushed to that new partition, not nothing.
+- **The targeted single-partition pop does not register a subscription.** It seeds only the
+  partition it names, from the intent carried on that request. If you mix targeted and wildcard
+  pops for the same group, the first one to run decides.
+
+Because the timestamp mode resolves to a segment boundary, replay is segment-granular: you land
+on the first segment at or after your timestamp, not on an exact message.
+
+## One leased batch per (partition, group)
+
+This is the limit to design around. Coordination state is one row per (partition, group) with
+one `batch_end` and one `worker_id`, so:
+
+- A pop that claims a partition holds it until the batch is acked or the lease expires. A second
+  consumer in the same group asking for that partition is skipped, without blocking, and moves on
+  to another candidate.
+- **Parallelism inside a consumer group is bounded by the number of partitions**, not by the
+  number of workers. Twenty workers on a single-partition queue in one group give you one
+  worker's throughput and nineteen idle pollers.
+- Different groups never interfere, because they are different rows.
+
+If you want more concurrency, add partitions. If your work has no natural key to partition on,
+you are choosing between ordering and parallelism. Queen gives ordering per lane, and the lane
+count is yours to pick.
+
+A lease carries an expiry. When it passes, the next pop for that (partition, group) re-delivers
+the same span from the cursor forward; the broker does not need a reaper for this, the claim
+simply ignores expired leases. Redelivery caused by an expiry is counted as an attempt but does
+**not** consume the retry budget: only an explicit `failed` ack does.
+
+To hold a batch longer than the lease, extend it: `POST /api/v1/lease/:leaseId/extend` with
+`{"seconds": 120}` (60 if you send no body) renews every live lease held by that lease id. The
+call always returns `200`; check `success` and `renewed`, which are `false` and `0` when the
+lease has already expired or never existed.
+
+## `autoAck`, and what it costs
+
+`autoAck=true` makes the pop commit the cursor in the same transaction that reads the messages.
+No lease is taken, `leaseId` comes back empty, and there is nothing to ack.
+
+That is **at-most-once**: the cursor has already moved when the response is written, so a
+consumer that crashes while handling the batch (or a response lost in the network) loses those
+messages permanently. Use it for data where loss is cheaper than duplicate work (metrics,
+sampled telemetry, cache warming) and never for work you would have to reconcile.
+
+## Delaying visibility
+
+Three queue options change what a pop is allowed to see. All three default to off.
+
+| Option | Effect |
+| --- | --- |
+| `delayedProcessing` | Seconds a message must age before it becomes visible. Always enforced in SQL, so it applies to every pop shape. |
+| `windowBuffer` | Holds a partition back while it is still being written to, to trade delivery latency for fatter batches. With the default broker-side candidate ring the hold is timed in the broker, ending at the earlier of the window elapsing and the batch filling. |
+| `minPopWaitTime` | Milliseconds a **non-empty** but under-full pop may wait for more messages before claiming, so one commit carries more work. It applies only to a pop that asked to block with a `batch` above 1, is clamped to 60000, is bounded further by that pop's own deadline, and never delays a pop on an empty queue. |
+
+## After the pop
+
+Acking is the other half of consuming, and it is where the model is least like other brokers:
+an ack is an offset commit, so acking one message finishes everything before it in that
+partition for that group. The acknowledgement page in this section covers the status values, the
+mixed-outcome clamping rules, and the reports you get for acks that land below the cursor.

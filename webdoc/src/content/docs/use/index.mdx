@@ -1,10 +1,80 @@
 ---
 title: Use Queen
-description: The concepts you need, the client SDKs, and worked examples for building an application on Queen.
+description: "The model, the SDKs and the worked examples you need to build an application on Queen."
 type: overview
 tier: use
 sidebar:
   order: 1
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/handlers/data.rs
 ---
 
-Placeholder — being written.
+This section is for the person writing code against Queen. The surface is small (push, pop,
+ack, and a transaction that bundles pushes and acks into one PostgreSQL commit), but the
+semantics are specific, and the two facts that surprise people most are consequences of the
+model rather than options you can turn off: **an acknowledgement is an offset commit**, and
+**a consumer group holds at most one leased batch per partition**.
+
+Read the concept chain in order. Everything after it (the SDK pages, the examples, the error
+handling) assumes you know what a partition, a cursor and a lease are.
+
+<CardGrid>
+  <LinkCard
+    href="/use/concepts"
+    title="The model in one page"
+    description="Queue, partition, offset, consumer group, cursor, lease, ack: the whole vocabulary and how the pieces relate."
+  />
+  <LinkCard
+    href="/use/concepts/queues-partitions"
+    title="Queues, partitions, namespaces and tasks"
+    description="What gets created when, what a partition costs, and how discovery finds a queue."
+  />
+  <LinkCard
+    href="/use/concepts/producing"
+    title="Producing"
+    description="The push request and its per-item verdicts, transactionId as an idempotency key, and what happens when the database is unreachable."
+  />
+  <LinkCard
+    href="/use/concepts/consuming"
+    title="Consuming"
+    description="Consumer groups, subscription modes, batch sizes, long-poll, and the one-leased-batch limit that bounds your parallelism."
+  />
+</CardGrid>
+
+## The rest of this section
+
+The four pages above are the first half of the concept chain. The sidebar continues with the
+rest of it, then with the language-specific material.
+
+| Group | What it covers |
+| --- | --- |
+| Concepts, continued | Acknowledgement as an offset commit, leases and retries and the dead-letter queue, transactions, replay and repositioning a group, retention, and a summary of the guarantees |
+| Clients | One page per SDK (JavaScript, Python, Go, PHP/Laravel, C++), plus using Queen from any language over plain HTTP |
+| Examples | Producer and consumer, fan-out with consumer groups, a transactional multi-stage pipeline, idempotent deduplication, replay, and handling failures through the DLQ |
+| Errors | HTTP status codes, `429` backpressure through the proxy, and what a client should retry |
+| Streams | Windowed aggregation over a queue |
+
+## Before you write code
+
+Four things are worth knowing before the first request.
+
+- **Everything is HTTP.** The SDKs are convenience layers over a small JSON API; there is no
+  custom wire protocol and no persistent connection to manage. The full route table, with the
+  access level each route requires, is in the [reference](/reference).
+- **Clients hold no coordination state.** The broker hands out no partition assignments and
+  runs no rebalancing protocol, so a worker that restarts does not stall its peers.
+- **The broker has no TLS listener and no CORS layer.** Terminate TLS at the proxy or at a
+  reverse proxy in front of it. See [self-hosting](/selfhost).
+- **`POST /api/v1/configure` is a full replace.** Any option you omit is reset to its default,
+  including `dedupWindowSeconds`, which goes back to 3600. Send the whole configuration every
+  time.
+
+## What "verified" means here
+
+Code samples on these pages are extracted from files the test suite executes, and each one is
+labelled with the file it came from. Where a page shows a flow that has no extracted snippet,
+the sample is hand-written and is not labelled as verified. Route tables,
+environment-variable tables and metric lists are generated from the source at build time.
+Throughput figures live in [benchmarks](/benchmarks), each with the configuration and the
+archived output that produced it.

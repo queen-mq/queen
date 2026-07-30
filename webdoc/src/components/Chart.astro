@@ -1,0 +1,46 @@
+---
+/**
+ * A generated benchmark figure.
+ *
+ * Two SVGs are rendered per figure, one per surface, and CSS shows the one that
+ * matches the reader's theme. An <img> cannot inherit `currentColor`, and a
+ * chart tuned for a white surface is unreadable on a black one, so the theme is
+ * handled here rather than inside the file.
+ *
+ * `src` is the figure's base name under public/charts. The component appends
+ * `-light.svg` / `-dark.svg`. Figures come from webdoc/scripts/charts.py; do
+ * not hand-place an SVG here.
+ */
+interface Props {
+  /** Base name of the figure, without the theme suffix or extension. */
+  src: string;
+  /** What the chart shows, for readers who cannot see it. Required. */
+  alt: string;
+  /** One line under the figure: what it demonstrates. */
+  caption?: string;
+  /** Repo-relative artifact the figure was rendered from. */
+  source?: string;
+}
+
+const { src, alt, caption, source } = Astro.props;
+---
+
+<figure class="nb-chart">
+  <img class="nb-chart-light" src={`/charts/${src}-light.svg`} alt={alt} loading="lazy" decoding="async" />
+  <img class="nb-chart-dark" src={`/charts/${src}-dark.svg`} alt={alt} loading="lazy" decoding="async" />
+  {
+    (caption || source) && (
+      <figcaption>
+        {caption}
+        {source && (
+          <>
+            {caption ? " " : ""}
+            <span class="nb-chart-source">
+              Rendered from <code>{source}</code>.
+            </span>
+          </>
+        )}
+      </figcaption>
+    )
+  }
+</figure>

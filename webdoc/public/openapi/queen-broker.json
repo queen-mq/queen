@@ -1,0 +1,3784 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Queen MQ broker API",
+    "version": "1.0.0",
+    "summary": "The HTTP API of the Queen MQ broker.",
+    "description": "Generated from the broker's own source at documentation build time by\n`webdoc/scripts/gen-openapi.mjs`: paths and methods come from the axum router,\nquery parameters from each handler's extractor, request bodies from the structs\nhandlers deserialize into, response codes from the `StatusCode` variants each\nhandler can return, and authorization from `auth::route_access_level`.\n\nResponse bodies on the hot paths are assembled by string concatenation rather than\nserialized from a type, and several management routes forward a stored procedure's\nJSON verbatim. Those responses carry `x-queen-schema: \"opaque\"` and are typed as an\nopen object: the field-by-field shape is documented on the reference pages instead of\nguessed at here.\n\nEvery 204 response has no body at all, not an empty JSON document.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:6632",
+      "description": "A broker with default settings"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Message plane"
+    },
+    {
+      "name": "Queues"
+    },
+    {
+      "name": "Consumer groups"
+    },
+    {
+      "name": "Messages, DLQ and traces"
+    },
+    {
+      "name": "Status and metrics"
+    },
+    {
+      "name": "Streams"
+    },
+    {
+      "name": "Operator"
+    },
+    {
+      "name": "Internal"
+    },
+    {
+      "name": "Other"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Only enforced when JWT_ENABLED is on. Access levels are a role set, not a ladder: a write-only credential passes POST /api/v1/push and is rejected everywhere else."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "description": "The broker's error body."
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/push": {
+      "post": {
+        "operationId": "push",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "POST /api/v1/push",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "write-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_push",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "queue": {
+                          "type": "string"
+                        },
+                        "partition": {
+                          "type": "string"
+                        },
+                        "payload": {
+                          "description": "Any JSON value."
+                        },
+                        "transactionId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "queue",
+                        "payload"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "items"
+                ]
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "PushBody"
+        }
+      }
+    },
+    "/api/v1/pop": {
+      "get": {
+        "operationId": "pop_discover",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "GET /api/v1/pop",
+        "parameters": [
+          {
+            "name": "batch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "partitions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "autoAck",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "leaseSeconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "consumerGroup",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subscriptionMode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subscriptionFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "204": {
+            "description": "No content. The broker returns 204 with an empty body: no content-length, no payload."
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_pop_discover",
+        "x-queen-query-params": "typed",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/pop/queue/{queue}": {
+      "get": {
+        "operationId": "pop",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "GET /api/v1/pop/queue/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "batch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "partitions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "autoAck",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "leaseSeconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "consumerGroup",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subscriptionMode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subscriptionFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "204": {
+            "description": "No content. The broker returns 204 with an empty body: no content-length, no payload."
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_pop",
+        "x-queen-query-params": "typed",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/pop/queue/{queue}/partition/{partition}": {
+      "get": {
+        "operationId": "pop_partition",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "GET /api/v1/pop/queue/:queue/partition/:partition",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "partition",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "batch",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "partitions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "autoAck",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "leaseSeconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "consumerGroup",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subscriptionMode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "subscriptionFrom",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "204": {
+            "description": "No content. The broker returns 204 with an empty body: no content-length, no payload."
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_pop_partition",
+        "x-queen-query-params": "typed",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ack": {
+      "post": {
+        "operationId": "ack",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "POST /api/v1/ack",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_ack",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "transactionId": {
+                    "type": "string"
+                  },
+                  "partitionId": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "consumerGroup": {
+                    "type": "string"
+                  },
+                  "leaseId": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "AckSingle"
+        }
+      }
+    },
+    "/api/v1/ack/batch": {
+      "post": {
+        "operationId": "ack_batch",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "POST /api/v1/ack/batch",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_ack_batch",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "acknowledgments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "transactionId": {
+                          "type": "string"
+                        },
+                        "partitionId": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "leaseId": {
+                          "type": "string"
+                        },
+                        "error": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "consumerGroup": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "AckBatch"
+        }
+      }
+    },
+    "/api/v1/transaction": {
+      "post": {
+        "operationId": "transaction",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "POST /api/v1/transaction",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_transaction",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operations": {
+                    "description": "See the reference page for this route."
+                  },
+                  "requiredLeases": {
+                    "description": "See the reference page for this route."
+                  },
+                  "type": {
+                    "description": "See the reference page for this route."
+                  },
+                  "items": {
+                    "description": "See the reference page for this route."
+                  },
+                  "transactionId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "partitionId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "consumerGroup": {
+                    "description": "See the reference page for this route."
+                  },
+                  "status": {
+                    "description": "See the reference page for this route."
+                  },
+                  "error": {
+                    "description": "See the reference page for this route."
+                  },
+                  "leaseId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "ok": {
+                    "description": "See the reference page for this route."
+                  },
+                  "acks": {
+                    "description": "See the reference page for this route."
+                  },
+                  "dlq": {
+                    "description": "See the reference page for this route."
+                  },
+                  "group": {
+                    "description": "See the reference page for this route."
+                  },
+                  "off": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/api/v1/lease/{leaseId}/extend": {
+      "post": {
+        "operationId": "lease_extend",
+        "tags": [
+          "Message plane"
+        ],
+        "summary": "POST /api/v1/lease/:leaseId/extend",
+        "parameters": [
+          {
+            "name": "leaseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/data.rs::handle_lease_extend",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "seconds": {
+                    "type": "integer",
+                    "format": "int32"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "RenewBody"
+        }
+      }
+    },
+    "/api/v1/configure": {
+      "post": {
+        "operationId": "configure",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "POST /api/v1/configure",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_configure",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "queue": {
+                    "description": "See the reference page for this route."
+                  },
+                  "options": {
+                    "description": "See the reference page for this route."
+                  },
+                  "dedupWindowSeconds": {
+                    "description": "See the reference page for this route."
+                  },
+                  "error": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/api/v1/resources/queues": {
+      "get": {
+        "operationId": "list_queues",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/queues",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_list_queues",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/resources/overview": {
+      "get": {
+        "operationId": "system_overview",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/overview",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_system_overview",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/resources/namespaces": {
+      "get": {
+        "operationId": "list_namespaces",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/namespaces",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_list_namespaces",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/resources/tasks": {
+      "get": {
+        "operationId": "list_tasks",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/tasks",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_list_tasks",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/resources/queues/{queue}": {
+      "get": {
+        "operationId": "get_queue",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/queues/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_get_queue",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_queue",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "DELETE /api/v1/resources/queues/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_delete_queue",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/messages": {
+      "get": {
+        "operationId": "list_messages",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "GET /api/v1/messages",
+        "parameters": [
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "messages",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/messages.rs::handle_list_messages",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/messages/{partitionId}/{transactionId}": {
+      "get": {
+        "operationId": "get_message",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "GET /api/v1/messages/:partitionId/:transactionId",
+        "parameters": [
+          {
+            "name": "partitionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transactionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/messages.rs::handle_get_message",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_message",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "DELETE /api/v1/messages/:partitionId/:transactionId",
+        "parameters": [
+          {
+            "name": "partitionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transactionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/messages.rs::handle_delete_message",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/messages/{partitionId}/{transactionId}/retry": {
+      "post": {
+        "operationId": "retry_message",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "POST /api/v1/messages/:partitionId/:transactionId/retry",
+        "parameters": [
+          {
+            "name": "partitionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transactionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/messages.rs::handle_retry_message",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/dlq": {
+      "get": {
+        "operationId": "dlq",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "GET /api/v1/dlq",
+        "parameters": [
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "messages",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/messages.rs::handle_dlq",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/traces": {
+      "post": {
+        "operationId": "record_trace",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "POST /api/v1/traces",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/traces.rs::handle_record_trace",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "transactionId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "partitionId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "data": {
+                    "description": "See the reference page for this route."
+                  },
+                  "consumerGroup": {
+                    "description": "See the reference page for this route."
+                  },
+                  "eventType": {
+                    "description": "See the reference page for this route."
+                  },
+                  "traceNames": {
+                    "description": "See the reference page for this route."
+                  },
+                  "success": {
+                    "description": "See the reference page for this route."
+                  },
+                  "error": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/api/v1/traces/names": {
+      "get": {
+        "operationId": "trace_names",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "GET /api/v1/traces/names",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/traces.rs::handle_trace_names",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/traces/by-name/{traceName}": {
+      "get": {
+        "operationId": "traces_by_name",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "GET /api/v1/traces/by-name/:traceName",
+        "parameters": [
+          {
+            "name": "traceName",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/traces.rs::handle_traces_by_name",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/traces/{partitionId}/{transactionId}": {
+      "get": {
+        "operationId": "message_traces",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "GET /api/v1/traces/:partitionId/:transactionId",
+        "parameters": [
+          {
+            "name": "partitionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transactionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/traces.rs::handle_message_traces",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "operationId": "api_status",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/status",
+        "parameters": [],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/status.rs::handle_api_status",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/status/analytics": {
+      "get": {
+        "operationId": "status_analytics",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/status/analytics",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_status_analytics",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/status/buffers": {
+      "get": {
+        "operationId": "status_buffers",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/status/buffers",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_status_buffers",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/status/queues": {
+      "get": {
+        "operationId": "status_queues",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/status/queues",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/status.rs::handle_status_queues",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/status/queues/{queue}": {
+      "get": {
+        "operationId": "queue_detail",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/status/queues/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_queue_detail",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/analytics/system-metrics": {
+      "get": {
+        "operationId": "system_metrics",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/system-metrics",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_system_metrics",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/analytics/worker-metrics": {
+      "get": {
+        "operationId": "worker_metrics",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/worker-metrics",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_worker_metrics",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/analytics/queue-lag": {
+      "get": {
+        "operationId": "queue_lag",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/queue-lag",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "queue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_queue_lag",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/analytics/queue-ops": {
+      "get": {
+        "operationId": "queue_ops",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/queue-ops",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_queue_ops",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/analytics/queue-parked-replicas": {
+      "get": {
+        "operationId": "queue_parked_replicas",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/queue-parked-replicas",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_queue_parked_replicas",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/analytics/retention": {
+      "get": {
+        "operationId": "retention",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/retention",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_retention",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/analytics/postgres-stats": {
+      "get": {
+        "operationId": "postgres_stats",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/postgres-stats",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_postgres_stats",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/consumer-groups": {
+      "get": {
+        "operationId": "consumer_groups",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "GET /api/v1/consumer-groups",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_consumer_groups",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/consumer-groups/lagging": {
+      "get": {
+        "operationId": "lagging_consumers",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "GET /api/v1/consumer-groups/lagging",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_lagging_consumers",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/consumer-groups/{group}": {
+      "get": {
+        "operationId": "consumer_group_details",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "GET /api/v1/consumer-groups/:group",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_consumer_group_details",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "delete_consumer_group",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "DELETE /api/v1/consumer-groups/:group",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deletedPartitions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_delete_consumer_group",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/consumer-groups/{group}/subscription": {
+      "post": {
+        "operationId": "update_subscription",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "POST /api/v1/consumer-groups/:group/subscription",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_update_subscription",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subscriptionTimestamp": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "SubscriptionBody"
+        }
+      }
+    },
+    "/api/v1/consumer-groups/{group}/queues/{queue}": {
+      "delete": {
+        "operationId": "delete_consumer_group_for_queue",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "DELETE /api/v1/consumer-groups/:group/queues/:queue",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "deletedPartitions",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_delete_consumer_group_for_queue",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/consumer-groups/{group}/queues/{queue}/seek": {
+      "post": {
+        "operationId": "seek_consumer_group",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "POST /api/v1/consumer-groups/:group/queues/:queue/seek",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_seek_consumer_group",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/api/v1/consumer-groups/{group}/queues/{queue}/partitions/{partition}/seek": {
+      "post": {
+        "operationId": "seek_partition",
+        "tags": [
+          "Consumer groups"
+        ],
+        "summary": "POST /api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "partition",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_seek_partition",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/api/v1/stats/refresh": {
+      "post": {
+        "operationId": "stats_refresh",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "POST /api/v1/stats/refresh",
+        "parameters": [],
+        "responses": {
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/status.rs::handle_stats_refresh",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/maintenance": {
+      "get": {
+        "operationId": "get_maintenance",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "GET /api/v1/system/maintenance",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_get_maintenance",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "set_maintenance",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "POST /api/v1/system/maintenance",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_set_maintenance",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "MaintenanceBody"
+        }
+      }
+    },
+    "/api/v1/system/maintenance/pop": {
+      "get": {
+        "operationId": "get_pop_maintenance",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "GET /api/v1/system/maintenance/pop",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_get_pop_maintenance",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "set_pop_maintenance",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "POST /api/v1/system/maintenance/pop",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_set_pop_maintenance",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "MaintenanceBody"
+        }
+      }
+    },
+    "/api/v1/system/shared-state": {
+      "get": {
+        "operationId": "shared_state",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "GET /api/v1/system/shared-state",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_shared_state",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/internal/api/notify": {
+      "post": {
+        "operationId": "notify",
+        "tags": [
+          "Internal"
+        ],
+        "summary": "POST /internal/api/notify",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/internal.rs::handle_notify",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "queue": {
+                    "description": "See the reference page for this route."
+                  },
+                  "partition": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/internal/api/shared-state/stats": {
+      "get": {
+        "operationId": "shared_state_stats",
+        "tags": [
+          "Internal"
+        ],
+        "summary": "GET /internal/api/shared-state/stats",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/internal.rs::handle_shared_state_stats",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/internal/api/inter-instance/stats": {
+      "get": {
+        "operationId": "inter_instance_stats",
+        "tags": [
+          "Internal"
+        ],
+        "summary": "GET /internal/api/inter-instance/stats",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/internal.rs::handle_inter_instance_stats",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/streams/v1/queries": {
+      "post": {
+        "operationId": "streams_register",
+        "tags": [
+          "Streams"
+        ],
+        "summary": "POST /streams/v1/queries",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/streams.rs::handle_streams_register",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "success": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/streams/v1/state/get": {
+      "post": {
+        "operationId": "streams_state_get",
+        "tags": [
+          "Streams"
+        ],
+        "summary": "POST /streams/v1/state/get",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/streams.rs::handle_streams_state_get",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "error": {
+                    "description": "See the reference page for this route."
+                  },
+                  "success": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/streams/v1/cycle": {
+      "post": {
+        "operationId": "streams_cycle",
+        "tags": [
+          "Streams"
+        ],
+        "summary": "POST /streams/v1/cycle",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/streams.rs::handle_streams_cycle",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query_id": {
+                    "description": "See the reference page for this route."
+                  },
+                  "partition_id": {
+                    "description": "See the reference page for this route."
+                  },
+                  "consumer_group": {
+                    "description": "See the reference page for this route."
+                  },
+                  "release_lease": {
+                    "description": "See the reference page for this route."
+                  },
+                  "state_ops": {
+                    "description": "See the reference page for this route."
+                  },
+                  "push_items": {
+                    "description": "See the reference page for this route."
+                  },
+                  "queue": {
+                    "description": "See the reference page for this route."
+                  },
+                  "partition": {
+                    "description": "See the reference page for this route."
+                  },
+                  "messageId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "transactionId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "payload": {
+                    "description": "See the reference page for this route."
+                  },
+                  "data": {
+                    "description": "See the reference page for this route."
+                  },
+                  "ack": {
+                    "description": "See the reference page for this route."
+                  },
+                  "status": {
+                    "description": "See the reference page for this route."
+                  },
+                  "count": {
+                    "description": "See the reference page for this route."
+                  },
+                  "leaseId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "success": {
+                    "description": "See the reference page for this route."
+                  },
+                  "ack_result": {
+                    "description": "See the reference page for this route."
+                  },
+                  "queueName": {
+                    "description": "See the reference page for this route."
+                  },
+                  "lease_released": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /health",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "503": {
+            "description": "Dependency unavailable, typically PostgreSQL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "public",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/status.rs::handle_health",
+        "x-queen-query-params": "none"
+      }
+    },
+    "/metrics/prometheus": {
+      "get": {
+        "operationId": "prometheus",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /metrics/prometheus",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "public",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/status.rs::handle_prometheus",
+        "x-queen-query-params": "none"
+      }
+    },
+    "/status": {
+      "get": {
+        "operationId": "status",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/status.rs::handle_status",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /metrics",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "public",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/status.rs::handle_metrics",
+        "x-queen-query-params": "none"
+      }
+    }
+  }
+}

@@ -1,0 +1,400 @@
+---
+title: C++ client
+description: "Complete surface of the single-header C++ client: build requirements, ClientConfig with defaults, every builder method, and the behaviours that differ from the other clients."
+type: reference
+sidebar:
+  order: 26
+  label: C++
+sourceOfTruth:
+  - clients/client-cpp/queen_client.hpp
+  - clients/client-cpp/Makefile
+  - server/src/main.rs
+verifiedBy:
+  - clients/client-cpp/test_client.cpp
+  - clients/client-cpp/test_retry429.cpp
+---
+
+One header, `queen_client.hpp`, namespace `queen`. Everything is `inline`, so there is nothing to
+link. Version 1.0.0, aligned with the broker.
+
+```cpp
+#include "queen_client.hpp"
+
+queen::QueenClient client("http://localhost:6632");
+```
+
+## Build requirements
+
+| Requirement | Notes |
+| --- | --- |
+| C++17 or later | The Makefile builds with `-std=c++17 -pthread`. |
+| `nlohmann/json` | Included as `<json.hpp>`. |
+| `cpp-httplib` | Included as `<httplib.h>`. The header force-defines `CPPHTTPLIB_OPENSSL_SUPPORT`, so OpenSSL must be available even for plain HTTP. |
+| `threadpool.hpp` | Included as `"../server/include/threadpool.hpp"`, relative to the header's own directory. Provides `astp::ThreadPool`, used to run concurrent consumers. |
+
+The relative include means the header expects to sit next to the repository's `server/`
+directory, or to be compiled with that directory on the include path
+(`-I../server/include -I../server/vendor`, as the shipped Makefile does).
+
+## Configuration
+
+```cpp
+struct Retry429Options {
+    int max_attempts = 0;   // 0 = kind-based default
+    int base_millis  = 0;   // 0 = 500
+    int cap_millis   = 0;   // 0 = 30000
+};
+
+struct ClientConfig {
+    std::vector<std::string> urls;
+    int timeout_millis = 30000;
+    int retry_attempts = 3;
+    int retry_delay_millis = 1000;
+    std::string load_balancing_strategy = "round-robin";
+    bool enable_failover = true;
+    std::string bearer_token;
+    Retry429Options retry_429;
+};
+```
+
+`Retry429Options` covers HTTP 429 only, separately from `retry_attempts`, which covers 5xx and
+network faults. A zero field means "use the kind-based default": `max_attempts` is 10 for ordinary
+requests and unbounded for a long-poll pop; `base_millis` is 500; `cap_millis` is 30000. A
+`Retry-After` header (seconds) wins over the computed delay, and every delay is jittered ±20%.
+
+<Aside type="caution">
+The C++ `ClientConfig` is smaller than the other clients'. There is no custom-headers map, no
+`Host` override, no affinity strategy and no unhealthy-backend cooldown. `load_balancing_strategy`
+recognises exactly one non-default value, `"session"`; **anything else — including
+`"affinity"` — falls through to round-robin silently**.
+</Aside>
+
+## `QueenClient`
+
+```cpp
+QueenClient(const std::string& url);
+QueenClient(const std::vector<std::string>& urls, const ClientConfig& config = ClientConfig());
+```
+
+<Aside type="danger">
+The one-argument constructor does not accept a bearer token and does not read one from a
+`ClientConfig`. It builds an unauthenticated client. Any deployment behind a proxy or with JWT
+enabled must use the two-argument form:
+
+```cpp
+queen::ClientConfig config;
+config.bearer_token = "…";
+queen::QueenClient client({"https://cell.example"}, config);
+```
+</Aside>
+
+| Method | Signature | Returns |
+| --- | --- | --- |
+| `queue` | `queue(const std::string& name = "")` | `QueueBuilder` |
+| `transaction` | `transaction()` | `TransactionBuilder` |
+| `ack` | `ack(const json& message, bool status = true, const json& context = json::object())` | `json` |
+| `renew` | `renew(const json& message_or_lease_id)` | `json` |
+| `flush_all_buffers` | `flush_all_buffers()` | `void` |
+| `get_buffer_stats` | `get_buffer_stats() const` | `json` |
+| `close` | `close()` | `void` — sets the shutdown flag, flushes buffers, cleans up |
+| `is_shutdown_requested` | `is_shutdown_requested() const` | `bool` — consumer workers poll this |
+| `get_http_client` | `get_http_client() const` | `std::shared_ptr<HttpClient>` |
+
+<Aside type="danger">
+Both constructors install signal handlers, and neither is safe. The `SIGINT` handler prints a
+message and calls `exit(0)` **without flushing buffers** — anything buffered at that moment is
+lost. The `SIGTERM` handler only prints; it does not stop consumers or flush. Install your own
+handlers after constructing the client if you need a clean shutdown, set a `std::atomic<bool>`
+stop signal for your consumers, and call `close()` yourself.
+</Aside>
+
+### `ack`
+
+`message` is a message object, a transaction-id string, or a JSON array of either. `status` is
+`bool` only — `true` → `completed`, `false` → `failed`. `context` accepts a `group` key and an
+`error` key.
+
+`partitionId` is required on every message object; without it the call throws
+`std::runtime_error("Message must have partitionId property")`. A `leaseId` is forwarded when
+present. One message posts to `/api/v1/ack`; an array posts to `/api/v1/ack/batch`.
+
+Return shape:
+
+| Call | Shape |
+| --- | --- |
+| success | `{"success": true, "result": <broker body>}` |
+| transport or HTTP failure | `{"success": false, "error": "<what()>"}` |
+| empty array | `{"processed": 0, "results": []}` |
+
+<Aside type="caution">
+Two limits compared with the other clients. `status` is a `bool`, so `retry` and `dlq` are not
+reachable through `ack()` — post to the ack route directly for those. And the wrapper reports
+`success: true` for any HTTP 200: the broker's per-item `success` flags are inside `result` and are
+not inspected. A rejected ack looks like a successful call unless you read `result`.
+</Aside>
+
+### `renew`
+
+Accepts a lease-id string, a message object, or an array of either. Lease ids are deduplicated in
+insertion order — with multi-partition pop one extend call renews every claimed partition, so
+passing the whole message array issues one HTTP call. Returns an array of
+`{leaseId, success, newExpiresAt}` for an array input, or the single element for a scalar input.
+
+## `QueueBuilder`
+
+`client.queue(name)`. Configuration methods return `QueueBuilder&`; terminal methods are `push()`,
+`pop()`, `consume()`, `create()`, `del()`, `dlq()` and `flush_buffer()`.
+
+### Addressing
+
+| Method | Default | Notes |
+| --- | --- | --- |
+| `namespace_name(const std::string&)` | `""` | Named `namespace_name` because `namespace` is a keyword. |
+| `task(const std::string&)` | `""` | Second grouping label. |
+| `partition(const std::string&)` | `"Default"` | The ordered lane. Anything else switches pop to the partition-scoped route. |
+| `group(const std::string&)` | `""` | Consumer group. Absent, the broker uses `__QUEUE_MODE__`. |
+
+### Queue lifecycle
+
+| Method | Wire call | Returns |
+| --- | --- | --- |
+| `config(const QueueConfig&)` | — | `QueueBuilder&` |
+| `create()` | `POST /api/v1/configure` | `json` |
+| `del()` | `DELETE /api/v1/resources/queues/:queue` | `json` — named `del` because `delete` is a keyword |
+
+`QueueConfig` and its `to_json()` output:
+
+| Field | Wire key | Default | Unit |
+| --- | --- | --- | --- |
+| `lease_time` | `leaseTime` | `300` | seconds |
+| `retry_limit` | `retryLimit` | `3` | attempts |
+| `delayed_processing` | `delayedProcessing` | `0` | seconds |
+| `window_buffer` | `windowBuffer` | `0` | seconds |
+| `retention_seconds` | `retentionSeconds` | `0` | seconds |
+| `completed_retention_seconds` | `completedRetentionSeconds` | `0` | seconds |
+| `encryption_enabled` | `encryptionEnabled` | `false` | — |
+
+`create()` always sends the complete set, so calling it without `config()` applies the struct's
+defaults — including `leaseTime: 300`, whereas a queue created implicitly by a first push gets a
+60-second lease. `to_json()` emits a fixed key set, so options outside that struct cannot be set
+through `config()`; post to `/api/v1/configure` yourself when you need one. And remember
+**`/configure` is a full replace**: keys absent from the body reset to the broker's defaults. The
+option list is in [Reference](/reference).
+
+### Producing
+
+| Method | Notes |
+| --- | --- |
+| `buffer(const BufferOptions&)` | `{message_count = 100, time_millis = 1000}`. Turns `push()` into an enqueue. |
+| `push(const std::vector<json>& payload)` | Returns `json`. Throws with no queue name. |
+
+Each item may carry `data`, `payload`, or be the payload itself. The client mints a UUIDv7
+`transactionId` when the item has none, and forwards `traceId` only when it is a valid UUID.
+A direct push returns the broker's per-item array; a buffered push returns
+`{"buffered": true, "count": n}` without sending.
+
+```cpp
+client.queue("orders")
+      .partition("customer-42")
+      .push({{{"data", {{"orderId", 8891}}}}});
+```
+
+### Consuming
+
+| Method | `pop()` default | `consume()` default | Notes |
+| --- | --- | --- | --- |
+| `batch(int)` | `1` | `1` | With `partitions(n)`, the total budget across all claimed partitions. |
+| `partitions(int)` | `1` | `1` | Claim up to N partitions per call; all share one `leaseId`. Sent only when `> 1`. |
+| `wait(bool)` | `true` | `true` | Long-poll. |
+| *(no setter)* | `30000` | `30000` | The long-poll deadline is fixed. The client adds 5 s of slack when waiting. |
+| `auto_ack(bool)` | `true` | `true` | See the warning. |
+| `subscription_mode(const std::string&)` | `""` | `""` | `all` \| `new`. |
+| `subscription_from(const std::string&)` | `""` | `""` | `"now"` or an ISO timestamp. |
+| `concurrency(int)` | — | `1` | `consume()` only. Thread-pool workers. |
+| `limit(int)` | — | `0` (unlimited) | `consume()` only. |
+| `idle_millis(int)` | — | `0` (no timeout) | `consume()` only. |
+| `renew_lease(bool, int interval_millis = 60000)` | — | `false` | `consume()` only. See the note below. |
+| `each()` | — | batch mode | `consume()` only. One message per handler call. |
+
+<Aside type="danger">
+`pop()` never sends `autoAck` to the broker, whatever `auto_ack()` was set to — the parameter is
+simply absent from the query it builds. So a C++ `pop()` is always a manual-ack pop, and you must
+ack or let the lease expire. On `consume()`, `auto_ack` defaults to `true` and drives the
+client-side ack/nack around your handler.
+</Aside>
+
+<Aside type="caution">
+`renew_lease()` sets a flag the consumer loop does not act on: the worker contains an unimplemented
+placeholder where the renewal timer would go. Long handlers must call `client.renew(message)`
+themselves before the lease expires.
+</Aside>
+
+<Aside type="note">
+`QueueBuilder` has no long-poll timeout setter — the other clients all have one. Both `pop()` and
+`consume()` use the fixed 30000 ms. A consumer that needs to release its long-poll more often, so a
+shutdown flag is observed promptly, has to build the query itself through
+`get_http_client()->get(...)` with `RetryKind::Pop`.
+</Aside>
+
+#### `pop()`
+
+`json pop()` — the `messages` array, or an empty array. Route selection: queue plus non-`Default`
+partition uses `/api/v1/pop/queue/:queue/partition/:partition`; queue alone uses
+`/api/v1/pop/queue/:queue`; namespace or task alone uses `/api/v1/pop`. None of the three throws.
+
+<Aside type="caution">
+`pop()` swallows every failure. A 4xx, an exhausted 429 budget, a terminal 403 such as
+`cluster_suspended` and a network error are all logged and return an empty array. An empty result
+does not distinguish an empty queue from revoked credentials.
+</Aside>
+
+#### `consume()`
+
+```cpp
+void consume(std::function<void(const json&)> handler,
+             std::atomic<bool>* stop_signal = nullptr);
+```
+
+Blocks until every worker stops. The handler receives one message in `each()` mode and the whole
+`messages` array otherwise. Workers stop when `*stop_signal` becomes true, when
+`is_shutdown_requested()` is set by `close()`, on the `limit`, or on the idle timeout.
+
+```cpp
+std::atomic<bool> stop{false};
+client.queue("orders").group("workers").batch(10).each()
+      .consume([](const queen::json& msg) { /* … */ }, &stop);
+```
+
+Worker loop behaviour:
+
+- A handler exception with `auto_ack` on nacks the message and the worker continues.
+- A 429 that escapes the HTTP layer's own retry sleeps for `Retry-After` (or 1 s) and continues.
+- A timeout while waiting, or a connection failure, retries after a short sleep.
+- A **403 stops that worker** and is re-thrown to the caller of `consume()` once every worker has
+  finished. Workers run inside `packaged_task`s that are only waited on, so the exception is
+  captured and re-thrown rather than discarded.
+- Any other `HttpError` or exception is re-thrown from the worker.
+
+<Aside type="note">
+In `each()` mode, a nack does **not** abandon the rest of the popped batch — the loop continues to
+the next message. The nack released the lease and clamped the broker cursor at the failed message,
+so the remaining messages will be redelivered and the acks for them will be rejected. If ordering
+matters, break out of the batch yourself by throwing from the handler on the first failure and
+using `stop_signal`, or process with `batch(1)`.
+</Aside>
+
+<Aside type="note">
+There is no `message.trace()` in C++ — a JSON object cannot carry a method. The header's trace hook
+is an explicit no-op. Post to `/api/v1/traces` through `get_http_client()->post(...)` when you need
+tracing.
+</Aside>
+
+### Buffering
+
+`flush_buffer()` flushes this builder's `queue/partition` buffer; throws with no queue name.
+`get_buffer_stats()` on the client returns the aggregate. Buffers are keyed on
+`"<queue>/<partition>"`, so builders addressing the same pair share one, and a buffer flushes at
+`message_count` messages or `time_millis` after its first message.
+
+### Dead-letter queue
+
+`dlq(const std::string& consumer_group = "")` returns a `DLQBuilder`; throws with no queue name.
+
+| Method | Notes |
+| --- | --- |
+| `limit(int)` / `offset(int)` | Paging. |
+| `from(const std::string&)` / `to(const std::string&)` | Time filters. |
+| `get()` | `json` — `{"messages": [...], "total": n}` |
+
+Read-only, and this client has no admin surface, so replay means reading the row and pushing the
+payload again, or calling `POST /api/v1/messages/{partitionId}/{transactionId}/retry` yourself.
+
+## `TransactionBuilder`
+
+`client.transaction()`. Pushes and acks in one PostgreSQL transaction, all-or-nothing.
+
+| Method | Notes |
+| --- | --- |
+| `ack(const json& message, const std::string& status = "completed", const json& context = json::object())` | Returns `TransactionBuilder&`. Requires `transactionId` and `partitionId`; a `leaseId` is collected into `requiredLeases`. Unlike `QueenClient::ack`, the status here is a string, so `retry` and `dlq` are reachable. |
+| `queue(const std::string& queue_name)` | Returns a `QueuePushBuilder` with `partition(...)` and `push(...)`. |
+| `commit()` | `json`. Posts `POST /api/v1/transaction`. |
+
+<Aside type="note">
+Atomic is not exactly-once end to end. A lost response plus a retry still duplicates unless the
+`transactionId` is deterministic and inside the dedup window.
+</Aside>
+
+## `HttpClient`
+
+There is **no `Admin` class in the C++ client**. Management and observability routes are reached
+through the shared `HttpClient` from `get_http_client()`:
+
+```cpp
+auto http = client.get_http_client();
+queen::json overview = http->get("/api/v1/resources/overview");
+```
+
+| Method | Signature |
+| --- | --- |
+| `get` | `get(path, request_timeout_millis = 0, retry_kind = RetryKind::Default)` |
+| `post` | `post(path, body = nullptr, request_timeout_millis = 0, retry_kind = RetryKind::Default)` |
+| `put` | `put(path, body = nullptr, request_timeout_millis = 0, retry_kind = RetryKind::Default)` |
+| `del` | `del(path, request_timeout_millis = 0, retry_kind = RetryKind::Default)` |
+| `get_load_balancer` | `get_load_balancer() const` |
+
+All four return `json` — `nullptr` for an empty body or a `204` (the broker sends no body at all
+on `204`) — and throw `HttpError` on any status `>= 400`. `request_timeout_millis` of `0` uses the
+client default. Pass `RetryKind::Pop` for a long-poll request so a 429 backs off indefinitely
+instead of using the bounded budget.
+
+The complete route list is in [Reference](/reference).
+
+## `HttpError`
+
+Derives from `std::runtime_error`, with `what()` set to the broker's `error` string, so existing
+`catch (const std::exception&)` sites keep working.
+
+| Accessor | Notes |
+| --- | --- |
+| `int status_code() const` | HTTP status. |
+| `const std::string& body() const` | Raw body. |
+| `const std::string& code() const` | The body's `code` field; empty when absent. Proxy contract: `rate_limited`, `quota_exceeded` on 429; `cluster_suspended`, `storage_quota_exceeded`, `feature_gated`, `forbidden` on 403. |
+| `std::optional<double> retry_after_seconds() const` | From the `Retry-After` header on a 429. |
+| `bool is_cluster_suspended() const` | The terminal 403 no retry resolves. |
+
+A transport failure with no response at all surfaces as a plain `std::runtime_error`, not an
+`HttpError`.
+
+## `LoadBalancer`
+
+Constructed automatically when the two-argument `QueenClient` gets more than one URL; throws
+`std::invalid_argument` on an empty vector. `get_next_url(session_key = "")` returns a sticky URL
+for `"session"` and a round-robin URL otherwise. `get_all_urls()`, `get_strategy()` and `reset()`
+are also public.
+
+## `util` helpers
+
+| Function | Notes |
+| --- | --- |
+| `generate_uuid_v7()` | The id used for `transactionId`; monotone within a process. |
+| `is_valid_uuid(const std::string&)` | |
+| `url_encode(const std::string&)` | |
+| `parse_url(const std::string&)` | `(scheme, host, port)`; port defaults to 443 for https, 80 for http. |
+| `get_iso_timestamp()` | UTC, millisecond precision. |
+| `compute_retry429_delay_millis(...)` | The backoff the HTTP layer applies; exposed for tests. |
+| `is_log_enabled()`, `log()`, `log_warn()`, `log_error()` | Gated by `QUEEN_CLIENT_LOG`, read once. |
+
+## Not in this client
+
+There is no streaming SDK for C++ and no `Admin` facade. The `Stream` builder, windows, gates and
+the `/streams/v1/*` runtime exist in the JavaScript, Python and Go clients only.
+
+## Same surface, other languages
+
+<CardGrid>
+  <LinkCard href="/reference/sdk/javascript" title="JavaScript" description="Thenable builders plus the streaming SDK." />
+  <LinkCard href="/reference/sdk/python" title="Python" description="Async client with the same builder chain." />
+  <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute(), full Admin facade." />
+  <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
+  <LinkCard href="/reference/queenctl" title="queenctl" description="The same operations from a shell." />
+</CardGrid>

@@ -1,0 +1,194 @@
+---
+title: Trust boundaries
+description: "What the broker protects, what it does not, and where every boundary in a Queen deployment actually sits."
+type: concept
+tier: operate
+sidebar:
+  order: 15
+  label: Security
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/config.rs
+  - server/src/mesh.rs
+  - server/src/tenant.rs
+  - server/src/handlers/static_files.rs
+  - server/sql/procedures/019_streams_schema.sql
+---
+
+The broker is one process with one listener. It binds `0.0.0.0:PORT` (6632) with a
+plain TCP listener, serves both the HTTP API and the dashboard from that port, and
+by default authenticates nobody. There is no TLS listener in the binary and no CORS
+layer anywhere in `server/src`.
+
+That is a deliberate shape, not an omission: the broker is designed to sit inside a
+trusted network segment with something in front of it. But it means every security
+property of a Queen deployment comes from a decision you make outside the broker.
+This page draws each boundary explicitly, then routes to the three mechanisms the
+broker does implement.
+
+## The boundaries, listed
+
+| Surface | Port | What the broker enforces | What you must add |
+| --- | --- | --- | --- |
+| HTTP API + dashboard | `PORT` (6632) | Optional JWT with a per-route access level | TLS termination; network policy |
+| Broker → PostgreSQL | 5432 | Optional TLS (`PG_USE_SSL`), optional chain validation | A database role with the right grants |
+| Mesh (multi-broker) | `QUEEN_MESH_PORT` (6633) | An HMAC'd HELLO handshake, then nothing | A firewall. This one is not optional |
+| Payload at rest | n/a | Optional AES-256-GCM on flagged queues | Key management, and a check that the key took effect |
+| Multi-tenant separation | n/a | `x-queen-tenant` scoping, when enabled | A gateway that is the only thing allowed to set that header |
+
+## The listener is plaintext HTTP
+
+`axum::serve` runs on a `tokio::net::TcpListener`. Nothing in the broker reads a
+certificate, and there is no configuration variable that would make it. Anything
+that needs HTTPS terminates it before the broker: the multi-tenant proxy
+(`QUEEN_PROXY_TLS_CERT` / `QUEEN_PROXY_TLS_KEY`, see
+[Deploying queen_proxy](/selfhost/multi-tenant/proxy)), or any reverse proxy you
+already run.
+
+There is also no CORS layer, so no browser on another origin can call the API
+directly: a preflight gets no `Access-Control-Allow-Origin` and the fetch fails.
+Treat that as a consequence, not a control: a non-browser client is unaffected by
+the absence of CORS headers.
+
+## The dashboard and the API share the port
+
+The router's fallback serves the dashboard assets that `rust_embed` compiled into
+the binary. Any request that matches no route is answered from those assets, with
+`index.html` as the last resort so client-side routes work. Two guards keep that
+from swallowing API mistakes: a path under `/api/` and any method other than `GET`
+or `HEAD` get a JSON `404 {"error":"Not Found","code":"no_such_route"}` instead of
+`index.html`.
+
+The consequence for security is that you cannot expose the API without also
+exposing the dashboard shell, and you cannot firewall the dashboard without also
+firewalling the API. If those need different audiences, that split has to happen in
+front of the broker.
+
+## Authentication is off by default
+
+`JWT_ENABLED` defaults to `false`, and with it off the auth middleware is a
+transparent pass-through: it stamps an empty identity into the request and calls
+the handler. Every route (including `DELETE /api/v1/resources/queues/:queue` and
+`POST /api/v1/system/maintenance`) is open to anything that can open a TCP
+connection.
+
+Turning it on gives you a per-route access level and five roles that are a *set*,
+not a ladder. [Broker authentication](/selfhost/security/jwt) covers the algorithms,
+JWKS rotation, the role model and the boot-time validation.
+
+Two things stay open even with JWT on:
+
+- `/health`, `/metrics`, `/metrics/prometheus` are classified `public` by the
+  route table, and are also listed in the `JWT_SKIP_PATHS` default.
+- `/`, `/assets/*` and `/favicon*` are classified `public` so the dashboard shell
+  can load.
+
+`/metrics/prometheus` being public matters more than it looks. Its per-queue series
+carry a `queue` label and no tenant label, and the parked-long-poll gauge is
+explicitly summed across tenants before it is written out. On a shared deployment
+that endpoint leaks every tenant's queue names and volumes to anyone who can reach
+the port. Restrict it at the network layer, or scrape it over a separate interface.
+
+## The mesh port is a control surface
+
+Multi-broker notifications travel over framed TCP on `QUEEN_MESH_PORT` (6633,
+still readable as the legacy `QUEEN_UDP_NOTIFY_PORT`). The dialer opens the
+connection with a `HELLO` frame carrying `{server_id, nonce, mac}`, where
+`mac = HMAC-SHA256(QUEEN_SYNC_SECRET, nonce)`, and the listener compares it in
+constant time before accepting anything else. With an empty secret the handshake is
+still exchanged (to learn the peer's `server_id`) but not verified at all.
+
+Three facts follow, and all three are in the code:
+
+- The nonce is generated by the dialer and never recorded by the listener, so a
+  captured `HELLO` frame replays.
+- Frames *after* the handshake carry no authentication of their own. They are JSON
+  payloads dispatched by a one-byte type.
+- The frame set includes `T_MAINTENANCE_MODE_SET` and
+  `T_POP_MAINTENANCE_MODE_SET`, which change how the receiving broker behaves.
+
+<Aside type="danger">
+Firewalling the mesh port to the broker peers themselves is a requirement, not a
+recommendation. `QUEEN_SYNC_SECRET` raises the cost of forging the first frame; it
+does not make the port safe to expose.
+</Aside>
+
+## `x-queen-tenant` is not a credential
+
+With `QUEEN_TENANCY_HEADER=true` the broker resolves a tenant from the
+`x-queen-tenant` header and scopes queue identity to it. The header is validated
+for shape (a malformed value is a `400`, an absent one means the default tenant),
+and it is validated against nothing else. Any caller that can reach the broker can
+name any tenant.
+
+That is intentional. The trust boundary is the gateway that sets the header plus the
+bearer secret the gateway presents, which is why native tenancy is an operator
+feature and never a client-facing one. See
+[Broker-native tenancy](/selfhost/multi-tenant/broker-tenancy).
+
+## PostgreSQL is inside the boundary
+
+The broker needs `CREATE SCHEMA` on first boot and no extensions. It reaches the
+database with `PG_USE_SSL` off by default, meaning the connection is plaintext until
+you turn it on. See [PostgreSQL TLS](/selfhost/security/postgres-tls) for what the
+two available modes do and do not prove.
+
+One schema is deliberately wide open at the database level: `019_streams_schema.sql`
+grants `USAGE` on `queen_streams` and `SELECT, INSERT, UPDATE, DELETE` on
+`queen_streams.queries` and `queen_streams.state` to `PUBLIC`. Any role with a
+connection to that database can read and rewrite stream definitions and stream
+state, regardless of what the HTTP layer allows, and nothing purges that state.
+
+Payload encryption is the one thing that survives a database compromise, and only
+for queues flagged for it. There is a sharp edge worth reading before you rely on it:
+[Payload encryption at rest](/selfhost/security/encryption).
+
+## A posture that holds
+
+<Steps>
+
+1. Bind the broker to a private interface, or firewall `PORT` to the clients that
+   need it. The mesh port goes to peers only.
+
+2. Terminate TLS in front of it. If tenants are involved, that terminator is the
+   proxy, not a plain reverse proxy. See
+   [Running Queen as a multi-tenant service](/selfhost/multi-tenant).
+
+3. Turn on `JWT_ENABLED` and give each client the narrowest role that works.
+   Confirm the boot log shows `JWT auth ENABLED` with the algorithm you meant.
+
+4. Set `PG_USE_SSL=true` if the database is not on localhost, and decide
+   deliberately between the two verification modes.
+
+5. Keep `/metrics/prometheus` off any network a tenant or customer can reach.
+
+6. If you enable payload encryption, verify the boot log line
+   `encryption service initialized (AES-256-GCM)` before you trust it.
+
+</Steps>
+
+## Then read
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/security/jwt"
+    title="Broker authentication"
+    description="JWT algorithms, JWKS rotation, the five access levels, and role remapping for an external identity provider."
+  />
+  <LinkCard
+    href="/selfhost/security/postgres-tls"
+    title="PostgreSQL TLS"
+    description="PG_USE_SSL, PG_SSL_REJECT_UNAUTHORIZED, and the encrypt-only mode managed PostgreSQL usually needs."
+  />
+  <LinkCard
+    href="/selfhost/security/encryption"
+    title="Payload encryption at rest"
+    description="AES-256-GCM on flagged queues, the key format, and the failure mode that stores plaintext with a warning."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant"
+    title="Multi-tenant hosting"
+    description="The gateway, the quotas and the isolation model for running Queen as a service for other people."
+  />
+</CardGrid>

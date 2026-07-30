@@ -1,8 +1,9 @@
 ---
 params: []
+description: "How the proxy classifies each broker route, and which ones a tenant credential can reach."
 ---
 
-{/* GENERATED FILE — do not edit by hand.
+{/* GENERATED FILE. Do not edit by hand.
     Regenerate with: pnpm --dir webdoc gen
     Source of truth:
       - queen_proxy/src/routes.rs (classify, is_operator_route)
@@ -16,7 +17,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | produce | Counted against the message quota. May create queues and partitions implicitly. |
 | consume | Pop, ack and lease extension. A `wait=true` pop also holds a parked-consumer slot. |
 | queue admin | Configuration, deletions, seeks and subscription changes. |
-| read | Listings, status, analytics, DLQ and message reads — all tenant-scoped. |
+| read | Listings, status, analytics, DLQ and message reads, all tenant-scoped. |
 | gated (streams) | Available when the plan enables the streams feature. |
 | gated (traces) | Writing a trace is available when the plan enables the traces feature. |
 | operator | Cell-wide surfaces. Not tenant-scopable, so a tenant credential gets the same 404 a blocked route returns. |
@@ -105,6 +106,8 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/api/v1/status/buffers` |
 | `GET` | `/api/v1/system/maintenance` |
 | `POST` | `/api/v1/system/maintenance` |
+| `GET` | `/api/v1/system/maintenance/pop` |
+| `POST` | `/api/v1/system/maintenance/pop` |
 | `GET` | `/metrics/prometheus` |
 
 ### blocked
@@ -113,8 +116,6 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | --- | --- |
 | `GET` | `/api/v1/pop` |
 | `POST` | `/api/v1/stats/refresh` |
-| `GET` | `/api/v1/system/maintenance/pop` |
-| `POST` | `/api/v1/system/maintenance/pop` |
 | `GET` | `/api/v1/system/shared-state` |
 | `GET` | `/internal/api/inter-instance/stats` |
 | `POST` | `/internal/api/notify` |

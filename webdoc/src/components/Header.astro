@@ -14,14 +14,14 @@ interface Props {
   entryId?: string;
   /**
    * Whether the page has a sidebar to open. When `false`, the mobile
-   * menu button is hidden — pages that opted out via `sidebar: false`
+   * menu button is hidden: pages that opted out via `sidebar: false`
    * shouldn't show a button that opens an empty dialog. Default `true`.
    */
   showSidebar?: boolean;
 }
 
 // `entryId` is part of Props as a forward-compat hook (the version-switcher
-// recipe reads it) but the base Header doesn't use it — leave it off the
+// recipe reads it) but the base Header doesn't use it, so leave it off the
 // destructure to avoid an unused-var warning.
 const { collection, showSidebar = true } = Astro.props;
 
@@ -36,12 +36,18 @@ const showSections = sections.length >= 2;
     <div class="flex items-center gap-3">
       <a href="/" class="group flex items-center gap-2">
         {/*
-          The brand mark is white line art on transparency, so it is painted as a
-          mask over `currentColor` rather than shown as an <img>: that way it
-          tracks the text colour in both themes and through the theme toggle,
-          with no per-theme asset and no filter hacks.
+          The same badge the dashboard puts in its sidebar (app/src/components/
+          Sidebar.vue), so the two surfaces carry one mark. It is full colour and
+          reads on either surface, so it needs no per-theme variant. The favicon
+          stays the monochrome line-mark, again matching the app.
         */}
-        <span class="nb-brand-mark h-5 w-5 shrink-0 text-foreground group-hover:text-primary transition-colors" aria-hidden="true"></span>
+        <img
+          src="/queen-badge-open.svg"
+          alt=""
+          width="22"
+          height="22"
+          class="h-[22px] w-[22px] shrink-0"
+        />
         <span class="font-semibold text-sm text-foreground group-hover:text-primary transition-colors">
           {config.title}
         </span>

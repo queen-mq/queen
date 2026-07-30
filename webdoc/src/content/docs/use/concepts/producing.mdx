@@ -1,0 +1,198 @@
+---
+title: Producing
+description: "The push request, the per-item verdict it returns, transactionId as an idempotency key, and what the broker does when PostgreSQL is unreachable."
+type: concept
+tier: use
+sidebar:
+  order: 4
+  label: Producing
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/sql/procedures/042_log_push.sql
+  - server/src/fusion.rs
+  - server/src/file_buffer.rs
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+  - clients/client-py/tests/test_push.py
+  - clients/client-go/tests/push_test.go
+---
+
+Producing is one route, `POST /api/v1/push`, taking a list of items. Every item names its own
+queue and partition, so one request can write to several queues at once, and the broker groups
+the items by (queue, partition) before it writes.
+
+## The request
+
+```json
+{
+  "items": [
+    {
+      "queue": "orders",
+      "partition": "cust-42",
+      "payload": { "orderId": 91, "total": 4200 },
+      "transactionId": "order-91-created"
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `queue` | yes | Queue name. Created on first push if it does not exist. |
+| `partition` | no | Partition name. Defaults to `Default`. Created on first push. |
+| `payload` | yes | Any JSON value. Stored verbatim; the broker does not inspect or reshape it. |
+| `transactionId` | no | The deduplication key. If omitted, the broker uses the message id it minted for this item. |
+
+An item with no `payload` or no `queue` fails body parsing and the whole request returns `400`.
+An empty `items` array returns `201` with an empty result array. Bodies above
+`QUEEN_MAX_BODY_BYTES` (default 64 MiB) are rejected with `413`.
+
+<Aside type="note">
+The field is `payload` on the way in and `data` on the way out: a popped message carries the
+same JSON under a `data` key. The SDKs paper over this: the JavaScript client accepts `data`,
+`payload`, or the bare object, and always sends `payload` on the wire.
+</Aside>
+
+`/api/v1/push` is the one route a **write-only** credential can call. Access levels are a role
+set rather than a ladder, so a write-only token is rejected on every read and consume route.
+
+## The response
+
+The status is `201 Created` and the body is a top-level array, one element per item, in request
+order:
+
+```json
+[
+  {
+    "index": 0,
+    "message_id": "0198e4c1-...",
+    "transaction_id": "order-91-created",
+    "queueName": "orders",
+    "status": "queued"
+  }
+]
+```
+
+There is no per-item error text. If you need to know *why* an item did not get stored, the
+status is what you get, and the broker's logs carry the rest.
+
+### The status values
+
+| Status | What it means |
+| --- | --- |
+| `queued` | Stored and committed. The message has an offset and is visible to consumers. |
+| `duplicate` | A message with this `transactionId` already exists in this partition, inside the deduplication window. **Nothing was written.** `message_id` is the original message's id. |
+| `buffered` | PostgreSQL was unreachable, or the broker is in maintenance mode. The item was appended to the on-disk spool and will be replayed when the database is healthy. It is **not** stored yet and is not visible to consumers. |
+| `failed` | The item could not be stored *and* could not be spooled. It is lost; the producer must retry it. |
+| `error` | An internal verdict. The database transaction that would have stored the item failed. The push handler never returns it: every `error` item is spooled and relabelled `buffered`, or `failed` if the spool write also failed. |
+
+<Aside type="caution">
+`201` does not mean "stored". Verdicts of `duplicate`, `buffered` and `failed` all arrive under
+it, so read the `status` of every item. The only push that reports trouble in the HTTP status is
+one made in maintenance mode where a spool write failed, which returns `500`. Note also that the
+JavaScript SDK's `onSuccess` / `onDuplicate` / `onError` callbacks classify only `queued`,
+`duplicate` and `failed`. A `buffered` item triggers none of them and raises nothing.
+</Aside>
+
+## Pushing from a client
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/js-push" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/py-push" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/go-push" />
+  </TabItem>
+</Tabs>
+
+## `transactionId` and deduplication
+
+Deduplication is on by default, with a window of 3600 seconds. It is **exact** (not a Bloom
+filter, not a probabilistic cache) and it is enforced inside PostgreSQL: the push probes the
+partition's hash sidecar under that partition's row lock *before* allocating an offset, so a
+duplicate writes nothing at all and needs no rollback.
+
+<Render file="snippets/js-push-dedup" />
+
+The rules that follow from that mechanism:
+
+- **The scope is one partition.** The same `transactionId` pushed to two different partitions of
+  the same queue produces two `queued` results. Deduplication cannot span lanes, because the
+  probe is a lookup inside one partition's history.
+- **The window is time-bounded.** Only history newer than `dedupWindowSeconds` is probed, so a
+  key re-used after the window elapses is accepted as a new message. Setting
+  `dedupWindowSeconds: 0` disables deduplication for the queue.
+- **First wins inside one body.** If a single push contains the same `transactionId` twice for
+  the same partition, the first item is `queued`, the second is `duplicate`, and both report the
+  first item's `message_id`.
+- **A duplicate result names the original.** The broker resolves the original message's id by
+  reading the segment that covers the original offset. If that segment has already been removed
+  by retention, the id comes back as the all-zero UUID
+  `00000000-0000-0000-0000-000000000000`, the "original unknown" sentinel.
+
+<Aside type="caution">
+`dedupWindowSeconds` lives only on the queue. Because `/configure` is a full replace, a
+configure call that omits it silently resets the window to 3600, including on a queue where
+you had deliberately turned deduplication off.
+</Aside>
+
+To make deduplication useful, the `transactionId` has to be **derived from the work**, not
+generated per attempt: a hash of the source record, the upstream event id, the primary key plus
+a version. A random UUID per retry deduplicates nothing. If you omit `transactionId` entirely
+the broker substitutes the fresh message id, which is a different value on every attempt. The
+JavaScript SDK does the same client-side, generating a UUID when you do not supply one.
+
+## `producerSub` is stamped, not accepted
+
+Every stored message carries a `producerSub`, delivered back on pop. It is taken **only** from
+the `sub` claim of the validated JWT on the push request. There is no `producerSub` field in the
+push wire format, so a value supplied in the body is not read and cannot be forged. With
+authentication disabled, `producerSub` is `null`.
+
+## What push does not carry
+
+`traceId` is accepted on push operations inside `POST /api/v1/transaction`, and only there. The
+plain push route does not parse it: the frame is stored with no trace id and pops back with
+`"traceId": null`. Some SDKs will happily send the field on a plain push; it is dropped.
+
+## Ordering inside a push
+
+Items in one push body that target the same partition are stored in body order, at consecutive
+offsets, in one segment. Across partitions there is no relationship: each partition's offsets
+are its own, and one request that touches three partitions produces three independent
+allocations.
+
+The broker also coalesces concurrent pushes: several requests writing to the same partition can
+be packed into one segment and committed together, and several *different* partitions can be
+committed in one transaction. This never reorders a partition (at most one write per partition
+is in flight at a time), and it is why per-partition offset order equals commit order.
+
+## When the database is unreachable
+
+A push whose transaction fails is not lost and not silently dropped. Each affected item is
+appended to an on-disk spool (`FILE_BUFFER_DIR`, default `/var/lib/queen/buffers`), the item
+comes back as `buffered`, and a background task replays the spool oldest-first once PostgreSQL
+answers again. Replay preserves the original `transactionId`, so deduplication makes it
+idempotent, which is another reason to make that value deterministic.
+
+Maintenance mode does the same thing deliberately: while it is on, **every** push is spooled and
+every item returns `buffered`, so an operator can take the database away without producers
+failing.
+
+<Aside type="caution">
+`/health` performs a real database round-trip and returns `503` when PostgreSQL is unreachable.
+Wiring it to a Kubernetes liveness probe therefore kills the broker exactly when the disk spool
+is doing its job. Use it as a readiness signal, not a liveness one.
+</Aside>
+
+## Client-side buffering is a different thing
+
+Several SDKs offer a producer-side buffer (the JavaScript client's
+`.buffer({ messageCount, timeMillis })`, for example), which accumulates items in the client
+process and sends them as one larger push later. That is a client-side latency/throughput
+trade: nothing has reached the broker, and a process that exits loses the buffer. It is
+unrelated to the broker's `buffered` status, which means the opposite: the broker has the
+message on disk and the database does not.

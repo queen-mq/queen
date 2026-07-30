@@ -1,0 +1,183 @@
+---
+title: Payload encryption at rest
+description: "AES-256-GCM on flagged queues: the key format, which messages it covers, and the failure that stores plaintext with only a warning."
+type: how-to
+tier: operate
+sidebar:
+  order: 18
+  label: Payload encryption
+sourceOfTruth:
+  - server/src/encryption.rs
+  - server/src/handlers/data.rs
+  - server/src/handlers/messages.rs
+  - server/src/db.rs
+  - server/sql/procedures/012_configure.sql
+---
+
+Queen can encrypt message payloads before they are written to PostgreSQL, so a
+database dump, a stolen backup or a read-only replica does not yield message
+contents. It is AES-256-GCM, it is opt-in per queue, and it needs exactly two things
+to be true at once — a key on the process and a flag on the queue.
+
+The rest of this page is mostly about what happens when only one of them is true,
+because that case fails quietly.
+
+## Enabling it
+
+<Steps>
+
+1. Generate 32 random bytes and give them to the broker as **64 hexadecimal
+   characters**.
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+2. Set `QUEEN_ENCRYPTION_KEY` to that value and restart. Every broker sharing the
+   database needs the same key, or messages one writes are unreadable to another.
+
+3. Confirm the boot log line:
+
+   ```text
+   encryption service initialized (AES-256-GCM)
+   ```
+
+   If that line is absent, encryption is off — see
+   [the silent failure](#a-bad-key-silently-stores-plaintext).
+
+4. Flag each queue that should be encrypted, with `encryptionEnabled` in the options
+   of `POST /api/v1/configure`.
+
+</Steps>
+
+`/configure` is a full replace: options you omit revert to their defaults, and
+`encryptionEnabled` defaults to `false`. A later `/configure` call that does not
+repeat `encryptionEnabled: true` turns encryption **off** for that queue, and
+subsequent pushes store plaintext. Send the complete option set every time.
+
+## What gets encrypted
+
+The flag lives on `queen.queues.encryption_enabled`, written by
+`configure_queue_v1` from `options.encryptionEnabled`. The broker resolves it per
+queue and caches the answer, keyed by tenant and queue name.
+
+Encryption applies when the key is loaded **and** the queue's flag is true. Four
+write paths consult the same flag: `POST /api/v1/push`, `POST /api/v1/transaction`,
+the stream emit path, and the disk spool the broker falls back to when PostgreSQL is
+unreachable — so a payload buffered to local disk during an outage is enveloped
+before it is written, not after it is replayed.
+
+Two cases resolve to "no encryption", both without an error:
+
+- The queue has no `queen.queues` row yet — it was created implicitly by a push and
+  never `/configure`d. The flag reads as `false`.
+- The flag lookup could not reach the database. The flag reads as `false`.
+
+What is *not* covered: the `transactionId`, the trace name, queue and partition
+names, offsets, timestamps, `producerSub`, consumer-group cursors, DLQ metadata.
+Only the payload is enveloped. Anyone with database access can still see the shape
+of your traffic, the names of your queues, and the identity of your producers.
+
+## The stored envelope
+
+An encrypted payload is stored as a JSON object:
+
+```json
+{
+  "encrypted": "<base64 ciphertext>",
+  "iv": "<base64, 16 bytes>",
+  "authTag": "<base64, 16 bytes>"
+}
+```
+
+Standard base64 with padding, `authTag` in camelCase. The envelope stores all 16 IV
+bytes but only the **first 12** are fed to the cipher, because that is what the
+previous OpenSSL-based implementation did — it never set the GCM IV length, so it
+silently used OpenSSL's default 12-byte nonce. Matching that byte for byte is what
+makes messages written by 0.16.0 readable here, and vice versa.
+
+## Reading it back
+
+Decryption is triggered by *shape*, not by the stored flag: any payload that parses
+as a JSON object carrying `encrypted`, `iv` and `authTag` string fields is decrypted.
+That is why a queue whose flag has since been turned off still returns readable
+messages, and why messages migrated from an older broker decrypt without touching
+their flags. The `isEncrypted` field in a message detail response reports the stored
+per-message flag, which is a separate thing from whether the broker just decrypted
+it.
+
+Three refusals, all of which return the payload **as stored**:
+
+- **No key configured.** Decryption returns nothing before it starts, so a read
+  serves the envelope JSON itself. A consumer receives
+  `{"encrypted":"…","iv":"…","authTag":"…"}` as its message body. That is the signal
+  that a broker in the group is missing the key.
+- **Wrong key.** The GCM tag verification fails and the envelope is served as-is.
+  There is no error and no log line on the read path.
+- **Wrong sizes.** An IV that is not 16 bytes or a tag that is not 16 bytes is
+  rejected without attempting the cipher.
+
+<Aside type="caution">
+A decrypt failure is never an error to a consumer. It is a message whose body happens
+to be an envelope. Any client that assumes its own schema will fail on the field
+names, not on a status code — so if you rely on encryption, assert on the decrypted
+shape in your consumer, and alert on it.
+</Aside>
+
+## A bad key silently stores plaintext
+
+This is the sharp edge. `QUEEN_ENCRYPTION_KEY` is read at boot, and every rejection
+path *disables encryption for the whole process and lets the broker start normally*:
+
+| Key value | Outcome | Log |
+| --- | --- | --- |
+| Unset or empty | Encryption disabled | none |
+| Not exactly 64 characters | Encryption disabled | `warn`: `QUEEN_ENCRYPTION_KEY must be 64 hex chars; encryption DISABLED` |
+| 64 characters, not all hex | Encryption disabled | `warn`: `QUEEN_ENCRYPTION_KEY is not valid hex; encryption DISABLED` |
+| 64 hex characters | Encryption enabled | `info`: `encryption service initialized (AES-256-GCM)` |
+
+With encryption disabled, a queue whose `encryptionEnabled` flag is `true` keeps
+accepting pushes and stores every payload in plaintext. The push succeeds. The
+response says `queued`. Nothing on the data path mentions it again.
+
+The same design covers a runtime cipher failure: if encryption is on and the cipher
+call fails for an individual message, the broker warns — sampled at one line per
+10,000 occurrences, so it cannot flood stderr at ingest rate — and stores that
+message in plaintext rather than failing the push.
+
+The practical consequence is that "the queue is flagged" is not evidence of
+anything. Verify at the deployment level:
+
+<Steps>
+
+1. Grep the boot log for `encryption service initialized`. Its absence, with a key
+   set, means the key is malformed.
+
+2. Push one message to a flagged queue and read the row directly in PostgreSQL. A
+   segment's frames should not contain your plaintext.
+
+3. Make that check part of the deploy, not a one-off. A key that arrives from a
+   secret store as an empty string, or with a trailing newline, produces exactly the
+   64-character check failure above — and 65 characters is a wrong length.
+
+</Steps>
+
+## Rotation
+
+There is no key rotation mechanism. One key is loaded per process, and decryption
+tries only that key. Rotating means: every broker in the group restarts with the new
+key at the same moment, and every message still in the log that was written under the
+old key becomes an undecryptable envelope from that instant.
+
+If you need to rotate, drain the affected queues first — consume to the head, or let
+retention age the old segments out — and only then change the key. Verify the drain
+with the queue's own depth, not with elapsed time.
+
+## Related
+
+- [Trust boundaries](/selfhost/security) — what else is and is not protected in a
+  Queen deployment.
+- [PostgreSQL TLS](/selfhost/security/postgres-tls) — protecting the payload in
+  transit to the database, which is a different problem from protecting it at rest.
+- The `QUEEN_ENCRYPTION_KEY` entry, and the boot block that masks it, are in the
+  [reference](/reference).

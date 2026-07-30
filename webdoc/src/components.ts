@@ -9,6 +9,7 @@ import { Aside } from "./components/ui/aside";
 import { Badge } from "./components/ui/badge";
 import { Card } from "./components/ui/card";
 import { CardGrid } from "./components/ui/card-grid";
+import Chart from "./components/Chart.astro";
 import { Code } from "./components/ui/code";
 import { CodeGroup } from "./components/ui/code-group";
 import { FileTree } from "./components/ui/file-tree";
@@ -29,6 +30,7 @@ export const components = {
   Badge,
   Card,
   CardGrid,
+  Chart,
   Code,
   CodeGroup,
   FileTree,

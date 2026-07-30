@@ -1,0 +1,200 @@
+---
+title: Isolation
+description: "What the multi-tenant design guarantees, how the ownership gate works, and which broker surfaces must never be exposed to a tenant."
+type: concept
+tier: operate
+sidebar:
+  order: 26
+  label: Isolation
+sourceOfTruth:
+  - server/src/handlers/mod.rs
+  - server/src/db.rs
+  - server/src/tenant.rs
+  - server/src/metrics.rs
+  - server/src/handlers/status.rs
+  - server/src/handlers/streams.rs
+  - queen_proxy/src/routes.rs
+  - queen_proxy/src/gateway.rs
+---
+
+Tenant isolation in Queen is split across two processes on purpose. The broker scopes
+everything that is queue-shaped, natively, in SQL, on every read and every write. The
+proxy is what makes the header that drives that scoping trustworthy, and what refuses
+the surfaces the broker does not scope because they describe the cell rather than a
+tenant.
+
+Neither half is sufficient alone. A broker reachable directly by a tenant has no
+isolation at all, because the scoping key arrives in an unauthenticated header. A proxy
+in front of a broker with tenancy off would route every tenant into the same namespace.
+
+## What the broker scopes natively
+
+With `QUEEN_TENANCY_HEADER=true`, `queen.log_queues` carries a `tenant_id` and queue
+identity becomes `(tenant, name)` rather than `name`. Two tenants can both own a queue
+called `orders` and they are different queues, with different partitions, different
+offsets, and different consumer-group cursors.
+
+Forty of the broker's sixty registered handlers resolve a tenant from the request and
+thread it into the SQL name-resolution functions. That covers the whole queue-shaped
+surface: push, pop, ack, transactions, configure, seeks, subscriptions, queue and
+namespace listings, per-queue analytics, consumer groups, message and DLQ reads, trace
+reads. The [route table in the reference](/reference) marks each one.
+
+## The ownership gate
+
+Some operations do not name a queue. They name a **partition id** (an ack, a message
+read, a message delete, a trace lookup), and the stored procedures behind them address
+rows by partition UUID alone, carrying no tenant. Scoping by name cannot help there.
+
+So the handler checks ownership first, before the procedure runs:
+
+```sql
+SELECT EXISTS(
+  SELECT 1 FROM queen.log_partitions p
+  JOIN queen.log_queues q ON q.id = p.queue_id
+  WHERE p.id = $1::text::uuid AND q.tenant_id = $2::text::uuid
+)
+```
+
+One indexed lookup on the partitions primary key. A partition id belonging to another
+tenant is rejected rather than acted on. Four properties make the gate trustworthy:
+
+- **Deny by default.** A pool checkout failure or a query error is treated as *not*
+  owned. A transient database problem cannot open a cross-tenant hole.
+- **It never consults the pid-to-queue memo.** That cache is populated by pop traffic,
+  and ownership must not trust a cache an attacker's traffic can fill.
+- **Only positives are cached.** A confirmed `(pid, tenant)` pair is remembered: a
+  partition's tenant is immutable, and UUIDs are not reused, so a positive is valid
+  forever. Negatives are never cached, which means a forged or foreign pid pays the
+  full check every single time and cannot be used to grow the map.
+- **The cache is bounded** at 500,000 entries and cleared wholesale on overflow;
+  correctness is unaffected because ownership is re-derived from the database.
+
+With tenancy off the gate short-circuits to "owned" with no database round trip, since
+a single-tenant broker has only default-tenant queues. That is what keeps the
+open-source path byte-identical.
+
+## Tenant-keyed in-process state
+
+Isolation would leak through caches if any of them were keyed by queue name alone. They
+are keyed by a `(tenant, queue)` composite instead:
+
+| State | Why the key matters |
+| --- | --- |
+| Lease-time cache | Two tenants' same-named queues can have different lease times |
+| Encryption-flag cache | A flag lookup must not be poisoned by another tenant's same-named queue |
+| Hot-list rings and long-poll wake gates | A wake for one tenant's `orders` must not wake another's |
+| Per-queue metric counters | Otherwise two tenants' counters would merge |
+| Parked-consumer gauges | Same |
+
+Cross-broker mesh frames carry the tenant, so an invalidation removes exactly one
+entry. A frame from a peer that predates tenancy (a rolling upgrade) has no tenant,
+and is fanned out to every tenant holding that queue name. That is an over-invalidation
+and an over-wake, both harmless; attributing it to the default tenant instead would
+silently drop the signal for every other tenant.
+
+Shared-cell memory is bounded by an idle sweep that drops per-`(tenant, queue)` rings
+and gates once they go quiet, so a tenant cannot pin unbounded per-name state by
+touching many queue names.
+
+## The surfaces that are not tenant-scoped
+
+These exist, they are useful, and they describe the **cell**. None of them can be
+scoped to a tenant, which is why the proxy classifies them as operator or blocked and
+answers `404` to everything else. Read this list as the reason the gateway exists, not
+as a set of holes.
+
+| Surface | What it exposes |
+| --- | --- |
+| `GET /api/v1/status`, `GET /api/v1/status/buffers` | Cell-wide broker state and buffer counts across every tenant |
+| `GET /api/v1/analytics/system-metrics` | Host CPU and memory of the machine the cell runs on |
+| `GET /api/v1/analytics/worker-metrics` | Process lifetime counters |
+| `GET /api/v1/analytics/postgres-stats` | PostgreSQL internals for the shared database |
+| `GET /metrics/prometheus` | Per-queue series labelled by queue name with **no tenant label** |
+| `POST /api/v1/system/maintenance` | A switch that changes the behaviour of the whole cell |
+| `/internal/*` | The broker-to-broker surface |
+| `/streams/v1/*` | Stream definitions and state, resolved against the **default tenant** |
+
+Two of those deserve the detail.
+
+### Prometheus sums across tenants
+
+The exposition format keeps one line per queue name, so the parked-long-poll gauge is
+explicitly aggregated across tenants before it is written, and the database-backed
+per-queue families (depth, pending, pop lag, acks per minute, DLQ depth) carry a
+`queue` label and nothing else.
+
+On a shared cell that endpoint therefore reveals every tenant's queue names and volumes.
+It is also classified `public` by the broker's own access-level table, so enabling JWT
+does not close it. Restrict it at the network layer and scrape it from the operator
+side only. Never proxy it to a tenant.
+
+### Streams resolve the default tenant
+
+The stream handlers are written for a dedicated cell: the encryption lookup, the
+per-queue metrics attribution and the hot-list keys inside the stream cycle all use the
+default tenant constant, not the request's tenant. On top of that,
+`queen_streams.queries` and `queen_streams.state` are granted to `PUBLIC` at the
+database level, and nothing purges stream state.
+
+<Aside type="danger">
+Do not enable the `streams` feature for a cluster that shares a cell. Its stream
+definitions and stream state land in the default tenant's namespace, alongside every
+other streams-enabled cluster on the same cell. The seeded `pro` plan has
+`cell_class = shared` **and** `features.streams = true`; if you use that plan as shipped
+on a shared cell, that is the configuration this warning is about. Either place
+streams-enabled clusters on dedicated cells, or clear the feature.
+</Aside>
+
+## Where the proxy is the boundary
+
+Every isolation property above depends on the tenant header being right, and on the
+broker being unreachable except through the thing that sets it:
+
+<Steps>
+
+1. **The client's credential never reaches the broker.** The proxy strips
+   `Authorization` and substitutes the cell secret.
+
+2. **The tenant header is set by the proxy**, from the cluster resolved out of the
+   `Host` label (from `clusters.broker_tenant_uuid`, a value the tenant never sees and
+   cannot choose).
+
+3. **Blocked and operator classes never forward.** An unknown API-shaped path is `404`,
+   not a pass-through, so a new broker route cannot become reachable by accident.
+
+4. **The operator capability is gated per cell.** With
+   `QUEEN_PROXY_OPERATOR_ENABLED=false`, the cell-wide routes have no code path at all,
+   a structural guarantee rather than a permission check.
+
+5. **The broker's network policy admits only the proxy.** This is the assumption all
+   four points above rest on.
+
+</Steps>
+
+## What isolation does not mean
+
+Honest limits, so nothing here is over-read:
+
+- **Not resource isolation.** Tenants on a shared cell share one broker process and one
+  PostgreSQL. The quotas bound each tenant's demand; they do not partition CPU, memory
+  or disk. A cell is sized for its tenants, and a tenant that needs a guarantee needs a
+  dedicated cell.
+- **Not isolation from the operator.** A live operator is admin on every cluster on the
+  cell, and anyone with pxdb access holds the cell secret. Isolation is between tenants,
+  not between a tenant and whoever runs the fleet.
+- **Not encryption between tenants.** Payload encryption is per queue with one key per
+  broker process, so it protects against database access, not against another tenant,
+  who cannot read those rows anyway.
+- **Not a substitute for the header discipline.** `x-queen-tenant` is unauthenticated by
+  design: [Broker-native tenancy](/selfhost/multi-tenant/broker-tenancy) is the page
+  that spells out what follows from that.
+
+## Related
+
+- [Endpoints a tenant can reach](/selfhost/multi-tenant/endpoints): the classifier
+  applied to every broker route.
+- [Broker-native tenancy](/selfhost/multi-tenant/broker-tenancy): the flag, the header,
+  and the default tenant.
+- [Trust boundaries](/selfhost/security): the same question for a single-tenant
+  deployment.

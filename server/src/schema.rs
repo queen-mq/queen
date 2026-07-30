@@ -24,15 +24,15 @@ const SCHEMA_SQL: &str = include_str!("../sql/schema.sql");
 /// (filename, contents) in the exact order they must be applied. schema.sql runs
 /// first (handled separately); these are the `procedures/*.sql` in lexical order.
 const PROCEDURES: &[(&str, &str)] = &[
-    ("001_push.sql", include_str!("../sql/procedures/001_push.sql")),
-    ("002_pop_unified.sql", include_str!("../sql/procedures/002_pop_unified.sql")),
-    ("002b_pop_unified_v2.sql", include_str!("../sql/procedures/002b_pop_unified_v2.sql")),
-    ("002c_pop_unified_v3.sql", include_str!("../sql/procedures/002c_pop_unified_v3.sql")),
-    ("002d_pop_unified_v4.sql", include_str!("../sql/procedures/002d_pop_unified_v4.sql")),
-    ("003_ack.sql", include_str!("../sql/procedures/003_ack.sql")),
-    ("004_transaction.sql", include_str!("../sql/procedures/004_transaction.sql")),
-    ("005_renew_lease.sql", include_str!("../sql/procedures/005_renew_lease.sql")),
-    ("006_has_pending.sql", include_str!("../sql/procedures/006_has_pending.sql")),
+    // 001-006 (rows push/pop/ack/transaction/renew_lease/has_pending) and
+    // 016_partition_lookup / 021_streams_cycle_v1 are GONE (2026-07-30): the log
+    // engine replaced that message plane wholesale, and a call-graph closure over
+    // src/ + the remaining SQL found zero callers for every function they defined.
+    // 049 drops them from databases that already applied them. What survives from
+    // the 0xx range is the MANAGEMENT plane — configure, consumer groups, stats
+    // readers, metrics, traces, streams register/state — which was never
+    // rows-specific: it reads queen.queues / queen.stats / queen.worker_metrics,
+    // tables both engines share.
     ("007_analytics.sql", include_str!("../sql/procedures/007_analytics.sql")),
     ("008_consumer_groups.sql", include_str!("../sql/procedures/008_consumer_groups.sql")),
     ("009_status.sql", include_str!("../sql/procedures/009_status.sql")),
@@ -42,12 +42,10 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("013_stats.sql", include_str!("../sql/procedures/013_stats.sql")),
     ("014_worker_metrics.sql", include_str!("../sql/procedures/014_worker_metrics.sql")),
     ("015_postgres_stats.sql", include_str!("../sql/procedures/015_postgres_stats.sql")),
-    ("016_partition_lookup.sql", include_str!("../sql/procedures/016_partition_lookup.sql")),
     ("017_retention_analytics.sql", include_str!("../sql/procedures/017_retention_analytics.sql")),
     ("018_prometheus.sql", include_str!("../sql/procedures/018_prometheus.sql")),
     ("019_streams_schema.sql", include_str!("../sql/procedures/019_streams_schema.sql")),
     ("020_streams_register_query_v1.sql", include_str!("../sql/procedures/020_streams_register_query_v1.sql")),
-    ("021_streams_cycle_v1.sql", include_str!("../sql/procedures/021_streams_cycle_v1.sql")),
     ("022_streams_state_get_v1.sql", include_str!("../sql/procedures/022_streams_state_get_v1.sql")),
     // ------------------------------------------------------------- log engine
     // Greenfield replacement of the seg_* family (18-log-engine.md). 040 first:
@@ -66,6 +64,10 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("046_log_streams.sql", include_str!("../sql/procedures/046_log_streams.sql")),
     ("047_log_admin.sql", include_str!("../sql/procedures/047_log_admin.sql")),
     ("048_log_stats.sql", include_str!("../sql/procedures/048_log_stats.sql")),
+    // Last: removes the rows message plane from databases that already applied
+    // the files deleted above. Runs after everything so a dependency error names
+    // a live dependant rather than an apply-order artifact.
+    ("049_drop_rows_message_plane.sql", include_str!("../sql/procedures/049_drop_rows_message_plane.sql")),
 ];
 
 /// Apply the schema at boot. Set `QUEEN_APPLY_SCHEMA=0` to skip (e.g. when the DB

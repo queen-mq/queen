@@ -1,0 +1,207 @@
+---
+title: Traces
+description: "Recording application trace events against a message and reading them back by address, by name, or as a name index."
+type: reference
+tier: use
+sidebar:
+  order: 12
+  label: Traces
+sourceOfTruth:
+  - server/src/handlers/traces.rs
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/db.rs
+  - server/sql/procedures/011_traces.sql
+  - server/sql/procedures/047_log_admin.sql
+verifiedBy:
+  - queen_proxy/scripts/isolation-smoke.sh
+---
+
+A trace is an application-written event attached to a message address. The broker
+stores what you post and gives you three ways to read it back; it never writes
+traces itself and never interprets the `data` you send. Use them to answer "what
+happened to this message, in the words of the workers that handled it"
+(retry reasons, external system responses, business checkpoints) for messages whose
+payload alone does not explain their fate.
+
+Traces are engine-agnostic: they live in `queen.message_traces`, keyed by
+`(partition_id, transaction_id)`, with optional labels in
+`queen.message_trace_names`. That key is why the read routes take the same
+two-segment address as the message routes.
+
+## POST /api/v1/traces
+
+Access level `read-write`. Required: `transactionId`, `partitionId`, `data`. A
+missing or empty `transactionId`/`partitionId` is a `400`
+(`transactionId and partitionId are required`); a missing `data` is a `400`
+(`data is required`).
+
+```json
+{
+  "transactionId": "order-4471",
+  "partitionId": "0198e0f2-1c44-7b91-9c31-9a4b8f2ad001",
+  "consumerGroup": "invoicer",
+  "eventType": "retry",
+  "data": { "reason": "downstream 503", "attempt": 2 },
+  "traceNames": ["payment-failures", "order-4471"]
+}
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `transactionId` | required | Free text; not validated against any message. |
+| `partitionId` | required | Must be a partition UUID. |
+| `consumerGroup` | `__QUEUE_MODE__` | The group the event is attributed to. |
+| `eventType` | `"info"` | Free text. |
+| `data` | required | Any JSON value; stored as given. |
+| `traceNames` | none | Array of labels, or a single string, which is wrapped into a one-element array. Anything else is ignored. |
+
+`workerId` is **always** stored as `seg-rust`. The handler stamps it and does not
+read a client-supplied value.
+
+Success is `201` with `{"success": true, "traceId": "0198..."}`. A stored-procedure
+body carrying `success: false` or a non-null `error` is served as `500`.
+
+<Aside type="caution">
+Nothing checks that the message exists. On the log engine a message's id lives
+inside a compressed segment blob and is invisible to SQL, so `record_trace_v1`
+resolves `message_id` from the rows-engine table, finds nothing, and inserts the
+trace with `message_id = NULL`. A trace posted for a transaction id that was never
+pushed is stored and returned by the read routes exactly like a real one. Traces
+are evidence you produce, not evidence the broker corroborates.
+</Aside>
+
+With `QUEEN_TENANCY_HEADER` enabled the `partitionId` is checked against the
+caller's tenant before anything is written, because it arrives straight off the
+wire and a leaked or guessed UUID would otherwise let anyone attach records to
+another tenant's messages. A foreign partition gets the same
+`{"success": false, "error": "Message not found"}` at `404` that an unknown one
+would. With tenancy off there is no gate, and a `partitionId` that is not a valid
+UUID reaches the stored procedure and comes back as `500`
+(`{"error":"trace failed: ..."}`).
+
+## GET /api/v1/traces/:partitionId/:transactionId
+
+All traces for one message address, oldest first.
+
+```json
+{
+  "traces": [
+    {
+      "id": "0198...",
+      "event_type": "retry",
+      "data": { "reason": "downstream 503", "attempt": 2 },
+      "consumer_group": "invoicer",
+      "worker_id": "seg-rust",
+      "created_at": "2026-07-30T10:52:11.400Z",
+      "trace_names": ["payment-failures", "order-4471"]
+    }
+  ]
+}
+```
+
+Keys are snake_case on all three read routes. An address with no traces returns
+`{"traces": []}` at `200`, and so does a partition belonging to another tenant,
+which is the same answer for the same reason as the message routes: an empty set
+leaks nothing about whether the partition exists elsewhere.
+
+## GET /api/v1/traces/by-name/:traceName
+
+Every trace carrying one label, oldest first, with the queue and partition names
+resolved and the rows-engine payload joined in where there is one.
+
+Query: `limit` (default `100`), `offset` (default `0`).
+
+```json
+{
+  "traces": [
+    {
+      "id": "0198...",
+      "transaction_id": "order-4471",
+      "partition_id": "0198...",
+      "event_type": "retry",
+      "data": { "reason": "downstream 503", "attempt": 2 },
+      "consumer_group": "invoicer",
+      "worker_id": "seg-rust",
+      "created_at": "2026-07-30T10:52:11.400Z",
+      "queue_name": "orders",
+      "partition_name": "eu-1",
+      "message_payload": null,
+      "trace_names": ["payment-failures", "order-4471"]
+    }
+  ],
+  "total": 1,
+  "pagination": { "limit": 100, "offset": 0 }
+}
+```
+
+`message_payload` is `null` for log-engine messages: it comes from the rows-engine
+`queen.messages` join, which log messages have no row in. Use
+`GET /api/v1/messages/:partitionId/:transactionId` to fetch the payload. See
+[messages and DLQ](/reference/http/messages-dlq).
+
+This route is name-addressed, so there is no partition id to gate on. Ownership is
+resolved per trace through its partition (looked up in both the log and rows
+partition tables), and only traces belonging to the caller's tenant are counted
+and returned. `total` here **is** a real count of the tenant-scoped match set, not
+the page length.
+
+## GET /api/v1/traces/names
+
+The index of labels that exist, most recently seen first.
+
+Query: `limit` (default `50`), `offset` (default `0`).
+
+```json
+{
+  "trace_names": [
+    {
+      "trace_name": "payment-failures",
+      "trace_count": 214,
+      "message_count": 173,
+      "last_seen": "2026-07-30T10:52:11.400Z"
+    }
+  ],
+  "total": 4,
+  "pagination": { "limit": 50, "offset": 0 }
+}
+```
+
+`trace_count` counts trace rows, `message_count` counts distinct transaction ids.
+A name appears only when at least one of its traces belongs to the caller's tenant,
+and its counts and `last_seen` are computed from that tenant's traces alone:
+trace names are caller-chosen text, so a global index would leak both the names
+and the activity times of every other tenant.
+
+## Operational limits
+
+Two properties of the trace tables that will surprise you eventually:
+
+- **Nothing purges traces.** Retention, the DLQ purge and the metrics cleanup all
+  leave `queen.message_traces` and `queen.message_trace_names` alone. Trace volume
+  is entirely your writes; size the table accordingly, and prune it yourself if you
+  trace at message rate.
+- **Deleting a queue leaves its traces behind.** The foreign keys from
+  `queen.message_traces` to the message and partition tables were dropped so the
+  table could serve both engines, so a queue delete does not cascade. The orphaned
+  rows stay in the table but become unattributable: the by-name and names routes
+  resolve ownership through the partition, and a trace whose partition row is gone
+  belongs to nobody, so it is filtered out rather than shown to everyone. It is
+  still readable by exact address.
+
+## Access levels
+
+| Route | Level |
+| --- | --- |
+| `POST /api/v1/traces` | read-write |
+| `GET /api/v1/traces/:partitionId/:transactionId` | read-only |
+| `GET /api/v1/traces/by-name/:traceName` | read-only |
+| `GET /api/v1/traces/names` | read-only |
+
+All four are tenant-scoped. Note the routing shape: `/api/v1/traces/names` is one
+segment deep and cannot collide with the two-segment address route, but
+`/api/v1/traces/by-name/:traceName` and
+`/api/v1/traces/:partitionId/:transactionId` are both two segments deep and the
+static `by-name` wins. A partition whose id were literally `by-name` is
+unreachable. Partition ids are UUIDs, so this is a routing fact rather than a
+practical limit.

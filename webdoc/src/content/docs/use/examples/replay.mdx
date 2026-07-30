@@ -1,0 +1,137 @@
+---
+title: Replay history
+description: "Reprocess what a queue already delivered, either by seeking an existing group's cursor back to a timestamp or by subscribing a new group from the beginning, and what segment granularity means for the boundary."
+type: example
+tier: use
+sidebar:
+  order: 24
+sourceOfTruth:
+  - server/sql/procedures/047_log_admin.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/008_consumer_groups.sql
+  - server/src/handlers/consumer_groups.rs
+  - server/src/fusion.rs
+---
+
+Messages are not deleted when they are consumed. A pop claims a span and an ack advances one integer; the segment rows stay exactly where they were until retention removes them. Replay is therefore not a recovery feature bolted on the side. It is moving that integer backwards.
+
+There are two ways to do it, and they answer different questions.
+
+## Seek an existing group backwards
+
+Use this when the group that already processed the data is the one that must process it again: a bad deployment, a bug in a handler, a downstream store that lost writes.
+
+```http
+POST /api/v1/consumer-groups/billing/queues/orders/seek
+Content-Type: application/json
+
+{"timestamp": "2026-07-29T14:00:00Z"}
+```
+
+This moves the group's cursor for **every partition of the queue**. The per-partition variant scopes it to one lane:
+
+```http
+POST /api/v1/consumer-groups/billing/queues/orders/partitions/8812/seek
+Content-Type: application/json
+
+{"timestamp": "2026-07-29T14:00:00Z"}
+```
+
+The other accepted body is `{"toEnd": true}`, which sets the cursor to the partition's current last offset: skip everything pending, start from the next push. On the per-partition route an **empty body defaults to `toEnd: true`** (that is what the dashboard's per-partition "skip to end" control sends); the per-queue route requires an explicit body.
+
+A seek does five things, and all five matter:
+
+<Steps>
+
+1. **Sets `committed`** to the resolved offset, per partition.
+
+2. **Releases any live lease** on that `(partition, group)` pair and clears the worker id and expiry, so an in-flight batch is abandoned rather than allowed to ack over the new position.
+
+3. **Resets the retry and redelivery counters** for the pair. A group seeked back into a range that previously exhausted its retry budget starts with a fresh budget.
+
+4. **Creates the cursor row** if the group had never popped that partition, so a seek can position a group that has not run yet.
+
+5. **Clears the group's empty-scan watermark** for the queue and re-seeds the broker's candidate hot list from committed state. Without those two steps a backward seek would appear to do nothing for up to 30 seconds: the stale watermark fences cold partitions out of the pop candidate scan, and the hot list is the discovery source when it is enabled (the default).
+
+</Steps>
+
+Send neither `toEnd` nor `timestamp` and the request is rejected with HTTP 400 and `Must specify toEnd=true or a timestamp`. Name a queue with no partitions for this tenant and the per-queue seek answers `success: false` with `Queue not found or has no partitions`. That is deliberate, rather than reporting success with `partitionsUpdated: 0` and letting a misdirected seek look like it worked.
+
+## Subscribe a new group from the beginning
+
+Use this when the replay must not disturb the group that is running: a backfill into a new index, a shadow deployment, a one-off analysis over history.
+
+A group is created by naming it. Its starting cursor is decided at the first pop of each partition and never revisited:
+
+```js
+// Illustrative, not extracted from a test.
+// Reads all retained history, then keeps up with new pushes.
+await client
+  .queue('orders')
+  .group('reindex-2026-07-30')
+  .batch(500)
+  .consume(async messages => { await reindex(messages) })
+```
+
+`all` is the default, and it seeds the cursor just below the oldest **retained** offset, so a fresh group reads every message still on disk. The alternatives are `subscriptionMode('new')` (or `subscriptionFrom('now')`), which seeds at the partition's current end and skips the backlog entirely, and `subscriptionFrom('<ISO timestamp>')`, which seeds at that point in history.
+
+The first pop of a `(queue, group)` pair also writes a durable registration recording the mode and timestamp. A partition created *later* seeds from that stored timestamp rather than from its own end, so adding partitions does not silently hide their backlog from an existing group.
+
+<Aside type="caution">
+`POST /api/v1/consumer-groups/{group}/subscription` updates the stored subscription timestamp, and clears the group's watermarks, but it does **not** move any existing cursor. It only changes where the group starts on partitions it has not contacted yet. To reposition a group that is already running, seek.
+</Aside>
+
+## What segment granularity means
+
+A timestamp seek does not land on a message. It lands on a segment.
+
+The broker resolves `{"timestamp": T}` as: find the first segment in this partition whose `created_at` is at or after `T`, and set `committed` to its `base_offset - 1`. Delivery resumes at that segment's first frame.
+
+That is exact with respect to the timestamps you can observe, because every message in a segment reports the segment's `created_at` as its own `createdAt`. It is coarse with respect to individual push calls, because a segment is one commit of the broker's push fusion: frames from several concurrent pushes to the same partition are packed into one segment and share one commit time. **You cannot seek into the middle of a segment.** The unit of replay is the fused batch.
+
+Two boundary cases fall out of the same walk:
+
+- **A timestamp older than the oldest retained segment** resolves to the oldest retained segment: you replay everything that still exists, not everything that ever existed.
+- **A timestamp newer than every segment** resolves to the partition's last offset, which is a future-only cursor. A seek to a future timestamp behaves like `toEnd: true`.
+
+The walk starts at the partition's retention watermark, never at offset zero, so a seek on a heavily retained partition does not pay for a scan over deleted history.
+
+## What replay cannot reach
+
+- **Below the retention watermark.** Retention deletes whole segments; those offsets are gone and no cursor position brings them back. Check the queue's window before promising a replay depth. Retention is opt-in, so a queue with `retentionEnabled` unset keeps everything.
+- **The dead-letter queue.** Dead-lettered messages live as separate snapshot rows in `queen.log_dlq`, which retention never purges. A cursor seek does not re-deliver them. See [Failures and the DLQ](/use/examples/dlq).
+- **Other groups' progress.** A seek is scoped to one group. Every other group's cursor is untouched.
+
+## Replay is redelivery, so handlers must be idempotent
+
+Nothing about replay is special from the consumer's point of view: the messages arrive exactly as they did the first time, with the same `transactionId` and the same `data`. Producer-side deduplication does not help here: it rejects repeated *pushes*, not repeated *deliveries*, and a replayed message is not being pushed again.
+
+If reprocessing must not double-apply, the guard belongs in your handler, keyed on `transactionId` (which is stable across redeliveries) rather than on `id`.
+
+## What to expect
+
+| Action | Cursor lands at | Side effects |
+| --- | --- | --- |
+| `{"toEnd": true}` | Partition's current last offset | Live lease released, retry state reset |
+| `{"timestamp": T}`, T inside retained history | First segment with `created_at >= T`, minus one | Same, plus watermark cleared and hot list re-seeded |
+| `{"timestamp": T}`, T older than all retained data | Oldest retained segment, minus one | Replays everything retained |
+| `{"timestamp": T}`, T in the future | Partition's last offset | Equivalent to `toEnd` |
+| Empty body on the per-partition route | Partition's last offset | Defaults to `toEnd` |
+| New group, default `all` | Just below the oldest retained offset | Registration written; later partitions seed from it |
+| New group, `new` | Partition's current end | Backlog skipped |
+| Seek during an in-flight batch | New position | The abandoned batch's ack is rejected as an expired lease |
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    href="/use/examples/fanout"
+    title="Shadow groups"
+    description="Why a replay group costs a cursor row rather than a copy of the data."
+  />
+  <LinkCard
+    href="/use/examples/dlq"
+    title="Getting messages out of the DLQ"
+    description="The one kind of replay a cursor seek cannot do."
+  />
+</CardGrid>

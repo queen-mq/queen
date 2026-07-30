@@ -1,0 +1,330 @@
+---
+title: Queues and resources
+description: "POST /api/v1/configure and the /api/v1/resources/* listings: every enforced option, its default, and what reads it."
+type: reference
+tier: use
+sidebar:
+  order: 9
+  label: Queues
+sourceOfTruth:
+  - server/src/handlers/queues.rs
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/db.rs
+  - server/src/retention.rs
+  - server/src/stats.rs
+  - server/sql/procedures/012_configure.sql
+  - server/sql/procedures/007_analytics.sql
+  - server/sql/procedures/013_stats.sql
+  - server/sql/procedures/014_worker_metrics.sql
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/044_log_ack.sql
+  - server/sql/procedures/045_log_maintenance.sql
+  - server/sql/procedures/048_log_stats.sql
+verifiedBy:
+  - clients/client-js/test-v2/queue.js
+  - clients/client-js/test-v2/retention.js
+  - test/runners/tenancy/tenancy-check.sh
+---
+
+A queue does not have to be created before it is used: the first push to a queue
+name creates the queue, one partition, and a `queen.log_queues` configuration row
+with engine defaults. It also derives `namespace` and `task` from a dotted queue
+name — `billing.invoice` becomes namespace `billing`, task `invoice` — so a
+push-only queue is still visible to namespace and task discovery pops.
+`POST /api/v1/configure` exists to set options that differ from the defaults, and to
+pre-create a queue so a consumer can attach before any producer runs.
+
+Two routes mutate queue state — `POST /api/v1/configure` (read-write) and
+`DELETE /api/v1/resources/queues/:queue` (**admin**). Everything else on this page
+is a read at the `read-only` access level.
+
+## POST /api/v1/configure
+
+`queue` is the only required field. Options may be nested under `options` or sent
+at the top level; the broker normalises them into one bag before calling
+`queen.configure_queue_v1`. Top-level `namespace` and `task` are folded into the
+options when they are non-empty strings.
+
+```json
+{
+  "queue": "orders",
+  "namespace": "billing",
+  "task": "invoice",
+  "options": {
+    "leaseTime": 120,
+    "retryLimit": 5,
+    "dedupWindowSeconds": 600
+  }
+}
+```
+
+An empty string is a valid queue name — `queen.configure_queue_v1` creates a row
+named `''`, and the JavaScript client's own load test relies on it. A missing or
+non-string `queue` is a `400`.
+
+### Configure is a full replace
+
+Every call rewrites the whole configuration row. Keys you omit are **reset to
+their defaults**, not left as they were.
+
+<Aside type="danger">
+`/configure` is not a patch. A queue configured with `retentionEnabled: true`
+and then reconfigured with only `leaseTime` loses retention. The same applies to
+`dedupWindowSeconds`, which falls back to **3600** — omitting it on a queue that
+had dedup disabled silently re-enables a one-hour dedup window. Always send the
+complete option set you want the queue to have.
+</Aside>
+
+The reset is structural: `configure_queue_v1` parses each option with
+`COALESCE(p_options->>'key', <default>)` and writes every column on
+`ON CONFLICT DO UPDATE`, so an absent key becomes the default value rather than
+being skipped.
+
+### Enforced options
+
+These are the options this engine reads. Each row names what enforces it, so you
+can predict the behaviour change from setting it.
+
+| Option | Default | What enforces it |
+| --- | --- | --- |
+| `namespace` | `""` | Stored on `queen.queues`; selects queues for the discovery pop and for `namespace` filters on the listings and analytics routes. |
+| `task` | `""` | Same as `namespace`, on the `task` axis. |
+| `leaseTime` | `300` (seconds) | Written to `queen.log_queues.lease_time`; the pop path uses `COALESCE(request leaseSeconds, queue lease_time, 60)` for the lease it takes. |
+| `retryLimit` | `3` | The per-(partition, group) retry budget charged by an explicit `failed` ack (`044_log_ack.sql`). Below the limit the batch redelivers; at the limit the head frame is dead-lettered or dropped. |
+| `deadLetterQueue` | `true` | With `dlqAfterMaxRetries`, decides whether an exhausted retry budget writes `queen.log_dlq`. |
+| `dlqAfterMaxRetries` | `true` | See the note below — the two flags are OR-ed. |
+| `delayedProcessing` | `0` (seconds) | Pop visibility: only segments at least this old are delivered. In-flight backlog is bounded by rate × delay. |
+| `windowBuffer` | `0` (seconds) | Pop visibility: if the partition received a segment within this window, the pop delivers **nothing** from that partition. Trades latency for larger batches. |
+| `minPopWaitTime` | `0` (ms, off) | How long a non-empty pop may hold an under-full batch before claiming it, so one commit carries more messages. Clamped by SQL to `[0, 60000]`. |
+| `retentionEnabled` | `false` | Master switch for the two age-based retention rules. Without it, `retentionSeconds` and `completedRetentionSeconds` do nothing. |
+| `retentionSeconds` | `0` | Rule 1 cutoff. Active only when `retentionEnabled` is true and the value is positive. Whole segments older than the cutoff are deleted. |
+| `completedRetentionSeconds` | `0` | Rule 2 cutoff: segments every group has consumed past. Also widens the `queen.log_txns` purge window (`GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900)`). |
+| `maxWaitTimeSeconds` | `0` | **Deletes whole segments older than the cutoff for every consumer group, in-flight leases included.** Independent of `retentionEnabled`. See below. |
+| `encryptionEnabled` | `false` | Stored on `queen.queues` and read at push time; payloads are stored as an encrypted envelope when a key is configured. |
+| `dedupWindowSeconds` | `3600` (seconds) | Written to `queen.log_queues.dedup_window_seconds`. The push path probes `queen.log_txns` within this window before allocating an offset. `0` disables the probe entirely. |
+
+Values are stored as given. The broker does not validate ranges, apart from the
+SQL clamp on `minPopWaitTime` and a `max(0)` floor on `dedupWindowSeconds`.
+
+<Aside type="note">
+The effective `leaseTime` depends on how the queue came to exist. A queue created
+implicitly by a push gets the `queen.log_queues` column default, **60 seconds**. A
+queue that has been through `/configure` at least once gets the option's default,
+**300 seconds**. Both are overridable per request with `?leaseSeconds=`. Every other
+option has the same default either way, because the `queen.queues` column defaults
+and the `/configure` defaults agree.
+</Aside>
+
+#### Disabling the dead-letter queue takes both flags
+
+`044_log_ack.sql` computes the DLQ switch as
+`COALESCE(dead_letter_queue, true) OR COALESCE(dlq_after_max_retries, true)`.
+Setting only one of them to `false` leaves dead-lettering on. Send both as
+`false` to turn it off — at which point an exhausted retry budget drops the
+poison frame instead of quarantining it.
+
+#### maxWaitTimeSeconds deletes messages
+
+`maxWaitTimeSeconds` is not a delivery deadline and it does not dead-letter.
+`queen.log_evict_max_wait_step_v1` delegates to the same delete-and-advance path
+retention uses, with the cutoff taken from `queen.queues.max_wait_time_seconds`:
+whole segments older than the cutoff are removed for every consumer group,
+including groups holding a live lease on them. The SQL calls this data loss by
+design. A cursor left below the new log start resumes at the next existing
+offset; the pop scan tolerates the gap. Use it only where dropping stale work is
+the intent.
+
+### Response
+
+`200` with the stored-procedure JSON passed through verbatim:
+
+```json
+{
+  "configured": true,
+  "queueId": "0198...",
+  "partitionId": "0198...",
+  "queue": "orders",
+  "namespace": "billing",
+  "task": "invoice",
+  "options": { "leaseTime": 120, "retryLimit": 5 }
+}
+```
+
+The `options` object echoes the resolved configuration — the values actually
+stored, after defaulting. Clients assert on `configured === true` and round-trip
+the option keys, so the body is never reshaped by the broker.
+
+After the stored procedure returns, the handler does three more things, in order:
+pins `queen.queues.storage = 'segments'`, upserts the `queen.log_queues` row with
+the resolved `leaseTime`, `retentionSeconds` and `dedupWindowSeconds`, and drops
+this queue's cached lease time — locally, and on mesh peers via a
+`QUEUE_CONFIG_SET` frame — so a `leaseTime` change is visible on the next pop. If
+the stored procedure returns a body carrying an `error` key, the handler
+short-circuits before those writes.
+
+Failures are `500` with `{"error":"configure failed: ..."}`,
+`configure(storage) failed:` or `configure(seg_queue) failed:` depending on which
+step failed.
+
+## GET /api/v1/resources/queues
+
+Lists the tenant's queues.
+
+```json
+{
+  "queues": [
+    {
+      "id": "0198...",
+      "name": "orders",
+      "namespace": "billing",
+      "task": "invoice",
+      "createdAt": "2026-07-30T09:12:44.011Z",
+      "partitions": 8,
+      "retainedBytes": 194883,
+      "segments": { "segments": 41, "messages": 12904 },
+      "messages": { "total": 12904, "pending": 310, "processing": 24 }
+    }
+  ]
+}
+```
+
+Two different clocks feed one object, and the difference matters when you read
+these numbers:
+
+- `partitions`, `segments` and `messages.total` are computed live per request
+  from `queen.log_partitions` / `queen.log_segments` (`log_queue_stats_all_v1`).
+  `messages.total` is the count of **retained** frames, not the backlog.
+- `messages.pending` and `messages.processing` come from `queen.stats`, which a
+  background reconciler refreshes every `STATS_INTERVAL_MS` (default `10000` ms)
+  on whichever replica wins advisory lock `737002`. They are the same watermark
+  values the overview sums, so the list agrees with the rest of the dashboard
+  rather than with a fresher count.
+
+<Aside type="caution">
+`namespace` and `task` query parameters are accepted and **ignored**. The handler
+takes no query extractor at all: it always serves the full list for the tenant.
+Filter client-side, or use `GET /api/v1/status/queues`, which does apply
+`queue`, `namespace` and `task`. See [Status and metrics](/reference/http/status-metrics).
+</Aside>
+
+## GET /api/v1/resources/queues/:queue
+
+One queue in detail: identity, per-partition stats, and totals.
+
+```json
+{
+  "id": "0198...",
+  "name": "orders",
+  "namespace": "billing",
+  "task": "invoice",
+  "createdAt": "2026-07-30T09:12:44.011Z",
+  "partitions": [
+    {
+      "id": "0198...",
+      "name": "Default",
+      "createdAt": "2026-07-30T09:12:44.031Z",
+      "stats": {
+        "total": 1600, "pending": 40, "processing": 8,
+        "completed": 1552, "failed": null, "deadLetter": 0
+      },
+      "oldestMessage": "2026-07-30T09:12:45.100Z",
+      "newestMessage": "2026-07-30T10:44:02.900Z"
+    }
+  ],
+  "totals": { "total": 12904, "pending": 310, "processing": 24, "completed": 12570, "failed": null, "deadLetter": 0 },
+  "retainedBytes": 194883,
+  "segments": { "segments": 41, "messages": 12904 }
+}
+```
+
+Notes that follow from the log engine: `pending` is measured against the **worst**
+(lowest) committed cursor across the queue's consumer groups, so a single lagging
+group holds the number up; `failed` is always `null` because there is no
+per-message failure state; and `retainedBytes` is a `queen.stats` value, refreshed
+on the stats cadence. A queue with no `queen.queues` row answers `404` with
+`{"error":"Queue not found"}`.
+
+## DELETE /api/v1/resources/queues/:queue
+
+Access level **admin**. Removes, in order, the queue's `queen.log_txns` and
+`queen.log_dlq` rows (neither carries a foreign key, so they are deleted
+explicitly while the partitions still resolve), then the `queen.log_queues` row —
+which cascades to `log_partitions`, `log_segments` and `log_consumers` — plus the
+rows-side coordination state and consumer watermarks via
+`queen.delete_queue_v1`.
+
+The response is `200` with a JSON body, never `204`: the SDKs read
+`res.deleted === true` and a bodyless response would make them see `null`.
+
+```json
+{ "deleted": true, "queue": "orders", "existed": true }
+```
+
+Deleting a queue that does not exist is also `200`, with the body made
+self-consistent rather than misleading:
+
+```json
+{
+  "deleted": false,
+  "queue": "nope",
+  "existed": false,
+  "message": "Queue not found — nothing was deleted"
+}
+```
+
+The status stays `200` because the SDKs use delete-before-create as a cleanup
+idiom; a `404` would turn a no-op into a thrown error for them. Check `deleted`,
+not the status code.
+
+Message traces are **not** deleted. `queen.message_traces` had its foreign keys
+dropped so it could hold traces for both engines, so a queue delete leaves its
+traces behind — see [Traces](/reference/http/traces).
+
+## Aggregate listings
+
+Three sibling reads, all `read-only`, all passing their stored procedure's JSON
+through unchanged.
+
+| Route | Returns |
+| --- | --- |
+| `GET /api/v1/resources/overview` | Counts (`queues`, `partitions`, `namespaces`, `tasks`), a `messages` block (`total`, `pending`, `processing`, `completed`, `failed`, `deadLetter`), a `lag` block (time and offset, avg/median/min/max), a `throughput` block (`ingestedPerSecond`, `processedPerSecond` over the last 5 minutes ÷ 300), `timestamp` and `statsAge`. |
+| `GET /api/v1/resources/namespaces` | `namespaces[]` with `namespace`, `queues`, `partitions`, `messages.total`, `messages.pending`. |
+| `GET /api/v1/resources/tasks` | The same shape on the `task` axis. |
+
+`statsAge` is the age in seconds of the numbers you are reading, or `-1` when
+nothing has been reconciled yet. Treat a large `statsAge` as "the reconciler is
+not running", not as "the queue is idle".
+
+<Aside type="note">
+`GET /api/v1/resources/overview` has two bodies. For the **default tenant** — which
+is every request when `QUEEN_TENANCY_HEADER` is off — it blends cluster-wide
+lifetime counters from `queen.worker_metrics_summary` and counts
+`queen.queues` without a tenant predicate, so on a shared cell the default-tenant
+overview is cell-wide. For a specific tenant it is re-derived from that tenant's
+`queen.stats` queue rows and its own per-queue counters. The `namespaces` count
+also changes meaning between the branches: `queen.stats` namespace rows for the
+default tenant, `COUNT(DISTINCT namespace)` for a tenant.
+</Aside>
+
+## Access levels
+
+Access levels are a role *set*, not a ladder. A `WriteOnly` token passes
+`/api/v1/push` and is rejected on every route on this page, including the
+listings.
+
+| Route | Level |
+| --- | --- |
+| `POST /api/v1/configure` | read-write |
+| `GET /api/v1/resources/queues` | read-only |
+| `GET /api/v1/resources/queues/:queue` | read-only |
+| `DELETE /api/v1/resources/queues/:queue` | admin |
+| `GET /api/v1/resources/overview` | read-only |
+| `GET /api/v1/resources/namespaces` | read-only |
+| `GET /api/v1/resources/tasks` | read-only |
+
+Every route here resolves a tenant from the request, so with
+`QUEEN_TENANCY_HEADER` on they are scoped to the caller's tenant. The full route
+table, generated from the router and the authorization function, is in the
+[reference index](/reference).

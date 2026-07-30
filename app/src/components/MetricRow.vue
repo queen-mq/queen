@@ -16,7 +16,7 @@
         {{ label }}
         <!-- A cell-level number read as a tenant number is the lie this chip
              exists to prevent: it covers every tenant on the cell. -->
-        <i v-if="scope === 'cell'" class="mr-scope" title="Cell-level: covers every tenant on this cell">cell</i>
+        <i v-if="scope === 'cell'" class="cell-chip" title="Cell-level: covers every tenant on this cell">cell</i>
       </span>
 
       <span class="mr-value">
@@ -215,19 +215,10 @@ const onRowClick = () => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.mr-scope {
-  font-style: normal;
-  font-size: 9px;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  color: var(--warn-400);
-  border: 1px solid var(--warn-400);
-  border-radius: var(--r-chip);
-  padding: 0 3px;
-  margin-left: 6px;
-  vertical-align: 1px;
-  opacity: .8;
-}
+/* The cell chip is the app-wide `.cell-chip` (style.css) — one amber
+   vocabulary for "this figure covers the whole cell", shared with
+   Dashboard's counts strip and QueueOperations' card titles. The local
+   `.mr-scope` copy it replaced differed only in margin-left. */
 
 .mr-na {
   font-size: 12px;

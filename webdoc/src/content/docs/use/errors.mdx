@@ -1,0 +1,198 @@
+---
+title: Errors, backpressure and retries
+description: "The error envelope, the status codes the broker and the proxy return, the 429 and Retry-After contract, and exactly what each SDK retries on your behalf."
+type: reference
+tier: use
+sidebar:
+  order: 27
+sourceOfTruth:
+  - server/src/handlers/mod.rs
+  - server/src/handlers/data.rs
+  - server/src/auth.rs
+  - server/src/handlers/static_files.rs
+  - queen_proxy/src/errors.rs
+  - queen_proxy/src/gateway.rs
+  - queen_proxy/src/limits.rs
+  - clients/client-js/client-v2/http/HttpClient.js
+  - clients/client-js/client-v2/streams/runtime/StreamsHttpClient.js
+---
+
+Three things about error handling in Queen are counter-intuitive enough to be worth stating before the tables: a rejected acknowledgement arrives as HTTP 200, a rolled-back transaction arrives as HTTP 200, and an empty pop arrives as HTTP 204 with no body at all. If your client checks status codes only, it will misread all three.
+
+## The envelope
+
+Every error body the broker produces is one JSON object with an `error` string:
+
+```json
+{"error":"Authentication required"}
+```
+
+The proxy adds a machine-readable `code` alongside it, and that field is the one to branch on — the human text may change, the codes are a contract:
+
+```json
+{"error":"request rate limit exceeded","code":"rate_limited"}
+```
+
+Two conventions surround the envelope.
+
+**A `204` carries no body whatsoever.** Not an empty object, not a zero-length body with a declared length — nothing. This is deliberate: announcing a content length on a body the HTTP layer then elides made strict HTTP/1.1 clients (Node's undici) treat the connection as poisoned and drop it, which under empty-poll load turned into connection-reset storms. Every client already early-returns on 204, so the body was pure cost.
+
+**An unknown route is a JSON 404, not the dashboard.** The broker's fallback serves the embedded single-page dashboard, but for any path under `/api/` and for any non-GET method it answers:
+
+```json
+{"error":"Not Found","code":"no_such_route"}
+```
+
+Before that guard existed, a call to a nonexistent endpoint came back HTTP 200 with an HTML document, which every JSON client read as success. A phantom endpoint now fails loudly.
+
+## Broker status codes
+
+| Code | When | Body |
+| --- | --- | --- |
+| `200` | Reads, acks, transactions, seeks, configure, lease extension | Route-specific JSON |
+| `201` | `POST /api/v1/push` accepted (including an empty item list, and including maintenance-mode buffering) | Per-item result array |
+| `204` | A pop with nothing to deliver, or a pop while pop-maintenance is on | Nothing |
+| `400` | Unparseable JSON body; a required field missing; an unsupported operation type in a transaction | `{"error":"bad body: …"}` or the specific message |
+| `401` | Authentication required, or the token failed validation | `{"error":"Authentication required"}`, `Token has expired`, `Invalid token signature`, `Unknown key ID`, … |
+| `403` | The token authenticated but its roles do not satisfy the route | `{"error":"Insufficient permissions"}` |
+| `404` | Unknown route; an addressed message or dead-letter row that does not exist; a stored procedure reporting an error whose text contains "not found" | `{"error":"Not Found","code":"no_such_route"}` or the route's own message |
+| `409` | `POST /streams/v1/queries` with a config-hash mismatch and no `reset` | `{"error":"…","success":false}` |
+| `413` | Request body larger than `QUEEN_MAX_BODY_BYTES` (default 64 MiB) | Framework response |
+| `500` | Connection pool exhausted or unavailable; a stored procedure error; a decode failure | `{"error":"pool"}`, `{"error":"push failed: …"}`, … |
+| `503` | `GET /health` when the database round-trip fails | Health payload |
+
+`401` and `403` only occur when JWT validation is switched on. Access levels are a **role set, not a ladder**: a `write-only` credential passes `POST /api/v1/push` and is rejected with 403 on every read and every consume route, including `/api/v1/pop`. The per-route level is listed in the generated route table in the [reference](/reference).
+
+### Where 200 does not mean success
+
+<Steps>
+
+1. **Acknowledgements.** `POST /api/v1/ack` and `/api/v1/ack/batch` always answer 200 with one item per acknowledgement, in request order:
+
+   ```json
+   [{"index":0,"transactionId":"…","success":false,"error":"invalid or expired lease","leaseReleased":false,"dlq":false,"noop":false}]
+   ```
+
+   `success` on the item is the only signal. The three rejections you will actually see are `invalid or expired lease`, `already committed: the cursor moved past this message before this ack`, and `unresolvable: transaction not in the ack window (hash purged or never pushed); if leased, the message redelivers`. A harmless duplicate completion reports `success: true` with `noop: true`. In every rejection case the cursor did not move, so the messages redeliver.
+
+2. **Transactions.** `POST /api/v1/transaction` answers 200 even when the transaction rolled back:
+
+   ```json
+   {"transactionId":"…","success":false,"error":"QDUP …","results":[]}
+   ```
+
+   A duplicate push (`QDUP`) or a rejected ack (`QTXN`) takes the whole batch down. Only a malformed body or an unsupported operation type produces a 400.
+
+3. **Stream cycles.** `POST /streams/v1/cycle` answers 200 for any completed procedure call. `success` and `error` in the body decide; a 500 there means an infrastructure error, and because the whole call is one transaction, retrying is safe.
+
+</Steps>
+
+The SDKs handle all three: the JavaScript, Python and Go clients raise on `success: false` for transactions and cycles, and normalise ack results per item — a truncated or misaligned ack response fails loudly rather than being misattributed to the wrong message.
+
+## Behind the proxy
+
+A proxy deployment adds its own error surface in front of the broker. Every response carries a `code`; these are the ones a client should switch on.
+
+| Status | `code` | Cause | Terminal for the client |
+| --- | --- | --- | --- |
+| `401` | `unauthorized` | Missing bearer credential, unknown or revoked API key, invalidated session | Yes — fix the credential |
+| `403` | `cluster_suspended` | The cluster is suspended or being deleted | Yes |
+| `403` | `storage_quota_exceeded` | Storage quota reached; pushes blocked | Yes |
+| `403` | `quota_exceeded` | Monthly message quota exhausted, or a queue/partition/retention ceiling refused | Yes |
+| `403` | `push_blocked` | Billing hold on the cluster | Yes |
+| `403` | `feature_gated` | The route belongs to a plan feature that is off (streams, traces) | Yes |
+| `404` | `route_blocked` | The route is never exposed to a tenant, or an operator route on a cell with the capability off | Yes |
+| `413` | `payload_too_large` | A single item over the plan's payload cap, a batch over the item cap, or a body over the instance cap | Yes — resize the request |
+| `421` | `cluster_unknown` | The request's Host does not resolve to a cluster | Yes — fix the endpoint |
+| `429` | `rate_limited` | Request-rate bucket, message-rate bucket, or parked-consumer slots exhausted | No — retry after backoff |
+| `502` | `bad_gateway` | Upstream unreachable, or a bad upstream URI | No — retriable |
+| `504` | `upstream_timeout` | The broker did not answer inside the proxy's timeout | No — retriable |
+
+<Aside type="caution">
+Both quota gates that block pushes — storage and monthly messages — are **hard** gates: they are enforced regardless of whether the proxy's rate limiting is in enforcing or shadow mode. A misconfigured monthly quota blocks production pushes on a cell that is otherwise only observing.
+</Aside>
+
+Note the asymmetry in how quotas are reported. A *rate* over-limit is a `429` and you should wait. A *quota* over-limit is a `403` and waiting will not help — the number is not going to refill this month, and a queue-count ceiling will not raise itself. Retrying a `403` is a busy loop.
+
+### The 429 and Retry-After contract
+
+Every `429` from the proxy carries a `Retry-After` header in **seconds**. Its value comes from the limiter that denied the request:
+
+- **Token-bucket denials** (request rate, message rate) compute `ceil(deficit / refill_rate)`, clamped to between 1 and 60 seconds. A denial never debits the bucket, so a shadow-mode deny does not distort later decisions.
+- **Parked-consumer denials** — too many concurrent long-poll pops holding slots — use a fixed 5 seconds.
+
+`Retry-After` is advice about when capacity returns, not a promise. Honour it, and add jitter.
+
+### 413 in particular
+
+The proxy enforces three separate size limits, and the message tells you which one you hit:
+
+| Limit | Message shape |
+| --- | --- |
+| Per item, from the plan | `item 3: payload 2097152 bytes exceeds max_payload_bytes (1048576)` |
+| Batch item count | `batch of 20000 items exceeds max_batch_items (10000)` |
+| Request body, per instance | `request body exceeds cap` |
+
+The per-item cap is checked per item precisely so a batch of many small messages is not rejected by the single-item ceiling. The right response to a `413` is to reshape the request — smaller batches, or a payload that carries a reference instead of the blob — not to retry it. Note that the broker's own body limit (`QUEEN_MAX_BODY_BYTES`, 64 MiB) is separate and larger than the proxy's default request-body cap (16 MiB), so behind a proxy the proxy's cap is the one you meet first.
+
+## What the SDKs retry for you
+
+The JavaScript, Python and Go clients share the same two-layer policy, configured independently.
+
+**Layer one: 5xx and network failures.** `retryAttempts` (default 3) attempts with exponential backoff starting at `retryDelayMillis` (default 1000 ms). With several backend URLs configured, a 5xx or network failure also marks that backend unhealthy and fails over to another. **Any 4xx short-circuits this loop** — client errors are not retried.
+
+**Layer two: 429 only.** A separate `retry429` policy retries in place, against the same backend, because a rate limit is not a backend-health signal and must not trigger failover.
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `maxAttempts` | 10 for ordinary requests; **unbounded** for a long-poll pop | Setting it explicitly applies the same bound to both kinds |
+| `baseMs` | 500 | Exponential base used when the response has no `Retry-After` |
+| `capMs` | 30000 | Ceiling on the computed delay |
+
+The delay is `Retry-After × 1000` when the header is present, otherwise `min(capMs, baseMs × 2^attempt)`; either way it is jittered by ±20% to avoid a synchronised thundering herd.
+
+The unbounded default for long-poll pops is deliberate. A consumer's poll loop is already unbounded, so an individual `429` should be waited out rather than surfaced as a failure after a handful of tries. Ordinary requests — push, admin calls, non-waiting pops — get the bounded budget so a producer does not hang forever.
+
+<Aside type="note">
+`pop()` in the JavaScript client swallows errors and returns an empty array. That covers an exhausted `429` budget and a terminal `403` alike: both are logged with their `.code` and reported as "no messages". If you need to distinguish "nothing to consume" from "your credential was revoked", read the logs or use the consume loop, which handles `429` and `403` explicitly.
+</Aside>
+
+The streams runtime uses its own smaller HTTP client for `/streams/v1/*`: up to 3 retries with exponential backoff from 100 ms to 5 s, retrying 5xx, network failures, `408` and `429`, and treating every other 4xx as terminal. It does not read `Retry-After`.
+
+## Durability when the database is down
+
+A push that cannot reach PostgreSQL is not simply an error. The broker appends it to an on-disk spool and a background loop replays it later; the same path handles maintenance mode, where every push is diverted and reported with per-item `status: "buffered"` at HTTP 201. A spool write that itself fails downgrades the response to 500 with the failing items marked `failed`.
+
+<Aside type="caution">
+`GET /health` performs a real database round-trip and returns `503` when PostgreSQL is unreachable. Wiring that endpoint to a Kubernetes liveness probe therefore kills the broker exactly when the disk spool exists to keep it useful — the pod is restarted while it is successfully buffering pushes. Use it as a readiness signal, or probe something that does not depend on the database.
+</Aside>
+
+## A checklist for a robust client
+
+- Read the per-item `success` on ack responses; do not infer it from the status code.
+- Read `success` on transaction and stream-cycle responses for the same reason.
+- Treat `403` and `413` as terminal. Log the `code` and stop; do not retry.
+- Treat `429` as backpressure. Honour `Retry-After`, jitter it, and let long-poll pops wait indefinitely.
+- Treat `502`, `504` and network failures as retriable, with backoff and failover.
+- Make handlers idempotent on `transactionId`. Every rejected ack, every lease expiry and every replay is a redelivery.
+- Expect `204` with no body from a pop, and do not attempt to parse it.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    href="/use/examples/dlq"
+    title="Failures that are the message's fault"
+    description="Nack, the retry budget and the dead-letter queue."
+  />
+  <LinkCard
+    href="/reference"
+    title="Route table and access levels"
+    description="Every route with the role set it requires, generated from the router."
+  />
+  <LinkCard
+    href="/selfhost"
+    title="Running the proxy"
+    description="Where the 429 and quota behaviour comes from, and how to configure it."
+  />
+</CardGrid>

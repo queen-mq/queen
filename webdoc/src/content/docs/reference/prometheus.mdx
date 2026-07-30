@@ -1,0 +1,175 @@
+---
+title: Prometheus metrics
+description: "What GET /metrics/prometheus exposes, how process and cluster series differ, and why the endpoint must never be handed to a tenant."
+type: reference
+tier: operate
+sidebar:
+  order: 17
+  label: Prometheus
+sourceOfTruth:
+  - server/src/metrics.rs
+  - server/src/handlers/status.rs
+  - server/src/auth.rs
+  - server/src/syscollect.rs
+  - server/sql/procedures/018_prometheus.sql
+---
+
+`GET /metrics/prometheus` returns exposition text with content type
+`text/plain; version=0.0.4; charset=utf-8` and `Cache-Control: no-cache`. Every
+family carries `# HELP` and `# TYPE`.
+
+`GET /metrics` is a different endpoint and is **not** Prometheus text: it returns
+a small JSON object with uptime, aggregate request and message counts, pool size
+and RSS. Scraping it will fail to parse.
+
+## The endpoint cannot be protected by broker authentication
+
+`/health`, `/metrics` and `/metrics/prometheus` resolve to access level
+`public` in the route table, and the authentication middleware short-circuits on
+`public` before it ever looks for a token. They are also in the default
+`JWT_SKIP_PATHS`. Removing them from that list changes nothing, because the
+level check wins.
+
+<Aside type="danger">
+Turning on `JWT_ENABLED` does not close this endpoint. If the broker's port is
+reachable, so is every number below. Restrict it at the network layer: a
+reverse proxy, a NetworkPolicy, or a listener that is not routable from tenant
+traffic.
+</Aside>
+
+## Process versus cluster
+
+Two namespaces answer two different questions, and mixing them is the most
+common mistake in a Queen dashboard.
+
+`queen_process_*` counts what **this one broker instance** did since it started.
+The counters live in memory, so they reset to zero on every restart, and each
+instance behind a load balancer reports its own numbers. Use them for rate
+queries and for attributing load to an instance.
+
+`queen_cluster_*` are **lifetime totals read back out of PostgreSQL**, from
+`queen.worker_metrics_summary`, which the metrics collector maintains. They
+survive restarts, and every instance in the cluster reports the *same* value
+because they all read the same row. Summing them across instances multiplies
+your traffic by the number of brokers. Aggregate them with `max`, never `sum`.
+
+The in-process families beyond `queen_process_*` (pool gauges, spool gauges,
+the maintenance flag, the Vegas limits, the fusion batch families, parked
+long-polls) are also per-instance and also reset on restart.
+
+## How a scrape is assembled
+
+The response is built in one pass and in a fixed order:
+
+1. In-process gauges and counters, always emitted.
+2. `queen_seg_push_vegas_limit` and `queen_seg_pop_vegas_limit`, the adaptive
+   concurrency limits.
+3. Pool gauges (`queen_db_pool_size`, `_idle`, `_active`), the push
+   maintenance-mode flag, and the disk spool gauges.
+4. One call to the database aggregator, whose JSON becomes the `queen_cluster_*`
+   families, the per-queue minute rates, and the DLQ depths.
+
+Step 4 is **best-effort**. If the pool has no connection or the read fails, the
+DB-backed families are silently absent from that scrape and the in-process block
+is still returned with HTTP 200. An alert on the absence of `queen_cluster_*`
+therefore detects a database problem; an alert on non-200 does not.
+
+Because step 4 is a database round trip per scrape, the scrape interval is a
+load knob. Its per-queue and per-worker reads are bounded to buckets from the
+last five minutes; the lifetime totals are a single-row read and the dead-letter
+depths are counts.
+
+## Label sets
+
+| Family or group | Labels |
+| --- | --- |
+| `queen_cluster_*_total` | `scope="cluster"` |
+| `queen_cluster_ack_total` | `scope="cluster"`, `result` = `success` or `failed` |
+| `queen_batches_fired_total`, `queen_batch_items_fired_total`, `queen_fusion_items_per_batch` | `op` = `push`, `pop` or `ack` |
+| `queen_batch_rtt_milliseconds` | `op`, plus `quantile` = `0.5` or `0.99` |
+| `queen_queue_*_per_minute`, `queen_queue_parked_consumers`, `queen_queue_metrics_age_seconds` | `queue` |
+| `queen_queue_pop_lag_milliseconds` | `queue`, `stat` = `avg` or `max` |
+| `queen_queue_ack_per_minute` | `queue`, `result` = `success` or `failed` |
+| `queen_dlq_depth` | `scope="cluster"` |
+| `queen_dlq_depth_by_queue`, `queen_parked_long_polls` | `queue` |
+| everything else | none |
+
+`queen_batch_rtt_milliseconds` is a **gauge** that happens to carry a `quantile`
+label. It is not a Prometheus summary, and `quantile` here is a plain label
+computed from a bounded in-process ring of recent round trips. Queue names are
+escaped for backslash, double quote and newline.
+
+## Freshness of the per-queue families
+
+Per-queue series do not come from live counters. Each instance flushes its
+per-queue deltas into minute buckets in PostgreSQL every `METRICS_FLUSH_MS`
+(60 s by default), and the aggregator reads the most recent bucket per queue
+within a five-minute window. Consequences:
+
+- a per-queue value can be up to one flush interval stale;
+- `queen_queue_metrics_age_seconds` is the age of the bucket the value came
+  from (use it to distinguish "zero traffic" from "stale bucket");
+- a queue that stops receiving traffic disappears from the exposition about five
+  minutes later, rather than reporting zero.
+
+`queen_parked_long_polls` is the exception: it is the live, instantaneous
+per-queue count of parked long-poll pops on this instance.
+
+## Per-queue series are not tenant-scoped
+
+No series on this endpoint carries a tenant label. When `QUEEN_TENANCY_HEADER`
+is on and two tenants hold the same queue name, their series collide:
+
+- `queen_dlq_depth_by_queue` groups dead-letter rows by queue **name**, so the
+  count is the sum across tenants;
+- `queen_parked_long_polls` explicitly sums the per-tenant gauges into one line
+  per queue name;
+- the per-queue minute rates are stored per tenant but the aggregator selects
+  one row per queue name, so one tenant's bucket is reported and the others are
+  hidden.
+
+<Aside type="danger">
+`/metrics/prometheus` is a cell-wide operator surface. Exposing it to a tenant
+leaks other tenants' queue names and volumes. The proxy classifies it as an
+operator route for exactly this reason.
+</Aside>
+
+## Three families you cannot alert on
+
+`queen_queue_depth_total` and `queen_queue_depth_pending` appear in the
+exposition code, gated on a `queue_depth` key in the aggregator's JSON. No
+stored procedure in this tree produces that key, so neither family is present on
+a real scrape. Do not build a backlog alert on them; use
+`queen_queue_pop_lag_milliseconds` and the consumer-group lag endpoints instead.
+
+`queen_dlq_depth` and `queen_dlq_depth_by_queue` are emitted, but they count
+rows in `queen.dead_letter_queue`, the table the retired rows engine wrote. The
+log engine dead-letters into `queen.log_dlq`, so both gauges read 0 on a healthy
+current deployment even while `GET /api/v1/dlq` returns rows (that endpoint reads
+both tables). For a working dead-letter signal use
+`queen_cluster_dlq_total{scope="cluster"}`, which accumulates the broker's own
+count of dead-letter transitions, or the DLQ listing endpoint.
+
+## The families
+
+<Render file="generated/broker-metrics" />
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/reference/config"
+    title="Environment variables"
+    description="METRICS_FLUSH_MS, STATS_INTERVAL_MS and the rest of the collector cadence."
+  />
+  <LinkCard
+    href="/reference/errors"
+    title="Status codes and error bodies"
+    description="What a failing request looks like, including behind the proxy."
+  />
+  <LinkCard
+    href="/selfhost"
+    title="Self-hosting"
+    description="Where to terminate TLS and how to keep operator surfaces off tenant traffic."
+  />
+</CardGrid>

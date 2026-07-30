@@ -1,0 +1,152 @@
+---
+title: The built-in dashboard
+description: "The Vue dashboard is compiled into the binary: what each view shows, how the fallback route serves it, and how to rebuild it from app/."
+type: how-to
+tier: operate
+sidebar:
+  order: 13
+  label: Dashboard
+sourceOfTruth:
+  - server/src/handlers/static_files.rs
+  - server/src/main.rs
+  - app/README.md
+  - app/src/router/index.js
+  - app/src/api/index.js
+  - app/package.json
+  - queen_proxy/src/webapp.rs
+---
+
+Every broker serves a dashboard on its own port. There is nothing to deploy: the
+built single-page application is compiled into the binary with `rust_embed` from
+`server/webapp/dist`, and the bytes are read out of the executable at request time.
+
+There is **no `QUEEN_STATIC_DIR`**. No runtime override exists, no directory is read
+from disk, and pointing a volume at the container changes nothing. If you need a
+different dashboard, you rebuild the binary.
+
+## How it is served
+
+The dashboard is the router's **fallback**, registered after every real route, so
+it can never shadow an API path. The fallback resolves in three steps:
+
+1. If the path is under `/api/` (or is exactly `/api`), or the method is anything
+   other than `GET` or `HEAD`, it answers a JSON 404:
+   `{"error":"Not Found","code":"no_such_route"}`.
+2. Otherwise, if the path matches an embedded asset, that asset is returned with a
+   content type guessed from its extension.
+3. Otherwise `index.html` is returned, so client-side routes like `/queues/orders`
+   work on a hard reload. If the dashboard was not bundled at build time, this is a
+   plain `404 Not Found`.
+
+Step 1 exists because the fallback matches any method. Without it, a call to an
+endpoint that does not exist came back `200 text/html`, which every JSON client,
+including the dashboard's own HTTP layer, read as success. A phantom endpoint now
+fails loudly.
+
+Assets are served with a content type and nothing else: no `Cache-Control`, no
+`ETag`, no compression negotiation. For a handful of operators that is fine. If the
+dashboard is on a hot path, put a reverse proxy or CDN in front and let it add
+caching.
+
+The same `server/webapp/dist` directory is embedded by `queen_proxy` as well, so a
+proxy and the broker behind it serve the identical bundle.
+
+## What the views show
+
+Every view is tenant-scoped except one, and the exception is labelled on screen.
+
+| View | Path | What it reads |
+| --- | --- | --- |
+| Dashboard | `/` | the resource overview, namespaces and tasks: the tenant's totals and key rates |
+| Queue Operations | `/operations` | per-queue throughput, lag and consumer health |
+| Queues | `/queues` | the queue list, with per-queue detail and delete |
+| Queue Detail | `/queues/:queueName` | one queue's configuration and current status |
+| Consumer Groups | `/consumers` | groups, their lag, the lagging list, subscription changes, seek and delete |
+| Messages | `/messages` | message listing and single-message inspection, plus delete |
+| Traces | `/traces` | trace names that actually exist, and the timeline for one |
+| Analytics | `/analytics` | per-queue status over time, queue lag and queue ops time series, retention volume |
+| Dead Letter | `/dlq` | the dead-letter listing, with purge |
+| System | `/system` | **cell-level**: host CPU and memory, worker metrics, PostgreSQL internals, the disk spool, the maintenance switch |
+
+Three properties of this UI are worth knowing before you read a number off it.
+
+**The System view is not about your tenant.** Host resources, PostgreSQL internals
+and the file-buffer state cover the whole cell: every tenant on it. The view says
+so on screen, and behind a proxy it answers only for an operator principal. Reading
+a cell figure as a tenant figure is the specific mistake the shell is built to
+prevent.
+
+**The dead-letter view inspects and purges. It has no replay control.** An earlier
+version of this UI had a retry button that posted to a path the broker did not
+route; the request fell through to the static fallback and reported success while
+doing nothing. The control was removed rather than left lying.
+
+**An unknown is not a zero.** Panels carry explicit loading, error and
+last-updated state, and a failed call renders as a failure instead of a confident
+`0`. Refresh is a single shared ticker rather than per-panel timers, so what you
+see across a page is one moment.
+
+## Rebuilding it
+
+The dashboard source is `app/`: Vue 3, Vite, Tailwind, Chart.js. It needs Node 22
+or newer.
+
+Run the first two steps from `app/` and the last from `server/`.
+
+<Steps>
+
+1. Install dependencies.
+
+   ```bash
+   npm install
+   ```
+
+2. Build. The output goes straight to `server/webapp/dist`, which is the one
+   artifact both Rust binaries embed.
+
+   ```bash
+   npm run build
+   ```
+
+3. Rebuild whichever binary serves it, because the bytes are baked in.
+
+   ```bash
+   cargo build --release
+   ```
+
+</Steps>
+
+<Aside type="caution">
+A source change ships only after **both** the `npm run build` and the `cargo
+build`. Debug builds of `rust_embed` read from disk, so locally the npm build alone
+usually appears to be enough. Release builds are not, and that difference is a
+reliable way to ship a stale dashboard.
+</Aside>
+
+For iterating on the UI, `npm run dev` serves it on port 4000 and proxies `/api`,
+`/auth`, `/health` and `/metrics` to a `queen_proxy` development cell on port
+6711. Setting `QUEEN_DEV_UPSTREAM=http://localhost:6632` points it straight at a
+broker instead. That mode exercises no authentication, no tenancy, no role checks
+and no rate limiting, so it is a debugging shortcut rather than a development
+default. `QUEEN_APP_BASE` sets the router and asset base if the bundle is mounted
+under a path prefix.
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/observability"
+    title="Observability"
+    description="The endpoints the dashboard reads, and the ones you should scrape instead."
+  />
+  <LinkCard
+    href="/selfhost/durability"
+    title="Surviving a PostgreSQL outage"
+    description="The spool and maintenance switch the System view exposes."
+  />
+  <LinkCard
+    href="/reference"
+    title="Reference"
+    description="Every route, its access level, and whether it is tenant-scoped."
+  />
+</CardGrid>

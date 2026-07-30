@@ -1,0 +1,245 @@
+---
+title: Deduplication
+description: "How exactness is achieved: the SQL probe before allocation under the partition lock, the sharded per-partition locks, and a broker cache that can narrow the probe but never change the verdict."
+type: concept
+tier: internals
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/sql/procedures/042_log_push.sql
+  - server/src/dedup.rs
+  - server/src/fusion.rs
+  - server/src/util.rs
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+---
+
+Deduplication in Queen is exact, not probabilistic. Within a partition and within the
+configured window, a `transactionId` that has already been stored writes nothing and returns
+`status: "duplicate"` with the original message's id. There is no Bloom filter, no sampling and
+no "best effort" qualifier.
+
+It is also on by default. `queen.log_queues.dedup_window_seconds` defaults to 3600, and only an
+explicit `0` disables it.
+
+Here is the observable behaviour:
+
+<Render file="snippets/js-push-dedup" />
+
+The rest of this page is how that is made true and, more usefully, why the fast paths cannot
+break it.
+
+## Three layers, one authority
+
+| Layer | Where | Scope | Authority? |
+| --- | --- | --- | --- |
+| 1 | push handler | one HTTP request body | first-wins inside the request |
+| 2 | fusion flush | one segment being built | first-wins inside the flush |
+| 3 | `log_push_one_v1` | the partition's window in PostgreSQL | **yes** |
+
+Layers 1 and 2 exist because a duplicate that never reaches SQL costs nothing. Layer 3 is the
+verdict. Layers 1 and 2 both take the first occurrence and make later ones followers that inherit
+the leader's final result, including the case where the leader itself turns out to be a duplicate
+of something already stored, in which case the followers report the pre-existing message id too.
+
+Layer 1 compares `queue \x1f partition \x1f transactionId`. Layer 2 compares the 16-byte
+`xxh3_128` hash of the `transactionId`, the same identity SQL compares, so a broker-local
+collision behaves exactly like a SQL one.
+
+## The probe: before allocation, under the lock
+
+Layer 3 is a probe that runs *before* an offset is allocated, while the partition row lock is
+held. That ordering is the whole correctness argument.
+
+```sql
+SELECT last_offset, txns_start INTO v_last, v_txns_start
+FROM queen.log_partitions WHERE id = v_pid
+FOR UPDATE;
+
+v_now := clock_timestamp();
+v_from := GREATEST(COALESCE(p_verified, -1), v_txns_start - 1);
+
+IF v_last > v_from THEN
+    SELECT jsonb_agg(jsonb_build_object('i', d.idx, 'off', d.off) ORDER BY d.idx)
+    INTO v_dups
+    FROM (
+        SELECT ih.idx AS idx, MIN(t.base_offset + th.idx) AS off
+        FROM queen.log_txns t
+        CROSS JOIN LATERAL queen.log_unnest_hashes(t.hashes) th
+        JOIN queen.log_unnest_hashes(p_hashes) ih ON ih.h = th.h
+        WHERE t.partition_id = v_pid
+          AND t.end_offset > v_from
+          AND t.created_at >= v_now - make_interval(secs => v_window)
+        GROUP BY ih.idx
+    ) d;
+    ...
+```
+
+Read it as four claims:
+
+1. **The row lock is the per-partition write serializer.** No concurrent pusher can commit new
+   rows into the probed span while it is held, so probe-then-allocate is race-free. This is why
+   the lock is taken with an explicit `SELECT ... FOR UPDATE` before the probe rather than left
+   to the allocator `UPDATE` that follows.
+2. **A duplicate writes nothing.** No allocator bump, no segment insert, no `log_txns` insert. So
+   the duplicate verdict needs no rollback, and therefore **no savepoint**. That matters in a
+   bundle: the other partitions' writes commit untouched. The retired engine detected duplicates
+   through a unique-index violation, which forced a per-segment subtransaction to contain the
+   rollback.
+3. **`MIN` picks the original occurrence.** One incoming hash can match several historical rows
+   (for instance if data was pushed while deduplication was off), and the response must carry the
+   first one.
+4. **The span has two lower bounds.** `txns_start - 1` is the purge watermark: rows below it are
+   gone, so there is nothing to compare against, and a redelivery of a hash older than the sidecar
+   window is *accepted as new*. `p_verified` is the broker's vouched watermark, described below.
+
+`log_txns` is written on every push regardless of the window, because ack-by-`transactionId`
+resolves through it. Turning deduplication off skips the probe, not the write. See
+[the storage model](/internals/storage-model).
+
+## Sharded per-partition locks
+
+Two distinct locks carry the word "per-partition" in this path, and it is worth separating them.
+
+**In PostgreSQL**, the `log_partitions` row lock. It is per partition by construction, so two
+partitions never contend, and the probe of one partition never blocks a push to another. The
+bundle pre-lock takes them all in ascending id order, which is the one global lock order shared
+with acks and retention.
+
+**In the broker**, the dedup cache's map is a `RwLock<HashMap<pid, Arc<Mutex<Entry>>>>`. The
+common path read-locks the map only long enough to look up and clone the handle, then does all its
+work under the **per-entry** mutex. This replaced one global mutex around the whole map, which
+under uniform load serialized every flush behind whichever partition happened to be resizing. The
+sharding is effectively free because the fusion layer already flushes a given partition
+single-flight and partitions are shard-affine: the only cross-thread contention on a partition's
+entry is eviction, driven by other partitions' flushes.
+
+## The broker cache, and what it is allowed to do
+
+The cache has exactly one load-bearing output: the `p_verified` watermark sent with a push. It
+means *"the broker vouches that none of this bundle's hashes occurs at or below offset
+p_verified"*, which lets SQL shrink its probe to `(p_verified, last_offset]`.
+
+`p_verified = -1` means "cannot vouch: probe the whole window", and that answer is always sound.
+So:
+
+<Aside type="tip">
+The cache can only make the probe **narrower**. It can never change a verdict, because the
+verdict is computed by SQL from `log_txns` under the row lock either way. A disabled cache
+(`QUEEN_DEDUP_CACHE=0`) is exactly equivalent to always answering `-1`.
+</Aside>
+
+The validity rule the cache must satisfy to vouch: it knows every hash in
+`(hydrated_from, verified_upto]`, and `hydrated_from` is at or below the window start. Three
+structural properties keep that true rather than merely intended:
+
+- **Entries are only born complete.** Hydration is always a full-window fetch:
+  `SELECT base_offset, end_offset, created_at, hashes FROM queen.log_txns WHERE partition_id = $1
+  AND created_at >= now() - $2`, with five seconds of clock-skew slack added on the safe side (extra
+  old rows only widen coverage).
+- **An interleave gap immediately disqualifies the entry.** After a successful push returning base
+  `B`, if `B == verified_upto + 1` the bundle's hashes are appended and the watermark advances. If
+  `B > verified_upto + 1`, another broker interleaved: the push itself was still correct, because
+  SQL probed past our watermark, but the cache no longer knows everything below `B`, so it records
+  the gap and answers `-1` until it is rebuilt. An overlap (`B <= verified_upto`) is impossible
+  under a monotone allocator and marks the entry for a full rebuild defensively.
+- **Expiry raises `hydrated_from` only past provably pre-window data.** See the block model below.
+
+Positive membership goes the other way. A hash present in the cache was committed within the
+window, but the caller **never** short-circuits on it. It routes the segment to SQL with
+`p_verified = -1` for the authoritative verdict, because that is also the only way to obtain the
+original offsets the wire response needs. A local hit is therefore a *hint that steers a segment
+to the full-window probe*, never a decision. A hint that is a shade stale costs one extra SQL
+probe.
+
+The cache also memoises each partition's id, deduplication window and allocator watermark with a
+30-second TTL. That TTL bounds how long a `/configure` window change can go unnoticed; a detected
+change forces a full rehydration, sticky until one succeeds, because the entry's expiry
+bookkeeping was computed under the old window.
+
+## How the hashes are stored
+
+Not as a hash map. Each partition's in-window hashes live in a time-ordered ring of **immutable,
+sorted blocks** plus one mutable arrival-order buffer. There is no per-hash membership map at all:
+membership means "present in some surviving block", found by binary search in each sealed block and
+a linear scan of the hot buffer.
+
+Three invariants make that correct and cheap:
+
+**No refcounting.** Two in-window segments carrying the same hash are a real case (after a window
+reconfiguration, or across brokers), and a refcount map existed to stop the first one's expiry from
+un-knowing the second. Immutable blocks give that for free: a hash lives independently in every
+block containing it, and expiry drops whole blocks, so a cross-block duplicate stays known until
+its last containing block is dropped.
+
+**Block-granular expiry is sound.** Blocks are time-ordered front to back, and a front block is
+dropped only when its *entire* span is stale. Every in-window hash therefore sits in a retained
+block, so the resident set is a **superset** of the in-window hashes. A superset can only produce a
+false local duplicate (which costs one extra probe), never a false "no duplicate". And because a
+dropped block is entirely pre-window, raising `hydrated_from` to its highest offset discards only
+pre-window offsets.
+
+**Allocation is bounded.** The hot buffer grows by ordinary doubling but is sealed the instant it
+reaches the block capacity, which is a power of two (4096 hashes, a 64 KiB block), so the seal is a
+no-copy hand-off. The largest allocation the cache can ever make is one block. The previous
+`HashMap` doubled its table toward the *full window size*, so enough uniformly loaded partitions
+crossing that threshold in lockstep produced synchronised, very large rehash bursts. A capped 64 KiB
+buffer, sealed on a staggered per-partition schedule, cannot.
+
+The byte accounting is deliberately coarse but dominated by the real 16 bytes per hash, so the LRU
+budget (`QUEEN_DEDUP_CACHE_MB`, default 512) reflects the true footprint.
+
+## Under memory pressure
+
+The naive behaviour at the cap is a thrash loop: a push to an evicted partition re-hydrates its
+whole window, which evicts a hot partition, which re-hydrates, and so on. Multi-megabyte hydrations
+in a cycle collapsed throughput.
+
+So a full rehydration is **gated**, and a partition that fails the gate enters a *suppressed* state
+where it simply answers `-1`:
+
+- **A fit test with hysteresis.** A rebuild is admitted only if everything except this partition's
+  own resident bytes, plus the estimated footprint, stays under 90% of the cap. The headroom is
+  what stops an admission from immediately forcing eviction of the set it just joined: it converts
+  ping-pong into a stable resident set plus suppressed overflow.
+- **A 30-second cooldown.** A suppressed partition is not re-tested on every flush; it serves the
+  cooldown first. Long enough not to re-thrash a resident set churning at the cap, short enough to
+  recover within seconds once pressure eases: a window shrinks via `/configure`, offered load
+  drops, or a peer leaves and frees the shared budget.
+- **A recent-use eviction guard.** A partition used within the last five seconds is never evicted
+  to admit another; the newcomer is suppressed instead.
+- **One warning per minute**, process-wide, plus a gauge for how many partitions are suppressed.
+
+Brand-new partitions estimate an empty window and are therefore never suppressed on first contact.
+Cheap admissions (a resident entry that is vouching, or a resident entry with an interleave gap)
+are always allowed and never gated.
+
+Suppression is purely a broker-resource trade. It cannot change a verdict, because the server-side
+probe is authoritative for every partition, suppressed or not. The auxiliary bookkeeping maps
+(cooldown deadlines, last-footprint hints) are soft-capped at 100,000 entries and pruned beyond
+that, so a workload churning through unboundedly many partition names cannot leak them; the only
+cost of a reset is a re-measured footprint estimate.
+
+## Multi-broker behaviour
+
+Nothing about deduplication needs coordination between brokers. Two brokers pushing the same
+`transactionId` to the same partition serialize on the same PostgreSQL row lock, and whichever
+probes second sees the first one's committed `log_txns` row. The broker cache is per process and
+its worst case (an interleave it did not observe) degrades it to `-1`, which is the full probe.
+
+## The edges
+
+| Situation | Result |
+| --- | --- |
+| Same `transactionId` twice in one request body | second item `duplicate`, carries the first's message id |
+| Same `transactionId` in a later request, inside the window | `duplicate` with the original message id; nothing written |
+| Original segment already deleted by retention | `duplicate`, but `messageId` is the zero UUID: the original cannot be read back |
+| `transactionId` re-pushed after the sidecar window elapsed | accepted as new; `log_txns` no longer holds the hash |
+| Same `transactionId` in a *different* partition | accepted: deduplication is per partition |
+| `dedupWindowSeconds: 0` | no probe; `log_txns` still written so acks still resolve |
+| `/configure` called without `dedupWindowSeconds` | the window is **reset to 3600**, because `/configure` is a full replace |
+| Duplicate inside `POST /api/v1/transaction` | the whole transaction rolls back (the wire raises `unique_violation`) |
+
+The `/configure` row is the one that catches people. Omitting a key does not leave it alone; it
+resets it to its default. A queue deliberately created with deduplication off will silently get a
+one-hour window back the next time someone calls `/configure` without naming it.

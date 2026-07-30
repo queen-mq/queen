@@ -1,0 +1,405 @@
+---
+title: Python
+description: "Install queen-mq, construct the async client, and use the fluent grammar, plus the four places it behaves differently from JavaScript."
+type: how-to
+tier: use
+sidebar:
+  order: 14
+sourceOfTruth:
+  - clients/client-py/queen/client.py
+  - clients/client-py/queen/builders/queue_builder.py
+  - clients/client-py/queen/builders/consume_builder.py
+  - clients/client-py/queen/builders/transaction_builder.py
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/http/http_client.py
+  - clients/client-py/queen/utils/defaults.py
+  - clients/client-py/queen/utils/logger.py
+  - clients/client-py/pyproject.toml
+verifiedBy:
+  - clients/client-py/tests/test_push.py
+  - clients/client-py/tests/test_pop.py
+  - clients/client-py/tests/test_consume.py
+  - clients/client-py/tests/test_transaction.py
+  - clients/client-py/tests/http_unit/test_retry_429.py
+  - clients/client-py/tests/http_unit/test_config_normalization.py
+---
+
+The Python client is async throughout, built on `httpx`. Every network call is a coroutine;
+the builders are synchronous until the terminal operation, which is awaited. The public
+surface mirrors JavaScript with `snake_case` names, and the four real behavioural differences
+are called out below.
+
+```bash
+pip install queen-mq
+```
+
+```python
+from queen import Queen
+```
+
+The package also exports `Admin`, `Stream`, `token_bucket_gate`, `sliding_window_gate`, the
+`TypedDict` message and response types, and the five defaults dicts.
+
+## The real Python floor is 3.9
+
+`pyproject.toml` declares `requires-python = ">=3.8"` and classifiers down to 3.8. That is
+wrong. `queen/builders/consume_builder.py` annotates a parameter as `dict[str, Any]` and
+`queen/utils/logger.py` uses `dict[str, Any]` inside `Union[...]`, both without
+`from __future__ import annotations`. PEP 585 subscripting of builtin generics landed in 3.9,
+so on 3.8 those annotations are evaluated at import time and raise
+`TypeError: 'type' object is not subscriptable`. Importing `queen` on Python 3.8 fails.
+**Treat 3.9 as the floor.**
+
+## Construct a client
+
+The first positional argument accepts a URL string, a list of URLs, or a dict. Every option is
+also available as a keyword argument, and keyword arguments win over the positional config.
+
+```python
+client = Queen("http://localhost:6632")
+```
+
+```python
+client = Queen(["http://broker-a:6632", "http://broker-b:6632"])
+```
+
+```python
+client = Queen(
+    urls=["http://broker-a:6632", "http://broker-b:6632"],
+    bearer_token=os.environ["QUEEN_TOKEN"],
+    timeout_millis=30000,
+    load_balancing_strategy="affinity",
+)
+```
+
+One URL means a direct client; several build a load balancer with failover. Passing neither
+`url` nor `urls` raises `ValueError`.
+
+`Queen` is an async context manager, which is the tidiest way to guarantee the buffers flush:
+
+```python
+async with Queen("http://localhost:6632") as client:
+    await client.queue("orders").push([{"data": {"id": 1}}])
+```
+
+### Client options
+
+Defaults come from `CLIENT_DEFAULTS` in `queen/utils/defaults.py`.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `url` / `urls` | none | Required. One backend or many. |
+| `timeout_millis` | `30000` | Per-request timeout. A long-poll pop adds 5 s of slack. |
+| `retry_attempts` | `3` | **Total** tries for `5xx` and network failures. |
+| `retry_delay_millis` | `1000` | First retry delay; doubles per attempt. |
+| `load_balancing_strategy` | `"affinity"` | `"round-robin"`, `"session"` or `"affinity"`. |
+| `affinity_hash_ring` | `128` | Virtual nodes per backend on the affinity ring. |
+| `enable_failover` | `True` | Try the next backend on `5xx` / network error. |
+| `health_retry_after_millis` | `5000` | How long a backend stays marked unhealthy. |
+| `bearer_token` | `None` | Sent as `Authorization: Bearer <token>`. |
+| `headers` | `{}` | Extra headers on every request. |
+| `retry_429` | `None` | `{"max_attempts": …, "base_ms": …, "cap_ms": …}`. |
+| `transport` | `None` | An `httpx` transport override: `httpx.MockTransport` lets tests drive the whole builder stack with no broker. |
+
+## Four differences from JavaScript
+
+These are the ones that change how you write code, not just how you spell it.
+
+**1. With `batch(1)`, the handler gets one message, not a list.** The consumer's worker
+checks `batch == 1 and len(messages) == 1` and passes the single message dict straight to your
+handler. With `batch(n)` for `n > 1` it passes the list. `.each()` always passes one message
+at a time. The JavaScript consumer passes the array in every case except `.each()`, so a
+handler ported across languages needs its signature checked.
+
+```python
+# single message
+await client.queue("jobs").batch(1).consume(handler)          # handler(msg)
+# list of messages
+await client.queue("jobs").batch(50).consume(handler)         # handler(msgs)
+# single message, one at a time, out of a batch of 50
+await client.queue("jobs").batch(50).each().consume(handler)  # handler(msg)
+```
+
+**2. Signal handlers are always installed and cannot be turned off.** The constructor calls
+`_setup_graceful_shutdown()` unconditionally, replacing the process's `SIGINT` and `SIGTERM`
+handlers. There is no `handle_signals=False`. If you embed the client in an application that
+manages its own signals, the client's handlers win until `close()` restores `SIG_DFL`. The
+handler schedules `close()` on the running loop, or runs it to completion and exits if the
+loop is idle; a second signal exits with code 1.
+
+**3. There is no injectable logger, and the client prints to stdout regardless.**
+`queen/utils/logger.py` is gated only by `QUEEN_CLIENT_LOG=true`, with no way to pass your
+own logger. Separately, `close()`, a failed `pop()`, a failed `trace()` and a failed lease
+renewal each call `print(...)` unconditionally: those lines appear on stdout even with
+logging off.
+
+**4. There is no `client.stream()` or `client.consumer()`.** JavaScript has both on the client
+object. In Python the streaming SDK is reached through `Stream.from_(queue_builder)`.
+
+Two smaller absences: `host_header` (the JavaScript option for advertising a different `Host`
+to a proxy) and `structured_logs` do not exist. Everything else in `CLIENT_DEFAULTS` matches.
+
+## Push
+
+<Render file="snippets/py-push" />
+
+`push()` takes one dict or a list of dicts. The body is `data`, or `payload`, or the dict
+itself. A missing `transactionId` is minted as a UUIDv7 client-side; a `traceId` is forwarded
+only if it is a valid UUID.
+
+The returned `PushBuilder` is awaitable and resolves to the broker's per-item array:
+
+```python
+res = await client.queue("orders").push([{"data": {"id": 1}}])
+assert res[0]["status"] == "queued"
+```
+
+`status` is `queued`, `duplicate`, `buffered` or `failed`. Supply your own `transactionId` to
+make a retry idempotent inside the queue's dedup window: the second push returns
+`duplicate` with the original message id and writes nothing.
+
+`on_success`, `on_duplicate` and `on_error` can be chained before the await, and they bucket
+the response by status the same way JavaScript does.
+
+## Pop
+
+<Render file="snippets/py-pop" />
+
+`pop()` returns a list of message dicts, or `[]`. Each message has `id`, `transactionId`,
+`traceId`, `data`, `producerSub`, `createdAt`, `partitionId`, `partition`, `leaseId` and
+`consumerGroup`.
+
+The builder's `wait` starts at `True`, so a bare `pop()` is a 30-second long poll. Use
+`.wait(False)` for an immediate return and `.timeout_millis(n)` to change the window.
+`.batch(n)` caps the messages returned; `.partitions(n)` claims up to `n` partitions in one
+call, with `batch` as the global cap and one shared `leaseId`. `.group(name)` selects a
+consumer group.
+
+<Aside type="caution">
+`pop()` catches every exception, prints `Pop failed: …`, and returns `[]`, including an
+exhausted `429` budget and a terminal `403`. An empty list does not mean an empty queue.
+</Aside>
+
+`.auto_ack(True)` on a pop makes the server commit the cursor inside the pop transaction,
+which is at-most-once delivery.
+
+## Consume
+
+```python
+async def handler(msg):
+    await process(msg["data"])
+
+await client.queue("jobs").group("workers").concurrency(4).batch(10).each().consume(handler)
+```
+
+`consume(handler)` returns an awaitable builder; awaiting it starts `concurrency` workers with
+`asyncio.gather` and returns when all of them stop. Without `limit`, `idle_millis` or a
+`signal`, it runs forever.
+
+| Method | Default | Effect |
+| --- | --- | --- |
+| `.group(name)` | queue mode | Consumer group whose cursor advances on ack. |
+| `.concurrency(n)` | `1` | Independent poll loops as asyncio tasks. |
+| `.batch(n)` | `1` | Messages per pop. Also decides the handler signature. See above. |
+| `.partitions(n)` | `1` | Claim up to `n` partitions per pop. |
+| `.each()` | off | One message per handler call. |
+| `.limit(n)` | `None` | Stop the worker after `n` messages. |
+| `.idle_millis(n)` | `None` | Stop the worker after `n` ms with no messages. |
+| `.auto_ack(bool)` | `True` | Ack on return, nack on raise (client-side). |
+| `.wait(bool)` | `True` | Long-poll the pop. |
+| `.timeout_millis(n)` | `30000` | Long-poll window. |
+| `.renew_lease(True, ms)` | off | Renew the batch's lease every `ms` as a background task. |
+| `.subscription_mode(m)` | `None` | `all` or `new`, applied only when the group's cursor is created. |
+| `.subscription_from(t)` | `None` | `now` or an ISO timestamp, same first-contact-only rule. |
+| `consume(fn, signal=event)` | none | An `asyncio.Event` that stops every worker when set. |
+
+`auto_ack` here is client-side: the consumer never sends `autoAck` to the server, it calls
+`POST /api/v1/ack` after your handler returns (status `completed`) or raises (status
+`failed`). Because an ack is an offset commit, a nack clamps the group's cursor at the failed
+message and everything after it in the popped batch is redelivered, so with `.each()` the
+worker abandons the rest of the batch after a nack instead of producing duplicates and
+rejected acks.
+
+Attaching `on_success` or `on_error` to a consume forces `auto_ack` off, on the assumption
+that your callback acks.
+
+Every delivered message gets an async `trace` entry that never raises:
+
+```python
+await msg["trace"]({"traceName": ["tenant-acme"], "eventType": "step", "data": {"stage": "charged"}})
+```
+
+## Acknowledge manually
+
+```python
+messages = await client.queue("orders").group("billing").batch(10).pop()
+for msg in messages:
+    await handle(msg)
+await client.ack(messages, True, {"group": "billing"})
+```
+
+`ack(message, status, context)` takes one message or a list. `status` is `True`
+(`completed`), `False` (`failed`), or the string `completed`, `failed`, `retry` or `dlq`.
+`context["group"]` names the consumer group and `context["error"]` records a failure reason
+that lands on the DLQ row if the nack exhausts the retry budget.
+
+`partitionId` is mandatory: a missing one raises `ValueError` for a batch or returns
+`{"success": False, "error": …}` for a single ack. Set `msg["_status"]` and `msg["_error"]` on
+individual messages to give them different outcomes in one batch call.
+
+<Aside type="note">
+A rejected ack arrives as HTTP 200 with `success: false` on the item. The Python client
+returns the broker's array under `results` for a batch ack but does not scan it for per-item
+failures the way JavaScript does. Inspect `results` yourself if a rejected ack matters.
+</Aside>
+
+## Transactions
+
+```python
+await (
+    client.transaction()
+    .queue("stage-2").push([{"data": {"value": msg["data"]["value"] + 1}}])
+    .ack(msg)
+    .commit()
+)
+```
+
+`transaction()` bundles pushes and acks into one PostgreSQL transaction, all or nothing.
+`.queue(name)` returns a sub-builder whose `.partition(p)` and `.push(items)` add operations
+and hand the parent builder back; `.ack(messages, status, context)` adds acks and collects
+their `leaseId`s as `requiredLeases`, so the commit fails if a lease expired. `context` uses
+`consumer_group` (not `group`) here. Committing with no operations raises.
+
+<Aside type="note">
+A transaction is not exactly-once end to end. A lost response plus a client retry duplicates
+the pushes unless their `transactionId`s are deterministic and still inside the dedup window.
+</Aside>
+
+## Lease renewal
+
+```python
+await client.renew(messages)
+```
+
+`renew()` accepts a lease ID, a message, or a list, and de-duplicates the lease IDs: a
+multi-partition pop shares one lease, so passing the whole list makes one HTTP call.
+
+<Aside type="caution">
+The returned `newExpiresAt` is always `None`. The broker answers
+`{"renewed":N,"expiresAt":"…"}` while the client reads `newExpiresAt` /
+`lease_expires_at`. The renewal happens; the reported expiry does not exist. Drive renewals
+from your own interval, which is what `.renew_lease(True, ms)` does.
+</Aside>
+
+## Client-side buffering
+
+```python
+await (
+    client.queue("events")
+    .buffer({"message_count": 500, "time_millis": 200})
+    .push([{"data": {"seen": time.time()}}])
+)
+```
+
+With `buffer()`, `push()` returns `{"buffered": True, "count": N}` immediately and the
+messages flush when the buffer reaches `message_count` (default `100`) or `time_millis`
+(default `1000`) elapses since the first message. Buffers are keyed per `queue/partition`.
+
+<Aside type="caution">
+A buffered push hides the per-item `queued` / `duplicate` verdict, and the buffer lives in
+process memory: an unflushed buffer is lost if the process dies without `close()`.
+</Aside>
+
+`await client.queue("events").flush_buffer()` flushes one address,
+`await client.flush_all_buffers()` flushes everything, and `client.get_buffer_stats()` returns
+`activeBuffers`, `totalBufferedMessages`, `oldestBufferAge` and `flushesPerformed`.
+
+## Admin
+
+```python
+overview = await client.admin.get_overview()
+queues = await client.admin.list_queues(limit=50)
+lagging = await client.admin.get_lagging_consumers(120)
+```
+
+`client.admin` is a lazily created singleton and matches the JavaScript admin surface
+method-for-method in `snake_case`. Query parameters are keyword arguments. The full route
+list, with each route's access level, is in [Reference](/reference).
+
+<Aside type="caution">
+`admin.clear_queue()` and `admin.move_message_to_dlq()` call paths the broker does not
+register (`DELETE /api/v1/queues/:queue/clear` and
+`POST /api/v1/messages/:partitionId/:transactionId/dlq`) and return 404.
+`admin.retry_message()` and `admin.delete_message()` are real.
+</Aside>
+
+## Dead-letter queue
+
+```python
+result = await client.queue("orders").dlq("billing").limit(50).get()
+```
+
+`dlq()` reads `GET /api/v1/dlq` and swallows errors to `{"messages": [], "total": 0}`. Each
+row carries `queue`, `partition`, `consumerGroup`, `errorMessage`, `retryCount`, `data`,
+`createdAt` and `failedAt`.
+
+<Aside type="note">
+`total` never comes back: the broker answers
+`{"messages":[…],"pagination":{"limit":…,"offset":…}}` with no `total` field. `.from_()`,
+`.to()` and the builder's partition are sent as query parameters the broker's DLQ handler does
+not read (it collects only `queue`, `consumerGroup`, `limit` and `offset`), so they are
+silently ignored. Page with `limit`/`offset` and filter the rest yourself.
+</Aside>
+
+To reprocess one dead letter, `admin.retry_message(partition_id, transaction_id)` calls the
+broker's replay route, which re-pushes the stored payload and then drops the DLQ row. The
+replayed message is a new message: fresh identity, tail of the partition, so its position
+relative to the original is not preserved. There is no bulk redrive. To replay many rows,
+read them and push them yourself.
+
+## Queue configuration
+
+```python
+await client.queue("orders").config({"lease_time": 300, "retry_limit": 5}).create()
+```
+
+`config()` merges your keys over `QUEUE_DEFAULTS` and `create()` converts every
+`snake_case` key to `camelCase` before posting to `/api/v1/configure`.
+
+<Aside type="caution">
+`/api/v1/configure` is a **full replace**: any key you omit is reset to its default,
+including `dedupWindowSeconds`, which falls back to 3600. Always send the complete
+configuration you want. Because `config()` merges over `QUEUE_DEFAULTS`, a partial dict here
+still posts a complete options object, but `dedupWindowSeconds` is not in
+`QUEUE_DEFAULTS`, so it resets unless you pass it explicitly.
+</Aside>
+
+## 429 and 403
+
+```python
+client = Queen(
+    url="https://cell.example",
+    bearer_token=token,
+    retry_429={"max_attempts": 20, "base_ms": 500, "cap_ms": 30000},
+)
+```
+
+A `429` is retried in place against the same backend, honouring `Retry-After` (seconds) when
+present and otherwise backing off `base_ms * 2^attempt` up to `cap_ms`, both with ±20 %
+jitter. `max_attempts` defaults to 10 for ordinary requests; a long-poll pop retries
+unboundedly unless you set it, in which case it applies to both. A `429` never triggers
+failover.
+
+A `403` is terminal: the consume worker logs the `code` and re-raises rather than looping on
+`cluster_suspended`, `storage_quota_exceeded`, `feature_gated` or `forbidden`. Exceptions
+carry the HTTP status on `error.response.status_code` and, when the body has one, the
+machine-readable `code`.
+
+## Shutdown
+
+```python
+await client.close()
+```
+
+`close()` flushes every buffer, cleans up the buffer manager, closes the `httpx` client and
+restores the default signal handlers. `async with Queen(...)` calls it for you on exit.

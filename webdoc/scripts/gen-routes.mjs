@@ -201,6 +201,7 @@ function main() {
   const res = emitPartial({
     name: "broker-routes",
     title: "broker route table",
+    description: "Every HTTP route the broker registers, with its access level and whether it is tenant-scoped.",
     sources: [`${MAIN} (Router::new chain)`, `${AUTH} (route_access_level)`, "server/src/handlers/*.rs (Tenant extension)"],
     body: lines.join("\n"),
     check,

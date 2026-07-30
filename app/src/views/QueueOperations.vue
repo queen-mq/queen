@@ -1,61 +1,78 @@
 <template>
   <div class="view-container">
 
+    <!-- Scope strip. Built from identity, never from fetched data, so it states
+         whose numbers these are while loading, while failing and when empty. -->
+    <div class="scope-strip">
+      <span class="chip chip-mute">tenant scope</span>
+      <span class="scope-text">
+        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
+        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
+        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
+      </span>
+      <span class="scope-fill"></span>
+      <span class="scope-meta">{{ rangeLabel }}</span>
+    </div>
+
     <!-- Controls: time range picker. The "Source" toggle that used to live
          here disappeared when this view became its own page — the only
          data source is queue-operations, so the toggle had no second
-         option to offer. -->
-    <div class="card" style="padding:12px 16px; margin-bottom:20px;">
-      <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px 20px;">
-        <div style="display:flex; align-items:center; gap:8px; margin-left:auto;">
-          <span style="font-size:11px; font-weight:500; color:var(--text-low);">Range</span>
-          <div class="seg">
-            <button
-              v-for="range in timeRanges"
-              :key="range.value"
-              @click="selectQuickRange(range.value)"
-              :class="{ on: timeRange === range.value && !customMode }"
-            >{{ range.label }}</button>
-            <button
-              @click="toggleCustomMode"
-              :class="{ on: customMode }"
-            >Custom</button>
+         option to offer. It left the picker floated right against two-thirds
+         of empty card; the picker is now the row's first field, as everywhere
+         else. -->
+    <div class="card filters">
+      <div class="card-body filter-rows">
+        <div class="filter-row">
+          <div class="filter-field">
+            <span class="label-xs">Range</span>
+            <div class="seg">
+              <button
+                v-for="range in timeRanges"
+                :key="range.value"
+                :class="{ on: timeRange === range.value && !customMode }"
+                @click="selectQuickRange(range.value)"
+              >{{ range.label }}</button>
+              <button
+                :class="{ on: customMode }"
+                @click="toggleCustomMode"
+              >Custom</button>
+            </div>
           </div>
-        </div>
-      </div>
 
-      <!-- Custom Date/Time Range -->
-      <div v-if="customMode" style="display:flex; flex-wrap:wrap; align-items:center; gap:12px; padding-top:12px; margin-top:12px; border-top:1px solid var(--bd);">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <label style="font-size:12px; font-weight:500; color:var(--text-low); white-space:nowrap;">From:</label>
-          <input
-            type="datetime-local"
-            v-model="customFrom"
-            class="input font-mono" style="font-size:13px; padding:6px 10px; width:auto;"
-          />
+          <!-- This page really does poll (`useAutoRefresh` below), so the tick
+               is a fact and not a label. It counts from the last SUCCESSFUL
+               queue-ops load, so a failing refresh makes it climb instead of
+               resetting into a freshness we do not have. -->
+          <span class="live-tick filter-field-right">
+            <span class="pulse" />
+            <span>live · {{ refreshAgo }}</span>
+          </span>
         </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <label style="font-size:12px; font-weight:500; color:var(--text-low); white-space:nowrap;">To:</label>
-          <input
-            type="datetime-local"
-            v-model="customTo"
-            class="input font-mono" style="font-size:13px; padding:6px 10px; width:auto;"
-          />
+
+        <!-- Custom Date/Time Range. Validation is live and Apply is the only
+             thing that re-scopes the panels — a half-typed range never does. -->
+        <div v-if="customMode" class="filter-row filter-row-sep">
+          <div class="filter-field">
+            <span class="label-xs">From</span>
+            <input v-model="customFrom" type="datetime-local" class="input" />
+          </div>
+          <div class="filter-field">
+            <span class="label-xs">To</span>
+            <input v-model="customTo" type="datetime-local" class="input" />
+          </div>
+          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+          <span v-if="customError" class="filter-invalid">{{ customError }}</span>
         </div>
-        <button
-          @click="applyCustomRange"
-          class="btn btn-primary" style="font-size:12px;"
-        >Apply</button>
-        <p v-if="rangeError" class="range-error">{{ rangeError }}</p>
       </div>
     </div>
 
     <!-- Loading skeleton — shown only on first fetch; subsequent refreshes
-         leave the previous data on screen for a smooth update. -->
+         leave the previous data on screen for a smooth update. Shaped like the
+         loaded page: one column of full-width cards, not a 2x2 grid. -->
     <div v-if="loading">
-      <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:16px;">
-        <div v-for="i in 4" :key="i" class="card" style="padding:24px;">
-          <div class="skeleton" style="height:192px; width:100%; border-radius:var(--r-card);" />
+      <div v-for="i in 3" :key="i" class="card" style="margin-bottom:16px;">
+        <div class="card-body">
+          <div class="skeleton" style="height:240px;" />
         </div>
       </div>
     </div>
@@ -63,13 +80,13 @@
     <template v-else>
       <!-- Nothing loaded at all. Without this the page rendered blank and the
            user had no way to tell a broken cluster from an empty one. -->
-      <div v-if="allFailed" class="card" style="padding:24px;">
-        <p style="font-weight:600; margin-bottom:8px; color:var(--ember-400);">
-          Cannot load queue operations
-        </p>
-        <p style="font-size:13px; color:var(--text-mid);">{{ describeApiError(opsError) }}</p>
-        <div style="margin-top:16px;">
-          <button class="btn btn-ghost" @click="fetchData">Retry</button>
+      <div v-if="allFailed" class="card">
+        <div class="card-body">
+          <div class="empty-state empty-state-failed">
+            <h3>Cannot load queue operations</h3>
+            <p>{{ describeApiError(opsError) }}</p>
+            <button class="btn btn-ghost" @click="fetchData">Retry</button>
+          </div>
         </div>
       </div>
 
@@ -83,25 +100,30 @@
         <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
             <h3>Retention &amp; Eviction Jobs</h3>
-            <span class="muted">messages deleted by retention / eviction workers</span>
+            <span class="card-sub">messages deleted by retention / eviction workers</span>
+            <span class="muted">{{ stamp(retentionPanel) }}</span>
           </div>
           <div class="card-body">
-            <div v-if="retentionError" class="panel-na">{{ describeApiError(retentionError) }}</div>
+            <div v-if="retentionError" class="panel-err">{{ describeApiError(retentionError) }}</div>
             <div v-else-if="retentionChartData.labels.length > 0">
-              <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:14px;">
-                <div class="stat" style="padding:8px 12px;">
+              <!-- The `|| 0` on these four figures is a KNOWN data-honesty bug
+                   (a missing total renders as 0, not as an em dash). It is left
+                   byte-identical here on purpose: changing what the tiles claim
+                   is not a chrome change and needs its own review. -->
+              <div class="stat-grid stat-grid-4" style="margin-bottom:14px;">
+                <div class="stat">
                   <div class="stat-label">Retention</div>
                   <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.retentionMsgs || 0) }}</div>
                 </div>
-                <div class="stat" style="padding:8px 12px;">
+                <div class="stat">
                   <div class="stat-label">Completed retention</div>
                   <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.completedRetentionMsgs || 0) }}</div>
                 </div>
-                <div class="stat" style="padding:8px 12px;">
+                <div class="stat">
                   <div class="stat-label">Eviction</div>
                   <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.evictionMsgs || 0) }}</div>
                 </div>
-                <div class="stat" style="padding:8px 12px;">
+                <div class="stat">
                   <div class="stat-label">Events</div>
                   <div class="stat-value font-mono">{{ formatNumber(retentionTotals?.eventCount || 0) }}</div>
                 </div>
@@ -128,10 +150,12 @@
         <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
             <h3>Top Queues</h3>
-            <span class="muted">averaged across the selected window — what to look at first</span>
+            <span class="card-sub">averaged across the window — what to look at first</span>
+            <span class="chip chip-mute">selected range</span>
+            <span class="muted">{{ stamp(opsPanel) }}</span>
           </div>
           <div class="card-body">
-            <div v-if="opsError" class="panel-na">{{ describeApiError(opsError) }}</div>
+            <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
             <div v-else-if="hasTopQueueData" class="top-queues-grid">
               <!-- Push rate -->
               <div>
@@ -190,7 +214,7 @@
                 <div v-else class="empty-tile">No measured lag</div>
               </div>
             </div>
-            <div v-else class="empty-tile">No queue activity in this range</div>
+            <div v-else class="panel-msg">No queue activity in this range</div>
           </div>
         </div>
 
@@ -198,51 +222,69 @@
         <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
             <h3>Per-Queue Metrics</h3>
+            <span class="card-sub">rates and latency, one line per queue</span>
+            <span class="muted">{{ stamp(opsPanel) }}</span>
           </div>
           <div class="card-body">
-            <div v-if="opsError" class="panel-na">{{ describeApiError(opsError) }}</div>
+            <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
             <template v-else-if="availableQueues.length > 0">
-              <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
-                <span style="font-size:12px; color:var(--text-low); white-space:nowrap;">Filter queues:</span>
-                <MultiSelect
-                  v-model="selectedQueues"
-                  :options="availableQueues"
-                  placeholder="All queues"
-                  search-placeholder="Search queues…"
-                />
-                <span v-if="selectedQueues.length > 0" style="font-size:12px; color:var(--text-low);">
-                  {{ selectedQueues.length }} of {{ availableQueues.length }}
-                </span>
-                <!-- Per-queue view-mode toggle: only meaningful for the Parked
-                     tab today (cluster-aggregate vs per-replica). Hidden on
-                     other ops to keep the surface tidy. -->
-                <div v-if="selectedQueueOp === 'parked'" style="display:flex; align-items:center; gap:8px; margin-left:auto;">
-                  <span style="font-size:11px; font-weight:500; color:var(--text-low);">View</span>
-                  <div class="seg">
-                    <button
-                      @click="viewMode = 'aggregate'"
-                      :class="{ on: viewMode === 'aggregate' }"
-                    >Cluster</button>
-                    <button
-                      @click="viewMode = 'individual'"
-                      :class="{ on: viewMode === 'individual' }"
-                    >Per Replica</button>
+              <!-- Panel-level controls. They stay INSIDE this card: the queue
+                   picker, the op selector and the view toggle narrow these
+                   charts only — the leaderboard and the retention panel above
+                   are not filtered by them, so hoisting them into the page's
+                   filter card would claim a page-wide scope they do not have. -->
+              <div class="filter-rows" style="margin-bottom:14px;">
+                <div class="filter-row">
+                  <div class="filter-field-col">
+                    <label class="label-xs">Queue</label>
+                    <MultiSelect
+                      v-model="selectedQueues"
+                      :options="availableQueues"
+                      placeholder="All queues"
+                      search-placeholder="Search queues…"
+                    />
+                  </div>
+                  <span v-if="selectedQueues.length > 0" class="filter-hint">
+                    {{ selectedQueues.length }} of {{ availableQueues.length }}
+                  </span>
+                  <!-- Per-queue view-mode toggle: only meaningful for the Parked
+                       tab today (cluster-aggregate vs per-replica). Hidden on
+                       other ops to keep the surface tidy. -->
+                  <div v-if="selectedQueueOp === 'parked'" class="filter-field">
+                    <span class="label-xs">View</span>
+                    <div class="seg">
+                      <button
+                        :class="{ on: viewMode === 'aggregate' }"
+                        @click="viewMode = 'aggregate'"
+                      >Cluster</button>
+                      <button
+                        :class="{ on: viewMode === 'individual' }"
+                        @click="viewMode = 'individual'"
+                      >Per Replica</button>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <!-- Op selector: choose which per-queue chart to show -->
-              <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
-                <span style="font-size:12px; color:var(--text-low); white-space:nowrap;">Op:</span>
-                <button
-                  v-for="op in queueOpTabs"
-                  :key="op.key"
-                  @click="selectedQueueOp = op.key"
-                  style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-                  :class="selectedQueueOp === op.key ? op.activeClass : 'opacity-50'"
-                >
-                  <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedQueueOp === op.key ? op.activeDot : 'var(--text-faint)' }" />
-                  {{ op.label }}
-                </button>
+                <!-- Op selector: choose which per-queue chart to show. This one
+                     row is single-select while the three metric rows further
+                     down are multi-select; both wear `.pill` because that is
+                     what the four hand-rolled inline copies became. -->
+                <div class="filter-row">
+                  <div class="filter-field">
+                    <span class="label-xs">Op</span>
+                    <div class="pill-row">
+                      <button
+                        v-for="op in queueOpTabs"
+                        :key="op.key"
+                        class="pill"
+                        :class="{ on: selectedQueueOp === op.key }"
+                        @click="selectedQueueOp = op.key"
+                      >
+                        <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedQueueOp === op.key ? op.activeDot : 'var(--text-faint)' }" />
+                        {{ op.label }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div>
                 <h4 class="label-xs" style="margin-bottom:10px;">
@@ -279,9 +321,9 @@
                 <div v-else class="empty-tile">No pops in this range, so no latency was measured</div>
               </div>
             </template>
-            <div v-else class="empty-tile">
-              <p>No per-queue metrics recorded yet.</p>
-              <p style="font-size:12px; margin-top:4px;">Per-queue data is collected as soon as the broker flushes its first minute boundary.</p>
+            <div v-else class="panel-msg">
+              No per-queue metrics recorded yet.<br />
+              Per-queue data is collected as soon as the broker flushes its first minute boundary.
             </div>
           </div>
         </div>
@@ -290,10 +332,11 @@
         <div class="card" style="margin-bottom:16px;">
           <div class="card-header">
             <h3>Partitions</h3>
-            <span class="muted">count &amp; creation / deletion rate per queue</span>
+            <span class="card-sub">count &amp; creation / deletion rate per queue</span>
+            <span class="muted">{{ stamp(opsPanel) }}</span>
           </div>
           <div class="card-body">
-            <div v-if="opsError" class="panel-na">{{ describeApiError(opsError) }}</div>
+            <div v-if="opsError" class="panel-err">{{ describeApiError(opsError) }}</div>
             <template v-else-if="partitionCountChartData.labels.length > 0 || partitionRateChartData.labels.length > 0">
               <div>
                 <h4 class="label-xs" style="margin-bottom:10px;">Partition count by Queue</h4>
@@ -319,9 +362,7 @@
                 <div v-else class="empty-tile">No partition create/delete events in this range</div>
               </div>
             </template>
-            <div v-else class="empty-tile">
-              <p>No partition metrics recorded yet.</p>
-            </div>
+            <div v-else class="panel-msg">No partition metrics recorded yet.</div>
           </div>
         </div>
 
@@ -343,7 +384,7 @@
 
           <div v-if="workerError" class="card" style="margin-bottom:16px;">
             <div class="card-body">
-              <div class="panel-na">{{ describeApiError(workerError) }}</div>
+              <div class="panel-err">{{ describeApiError(workerError) }}</div>
             </div>
           </div>
 
@@ -352,16 +393,17 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Message Throughput <span class="cell-chip">cell</span></h3>
-                <span class="muted">{{ workerData?.pointCount || 0 }} data points</span>
+                <span class="chip chip-mute">{{ workerData?.pointCount || 0 }} data points</span>
+                <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
-                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <div class="pill-row" style="margin-bottom:14px;">
                   <button
                     v-for="metric in throughputMetrics"
                     :key="metric.key"
+                    class="pill"
+                    :class="{ on: selectedThroughputMetrics[metric.key] }"
                     @click="toggleThroughputMetric(metric.key)"
-                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-                    :class="selectedThroughputMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
                   >
                     <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedThroughputMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
                     {{ metric.label }}
@@ -382,7 +424,8 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Message Latency <span class="cell-chip">cell</span></h3>
-                <span class="muted">time from push to pop</span>
+                <span class="card-sub">time from push to pop</span>
+                <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
                 <BaseChart
@@ -406,15 +449,17 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Event Loop Latency <span class="cell-chip">cell</span></h3>
+                <span class="card-sub">avg and max delay reported by the broker workers</span>
+                <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
-                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <div class="pill-row" style="margin-bottom:14px;">
                   <button
                     v-for="metric in eventLoopMetrics"
                     :key="metric.key"
+                    class="pill"
+                    :class="{ on: selectedEventLoopMetrics[metric.key] }"
                     @click="toggleEventLoopMetric(metric.key)"
-                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-                    :class="selectedEventLoopMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
                   >
                     <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedEventLoopMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
                     {{ metric.label }}
@@ -438,16 +483,17 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Errors <span class="cell-chip">cell</span></h3>
-                <span v-if="totalErrors > 0" class="chip chip-bad" style="margin-left:auto;">{{ totalErrors }} in period</span>
+                <span v-if="totalErrors > 0" class="chip chip-bad">{{ totalErrors }} in period</span>
+                <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
-                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px;">
+                <div class="pill-row" style="margin-bottom:14px;">
                   <button
                     v-for="metric in errorMetrics"
                     :key="metric.key"
+                    class="pill"
+                    :class="{ on: selectedErrorMetrics[metric.key] }"
                     @click="toggleErrorMetric(metric.key)"
-                    style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:var(--r-pill); font-size:11px; font-weight:500; cursor:pointer; border:1px solid var(--bd-hi); transition:.15s;"
-                    :class="selectedErrorMetrics[metric.key] ? metric.activeClass : 'opacity-50'"
                   >
                     <span style="width:6px; height:6px; border-radius:var(--r-pill);" :style="{ background: selectedErrorMetrics[metric.key] ? metric.activeDot : 'var(--text-faint)' }" />
                     {{ metric.label }}
@@ -473,10 +519,9 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Dead Letter Queue <span class="cell-chip">cell</span></h3>
-                <span v-if="dlqTotal > 0" class="chip chip-bad" style="margin-left:auto;">
-                  {{ formatNumber(dlqTotal) }} in period
-                </span>
-                <span v-else class="muted">messages moved to DLQ</span>
+                <span class="card-sub">messages moved to DLQ</span>
+                <span v-if="dlqTotal > 0" class="chip chip-bad">{{ formatNumber(dlqTotal) }} in period</span>
+                <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
                 <BaseChart
@@ -486,7 +531,7 @@
                   :options="dlqChartOptions"
                   height="180px"
                 />
-                <div v-else class="empty-tile" style="color:var(--ok-500);">
+                <div v-else class="empty-tile empty-tile-ok">
                   No DLQ events on this cell in this period
                 </div>
               </div>
@@ -498,7 +543,8 @@
             <div v-if="workerData?.workers?.length" class="card">
               <div class="card-header">
                 <h3>Workers Status <span class="cell-chip">cell</span></h3>
-                <span class="muted">{{ workerData.workers.length }} workers</span>
+                <span class="chip chip-mute">{{ workerData.workers.length }} workers</span>
+                <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
                 <div style="overflow-x:auto;">
@@ -549,14 +595,14 @@ import { system, operator as operatorApi, describeApiError } from '@/api'
 import { toNum, trimIncompleteBuckets, formatNumber } from '@/composables/useApi'
 import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
-import { useToast } from '@/composables/useToast'
+import { useRefreshAgo } from '@/composables/useRefreshAgo'
+import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
 import { chartColor, chartTheme, semanticColors, alpha } from '@/composables/useChartTheme'
 import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
 
-const { can, actingTenantSlug } = useIdentity()
-const { notifyWarn } = useToast()
+const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 
 // ---------------------------------------------------------------------------
 // State
@@ -566,7 +612,9 @@ const timeRange = ref(60)
 const customMode = ref(false)
 const customFrom = ref('')
 const customTo = ref('')
-const rangeError = ref(null)
+// The range the data on screen was actually fetched for — only Apply moves it,
+// so a half-typed custom range never silently re-scopes the panels.
+const appliedCustom = ref(null)
 
 // CELL-LEVEL. worker-metrics carries broker-wide worker counters with no
 // tenant column; the proxy classifies it Operator and answers 404 to everyone
@@ -578,6 +626,11 @@ const workerError = ref(null)
 const queueOpsData = ref(null)
 const queueOpsError = ref(null)
 const retentionError = ref(null)
+// When each source last answered. Drives the per-card freshness stamp; null
+// means "never loaded", which renders nothing rather than a lie.
+const workerUpdatedAt = ref(null)
+const opsUpdatedAt = ref(null)
+const retentionUpdatedAt = ref(null)
 // Per-replica parked breakdown — only fetched when the Parked tab is active
 // and the per-queue view is set to 'individual'. Null otherwise so the
 // aggregate path is unaffected.
@@ -636,55 +689,96 @@ const formatParked = (v) => {
 // ---------------------------------------------------------------------------
 // Time range picker
 // ---------------------------------------------------------------------------
+/** The window the fetch actually asks for. Custom counts only once applied. */
+function currentRange() {
+  if (customMode.value && appliedCustom.value) return appliedCustom.value
+  const to = new Date()
+  const from = new Date(to.getTime() - timeRange.value * 60 * 1000)
+  return { from, to }
+}
+
+/** What the scope strip states the panels are bounded by. */
+const rangeLabel = computed(() => {
+  if (customMode.value && appliedCustom.value) {
+    const { from, to } = appliedCustom.value
+    return `${from.toLocaleString()} → ${to.toLocaleString()}`
+  }
+  const r = timeRanges.find(t => t.value === timeRange.value)
+  return `last ${r ? r.label : `${timeRange.value}m`}`
+})
+
+// Live, not on-click: an invalid range explains itself as it is typed instead
+// of leaving the user with a button that does nothing when pressed. The message
+// belongs next to the fields — the toast this used to raise said the same thing
+// twice.
+const customError = computed(() => validateRange(customFrom.value, customTo.value).error || '')
+const customRangeValid = computed(() => !customError.value)
+
 const selectQuickRange = (value) => {
   customMode.value = false
-  rangeError.value = null
   timeRange.value = value
   fetchData()
 }
 
 const toggleCustomMode = () => {
   customMode.value = !customMode.value
-  rangeError.value = null
   if (customMode.value) {
+    // Entering custom mode drops any previously applied window as well as
+    // prefilling the fields: the panels still hold the quick-range data at this
+    // point, and reviving an old applied window here would make the scope strip
+    // name a range the charts were not fetched for until the next tick.
+    appliedCustom.value = null
     const now = new Date()
     const from = new Date(now.getTime() - timeRange.value * 60 * 1000)
     customTo.value = formatDateTimeLocal(now)
     customFrom.value = formatDateTimeLocal(from)
+  } else {
+    appliedCustom.value = null
+    fetchData()
   }
 }
 
 const applyCustomRange = () => {
-  // Apply used to `return` on a bad range and look like a dead button.
-  const range = validateRange(customFrom.value, customTo.value)
-  if (range.error) {
-    rangeError.value = range.error
-    notifyWarn('Range not applied', range.error)
-    return
-  }
-  rangeError.value = null
+  const parsed = validateRange(customFrom.value, customTo.value)
+  if (parsed.error) return
+  appliedCustom.value = { from: parsed.from, to: parsed.to }
   fetchData()
 }
 
 const timestampsOf = (rows) => (rows || []).map(r => r.timestamp)
 
 // ---------------------------------------------------------------------------
-// Throughput / latency / event loop / errors — chip metric toggles
+// Freshness. This view fetches by hand rather than through useApi, so each
+// source is wrapped in the { failed, lastUpdated } shape the shared `stamp()`
+// expects — the header slot then says the same three things here as on every
+// other page.
 // ---------------------------------------------------------------------------
-// `activeDot` is a CSS colour for the inline dot next to each chip, so it is
+const opsPanel = { failed: computed(() => queueOpsError.value !== null), lastUpdated: opsUpdatedAt }
+// Live tick in the filter card, off the app's one shared ticker. Fed by the
+// last GOOD queue-ops load, never by the poll attempt.
+const refreshAgo = useRefreshAgo(opsUpdatedAt)
+const retentionPanel = { failed: computed(() => retentionError.value !== null), lastUpdated: retentionUpdatedAt }
+const workerPanel = { failed: computed(() => workerError.value !== null), lastUpdated: workerUpdatedAt }
+
+// ---------------------------------------------------------------------------
+// Throughput / latency / event loop / errors — pill metric toggles
+// ---------------------------------------------------------------------------
+// `activeDot` is a CSS colour for the inline dot next to each pill, so it is
 // written as a var() the same way the inactive fallback (`var(--text-faint)`)
-// already is — no literal to drift from the series ramp it is quoting.
+// already is — no literal to drift from the series ramp it is quoting. The
+// per-metric `activeClass` that used to tint the whole control is gone: these
+// are controls, and a status chip's hue on a control read as a health state.
 const throughputMetrics = [
-  { key: 'push', label: 'Push', activeClass: 'chip-mute', activeDot: 'var(--series-1)' },
-  { key: 'pop',  label: 'Pop',  activeClass: 'chip-mute', activeDot: 'var(--series-2)' },
-  { key: 'ack',  label: 'Ack',  activeClass: 'chip-ok',   activeDot: 'var(--ok-500)' },
+  { key: 'push', label: 'Push', activeDot: 'var(--series-1)' },
+  { key: 'pop',  label: 'Pop',  activeDot: 'var(--series-2)' },
+  { key: 'ack',  label: 'Ack',  activeDot: 'var(--ok-500)' },
 ]
 const selectedThroughputMetrics = reactive({ push: true, pop: true, ack: true })
 const toggleThroughputMetric = (key) => { selectedThroughputMetrics[key] = !selectedThroughputMetrics[key] }
 
 const eventLoopMetrics = [
-  { key: 'avg', label: 'Avg Event Loop', activeClass: 'chip-mute', activeDot: 'var(--series-1)' },
-  { key: 'max', label: 'Max Event Loop', activeClass: 'chip-bad',  activeDot: 'var(--ember-400)' },
+  { key: 'avg', label: 'Avg Event Loop', activeDot: 'var(--series-1)' },
+  { key: 'max', label: 'Max Event Loop', activeDot: 'var(--ember-400)' },
 ]
 const selectedEventLoopMetrics = reactive({ avg: true, max: true })
 const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !selectedEventLoopMetrics[key] }
@@ -693,8 +787,8 @@ const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !select
 // db.rs writes it, but nothing in the broker ever increments it — the series
 // was a guaranteed zero wearing the name of a real failure mode.
 const errorMetrics = [
-  { key: 'ackFailed', label: 'Ack Failed', activeClass: 'chip-warn', activeDot: 'var(--warn-400)' },
-  { key: 'dlq',       label: 'DLQ',        activeClass: 'chip-bad',  activeDot: 'var(--ember-400)' },
+  { key: 'ackFailed', label: 'Ack Failed', activeDot: 'var(--warn-400)' },
+  { key: 'dlq',       label: 'DLQ',        activeDot: 'var(--ember-400)' },
 ]
 const selectedErrorMetrics = reactive({ ackFailed: true, dlq: true })
 const toggleErrorMetric = (key) => { selectedErrorMetrics[key] = !selectedErrorMetrics[key] }
@@ -774,14 +868,14 @@ const retentionChartOptions = {
 // for derived metrics.
 // ---------------------------------------------------------------------------
 const queueOpTabs = [
-  { key: 'pop',    label: 'Pop/s',   activeClass: 'chip-mute', activeDot: 'var(--series-2)', field: 'popPerSecond',   yLabel: 'Pops/s',     kind: 'rate'  },
-  { key: 'push',   label: 'Push/s',  activeClass: 'chip-mute', activeDot: 'var(--series-1)', field: 'pushPerSecond',  yLabel: 'Pushes/s',   kind: 'rate'  },
-  { key: 'ack',    label: 'Ack/s',   activeClass: 'chip-ok',   activeDot: 'var(--ok-500)',   field: 'ackPerSecond',   yLabel: 'Acks/s',     kind: 'rate'  },
-  { key: 'empty',  label: 'Empty/s', activeClass: 'chip-mute', activeDot: 'var(--series-4)', field: 'emptyPerSecond', yLabel: 'Empty/s',    kind: 'rate'  },
+  { key: 'pop',    label: 'Pop/s',   activeDot: 'var(--series-2)', field: 'popPerSecond',   yLabel: 'Pops/s',     kind: 'rate'  },
+  { key: 'push',   label: 'Push/s',  activeDot: 'var(--series-1)', field: 'pushPerSecond',  yLabel: 'Pushes/s',   kind: 'rate'  },
+  { key: 'ack',    label: 'Ack/s',   activeDot: 'var(--ok-500)',   field: 'ackPerSecond',   yLabel: 'Acks/s',     kind: 'rate'  },
+  { key: 'empty',  label: 'Empty/s', activeDot: 'var(--series-4)', field: 'emptyPerSecond', yLabel: 'Empty/s',    kind: 'rate'  },
   // Fill ratio = popMessages / (popMessages + popEmpty). Returns null
   // (= chart gap) when the bucket has too few completions to compute
   // meaningfully — a once-a-minute blip mustn't read as 100%.
-  { key: 'fill',   label: 'Fill %',  activeClass: 'chip-ok',   activeDot: 'var(--ok-500)',
+  { key: 'fill',   label: 'Fill %',  activeDot: 'var(--ok-500)',
     field: (e) => {
       const pop = toNum(e.popMessages)
       const empty = toNum(e.popEmpty)
@@ -792,7 +886,7 @@ const queueOpTabs = [
     },
     yLabel: 'Fill %', kind: 'percent' },
   // Signed push − pop rate: positive = backlog growing, negative = draining.
-  { key: 'delta',  label: 'Push−Pop Δ', activeClass: 'chip-warn', activeDot: 'var(--warn-400)',
+  { key: 'delta',  label: 'Push−Pop Δ', activeDot: 'var(--warn-400)',
     field: (e) => {
       const push = toNum(e.pushPerSecond)
       const pop  = toNum(e.popPerSecond)
@@ -800,11 +894,11 @@ const queueOpTabs = [
       return Math.round(((push || 0) - (pop || 0)) * 100) / 100
     },
     yLabel: 'Push − Pop (msgs/s)', kind: 'rate-signed' },
-  { key: 'trx',    label: 'Trx',     activeClass: 'chip-mute', activeDot: 'var(--warn-400)', field: 'transactions',   yLabel: 'Transactions', kind: 'count' },
+  { key: 'trx',    label: 'Trx',     activeDot: 'var(--warn-400)', field: 'transactions',   yLabel: 'Transactions', kind: 'count' },
   // The parked dot was a hand-picked blue — the app's only chip hue with no
   // token behind it. --info-400 is the slot the palette added for exactly
   // this ("FYI", not a health state), and is the same blue to within 2%.
-  { key: 'parked', label: 'Parked',  activeClass: 'chip-mute', activeDot: 'var(--info-400)', field: 'parkedCount',    yLabel: 'Parked',     kind: 'gauge' },
+  { key: 'parked', label: 'Parked',  activeDot: 'var(--info-400)', field: 'parkedCount',    yLabel: 'Parked',     kind: 'gauge' },
 ]
 const queueOpActive = computed(() => queueOpTabs.find(t => t.key === selectedQueueOp.value) || queueOpTabs[0])
 const isParkedIndividual = computed(() =>
@@ -1355,21 +1449,7 @@ const fetchData = async () => {
   // data on screen for a smooth update.
   if (!queueOpsData.value && !workerData.value) loading.value = true
 
-  let from, to
-  if (customMode.value && customFrom.value && customTo.value) {
-    const range = validateRange(customFrom.value, customTo.value)
-    if (range.error) {
-      rangeError.value = range.error
-      loading.value = false
-      return
-    }
-    from = range.from
-    to = range.to
-  } else {
-    const now = new Date()
-    from = new Date(now.getTime() - timeRange.value * 60 * 1000)
-    to = now
-  }
+  const { from, to } = currentRange()
   const params = { from: from.toISOString(), to: to.toISOString() }
 
   const wantParkedReplicas = selectedQueueOp.value === 'parked'
@@ -1397,6 +1477,7 @@ const fetchData = async () => {
   // per-queue / parked / retention data share the once-per-minute cadence.
   workerError.value = workerRes.error
   if (workerRes.data) {
+    workerUpdatedAt.value = new Date()
     workerData.value = {
       ...workerRes.data,
       timeSeries: trimIncompleteBuckets(workerRes.data.timeSeries || [], {
@@ -1410,6 +1491,7 @@ const fetchData = async () => {
 
   queueOpsError.value = queueOpsRes.error
   if (queueOpsRes.data) {
+    opsUpdatedAt.value = new Date()
     queueOpsData.value = {
       ...queueOpsRes.data,
       series: trimIncompleteBuckets(queueOpsRes.data.series || [], {
@@ -1423,6 +1505,7 @@ const fetchData = async () => {
 
   retentionError.value = retentionRes.error
   if (retentionRes.data) {
+    retentionUpdatedAt.value = new Date()
     retentionData.value = {
       ...retentionRes.data,
       series: trimIncompleteBuckets(retentionRes.data.series || [], {
@@ -1471,73 +1554,15 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
 </script>
 
 <style scoped>
-@media (max-width: 1100px) {
-  div[style*="grid-template-columns:repeat(2"] { grid-template-columns: 1fr !important; }
-}
-
-/* A panel whose source failed or does not exist. Deliberately not styled as
-   an empty state: "nothing to show" and "we could not ask" are different
-   answers and must not look the same. */
-.panel-na {
-  font-size: 12.5px;
-  font-style: italic;
-  color: var(--text-low);
-  text-align: center;
-  padding: 20px 12px;
-  border: 1px dashed var(--warn-400);
-  border-radius: var(--r-card);
-}
-
-/* CELL · OPERATOR divider — same amber vocabulary as the sidebar's Cell
-   group, so "this is not your tenant's number" reads the same everywhere. */
-.cell-section {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 10px 14px;
-  margin: 24px 0 14px;
-  font-size: 12px;
-  color: var(--text-low);
-  border: 1px solid var(--bd);
-  border-left: 3px solid var(--warn-400);
-  border-radius: var(--r-card);
-  /* Half the --warn-glow tint: this band is a full-width divider, and at the
-     glow's .12 it stops reading as a rule and starts reading as a panel. */
-  background: color-mix(in srgb, var(--warn-400) 5%, transparent);
-}
-.cell-tag {
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: .12em;
-  color: var(--warn-400);
-  border: 1px solid var(--warn-400);
-  border-radius: var(--r-chip);
-  padding: 1px 5px;
-  white-space: nowrap;
-}
-.cell-chip {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  color: var(--warn-400);
-  border: 1px solid var(--warn-400);
-  border-radius: var(--r-chip);
-  padding: 0 3px;
-  margin-left: 6px;
-  vertical-align: 2px;
-  opacity: .8;
-}
+/* The shared vocabulary this view used to declare privately now lives in
+   style.css and is deliberately NOT restated here: `.scope-strip`,
+   `.filters`/`.filter-*`, `.card-sub`, `.stat-grid`, `.pill`/`.pill-row`,
+   `.panel-err`, `.panel-na`, `.panel-msg`, `.empty-tile`, `.empty-state`,
+   `.cell-section`, `.cell-tag`, `.cell-chip`. A scoped copy would outrank the
+   shared rule and quietly reintroduce the drift this pass removed. */
 
 .val-warn { color: var(--warn-400); }
 .val-bad { color: var(--ember-400); }
-
-.range-error {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--warn-400);
-}
 
 /* Top Queues leaderboard — 2x2 grid so each mini-table gets enough
    horizontal room to show full queue names without ellipsis. The earlier
@@ -1572,9 +1597,5 @@ watch([selectedQueueOp, viewMode], ([op, mode], [prevOp, prevMode]) => {
 .top-queues td.val {
   width: 80px;
   text-align: right; white-space: nowrap; color: var(--text-hi);
-}
-.empty-tile {
-  font-size: 12px; color: var(--text-low); text-align: center;
-  padding: 16px 0; border: 1px dashed var(--bd); border-radius: var(--r-card);
 }
 </style>

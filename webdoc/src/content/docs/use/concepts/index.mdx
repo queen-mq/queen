@@ -1,0 +1,144 @@
+---
+title: The model in one page
+description: "Queue, partition, offset, consumer group, cursor, lease and ack: the whole vocabulary and how the pieces fit together."
+type: concept
+tier: use
+sidebar:
+  order: 2
+  label: The model
+sourceOfTruth:
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/044_log_ack.sql
+  - server/src/handlers/data.rs
+---
+
+Queen is a queue with two halves, and knowing which half you are looking at explains most of its
+behaviour.
+
+**The Kafka half is the log.** A queue is split into partitions; each message gets a monotone
+integer offset inside its partition; a consumer group owns one cursor per partition, so groups
+read the same data independently and a group can be moved backwards to re-read history.
+
+**The RabbitMQ half is the work queue.** A consumer claims a batch under a lease with an expiry
+and then reports each message as completed, failed, retried or dead-lettered; a message that
+exhausts its retry budget is copied into a real dead-letter table; and consumers that name no
+group compete for the same messages.
+
+Where the two halves would contradict each other, the log wins: progress is recorded as a
+cursor, not as per-message state, so "this one message is still in flight" is not a thing the
+system can represent.
+
+Neither half involves the client in coordination. The broker hands out no partition
+assignments, there is no rebalancing protocol, and a consumer that dies is recovered by its
+lease expiring rather than by a group membership change.
+
+## The vocabulary
+
+| Term | What it is |
+| --- | --- |
+| **Queue** | A named container with a configuration. Created implicitly by the first push to it, or explicitly with `POST /api/v1/configure`. |
+| **Partition** | An ordered lane inside a queue, created the first time you push to its name. The default name is `Default`. One row in `queen.log_partitions`. |
+| **Offset** | A per-partition `BIGINT`, allocated monotonically under that partition's row lock. It is not global, not a timestamp, and not comparable across partitions. |
+| **Segment** | One row in `queen.log_segments` holding many messages as length-prefixed frames, packed and zstd-compressed, covering an inclusive offset range. It is the unit of storage, of retention, and of a timestamp seek. |
+| **Consumer group** | A named reader of a queue. Each group has its own cursor per partition. Omitting a group puts you in the implicit group `__QUEUE_MODE__`. |
+| **Cursor** (`committed`) | The last acked offset for one (partition, group), in `queen.log_consumers`. Everything at or below it is done; the next message the group wants is `committed + 1`. |
+| **Lease** | A claim on the span `(committed, batch_end]` for one (partition, group), carrying a worker id (the `leaseId` you echo back on an ack) and an expiry. |
+| **Ack** | An offset commit that moves `committed`. On the wire it is addressed by `transactionId` plus `partitionId`, not by offset. |
+| **`transactionId`** | The idempotency key of a push, and the address of a message in an ack. You supply it; if you omit it the broker uses the message id it minted. |
+| **Namespace and task** | Two labels on a queue. They are what a discovery pop and the namespace/task listings match on. |
+| **DLQ** | `queen.log_dlq`, a real table. A message whose retry budget runs out on a DLQ-enabled queue is copied there with its payload and the failure reason. |
+
+There is no per-message row anywhere in that list. Consumption state for a whole partition is
+one row per group holding one integer, which is why ten thousand partitions cost ten thousand
+rows rather than ten thousand files or processes.
+
+## How a message moves
+
+```text
+push  ->  queue "orders"
+            partition "cust-42"    offsets:   0   1   2   3   4   5
+                                   segments: [ 0 .. 2 ][ 3 .. 5 ]
+
+          group "billing"   committed = 2   ->  next wanted = 3
+          group "audit"     committed = -1  ->  next wanted = 0
+```
+
+A push to `orders` / `cust-42` locks that partition's row, allocates the next offsets, writes
+one segment row, and commits. `created_at` is stamped while the lock is held, so it is
+monotone per partition in commit order. Time-based retention and timestamp subscriptions
+depend on that.
+
+A pop by group `billing` claims from `committed + 1` forward, up to the batch budget, and
+takes a lease on what it delivered: `batch_end = 5`, span `(2, 5]`. Group `audit` is
+unaffected; its cursor is a different row.
+
+An ack for the message at offset 5 with status `completed` sets `committed = 5`. Offsets 3 and
+4 are now also done, whether or not you acked them, because the cursor is the only record of
+progress. If the consumer dies instead, the lease expires and the next pop for `billing` on
+that partition re-delivers from offset 3.
+
+## The five invariants
+
+1. **Order is per partition, in commit order.** `log_partitions.last_offset` is bumped under
+   that row's `FOR UPDATE` lock, and at most one write per partition is in flight at a time,
+   so offset order equals commit order. There is no global ordering across partitions.
+2. **One in-flight leased batch per (partition, group).** `queen.log_consumers` has one row per
+   pair, with one `batch_end` and one `worker_id`. A second consumer in the same group asking
+   for the same partition gets nothing until the lease is acked or expires, so parallelism
+   inside a group is bounded by the number of partitions, not by the number of workers.
+3. **An ack is an offset commit.** Acking message N completes every earlier unacked message in
+   that partition for that group. You cannot complete offset 7 while leaving 5 outstanding for
+   the same group; when one call carries mixed outcomes the cursor clamps at the lowest signal,
+   and at equal offset `dlq` beats `failed` beats `retry`.
+4. **Deduplication is exact, per partition, and windowed.** A repeated `transactionId` inside
+   `dedupWindowSeconds` (default 3600, enabled) is rejected before an offset is allocated, so a
+   duplicate writes nothing and comes back as `status: "duplicate"`. The same key on a
+   different partition is not a duplicate.
+5. **Delivery is at-least-once.** A leased pop plus an explicit ack can redeliver but cannot
+   lose. Setting `autoAck=true` on a pop commits the cursor inside the pop transaction, which
+   is at-most-once: a consumer that crashes after the response has already been marked done.
+
+## What the model does not have
+
+<Aside type="caution">
+These are design decisions, not gaps waiting for a flag.
+</Aside>
+
+- **No global ordering.** If your correctness argument needs a total order over more than one
+  partition, Queen will not give it to you.
+- **No priority queueing of any kind.** A partition is drained from its cursor forward.
+- **No per-message delivery state.** There is nothing to clean up, and nothing to inspect that
+  would tell you "message 4 is in flight" independently of its neighbours.
+- **No client-side assignment or rebalancing.** Which is why a restart is cheap, and also why
+  you cannot pin a worker to a partition and rely on the broker to keep it there.
+- **No bulk DLQ requeue.** The dead-letter queue is readable (`GET /api/v1/dlq`), and a single
+  address can be deleted or replayed: `POST /api/v1/messages/:partitionId/:transactionId/retry`
+  re-pushes the stored payload snapshot under a *fresh* `transactionId` and then drops the DLQ
+  row. Nothing drains a whole DLQ in one call.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard
+    href="/use/concepts/queues-partitions"
+    title="Queues, partitions, namespaces and tasks"
+    description="What exists after a push, what a partition costs, and how discovery finds a queue."
+  />
+  <LinkCard
+    href="/use/concepts/producing"
+    title="Producing"
+    description="The push request, its per-item verdicts, and deduplication."
+  />
+  <LinkCard
+    href="/use/concepts/consuming"
+    title="Consuming"
+    description="Groups, subscription modes, long-poll, and the leased-batch limit."
+  />
+  <LinkCard
+    href="/reference"
+    title="Reference"
+    description="Every route with its access level, every environment variable with its default."
+  />
+</CardGrid>

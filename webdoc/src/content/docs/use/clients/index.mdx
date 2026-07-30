@@ -1,0 +1,243 @@
+---
+title: Pick your SDK
+description: "What each Queen client actually implements: five SDKs, the plain HTTP API, and the gaps verified in their source."
+type: overview
+tier: use
+sidebar:
+  order: 12
+  label: Clients
+sourceOfTruth:
+  - clients/client-js/client-v2/Queen.js
+  - clients/client-py/queen/client.py
+  - clients/client-go/queen.go
+  - clients/client-laravel/src/Queen.php
+  - clients/client-cpp/queen_client.hpp
+  - server/src/main.rs
+---
+
+Every SDK speaks the same HTTP API, so the choice is about ergonomics and completeness, not
+about capability. All five wrap the same six calls (push, pop, ack, transaction, lease
+renewal, DLQ query) behind a fluent builder with the same method names transliterated into
+each language's conventions. The differences are in what got finished: the admin surface,
+client-side buffering, lease renewal inside the consume loop, and how each one behaves when
+a proxy answers `429` or `403`.
+
+If your language is not here, the HTTP API is the SDK. The whole message plane is eight
+routes and one header. See [Using Queen over HTTP](/use/clients/http).
+
+## The matrix
+
+| | JavaScript | Python | Go | PHP / Laravel | C++ | HTTP |
+| --- | --- | --- | --- | --- | --- | --- |
+| Install | npm `queen-mq` | PyPI `queen-mq` | `go get github.com/smartpricing/queen/clients/client-go` | Composer `smartpricing/queen-mq` | vendor `queen_client.hpp` | n/a |
+| Runtime floor | Node 22 | Python 3.9 | Go 1.24 | PHP 8.3 | C++17 | any |
+| Style | async/await | async/await (httpx) | `context.Context` + explicit `Execute` | synchronous, explicit `execute()` | synchronous, blocking | your own |
+| push / pop / ack | yes | yes | yes | yes | yes | yes |
+| Transactions | yes | yes | yes | yes | yes | yes |
+| Consume loop with workers | yes | yes | yes | yes | yes | write it |
+| Multi-partition pop | yes | yes | yes | yes | yes | `?partitions=N` |
+| Client-side buffering | yes | yes | yes | yes | yes | batch the body yourself |
+| Admin / observability calls | yes | yes | yes | yes | **none** | yes |
+| DLQ query | yes | yes | yes | yes | yes | `GET /api/v1/dlq` |
+| Streaming SDK in the same package | yes | yes | yes | no | no | `/streams/v1/*` |
+| Lease renewal during consume | yes | yes | yes | yes | **not implemented** | your own timer |
+| `429` backoff with `Retry-After` | yes | yes | yes | yes | yes | your own |
+| `403` treated as terminal | yes | yes | yes | yes | yes | your own |
+| Signal handling on by default | yes | yes (no opt-out) | no | consumer only | partial, unsafe | n/a |
+| Load-balancing strategies | round-robin, session, affinity | round-robin, session, affinity | round-robin, session, affinity | round-robin, session, affinity | round-robin, session | n/a |
+
+The runtime floors are read from `package.json` (`engines.node`), the PEP 585 annotations in
+`clients/client-py/queen/` (see [Python](/use/clients/python)), `go.mod`, `composer.json`
+(`php: ^8.3`) and the `-std=c++17` in the C++ `Makefile`.
+
+## Same grammar, five spellings
+
+Every SDK builds a request the same way: name the queue, narrow it, then act.
+
+<Tabs>
+
+<TabItem label="JavaScript">
+
+```js
+await client.queue('orders').partition('acct-42').push([{ data: { id: 1 } }])
+```
+
+</TabItem>
+
+<TabItem label="Python">
+
+```python
+await client.queue("orders").partition("acct-42").push([{"data": {"id": 1}}])
+```
+
+</TabItem>
+
+<TabItem label="Go">
+
+```go
+_, err := client.Queue("orders").Partition("acct-42").Push(payload).Execute(ctx)
+```
+
+</TabItem>
+
+<TabItem label="PHP">
+
+```php
+$client->queue('orders')->partition('acct-42')->push([['data' => ['id' => 1]]])->execute();
+```
+
+</TabItem>
+
+<TabItem label="C++">
+
+```cpp
+client.queue("orders").partition("acct-42").push({{{"data", {{"id", 1}}}}});
+```
+
+</TabItem>
+
+</Tabs>
+
+Two rules hold in all of them. `data` (or `payload`) is unwrapped as the message body; an
+item with neither key is sent as the body itself. And a `transactionId` you do not supply is
+minted client-side as a UUIDv7, which means it is unique per call and therefore
+non-idempotent. Supply your own if you want the dedup window to protect a retry.
+
+## Where the SDKs diverge
+
+These are behaviours you cannot infer from one SDK by reading another.
+
+**`pop()` long-polls everywhere except Go.** JavaScript, Python, PHP and C++ all initialise
+the builder's wait flag from their *consume* defaults, which is `true`, so a bare `pop()`
+issues a 30-second long poll. Go's `Pop()` leaves the flag unset and falls back to
+`PopDefaults.Wait`, which is `false`, so it returns immediately with whatever is available.
+Call `.Wait(true).TimeoutMillis(...)` in Go, or `.wait(false)` elsewhere, rather than
+relying on the default.
+
+**A failed pop is silent in three SDKs.** JavaScript, Python and C++ catch every exception
+inside `pop()`, including an exhausted `429` budget and a terminal `403`, and return an
+empty list. An empty result therefore does not mean an empty queue. PHP's `pop()` and
+Go's `Pop()` propagate the error instead. If you need to distinguish, use the consume loop,
+which logs the status code and treats `403` as fatal.
+
+**The handler signature is not the same everywhere.** JavaScript and PHP pass the array of
+popped messages unless you call `.each()`. Python passes a *single* message when `batch` is 1
+and one message came back, and the list otherwise. Go picks the shape from the method:
+`Consume` takes one message, `ConsumeBatch` takes a slice. C++ always hands the handler a
+`json` value: the array, or one message under `.each()`. Details are on each SDK's page.
+
+**Only three consumers abandon a batch after a negative ack.** Because an ack is an offset
+commit, a nack clamps the group's cursor at the failed message, so every later message in that
+popped batch is coming back. Under `.each()` the JavaScript, Python and Go consumers stop and
+drop the rest of the batch; the PHP and C++ consumers keep going and ack messages that will be
+redelivered anyway, producing duplicate work and rejected acks. Make those handlers
+idempotent, or fail the whole batch.
+
+**Client-side buffering suppresses the server's verdict.** With a buffer configured, `push`
+returns a local acknowledgement immediately and the messages flush later on a count or time
+trigger. You never see the per-item `queued` / `duplicate` status for a buffered push, and the
+buffer lives in process memory: a crash between the call and the flush loses the messages.
+Every SDK's `close()` flushes first, so run it. The JavaScript, Python and PHP consumers hook
+signals to do that for you, and Go and C++ leave it to you.
+
+## Verified gaps
+
+Every item below was checked against the current source and the broker's router. They are
+listed here so a green call does not mislead you.
+
+- **`renew()` never reports the new expiry.** The broker's `POST /api/v1/lease/:leaseId/extend`
+  returns `{"renewed":N,"expiresAt":"..."}` (`server/sql/procedures/044_log_ack.sql`), while
+  every SDK reads `newExpiresAt` or `lease_expires_at`. The renewal itself happens; the
+  expiry field you get back is `null` (JavaScript, Python, PHP), the zero time (Go) or
+  `null` (C++). Schedule the next renewal from your own clock, not from the response.
+- **Two admin methods target routes the broker does not register.** `clearQueue()` (`DELETE
+  /api/v1/queues/:queue/clear`) and `moveMessageToDLQ()` (`POST
+  /api/v1/messages/:partitionId/:transactionId/dlq`) exist in the JavaScript, Python, Go and
+  PHP admin surfaces, but neither path appears in `server/src/main.rs`. They return a 404.
+  `retryMessage()` and `deleteMessage()` are real.
+- **C++ has no admin surface at all.** `queen_client.hpp` defines no `Admin` class: no
+  overview, queue listing, status, analytics, traces-by-name, maintenance mode or consumer
+  group calls. Only the message plane, transactions and the DLQ query are reachable.
+- **C++ accepts `renew_lease(true, ms)` and does nothing with it.** The value is carried into
+  `ConsumeOptions`, and the consume worker's renewal site is a `// TODO`. Long-running C++
+  handlers must call `client.renew(messages)` on their own timer or lose the lease.
+- **Go's per-message `Queue`, `RetryCount` and `ErrorMessage` stay empty after a pop.** The
+  broker's pop response carries `queue` once at the top level and emits no `retryCount` or
+  `errorMessage` per message (`server/src/handlers/data.rs`), so those struct fields are
+  never populated from a pop.
+- **The Python client prints to stdout unconditionally.** `close()`, a failed `pop()`, a
+  failed trace and a failed lease renewal all `print(...)` regardless of
+  `QUEEN_CLIENT_LOG`. There is no injectable logger, unlike JavaScript.
+- **C++ signal handling is not safe to rely on.** The `SIGINT` handler calls `exit(0)`
+  without flushing buffers and the `SIGTERM` handler only prints. Call `close()` from your
+  own handler.
+- **The DLQ builders send filters the broker ignores.** `GET /api/v1/dlq` reads only `queue`,
+  `consumerGroup`, `limit` and `offset` (`server/src/handlers/messages.rs`). Every SDK also
+  sends `partition`, `from` and `to`, which are dropped. The response has no `total` either
+  (it carries `messages` plus a `pagination` object), so the `total` field the SDKs expose is
+  always zero or undefined.
+
+## Authentication and rate limits
+
+All five SDKs authenticate with one header, `Authorization: Bearer <token>`. There is no
+API-key header and no query-string token. Set it as `bearerToken` (JavaScript, PHP),
+`bearer_token` (Python), `BearerToken` (Go) or `ClientConfig::bearer_token` (C++). The broker
+also accepts a bare token with no `Bearer ` prefix, but the SDKs always send the prefix. In C++
+the token only takes effect through the vector-of-URLs constructor; the single-URL constructor
+ignores `ClientConfig` entirely.
+
+The `429` and `403` handling exists because of the multi-tenant proxy, not the broker. All
+five implement the same policy: a `429` is retried in place against the same backend with
+exponential backoff (base 500 ms, cap 30 s, ±20 % jitter) and `Retry-After` wins when the
+server sends one. An ordinary request gets ten attempts; a long-poll pop retries
+unboundedly, because its outer loop is already an indefinite wait. Setting the maximum
+explicitly applies it to both kinds. A `429` never triggers failover to another backend: it
+is a quota signal, not a health signal. A `403` is terminal: `cluster_suspended`,
+`storage_quota_exceeded`, `feature_gated` and `forbidden` cannot resolve themselves, so the
+consume loop stops and surfaces the error rather than retrying.
+
+<Aside type="caution">
+Access levels are a role *set*, not a ladder. A `WriteOnly` token passes `POST /api/v1/push`
+and is rejected on every read and consume route, so a producer credential cannot be reused
+for a consumer. See [Reference](/reference) for the level of every route.
+</Aside>
+
+## Versions
+
+At the 1.0.0 release the client SDKs are version-aligned with the broker. Pin the SDK to the
+broker's major version; the wire contract shown throughout these pages is the 1.0.0 one.
+
+## The pages
+
+<CardGrid>
+  <LinkCard
+    href="/use/clients/javascript"
+    title="JavaScript"
+    description="npm queen-mq, the reference implementation: buffering, load balancing, injectable logger, host-routed proxies."
+  />
+  <LinkCard
+    href="/use/clients/python"
+    title="Python"
+    description="PyPI queen-mq: async/await on httpx, and the four places it differs from JavaScript."
+  />
+  <LinkCard
+    href="/use/clients/go"
+    title="Go"
+    description="context.Context throughout, explicit Execute, and a Pop() that does not long-poll by default."
+  />
+  <LinkCard
+    href="/use/clients/php-laravel"
+    title="PHP and Laravel"
+    description="The plain PHP SDK, the service provider, and the artisan queen:consume command."
+  />
+  <LinkCard
+    href="/use/clients/cpp"
+    title="C++"
+    description="One header, three vendored dependencies whose include paths no longer resolve, and how to build it anyway."
+  />
+  <LinkCard
+    href="/use/clients/http"
+    title="Plain HTTP"
+    description="Base URL, auth header, the push/pop/ack shapes, the bodiless 204, and a complete curl walkthrough."
+  />
+</CardGrid>

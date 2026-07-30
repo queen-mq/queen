@@ -1,0 +1,232 @@
+---
+title: Guarantees
+description: "Exactly what Queen promises about ordering, durability and delivery — where duplicates still come from, what deduplication makes exact, and what a broker crash, a database failover and a client crash each look like."
+type: concept
+tier: use
+sidebar:
+  order: 11
+sourceOfTruth:
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/044_log_ack.sql
+  - server/src/handlers/data.rs
+  - server/src/dedup.rs
+  - server/src/fusion.rs
+  - server/src/file_buffer.rs
+  - server/src/handlers/status.rs
+verifiedBy:
+  - clients/client-js/test-v2/semantics.js
+  - clients/client-js/test-v2/push.js
+---
+
+This page states the promises precisely, including where they stop. Read it before you design
+around any of them.
+
+## Ordering
+
+**Order is per partition, in commit order.** A partition is one ordered lane: every message in
+it has a single monotone integer offset, allocated while the pushing transaction holds that
+partition's row lock. A message's offset, and its commit timestamp, are fixed at commit time and
+never change.
+
+Because the lock serialises allocation, two properties hold inside a partition: offsets have no
+gaps in steady state, and commit timestamps increase with offset. The second is what makes
+time-based retention and timestamp seeks meaningful — see
+[Replay and subscription modes](/use/concepts/replay).
+
+What is **not** promised:
+
+- **No global ordering.** Two messages in different partitions have no defined relative order,
+  even within the same queue. A timestamp is resolved to a position independently in each
+  partition, so it is not a consistent cut across a queue.
+- **No ordering of any kind by priority.** Nothing reorders a partition. Delivery follows the
+  cursor.
+- **No cross-partition atomic visibility.** A transaction that pushes to several partitions
+  commits at once, but consumers of those partitions are independent and will observe the
+  messages at whatever time each partition is polled.
+
+Delivery order within a group is additionally serialised by the one-lease rule: since exactly
+one batch of a partition is leased per consumer group at a time, a group never processes two
+overlapping batches of the same lane concurrently. Ordering is preserved through failure only
+if your handlers are sequential — a nack rewinds to the failed message and redelivers
+everything after it, so parallel processing inside one partition trades order for throughput.
+
+The ordering claim has been measured end to end: a four-stage pipeline over 1000 partitions,
+25,000 events per second for 600 seconds, verified 88,503,408 messages with **0 duplicates, 0
+gaps and 0 order violations**. The loader ran with a 300-second deduplication window. Full
+conditions and artifacts are in [Benchmarks](/benchmarks).
+
+## Durability
+
+Durability is PostgreSQL's. The broker holds no committed state of its own: a push is durable
+when its database transaction commits, and it survives a broker restart because the broker was
+never where it lived.
+
+The consequence you must code against is that **HTTP 201 on a push does not mean "in
+PostgreSQL"**. An accepted push request answers `201` and reports the outcome per item:
+
+| `status` | Meaning |
+| --- | --- |
+| `queued` | Committed to PostgreSQL. Durable. |
+| `duplicate` | Not written; an identical transaction id already exists in the window. The response carries the original message id. |
+| `buffered` | **Not in PostgreSQL.** The database write failed and the payload was written to the broker's local disk spool for later replay. |
+| `failed` | Neither stored nor spooled. Lost unless you retry. |
+
+The disk spool is the broker's answer to a database outage: rather than rejecting the push, the
+payload is appended to a local file and replayed oldest-first once the database is reachable,
+preserving the original transaction id so deduplication makes the replay idempotent. It is a
+real durability tier, but a different one — the data is on that broker's disk, not in your
+replicated database. If the broker's disk is ephemeral, `buffered` is a warning, not a
+reassurance.
+
+An ack is durable in the same sense: the cursor moves when the transaction commits, and the
+item comes back `success: true`. Anything else means the cursor did not move.
+
+Sustained-durability evidence: a 24-hour soak processed 51,820,403,100 messages at roughly
+600,000 messages per second per side with an error rate of 0.00012%, 0 restarts and flat broker
+memory (~6.3 GB resident). That run used **explicit acknowledgement** (`manualAck=true`,
+`ackAsync=true`) on a 32-vCPU, 62 GiB machine, at commit `615efdc`. Artifacts and the full
+conditions are in [Benchmarks](/benchmarks).
+
+## Delivery
+
+Two modes, and the choice is per pop.
+
+**At-least-once — leased pops (`autoAck=false`).** The pop claims a span under a lease and
+leaves the cursor where it was. The cursor moves only when you ack. If the consumer dies, the
+lease expires and the whole span is delivered again. Nothing is lost; some things arrive twice.
+This is the default and the right choice for work that matters.
+
+**At-most-once — server-side auto-ack (`autoAck=true`).** The pop commits the cursor inside the
+same transaction that reads the messages, and returns no lease. If the response is lost in
+flight, or the consumer crashes before processing, those messages are gone — the broker has
+already recorded them as consumed. Choose it only when losing a message is cheaper than handling
+it twice.
+
+<Aside type="note">
+The client SDKs also have a client-side auto-ack, which is a different thing: the consumer sends
+a real ack after your handler returns (and a nack if it throws). That is still at-least-once. In
+the JavaScript client, consumer-side `autoAck` defaults to on and is never sent to the server;
+the server-side `autoAck` flag applies to direct `pop()` calls only.
+</Aside>
+
+## Deduplication is exact inside its window
+
+Deduplication is on by default with a 3600-second window (`dedupWindowSeconds`), scoped per
+partition, and keyed on your `transactionId`.
+
+"Exact" means what it says, and the mechanism is worth knowing because it explains the
+guarantee:
+
+1. The broker hashes each message's transaction id to 128 bits. Every push writes those hashes
+   into a sidecar table alongside the segment, whether deduplication is on or off.
+2. On a push to a deduplication-enabled queue, SQL takes the partition's row lock **first**,
+   then probes the sidecar for the incoming hashes within the window, and only then allocates
+   offsets.
+
+Because the probe happens under the write serialiser, no concurrent push can slip a matching
+message into the probed range. A duplicate therefore writes **nothing at all** — no offset
+consumed, no rollback needed — and returns `status: "duplicate"` with the original message's id.
+There is no probabilistic filter anywhere in the path, and no cache is allowed to decide the
+verdict: the broker's in-memory deduplication cache only supplies a watermark that narrows the
+SQL probe, and when it cannot vouch for a range it says so and the full window is probed.
+
+First-wins also applies *within* a single push: a transaction id repeated inside one request
+body, or inside one internally-fused batch, produces one stored message and reports the repeats
+as `duplicate` sharing the leader's message id.
+
+The bounds of the guarantee:
+
+- **Per partition.** The same transaction id in two partitions is two messages.
+- **Window-bounded.** Outside the window, or after the sidecar row is purged, a repeat is
+  accepted as a new message. The sidecar's own retention is
+  `max(dedupWindowSeconds, completedRetentionSeconds, 900 seconds)`.
+- **Identity is the hash, not the string.** Two different transaction ids that collide in 128
+  bits would be treated as the same message. The probability is negligible; the statement is
+  that identity is a hash comparison, consistently, everywhere in the system.
+- **Off means off.** With `dedupWindowSeconds: 0` there is no probe at all, and repeats are
+  stored. Note that `/configure` resets an omitted `dedupWindowSeconds` back to 3600.
+
+Deduplication guards the *push* side. It does not make consumption exactly-once.
+
+## Where duplicates still come from
+
+Every one of these is normal operation, not a defect:
+
+- **Lease expiry.** A slow or dead consumer's whole leased span is redelivered.
+- **Any nack.** The cursor clamps at the lowest explicit failure in the call, so messages after
+  it — including ones you acked `completed` in that same call — come back.
+- **A broker restart or a lost ack.** The lease outlives the process in the database and expires
+  normally, redelivering the batch.
+- **An ack outside the hash window.** It is reported as `unresolvable`, and the message
+  redelivers rather than being silently dropped.
+- **A transaction retried after a lost response**, when the pushed items do not carry
+  deterministic transaction ids.
+- **A dead-letter replay.** The replayed message deliberately gets a fresh transaction id, so
+  deduplication cannot suppress a second replay of the same payload.
+
+Making them harmless is a design task, and there are only two levers worth using: write
+handlers that are idempotent on a key you control (the message's `transactionId` is the obvious
+one, since it survives redelivery unchanged), and use deterministic transaction ids on pushes so
+retries collapse inside the deduplication window. Everything else is hope.
+
+## What each failure looks like
+
+### A broker crash
+
+The broker is stateless, so a crash costs no committed data. Concretely:
+
+- In-flight pushes that had not committed are lost from the client's point of view; it never got
+  a response. Retry them — with a deterministic transaction id, the retry is either accepted or
+  reported as a duplicate.
+- Leases held by that broker remain in the database with their expiry. They are not released
+  early. Consumers see those spans again when the lease expires, so the redelivery delay after a
+  crash is up to the queue's lease time.
+- Undrained disk spool files sit on that broker's own disk and are replayed when it starts
+  again. Nothing else reads them, so a broker that never comes back takes its spool with it.
+- Any other broker keeps serving throughout. There is no leader election on the delivery path.
+
+A clean stop is gentler than a crash but not different in kind: on `SIGTERM` the broker drains
+in-flight requests before exiting, so an ack already being processed still commits. It does not
+release the leases it was holding — those still wait out their expiry.
+
+### A database failover or outage
+
+- Pushes fail their transaction and are spooled to local disk, reported as `buffered` under an
+  HTTP `201`. Replay begins automatically once connections work again, preserving transaction
+  ids.
+- Pops and acks fail outright. No cursor moves, so nothing is lost — every un-acked message is
+  simply still un-acked, and leases expire in the meantime.
+- `GET /health` performs a real database round-trip and returns `503` while PostgreSQL is
+  unreachable. That makes it an accurate readiness signal and a poor liveness probe: killing the
+  broker for being unhealthy destroys the disk spool's whole purpose. Operator guidance is in
+  [Self-hosting](/selfhost).
+- What survives the failover is exactly what PostgreSQL confirmed as committed. Queen adds no
+  guarantee on top of your database's replication configuration and cannot compensate for one
+  that acknowledges writes it can lose.
+
+### A client crash
+
+- Messages leased but not acked are redelivered in full when the lease expires — including
+  messages the handler completed but had not acked. This is the case that makes idempotent
+  handlers mandatory rather than advisable.
+- Messages acked before the crash stay acked; the cursor is durable.
+- With server-side `autoAck=true`, everything in the last response is lost.
+- A crash charges nothing against the retry budget, so a crash-looping consumer redelivers
+  forever without ever dead-lettering. Watch redelivery counts, not just the dead-letter queue.
+
+## Summary
+
+| Property | Guarantee | Boundary |
+| --- | --- | --- |
+| Ordering | Total order per partition, in commit order | None across partitions; none by priority |
+| Durability | PostgreSQL commit | `buffered` means broker disk, not the database |
+| Delivery (leased) | At-least-once | Duplicates on expiry, nacks and restarts |
+| Delivery (`autoAck`) | At-most-once | Loss on a lost response or a crash |
+| Push deduplication | Exact, per partition, inside the window | Hash identity; off when the window is 0 |
+| Consumption | Not exactly-once | Ack is an offset commit, not a receipt |
+
+The mechanisms behind the first and last rows are on
+[Acknowledgement is an offset commit](/use/concepts/ack) and
+[Transactions](/use/concepts/transactions).

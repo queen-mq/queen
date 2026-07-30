@@ -1,0 +1,297 @@
+---
+title: Deploy a broker
+description: "From zero to a broker serving traffic: the published image, the environment variables that matter, building from source, and verification steps that prove the whole path works."
+type: how-to
+tier: operate
+sidebar:
+  order: 2
+  label: Deploy
+sourceOfTruth:
+  - Dockerfile
+  - server/Dockerfile
+  - build.sh
+  - server/src/main.rs
+  - server/src/config.rs
+  - server/src/schema.rs
+  - server/src/handlers/static_files.rs
+  - server/src/handlers/status.rs
+  - server/build.rs
+  - test/compose/docker-compose.single.yml
+---
+
+Two ways to get a broker: run the published container, or build the binary. Both
+end at the same place: one process holding a connection pool to PostgreSQL, with
+the schema and the dashboard already inside it.
+
+The broker applies its own schema on every boot, so there is no ordering
+requirement beyond "PostgreSQL is reachable". If it is not, boot fails loudly
+rather than starting in a half-working state.
+
+## Run the published image
+
+The image is `smartnessai/queen-mq:1.0.0`. Its runtime stage is `ubuntu:24.04`,
+its working directory is `/app`, and its command is `./bin/queen-seg`.
+
+<Steps>
+
+1. **Give the broker a network and a PostgreSQL.** Any reachable PostgreSQL
+   works; the test harness and the benchmark rigs both use `postgres:16`.
+
+   ```bash
+   docker network create queen
+   ```
+
+   ```bash
+   docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16
+   ```
+
+2. **Start the broker.** `PG_USER` and `PG_DATABASE` both default to `postgres`,
+   so a minimal run only needs the host, the port and the password.
+
+   ```bash
+   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres smartnessai/queen-mq:1.0.0
+   ```
+
+3. **Give the disk spool a real home.** `FILE_BUFFER_DIR` defaults to
+   `/var/lib/queen/buffers`, which inside a container is ephemeral. Pushes
+   accepted while PostgreSQL was unreachable live there until they are replayed,
+   so mount it if you want that durability to survive the container.
+
+   ```bash
+   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PASSWORD=postgres -v queen-spool:/var/lib/queen/buffers smartnessai/queen-mq:1.0.0
+   ```
+
+</Steps>
+
+### The environment variables that matter
+
+Everything has a working default; in practice a deployment sets variables from
+this list and leaves the rest alone. The full generated table lives in
+[Reference](/reference).
+
+| Variable | Default | Why you would set it |
+| --- | --- | --- |
+| `PG_HOST` | `localhost` | Always, in a container. |
+| `PG_PORT` | `5432` | Non-standard port or a pooler's port. |
+| `PG_USER` | `postgres` | A dedicated role. |
+| `PG_PASSWORD` | `postgres` | Always. |
+| `PG_DATABASE` | `postgres` | A dedicated database. Resolves `PG_DATABASE`, then the legacy `PG_DB`, then `postgres`. |
+| `DB_POOL_SIZE` | `160` | Must fit inside PostgreSQL's `max_connections` across **all** replicas. |
+| `PORT` | `6632` | A different HTTP port. |
+| `QUEEN_APPLY_SCHEMA` | `true` | Set `0` to run as a low-privilege role against a pre-applied schema. |
+| `FILE_BUFFER_DIR` | `/var/lib/queen/buffers` | Point it at a writable, persistent path. |
+| `QUEEN_STMT_TIMEOUT_MS` | `30000` | Bound how long a single statement may run before the broker abandons and cancels it. |
+| `PG_USE_SSL` | `false` | A managed PostgreSQL that requires TLS. |
+| `JWT_ENABLED` | `false` | Turn authentication on. Off means every route is open. |
+| `QUEEN_MESH_PEERS` | unset | Running more than one replica. |
+| `QUEEN_SYNC_SECRET` | unset | Always, when the mesh is on. |
+| `LOG_LEVEL` | `info` | Accepts full `EnvFilter` syntax, e.g. `info,queen_seg::pop=debug`. `RUST_LOG` overrides it. |
+
+<Aside type="caution">
+Booleans are strict. `true/false`, `1/0`, `yes/no`, `on/off` are accepted
+case-insensitively; unset or empty uses the default; **anything else is a fatal
+boot error**. `JWT_ENABLED=maybe` will not quietly mean "off". See
+[Configuration](/selfhost/configuration).
+</Aside>
+
+### Ports
+
+| Port | Protocol | Exposed by the image | Purpose |
+| --- | --- | --- | --- |
+| 6632 | HTTP | Yes (`EXPOSE 6632`) | The API and the dashboard. `PORT` changes it. |
+| 6633 | Framed TCP | No | The inter-replica mesh. `QUEEN_MESH_PORT` changes it; the legacy name `QUEEN_UDP_NOTIFY_PORT` still reads the same setting. |
+
+The mesh port is not published by the image because a single broker with no
+peers never binds it. When you do run replicas, the mesh port must be reachable
+between them and reachable from nowhere else. See
+[High availability](/selfhost/ha).
+
+### What else is inside the image
+
+The published image is more than the broker binary, and two of the extras are
+directly useful to an operator.
+
+- **`queenctl` on `PATH`**, at `/usr/local/bin/queenctl`, built from
+  `clients/client-cli` as a static CGO-free Go binary. The image sets
+  `ENV QUEEN_SERVER=http://localhost:6632`, so an in-container invocation needs
+  no flags:
+
+  ```bash
+  docker exec -it queen queenctl status
+  ```
+
+- **PostgreSQL 18 client tools**, installed from the PGDG repository: `psql`,
+  `pg_dump`, `pg_restore`. The broker's whole state is in PostgreSQL, so backup
+  and restore are plain `pg_dump` and `pg_restore`, and the tools travel with the
+  image rather than needing a second container.
+
+- **`/app/webapp/dist`**, the same dashboard bytes the binary already embeds,
+  written to disk for inspection. The binary does **not** read them. There is no
+  static-directory override, and the image deliberately does not set
+  `QUEEN_STATIC_DIR`, because no code reads it.
+
+## Build from source
+
+The repository root `Dockerfile` builds the whole stack in four stages: the Vue
+dashboard, the Rust broker, `queenctl`, and the runtime image. It requires
+BuildKit, because the Rust stage mounts cache directories for the Cargo registry
+and the target directory.
+
+```bash
+DOCKER_BUILDKIT=1 docker build -t queen-mq .
+```
+
+`build.sh <registry>` is the publish path: it reads `name` and `version` from
+`server/server.json`, builds for `linux/amd64` with `QUEENCTL_VERSION` set to
+that version, tags the result `<registry>/<name>:<version>`, and pushes it. The
+version in `server/server.json` is therefore the single source of truth for the
+image tag, for what `/health` reports, and for what `queenctl version` reports.
+`server/build.rs` embeds it into the binary as `QUEEN_VERSION`.
+
+To build only the binary:
+
+```bash
+cargo build --release --manifest-path server/Cargo.toml
+```
+
+The result is `server/target/release/queen-seg`. Two build-time couplings are
+worth knowing before you start.
+
+<Aside type="caution">
+**The dashboard is a compile-time dependency, not packaging.**
+`server/src/handlers/static_files.rs` embeds `webapp/dist` with `rust_embed`,
+which hard-errors at compile time when the folder is missing. If your tree has
+no `server/webapp/dist`, build the frontend first. `app/vite.config.js` writes
+its output to exactly that path:
+
+```bash
+npm --prefix app ci
+```
+
+```bash
+npm --prefix app run build
+```
+</Aside>
+
+<Aside type="caution">
+**The SQL is compiled in.** `server/src/schema.rs` pulls `sql/schema.sql` and all
+34 `sql/procedures/*.sql` files in with `include_str!`, so the running binary
+carries the SQL it was built with. Editing a `.sql` file changes nothing until
+you rebuild, and a running broker will keep applying the old text at every boot.
+Rebuild before you test a SQL change.
+</Aside>
+
+There is also a broker-only image at `server/Dockerfile`, on a
+`debian:bookworm-slim` runtime. It builds only the binary from `server/`, sets
+`PORT=6632`, and carries no `queenctl` and no PostgreSQL client tools. Use it
+when you want the smallest possible broker and have the operator tooling
+elsewhere.
+
+## Verify it actually works
+
+`/health` proves the broker can reach PostgreSQL. It does not prove that a
+message can be stored and delivered. Run all four steps: the last one is the one
+that catches a broker that accepts writes but cannot serve them.
+
+<Steps>
+
+1. **Health.** This is not a static answer: the handler takes a connection from
+   the pool and issues a real query, so a 200 means the broker *and* PostgreSQL
+   are both working.
+
+   ```bash
+   curl -s http://localhost:6632/health
+   ```
+
+   ```json
+   {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.0"}
+   ```
+
+   Unreachable PostgreSQL yields HTTP 503 and
+   `{"status":"unhealthy","database":"disconnected",…}`.
+
+2. **Read the boot log.** The broker prints the configuration it actually
+   resolved, one line per subsystem, with secrets masked. These are the messages
+   to look for, in order: `applied schema.sql + procedures` on the `schema`
+   target, then the `config: server` / `config: postgres` / `config: auth` /
+   `config: sync` / `config: engine` / `config: flow` / `config: jobs` /
+   `config: file_buffer` / `config: security` / `config: logging` blocks on the
+   `boot` target, then `listening`.
+
+   ```bash
+   docker logs queen 2>&1 | grep -E 'schema|config:|listening'
+   ```
+
+   If a setting appears not to have taken effect, this block is the answer — it
+   shows the value the broker understood, not the value you thought you set.
+
+3. **Push a message.** A queue and a partition are created by the first push that
+   names them; there is nothing to provision first.
+
+   ```bash
+   curl -s -X POST http://localhost:6632/api/v1/push -H 'Content-Type: application/json' -d '{"items":[{"queue":"deploy-check","partition":"p1","payload":{"hello":"world"}}]}'
+   ```
+
+   The response carries one result per item. `status` is `queued` when the
+   message was stored.
+
+4. **Pop it, and pop again.** `autoAck=true` commits the consumer cursor inside
+   the pop transaction, so the second call proves the cursor advanced rather than
+   only proving that a read returned bytes.
+
+   ```bash
+   curl -s 'http://localhost:6632/api/v1/pop/queue/deploy-check?batch=10&autoAck=true'
+   ```
+
+   ```bash
+   curl -si 'http://localhost:6632/api/v1/pop/queue/deploy-check?batch=10&autoAck=true'
+   ```
+
+   The second call must answer **`HTTP/1.1 204 No Content`** with no body at all.
+   A 204 from this broker never carries a body — that is deliberate, because
+   announcing a content-length on an elided body poisoned Node and undici
+   connections.
+
+</Steps>
+
+If step 4 keeps returning the same message, the cursor is not advancing and
+something is wrong with the ack path, not with the network. If step 3 succeeds
+but step 4 returns 204 on the *first* call, check whether pop maintenance mode is
+on: a paused pop path also answers 204 with no body, so the response alone cannot
+distinguish "paused" from "empty". `GET /api/v1/system/maintenance/pop` reports
+the flag.
+
+<Aside type="note">
+The dashboard's assets are served, but the SPA boots by calling `GET /auth/me`,
+which only `queen_proxy` serves. A broker-only deployment will not get past the
+dashboard's gate. That is a known gap, not a misconfiguration on your side.
+</Aside>
+
+## Compose, for a two-broker stack
+
+The repository's test harness contains a working multi-broker Compose file at
+`test/compose/docker-compose.ha.yml`: one PostgreSQL, two brokers with distinct
+`QUEEN_SERVER_ID`, an identical `QUEEN_SYNC_SECRET`, `QUEEN_MESH_PEERS` pointing
+at each other, and a separate `FILE_BUFFER_DIR` per broker. That last detail is
+load-bearing: the spool is node-local and must never be shared between brokers.
+[High availability](/selfhost/ha) explains why.
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/postgres"
+    title="PostgreSQL"
+    description="Privileges, pool sizing, why a direct connection is required, and the server settings that matter."
+  />
+  <LinkCard
+    href="/selfhost/configuration"
+    title="Configuration"
+    description="The strict boolean parser, the fatal boot errors, and which variables are experiment-only."
+  />
+  <LinkCard
+    href="/selfhost/kubernetes"
+    title="Kubernetes"
+    description="A complete reference manifest, including probes that do not restart brokers when the database blips."
+  />
+</CardGrid>

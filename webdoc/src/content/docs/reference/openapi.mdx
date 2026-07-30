@@ -1,0 +1,115 @@
+---
+title: OpenAPI documents
+description: Machine-readable OpenAPI 3.1 descriptions of the broker and proxy APIs, generated from the Rust source at documentation build time.
+type: reference
+sidebar:
+  order: 28
+sourceOfTruth:
+  - webdoc/scripts/gen-openapi.mjs
+  - server/src/main.rs
+  - server/src/handlers
+  - queen_proxy/src/main.rs
+  - queen_proxy/src/console.rs
+  - queen_proxy/src/oauth.rs
+---
+
+Two OpenAPI 3.1 documents are published with this site. Neither is written by hand: both are
+generated from the routers and handlers by `webdoc/scripts/gen-openapi.mjs`, and CI fails if
+either is behind the source it was derived from.
+
+<CardGrid>
+  <LinkCard
+    href="/openapi/queen-broker.json"
+    title="queen-broker.json"
+    description="The broker's HTTP API: the message plane, queue and consumer-group management, inspection, status and operator surfaces."
+  />
+  <LinkCard
+    href="/openapi/queen-proxy.json"
+    title="queen-proxy.json"
+    description="The proxy's own surface: service endpoints, the login and OAuth flow, and the cluster console API."
+  />
+</CardGrid>
+
+<Render file="generated/openapi-coverage" />
+
+## What is derived, and from what
+
+Every element below is read out of a specific construct in the Rust source. If the code
+changes, the document changes with it.
+
+| Element | Derived from |
+| --- | --- |
+| Paths and methods | the `Router::new()` chain: the broker's in `server/src/main.rs`, the proxy's in `queen_proxy/src/main.rs` plus the nested console and auth routers |
+| Path parameters | the `:name` segments of the registered path |
+| Query parameters | the handler's `Query<T>` extractor: the fields of `T` with their serde renames and optionality. For a handler taking `Query<HashMap<..>>`, the literal keys it reads out of the map |
+| Request bodies | the struct the handler passes to `serde_json::from_slice`, walked recursively into nested structs |
+| Response status codes | every `StatusCode` variant reachable in the handler body |
+| Authorization | `auth::route_access_level`, which also fills `x-queen-access-level` |
+| Tenant scoping | whether the handler takes the `Tenant` request extension, which also adds the `x-queen-tenant` header parameter |
+
+## What is not derivable, and how the documents say so
+
+Two things resist derivation, and the documents mark them rather than guess.
+
+**Success response bodies.** The hot paths assemble their JSON by string concatenation
+(`render_push_results`, `render_pop_parts`, `render_ack_results`), and several management
+routes forward a stored procedure's JSON verbatim. There is no type to read. Those responses
+carry `"x-queen-schema": "opaque"` and an **unconstrained** schema, deliberately not
+`type: object`, because some of these routes answer with a top-level array and asserting
+"object" would be worse than asserting nothing. The field-by-field contract lives on the route
+pages under [the HTTP reference](/reference/http).
+
+**Query parameters that are forwarded whole.** Some listing handlers hand their entire query
+map to a stored procedure without reading keys by name in Rust. Those operations carry
+`"x-queen-query-params": "forwarded"` and a note; their parameters are documented on the route
+pages.
+
+Request bodies that a handler parses as a dynamic JSON document, rather than into a struct,
+carry `"x-queen-schema": "opaque"` too, with the keys the handler does read by name listed as
+properties.
+
+## Extensions
+
+Both documents use a small set of `x-queen-*` extensions so a reader or a tool can tell
+derived facts from undeclared ones.
+
+| Extension | Meaning |
+| --- | --- |
+| `x-queen-access-level` | `public`, `read-only`, `read-write`, `write-only` or `admin`, from the broker's authorization table |
+| `x-queen-tenant-scoped` | the handler resolves a tenant, so the request is scoped when `QUEEN_TENANCY_HEADER` is on |
+| `x-queen-handler` | the file and function that serves the operation |
+| `x-queen-schema` | `derived` when the schema comes from a Rust type, `opaque` when it could not |
+| `x-queen-query-params` | `typed`, `adhoc`, `forwarded` or `none`: how the query parameters were recovered |
+| `x-queen-catch-all` | the path is an axum catch-all segment, which OpenAPI cannot express |
+| `x-queen-note` | a caveat about this operation specifically |
+
+## Using them
+
+Both files are static assets, so any tool that reads a URL can consume them:
+
+```bash
+curl -s https://queenmq.com/openapi/queen-broker.json -o queen-broker.json
+```
+
+Generating a client is a reasonable use for the request side: paths, parameters and bodies
+are all derived. Be careful with generated *response* types: wherever
+`x-queen-schema` is `opaque`, the generator will produce an untyped value, and the real shape
+is the one documented on the route page.
+
+<Aside type="note">
+The proxy document describes only what the proxy itself serves. Every other path is forwarded
+to the broker of the cluster addressed by the request's first DNS label. Which of the broker's
+routes a tenant credential can actually reach is a separate question, answered by the
+route-class table in [Self-hosting](/selfhost).
+</Aside>
+
+## Regenerating
+
+```bash
+pnpm --dir webdoc gen
+```
+
+`pnpm --dir webdoc gen:check` is the CI form: it regenerates into memory and fails if what is
+committed differs. The generator also runs a structural self-check on both documents before
+writing them. Duplicate operation ids, undeclared path parameters, dangling `$ref`s and
+Rust-style `:param` leftovers all fail the build rather than ship.

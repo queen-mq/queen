@@ -1,0 +1,224 @@
+---
+title: Run Queen as a multi-tenant service
+description: "The architecture behind hosting Queen for other people: tenant, cluster and cell, and why every per-cluster limit is exact."
+type: concept
+tier: operate
+sidebar:
+  order: 19
+  label: Multi-tenant
+sourceOfTruth:
+  - queen_proxy/src/main.rs
+  - queen_proxy/src/cache.rs
+  - queen_proxy/src/gateway.rs
+  - queen_proxy/src/state.rs
+  - queen_proxy/migrations/001_init.sql
+  - queen_proxy/CONTRACTS.md
+---
+
+The broker and the gateway in front of it are both Apache-2.0. Nothing in this
+repository is a hosted-only component, which means anyone can stand up the same
+multi-tenant service in-house — for internal teams, for customers, or for a product
+built on top. This section documents how that system is put together, what it
+enforces, and where its edges are.
+
+It is not a description of a commercial offering. It is the design of
+`queen_proxy/`, read out of the code.
+
+## Three nouns
+
+| Term | What it is | Where it lives |
+| --- | --- | --- |
+| **Tenant** | The organisation. Owns users and clusters, carries a lifecycle status, is what a bill would be addressed to | `queen_proxy.tenants` |
+| **Cluster** | The tenant-visible Queen: one hostname, one plan, one set of quotas, one queue namespace | `queen_proxy.clusters` |
+| **Cell** | One physical stack — a broker, its PostgreSQL, and a proxy — on one failure domain | `queen_proxy.cells` |
+
+Users belong to a tenant; permissions do not. A user's role is granted per cluster
+(`queen_proxy.cluster_roles`), so one person can be admin on one cluster and a viewer
+on another inside the same organisation.
+
+A tenant may own many clusters — production, staging, one per region. Each cluster
+is a separate namespace on the broker and a separate quota bundle.
+
+## Cluster to cell
+
+```text
+tenant "acme"
+├── cluster "acme-prod"    → cell "eu1-shared-a"
+└── cluster "acme-staging" → cell "eu1-shared-a"
+
+tenant "globex"
+└── cluster "globex"       → cell "eu1-ded-7"   (dedicated: nothing else on it)
+```
+
+The relationship is **N:1 on shared cells and 1:1 on dedicated ones**. Plans carry a
+`cell_class` of `shared` or `dedicated` and cells carry the same field, but the
+pairing is a placement decision made by whoever runs the fleet — there is no database
+constraint that stops a shared cluster landing on a dedicated cell. See
+[Tenants, clusters and cells](/selfhost/multi-tenant/tenants) for what that means in
+practice, including the fact that placement is manual today.
+
+Each cluster also carries a `broker_tenant_uuid`, generated when the cluster is
+created. That UUID — not the tenant id — is what the proxy injects as
+`x-queen-tenant` upstream, and it is what scopes queue identity inside the broker.
+
+## One cluster lives on exactly one cell
+
+This is the structural decision the whole enforcement model rests on. A cluster's
+traffic can only arrive at the one proxy that fronts its cell. Therefore:
+
+- **Rate limits are exact.** The request and message token buckets are plain
+  in-process state, sharded 16 ways by cluster id. There is no Redis, no gossip, no
+  approximation of a shared counter, and no coordination latency in the request path.
+- **Parked-consumer slots are exact.** A long-poll pop holds an RAII guard across the
+  upstream await; the gauge is a per-cluster atomic plus a cell-wide one.
+- **Queue and partition caps are exact.** The proxy remembers every
+  `(queue, partition)` pair it has admitted for the cluster, so the common case is a
+  set lookup and no database round trip.
+- **Usage is aggregated locally** and flushed per minute, rather than counted twice
+  and reconciled.
+
+The cost of that design is honest and worth stating: the counters are process-local,
+so a proxy restart resets them. Token buckets start full, and the in-memory
+push-block flags are empty until the pumps that own them run again — the storage flag
+within about ten seconds of the next successful reconcile, the monthly-quota flag on
+the rollup task's first tick, which fires immediately at startup for exactly this
+reason.
+
+Running two proxies in front of one cell would break the exactness — each would
+enforce its own share of the limits. One proxy per cell is not a deployment
+convention, it is the assumption the code is written against.
+
+## Routing is a DNS label
+
+The proxy resolves the cluster from the **first label of the `Host` header**:
+
+```text
+Host: acme-prod.eu1.example.com  →  slug "acme-prod"
+Host: Acme-Prod.eu1.example.com:6711  →  slug "acme-prod"
+```
+
+The port is stripped when what follows the colon is all digits, and the label is
+lowercased because `clusters.slug` is stored lowercase and DNS is case-insensitive.
+A slug that resolves to no cluster answers `421` with
+`{"code":"cluster_unknown"}` — not `404`, because the request reached the wrong
+endpoint rather than asking for a missing thing.
+
+`clusters.slug` is checked against `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` — it is
+literally used as a DNS label, so it is validated as one, and it is globally unique
+across all tenants.
+
+One hostname per cluster is the normal shape. The dashboard is the exception: it is
+served from a single hostname for every cluster, so a browser has no label to route
+by. That case uses an explicit `x-queen-act-cluster` header, which is honoured for a
+human session and refused for an API key —
+[Credentials and authorization](/selfhost/multi-tenant/auth) has the matrix.
+
+## What a request goes through
+
+The order is load-bearing, and it is the order in the gateway:
+
+<Steps>
+
+1. **Resolve the cluster** from `Host`, or from `x-queen-act-cluster` when a session
+   named one. A miss is `421`.
+
+2. **Status gate.** A suspended or deleting cluster is `403 cluster_suspended` before
+   anything else looks at the request. A produce request against a push-blocked
+   cluster is `403` here too, with the code naming the cause.
+
+3. **Classify the route**, then gate features. An unknown API-shaped path is `404`.
+   A plan without the feature is `403 feature_gated`.
+
+4. **Authenticate and authorize.** An API key resolves to a cluster and a scope set;
+   a session resolves to a per-cluster role.
+
+5. **Limits.** The request bucket always; for produce, the body is buffered so items
+   can be counted and each `(queue, partition)` admitted, then the message bucket; a
+   long-poll pop takes a parked slot held across the upstream call.
+
+6. **Forward.** Rebuild the URI on the cell's base URL, strip hop-by-hop headers,
+   replace the client's `Authorization` with the cell secret, inject
+   `x-queen-tenant` and a request id.
+
+7. **Meter the response** from the per-item statuses it actually returned, not from
+   what was requested.
+
+</Steps>
+
+## What the proxy is not
+
+- **Not a control plane.** Every mutation of tenants, clusters, users, keys, plans
+  and roles happens through SQL functions in the `queen_proxy` schema. The proxy
+  reads that data; it does not own its lifecycle. There is no HTTP endpoint that
+  creates a tenant.
+- **Not a billing console.** It has a cluster console — usage, keys, members — and
+  nothing about invoices or payment.
+- **Not a second broker.** It parses request bodies to count and cap them and it
+  never rewrites one. A refused `/configure` is an error the caller sees, not a
+  silently clamped configuration.
+- **Not an isolation layer bolted onto an open broker.** The broker does its own
+  tenant scoping natively when the flag is on. The proxy is what makes the header
+  that drives it trustworthy —
+  [Isolation](/selfhost/multi-tenant/isolation) draws the line precisely.
+
+## The pieces
+
+| File in `queen_proxy/` | Responsibility |
+| --- | --- |
+| `src/main.rs` | Listener, optional TLS, the background pumps, graceful shutdown |
+| `src/cache.rs` | Host → cluster and API-key-hash → cluster, with `LISTEN` invalidation |
+| `src/gateway.rs` | The request pipeline above |
+| `src/routes.rs` | Route classification — the enforcement spec |
+| `src/auth.rs` | Credential verification, JWT mint and verify, the authorization matrix |
+| `src/limits.rs` | Token buckets, parked-slot gauges, push-block flags |
+| `src/registry.rs` | Queue/partition admission and the per-cell inventory reconciler |
+| `src/meter.rs` | Usage aggregation, the daily roll-up, the monthly quota chain |
+| `src/spool.rs` | Disk spool for usage rows when the proxy database is unreachable |
+| `src/console.rs` | Cluster console API and its embedded SPA |
+| `src/oauth.rs` | Local login, Google and GitHub, session cookies |
+| `migrations/` | The `queen_proxy` schema and its control-plane SQL functions |
+
+## Read next
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/multi-tenant/proxy"
+    title="Deploying queen_proxy"
+    description="Its own PostgreSQL, TLS termination, the cell secret, the cache, and every configuration variable."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant/tenants"
+    title="Tenants, clusters and cells"
+    description="The data model and the SQL functions that provision it — including what is not implemented."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant/auth"
+    title="Credentials and authorization"
+    description="Cluster API keys, proxy-minted user JWTs, the OAuth flow, and the authorization matrix."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant/quotas"
+    title="Quotas and rate limits"
+    description="What is enforced, what only warns, and the 429 contract the SDKs already honour."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant/endpoints"
+    title="Endpoints a tenant can reach"
+    description="Every broker route, classified: produce, consume, admin, read, gated, operator, blocked."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant/metering"
+    title="Usage metering"
+    description="Per-minute aggregation from response statuses, the disk spool, the roll-up and the quota chain."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant/isolation"
+    title="Isolation"
+    description="What the design guarantees, and which broker surfaces must never be exposed to a tenant."
+  />
+  <LinkCard
+    href="/selfhost/multi-tenant/broker-tenancy"
+    title="Broker-native tenancy"
+    description="QUEEN_TENANCY_HEADER, the x-queen-tenant header, and why it is unauthenticated by design."
+  />
+</CardGrid>

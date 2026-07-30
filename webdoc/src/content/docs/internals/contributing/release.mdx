@@ -1,0 +1,180 @@
+---
+title: How Queen ships
+description: "The registries a release touches, which two of them CI publishes and which four a human publishes, where the version number lives, and which parts of the older release note no longer hold."
+type: reference
+tier: internals
+sidebar:
+  order: 17
+  label: Releasing
+sourceOfTruth:
+  - server/server.json
+  - server/build.rs
+  - build.sh
+  - .github/workflows/docker-build.yml
+  - .github/workflows/release-cli.yml
+  - .github/workflows/cli.yml
+  - .github/workflows/cpp-server-build.yml
+  - clients/client-cli/.goreleaser.yaml
+  - clients/client-js/package.json
+  - clients/client-py/pyproject.toml
+  - clients/client-laravel/composer.json
+  - clients/client-go/go.mod
+  - server/src/schema.rs
+  - server/sql/procedures/040_log_drop_legacy.sql
+  - developer/14-release.md
+---
+
+A release touches the broker image, five client SDKs and the CLI, across five package registries
+plus GitHub Releases. Two of those channels are published by CI on a trigger; the rest are
+published by a person running a command. Knowing which is which is the point of this page.
+
+## Where the version lives
+
+`server/server.json` is the single source. Three separate things read it:
+
+- `server/build.rs` extracts `version` and exports it as `QUEEN_VERSION`, which is what
+  `GET /health`, the boot log and `queenctl ping` report. A version bump therefore forces a
+  rebuild of the broker.
+- `build.sh` uses `name` and `version` to tag and push the image locally.
+- `.github/workflows/docker-build.yml` reads both with `jq` for the same purpose in CI.
+
+Everything else carries its own version, or none at all.
+
+| Artifact | Where its version lives |
+| --- | --- |
+| Broker image | `server/server.json` |
+| JavaScript client | `clients/client-js/package.json` |
+| Python client | `clients/client-py/pyproject.toml` |
+| PHP/Laravel client | nowhere: `composer.json` has no `version` field; Packagist reads the git tag |
+| Go client | nowhere: the git tag *is* the version |
+| `queenctl` | nowhere: the tag is the version, injected at build time with `-ldflags` |
+| C++ client | nowhere: header-only, taken at whatever tag you check out |
+| Dashboard (`app/`) | `app/package.json`, private, never published separately |
+
+## The versioning rule
+
+**The broker and the SDKs are version-aligned at 1.0.0.** One `MAJOR.MINOR.PATCH` for the
+broker image, npm, PyPI, Packagist, the Go module tag and the CLI tag, so a client version tells
+you which broker it was released against without a compatibility matrix.
+
+<Aside type="note">
+The numbers in the tree have not been aligned yet. `server/server.json` still reads
+`1.0.0-alpha-01`, the JavaScript client `0.16.1`, the Python client `0.15.0` and the dashboard
+`0.15.1`. Aligning them at `1.0.0` is part of cutting the release, not something already done.
+`README.md` also still advertises `smartnessai/queen-mq:0.16.0` and 0.16-era numbers.
+</Aside>
+
+## What CI publishes
+
+### The broker image
+
+`.github/workflows/docker-build.yml` builds the root `Dockerfile` for `linux/amd64` and
+`linux/arm64` and pushes two tags (the version from `server.json` and `latest`) to the
+registry named by the `DOCKER_REGISTRY` secret, with `DOCKER_USERNAME` and `DOCKER_PASSWORD` as
+credentials. It passes `QUEENCTL_VERSION` (the same version string) and `QUEENCTL_COMMIT` (the
+short SHA) as build arguments so that `queenctl version` inside the container matches what the
+broker reports. Layer caching is GitHub Actions cache.
+
+The trigger is a push to the **`release` branch**, not a tag. A pull request against `release`
+builds without pushing.
+
+<Aside type="caution">
+That workflow still contains a "Test Docker Hub login" step which logs in a second time, echoes
+the username and registry into the build log, and pushes a `hello-world` image to
+`<registry>/test:latest` on every release build. It is debug scaffolding that was never removed.
+It does not affect the published image, but it does write a stray repository into the registry.
+</Aside>
+
+### The CLI
+
+`.github/workflows/release-cli.yml` fires on a tag matching `clients/client-cli/v*` and runs
+GoReleaser v2, which cross-compiles `queenctl` for linux, darwin and windows on amd64 and arm64
+(windows/arm64 excluded), produces `tar.gz` archives (`zip` on windows) with checksums and
+pre-built shell completions, and attaches them to a GitHub Release. Version, commit and build
+date go in through `-ldflags`, so `queenctl version` reports the tag.
+
+The directory-prefixed tag shape is required by Go's module proxy for a nested module, and
+GoReleaser wants bare semver, so the workflow strips the prefix into `GORELEASER_CURRENT_TAG`
+and runs with `--skip=validate`. The bare semver tag does not physically exist at the release
+commit, only the prefixed one does.
+
+## What a human publishes
+
+Four channels have no workflow. Each needs a command run by a maintainer.
+
+| Channel | Package | How |
+| --- | --- | --- |
+| npm | `queen-mq` | `npm publish` from `clients/client-js` |
+| PyPI | `queen-mq` | `clients/client-py/publish.sh`, which builds the wheel and sdist and uploads with twine |
+| Go modules | `github.com/smartpricing/queen/clients/client-go` | push a `clients/client-go/vX.Y.Z` tag; the module proxy picks it up |
+| Packagist | `smartpricing/queen-mq` | push a `vX.Y.Z` tag; a webhook makes Packagist pull it |
+
+The C++ client needs nothing published: consumers take `clients/client-cpp/queen_client.hpp` at
+the tag.
+
+Two tag shapes are load-bearing and easy to get wrong. Both nested Go modules need the
+directory-prefixed form (`clients/client-go/v1.0.0` and `clients/client-cli/v1.0.0`) because
+that is how Go's module proxy resolves a module that is not at the repository root. Without the
+prefix, `go get` reports no matching versions. The tags already in the repository follow both
+shapes, alongside the plain `vX.Y.Z` broker tags.
+
+## Order
+
+The broker tag and image go first, because every SDK is released *against* a broker; then npm,
+because most downstream consumers wait on it; then PyPI; then the Go module tag; then the plain
+`vX.Y.Z` tag that Packagist and the C++ header hang off; then the CLI tag, which triggers its own
+workflow.
+
+## Rollback, and the one place additivity stops
+
+Schema application is idempotent by construction. `server/src/schema.rs` applies `schema.sql`
+and all 34 stored-procedure files at every boot, in lexical order, under a session advisory lock,
+and every statement is `CREATE OR REPLACE`, `IF NOT EXISTS` or `ADD COLUMN IF NOT EXISTS`. So
+re-applying is always safe, and rolling the broker image back to a previous 1.x is safe at the
+database level.
+
+There is one hard exception, and it is the boundary into 1.0.
+`server/sql/procedures/040_log_drop_legacy.sql` runs before the log-engine schema and
+**drops** the retired `seg_*` engine: every `queen.seg_*` function, discovered dynamically over
+`pg_proc` so no straggler survives, then the legacy tables, then the seg-era columns folded into
+`queen.partition_consumers`. It is written to be a no-op on a database that never had them and a
+full teardown on one that did.
+
+<Aside type="danger">
+Booting a 1.0 broker against a database that was serving the retired segments engine removes
+that engine's objects. There is no data migration: the log engine is a greenfield replacement.
+Rolling *back* to a segments-era broker after that boot is not possible at the database level.
+Take a `pg_dump` before the first 1.0 boot against an existing database.
+</Aside>
+
+## What the older release note gets wrong
+
+`developer/14-release.md` is the pre-1.0 checklist and is still in the tree. Read it for the
+publishing mechanics of npm, PyPI and Packagist, which are unchanged. Everything below it says
+no longer holds.
+
+| It says | Actually |
+| --- | --- |
+| the version is `0.14.1.beta.1` in `server/server.json` | it is `1.0.0-alpha-01`, shipping as `1.0.0` |
+| the release covers "the C++ broker binary, libqueen, and five client SDKs" | there is no C++ broker and no `lib/`. The image carries the Rust broker, the dashboard and `queenctl` |
+| the pre-release checklist runs `cd lib && make test-contention` | that directory does not exist. The gate is `test/run.sh`. See [Testing](/internals/contributing/testing) |
+| user-facing docs live in `docs/*.html`, and a version bump has to edit `docs/index.html` and `docs/quickstart.html` | that site is retired. Documentation is `webdoc/`, and it is built and gated by its own workflow |
+| the version lives "in nine places" including those HTML files | the live places are `server/server.json`, `clients/client-js/package.json`, `clients/client-py/pyproject.toml`, `README.md`, and the image tag shown in these docs |
+| a rolled-back procedure can be re-applied from `lib/schema/procedures/` | procedures live in `server/sql/procedures/` and are embedded in the binary, so the binary and the procedures roll together: you cannot roll one back independently |
+| `helm/`, `helm_queen/` and `proxy/helm/` are release artifacts to update | those directories are gitignored and untracked. Nothing in CI reads them and they are not shipped |
+| the schema is "always additive between versions", so a rollback is always safe | true within 1.x, false across the 0.16-to-1.0 boundary. See the warning above |
+
+One workflow is dead in the same way. `.github/workflows/cpp-server-build.yml` triggers on the
+`release` branch and runs `make deps` and `make build-only` in `server/`, targets that were
+removed with the C++ broker; it cannot succeed. And `.github/workflows/cli.yml` pins its
+end-to-end broker to `smartnessai/queen-mq:0.14.3`, so the CLI's end-to-end suite currently
+tests against a pre-log-engine broker.
+
+## Post-release
+
+- Smoke-test the published packages from a clean directory rather than a local link: install
+  `queen-mq` from npm and from PyPI, and `go get` the client module at the new version.
+- Write release notes covering schema changes, new environment variables and anything removed.
+  A removed route or environment variable is a major-version change.
+- Re-check that the published image tag in these docs matches what was pushed. It appears in
+  [Start here](/start) and [Self-hosting](/selfhost).

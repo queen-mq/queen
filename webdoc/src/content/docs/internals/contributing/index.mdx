@@ -1,0 +1,277 @@
+---
+title: Building and developing
+description: "The workspace as it is today, the build order that matters, and the compile-time embedding that makes a SQL edit invisible until you rebuild."
+type: overview
+tier: internals
+sidebar:
+  order: 14
+  label: Contributing
+sourceOfTruth:
+  - Dockerfile
+  - server/Dockerfile
+  - server/Cargo.toml
+  - server/build.rs
+  - server/src/schema.rs
+  - server/src/handlers/static_files.rs
+  - app/vite.config.js
+  - queen_proxy/Cargo.toml
+  - queen_proxy/src/webapp.rs
+  - queen_proxy/scripts/dev-cell.sh
+  - go.work
+  - .gitignore
+---
+
+Queen is one repository with two Rust binaries in it, a Vue dashboard that is compiled
+*into* both of them, five client SDKs, a Dockerised test matrix and this site. Nothing is
+generated at runtime: the SQL, the dashboard and the version string are all baked into the
+binary at compile time, which makes the build order load-bearing in ways a normal Rust
+project's is not. That is the main thing this page is for.
+
+## What is in the tree
+
+<FileTree>
+
+- server/
+  - src/
+    - handlers/
+    - main.rs
+    - schema.rs
+  - sql/
+    - schema.sql
+    - procedures/
+  - webapp/
+    - dist/
+  - server.json
+  - build.rs
+  - Dockerfile
+- queen_proxy/
+  - src/
+  - migrations/
+  - console/
+  - scripts/
+- app/
+  - src/
+  - vite.config.js
+- clients/
+  - client-js/
+  - client-py/
+  - client-go/
+  - client-laravel/
+  - client-cpp/
+  - client-cli/
+- test/
+  - run.sh
+  - compose/
+  - runners/
+- webdoc/
+- benchmark-queen/
+- examples/
+- Dockerfile
+- go.work
+
+</FileTree>
+
+| Path | What it is |
+| --- | --- |
+| `server/` | The broker. Crate `queen-seg-rust`, binary `queen-seg`. Axum 0.7 + tokio + deadpool-postgres. |
+| `server/sql/` | `schema.sql` plus 34 `procedures/*.sql` files. All queue semantics live here, and all of it is embedded in the binary. |
+| `server/webapp/dist/` | The built dashboard the binary embeds. Gitignored, so a clean clone does not have it. |
+| `server/server.json` | Name and version. The single source of the version string. |
+| `queen_proxy/` | The multi-tenant gateway, one per cell. Binary `queen-proxy`, its own PostgreSQL schema under `migrations/`. |
+| `queen_proxy/console/` | The operator console SPA. Unlike the dashboard, its `dist/` **is** committed. |
+| `app/` | Vue 3 + Vite dashboard. Builds into `server/webapp/dist`. |
+| `clients/` | Five client SDKs: JavaScript (npm `queen-mq`), Python (PyPI `queen-mq`), Go, PHP/Laravel (Packagist `smartpricing/queen-mq`) and a header-only C++ client. Also `queenctl`, the operator CLI. |
+| `test/` | The Docker Compose test matrix. One entry point, `run.sh`. |
+| `webdoc/` | This site. |
+| `benchmark-queen/` | Archived benchmark sessions, their loaders and their raw output. |
+| `Dockerfile` | The full-stack image: dashboard, broker and `queenctl`. |
+| `go.work` | Go workspace joining `client-cli` and `client-go`. |
+
+Three things in the tree are **stale**: `DEVELOPING.md`, `developer/*.md`, and the `docs/`
+HTML site. They document the retired C++ broker (`lib/`, libqueen, uWebSockets,
+`NUM_WORKERS`, `make deps`), none of which exists here any more. `CONTRIBUTING.md` still sends
+a new contributor to `DEVELOPING.md`. Treat all of them as history; this site and the source
+are current.
+
+<Aside type="caution">
+`helm/`, `helm_queen/`, `upgrade.sh` and `upgrade_queen.sh` appear in a local checkout but are
+listed in `.gitignore` and are not tracked by git. They are not shipped artifacts and nothing
+in CI reads them.
+</Aside>
+
+## The build order
+
+`server/` will not compile from a clean clone until the dashboard exists, because
+`server/src/handlers/static_files.rs` embeds it:
+
+```rust
+#[derive(RustEmbed)]
+#[folder = "webapp/dist"]
+struct Assets;
+```
+
+`server/webapp/dist` is gitignored, and `rust_embed` fails at compile time when the folder is
+missing. `app/vite.config.js` sets `outDir` to `../server/webapp/dist`, so building the
+dashboard is what puts it there. The proxy embeds the same directory through
+`queen_proxy/src/webapp.rs` (`#[folder = "../server/webapp/dist"]`) rather than keeping a
+second copy, so one dashboard build serves both binaries.
+
+<Steps>
+
+1. Build the dashboard once. From `app/`:
+
+   ```bash
+   npm ci
+   ```
+
+   ```bash
+   npm run build
+   ```
+
+2. Build the broker. From `server/`:
+
+   ```bash
+   cargo build --release
+   ```
+
+   The binary lands at `server/target/release/queen-seg`.
+
+3. Build the proxy, if you are touching it. From `queen_proxy/`:
+
+   ```bash
+   cargo build --release
+   ```
+
+</Steps>
+
+Two things the binary carries besides the dashboard. `server/build.rs` reads
+`server/server.json` and exports its `version` as `QUEEN_VERSION`, which is what `/health`,
+the boot log and `queenctl ping` report, so a version bump is a rebuild. And every file
+under `server/sql/` is `include_str!`'d by `server/src/schema.rs`.
+
+## Editing SQL means rebuilding
+
+All queue semantics live in PostgreSQL stored procedures, and every one of them is compiled
+into the binary:
+
+```rust
+const SCHEMA_SQL: &str = include_str!("../sql/schema.sql");
+
+const PROCEDURES: &[(&str, &str)] = &[
+    ("007_analytics.sql", include_str!("../sql/procedures/007_analytics.sql")),
+    // ... 22 more, in the order they must be applied
+];
+```
+
+<Aside type="danger">
+Editing a file under `server/sql/` changes nothing at runtime until you rebuild. The running
+process holds the *old* text, and it re-applies that old text over your edit on its next boot,
+so a hand-applied `psql` fix is silently reverted by the next restart. Always
+`cargo build` after a SQL edit, then restart.
+</Aside>
+
+The applier runs at every boot, in the lexical order of the list above, under a session
+advisory lock so replicas serialise rather than race. Every statement is idempotent
+(`CREATE OR REPLACE`, `IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), which is what makes
+re-applying on every boot safe. Note the ordering intent baked into the list: the `04x`
+log-engine files deliberately land after the `007`–`018` originals whose stored procedures
+they redefine, so lexical order is not cosmetic. Setting `QUEEN_APPLY_SCHEMA=0` skips the
+whole step.
+
+The dashboard has the opposite failure mode and it is worth knowing the difference: a `debug`
+`rust_embed` build reads assets from disk, so a dashboard change *appears* to take effect
+after only the `npm run build`. A `--release` build does not. `include_str!` is unconditional:
+SQL is always frozen at compile time, in both profiles.
+
+## The development loop
+
+For broker work, a container for PostgreSQL and the binary on the host is enough. Give it a
+port that is not one of the reserved ones (`queen_proxy/CONTRACTS.md` reserves 5432, 5455,
+5457, 5460, 5464, 6632, 6682, 6690 and 6702 for other local stacks).
+
+<Steps>
+
+1. Start a PostgreSQL. The broker creates the `queen` and `queen_streams` schemas itself and
+   needs no extensions.
+
+   ```bash
+   docker run -d --name qpg -p 5433:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+   ```
+
+2. Run the broker against it. It applies the schema, then binds `PORT` (default 6632).
+
+   ```bash
+   PG_HOST=localhost PG_PORT=5433 PG_PASSWORD=postgres ./target/release/queen-seg
+   ```
+
+3. Confirm. `/health` does a real database round-trip, so a 200 means broker plus PostgreSQL
+   plus schema.
+
+   ```bash
+   curl localhost:6632/health
+   ```
+
+</Steps>
+
+For anything that involves authentication, tenancy, quotas or 429s, use the proxy's
+development cell instead. `queen_proxy/scripts/dev-cell.sh up` builds both binaries in debug,
+starts two PostgreSQL containers (the proxy's own state database on 5465 and a cell database
+on 5466), starts the broker on 6710 with `QUEEN_TENANCY_HEADER=true`, starts the proxy on
+6711, and seeds a development tenant, cluster and API key. It writes logs and pid files under
+`queen_proxy/.devcell/`, which is gitignored. The proxy comes up in shadow mode by default;
+`QUEEN_PROXY_ENFORCE=true scripts/dev-cell.sh up` turns real rate-limit responses on, which
+is what the 429 checks need.
+
+```bash
+queen_proxy/scripts/dev-cell.sh up
+```
+
+The dashboard's own dev server (`npm run dev` in `app/`) listens on 4000 and proxies `/api`,
+`/auth`, `/health` and `/metrics` to `http://localhost:6711`: the proxy, not the broker,
+because auth and tenancy are what the app has to behave correctly against.
+`QUEEN_DEV_UPSTREAM=http://localhost:6632` switches it to broker-direct for debugging the
+operator escape hatch. More on the dashboard itself is in [Self-hosting](/selfhost).
+
+## Container builds
+
+There are two Dockerfiles and they are not interchangeable.
+
+| File | Contents | Used by |
+| --- | --- | --- |
+| `server/Dockerfile` | Broker only. Copies `src`, `sql` and a pre-built `webapp` into a `rust:1-bookworm` stage, runs on `debian:bookworm-slim`. | `test/run.sh` and the `tests` CI workflow, tagged `queen-seg:test` |
+| `Dockerfile` (root) | Four stages: Node builds the dashboard, Rust builds the broker, Go builds `queenctl`, and an `ubuntu:24.04` runtime carries all three plus the PostgreSQL 18 client tools. | the published image |
+
+`server/Dockerfile` expects `server/webapp/` to already exist in its build context, so it is
+the "I built the dashboard already" image. The root Dockerfile builds the dashboard itself and
+therefore works from a clean clone.
+
+<Aside type="note">
+The root image copies the dashboard onto disk at `/app/webapp/dist` as well as into the
+binary. The binary does not read it: no code implements a static-directory override, and
+there is no `QUEEN_STATIC_DIR`. It is there for humans to inspect.
+</Aside>
+
+## Go modules
+
+`clients/client-go` and `clients/client-cli` are separate Go modules, and `go.work` at the
+repository root joins them so a change to the client is immediately visible to the CLI without
+publishing. End users are unaffected: `go install` ignores `go.work` and resolves through the
+public proxy using the versions pinned in `client-cli/go.mod`. The CLI's own test suite needs
+that workspace, which is why the `cli` runner image is built with it.
+
+## Conventions
+
+- **English in committed material.** Source comments, documentation and commit messages.
+  Several benchmark session notes under `benchmark-queen/` are in Italian; they are working
+  records, not published documentation.
+- **One logical change per pull request**, with the component in the title (`server:`,
+  `queen_proxy:`, `client-py:`, `sql:`).
+- **Run the matrix for what you touched.** See [Testing](/internals/contributing/testing).
+- **Regenerate the derived documentation** when you change the router, the configuration, the
+  metrics, the proxy's route classifier or a published snippet. See
+  [The documentation site](/internals/contributing/docs).
+- **Do not add a dependency that needs cmake or a system OpenSSL.** Both crates are
+  deliberately `rustls` + `ring` only; `server/Cargo.toml` records the reasoning at each
+  dependency. This is why there is no `reqwest` and why JWKS fetching is a small in-tree HTTPS
+  client (`server/src/httpget.rs`).
+- The licence is Apache 2.0, and contributions are under it.

@@ -117,6 +117,7 @@ function main() {
   const res = emitPartial({
     name: "broker-metrics",
     title: "Prometheus families",
+    description: "Every Prometheus metric family the broker exposes, with its type and help text.",
     sources: SOURCES,
     body: lines.join("\n"),
     check,

@@ -16,6 +16,10 @@
     </div>
 
     <template v-else>
+      <!-- SCOPE STRIP. Cell variant: same container as every other view's
+           strip, amber because the scope differs — not because anything is
+           wrong. Built from useIdentity(), so it renders while loading, on a
+           failed fetch and on an empty page. -->
       <div class="scope-strip scope-strip-cell">
         <span class="chip chip-warn"><span class="dot"></span>cell · operator</span>
         <span class="scope-text">
@@ -26,7 +30,87 @@
         </span>
       </div>
 
-      <!-- =================== FILE BUFFER (disk spool) =================== -->
+      <!-- PAGE BANNERS. The Source switch decides which fetch the whole page is
+           made of, so either failure is a fact about the page. A single panel's
+           failure stays inside that panel as .panel-err. -->
+      <div v-if="dataSource === 'system' && metrics.failed.value" class="status-banner banner-bad view-banner">
+        <span><strong>Could not load server metrics</strong> · {{ describeApiError(metrics.error.value) }}<template v-if="systemData"> · showing the last samples that loaded{{ metrics.lastUpdated.value ? ` (as of ${metrics.lastUpdated.value.toLocaleTimeString()})` : '' }}</template></span>
+      </div>
+      <div v-if="dataSource === 'postgres' && pg.failed.value" class="status-banner banner-bad view-banner">
+        <span><strong>Could not load Postgres stats</strong> · {{ describeApiError(pg.error.value) }}<template v-if="postgresData"> · showing the last stats that loaded{{ pg.lastUpdated.value ? ` (as of ${pg.lastUpdated.value.toLocaleTimeString()})` : '' }}</template></span>
+      </div>
+
+      <!-- =================== FILTERS =================== -->
+      <div class="card filters">
+        <div class="card-body filter-rows">
+
+          <div class="filter-row">
+            <div v-if="dataSource === 'system'" class="filter-field">
+              <span class="label-xs">Range</span>
+              <div class="seg">
+                <button
+                  v-for="range in timeRanges"
+                  :key="range.value"
+                  :class="{ on: timeRange === range.value && !customMode }"
+                  @click="selectQuickRange(range.value)"
+                >{{ range.label }}</button>
+                <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
+              </div>
+            </div>
+
+            <div class="filter-field">
+              <span class="label-xs">Source</span>
+              <div class="seg">
+                <button :class="{ on: dataSource === 'system' }" @click="selectSource('system')">Server resources</button>
+                <button :class="{ on: dataSource === 'postgres' }" @click="selectSource('postgres')">Postgres stats</button>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="dataSource === 'system'" class="filter-row">
+            <div class="filter-field">
+              <span class="label-xs">View</span>
+              <div class="seg">
+                <button :class="{ on: viewMode === 'individual' }" @click="viewMode = 'individual'">Per server</button>
+                <button :class="{ on: viewMode === 'aggregate' }" @click="viewMode = 'aggregate'">Aggregate</button>
+              </div>
+            </div>
+            <div class="filter-field">
+              <span class="label-xs">Metric</span>
+              <div class="seg">
+                <button
+                  v-for="agg in aggregationTypes"
+                  :key="agg.value"
+                  :class="{ on: aggregationType === agg.value }"
+                  @click="aggregationType = agg.value"
+                >{{ agg.label }}</button>
+              </div>
+            </div>
+            <span class="filter-hint">
+              {{ viewMode === 'aggregate'
+                ? `summed across ${replicaCountLabel}; a bucket where a replica sent no sample sums only those that did`
+                : 'one line per broker replica; gaps are buckets that replica never reported' }}
+            </span>
+          </div>
+
+          <div v-if="dataSource === 'system' && customMode" class="filter-row filter-row-sep">
+            <div class="filter-field">
+              <span class="label-xs">From</span>
+              <input v-model="customFrom" type="datetime-local" class="input" />
+            </div>
+            <div class="filter-field">
+              <span class="label-xs">To</span>
+              <input v-model="customTo" type="datetime-local" class="input" />
+            </div>
+            <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
+            <span v-if="customError" class="filter-invalid">{{ customError }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- =================== FILE BUFFER (disk spool) ===================
+           The page's summary block: the one snapshot that holds whichever
+           source is selected. -->
       <div class="card" :class="{ 'card-alarm': spoolAlarm }" style="margin-bottom:16px;">
         <div class="card-header">
           <h3>File buffer</h3>
@@ -38,7 +122,7 @@
             Spool state unavailable — {{ describeApiError(buffers.error.value) }}.
             Pending and failed counts below are unknown, not zero.
           </div>
-          <div class="sys-grid-3">
+          <div class="stat-grid stat-grid-3">
             <div class="stat">
               <div class="stat-label">Database</div>
               <div class="stat-value">
@@ -70,98 +154,23 @@
         </div>
       </div>
 
-      <!-- =================== CONTROLS =================== -->
-      <div class="card sys-controls" style="margin-bottom:16px;">
-        <div class="sys-row">
-          <div class="sys-field">
-            <span class="label-xs">Source</span>
-            <div class="seg">
-              <button :class="{ on: dataSource === 'system' }" @click="selectSource('system')">Server resources</button>
-              <button :class="{ on: dataSource === 'postgres' }" @click="selectSource('postgres')">Postgres stats</button>
-            </div>
-          </div>
-
-          <div v-if="dataSource === 'system'" class="sys-field sys-field-right">
-            <span class="label-xs">Range</span>
-            <div class="seg">
-              <button
-                v-for="range in timeRanges"
-                :key="range.value"
-                :class="{ on: timeRange === range.value && !customMode }"
-                @click="selectQuickRange(range.value)"
-              >{{ range.label }}</button>
-              <button :class="{ on: customMode }" @click="toggleCustomMode">Custom</button>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="dataSource === 'system'" class="sys-row sys-row-sep">
-          <div class="sys-field">
-            <span class="label-xs">View</span>
-            <div class="seg">
-              <button :class="{ on: viewMode === 'individual' }" @click="viewMode = 'individual'">Per server</button>
-              <button :class="{ on: viewMode === 'aggregate' }" @click="viewMode = 'aggregate'">Aggregate</button>
-            </div>
-          </div>
-          <div class="sys-field">
-            <span class="label-xs">Metric</span>
-            <div class="seg">
-              <button
-                v-for="agg in aggregationTypes"
-                :key="agg.value"
-                :class="{ on: aggregationType === agg.value }"
-                @click="aggregationType = agg.value"
-              >{{ agg.label }}</button>
-            </div>
-          </div>
-          <span class="sys-hint">
-            {{ viewMode === 'aggregate'
-              ? `summed across ${replicaCountLabel}; a bucket where a replica sent no sample sums only those that did`
-              : 'one line per broker replica; gaps are buckets that replica never reported' }}
-          </span>
-        </div>
-
-        <div v-if="dataSource === 'system' && customMode" class="sys-row sys-row-sep">
-          <div class="sys-field">
-            <span class="label-xs">From</span>
-            <input v-model="customFrom" type="datetime-local" class="input font-mono sys-dt" />
-          </div>
-          <div class="sys-field">
-            <span class="label-xs">To</span>
-            <input v-model="customTo" type="datetime-local" class="input font-mono sys-dt" />
-          </div>
-          <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
-          <span v-if="customError" class="sys-invalid">{{ customError }}</span>
-        </div>
-      </div>
-
       <!-- =================== SERVER RESOURCES =================== -->
       <template v-if="dataSource === 'system'">
         <div v-if="metricsFirstLoad" class="sys-grid-2">
-          <div v-for="i in 4" :key="i" class="card" style="padding:20px;">
-            <div class="skeleton" style="height:192px;" />
+          <div v-for="i in 4" :key="i" class="card">
+            <div class="card-body"><div class="skeleton" style="height:192px;" /></div>
           </div>
         </div>
 
         <template v-else>
-          <div v-if="metrics.failed.value" class="card" style="margin-bottom:16px;">
-            <div class="card-body">
-              <div class="panel-err">
-                Server metrics unavailable — {{ describeApiError(metrics.error.value) }}.
-                <span v-if="systemData">
-                  Everything below is from {{ metrics.lastUpdated.value?.toLocaleTimeString() }} and may no longer be true.
-                </span>
-              </div>
-            </div>
-          </div>
-
           <template v-if="systemData">
             <div class="sys-grid-2" style="margin-bottom:16px;">
               <div class="card">
                 <div class="card-header">
                   <h3>CPU usage</h3>
+                  <span class="card-sub">{{ replicaCountLabel }}</span>
                   <span class="chip chip-mute">cell-level</span>
-                  <span class="muted">{{ replicaCountLabel }}</span>
+                  <span class="muted">{{ stamp(metrics) }}</span>
                 </div>
                 <div class="card-body">
                   <BaseChart
@@ -176,6 +185,7 @@
                 <div class="card-header">
                   <h3>Memory usage</h3>
                   <span class="chip chip-mute">cell-level</span>
+                  <span class="muted">{{ stamp(metrics) }}</span>
                 </div>
                 <div class="card-body">
                   <BaseChart
@@ -192,6 +202,7 @@
                 <div class="card-header">
                   <h3>Database pool</h3>
                   <span class="chip chip-mute">cell-level</span>
+                  <span class="muted">{{ stamp(metrics) }}</span>
                 </div>
                 <div class="card-body">
                   <BaseChart
@@ -248,7 +259,7 @@
                 <span class="muted">{{ stamp(metrics) }}</span>
               </div>
               <div class="card-body">
-                <div class="sys-grid-6">
+                <div class="stat-grid stat-grid-6">
                   <div class="stat">
                     <div class="stat-label">Replicas</div>
                     <div class="stat-value font-mono">{{ metric(toNum(systemData.replicaCount)) }}</div>
@@ -283,8 +294,9 @@
             <div v-if="replicas.length" class="card">
               <div class="card-header">
                 <h3>Server details</h3>
+                <span class="card-sub">last sample per replica</span>
                 <span class="chip chip-mute">cell-level</span>
-                <span class="muted">last sample per replica</span>
+                <span class="muted">{{ stamp(metrics) }}</span>
               </div>
               <div class="card-body">
                 <div class="sys-scroll">
@@ -322,32 +334,22 @@
       <!-- =================== POSTGRES =================== -->
       <template v-else>
         <div v-if="pgFirstLoad" class="sys-grid-2">
-          <div v-for="i in 4" :key="i" class="card" style="padding:20px;">
-            <div class="skeleton" style="height:192px;" />
+          <div v-for="i in 4" :key="i" class="card">
+            <div class="card-body"><div class="skeleton" style="height:192px;" /></div>
           </div>
         </div>
 
         <template v-else>
-          <div v-if="pg.failed.value" class="card" style="margin-bottom:16px;">
-            <div class="card-body">
-              <div class="panel-err">
-                Postgres stats unavailable — {{ describeApiError(pg.error.value) }}.
-                <span v-if="postgresData">
-                  Everything below is from {{ pg.lastUpdated.value?.toLocaleTimeString() }}.
-                </span>
-              </div>
-            </div>
-          </div>
-
           <template v-if="postgresData">
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Cache performance</h3>
+                <span class="card-sub">{{ postgresData.database }}</span>
                 <span class="chip chip-mute">cell-level</span>
-                <span class="muted">{{ postgresData.database }} · {{ stamp(pg) }}</span>
+                <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">
-                <div class="sys-grid-4">
+                <div class="stat-grid stat-grid-4">
                   <div class="stat">
                     <div class="stat-label">Database hit ratio</div>
                     <div class="stat-value font-mono" :class="cacheClass(postgresData.databaseCache?.cacheHitRatio)">
@@ -380,7 +382,8 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Table cache stats</h3>
-                <span class="muted">hit ratios per table in the queen schema</span>
+                <span class="card-sub">hit ratios per table in the queen schema</span>
+                <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">
                 <div class="sys-scroll">
@@ -413,7 +416,8 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Index cache stats</h3>
-                <span class="muted">top 20 by disk reads</span>
+                <span class="card-sub">top 20 by disk reads</span>
+                <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">
                 <div class="sys-scroll">
@@ -448,7 +452,8 @@
             <div v-if="postgresData.bufferUsage?.length" class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Buffer cache contents</h3>
-                <span class="muted">what is cached in shared_buffers</span>
+                <span class="card-sub">what is cached in shared_buffers</span>
+                <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">
                 <div class="sys-scroll">
@@ -482,7 +487,8 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Table sizes</h3>
-                <span class="muted">storage usage per table</span>
+                <span class="card-sub">storage usage per table</span>
+                <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">
                 <div class="sys-scroll">
@@ -512,10 +518,11 @@
               <div class="card">
                 <div class="card-header">
                   <h3>Dead tuples</h3>
+                  <span class="card-sub">tables needing vacuum</span>
                   <span v-if="postgresData.deadTuples?.length" class="chip chip-warn">
                     {{ postgresData.deadTuples.length }} tables
                   </span>
-                  <span v-else class="muted">tables needing vacuum</span>
+                  <span class="muted">{{ stamp(pg) }}</span>
                 </div>
                 <div class="card-body">
                   <div v-if="postgresData.deadTuples?.length" class="sys-scroll">
@@ -542,7 +549,7 @@
                       </tbody>
                     </table>
                   </div>
-                  <div v-else class="panel-msg" style="color:var(--ok-500);">
+                  <div v-else class="panel-msg panel-msg-ok">
                     No dead tuples — tables are clean
                   </div>
                 </div>
@@ -551,7 +558,8 @@
               <div class="card">
                 <div class="card-header">
                   <h3>HOT update efficiency</h3>
-                  <span class="muted">higher is better</span>
+                  <span class="card-sub">higher is better</span>
+                  <span class="muted">{{ stamp(pg) }}</span>
                 </div>
                 <div class="card-body">
                   <div v-if="postgresData.hotUpdates?.length" class="sys-scroll">
@@ -584,10 +592,11 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Active queries</h3>
+                <span class="card-sub">queries running longer than 1s</span>
                 <span v-if="postgresData.activeQueries?.length" class="chip chip-bad">
                   {{ postgresData.activeQueries.length }} slow
                 </span>
-                <span v-else class="muted">queries running longer than 1s</span>
+                <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">
                 <p class="sys-note">
@@ -608,7 +617,7 @@
                     </div>
                   </div>
                 </div>
-                <div v-else class="panel-msg" style="color:var(--ok-500);">No slow queries running</div>
+                <div v-else class="panel-msg panel-msg-ok">No slow queries running</div>
               </div>
             </div>
 
@@ -616,6 +625,7 @@
               <div class="card-header">
                 <h3>Autovacuum status</h3>
                 <span class="chip chip-warn">{{ postgresData.autovacuumStatus.length }} pending</span>
+                <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">
                 <div class="sys-scroll">
@@ -656,6 +666,7 @@ import { formatNumber, formatRelativeTime, toNum, useApi } from '@/composables/u
 import { chartColor } from '@/composables/useChartTheme'
 import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
+import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
 
 // CELL-LEVEL PAGE — every source is an operator route (queen_proxy
@@ -768,15 +779,6 @@ const systemData = computed(() => metrics.data.value)
 const postgresData = computed(() => pg.data.value)
 const metricsFirstLoad = computed(() => metrics.loading.value && !metrics.data.value)
 const pgFirstLoad = computed(() => pg.loading.value && !pg.data.value)
-
-const stamp = (panel) => {
-  if (panel.failed.value) {
-    return panel.lastUpdated.value
-      ? `stale · last good ${panel.lastUpdated.value.toLocaleTimeString()}`
-      : 'unavailable'
-  }
-  return panel.lastUpdated.value ? `as of ${panel.lastUpdated.value.toLocaleTimeString()}` : ''
-}
 
 /** A number we hold, or an em dash — never a 0 standing in for "unknown". */
 const metric = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
@@ -1042,46 +1044,23 @@ const poolOptions = {
 </script>
 
 <style scoped>
-.scope-strip {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  margin-bottom: 12px;
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-  background: var(--ink-2);
-  font-size: 11.5px;
-  color: var(--text-mid);
-}
-/* Amber is this page's CELL-scope signal, not a warning: the strip and the
-   inset rule say "these numbers are the whole cell's". Kept on --warn-400. */
-.scope-strip-cell { border-color: var(--warn-bd); box-shadow: inset 3px 0 0 var(--warn-400); }
-.scope-text strong { color: var(--text-hi); font-weight: 600; }
-.scope-sep { margin: 0 6px; color: var(--text-faint); }
+/* Everything shared with the other nine views now lives in style.css:
+   .scope-strip*, the .filter-* card family, .card-sub, .stat-grid*, .view-banner,
+   .panel-err and .panel-msg*. What is left below is System's own layout. */
 
 /* One step louder than the scope strip on purpose — the spool is actually in
    trouble here, so it keeps its own alpha rather than collapsing to --warn-bd. */
 .card-alarm { border-color: color-mix(in srgb, var(--warn-400) 35%, transparent); }
 
-.sys-controls { padding: 12px 14px; }
-.sys-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
-.sys-row-sep { padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--bd); }
-.sys-field { display: flex; align-items: center; gap: 8px; }
-.sys-field-right { margin-left: auto; }
-.sys-dt { width: auto; font-size: 13px; }
-.sys-hint { font-size: 11px; color: var(--text-low); }
-.sys-invalid { font-size: 11.5px; color: var(--ember-400); }
 .sys-note { margin-top: 10px; font-size: 11.5px; color: var(--text-low); }
 .sys-scroll { overflow-x: auto; }
 .sys-age { font-size: 12px; color: var(--text-low); }
 .muted-cell { color: var(--text-mid); }
 .right { text-align: right; }
 
+/* The panel pair. Not a stat grid: it lays out CARDS, at the 16px block
+   rhythm, so it keeps its own rule (as Analytics' .an-grid-2 does). */
 .sys-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.sys-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.sys-grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-.sys-grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
 
 .sys-workers { display: flex; flex-direction: column; gap: 8px; }
 .sys-worker {
@@ -1101,24 +1080,7 @@ const poolOptions = {
 .sys-query-sql { font-size: 12px; color: var(--text-hi); display: block; word-break: break-all; }
 .sys-query-wait { margin-top: 8px; font-size: 12px; color: var(--text-low); }
 
-.panel-msg { padding: 32px 0; text-align: center; font-size: 13px; color: var(--text-mid); }
-.panel-err {
-  padding: 12px 14px;
-  margin-bottom: 12px;
-  border: 1px solid var(--ember-bd);
-  border-radius: var(--r-card);
-  background: var(--ember-glow);
-  color: var(--ember-400);
-  font-size: 12.5px;
-}
-
 @media (max-width: 1100px) {
-  .sys-grid-6 { grid-template-columns: repeat(3, 1fr); }
-  .sys-grid-4 { grid-template-columns: repeat(2, 1fr); }
-  .sys-grid-3 { grid-template-columns: 1fr; }
   .sys-grid-2 { grid-template-columns: 1fr; }
-}
-@media (max-width: 640px) {
-  .sys-grid-6 { grid-template-columns: repeat(2, 1fr); }
 }
 </style>

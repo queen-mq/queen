@@ -1,0 +1,201 @@
+---
+title: Backup and restore
+description: "Dump both schemas with pg_dump, restore with pg_restore, and know what a restore does to consumer cursors and in-flight leases."
+type: how-to
+tier: operate
+sidebar:
+  order: 12
+sourceOfTruth:
+  - server/sql/schema.sql
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/019_streams_schema.sql
+  - server/src/schema.rs
+  - server/src/migrate.rs
+  - server/src/file_buffer.rs
+  - server/Dockerfile
+---
+
+Queen has no backup feature. The broker's built-in migration surface was removed,
+and the `migrate` subcommand that remains only reports that offline migration is
+unsupported and exits non-zero. Backup is therefore a PostgreSQL operation, done
+with the standard tools, and there is nothing broker-specific to install.
+
+What makes it simple is that the broker is stateless. Everything it persists lives
+in **two schemas** (`queen` and `queen_streams`) plus the node-local push spool,
+which no database backup can capture. No table lives in `public`, and no extension
+is required: the schema needs `CREATE SCHEMA` and nothing else.
+
+<Aside type="caution">
+The broker image is a slim Debian base holding only the binary. It does **not**
+ship `pg_dump`, `psql` or `pg_restore`. Run these commands from a client image, a
+PostgreSQL image, or the database host, and match the client's major version to
+the server's or newer.
+</Aside>
+
+## Dumping both schemas
+
+One command, two `-n` flags, custom format so the restore can be parallel and
+selective:
+
+```bash
+pg_dump -Fc -n queen -n queen_streams -f queen-2026-07-30.dump "postgresql://user@host:5432/queen"
+```
+
+Omitting `queen_streams` is the most common mistake. It holds every registered
+streaming query and all per-key operator state; without it a restored deployment
+loses its stream definitions and every aggregate they had accumulated, and the
+loss is silent: the broker boots happily and recreates an empty schema.
+
+To check what you captured before you trust it:
+
+```bash
+pg_restore -l queen-2026-07-30.dump
+```
+
+A dump can be taken against a running broker. `pg_dump` works from a single
+transaction snapshot, so the result is internally consistent: a consistent
+picture of a moving system, which is what the next section is about.
+
+Schema-only and data-only dumps are both viable, but note that the broker
+re-applies its full DDL at every boot under an advisory lock, and every statement
+is idempotent. A schema-only dump is therefore redundant for recovery: the binary
+carries the schema. Dump the data and let the broker own the shape.
+
+## Restoring
+
+Restore into an empty database, with the broker stopped.
+
+```bash
+createdb -h host -U postgres queen_restored
+```
+
+```bash
+pg_restore --no-owner --no-privileges -d "postgresql://postgres@host:5432/queen_restored" queen-2026-07-30.dump
+```
+
+`--no-owner` and `--no-privileges` are deliberate: the boot-time schema applier
+re-issues the `GRANT` statements the broker needs, so you do not have to reproduce
+the source cluster's roles. Start a broker against the restored database with
+`QUEEN_APPLY_SCHEMA` at its default of true and it will bring the restored schema
+up to whatever the binary expects, which also means a restore into a newer broker
+version needs no manual migration step.
+
+<Aside type="danger">
+Do not restore into a database a broker is still connected to. A restore while
+instances are pushing and acking rewrites cursor rows underneath them; the result
+is not a rolled-back deployment, it is an incoherent one. Stop every instance
+first, including ones you forgot were behind the load balancer.
+</Aside>
+
+## What a restore does to consumers
+
+A restore rolls the *entire* consumption state back to the dump instant, and the
+consequences are mechanical rather than mysterious.
+
+**Cursors go backwards, so messages are redelivered.** Consumption state is one
+`committed` offset per (partition, consumer group). Restoring sets it back to its
+dump-time value, so every message acked between the dump and the restore is
+delivered again. The volume of duplicate delivery is proportional to the age of
+the dump: an hour-old dump means an hour of reprocessing. Consumers must be
+idempotent for this to be a recovery rather than an incident.
+
+**Leases come back expired, and nothing is handed back.** A lease is a set of
+columns on the consumer row (`worker_id`, `batch_end`, `lease_expires_at`), not a
+session. A dump captures whichever leases were open at that instant. After the
+restore, those timestamps are in the past, the lease predicate treats the row as
+free, and the next pop re-leases the span from `committed`. Nothing is stuck.
+
+The one edge to know: if you restore *quickly*, a captured `lease_expires_at` may
+still be in the future, and that (partition, group) is invisible to pops until it
+passes. Wait it out; the wait is bounded by the queue's lease time.
+
+**Deduplication is restored, partially.** `queen.log_txns`, the hash sidecar the
+push path probes, is in the dump, so producers replaying messages that were
+already stored before the dump are still deduplicated inside the window. Hashes
+written *after* the dump are gone, so a producer retrying one of those pushes will
+be accepted as new. Combined with the cursor rollback, plan for both duplicate
+delivery and, for post-dump traffic, duplicate storage.
+
+**Retry budgets and dead letters roll back too.** `batch_retry_count` returns to
+its dump value, so a batch that had exhausted its retries gets its budget back.
+`queen.log_dlq` rows written after the dump are gone.
+
+**The maintenance flag is in the dump.** Both flags live in
+`queen.system_state`, and the broker reads them at boot. A dump taken during a
+maintenance window restores with push maintenance **on**, which means every push
+goes straight to the spool and nothing reaches PostgreSQL. Check
+`GET /api/v1/system/maintenance` immediately after any restore.
+
+**The spool is not in the dump.** Buffered pushes are files under
+`FILE_BUFFER_DIR` on whichever node accepted them. A database restore neither
+captures nor replays them. If you are rebuilding a deployment, drain the spools
+first. See [Surviving a PostgreSQL outage](/selfhost/durability).
+
+**Metrics and stats recover on their own.** `queen.stats` is recomputed by the
+reconciler within one interval, and the metrics tables refill from the collectors.
+Restoring them is harmless but not required, so a data-only restore that skips
+`queen.system_metrics`, `queen.worker_metrics` and `queen.queue_lag_metrics` is a
+legitimate way to make a large dump smaller.
+
+## Cloning a deployment
+
+The same two-schema dump is how you build a staging copy from production.
+
+<Steps>
+
+1. Dump both schemas from the source, as above.
+
+2. Restore into a fresh database on the target cluster with `--no-owner
+   --no-privileges`.
+
+3. Start one broker against it and read the `config: postgres` boot line to
+   confirm it is talking to the clone and not to production.
+
+4. Review the clone's mesh configuration before it serves anything.
+   **Do not leave `QUEEN_MESH_PEERS` pointing at the source deployment's
+   instances**: mesh frames wake parked pops and include a maintenance-mode set, so
+   a clone that joins the original mesh can affect production. The mesh port must be
+   firewalled in both deployments regardless.
+
+5. Decide what the clone's consumers should see. The restored cursors are
+   production's cursors. To replay history in the clone, seek the consumer groups
+   back with `POST /api/v1/consumer-groups/:group/queues/:queue/seek` rather than
+   editing rows by hand.
+
+</Steps>
+
+A clone is a separate database, so the advisory locks that gate retention and the
+stats reconciler are separate too; the clone sweeps its own data and cannot
+interfere with the source's maintenance.
+
+## Physical backups
+
+Nothing about the broker argues against a physical backup: a base backup plus WAL
+archiving, or your provider's snapshot and point-in-time recovery. It covers both
+schemas by construction, which removes the "forgot `queen_streams`" failure mode
+entirely, and it is the right choice once a logical dump stops finishing in a
+sensible window.
+
+The restore semantics above are unchanged: recovering to a point in time rolls
+consumer cursors back to that point, with exactly the same redelivery
+consequences. The spool remains outside the picture either way.
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/durability"
+    title="Surviving a PostgreSQL outage"
+    description="The node-local spool that no database backup captures."
+  />
+  <LinkCard
+    href="/selfhost/probes-restarts"
+    title="Probes and restarts"
+    description="Draining instances before you touch the database."
+  />
+  <LinkCard
+    href="/selfhost/retention"
+    title="Operating retention"
+    description="What a dump will and will not still contain, and what grows forever."
+  />
+</CardGrid>

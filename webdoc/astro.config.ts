@@ -23,10 +23,11 @@ const nimbusConfig = defineNimbusConfig({
     { tag: "link", attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" } },
   ],
   sidebar: {
-    // Six top-level sections, each one a reading tier. `section` scoping
-    // keeps every rail short; cross-tier navigation happens through the
-    // header tabs.
-    scope: "section",
+    // The whole tree in every rail, with groups collapsed. Section-scoped rails
+    // read shorter, but they hide the rest of the site behind the header tabs —
+    // a reader who does not know a section exists never opens it. Six collapsed
+    // groups fit on screen, and the group holding the current page opens itself.
+    scope: "full",
     defaultCollapsed: true,
     overviewLabel: "Overview",
     indexDisplay: "overview-leaf",
@@ -66,7 +67,10 @@ export default defineConfig({
       // block usually means a page has drifted from what it documents.
       rules: {
         "nimbus/frontmatter-shape": "error",
-        "nimbus/internal-link": "error",
+        // The generated OpenAPI documents are static assets under public/, not
+        // pages, so the route map the rule checks against does not contain
+        // them. Everything else must resolve to a real page.
+        "nimbus/internal-link": ["error", { ignore: ["/openapi/**"] }],
         "nimbus/description-required": "error",
         "nimbus/single-h1": "error",
         "nimbus/heading-hierarchy": "error",

@@ -1,0 +1,377 @@
+---
+title: The documentation site
+description: "How this site is built: the content tree, the strict frontmatter contract, the seven generators that derive fact tables, OpenAPI documents and benchmark figures from the source, and the drift guards that fail the build when a mirrored classifier changes."
+type: how-to
+tier: internals
+sidebar:
+  order: 16
+  label: Documentation
+sourceOfTruth:
+  - webdoc/package.json
+  - webdoc/astro.config.ts
+  - webdoc/src/content.config.ts
+  - webdoc/src/components.ts
+  - webdoc/scripts/gen.mjs
+  - webdoc/scripts/gen-routes.mjs
+  - webdoc/scripts/gen-config.mjs
+  - webdoc/scripts/gen-metrics.mjs
+  - webdoc/scripts/gen-proxy-routes.mjs
+  - webdoc/scripts/gen-openapi.mjs
+  - webdoc/scripts/gen-charts.mjs
+  - webdoc/scripts/charts.py
+  - webdoc/scripts/gen-snippets.mjs
+  - webdoc/scripts/lib/source.mjs
+  - .github/workflows/docs.yml
+---
+
+This site exists because the previous one drifted far enough from the implementation to
+document two HTTP routes that never existed. The design response is structural, not editorial:
+every table that can be derived from the source *is* derived from the source, every published
+code sample is extracted from a file the test harness executes, and CI fails when either is
+behind what it was derived from. Prose is hand-written; facts are generated.
+
+## The stack
+
+Astro 7 with `@cloudflare/nimbus-docs`, which supplies the content schemas, the sidebar and
+table of contents, the MDX-to-markdown alternate for each page, and the `nimbus-docs` linter.
+Tailwind 4 comes in through its Vite plugin. Output is `static`, so `pnpm build` emits `dist/`
+for Cloudflare Pages. Search is Pagefind, indexed at build time. Open Graph cards are rendered
+by `astro-og-canvas`; icons are Phosphor through `astro-icon`.
+
+## The content tree
+
+<FileTree>
+
+- webdoc/
+  - astro.config.ts
+  - package.json
+  - scripts/
+    - gen.mjs
+    - gen-routes.mjs
+    - gen-config.mjs
+    - gen-metrics.mjs
+    - gen-proxy-routes.mjs
+    - gen-openapi.mjs
+    - gen-charts.mjs
+    - charts.py
+    - gen-snippets.mjs
+    - lib/
+      - source.mjs
+  - src/
+    - components.ts
+    - content.config.ts
+    - content/
+      - docs/
+        - start/
+        - use/
+        - reference/
+        - selfhost/
+        - internals/
+        - benchmarks/
+      - partials/
+        - generated/
+        - snippets/
+
+</FileTree>
+
+Pages are `.mdx` under `src/content/docs/<section>/`. The six directories are the six sections
+in the header, each declared in `astro.config.ts` with `autogenerate`, so a new file appears in
+its sidebar without any registration. The sidebar is scoped per section, which is why every
+whole tree is present in every rail with groups collapsed, so a reader can see that a section
+exists without having to guess: the group holding the current page opens itself.
+
+`src/content/partials/` holds fragments that pages pull in with `<Render file="…" />`. Both of
+its subdirectories are machine-written: `generated/` by five of the generators and `snippets/`
+by the sixth. Editing a file in either is pointless — the next `pnpm gen` overwrites it, and
+`gen-snippets` deletes and rewrites its whole directory so that removing a marker in the source
+removes the partial.
+
+## The frontmatter contract
+
+`src/content.config.ts` registers the docs collection with five fields added to the Nimbus base
+schema:
+
+```yaml
+---
+title: Short title
+description: "One sentence. Quote it if it contains a colon."
+type: concept          # overview|quickstart|tutorial|how-to|concept|reference|example|troubleshooting|changelog
+tier: use              # use|operate|internals
+status: stable         # stable|beta|preview|internal — defaults to stable
+sidebar:
+  order: 3
+  label: Shorter label
+sourceOfTruth:
+  - server/src/handlers/data.rs
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+generated: false
+---
+```
+
+`title` is required and becomes the H1, so the body must not repeat it. `type` names the recipe
+the page follows — one page, one reader question. `tier` marks which reading tier it belongs to.
+`status` renders a badge for anything other than `stable`, so a reader never mistakes a preview
+for a contract.
+
+The last three are the traceability contract, and they are the part that matters most.
+`sourceOfTruth` lists the repo-relative paths of the code that governs the page: if that code
+changes, the page is in debt, and the list is what tells you which pages to re-read.
+`verifiedBy` lists tests or examples that execute what the page shows — a page claiming
+"verified" has to name what verified it. `generated` marks machine-written content.
+
+Undeclared keys do not silently pass: `nimbus/frontmatter-shape` is configured as an error, so
+a stray field fails `pnpm lint:docs`.
+
+## Body rules
+
+Enforced by the linter, with every structural rule set to `error` in `astro.config.ts`:
+
+| Rule | What it catches |
+| --- | --- |
+| `nimbus/frontmatter-shape` | an undeclared or malformed frontmatter key |
+| `nimbus/internal-link` | a link to a page path that does not exist |
+| `nimbus/description-required` | a page with no `description` |
+| `nimbus/single-h1` | an `#` heading in the body, competing with the title |
+| `nimbus/heading-hierarchy` | a skipped heading level |
+| `nimbus/code-block-lang` | a fenced block with no language tag |
+| `nimbus/code-block-prompt-prefix` | a shell block written with a `$` prompt |
+| `nimbus/no-self-host-url` | an absolute link back to this site's own domain |
+| `nimbus/image-ref` | an image reference that does not resolve |
+
+Three more are warnings rather than errors: `nimbus/duplicate-heading-text`,
+`nimbus/heading-punctuation` and `nimbus/bare-url`.
+
+Beyond the linter, two MDX facts bite regularly. Components must be PascalCase **and**
+registered in `src/components.ts` — the registered set is `Accordion`, `AccordionContent`,
+`AccordionGroup`, `AccordionTrigger`, `Aside`, `Badge`, `Card`, `CardGrid`, `Code`, `CodeGroup`,
+`FileTree`, `Frame`, `LinkButton`, `LinkCard`, `PackageManagers`, `Render`, `Step`, `Steps`,
+`TabItem` and `Tabs`, and nothing else is available without importing it. And remark or rehype
+plugins attached through the MDX integration are dropped, which is why there is no Mermaid on
+this site: diagrams are prose, tables or nothing.
+
+## The seven generators
+
+`pnpm gen` runs `scripts/gen.mjs`, which shells out to each generator in turn.
+`pnpm gen:check` runs the same seven with `--check`, which compares instead of writing and exits
+non-zero on any difference. Every generator writes through `emitPartial`, which stamps a banner
+naming the sources it read and the command to regenerate.
+
+| Generator | Partial | Derived from |
+| --- | --- | --- |
+| `gen-routes.mjs` | `generated/broker-routes` | the `Router::new()` chain in `server/src/main.rs`, the access table in `server/src/auth.rs`, and whether each handler takes the `Tenant` extension |
+| `gen-config.mjs` | `generated/broker-config` | every `env_bool` / `env_int` / `env_f64` / `env_str` call site in `server/src/config.rs`, plus the raw `std::env::var` reads in `server/src/fusion.rs` |
+| `gen-metrics.mjs` | `generated/broker-metrics` | the Prometheus exposition assembled in `server/src/metrics.rs` and `server/src/handlers/status.rs` |
+| `gen-proxy-routes.mjs` | `generated/proxy-route-classes` | the request classifier in `queen_proxy/src/routes.rs`, applied to the broker's real route list |
+| `gen-openapi.mjs` | `generated/openapi-coverage`, plus `public/openapi/queen-{broker,proxy}.json` | both routers, each handler's `Query<T>` extractor and body struct, the `StatusCode` variants each handler can return, and the access table |
+| `gen-charts.mjs` | `public/charts/*.svg` | the archived CSV and stdout artifacts under `benchmark-queen/`, plotted by `charts.py` |
+| `gen-snippets.mjs` | `snippets/*` and `snippets/index` | marked regions of the client test suites |
+
+### Routes
+
+The router chain is sliced out of `main.rs` between `let app = Router::new()` and
+`.with_state(state);`, and each `.route("…", …)` is paired with the HTTP verbs in the method
+router that follows it. Tenant scoping is not transcribed either: the generator walks every
+`.rs` file under `server/src`, collects the signature of each `pub async fn`, and marks a route
+tenant-scoped when its handler takes `tenant::Tenant` or `Extension<Tenant>`.
+
+Two sanity gates protect against a silently broken parser. Fewer than 40 parsed routes is a
+hard error, and so is a handler that the router references but that does not exist under
+`server/src` — which is precisely the class of bug that produced the two imaginary routes on the
+old site.
+
+### Configuration
+
+Defaults are read out of the call site, including nested ones. A nested call is how the source
+expresses a legacy alias:
+
+```rust
+env_int("QUEEN_MESH_PORT", env_int("QUEEN_UDP_NOTIFY_PORT", 6633))
+```
+
+The generator reads that as variable `QUEEN_MESH_PORT`, also read as
+`QUEEN_UDP_NOTIFY_PORT`, with a real default of `6633`. Trailing Rust noise (`.max(1)`,
+`as usize`, `.to_string()`) is stripped. Fewer than 60 parsed variables is a hard error.
+
+Three curated lists shape presentation only, never content. `GROUPS` decides which section a
+variable appears under; an unclassified variable still appears, in `Other`, so a new knob cannot
+ship undocumented. `EXPERIMENTAL` and `INERT` move a variable into its own labelled table —
+`EXPERIMENTAL` for knobs the source itself calls experiment-only, `INERT` for variables the
+broker still parses and still prints in its boot log while wired to nothing. Both are still
+**published**, because silence about a live-looking variable is how the previous site went
+stale.
+
+### Metrics
+
+The exposition is built in two places with two different shapes, so both are parsed: helper
+calls in `metrics.rs`, and raw `# HELP` / `# TYPE` strings in `handlers/status.rs`, some of them
+templated over a nearby array of family names. Then every `"queen_*"` string literal in either
+file is checked against what was parsed. An unmatched family is reported on the console and
+published with no help text rather than dropped — the failure mode is a visibly incomplete row,
+never a missing one. Fewer than 25 families is a hard error.
+
+### Proxy route classes
+
+The proxy is the enforcement point for what a tenant may call, and
+`queen_proxy/src/routes.rs` classifies every broker-bound request into exactly one class, with
+anything API-shaped that matches no rule blocked. This generator applies that same
+classification to the broker's real route list, so the published table is a join of two derived
+facts rather than a hand-maintained list.
+
+One detail worth knowing if you extend it: the proxy classifies concrete paths, while the router
+declares `:param` patterns. The generator substitutes a representative value for each parameter
+before classifying, so prefix rules match the way they will at runtime.
+
+### OpenAPI documents
+
+`gen-openapi.mjs` emits `public/openapi/queen-broker.json` and `public/openapi/queen-proxy.json`
+as OpenAPI 3.1, plus a small coverage partial. Paths and methods come from the routers; query
+parameters from each handler's `Query<T>` extractor, walking the struct's serde renames and
+optionality, or from the literal keys a `Query<HashMap<..>>` handler reads by name; request
+bodies from the struct the handler passes to `serde_json::from_slice`, resolved recursively;
+response status codes from every `StatusCode` variant reachable in the handler body.
+
+Two things resist derivation and are marked rather than guessed. Success bodies on the hot paths
+are assembled by string concatenation, so their schema is left **unconstrained** — deliberately
+not `type: object`, since some of those routes answer with a top-level array and asserting
+"object" would be a false statement. And some listing handlers forward their whole query map to
+a stored procedure, so their parameters cannot be recovered from Rust. Both cases carry an
+`x-queen-*` extension saying so; see [OpenAPI documents](/reference/openapi).
+
+Before writing, the generator runs a structural self-check over both documents: duplicate
+operation ids, path parameters that are templated but not declared, dangling `$ref`s and
+Rust-style `:param` leftovers all abort the run. That check earned its place immediately — it
+caught `/console` and `/console/` collapsing onto one operation id on the first run.
+
+### Benchmark figures
+
+A chart is a claim, so the figures are derived like everything else:
+`gen-charts.mjs` shells out to `charts.py`, which reads the archived CSV and
+stdout artifacts under `benchmark-queen/` and renders one SVG per theme into
+`public/charts/`. `--check` re-renders into a temporary directory and compares, so
+a changed artifact fails CI until the figure is regenerated. Rendering needs
+python3 with matplotlib; the workflow installs it.
+
+Three rules the figures follow, each of which caught a real mistake during the
+first pass:
+
+- **Never a second y-axis.** Two measures of different scale become two stacked
+  panels sharing an x-axis. The 24-hour figure would otherwise have plotted broker
+  memory against PostgreSQL CPU on one plot and invented a correlation.
+- **A chart has to show what its caption claims.** The first throughput-ceiling
+  figure plotted offered against accepted to show a 0.086% shortfall — but at
+  per-second resolution the two lines sit exactly on top of each other, and the
+  shortfall is a cumulative total. It became a single-series chart, and the
+  shortfall stayed a number in the table where it belongs.
+- **Check whether a counter is cumulative.** The cell figure's 429 series came
+  straight from `err_429`, which is a running total: it plotted as a perfectly
+  straight ramp labelled "per interval". It is differenced into a rate now.
+
+Two SVGs are written per figure and swapped by CSS on `data-mode`, because an
+`<img>` cannot inherit `currentColor` and a figure tuned for a white surface is
+unreadable on a black one. Palettes are the categorical slots from the
+data-visualisation guidance, stepped per mode and validated against this site's
+actual surfaces rather than flipped.
+
+### Snippets
+
+A snippet is a region of a real source file between two markers:
+
+```js
+// docs:start(push-one-message)
+// ... the code a page will publish ...
+// docs:end
+```
+
+Marker syntax is comment-flavour agnostic — anything ending in `docs:start(<id>)` opens a
+region and anything ending in `docs:end` closes it, so `//`, `#` and `--` all work. Each region
+becomes a partial carrying a header that names the file it came from, and pages include it with
+`<Render file="snippets/<id>" />`. A published snippet is therefore never a transcription; it is
+the code that ran.
+
+Ids must be unique across all sources and regions must be closed — both are hard errors, as is
+a `docs:start` inside an already-open region. Common leading indentation is stripped so a
+snippet extracted from inside a test function reads as top-level code. An index partial lists
+the whole inventory.
+
+The scanned directories are the JavaScript, Python, Go and C++ client test trees.
+
+## The drift guards
+
+Two of the generators cannot work by parsing alone: they need to *apply* a Rust rule, so they
+mirror it in JavaScript. A stale mirror would not fail — it would quietly publish a wrong table,
+which is the worst possible outcome. So each mirrored function is fingerprinted.
+
+`fingerprint()` strips line and block comments, collapses all whitespace, hashes with SHA-256
+and keeps the first 16 hex characters. Comment edits and reflows therefore do not trip the
+guard; a changed rule always does. `assertFingerprint` throws with the expected value, the
+actual value and instructions to re-read the Rust, update the mirror, and only then paste the
+new fingerprint in.
+
+| Mirrored function | Guarded in |
+| --- | --- |
+| `route_access_level` in `server/src/auth.rs` | `gen-routes.mjs` (and re-derived in `gen-openapi.mjs`) |
+| `classify` in `queen_proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
+| `is_operator_route` in `queen_proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
+
+When a guard trips, the generator refuses to run at all. That is the intended behaviour: the
+build stops until a human has compared the two implementations.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `pnpm dev` | Astro dev server |
+| `pnpm gen` | run all seven generators, writing partials, the OpenAPI documents and the figures |
+| `pnpm gen:check` | compare instead of writing; non-zero on drift |
+| `pnpm lint:docs` | the Nimbus linter over prose, MDX and frontmatter |
+| `pnpm lint:docs:fix` | the same, applying the fixable rules |
+| `pnpm build` | static build into `dist/`, including the Pagefind index |
+| `pnpm typecheck` | `astro check` |
+| `pnpm verify` | `gen:check`, then `build`, then `lint:docs` — what to run before pushing |
+
+Run them from `webdoc/`, or with `pnpm --dir webdoc <script>` from the repository root.
+
+## In CI
+
+`.github/workflows/docs.yml` runs `pnpm gen:check`, then `pnpm build`, then `pnpm lint:docs`, so
+a page built from source can never be published behind that source. The order matters: the
+`nimbus/internal-link` rule resolves links against `.nimbus/routes.json`, which Astro
+materializes at `astro:build:done`, so linting before building checks links against a stale
+route map — or none at all on a clean checkout.
+
+Its path filter is the other interesting part: because the generators read code, the workflow
+triggers on changes to `server/src/**`, `server/sql/**`, the proxy's router, console and auth
+modules, and the JavaScript, Python and Go client test directories — not only on changes under
+`webdoc/**`.
+
+<Aside type="note">
+`gen-snippets.mjs` also scans `clients/client-cpp`, which the workflow's path filter does not
+include. No C++ file carries a marker today, so nothing is currently missed — but a snippet
+added there would not be drift-checked until the filter is extended.
+</Aside>
+
+The workflow builds and gates; it does not deploy. Deployment is Cloudflare Pages against
+`dist/`.
+
+## Adding a page
+
+<Steps>
+
+1. Read the code the page will describe, and list those paths in `sourceOfTruth`. This is the
+   step the old site skipped.
+
+2. Create the `.mdx` under the right section directory. The sidebar picks it up from
+   `autogenerate`; set `sidebar.order` to place it.
+
+3. Prefer a generated partial to a hand-written table, and a verified snippet to hand-written
+   code. If a flow you want to show has no snippet, consider adding markers to the test that
+   already covers it rather than transcribing it.
+
+4. Check the whole contract in one command.
+
+   ```bash
+   pnpm --dir webdoc verify
+   ```
+
+</Steps>

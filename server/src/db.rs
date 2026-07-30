@@ -1977,19 +1977,6 @@ pub async fn streams_cycle(
     Ok(row.get(0))
 }
 
-// POST /api/v1/stats/refresh -> queen.refresh_all_stats_v1(true). Engine stats
-// for the log engine are reconciled by log_refresh_all_stats_v1 on the stats
-// cadence; this is wired for parity with the rows reconciler the dashboard
-// expects.
-pub async fn refresh_all_stats(
-    client: &deadpool_postgres::Client,
-) -> Result<String, tokio_postgres::Error> {
-    let row = client
-        .query_one("SELECT (queen.refresh_all_stats_v1(true))::text", &[])
-        .await?;
-    Ok(row.get(0))
-}
-
 // ------------------------------------------------------- system state (maintenance)
 // Maintenance flags live in queen.system_state as {"enabled": bool} JSONB, keyed
 // 'maintenance_mode' / 'pop_maintenance_mode' — the SAME rows the C++ broker's

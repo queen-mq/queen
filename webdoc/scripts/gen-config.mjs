@@ -135,7 +135,7 @@ const GROUPS = [
   ["Consume and long-poll", (n) => n.startsWith("POP_") || n === "DEFAULT_TIMEOUT" || n.startsWith("QUEEN_POP_")],
   ["Storage engine", (n) => n.startsWith("QUEEN_V2_") || n.startsWith("QUEEN_DEDUP") || n.startsWith("QUEEN_ACK_") || n.startsWith("QUEEN_HOTLIST")],
   ["Flow control", (n) => n.startsWith("QUEEN_VEGAS") || n.startsWith("QUEEN_LIMIT") || n.startsWith("QUEEN_SEG_PUSH_") || n.startsWith("QUEEN_SEG_POP_")],
-  ["Background jobs", (n) => n.startsWith("RETENTION") || n.startsWith("STATS_") || n.startsWith("PARTITION_CLEANUP") || n.startsWith("METRICS_")],
+  ["Background jobs", (n) => n.startsWith("RETENTION") || n.startsWith("STATS_") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" || n.startsWith("METRICS_")],
   ["Durability spool", (n) => n.startsWith("FILE_BUFFER")],
   ["Security", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
   ["Logging", (n) => n === "LOG_LEVEL" || n === "RUST_LOG" || n.startsWith("QUEEN_LOG")],
@@ -176,7 +176,6 @@ const EXTRA_VARS = [
 const INERT = new Map([
   ["QUEEN_V2_FUSION_FRAMES", "kept for env compatibility; no longer a flush trigger (fusion.rs)"],
   ["RETENTION_PARALLELISM", "read and ignored; retention runs one bounded step at a time"],
-  ["PARTITION_CLEANUP_DAYS", "read and ignored; partitions are never auto-deleted"],
 ]);
 
 function groupOf(name) {
@@ -216,7 +215,7 @@ function main() {
 
   const lines = [];
   lines.push(
-    `The broker is configured entirely through environment variables — ` +
+    `The broker is configured entirely through environment variables: ` +
       `${main_.length} of them, listed below with the defaults the code actually applies. ` +
       `Booleans go through one strict parser: an unparseable value is a fatal boot error, ` +
       `while unset and empty both fall back to the default.`,
@@ -230,7 +229,7 @@ function main() {
     lines.push("| Variable | Type | Default | Also read as |");
     lines.push("| --- | --- | --- | --- |");
     for (const v of rows) {
-      lines.push(`| \`${v.name}\` | ${v.type} | \`${cell(v.def)}\` | ${v.aliases.length ? v.aliases.map((a) => `\`${a}\``).join(", ") : "—"} |`);
+      lines.push(`| \`${v.name}\` | ${v.type} | \`${cell(v.def)}\` | ${v.aliases.length ? v.aliases.map((a) => `\`${a}\``).join(", ") : ""} |`);
     }
     lines.push("");
   }
@@ -268,6 +267,7 @@ function main() {
   const res = emitPartial({
     name: "broker-config",
     title: "broker environment variables",
+    description: "Every environment variable the broker reads, with the default the code applies.",
     sources: [CONFIG, ...EXTRA_SOURCES],
     body: lines.join("\n"),
     check,

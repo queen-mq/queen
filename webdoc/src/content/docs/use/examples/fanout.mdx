@@ -1,0 +1,149 @@
+---
+title: Fan-out with consumer groups
+description: "Two independent consumer groups each receiving every message, and why the second group costs one small row per partition instead of a second copy of the data."
+type: example
+tier: use
+sidebar:
+  order: 21
+sourceOfTruth:
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/045_log_maintenance.sql
+  - server/src/db.rs
+  - server/src/handlers/consumer_groups.rs
+verifiedBy:
+  - clients/client-js/test-v2/consume.js
+---
+
+Fan-out in Queen is not a routing feature. It is a consequence of where consumption state lives: the messages are one immutable log, and a consumer group is a cursor over it. Two groups reading the same queue is two integers advancing independently over one copy of the data.
+
+## Two groups over one queue
+
+Name a group on the consumer. That is the whole declaration — there is no create-group call, no binding, no exchange.
+
+```js
+// Illustrative, not extracted from a test.
+// Process A
+await client
+  .queue('orders')
+  .group('billing')
+  .batch(50)
+  .consume(async messages => { await bill(messages) })
+
+// Process B, independently
+await client
+  .queue('orders')
+  .group('analytics')
+  .batch(500)
+  .consume(async messages => { await index(messages) })
+```
+
+Both groups receive every message pushed to `orders`. Their batch sizes, their failure handling and their progress are unrelated: `billing` stalling does not slow `analytics` down, and `analytics` restarting does not replay anything for `billing`.
+
+<Aside type="note">
+A consumer that names no group still gets a cursor — the broker records it under the literal group name `__QUEUE_MODE__`. That unnamed cursor is one group among the others, so an unnamed consumer and a named group on the same queue each receive every message. It is not a fallback or a wildcard.
+</Aside>
+
+## Why this costs one write, not N
+
+The write path and the read path are different tables, and only one of them is per-group.
+
+A push packs its messages into frames, length-prefixes them, zstd-compresses the batch and stores it as a single row in `queen.log_segments`, covering the inclusive offset range `[base_offset, end_offset]`. That row is written **once**, before any group exists and regardless of how many will later appear. A message's identity is a single monotone `BIGINT` offset inside its partition.
+
+Consumption state is one row in `queen.log_consumers`, keyed `(partition_id, consumer_group)`. Its load-bearing column is `committed` — the last acknowledged offset. "Has this group consumed message N" is the comparison `committed >= N`. There is no per-message, per-group row anywhere in the schema.
+
+So the cost of adding a group is:
+
+| Resource | Cost of the second group |
+| --- | --- |
+| Message bytes stored | Zero. The segment row is shared. |
+| New rows written per message | Zero. |
+| New rows written per group | One `log_consumers` row per partition the group actually pops, created on first contact. |
+| Per-ack write | One in-place update of that group's cursor row (no indexed column changes, so PostgreSQL keeps it a heap-only tuple). |
+
+The honest counterpart: **reads do scale with groups.** Each group's pop fetches and decompresses the segments it needs, so N groups reading the same backlog means N decompressions of the same bytes and N sets of pop transactions. Fan-out is free on the write side and linear on the read side.
+
+## Where a group starts
+
+The cursor row does not exist until the group first pops a partition. What it is seeded with is decided then, and never revisited — an existing cursor is never re-seeded, so changing the subscription options later has no effect on a group that has already run.
+
+| Subscription | Seeded cursor | Effect |
+| --- | --- | --- |
+| `all` (the default) | Just below the oldest retained offset | The group reads the entire retained backlog |
+| `new` (or `subscriptionFrom: 'now'`) | The partition's current last offset | The group skips the backlog and sees only later pushes |
+| `subscriptionFrom: <ISO timestamp>` | Just below the first segment created at or after the timestamp | The group starts at that point in history, segment-granular |
+
+The choice is durable: the first pop of a `(queue, group)` pair writes a `queen.consumer_groups_metadata` row recording the mode and timestamp, and a partition created *after* that registration seeds from the stored timestamp rather than from its own end — so a new partition does not silently skip its backlog for an existing group.
+
+To move an existing group, use a seek instead. See [Replay history](/use/examples/replay).
+
+## Watching the groups diverge
+
+```http
+GET /api/v1/consumer-groups
+```
+
+lists every group with its per-queue lag. For one group:
+
+```http
+GET /api/v1/consumer-groups/billing
+```
+
+And to find only the groups that have fallen behind — the threshold defaults to 3600 seconds:
+
+```http
+GET /api/v1/consumer-groups/lagging?minLagSeconds=300
+```
+
+A single message read (`GET /api/v1/messages/{partitionId}/{transactionId}`) reports per-group progress directly, as a `consumerGroups` array of `name`, `consumed` and `leaseExpiresAt`. Its summary `status` field is `completed` only when every named group's cursor has passed the message — which is exactly the fan-out question, answered per message.
+
+## Retention is the coupling you do have
+
+Groups are independent in delivery. They are not independent in data lifetime, and this is the one place a slow group changes another group's outcome.
+
+Retention is opt-in (`retentionEnabled` plus a positive window) and deletes **whole segments**. Two rules run:
+
+- **`retentionSeconds` deletes by age, regardless of consumption.** A segment older than the window goes even if a group never read it. A group that is down for longer than the window loses data — permanently, and with no error at the moment it happens.
+- **`completedRetentionSeconds` deletes only consumed data.** Its time boundary is capped at `MIN(committed) + 1` across the partition's cursor rows: the slowest group's next wanted offset. So the slowest group holds the floor for everyone, and a partition with no cursor rows at all has nothing consumed and keeps everything.
+
+<Aside type="caution">
+Adding a group to a queue with `retentionSeconds` set does not extend that queue's history. If the new group's `all` subscription needs a backlog that retention has already deleted, it starts from the oldest surviving segment — there is no error and no gap report. Check the retention window before you point a new group at history.
+</Aside>
+
+Two more retention facts worth carrying: retention never purges `queen.log_dlq`, and a partition is deleted only once it is empty and has been idle for `PARTITION_CLEANUP_DAYS` (30) — which drops every group's cursor for that partition along with it. Nothing is left to re-read, so the cost is the `total_consumed` counter, not a replay.
+
+## Removing a group
+
+```http
+DELETE /api/v1/consumer-groups/billing
+```
+
+drops the group's cursor rows for every partition, plus its empty-scan watermarks. Clearing the watermark is what allows a group of the same name to re-consume from the start afterwards — a stale watermark would otherwise fence off every partition. There is also a per-queue variant, `DELETE /api/v1/consumer-groups/{group}/queues/{queue}`, which scopes the deletion to one queue.
+
+Both answer HTTP 200 with the merged result JSON, including `deletedPartitions`. Recreating the group is, again, just naming it on a consumer.
+
+## What to expect
+
+| Situation | Result |
+| --- | --- |
+| Second group added to a live queue | Reads the retained backlog from the start (default `all`), independently of the first group |
+| One group's handler keeps failing | Only that group's cursor stalls; its own retry budget and DLQ apply |
+| Two consumers in the same group, one partition | One holds the lease; the other gets nothing until it clears |
+| Two consumers in the same group, many partitions | Each claims different partitions; that is the unit of parallelism |
+| A group deleted and recreated with the same name | New cursor, seeded by the subscription mode of its first pop |
+| `retentionSeconds` window passes while a group is down | That group's unread segments are gone, silently |
+
+## Next
+
+<CardGrid>
+  <LinkCard
+    href="/use/examples/pipeline"
+    title="Chain the stages"
+    description="Ack one stage and push the next in a single PostgreSQL transaction."
+  />
+  <LinkCard
+    href="/use/examples/replay"
+    title="Move a group's cursor"
+    description="Seek back to a timestamp, or subscribe a new group from the beginning."
+  />
+</CardGrid>

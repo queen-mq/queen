@@ -1,10 +1,186 @@
 ---
 title: Internals
-description: How the log engine stores, finds and hands out messages.
+description: "The shape of the system in one page: an axum router, a connection pool, the fusion layer, the log engine in PostgreSQL, the background jobs, and the mesh."
 type: overview
 tier: internals
 sidebar:
   order: 1
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/schema.rs
+  - server/src/db.rs
+  - server/src/fusion.rs
+  - server/src/handlers/data.rs
+  - server/sql/procedures/041_log_schema.sql
 ---
 
-Placeholder — being written.
+Queen is one stateless Rust binary (crate `queen-seg-rust`, binary `queen-seg`) and one
+PostgreSQL database. The binary holds no durable state. Every offset, cursor, lease and
+segment lives in PostgreSQL, and every in-memory structure in the broker is a cache or a
+scheduler over it. That single fact is the key to reading this section: when an in-memory
+structure is stale, wrong, or lost to a restart, the outcome is extra work, not lost or
+misdelivered messages. Each page below states its own version of that argument, because each
+structure earns its place only by having one.
+
+Read the [concept pages](/use) first if you want to know what Queen promises. This section
+explains how it keeps those promises, and where it pays for them.
+
+## The request path
+
+An HTTP request crosses the same five layers regardless of what it does.
+
+1. **The axum router** in `server/src/main.rs`. Sixty method-and-path pairs on one flat `Router`,
+   plus a fallback that serves the dashboard SPA compiled into the binary with `rust_embed` from
+   `server/webapp/dist`. There is no runtime static-directory override. There is no TLS listener
+   and no CORS layer: the broker speaks plaintext HTTP on `PORT` (6632) and expects a proxy in
+   front of it.
+2. **Middleware.** JWT validation (off by default) resolves an access level and an
+   authenticated `sub`; tenant resolution reads `x-queen-tenant` when
+   `QUEEN_TENANCY_HEADER=1`, otherwise stamps the fixed default tenant. Both run before any
+   handler and both are transparent when disabled.
+3. **A concurrency permit.** Push and pop each pass through their own adaptive limiter, a
+   Vegas-style controller that sizes itself from observed PostgreSQL round-trip times. See
+   [Flow control](/internals/flow-control).
+4. **A pooled connection.** One `deadpool-postgres` pool, `DB_POOL_SIZE` connections
+   (default 160), shared by handlers and background jobs. Hot statements go through
+   `prepare_cached`, so a steady-state call re-uses a prepared statement on that connection.
+5. **One stored-procedure call.** Almost every route is a single `SELECT queen.<sp>(...)`
+   whose JSON result the handler forwards, sometimes verbatim. The decision procedures
+   (who gets which message, whether a push is a duplicate, what an ack commits) live in SQL,
+   under row locks, not in Rust.
+
+A pop that has to wait is the one exception worth knowing: it releases both the permit and
+the connection *before* it parks, and re-acquires them on wake. A parked long-poll costs the
+broker a timer and nothing else.
+
+## What lives in memory
+
+Nothing in this table is durable. Every entry is followed by what its being wrong costs.
+
+| Structure | Module | Replaces | Cost of being wrong |
+| --- | --- | --- | --- |
+| Push fusion shards | `fusion.rs` | one transaction per push request | the bundle fails; participants are told `error` and spooled to disk |
+| Hot-list rings | `hotlist.rs` | the SQL wildcard candidate scan | one empty `SKIP LOCKED` claim that returns no rows |
+| Dedup cache | `dedup.rs` | nothing: it only narrows the SQL probe | the probe widens to the full window |
+| Ack registry | `ack_registry.rs` | per-ack hash resolution | the ack falls through to the SQL path |
+| Ack fusion buffers | `ack_fusion.rs` | one transaction per ack | the whole flush errors; leases expire and redeliver |
+| Long-poll gates and hints | `notify.rs` | polling | the parked pop waits out its own backoff |
+| Disk spool | `file_buffer.rs` | losing pushes during a database outage | pushes fail outright |
+
+The two things that decide *what data exists* (the deduplication verdict and the consumer
+cursor) are not in this table. They are in PostgreSQL, computed under a row lock, on every
+call.
+
+## The storage side
+
+Storage is the "log engine": five tables created by `041_log_schema.sql`
+(`queen.log_queues`, `log_partitions`, `log_segments`, `log_txns`, `log_consumers`) plus
+`queen.log_dlq` from the ack file. A partition is an ordered lane; a message's position is a
+single monotone `BIGINT` offset; a segment is one row holding many messages packed together
+and zstd-compressed. [The storage model](/internals/storage-model) has the row-by-row detail.
+
+`server/sql/schema.sql` and 24 files under `server/sql/procedures/` are embedded in the binary
+with `include_str!` and applied at every boot, in lexical order, under session advisory lock
+`778120010`. Every statement is idempotent, so re-apply is a no-op. `QUEEN_APPLY_SCHEMA=0`
+skips the whole step so a privileged role can pre-apply the DDL and the broker can then run as
+a low-privilege user.
+
+The lexical order matters: the `04x` log-engine files load *after* the `0xx` files whose
+shared procedures they supersede, which is why the retired rows-engine procedures are still
+applied at boot. See [Retired objects](/internals/legacy) for what that means for anyone
+browsing the database.
+
+## Background jobs
+
+Several loops run alongside the HTTP server. Each is spawned before `axum::serve`, each
+swallows its own errors so a transient database failure cannot kill it, and each that mutates
+shared state elects a leader with an advisory lock so replicas never double-work.
+
+| Loop | Cadence | Leader gate | What it does |
+| --- | --- | --- | --- |
+| Retention | `RETENTION_INTERVAL`, 5000 ms | session lock `737001` | bounded autocommitting delete steps ([Retention](/internals/retention)) |
+| Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | transaction lock `737002` | recomputes `queen.stats` from the log tables ([Stats](/internals/stats)) |
+| Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | none, by design | per-replica rows in `worker_metrics` and `system_metrics` |
+| Hot-list wheel tick | 50 ms | none | promotes due deferred and lease-parked ring entries |
+| Hot-list wake tick | 5 ms | none | one coalesced wake per queue that received pushes |
+| Hot-list reseed floor | 2 s tick, per ring `QUEEN_HOTLIST_RESEED_MS` | none | re-derives ring contents from PostgreSQL |
+| Reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60000 ms | none | re-reads maintenance flags, drops per-queue caches |
+| Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS`, 300000 ms | none | drops rings and wake gates for queues nobody touched |
+| Spool drain | `FILE_BUFFER_FLUSH_MS`, 100 ms | none | replays disk-spooled pushes once the database is reachable |
+
+The metrics collector is deliberately un-gated: every replica records its own rows, keyed by
+hostname and worker id, and the dashboard aggregates across them.
+
+## The mesh
+
+With `QUEEN_MESH_PEERS` set, replicas form a full mesh over framed TCP. It carries three
+things: a wake for a parked pop when a push commits on another replica, maintenance-mode
+flips, and queue-config cache invalidation. Nothing it carries is authoritative: PostgreSQL
+is re-read every `QUEEN_CACHE_REFRESH_INTERVAL_MS` and a parked pop re-polls on its own
+backoff, so a dropped frame costs latency only. It also has a security boundary you must
+enforce yourself: see [The mesh](/internals/mesh).
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard
+    href="/internals/storage-model"
+    title="The storage model"
+    description="Segments, offsets and the five log tables: what each row is, and the invariants that make offset arithmetic safe."
+  />
+  <LinkCard
+    href="/internals/life-of-a-push"
+    title="Life of a push"
+    description="From HTTP body to committed rows: grouping, intra-request dedup, and how N partitions cost one commit."
+  />
+  <LinkCard
+    href="/internals/life-of-a-pop"
+    title="Life of a pop"
+    description="Candidate selection, the claim under FOR UPDATE SKIP LOCKED, the head probe, and lease versus auto-ack."
+  />
+  <LinkCard
+    href="/internals/hotlist"
+    title="The hot-list"
+    description="The in-memory ring that replaced the SQL candidate scan: tri-state verdicts, epoch-CAS clears, and the revisit wheel."
+  />
+  <LinkCard
+    href="/internals/dedup"
+    title="Deduplication"
+    description="How exactness is achieved in SQL, and why the broker-side cache can never change a verdict."
+  />
+  <LinkCard
+    href="/internals/ack-internals"
+    title="Ack internals"
+    description="The ack registry, ack fusion, and how a transactionId resolves to an offset through the hash sidecar."
+  />
+  <LinkCard
+    href="/internals/flow-control"
+    title="Flow control"
+    description="The adaptive concurrency limiter: what it measures, how the limit moves, and why raising the maximum does nothing."
+  />
+  <LinkCard
+    href="/internals/retention"
+    title="Retention internals"
+    description="Bounded autocommitting steps, one partition lock at a time, and the three eviction watermarks."
+  />
+  <LinkCard
+    href="/internals/stats"
+    title="Counters, rates and lag"
+    description="Where every number on the dashboard comes from, and why the manual refresh route does nothing useful."
+  />
+  <LinkCard
+    href="/internals/mesh"
+    title="The mesh"
+    description="Framed TCP, the HMAC HELLO handshake, the frame set, and the security reality."
+  />
+  <LinkCard
+    href="/internals/schema"
+    title="Schema and procedure catalogue"
+    description="Every log table with its columns, and every log-engine stored procedure with its signature and role."
+  />
+  <LinkCard
+    href="/internals/legacy"
+    title="Retired objects"
+    description="Why the rows-engine tables and procedures are still applied at boot, and what the boot-time apply drops."
+  />
+</CardGrid>

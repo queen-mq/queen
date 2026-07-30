@@ -1,0 +1,230 @@
+---
+title: Operating retention
+description: "Retention is opt-in and runs as bounded steps every five seconds; what it deletes, what it never deletes, and how to watch disk growth."
+type: how-to
+tier: operate
+sidebar:
+  order: 11
+sourceOfTruth:
+  - server/src/retention.rs
+  - server/sql/procedures/045_log_maintenance.sql
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/044_log_ack.sql
+  - server/sql/procedures/014_worker_metrics.sql
+  - server/sql/procedures/019_streams_schema.sql
+  - server/sql/procedures/015_postgres_stats.sql
+  - server/src/config.rs
+---
+
+Retention is **opt-in per queue**. A fresh queue keeps everything forever, and no
+amount of consuming changes that. Until you set `retentionEnabled` together with a
+positive window, the only thing the maintenance loop does to your data is purge
+the deduplication hash sidecar.
+
+That default is deliberate (losing data quietly is worse than filling a disk
+visibly), but it means capacity planning is your job from the first push.
+
+## The two rules
+
+Retention is expressed as two independent windows on the queue, and a segment is
+deleted when either rule says so.
+
+`retentionSeconds` deletes segments older than the cutoff **regardless of
+consumption state**. This is the explicit "drop unconsumed data after N seconds"
+knob, and it is the one that can lose messages nobody ever read.
+
+`completedRetentionSeconds` deletes only data that has been consumed. Its time
+boundary is capped at `MIN(committed) + 1` across every consumer-group cursor on
+that partition, the slowest group's next wanted offset. Two consequences worth
+memorising: a partition with **no** consumer rows has consumed nothing, so this
+rule contributes nothing and old-but-unread segments survive; and one stalled
+consumer group pins the whole partition's history for every group.
+
+Both rules require `retentionEnabled` to be true *and* the corresponding window to
+be positive. A queue with `retentionEnabled: true` and no windows set is swept by
+nothing.
+
+<Aside type="caution">
+`POST /api/v1/configure` is a **full replace**. Keys you omit are reset to their
+defaults, so a later call that sets one unrelated option silently turns retention
+back off. Always send the complete option set.
+</Aside>
+
+## Whole segments, never partial ones
+
+A segment is one row holding many length-prefixed frames. Retention deletes whole
+segment rows and nothing finer: only segments lying **entirely** below the
+computed boundary go. When `completedRetentionSeconds` puts the boundary in the
+middle of a segment (because that is where the slowest cursor happens to be),
+the covering segment survives with its consumed head still in it, and the
+partition's watermark advances only as far as the last fully deleted segment.
+
+So disk is reclaimed in steps the size of a segment, not message by message, and
+a queue whose producers batch heavily reclaims in larger, lumpier steps. Expect
+the on-disk footprint to lag the logical retention window.
+
+## The cadence
+
+The loop runs every `RETENTION_INTERVAL` milliseconds (default **5000**, not the
+five minutes an older generation of this system used) on one dedicated pooled
+connection. Each cycle:
+
+<Steps>
+
+1. Takes session advisory lock `737001`. A replica that cannot get it skips the
+   cycle entirely, so exactly one instance sweeps per cycle and replicas never
+   double-delete.
+
+2. Builds the work list with one query: every partition of every log-engine queue,
+   with all four cutoffs precomputed from a single `now()` so the whole cycle uses
+   one consistent clock. A `NULL` cutoff means that rule is disabled for that
+   queue.
+
+3. Runs three phases of bounded step calls, each looped until it reports
+   `done`, then purges old metrics rows.
+
+4. Releases the lock on every exit path, including after an error.
+
+</Steps>
+
+The important structural property is that **there is no wrapping transaction**.
+Every step call autocommits, takes exactly one `queen.log_partitions` row lock
+(the same serializer the push allocator uses), and holds it only for its own batch
+of at most `RETENTION_BATCH_SIZE` rows (default 1000). A large backlog is drained
+in many short transactions with pushes interleaving between them, instead of one
+sweep-length lock hold. Because no step ever holds two partition locks, the steps
+cannot deadlock against the multi-partition writers.
+
+The three phases are:
+
+| Phase | Applies to | Cutoff |
+| --- | --- | --- |
+| Retention | partitions of queues with at least one enabled rule | `retentionSeconds` and `completedRetentionSeconds` |
+| Hash-sidecar purge | **every** log partition, always | `GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900s)` |
+| Age eviction | queues with `maxWaitTimeSeconds > 0` | `maxWaitTimeSeconds` |
+
+The middle phase is why the loop touches every partition on every cycle even on a
+deployment with retention off everywhere: `queen.log_txns` is written for every
+push whether deduplication is on or not, because ack resolution depends on it, and
+it expires on its own clock. Its 900-second floor means a hash is never dropped
+while a plausible late ack could still need it. A hash that outlives the window
+resolves as unknown on ack, which the ack path counts as *not* acked: redelivery
+over loss, the engine's standing bias.
+
+## maxWaitTimeSeconds deletes unconsumed data, for every group, including leased batches
+
+This is not a retention rule with a friendlier name. It deletes whole segments
+older than `now() - maxWaitTimeSeconds` for every consumer group on the partition,
+in-flight leases included, and it applies **regardless of `retentionEnabled`**: a
+queue configured with only this option is still swept. The stored procedure calls
+it data loss by design.
+
+It does **not** dead-letter. Nothing is written to `queen.log_dlq`, nothing is
+recorded against a consumer group, and no client is told. A cursor left below the
+new watermark resumes at the next offset that still exists; the pop scan
+tolerates the gap.
+
+Use it only where a stale message is worthless: a live price tick, a presence
+update. If you want an age limit *with* an audit trail, you do not want this
+option.
+
+## The metrics purge
+
+The fourth phase of every cycle trims the observability tables on
+`METRICS_RETENTION_DAYS`, default **90**. One stored procedure ages out
+`queen.worker_metrics`, `queen.queue_lag_metrics`, `queen.queue_parked_replica`
+and `queen.retention_history`; a second batched delete trims
+`queen.system_metrics` in chunks of `RETENTION_BATCH_SIZE`.
+
+These run as plain autocommitting statements on the same connection, and a failure
+is logged and swallowed: it cannot poison the segment deletes, which have already
+committed statement by statement. The purge rarely finds anything, so it is not
+gated behind the "did we delete something" check that suppresses idle logging.
+
+## Two growth surfaces nothing reclaims
+
+<Aside type="danger">
+Retention never touches `queen.log_dlq`. Dead-lettered messages accumulate
+forever, payload included, and the only way to remove one is
+`DELETE /api/v1/messages/:partitionId/:transactionId`. A queue with a steady
+failure rate and no dead-letter hygiene is an unbounded table.
+</Aside>
+
+The second is stream state. `queen_streams.state` holds one row per (query,
+partition, key) and nothing purges it: the schema comments say so explicitly, and
+the design is that state is dropped only when an application resets its query. A
+high-cardinality key space in a streaming query is therefore permanent storage.
+The `queen_streams` tables are also granted to `PUBLIC`, so anything holding a
+broker database credential can read and write them.
+
+Partitions are the one thing in this family that *is* reclaimed: a
+`queen.log_partitions` row created by one push at 3am is deleted once it has been
+empty and idle for `PARTITION_CLEANUP_DAYS` (30), on a phase that runs at most
+once a minute. "Empty" excludes dead-letter rows and streaming state, so the row
+above (the DLQ one) pins its partition in place too. Set
+`QUEEN_PARTITION_CLEANUP_ENABLED=false` for the older behaviour of keeping every
+partition row forever. `RETENTION_PARALLELISM` is still read for configuration
+compatibility and does nothing under this engine.
+
+## Watching disk growth
+
+Start with what the sweep says about itself. The `retention` target logs a line
+only when a cycle actually deleted something:
+
+```text
+INFO retention  swept queues=12 segments_deleted=340 txns_purged=340 max_wait_evicted=0 partitions_deleted=0 metrics_purge=… elapsed_ms=47
+```
+
+An idle cycle is DEBUG, so silence at `info` means "nothing to delete", which on a
+growing deployment is the thing to be suspicious about. A cycle that keeps
+reporting large `segments_deleted` with a growing `elapsed_ms` means the sweep is
+running behind ingest.
+
+Then measure the tables directly. `GET /api/v1/analytics/postgres-stats` returns
+per-table total, table and index sizes, but only for the **`queen`** schema, and
+only the 20 largest relations. `queen_streams` growth does not appear there at
+all; query it yourself:
+
+```sql
+SELECT pg_size_pretty(pg_total_relation_size('queen_streams.state'));
+```
+
+The four relations that dominate a busy deployment are `queen.log_segments` (and
+its TOAST table, which holds the compressed payloads), `queen.log_txns`,
+`queen.log_dlq`, and `queen.system_metrics` if the metrics purge has been
+disabled by a very large `METRICS_RETENTION_DAYS`.
+
+Finally, `GET /api/v1/analytics/retention` aggregates `queen.retention_history`
+(the audit row each deleting step writes) into a time series, so you can see
+eviction volume per rule over time. Note that its `messagesDeleted` figures are
+frame counts, not segment-row counts, and that the table itself ages out on the
+metrics window.
+
+<Aside type="note">
+Autovacuum settings are applied to the hot tables by the boot-time schema, tuned
+by measurement: aggressive threshold-based triggering on the small fixed-population
+tables, and `vacuum_truncate = off` on `queen.log_partitions` and
+`queen.log_consumers` because heap truncation takes an `ACCESS EXCLUSIVE` lock that
+stalls every push and pop while reclaiming nothing. Do not override those in
+`postgresql.conf` per-table without re-reading the schema comments.
+</Aside>
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/sizing"
+    title="Capacity planning"
+    description="What actually costs money in this engine: commits, fsyncs and partition count."
+  />
+  <LinkCard
+    href="/selfhost/backup"
+    title="Backup and restore"
+    description="Both schemas, and what a restore means for cursors and leases."
+  />
+  <LinkCard
+    href="/reference"
+    title="Reference"
+    description="Queue options and every retention-related environment variable."
+  />
+</CardGrid>

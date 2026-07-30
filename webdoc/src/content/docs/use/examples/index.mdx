@@ -1,0 +1,119 @@
+---
+title: Verified examples
+description: "Every code block in this section is a region lifted out of a file the test harness executes. Here is how that works, and exactly what it does and does not prove."
+type: overview
+tier: use
+sidebar:
+  order: 19
+  label: Examples
+sourceOfTruth:
+  - webdoc/scripts/gen-snippets.mjs
+  - webdoc/scripts/gen.mjs
+  - test/run.sh
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+  - clients/client-py/tests/test_push.py
+  - clients/client-go/tests/push_test.go
+---
+
+The examples in this section are not transcriptions. Where a page shows a flow that a client test already covers, the code block on the page is the exact text of a region inside that test file, extracted at documentation build time. Nobody retypes it, so it cannot drift into being subtly wrong while still looking plausible.
+
+That is a narrow claim, and the rest of this page is about its edges. Read it before you trust a snippet more than your own integration test.
+
+## How a snippet gets onto a page
+
+A region of a real source file is delimited by two comment markers. Anything ending in `docs:start(<id>)` opens a region; anything ending in `docs:end` closes it. The marker matcher is comment-flavour agnostic, so `//`, `#` and `--` all work.
+
+```js
+// docs:start(js-push)
+const res = await client
+.queue('test-queue-v2')
+.push([{ data: { message: 'Hello, world!' } }])
+// docs:end
+```
+
+`webdoc/scripts/gen-snippets.mjs` walks four directories (the JavaScript, Python and Go client test trees plus the C++ client directory), collects every region, strips the common leading indentation, and writes one partial per region under `src/content/partials/snippets/`. Each partial carries a header naming the file it came from and the suite that runs it, and the fenced block is titled with that same repo-relative path. A page includes it by id:
+
+```mdx
+<Render file="snippets/js-push" />
+```
+
+Three properties of the extractor matter when you read a snippet:
+
+- **Ids are globally unique.** Two regions with the same id anywhere in the client trees is a hard error, so an id always names one place in the source.
+- **Unbalanced markers fail loudly.** A `docs:start` inside an open region, a `docs:end` without a start, or a region that is never closed all abort the generator.
+- **Removing a marker removes the partial.** The output directory is rewritten from scratch on every run, and `gen.mjs --check` compares instead of writing and exits non-zero on any difference. A page that renders a snippet whose markers were deleted fails the build rather than publishing stale code.
+
+Regenerate everything with one command:
+
+```bash
+pnpm --dir webdoc gen
+```
+
+## What running the suites proves
+
+`test/run.sh` builds the broker image and one runner image per language, then runs each suite against a real broker and a real PostgreSQL in an isolated Docker Compose project. Each suite runs on more than one topology: `single` (one PostgreSQL, one broker), `ha` (a two-broker mesh pair), and `tenanted` (the single stack with native tenant scoping switched on while the client suites send no tenant header: the default-tenant path). The tenanted lane must produce results identical to `single`, and the run fails on any divergence.
+
+So when a snippet's suite is green, the following held: the code in that block executed against a broker process talking to PostgreSQL over HTTP, the assertions surrounding it in the same test function passed, and the same code passed again with tenant scoping enabled.
+
+You can run one suite on its own:
+
+```bash
+test/run.sh --suite js
+```
+
+## What the claim does not cover
+
+Be precise about the limits, because a "verified" badge invites over-reading.
+
+- **A snippet is a fragment, not a test.** The assertions that make the test meaningful usually sit outside the marked region. `js-push-dedup` is unusual in carrying its expected statuses as a trailing comment; most snippets show the call and leave the check to the file.
+- **Region boundaries are a human choice.** Setup that the call depends on (creating the queue, pushing the message the pop consumes) is frequently just above the `docs:start`. Read the source file when a snippet looks like it works in isolation.
+- **Green means green in that harness.** The suites run with the broker's default configuration on a throwaway database. A snippet passing does not establish behaviour under a different queue configuration, under load, or behind the proxy.
+- **Extraction reads the working tree.** Snippets come from the checkout the site was built from, not from a published package tag.
+- **Only the fenced block is extracted.** The prose around it is written by hand and carries the ordinary risk of prose. Where a page states a rule about the broker, the page's `sourceOfTruth` frontmatter names the file that rule was read out of.
+- **Hand-written code is labelled.** Some flows have no snippet yet. Those pages show minimal illustrative code and say so; treat it as a sketch of the call shape, not as executed code.
+
+<Aside type="caution">
+A snippet proves that a call is accepted, never that a design is correct for your workload. Ordering, retry and deduplication semantics are properties of the broker, not of the example. The pages here state each rule and name the source file it came from.
+</Aside>
+
+## The inventory
+
+Every region currently marked in the client test trees:
+
+<Render file="snippets" />
+
+## The examples
+
+<CardGrid>
+  <LinkCard
+    href="/use/examples/producer-consumer"
+    title="Producer and consumer"
+    description="The smallest complete loop: push, pop with a consumer group, ack."
+  />
+  <LinkCard
+    href="/use/examples/fanout"
+    title="Fan-out to two groups"
+    description="Two independent groups reading every message, at one copy of the data."
+  />
+  <LinkCard
+    href="/use/examples/pipeline"
+    title="Multi-stage pipeline"
+    description="Ack the input and push the next stage in one PostgreSQL transaction."
+  />
+  <LinkCard
+    href="/use/examples/dedup"
+    title="Idempotent producers"
+    description="Deterministic transaction ids, the window, and life after the window closes."
+  />
+  <LinkCard
+    href="/use/examples/replay"
+    title="Replay history"
+    description="Seek a group backwards, or subscribe a new group from the beginning."
+  />
+  <LinkCard
+    href="/use/examples/dlq"
+    title="Failures and the DLQ"
+    description="Nack, the retry budget, reading the dead-letter queue, and replaying from it."
+  />
+</CardGrid>

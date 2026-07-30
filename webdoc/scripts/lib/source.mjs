@@ -116,7 +116,7 @@ export function assertFingerprint(label, body, expected) {
 
 const BANNER = (sources) =>
   [
-    `{/* GENERATED FILE — do not edit by hand.`,
+    `{/* GENERATED FILE. Do not edit by hand.`,
     `    Regenerate with: pnpm --dir webdoc gen`,
     `    Source of truth:`,
     ...sources.map((s) => `      - ${s}`),
@@ -127,12 +127,16 @@ const BANNER = (sources) =>
  * Write a generated partial. `check` mode compares instead of writing, so CI
  * can fail when a partial is behind its source without touching the tree.
  */
-export function emitPartial({ name, title, sources, body, check }) {
+export function emitPartial({ name, title, sources, body, check, description }) {
   mkdirSync(OUT_DIR, { recursive: true });
   const file = join(OUT_DIR, `${name}.mdx`);
   const content = [
+    // `description` is here for the prose linter, which checks every .mdx
+    // including partials. It never reaches a page: the including page owns the
+    // metadata a reader or an agent sees.
     "---",
     `params: []`,
+    `description: "${(description ?? `Generated ${title}.`).replace(/"/g, "'")}"`,
     "---",
     "",
     BANNER(sources),
@@ -160,7 +164,7 @@ export function emitPartial({ name, title, sources, body, check }) {
 
 /** Escape a value for a markdown table cell. */
 export function cell(v) {
-  if (v === undefined || v === null || v === "") return "—";
+  if (v === undefined || v === null || v === "") return "";
   return String(v).replace(/\|/g, "\\|").replace(/\n/g, " ");
 }
 

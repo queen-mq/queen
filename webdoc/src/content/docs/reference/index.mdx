@@ -1,9 +1,103 @@
 ---
 title: Reference
-description: Routes, configuration, metrics, client APIs and defaults — generated from the source where possible.
+description: "Routes, configuration, metrics, client APIs and defaults, generated from the source where possible."
 type: overview
 sidebar:
   order: 1
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/config.rs
 ---
 
-Placeholder — being written.
+This section is lookup material. Every page names the source files that govern it, in the
+`sourceOfTruth` field of its frontmatter, and the largest tables here are not written by hand
+at all: they are extracted from the code when the site is built.
+
+The version documented here is **1.0.0**. The broker and all client SDKs are version-aligned
+at that number.
+
+## What is generated from source
+
+| Table | Extracted from | Appears on |
+| --- | --- | --- |
+| Every route, with its access level and whether it resolves a tenant | the axum router in `server/src/main.rs` plus the access-level map in `server/src/auth.rs` | [HTTP conventions](/reference/http) and [Route table](/reference/http/routes) |
+| Every environment variable with the default the code applies | `server/src/config.rs`, plus `server/src/fusion.rs` for the experiment-only overrides | the configuration page in this section |
+| Every Prometheus metric family | the broker's metrics module | the Prometheus page in this section |
+| What a tenant may call through the multi-tenant gateway | `queen_proxy/` | the proxy pages in [Self-hosting](/selfhost) |
+
+A generated table cannot drift into documenting a route that does not exist. Hand-written
+prose can, which is why the pages around those tables stay short and mechanical.
+
+## The message plane
+
+Five routes are the whole data path. Everything else in the HTTP API is queue management,
+inspection or operations.
+
+<CardGrid>
+  <LinkCard
+    href="/reference/http"
+    title="HTTP conventions"
+    description="Base URL, authentication and the access-level role set, error bodies, the empty-204 rule, the body cap. Read this before the route pages."
+  />
+  <LinkCard
+    href="/reference/http/push"
+    title="POST /api/v1/push"
+    description="Every request field, the per-item response array, all four item statuses, and how deduplication decides."
+  />
+  <LinkCard
+    href="/reference/http/pop"
+    title="The pop routes"
+    description="All three of them, every query parameter with its default, the response field by field, and what a popped message does not carry."
+  />
+  <LinkCard
+    href="/reference/http/ack"
+    title="POST /api/v1/ack"
+    description="Ack as an offset commit: the status values, the per-item result fields, and what an already-committed or unresolvable ack returns."
+  />
+  <LinkCard
+    href="/reference/http/transaction"
+    title="POST /api/v1/transaction"
+    description="Pushes and acks in one PostgreSQL transaction: the bundle shape, every rollback cause, and the result array."
+  />
+  <LinkCard
+    href="/reference/http/lease"
+    title="POST /api/v1/lease/:leaseId/extend"
+    description="Extending a lease while a handler is still working, and what a failed extension means."
+  />
+  <LinkCard
+    href="/reference/http/routes"
+    title="Route table"
+    description="Every method and path the broker registers, with access level and tenant scoping, on one searchable page."
+  />
+</CardGrid>
+
+## The rest of this section
+
+The sidebar lists these pages under **Reference**. They are grouped by what you are looking
+up rather than by which component implements it.
+
+| Looking for | Where it lives |
+| --- | --- |
+| The remaining HTTP routes: queues, consumer groups, messages and DLQ, traces, status, analytics, system | Reference → HTTP API, one page per group |
+| A client library's methods and builder chain | Reference → SDK, one page per language |
+| Command-line usage | Reference → queenctl |
+| Environment variables and their defaults | Reference → Configuration (generated) |
+| Queue options accepted by `/api/v1/configure` | Reference → Queue options |
+| Prometheus metric families | Reference → Prometheus (generated) |
+| HTTP status codes and error strings | Reference → Errors |
+| Effective defaults, including the values that differ depending on how a queue was created | Reference → Defaults |
+| Which client versions work with which broker | Reference → Compatibility |
+
+## Reading order
+
+Reference pages assume you already know what a partition, an offset commit and a lease are.
+When a route's behaviour looks arbitrary, the explanation is usually one level down in the
+model rather than in the route itself.
+
+| If you want | Go to |
+| --- | --- |
+| The concepts the routes are built on | [Use Queen](/use) |
+| To run the broker | [Self-hosting](/selfhost) |
+| Why the storage engine behaves this way | [Internals](/internals) |
+| Measured throughput, with the configuration that produced it | [Benchmarks](/benchmarks) |

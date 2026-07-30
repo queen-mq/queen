@@ -1,0 +1,40 @@
+---
+title: Route table
+description: "Every method and path the broker registers, with its access level and whether it resolves a tenant, all read out of the router at build time."
+type: reference
+sidebar:
+  order: 3
+  label: Route table
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/auth.rs
+---
+
+This is the complete surface of the broker binary, on its own page so it is linkable and
+searchable. It is not maintained by hand: the generator walks the `Router::new()` chain in
+`server/src/main.rs`, resolves each route's required access level through
+`route_access_level` in `server/src/auth.rs`, and records whether the handler resolves a
+tenant. A route that does not exist in the code cannot appear here, and one that is added
+appears without anyone editing this page.
+
+How to read the columns:
+
+- **Access level**: the role set that satisfies the route. The levels are not a ladder;
+  `write-only` and `read-only` are disjoint capabilities. The
+  [conventions page](/reference/http) has the matrix, and the levels apply only when
+  `JWT_ENABLED` is on.
+- **Tenant-scoped**: whether the handler resolves a tenant identity and threads it into
+  queue resolution. With native tenant scoping off (the default) every request resolves to
+  one default tenant, and this column tells you which handlers would participate if it were
+  on. Routes marked `no` are cell-wide reads or operator surfaces; that matters for
+  multi-tenant deployments, covered in [Self-hosting](/selfhost).
+- **Internal (broker-to-broker)** routes are not a client API. They exist so brokers sharing a
+  database can notify each other, and they require `admin`.
+
+The five message-plane routes have a page each documenting their request and response
+fields: [push](/reference/http/push), [pop](/reference/http/pop),
+[ack](/reference/http/ack), [transaction](/reference/http/transaction) and
+[lease extension](/reference/http/lease). The remaining groups are documented on the
+other pages of this section.
+
+<Render file="generated/broker-routes" />

@@ -1,48 +1,57 @@
 <template>
   <div class="view-container">
 
-    <!-- Bus mode. Driven by what the rows actually report as well as by the
-         top-level mode: a log-engine queue reports its groups per message. -->
-    <div v-if="busGroups > 0" class="card" style="padding:10px 14px; margin-bottom:16px;">
-      <div style="display:flex; align-items:center; gap:8px; font-size:13px;">
-        <svg style="width:16px; height:16px; color:var(--text-mid);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-        </svg>
-        <span style="font-weight:600; color:var(--text-hi);">Bus Mode Active</span>
-        <span class="chip chip-ice">{{ busGroups }} consumer group(s)</span>
-      </div>
+    <!-- Scope. These rows are the acting tenant's, on the acting cluster's cell;
+         saying so is what keeps a tenant number from being read as a cell number.
+         Built from identity, not from the fetch, so it survives a failed load. -->
+    <div class="scope-strip">
+      <span class="chip chip-mute">tenant scope</span>
+      <span class="scope-text">
+        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
+        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
+        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
+      </span>
+      <span class="scope-fill"></span>
+    </div>
+
+    <!-- The list failed. Whatever is in the table below is stale, and saying so
+         is the whole point — an empty table would read as "no messages". -->
+    <div v-if="listError" class="status-banner banner-bad view-banner">
+      <span>
+        <strong>Could not load messages</strong> · {{ describeApiError(listError) }}<template v-if="messages.length">
+          · showing the last rows that loaded{{ lastUpdatedText ? ` (${lastUpdatedText})` : '' }}</template>
+      </span>
+    </div>
+
+    <!-- The broker answered page N with page N-1's rows: paging further would
+         renumber the same messages. -->
+    <div v-if="paginationStalled" class="status-banner banner-warn view-banner">
+      <span>
+        <strong>Pagination is not advancing</strong> ·
+        this broker returned the same rows for page {{ currentPage }}. Narrow the time range or the filters instead.
+      </span>
     </div>
 
     <!-- Filters -->
-    <div class="card" style="margin-bottom:16px;">
-      <div class="card-header">
-        <h3>Filters</h3>
-      </div>
-      <div class="card-body" style="display:flex; flex-direction:column; gap:14px;">
-        <!-- First Row: Filter, Queue, Status, Limit -->
-        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:12px; align-items:end;">
-          <div>
-            <label class="label-xs" style="display:block; margin-bottom:6px;">Filter loaded rows</label>
-            <div style="position:relative;">
-              <input
-                v-model="searchQuery"
-                type="text"
-                placeholder="Transaction or partition ID…"
-                class="input"
-                style="padding-left:34px;"
-                title="Filters the rows already on this page. It is not a server-side transaction lookup."
-              />
-              <svg
-                style="position:absolute; left:10px; top:50%; transform:translateY(-50%); width:15px; height:15px; color:var(--text-low);"
-                fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"
-              >
-                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-              </svg>
-            </div>
+    <div class="card filters">
+      <div class="card-body filter-rows">
+        <!-- Entity filters -->
+        <div class="filter-row">
+          <div class="filter-search">
+            <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+            </svg>
+            <input
+              v-model="searchQuery"
+              type="text"
+              placeholder="Filter loaded rows — transaction or partition ID"
+              class="input"
+              title="Filters the rows already on this page. It is not a server-side transaction lookup."
+            />
           </div>
 
-          <div>
-            <label class="label-xs" style="display:block; margin-bottom:6px;">Queue</label>
+          <div class="filter-field-col">
+            <label class="label-xs">Queue</label>
             <select v-model="filterQueue" class="input">
               <option value="">All Queues</option>
               <option v-for="q in queues" :key="q.name" :value="q.name">
@@ -51,8 +60,8 @@
             </select>
           </div>
 
-          <div>
-            <label class="label-xs" style="display:block; margin-bottom:6px;">Partition Name</label>
+          <div class="filter-field-col">
+            <label class="label-xs">Partition name</label>
             <input
               v-model="filterPartition"
               type="text"
@@ -61,8 +70,8 @@
             />
           </div>
 
-          <div>
-            <label class="label-xs" style="display:block; margin-bottom:6px;">Status</label>
+          <div class="filter-field-col">
+            <label class="label-xs">Status</label>
             <select v-model="filterStatus" class="input">
               <option value="">All Status</option>
               <option value="pending">Pending</option>
@@ -72,8 +81,8 @@
             </select>
           </div>
 
-          <div>
-            <label class="label-xs" style="display:block; margin-bottom:6px;">Limit</label>
+          <div class="filter-field-col">
+            <label class="label-xs">Limit</label>
             <select v-model="limit" class="input">
               <option :value="50">50 messages</option>
               <option :value="100">100 messages</option>
@@ -83,71 +92,55 @@
           </div>
         </div>
 
-        <!-- Second Row: Date Range and Actions -->
-        <div style="display:flex; flex-wrap:wrap; align-items:end; gap:12px;">
-          <div style="flex:1; min-width:180px; max-width:260px;">
-            <label class="label-xs" style="display:block; margin-bottom:6px;">From</label>
-            <input
-              v-model="filterFrom"
-              type="datetime-local"
-              class="input"
-              style="font-size:13px;"
-            />
+        <!-- Time window and actions. The 1h / 24h / 7d buttons only PREFILL the
+             two inputs — nothing is selected until Apply runs — so they stay
+             loose buttons under a "quick fill" label instead of becoming a
+             range picker with an active state the page has not chosen. -->
+        <div class="filter-row">
+          <div class="filter-field">
+            <span class="label-xs">From</span>
+            <input v-model="filterFrom" type="datetime-local" class="input" />
           </div>
 
-          <div style="flex:1; min-width:180px; max-width:260px;">
-            <label class="label-xs" style="display:block; margin-bottom:6px;">To</label>
-            <input
-              v-model="filterTo"
-              type="datetime-local"
-              class="input"
-              style="font-size:13px;"
-            />
+          <div class="filter-field">
+            <span class="label-xs">To</span>
+            <input v-model="filterTo" type="datetime-local" class="input" />
           </div>
 
-          <!-- Quick Time Range Buttons -->
-          <div style="display:flex; flex-wrap:wrap; gap:8px;">
-            <button @click="setTimeRange(1)" class="btn btn-ghost" style="font-size:12px;">1h</button>
-            <button @click="setTimeRange(24)" class="btn btn-ghost" style="font-size:12px;">24h</button>
-            <button @click="setTimeRange(168)" class="btn btn-ghost" style="font-size:12px;">7d</button>
-            <button @click="applyFilters" class="btn btn-primary" style="font-size:12px;">Apply</button>
-            <button
-              v-if="hasActiveFilters"
-              @click="clearFilters"
-              class="btn btn-ghost" style="font-size:12px;"
-            >
-              Clear
-            </button>
+          <div class="filter-field">
+            <span class="label-xs">Quick fill</span>
+            <button class="btn btn-ghost" @click="setTimeRange(1)">1h</button>
+            <button class="btn btn-ghost" @click="setTimeRange(24)">24h</button>
+            <button class="btn btn-ghost" @click="setTimeRange(168)">7d</button>
           </div>
+
+          <button class="btn btn-primary" @click="applyFilters">Apply</button>
+          <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
         </div>
       </div>
     </div>
 
-    <!-- The list failed. Whatever is in the table below is stale, and saying so
-         is the whole point — an empty table would read as "no messages". -->
-    <div v-if="listError" class="status-banner banner-bad" style="border-radius:var(--r-card); margin-bottom:16px;">
-      <span class="pulse-ember" style="width:7px; height:7px; flex-shrink:0;" />
-      <span>
-        <strong>Could not load messages</strong> · {{ describeApiError(listError) }}<template v-if="messages.length">
-          · showing the last rows that loaded{{ lastUpdatedText ? ` (${lastUpdatedText})` : '' }}</template>
-      </span>
-    </div>
-
-    <!-- The broker answered page N with page N-1's rows: paging further would
-         renumber the same messages. -->
-    <div v-if="paginationStalled" class="status-banner banner-warn" style="border-radius:var(--r-card); margin-bottom:16px;">
-      <span>
-        <strong>Pagination is not advancing</strong> ·
-        this broker returned the same rows for page {{ currentPage }}. Narrow the time range or the filters instead.
-      </span>
+    <!-- Bus mode. Driven by what the rows actually report as well as by the
+         top-level mode: a log-engine queue reports its groups per message. -->
+    <div v-if="busGroups > 0" class="card" style="margin-bottom:16px;">
+      <div class="card-body">
+        <div style="display:flex; align-items:center; gap:8px; font-size:13px;">
+          <svg style="width:16px; height:16px; color:var(--text-mid);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+          </svg>
+          <span style="font-weight:600; color:var(--text-hi);">Bus Mode Active</span>
+          <span class="chip chip-ice">{{ busGroups }} consumer group(s)</span>
+        </div>
+      </div>
     </div>
 
     <!-- Messages list -->
     <div class="card">
       <div class="card-header">
         <h3>Messages</h3>
-        <span class="chip chip-ice">{{ formatNumber(messages.length) }} loaded</span>
-        <span class="muted" :title="scopeTitle">{{ scopeLabel }} · page <span class="font-mono tabular-nums">{{ currentPage }}</span></span>
+        <span class="chip chip-mute">{{ formatNumber(messages.length) }} loaded</span>
+        <span class="chip chip-mute">page <span class="font-mono tabular-nums">{{ currentPage }}</span></span>
+        <span class="muted">{{ stamp(listPanel) }}</span>
       </div>
 
       <div style="overflow-x:auto;">
@@ -239,84 +232,70 @@
             <!-- Never an idle empty state on a failure: that is a load error
                  wearing "no messages" as a disguise. -->
             <tr v-else-if="listError">
-              <td colspan="6" style="text-align:center; padding:48px 16px;">
-                <p style="color:var(--ember-400); font-size:13px;">{{ describeApiError(listError) }}</p>
-                <p style="color:var(--text-low); font-size:12px; margin-top:6px;">
-                  Nothing loaded — this is a failure, not an empty queue.
-                </p>
+              <td colspan="6">
+                <div class="empty-state empty-state-failed">
+                  <h3>{{ describeApiError(listError) }}</h3>
+                  <p>Nothing loaded — this is a failure, not an empty queue.</p>
+                </div>
               </td>
             </tr>
             <tr v-else>
-              <td colspan="6" style="text-align:center; padding:48px 16px;">
-                <svg style="width:48px; height:48px; margin:0 auto 12px; color:var(--text-low);" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
-                </svg>
-                <p v-if="searchQuery && messages.length" style="color:var(--text-mid);">
-                  No loaded row matches “{{ searchQuery }}” — the filter only searches this page.
-                </p>
-                <p v-else style="color:var(--text-mid);">No messages found</p>
+              <td colspan="6">
+                <div class="empty-state">
+                  <svg class="empty-state-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                  </svg>
+                  <template v-if="searchQuery && messages.length">
+                    <h3>No row matches this filter</h3>
+                    <p>No loaded row matches “{{ searchQuery }}” — the filter only searches this page.</p>
+                  </template>
+                  <template v-else>
+                    <h3>No messages found</h3>
+                    <p>Try a wider time range, or fewer filters.</p>
+                  </template>
+                </div>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <!-- Pagination -->
-      <div style="padding:14px 16px; border-top:1px solid var(--bd); display:flex; align-items:center; justify-content:space-between;">
-        <div style="font-size:13px; color:var(--text-mid);">
-          Page <span class="font-mono tabular-nums">{{ currentPage }}</span>
-        </div>
-        <div style="display:flex; gap:8px;">
-          <button
-            @click="prevPage"
-            :disabled="currentPage === 1"
-            class="btn btn-ghost" style="padding:6px 10px;"
-          >
-            <svg style="width:16px; height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
-          <button
-            @click="nextPage"
-            :disabled="!canPageForward"
-            class="btn btn-ghost" style="padding:6px 10px;"
-          >
-            <svg style="width:16px; height:16px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
+      <!-- Pagination. Not drawn under an empty first page or under a failure:
+           Previous/Next below "no messages" offer travel that goes nowhere. -->
+      <div v-if="messages.length || currentPage > 1" class="pager">
+        <span class="pager-count">Page <span class="font-mono tabular-nums">{{ currentPage }}</span></span>
+        <div class="pager-nav">
+          <button class="btn btn-ghost" :disabled="currentPage === 1" @click="prevPage">Previous</button>
+          <button class="btn btn-ghost" :disabled="!canPageForward" @click="nextPage">Next</button>
         </div>
       </div>
     </div>
 
     <!-- Message detail panel (teleported to body to avoid transform issues) -->
     <Teleport to="body">
-      <div v-if="selectedMessage" class="msg-panel">
-      <div style="padding:20px 24px;">
-        <!-- Header -->
-        <div style="display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; padding-bottom:16px; border-bottom:1px solid var(--bd);">
-          <div style="flex:1; min-width:0;">
-            <h3 style="font-size:15px; font-weight:700; margin-bottom:4px; color:var(--text-hi);">Message Details</h3>
-            <p class="font-mono" style="font-size:11px; color:var(--text-low); word-break:break-all;">
-              {{ messageDetail?.transactionId }}
-            </p>
-          </div>
+      <!-- Backdrop before the panel, so DOM order matches paint order. -->
+      <div v-if="selectedMessage" class="modal-backdrop" @click="closePanel"></div>
+
+      <div v-if="selectedMessage" class="drawer-panel">
+        <div class="card-header">
+          <h3>Message Details</h3>
+          <span v-if="messageDetail?.transactionId" class="card-sub font-mono">{{ messageDetail.transactionId }}</span>
           <button
             @click="closePanel"
-            class="btn btn-ghost btn-icon"
+            class="btn btn-ghost btn-icon modal-close"
           >
             <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
-
+      <div class="card-body">
         <div v-if="detailLoading" style="text-align:center; padding:48px 0;">
           <div class="spinner" style="margin:0 auto 12px;"></div>
           <p style="color:var(--text-low);">Loading details...</p>
         </div>
 
-        <div v-else-if="detailError" style="font-size:13px; color:var(--ember-400);">
+        <div v-else-if="detailError" class="panel-err">
           {{ detailError }}
         </div>
 
@@ -456,6 +435,10 @@
 
           <!-- Actions -->
           <div style="display:flex; flex-direction:column; gap:8px; padding-top:8px;">
+            <!-- Sits with the button that produced it: this drawer scrolls, and
+                 a delete failure hoisted to the top would land off screen. -->
+            <div v-if="actionError" class="panel-err">{{ actionError }}</div>
+
             <div v-if="messageDetail.status === 'completed'" class="card" style="padding:12px 14px; border-color:var(--ok-bd);">
               <div style="display:flex; gap:8px; align-items:center; font-size:13px; color:var(--ok-500);">
                 <svg style="width:18px; height:18px; flex-shrink:0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -490,20 +473,9 @@
               re-routed from here. Only dead-lettered entries can be purged.
             </p>
           </div>
-
-          <div v-if="actionError" style="font-size:13px; color:var(--ember-400); margin-top:16px;">
-            {{ actionError }}
-          </div>
         </template>
       </div>
       </div>
-
-      <!-- Backdrop -->
-      <div
-        v-if="selectedMessage"
-        class="msg-backdrop"
-        @click="closePanel"
-      ></div>
     </Teleport>
   </div>
 </template>
@@ -514,11 +486,12 @@ import { useRoute } from 'vue-router'
 import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatDateTime, formatRelativeTime } from '@/composables/useApi'
 import { useRefresh } from '@/composables/useRefresh'
+import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 
 const route = useRoute()
-const { can, actingTenantSlug, actingClusterSlug } = useIdentity()
+const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess } = useToast()
 
 // State
@@ -546,13 +519,10 @@ const payloadCopied = ref(false)
 // The list, its loading/error state and its "as of when" come from one place.
 // useApi also aborts on unmount and discards any response that belongs to a
 // cluster we have since left, so a late answer cannot land under a new tenant.
-const {
-  data: listData,
-  loading,
-  error: listError,
-  lastUpdated,
-  execute: executeList,
-} = useApi((params, config) => messagesApi.list(params, config), {
+// Kept as one object as well as destructured refs: the shared `stamp()` takes
+// the whole panel, because "stale · last good HH:MM" needs `failed` next to
+// `lastUpdated`.
+const listPanel = useApi((params, config) => messagesApi.list(params, config), {
   immediate: false,
   onSuccess: (payload) => {
     const rows = payload?.messages || []
@@ -562,6 +532,14 @@ const {
     pageHeadKey = headKey(rows)
   },
 })
+
+const {
+  data: listData,
+  loading,
+  error: listError,
+  lastUpdated,
+  execute: executeList,
+} = listPanel
 
 const { data: queuesData, refresh: refreshQueues } = useApi(
   (config) => queuesApi.list(undefined, config),
@@ -574,13 +552,6 @@ const queueMode = computed(() => listData.value?.mode || null)
 
 // Permissions come from the identity store only — never from whether a call 403'd.
 const canAdmin = computed(() => can('queueAdmin'))
-
-// Scope. These rows are the acting tenant's, on the acting cluster's cell;
-// saying so is what keeps a tenant number from being read as a cell number.
-const scopeLabel = computed(
-  () => `tenant ${actingTenantSlug.value || '—'} · cluster ${actingClusterSlug.value || '—'}`
-)
-const scopeTitle = 'Tenant-scoped: only messages belonging to this tenant on the acting cluster.'
 
 // Computed
 const filteredMessages = computed(() => {
@@ -898,24 +869,9 @@ watch([filterQueue, filterPartition, filterStatus], () => {
 </script>
 
 <style scoped>
-/* The panel is teleported but still this component's DOM, so scoped styles
-   apply. The drawer floats over the page, so it sits at card level; the two
-   near-black gradient stops it used to carry were picked to sit BELOW the old,
-   lighter page and would read as raised chrome on the current one. */
-.msg-panel {
-  position: fixed; top: 0; right: 0; bottom: 0;
-  width: 100%; max-width: 640px; z-index: 50;
-  overflow-y: auto;
-  border-left: 1px solid var(--bd);
-  background: color-mix(in srgb, var(--card) 97%, transparent);
-  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
-}
-
-.msg-backdrop {
-  position: fixed; inset: 0; z-index: 40;
-  background: color-mix(in srgb, var(--ink-0) 50%, transparent);
-  backdrop-filter: blur(4px);
-}
+/* The drawer shell (`.drawer-panel`) and its scrim (`.modal-backdrop`) are
+   shared rules in style.css now — every drawer in the app is the same 640px
+   panel over the same scrim. Only the payload box below is this view's own. */
 
 /* Payload: recessed against the drawer, hairline to close the box. */
 .msg-code {

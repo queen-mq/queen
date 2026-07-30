@@ -1,0 +1,184 @@
+---
+title: Queues, partitions, namespaces and tasks
+description: "What exists after the first push, what a partition actually costs, and how namespaces and tasks make a queue discoverable."
+type: concept
+tier: use
+sidebar:
+  order: 3
+  label: Queues and partitions
+sourceOfTruth:
+  - server/src/handlers/queues.rs
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/012_configure.sql
+  - server/sql/procedures/013_stats.sql
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+---
+
+A queue is a named container with a configuration. A partition is an ordered lane inside it.
+Neither has to be declared before use: pushing to a queue and partition that do not exist
+creates both, inside the same transaction that stores the message.
+
+## A queue is created in one of two ways
+
+**By a push.** The first push to a name provisions the engine-side queue row, a configuration
+row, and the partition named in the request. Nothing else happens — no schema change, no file,
+no background job.
+
+**By `POST /api/v1/configure`.** This creates the queue if it is missing and rewrites its
+configuration if it exists. It also materialises the `Default` partition on the configuration
+side.
+
+The two paths do not produce identical queues. The lease time differs, because the two code
+paths resolve their default from different places:
+
+| Queue created by | `leaseTime` in effect |
+| --- | --- |
+| A push | 60 seconds |
+| `/configure` with no `leaseTime` | 300 seconds |
+
+<Aside type="caution">
+`/configure` is a **full replace**, not a patch. Every option you omit is reset to its
+default — including `dedupWindowSeconds`, which returns to 3600, and `namespace` and `task`,
+which return to empty. Always send the complete configuration.
+</Aside>
+
+## Partitions are created on first push
+
+Each item in a push body may carry a `partition`. If you omit it, the partition is `Default`.
+Partition names are opaque strings; a partition's identity is the pair (queue, name).
+
+```json
+{
+  "items": [
+    { "queue": "orders", "partition": "cust-42", "payload": { "id": 1 } },
+    { "queue": "orders", "payload": { "id": 2 } }
+  ]
+}
+```
+
+That request creates two partitions of `orders`: `cust-42` and `Default`. There is no
+preallocation step and no fixed partition count to choose up front, so the natural choice is
+to partition by the entity whose order you care about — a customer, a device, a document —
+and let the set grow as entities appear.
+
+An entity that goes quiet leaves an empty lane behind, and that lane is reclaimed: once a partition
+has been empty and untouched for `PARTITION_CLEANUP_DAYS` (30 by default), the maintenance cycle
+deletes the row. A partition still holding segments, dead-letter rows, streaming state or a live
+lease is never deleted, whatever its age, and a later push simply recreates the lane under a new id
+starting from offset 0.
+
+## What a partition costs
+
+| Per partition | Per (partition, consumer group) |
+| --- | --- |
+| One row in `queen.log_partitions` (the offset allocator, the retention watermarks, and `last_write_at`) | One row in `queen.log_consumers` (the cursor, the current lease, the retry counter) |
+
+Messages themselves do not live per partition: they are packed into segment rows, many
+messages per row, so a thousand partitions each holding ten messages costs far less than ten
+thousand individual message rows would.
+
+Two details of that layout are worth knowing because they show up as behaviour:
+
+- **`last_write_at` is quantised to one real update per second per partition.** It is the
+  indexed column a wildcard pop uses to find recently written partitions, and bumping it on
+  every push would make each allocator update non-HOT. Candidate selection therefore tolerates
+  staleness and searches with two minutes of slack.
+- **A group's cursor rows are created in bulk on first contact.** The first wildcard or
+  discovery pop of a (queue, group) seeds a `log_consumers` row for *every* partition of the
+  queue in one statement. A group that starts reading a 10,000-partition queue creates 10,000
+  rows at that moment, once.
+
+## How many partitions is reasonable
+
+Thousands per queue are ordinary. The archived ordering benchmark drove a four-stage pipeline
+over **1000 partitions at 25,000 events/s for 600 s** with `dedupWindow=300s`, verifying
+88,503,408 messages with 0 duplicates, 0 gaps and 0 order violations — see
+[benchmarks](/benchmarks) for the run and its raw output.
+
+What bounds the useful count is discovery, not storage. A wildcard pop does not scan the whole
+partition set:
+
+- **The candidate set is capped, well below any large partition count.** With the broker-side
+  candidate ring (`QUEEN_HOTLIST`, on by default) a pop takes `partitions * 8` candidates from
+  memory, clamped to the range 16…256. With the ring disabled the SQL candidate scan takes
+  `partitions * 4`, clamped to 64…512 and pinned at 512 once you ask for 128 partitions or more.
+- **Candidates are the recently written ones.** The SQL scan considers only partitions written
+  since this group last found the queue empty, minus two minutes of slack, in random order so
+  many consumers spread out instead of convoying on the same names.
+- **A quiet consumer costs no database work.** With the ring on, a re-poll that finds the ring
+  empty short-circuits in memory: it takes no connection and no serving permit. The correctness
+  re-walk of the partition set runs every 30 s, in keyset pages of 10,000 rows, at most 200 pages
+  per walk.
+
+So the cost of a large partition count is paid on cold discovery — a group with nothing in its
+ring has to walk rows to find work — and in the per-group cursor rows described above. Tens of
+thousands of partitions per queue work; a partition per message does not, because each one
+still costs a row that nothing ever deletes.
+
+## Namespaces and tasks
+
+A queue carries two optional labels, `namespace` and `task`. They exist so a consumer can ask
+for work without naming a queue:
+
+```text
+GET /api/v1/pop?namespace=orders&consumerGroup=billing
+GET /api/v1/pop?task=email
+```
+
+A discovery pop resolves every queue whose configuration row matches the namespace and/or task
+and wildcard-pops across their partitions in one call. At least one of the two must be present
+— a request with neither is rejected with `400`.
+
+The labels are set in two different ways, and the interaction between them is the sharpest
+edge on this page.
+
+- **A push derives them from a dotted queue name.** The part before the first dot becomes the
+  namespace, the part between the first and second dot becomes the task: the first push to
+  `orders.email` creates the configuration row with namespace `orders` and task `email`. A name
+  with no dot gives the whole name as the namespace and an empty task.
+- **`/configure` sets them explicitly**, from `namespace` and `task` in the request. Because
+  configure is a full replace, omitting them writes empty strings.
+
+<Aside type="caution">
+Creating a queue with `/configure` and no `namespace` or `task` — which is what the SDK
+`create()` helpers do unless you call `.namespace()` / `.task()` — leaves both labels empty.
+A discovery pop will never match that queue, and it will not appear in the namespace or task
+listings. Running `/configure` on a queue that a push created with a dotted name also wipes
+the derived labels.
+</Aside>
+
+## Listing what exists
+
+| Route | Returns |
+| --- | --- |
+| `GET /api/v1/resources/queues` | Every queue, each enriched with a live partition count and segment/message counts |
+| `GET /api/v1/resources/queues/:queue` | One queue's detail, plus its segment and message counts; `404` if it does not exist |
+| `GET /api/v1/resources/namespaces` | Namespaces with queue, partition and message rollups |
+| `GET /api/v1/resources/tasks` | The same rollup keyed by task |
+| `GET /api/v1/resources/overview` | System-wide counters |
+
+Three honest caveats about those numbers:
+
+- The queue list **accepts `namespace` and `task` query parameters and does not apply them**.
+  You get the full list either way; filter client-side.
+- In the queue list, `messages.total` is the **retained** frame count — everything still stored,
+  acked or not. `pending` and `processing` come from the periodically refreshed statistics
+  table, so they are the backlog reading and they lag slightly.
+- The namespace and task listings count partitions from the configuration-side catalog, which
+  the log engine does not write. A queue that was only ever pushed to reports **0 partitions**
+  there. The queue list does not have this problem: the broker overlays the live count.
+
+## Deleting a queue
+
+`DELETE /api/v1/resources/queues/:queue` requires admin access and removes the queue's
+partitions, its segments, its deduplication sidecar, its consumer cursors, and its dead-letter
+rows. Retention never touches DLQ rows, so deleting the queue — or deleting/replaying one
+dead-lettered address — is the only way they go away.
+
+The response is always `200`. `deleted` is `true` only if a queue was actually removed; for a
+name that did not exist you get `deleted: false` with the message `Queue not found — nothing
+was deleted`. Delete is deliberately idempotent because the SDKs use delete-then-create as a
+test cleanup idiom.

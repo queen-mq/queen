@@ -1,0 +1,314 @@
+---
+title: Ack internals
+description: "The two accelerators (the ack registry and ack fusion), plus how a transactionId resolves to an offset through the log_txns hash sidecar."
+type: concept
+tier: internals
+sidebar:
+  order: 7
+sourceOfTruth:
+  - server/sql/procedures/044_log_ack.sql
+  - server/src/ack_registry.rs
+  - server/src/ack_fusion.rs
+  - server/src/handlers/data.rs
+  - server/src/util.rs
+---
+
+An ack is a cursor commit. There is no per-message state to flip, so acking offset `N` implicitly
+completes every earlier unacked offset in that partition for that group. But the wire does not
+carry offsets. It carries `transactionId`, because that is the identifier a client actually holds.
+Turning one into the other is the work this page describes, along with the two accelerators that
+avoid doing it.
+
+The wire contract:
+
+```text
+POST /api/v1/ack        {transactionId, partitionId, status, consumerGroup?, leaseId?}
+POST /api/v1/ack/batch  {consumerGroup?, acknowledgments:[{transactionId, partitionId, status, leaseId?}]}
+```
+
+Both answer with a **top-level array**, one element per ack in request order, each carrying
+`index`, `transactionId`, `success`, `error`, `leaseReleased`, `dlq` and `noop`.
+
+## Resolution: transactionId to hash to offset
+
+The broker computes `xxh3_128(transactionId)`, 16 bytes, big-endian. SQL never hashes anything; it
+stores and compares `bytea`. Resolution then walks `queen.log_txns`, which holds one row per pushed
+segment with `16 × msg_count` bytes of hashes in frame order. Hash at index `k` of the row based at
+`base_offset` belongs to offset `base_offset + k`.
+
+That sidecar is written on every push whether or not deduplication is enabled, precisely so this
+resolution works on a deduplication-disabled queue. On the retired engine, `dedupWindow = 0` also
+disabled explicit acks; that landmine is gone.
+
+Two consequences follow from the sidecar being purged on its own clock (`GREATEST(dedup window,
+completed retention, 900 s)`):
+
+- An ack for a `transactionId` whose sidecar row was purged is **unresolvable**. The cursor stops
+  before that position and those frames redeliver. Redelivery over loss is the standing bias.
+- Unresolvable hashes are now **reported** (`unresolvedHashes`), not silently defaulted to success.
+  The bug that motivated it is worth remembering: a client acking beyond the hash window was told
+  the ack landed while the cursor never moved, and a `failed` or `dlq` signal there vanished with no
+  retry charge and no DLQ hand-off, which is a silent redelivery livelock.
+
+## The authoritative decision procedure
+
+`queen.log_ack_by_hash_v1(partition_id, group, worker, hashes[], statuses[])` is the one place that
+implements the full ack contract. Everything else in this page is a fast path that must reduce to it.
+
+It locks the `queen.log_consumers` row (the only lock the ack path ever takes, never a
+`log_partitions` row lock), so acks cannot form a cross-space cycle with the push serializer. Then it
+validates the lease, but **only when a non-empty `leaseId` was supplied**: a lease-less ack falls
+straight through and still advances the cursor.
+
+Resolution is one join, materialised once, from which every downstream decision is a scalar
+aggregate:
+
+- **`input`**: the incoming hashes unnested once, each carrying its status and array position.
+- **`occ`**: hash occurrences from `log_txns` in the ackable span. Under a lease this is bounded to
+  rows with `base_offset <= batch_end`. That bound is result-preserving (a row above the leased batch
+  can resolve neither to an in-span offset nor to a below-cursor one) and it is the whole
+  optimisation: an ack at the head of a deep partition explodes only the batch's hash blobs, not the
+  partition's.
+- **`resolved`**: per input hash, `eff` = the minimum matching offset inside the ackable span
+  `[GREATEST(committed + 1, txns_start), batch_end]`, and `below` = whether any occurrence sits at or
+  below `committed`. `MIN` prefers the in-span occurrence, so a re-push below the cursor never
+  shadows the copy the client is actually acking.
+- **`sig`**: the head signal, the lowest `eff` among `failed`, `dlq` and `retry`, with ties broken
+  `dlq > failed > retry`.
+
+The new cursor is the maximum acked-ok offset *clamped below the signal*, and `acked` is pure
+arithmetic: `new_committed - old_committed`.
+
+### The two honesty guarantees
+
+**An explicit signal is never skipped.** The cursor clamps at the lowest explicit
+`failed`/`dlq`/`retry` position in the call, even when a later position in the same call was acked
+`completed`. That lowest signal decides the action; completed positions above it simply redeliver.
+An at-least-once duplicate is acceptable; a lost nack is not. Only *silent gaps* (positions the
+client did not mention at all) are implicitly completed.
+
+**An ack that can no longer have an effect says so.** Positions resolving at or below the cursor come
+back in one of two lists:
+
+| List | Contents | What the client is told |
+| --- | --- | --- |
+| `noopHashes` | below-cursor positions acked `completed` | `noop: true`, a harmless duplicate commit |
+| `staleHashes` | below-cursor positions acked `failed`/`dlq`/`retry` | rejected, "already committed" |
+| `unresolvedHashes` | no occurrence anywhere | rejected, "unresolvable" |
+
+All three are arrays of 32-character lowercase hex tokens. The broker maps them back to
+`transactionId` strings, since it holds the request's mapping.
+
+### The branches
+
+| Signal | Retry budget | Effect |
+| --- | --- | --- |
+| `dlq` | bypassed | advance over the completed prefix, **keep the lease**, hand the poison offset to the broker |
+| `failed` | budget remains | advance over the prefix, release the lease, charge `batch_retry_count` once; the batch redelivers |
+| `failed` | exhausted, DLQ enabled | advance over the prefix, keep the lease, hand off the poison |
+| `failed` | exhausted, DLQ disabled | **drop the poison**: cursor advances past it, counter resets, lease released |
+| `retry` | untouched | advance over the prefix, release the lease (a budget-free explicit retry) |
+| all completed, reached `batch_end` | reset | advance, release the lease, reset attempt and retry state |
+| all completed, partial | untouched | advance, keep the lease so the rest of the batch can still be acked |
+
+The retry limit comes from `queen.queues.retry_limit` (default 3), and the DLQ is enabled when
+either `dead_letter_queue` or `dlq_after_max_retries` is true. Both default true, so an unconfigured
+queue dead-letters.
+
+`batch_retry_count` is charged **only** by an explicit `failed`. A lease expiry never spends it. The
+redelivery counter `attempt_count` is separate telemetry, incremented by the pop path when a batch
+redelivers from the same start offset.
+
+### Filing the DLQ row
+
+When the procedure returns `dlq: true` it keeps the lease, because only the broker can decompress a
+segment. The broker fetches the covering segment, extracts frame `off - base_offset` (payload,
+message id, `transactionId`), picks the failure reason from the matching nack, and calls:
+
+```sql
+queen.log_dlq_head_v1(partition_id, group, worker, off, message_id, txn, payload, error)
+```
+
+Under the validated lease that files the `queen.log_dlq` row with a snapshot of the payload and of
+the retry budget consumed, advances the cursor past that one frame (with a `GREATEST` guard so a
+stale caller can never move the cursor backward), resets the attempt and retry state so the next
+batch starts with a fresh budget, and releases the lease. Calling it twice is safe: the first call
+released the lease, so the second fails the worker match and returns `ok: false` with no side
+effects.
+
+The DLQ row stores a payload **snapshot** rather than a reference, and carries no foreign key into
+`log_segments`. That decoupling is deliberate: the rows engine's cascade silently dropped DLQ rows
+when the source row was retained away.
+
+<Aside type="note">
+Replay is a re-push, not a revival. `POST /api/v1/messages/:partitionId/:transactionId/retry`
+pushes the stored payload back into its queue under a fresh identity and then drops the DLQ
+row, so the replayed message lands at the tail of the partition and the offset the original
+occupied stays committed. `GET /api/v1/dlq` lists rows and
+`DELETE /api/v1/messages/:partitionId/:transactionId` removes one.
+</Aside>
+
+## Accelerator one: the ack registry
+
+Hash resolution costs several passes over the leased range's hash blobs, and it is pure waste in the
+overwhelmingly common case: a client that acks the entire batch it was just given, all `completed`.
+The broker already holds everything that case needs: at pop-serve time it unpacked the frames (it
+wrote each `transactionId` into the response) and it knows the batch's end offset.
+
+So the registry is a process-local map keyed `(partition_id, consumer_group)` holding, per active
+lease: the worker id, the inclusive `batch_end`, and the **distinct** set of `xxh3_128` hashes
+delivered.
+
+The fast path fires for a `(partition, worker)` ack group only when all three hold:
+
+1. every item in the group has status `completed`;
+2. the acked hash set **exactly equals** the lease's delivered hash set;
+3. the request's `leaseId` matches the lease's worker.
+
+When they do, the ack becomes a single positional cursor advance,
+`queen.log_ack_at_v1(pid, group, worker, batch_end, true, count)`, with no hash resolution at all.
+
+The soundness argument is short: with every delivered message acked `completed` and none failed,
+retried or dead-lettered, the implicit-ack rule advances `committed` to the maximum acked position,
+which is `batch_end`; there is nothing below the cursor, no signal to clamp at, and no retry or DLQ
+hand-off. Every other case (a partial ack, any non-`completed` status, a worker mismatch, an
+unknown, evicted or expired entry) never reaches the fast path and takes the verbatim SQL path, so
+below-cursor honesty, the retry budget and DLQ hand-off are preserved *by construction*: those code
+paths are untouched.
+
+And `log_ack_at_v1` still re-validates the lease under the consumer row lock. A stale registry hit
+(a lease that expired or was reassigned between pop and ack) is rejected by PostgreSQL and falls
+back to the hash path. **The registry can never grant an ack PostgreSQL would refuse.**
+
+Two implementation notes:
+
+- **Set equality, not multiset.** The stored set is distinct hashes. The cover test is meant to be
+  order- and multiplicity-insensitive, and the degenerate case (two delivered messages sharing one
+  `transactionId`) collapses to one member. But acking that `transactionId` acks both offsets in the
+  SQL model too, so advancing to `batch_end` stays correct.
+- **One global mutex**, deliberately. The work under the lock is one lookup, one `HashSet ==`
+  against a prebuilt set, and one removal; the request-side set is built off-lock. The ack rate is
+  the message rate divided by the pop batch size, which is small. Sharding is a drop-in if a
+  tiny-batch workload ever needs it.
+
+Entries are born on a leasing pop that delivered at least one frame, in every leasing variant:
+wildcard binary and wire, specific-partition, discovery, and the mesh hint-targeted pop. They die on
+a fast-path hit, on any SQL-path ack outcome for that `(partition, group)` (lease release, nack, DLQ
+hand-off, partial ack), on TTL expiry (the lease length plus a 10-second margin), or to LRU eviction
+under `QUEEN_ACK_REGISTRY_MB` (default 64). The TTL is a memory bound, not a correctness mechanism.
+PostgreSQL's lease validation is what protects against a late ack. A full sweep runs opportunistically
+on insert, at most every 5 seconds, so no background task is needed. Every death mode degrades to the
+SQL path.
+
+`QUEEN_ACK_REGISTRY=0` disables it.
+
+## Accelerator two: ack fusion
+
+A registry hit is one cursor advance, but still one transaction, hence one commit and one fsync.
+Since a cursor advance is **monotone and idempotent** (acking to offset 200 implies everything
+through 200, including an earlier ack to 100), many independent advances can fuse into one
+transaction with no loss of semantics. That is what collapses the ack commit rate so the push
+pipeline stops queueing behind a flood of tiny ack fsyncs.
+
+The mechanism mirrors push fusion:
+
+- **Sharded** by hash of the partition id (`QUEEN_ACK_FUSION_SHARDS`, default 8), so all acks for a
+  given partition land in one shard and both same-key folding and per-partition commit order are
+  intra-shard and race-free.
+- **Fire-on-idle.** At most one flush per shard is in flight. On arrival with nothing in flight the
+  shard flushes immediately, so at low load an ack commits in about one round trip, a flush of
+  exactly one row. Under load, arrivals accumulate for the in-flight flush's duration and the next
+  flush commits all of them. Batch size is emergent. `QUEEN_ACK_FUSION_HOLD_MS` (default 3) is a
+  liveness backstop tick, not a latency floor.
+- **Folding.** Entries with the same `(partition, group, worker)` fold to `max(batch_end)`, and every
+  folded request receives that row's verdict, which is sound by monotonicity. Two *different* workers
+  on one `(partition, group)` do **not** fold; they stay separate rows, each independently validated
+  by the procedure's per-row worker and lease guard.
+- **Synchronous response.** The HTTP response resolves only when the flush commits, so a `200` still
+  means the cursor is durable.
+
+The commit is `queen.log_ack_multi_v1(pids[], groups[], ends[], workers[], counts[])`. Each row runs
+the identical per-row procedure as `log_ack_at_v1` with `ok = true`: lock the consumer row, validate
+worker and lease only when the worker is non-empty, clamp to the leased `batch_end`, advance
+`committed`, release the lease, bump `total_consumed`. There is no nack, retry or DLQ branch, because
+the fusion path only ever enqueues full-batch completed acks.
+
+Two invariants in that procedure are load-bearing:
+
+- **Deterministic lock order.** Rows are processed `ORDER BY (partition_id, consumer_group)`, so every
+  flush takes its consumer-row locks in one total order, the same discipline as the push pre-lock and
+  the transaction wire's ack loop. Flushes are sharded so two never share a consumer row, but the
+  ordering also keeps a flush from deadlocking against the transaction wire or a pop touching the same
+  rows.
+- **Result realignment.** Verdicts are emitted by *input ordinal*, not execution order, so the caller
+  maps each verdict back to its enqueue slot.
+
+Three verdicts come back per row:
+
+| Verdict | Meaning | Client sees |
+| --- | --- | --- |
+| `Committed` | the cursor advanced durably | success, lease released |
+| `Rejected` | the row was rejected (stale or expired lease, batch clamp) but the flush committed | falls back to the hash path for that one client |
+| `FlushErr` | the whole flush failed: pool, infrastructure, timeout, parse | an error; the lease expires and the batch redelivers |
+
+`QUEEN_ACK_FUSION=0` reverts to the synchronous single `log_ack_at_v1` call.
+
+The `ack-fusion` log target emits a `coalesce summary` about every ten seconds with `commits`, `rows`
+and `rows_per_commit`. That is the direct broker-side evidence to cross-check against
+`pg_stat_statements`, where `log_ack_multi_v1.calls` should be far below the total ack count.
+
+## One connection discipline that matters
+
+With fusion on, the ack handler never holds a pooled connection while parked on a flush commit. If it
+did, once more acks parked than the pool is deep, the flush task, which needs its own connection from
+the same pool, would deadlock. So the shared client is acquired lazily for the SQL paths and released
+at the end of each group's iteration. With fusion off, the client is acquired once up front and held
+across the loop, exactly as before.
+
+## The positional variants
+
+Three positional ack procedures exist, and the difference is only how the partition is addressed:
+
+| Procedure | Addressed by | Used by |
+| --- | --- | --- |
+| `log_ack_v1` | `(queue, partition)` names, tenant-scoped | the transaction wire's positional form |
+| `log_ack_at_v1` | `partition_id` | the registry fast path |
+| `log_ack_multi_v1` | arrays of `partition_id` | ack fusion |
+
+The ack wire is partition-id-keyed and carries no partition name (nor, for a discovery pop, a queue
+name), so the fast paths address by id rather than paying a name-to-id join per ack, which would
+reintroduce exactly the work they exist to remove.
+
+## Lease renewal
+
+`POST /api/v1/lease/:leaseId/extend` calls `queen.log_renew_lease_v1(worker, seconds)`, which renews
+**every live lease held by that worker** (a multi-partition pop shares one worker id). It uses
+`GREATEST`, so renewing can never shorten a lease, and reports the **minimum** expiry across the
+renewed rows, since the earliest deadline is what the caller needs in order to schedule the next
+renewal. It always answers `200`; renewal is best-effort.
+
+With tenancy enabled there is an ownership gate, and its shape is instructive. The route is addressed
+by lease id alone (bearer-token semantics) and the procedure carries no tenant, so a leaked lease id
+would otherwise let one tenant keep another tenant's batch leased and delay its redelivery. The gate
+and the renewal are therefore **one statement**: the procedure is projected only when a single
+`EXISTS` proves that a live lease of that worker sits on a partition of the requesting tenant. No row
+back means the unknown-lease body, so a foreign lease is indistinguishable from an expired or
+never-existent one.
+
+## Acks inside a transaction
+
+`POST /api/v1/transaction` bundles pushes and acks into one `queen.log_transaction_wire_v1` call, one
+PostgreSQL transaction, all or nothing. Its ack elements come in both forms: positional (`uptoOff`)
+when the pop was served by this process, and hash-resolved (an `acks` array of hex tokens) when it was
+not, for instance when another broker answered the pop, so there is no local registry entry.
+
+Every failure raises, which rolls back everything else in the batch: a duplicate push escalates to
+`unique_violation` with a `QDUP` message, and an ack soft failure (`ok: false` for an invalid or
+expired lease, or a position beyond the leased batch) escalates likewise. The lock discipline is the
+same total order used everywhere: provisioning, then partition rows ascending by id, then consumer
+rows ascending by `(partition_id, group)`. Consumer locks are only ever taken after all partition
+locks, so the two lock spaces cannot form a cycle.
+
+The transaction is atomic, but it is not exactly-once end to end. A lost response plus a client retry
+still duplicates unless the `transactionId` is deterministic and the retry lands inside the
+deduplication window.

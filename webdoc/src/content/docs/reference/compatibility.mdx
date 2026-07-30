@@ -1,0 +1,176 @@
+---
+title: Versions and compatibility
+description: "What 1.0.0 covers, why the HTTP API is the only compatibility surface, what applying the schema at every boot means for upgrades, and why coming from 0.16 is not a data migration."
+type: reference
+tier: operate
+sidebar:
+  order: 20
+  label: Compatibility
+sourceOfTruth:
+  - server/src/schema.rs
+  - server/src/migrate.rs
+  - server/src/main.rs
+  - server/sql/procedures/040_log_drop_legacy.sql
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/build.rs
+---
+
+Queen MQ 1.0.0 is one broker binary plus a set of client SDKs released at the
+same version: JavaScript, Python, Go, PHP (Laravel), C++, and a Go command-line
+client. The broker reports its version on `GET /health` and in its boot log; the
+value is compiled in from a single file, so the binary, the container tag and the
+health document can never disagree.
+
+## The HTTP API is the compatibility surface
+
+The contract is the HTTP API: the paths under `/api/v1` and `/streams/v1`, their
+methods, their JSON field names, and the status-code behaviour described in
+[Status codes and error bodies](/reference/errors). An SDK is a convenience over
+that surface, not a separate contract: anything an SDK can do, a plain HTTP call
+can do.
+
+Everything else is an implementation detail and changes without notice:
+
+- the SQL schema, the table shapes, and all stored-procedure names and signatures;
+- the routes under `/internal/`, which exist for broker-to-broker traffic;
+- the multi-broker mesh frame format;
+- the embedded dashboard bundle;
+- the boot log's field names.
+
+Two consequences follow from taking the JSON field names (rather than their
+meaning) as the contract. First, fields are added, not renamed: a client must
+ignore fields it does not know. Second, some fields are **opaque by contract**.
+`seq` and `startOff` on a pop response kept their names across the storage-engine
+rewrite while their meaning changed completely: `seq` now carries a segment's
+base offset and `startOff` a frame index within it. A client that treats them as
+tokens to hand back is correct; a client that does arithmetic on them is not.
+
+## The schema is applied at every boot
+
+The broker owns its own schema. It embeds `schema.sql` and 34 stored-procedure
+files into the binary at compile time and applies all of them on every start,
+in lexical file order, before it accepts a request.
+
+Three properties make that safe to do on every boot:
+
+- **Idempotent statements.** `CREATE TABLE IF NOT EXISTS`,
+  `CREATE OR REPLACE FUNCTION`, `ADD COLUMN IF NOT EXISTS`. Re-applying is a
+  no-op when nothing changed.
+- **Serialised across instances.** The apply holds a session advisory lock, so a
+  rolling restart of several brokers cannot run two DDL passes concurrently.
+- **Fail-fast.** Any DDL error aborts the boot with the failing file named in the
+  message. A broker never serves against a schema it could not bring to the
+  expected shape.
+
+Order is load-bearing rather than incidental: the `04x` log-engine files
+deliberately redefine shared procedures that the earlier `007`–`018` files
+create. That is why the applier walks the whole list every time instead of
+tracking a migration version.
+
+### What that means for an upgrade
+
+Deploy the new binary. It brings the schema forward itself; there is no migration
+step, no version table, and nothing to run by hand.
+
+Two details are worth knowing before rolling several instances at once. A
+redefinition that changes a procedure's return type cannot be a
+`CREATE OR REPLACE`, so those are expressed as a drop followed by a create. The
+pop family is the notable case. And the advisory lock only serialises applies
+against each other: it does not stop an older instance from continuing to serve
+while a newer one rewrites shared procedures. Roll instances one at a time, and
+do not point two different broker versions at one database as a steady state.
+
+A **downgrade** is not covered by any of this. An older broker boots and
+re-applies its *own* older definitions over the newer ones, and the drop step
+described below is not reversible. Roll back by restoring a dump, not by
+restarting an older image.
+
+### Running as a low-privilege user
+
+`QUEEN_APPLY_SCHEMA=0` skips the apply entirely. A privileged role then owns the
+DDL and pre-applies it, and the broker's own database user needs no `CREATE`
+rights. The trade is that the ordering guarantee becomes yours: a broker that
+skips the apply and finds an older schema fails on the first request that needs a
+missing object, not at boot.
+
+With the apply enabled, the database user needs `CREATE SCHEMA` and nothing else.
+The schema requires **no extensions**: `gen_random_uuid()` is used as a core
+built-in, not the `pgcrypto` function. The test matrix runs against
+PostgreSQL 16.
+
+## Coming from the retired 0.16 broker
+
+The 0.16 broker was a different implementation: C++, and a different storage
+engine. Replacing it with 1.0.0 is **not a data migration**, and there is no tool
+that makes it one.
+
+**There is no importer.** The `migrate` subcommand still exists so the CLI entry
+compiles, and all it does is log
+`migration is not supported on the log engine` and exit 1. It never opens a
+database connection. There are no migration HTTP endpoints either.
+
+**The boot apply deletes the retired segments engine's objects.** The first
+log-engine file runs before the new schema is created and, driven off the system
+catalogs rather than a hardcoded list, drops every `queen.seg_*` function (with
+`CASCADE`) and every `queen.seg_*` table, then drops the cursor columns that
+engine had grafted onto `queen.partition_consumers`. On a database that never had
+them it is a no-op. On one that does, it is a full teardown (including the
+message data in those tables) and it is not reversible.
+
+<Aside type="danger">
+Point 1.0.0 at a database that still carries `queen.seg_*` tables and their
+contents are dropped during boot, before the broker serves a request. Take a
+`pg_dump` first, and prefer a fresh database or a fresh schema for the new broker.
+</Aside>
+
+**The rows-era tables survive, and stay unread by the message plane.**
+`schema.sql` still creates `queen.messages` and its neighbours, and their contents
+are left alone. A few management readers still consult them: the dead-letter
+listing, for instance, unions the old dead-letter table with the log engine's own,
+so an old row there is not hidden. But the log engine writes and reads messages
+only in its own `queen.log_*` tables, and nothing copies rows across. Old messages
+in `queen.messages` are therefore invisible to push, pop and ack.
+
+The practical upgrade is therefore a cutover, not an in-place migration: stand up
+1.0.0 against a clean database, move producers over, let the old consumers drain
+the old broker, and keep a dump of the old database as the record.
+
+Backup and restore are plain `pg_dump` and `pg_restore`. The broker offers no
+backup endpoint.
+
+## Mixed versions in a mesh
+
+A multi-broker deployment can be rolled one instance at a time. Where a frame
+from an older peer omits information a newer instance expects (the tenant on a
+wake or invalidation frame), the newer instance fans the effect out rather than
+guessing: it wakes every tenant holding that queue name and drops every tenant's
+cache entry for it. Over-waking costs one empty probe; over-invalidating costs one
+lazy re-fetch. Neither is a correctness problem, so a mixed-version mesh is safe.
+
+<Aside type="danger">
+This tolerance is not authentication. Post-handshake mesh frames are
+unauthenticated JSON, and the frame set includes one that flips maintenance mode.
+Firewalling the mesh port is a requirement, not a recommendation. See
+[Self-hosting](/selfhost).
+</Aside>
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/reference/config"
+    title="Environment variables"
+    description="QUEEN_APPLY_SCHEMA, the mesh variables, and everything else the boot reads."
+  />
+  <LinkCard
+    href="/selfhost"
+    title="Self-hosting"
+    description="Deployment, database privileges, TLS termination and the mesh."
+  />
+  <LinkCard
+    href="/internals"
+    title="Internals"
+    description="The log engine, segments, offsets and the maintenance steps."
+  />
+</CardGrid>

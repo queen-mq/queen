@@ -1,0 +1,395 @@
+---
+title: Queue options
+description: "Every option POST /api/v1/configure accepts and enforces, with its default, its effect, and what changing it does to data already in the queue."
+type: reference
+tier: use
+sidebar:
+  order: 21
+sourceOfTruth:
+  - server/sql/procedures/012_configure.sql
+  - server/src/handlers/queues.rs
+  - server/sql/schema.sql
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/044_log_ack.sql
+  - server/sql/procedures/045_log_maintenance.sql
+  - server/src/retention.rs
+  - server/src/hotlist.rs
+---
+
+`POST /api/v1/configure` creates or updates a queue's configuration. It is a
+**full replace**, not a patch.
+
+<Aside type="danger">
+Every key you omit is reset to its default. Configuring `retentionEnabled` on a
+queue that already had `dedupWindowSeconds: 300` silently puts the deduplication
+window back to 3600. Always send the complete set of options you want the queue
+to have, and keep it in version control rather than reconstructing it from
+memory.
+</Aside>
+
+A queue does not need to be configured at all: the first push creates it, with
+every column at its default except `namespace` and `task`, which are derived
+from the queue name. `/configure` is how you move off those defaults.
+
+## Sending it
+
+The body carries the queue name and the options, which may be nested or
+top-level:
+
+```json
+{"queue":"orders.shipped","options":{"leaseTime":120,"retryLimit":5}}
+```
+
+Only `queue` is required, and it must be a string. An empty string is a valid
+queue name. `namespace` and `task` are read from the options object, and are also
+accepted at the top level. Anything else at the top level is treated as an option
+when no `options` object is present.
+
+The response is HTTP 200 with `configured: true`, the queue and default partition
+ids, the queue name, its namespace and task, and an `options` object echoing the
+resolved values. One option is missing from that echo: `dedupWindowSeconds` lives
+on the storage engine's own row, so it is applied but not reflected back, and no
+read endpoint reports it either. Keep the value you sent; the API will not tell
+you what it is.
+
+## Where the values live
+
+Two rows are written on every `/configure` call, and knowing which is which
+explains most of the timing behaviour below.
+
+The **configuration row** holds everything in this page except the deduplication
+window. It is what the pop path reads for visibility rules, what the ack path
+reads for the retry budget and dead-lettering, and what the maintenance service
+reads for retention cutoffs.
+
+The **engine row** holds the lease time and the deduplication window: the two
+values the hot push and pop paths need without a join. `/configure` copies the
+resolved lease time into it, which is why the lease default differs depending on
+how the queue was created.
+
+## At a glance
+
+| Option | Type | Default | Enforced by |
+| --- | --- | --- | --- |
+| `namespace` | string | `""` | Discovery pop, namespace listings |
+| `task` | string | `""` | Discovery pop, task listings |
+| `leaseTime` | integer (s) | `300` | Pop, when the request sends no `leaseSeconds` |
+| `retryLimit` | integer | `3` | Ack, on explicit `failed` |
+| `deadLetterQueue` | boolean | `true` | Ack, when the retry budget is exhausted |
+| `dlqAfterMaxRetries` | boolean | `true` | Ack, combined with the previous flag by `OR` |
+| `delayedProcessing` | integer (s) | `0` | Pop, in SQL, always |
+| `windowBuffer` | integer (s) | `0` | Pop, in SQL or in the broker's scheduler |
+| `retentionEnabled` | boolean | `false` | Maintenance service |
+| `retentionSeconds` | integer (s) | `0` | Maintenance service, rule 1 |
+| `completedRetentionSeconds` | integer (s) | `0` | Maintenance service, rule 2 |
+| `maxWaitTimeSeconds` | integer (s) | `0` | Maintenance service, independently of `retentionEnabled` |
+| `minPopWaitTime` | integer (ms) | `0` | Pop, in the broker |
+| `encryptionEnabled` | boolean | `false` | Push, if a valid key is configured |
+| `dedupWindowSeconds` | integer (s) | `3600` | Push, in SQL, under the partition lock |
+
+## namespace
+
+**Type** string. **Default** `""`.
+
+A grouping label. Its only functional role is the discovery pop
+(`GET /api/v1/pop?namespace=…`), which matches it for **exact equality** across
+every queue of the tenant, and the namespace listing endpoints. For a queue
+created implicitly by a push, it is derived from the queue name: the part before
+the first `.`.
+
+Changing it moves nothing. Messages stay where they are; the queue simply starts
+matching a different discovery pop from the next call onwards. A consumer group
+that was discovering the old namespace stops seeing the queue, keeping its cursor
+exactly where it was.
+
+## task
+
+**Type** string. **Default** `""`.
+
+The second discovery dimension, matched the same way, and derived for a
+push-created queue from the name between the first and second `.` (empty when the
+name has no dot). Same change semantics as `namespace`.
+
+## leaseTime
+
+**Type** integer, seconds. **Default** `300` from `/configure`; the engine row's
+column default of **60** applies to a queue created by a push.
+
+How long a leased batch stays invisible to other consumers in the same group. A
+pop resolves its lease as: the request's `leaseSeconds` when positive, else this
+value, else 60 if the queue has no engine row or the lookup could not reach the
+database.
+
+Changing it affects **new** pops only. Leases already issued keep the expiry they
+were given. The broker that served the `/configure` drops its cached copy
+immediately, and notifies its peers; a peer that misses the notification picks up
+the change within `QUEEN_CACHE_REFRESH_INTERVAL_MS` (60 s by default).
+
+<Aside type="caution">
+The queue detail endpoint reports `leaseTime` from the configuration row, while
+the pop path reads it from the engine row. On a queue created by a push and never
+configured, those disagree: the detail view says 300 and the actual lease is 60.
+One `/configure` call makes them agree, because it writes both.
+</Aside>
+
+Set it longer than your slowest realistic message handler. A lease that expires
+while a consumer is still working means the batch is redelivered to someone else,
+and because the retry budget is only charged by explicit `failed` acks, lease
+expiry can redeliver indefinitely without ever dead-lettering.
+
+## retryLimit
+
+**Type** integer. **Default** `3`.
+
+The number of explicit `failed` acks a leased batch may accumulate before the
+broker dead-letters or drops the failing message. The counter lives per
+(partition, consumer group) and is reset when a batch completes.
+
+Only an explicit `failed` charges it. A `retry` status releases the lease without
+charging, and a lease expiry does not charge either, so this is a budget for
+*reported* failures, not for delivery attempts.
+
+Changing it takes effect on the next `failed` ack, and existing counters are
+**not** reset. Lowering the limit below a partition's current counter means the
+next `failed` ack on that partition dead-letters immediately.
+
+## deadLetterQueue
+
+**Type** boolean. **Default** `true`.
+
+Whether a message that exhausts the retry budget is written to the dead-letter
+table. `true` for an unconfigured queue, so dead-lettering is the default
+behaviour.
+
+Changing it affects only future budget exhaustions. Rows already in the
+dead-letter table stay there. Nothing purges them, including retention.
+
+## dlqAfterMaxRetries
+
+**Type** boolean. **Default** `true`.
+
+A second flag with the same meaning, kept for compatibility. The ack path
+combines the two with `OR`.
+
+<Aside type="caution">
+Because the two flags are OR-ed, setting `deadLetterQueue: false` alone does
+nothing. Both must be `false` to disable dead-lettering, and when they are, a
+message that exhausts its retry budget is **dropped**: the cursor advances past
+it and the ack reports `dropped: true`. That is silent data loss, chosen
+deliberately over an unbounded redelivery loop.
+</Aside>
+
+## delayedProcessing
+
+**Type** integer, seconds. **Default** `0` (off).
+
+A visibility delay. Only segments at least this old are delivered, so a message
+becomes available `delayedProcessing` seconds after it was committed. This rule
+is always enforced in SQL: the broker's in-memory scheduler only schedules a
+revisit, it never bypasses the cut.
+
+Because a partition's commit timestamps are monotone, the delay cuts a contiguous
+recent tail, and the pop scan stops at the batch budget before ever reaching it.
+
+Changing it applies to existing messages immediately in SQL: raising it hides
+messages that were visible a moment ago, and lowering it exposes them. The
+broker's scheduling copy of the value refreshes within 30 s, so a *lowered* delay
+can take up to that long to wake a parked consumer, even though a fresh pop sees
+the change at once.
+
+## windowBuffer
+
+**Type** integer, seconds. **Default** `0` (off).
+
+A quiet-period debounce, evaluated per partition: while the partition has
+received a segment within the last `windowBuffer` seconds, it delivers **nothing**.
+The intent is to batch a bursty writer into fewer, fatter deliveries.
+
+The rule has two implementations, and which one runs matters:
+
+- With `QUEEN_HOTLIST` on (the default), the broker's timer wheel owns it. A
+  partition is held until its first mark plus the window, or promoted early once
+  the accumulated batch reaches `QUEEN_HOTLIST_WINDOW_BATCH` (100 messages),
+  whichever comes first. The SQL debounce is bypassed for the queue once the
+  broker has read a positive window from its configuration; until then SQL stays
+  the floor.
+- With `QUEEN_HOTLIST=0`, only the SQL debounce runs, and it has no early
+  promotion.
+
+<Aside type="caution">
+Under the SQL-only path, a partition written to more often than every
+`windowBuffer` seconds is never delivered at all: each pop finds a segment inside
+the quiet window and returns empty. The broker's wheel is what makes a continuously
+written partition still deliver at first mark plus the window.
+</Aside>
+
+Changing it does not touch stored data. As with `delayedProcessing`, the broker's
+copy refreshes within 30 s.
+
+## retentionEnabled
+
+**Type** boolean. **Default** `false`.
+
+The master switch for the two time-based retention rules. Retention is opt-in:
+without this flag, and without a positive window, the maintenance service does no
+deletion work for the queue at all, and a queue grows until you delete it.
+
+Turning it on with a window already configured makes the next maintenance cycle
+start deleting eligible segments, at most `RETENTION_INTERVAL` (5 s) away.
+Turning it off stops future deletion; it does not bring anything back.
+
+## retentionSeconds
+
+**Type** integer, seconds. **Default** `0`. **Requires** `retentionEnabled` and a
+positive value.
+
+Deletes whole segments older than `now - retentionSeconds`, **regardless of
+whether anything consumed them**. This is the explicit "drop unconsumed data after
+N seconds" knob, and it will delete a backlog a consumer never read.
+
+Deletion is whole-segment: a segment survives until every message in it is past
+the cutoff. Consumers whose cursor was inside the deleted range resume at the next
+existing offset (the pop scan tolerates the gap), so they silently skip the
+deleted messages rather than erroring.
+
+Lowering the value takes effect on the next cycle and can delete a large backlog,
+in bounded steps of `RETENTION_BATCH_SIZE` segment rows per transaction so pushes
+interleave.
+
+## completedRetentionSeconds
+
+**Type** integer, seconds. **Default** `0`. **Requires** `retentionEnabled` and a
+positive value.
+
+Deletes segments older than `now - completedRetentionSeconds`, but only up to
+what has actually been consumed: the boundary is capped at the *slowest* consumer
+group's cursor across the partition. Unconsumed backlog is never lost to this
+rule.
+
+A partition with no consumer group rows has consumed nothing, so this rule
+contributes nothing there: old-but-unconsumed segments survive. That is the
+intended asymmetry with `retentionSeconds`: use this one to reclaim space behind
+your consumers, and that one to enforce a hard age limit.
+
+One side effect is worth knowing: this value also participates in the retention
+window of the transaction-hash sidecar, described under `dedupWindowSeconds`.
+
+## maxWaitTimeSeconds
+
+**Type** integer, seconds. **Default** `0` (off).
+
+**Deletes whole segments older than the cutoff for every consumer group, including
+in-flight leased batches.** The SQL calls this data loss by design. It does not
+dead-letter, does not notify, and does not wait for a consumer.
+
+It is the one deletion rule that ignores `retentionEnabled`: a queue configured
+with only `maxWaitTimeSeconds` still gets swept. Mechanically it is the same
+boundary walk and prefix delete as `retentionSeconds` with a different cutoff
+source, and consumers left behind the new watermark resume at the next existing
+offset.
+
+Use it when stale data is worse than lost data: a live telemetry lane where a
+message older than the window has no value. Do not use it as a retention policy
+for anything you would want to audit.
+
+## minPopWaitTime
+
+**Type** integer, milliseconds. **Default** `0` (off). Clamped to 0–60000.
+
+How long a pop may hold an under-full batch back so one commit carries more
+messages. The wait happens in the broker, before it takes a serving permit or a
+pooled connection, so a waiting pop costs a timer and nothing else.
+
+It engages only when all of these hold: the value is positive, the caller sent
+`wait=true`, the requested batch is larger than 1, the queue is **not** empty, and
+the broker's estimate of what a claim would take right now is below the batch
+size. The wait is also capped by the caller's own remaining timeout. Otherwise the
+pop is served immediately, exactly as if the option were 0.
+
+An empty queue is not this option's case: that belongs to the long-poll park and
+wake path, which is unaffected.
+
+Changing it affects future pops, with the broker's copy refreshing within 30 s.
+The two counters `queen_pop_fill_wait_total` and
+`queen_pop_fill_wait_microseconds_total` tell you whether the lever is actually
+engaging.
+
+## encryptionEnabled
+
+**Type** boolean. **Default** `false`.
+
+Stores payloads pushed to this queue as an AES-256-GCM envelope instead of
+plaintext. It requires `QUEEN_ENCRYPTION_KEY` to be a valid 64-hex-character key.
+
+<Aside type="danger">
+With no key, or a malformed one, the broker logs a warning and disables
+encryption: pushes to a queue flagged `encryptionEnabled` then succeed and store
+**plaintext**. Nothing in the response says so. Verify the key in the boot log
+before relying on this flag.
+</Aside>
+
+Changing it is not retroactive in either direction. Existing messages are not
+re-encrypted when you turn it on, and not rewritten when you turn it off.
+Decryption is decided per message by sniffing the stored envelope, not by the
+queue's current flag, so a queue can hold both forms and both read back correctly.
+
+One timing wrinkle: the broker that served the `/configure` invalidates its cached
+lease time immediately but not its cached encryption flag, so on that instance a
+flip can take up to `QUEEN_CACHE_REFRESH_INTERVAL_MS` (60 s) to apply. Configure
+encryption before you start producing, not while.
+
+## dedupWindowSeconds
+
+**Type** integer, seconds. **Default** `3600`. Stored on the engine row, and not
+echoed in the `/configure` response.
+
+The window within which a repeated `transactionId` is recognised as a duplicate
+for the same partition. Deduplication is **on by default**; only an explicit `0`
+turns it off. Enforcement is in SQL, probing the transaction-hash sidecar under
+the partition's row lock *before* an offset is allocated, so a duplicate writes
+nothing at all and the push reports `status: "duplicate"` with the original
+message's id.
+
+Two things this option also controls, both easy to be surprised by:
+
+- **How long an ack can be resolved.** Acks arrive addressed by `transactionId`
+  and are resolved through the same hash sidecar. The sidecar is purged on a
+  window of `GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900 s)`, so
+  shrinking the deduplication window also shortens the period in which a late ack
+  can still be matched. Past it, the ack is reported as `unresolvable` rather than
+  silently succeeding. If the batch is still leased, the message
+  redelivers.
+- **Broker memory.** The dedup cache holds roughly 16 bytes per in-window message
+  hash across active partitions, so the working set scales with rate × window. The
+  cache degrades gracefully under `QUEEN_DEDUP_CACHE_MB`: partitions that do not
+  fit fall back to a full SQL probe rather than thrashing.
+
+Changing the value is picked up by SQL at once and by the broker's per-partition
+cache within 30 s. Widening the window forces that cache to rebuild, because
+hashes it had already expired are back in scope.
+
+Setting it to `0` is a real choice with a real cost: pushes get cheaper, and a
+client retry after a lost response duplicates the message. Do that only where the
+consumer is idempotent.
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/reference/defaults"
+    title="Defaults"
+    description="These defaults alongside the environment and request-parameter ones."
+  />
+  <LinkCard
+    href="/reference/errors"
+    title="Status codes and error bodies"
+    description="What a rejected configure call returns, and how ack outcomes are reported."
+  />
+  <LinkCard
+    href="/use"
+    title="Use Queen"
+    description="Consumer groups, leases, retries and dead-lettering in context."
+  />
+</CardGrid>

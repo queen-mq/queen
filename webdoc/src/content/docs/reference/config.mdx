@@ -1,0 +1,154 @@
+---
+title: Environment variables
+description: "How the broker reads configuration, which variables an operator actually touches, and every variable with the default the code applies."
+type: reference
+tier: operate
+sidebar:
+  order: 16
+  label: Configuration
+sourceOfTruth:
+  - server/src/config.rs
+  - server/src/main.rs
+  - server/src/obs.rs
+  - server/src/schema.rs
+  - server/src/encryption.rs
+---
+
+The broker has no configuration file and no command-line flags. Every knob is an
+environment variable, read once by `config::load()` during boot, before the HTTP
+listener binds. There is no reload: changing a variable means restarting the
+process. The one argument the binary accepts is the subcommand `migrate`, which
+exists only to report that offline migration was retired and exit non-zero.
+
+## One boolean parser
+
+Every boolean in the broker goes through the same parser, so `=on`, `=1` and
+`=true` mean the same thing everywhere. The accepted spellings are
+`true/false`, `1/0`, `yes/no`, `on/off`, case-insensitive, surrounding
+whitespace trimmed.
+
+Three outcomes, and only three:
+
+- **Recognised value**: used.
+- **Unset, or present but empty or whitespace-only**: the documented default.
+  `JWT_ENABLED=` in a Compose file means "leave it alone", not `false`.
+- **Anything else**: a **fatal boot error**. The process logs
+  `FATAL: JWT_ENABLED="maybe" is not a boolean (expected true/false, 1/0, yes/no, on/off)`
+  and exits 1.
+
+That last rule exists because the alternative failed in both directions: a
+strict parser with a silent fallback turned `JWT_ENABLED=1` into a broker
+running with authentication off and nothing in the log. Booleans read outside
+`config.rs` (`QUEEN_LOG_JSON`, `QUEEN_APPLY_SCHEMA`, `QUEEN_V2_BUNDLE_LOG`)
+are validated eagerly at the same moment, so every boolean mistake in a
+deployment surfaces on the same boot with the same message.
+
+<Aside type="caution">
+Numbers are **not** strict. An unparseable integer or float silently resolves to
+the default: `DB_POOL_SIZE=16O` (letter O) yields 160, not an error. The
+protection against that is the boot block below, not the parser.
+</Aside>
+
+Several numeric knobs are also clamped after parsing. Interval and size knobs
+are floored at 1, and `STATS_INTERVAL_MS` and `METRICS_FLUSH_MS` are floored at
+1000 ms: a value below the floor is raised without comment.
+
+## The effective configuration is printed at boot
+
+After the JWT configuration is validated, the broker emits one `boot` block per
+subsystem (`config: server`, `postgres`, `auth`, `sync`, `engine`, `flow`,
+`jobs`, `file_buffer`, `security`, `logging`) carrying the values it actually
+resolved. A misspelled variable, a defaulted knob, or a value that came from a
+legacy alias is visible there instead of having to be inferred from behaviour.
+Read that block first when a setting appears not to have taken effect.
+
+Secrets are masked, never printed: `JWT_SECRET`, `PG_PASSWORD`,
+`QUEEN_ENCRYPTION_KEY` and `QUEEN_SYNC_SECRET` render as `<unset>` or
+`<set:32 chars>`. That is enough to tell "I forgot to mount the secret" from "I
+mounted the wrong one" without putting key material into a log shipper.
+
+## What kills the boot
+
+The broker prefers to die at startup over serving in a state you did not ask
+for. All four of these exit 1:
+
+- an unparseable boolean, as above;
+- `JWT_ENABLED=true` with no usable key material for the configured algorithm,
+  or an algorithm outside `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`,
+  `EdDSA`, `auto`;
+- a schema apply failure (unless `QUEEN_APPLY_SCHEMA=0`);
+- failure to bind `0.0.0.0:$PORT`.
+
+One important omission from that list: a malformed `QUEEN_ENCRYPTION_KEY` (not
+64 hex characters, or not hex) logs a single warning and **disables
+encryption**. Queues flagged `encryptionEnabled` then store plaintext and the
+pushes succeed. Grep the boot `config: security` block for
+`encryption_key=<set:64 chars>` before trusting at-rest encryption.
+
+## Which variables actually matter
+
+Most of the table below is measured engine tuning that should be left alone. In
+practice a deployment sets variables from these groups only.
+
+| Purpose | Variables |
+| --- | --- |
+| Reach PostgreSQL | `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` |
+| Size the connection pool and bound statements | `DB_POOL_SIZE`, `QUEEN_STMT_TIMEOUT_MS` |
+| Encrypt broker-to-PostgreSQL traffic | `PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED` |
+| Serve on a different port | `PORT` |
+| Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
+| Run more than one broker | `QUEEN_MESH_PEERS`, `QUEEN_MESH_PORT`, `QUEEN_SYNC_SECRET` |
+| Survive a database outage | `FILE_BUFFER_DIR` (must be writable and persistent) |
+| Change the maintenance cadence | `RETENTION_INTERVAL` |
+| Accept larger request bodies | `QUEEN_MAX_BODY_BYTES` |
+| Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY` |
+| Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS` |
+| Let a privileged role own the DDL | `QUEEN_APPLY_SCHEMA` |
+| Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER`. See [Self-hosting](/selfhost) |
+
+Two conventions in that list are worth stating explicitly.
+
+`LOG_LEVEL` accepts the full `EnvFilter` syntax, not just a bare level:
+`info,queen_seg::pop=debug` works. `RUST_LOG` takes precedence over it, and an
+unparseable filter falls back to `info`.
+
+`PG_DATABASE` resolves through a non-empty chain (`PG_DATABASE`, then the
+legacy `PG_DB`, then `postgres`), so an explicitly empty value falls through.
+Every other string variable keeps a present-but-empty value verbatim, which is
+how `JWT_SKIP_PATHS=""` can be used to clear the default skip list.
+
+## The variables
+
+Defaults below are the ones the code applies, extracted from `config.rs` at
+build time. Where a variable has an alias, both names read the same setting and
+the newer name wins.
+
+<Render file="generated/broker-config" />
+
+### Node identity
+
+One variable does not appear in the table because it is not read through the
+same helper: `QUEEN_SERVER_ID` names this instance in mesh heartbeats and peer
+stats. Unset, the broker uses `HOSTNAME`; with neither, it generates
+`queen-<8 hex>`. The value is cosmetic (nothing routes on it), but it is what
+makes a peer list readable in the `config: sync` boot block.
+
+## Related pages
+
+<CardGrid>
+  <LinkCard
+    href="/reference/defaults"
+    title="Defaults"
+    description="Queue options, request parameters and the values where two numbers circulate."
+  />
+  <LinkCard
+    href="/reference/prometheus"
+    title="Prometheus metrics"
+    description="What the metrics endpoint exposes, and why it is not a per-tenant surface."
+  />
+  <LinkCard
+    href="/selfhost"
+    title="Self-hosting"
+    description="Deploying the broker, securing it, and running it multi-tenant."
+  />
+</CardGrid>

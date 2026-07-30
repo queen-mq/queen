@@ -1,15 +1,92 @@
 # Changelog
 
-Release history for the Queen MQ server and client SDKs. For the at-a-glance
-compatibility table see the [README](README.md#versions--compatibility); full
-release notes live on [GitHub Releases](https://github.com/queen-mq/queen/releases).
+Release history for the Queen MQ server and client SDKs. Full release notes live on
+[GitHub Releases](https://github.com/queen-mq/queen/releases).
+
+## 1.0.0
+
+**A Rust broker on a new storage engine.** The 0.x line was a C++ implementation
+(libqueen, uWebSockets, libpq) storing one row per message in `queen.messages`. 1.0.0
+replaces both halves: the broker is a single stateless Rust binary (`queen-seg`, axum and
+tokio over a pooled `libpq`), and the storage engine is a log of compressed segments.
+
+### The storage engine
+
+A message's position is now a single monotone per-partition offset. A segment is one row
+holding many length-prefixed frames, packed and zstd-compressed, so a push writes segments
+rather than rows. Consumption state is one cursor per (partition, consumer group) in
+`queen.log_consumers`: there is no per-message delivery state anywhere in the schema, which
+is what makes tens of thousands of partitions cheap.
+
+- **Acknowledgement is an offset commit.** Acking a message commits the cursor past it and
+  implicitly completes everything before it in that partition for that group. Acks still
+  arrive addressed by `transactionId`; the broker resolves them through a 16-byte-per-frame
+  hash sidecar (`queen.log_txns`).
+- **Two honesty guarantees, both contract-tested.** An explicit `failed`, `dlq` or `retry`
+  is never skipped by a later `completed` ack in the same call: the cursor clamps at the
+  lowest signal. An ack that lands below the cursor or outside the hash window is reported
+  as a no-op rather than silently succeeding.
+- **Deduplication is exact and enforced in SQL.** The probe of the transaction-id sidecar
+  happens under the partition row lock, before an offset is allocated, so a duplicate writes
+  nothing. The broker-side cache can only narrow that probe, never change its verdict.
+- **Commits are amortised.** A fusion layer groups pending writes by partition and bundles
+  disjoint partitions into one transaction, so N segments cost one commit and one fsync.
+- **Pop candidates come from memory.** An in-process hot-list ring replaces the SQL
+  candidate scan on the wildcard pop path, with a deferred-visibility wheel for leases and
+  timed retries.
+
+### Elsewhere
+
+- **Multi-tenancy.** Native tenant scoping in the broker behind `QUEEN_TENANCY_HEADER`
+  (off by default), plus `queen_proxy`, a separate Apache-2.0 gateway with API keys, plans,
+  quotas, rate limiting, metering and a console. Documented under
+  [Self-hosting](https://queenmq.com/selfhost).
+- **Multi-broker coordination is framed TCP**, not UDP. The old `QUEEN_UDP_*` variables are
+  accepted as aliases for `QUEEN_MESH_*`. Everything the mesh carries is a best-effort hint;
+  PostgreSQL remains the only source of truth. **The mesh port must be firewalled.**
+- **The dashboard is compiled into the binary** (`rust_embed`). There is no
+  `QUEEN_STATIC_DIR` and no on-disk assets at runtime.
+- **New documentation.** [queenmq.com](https://queenmq.com) is rewritten from the current
+  source. Its route table, environment-variable reference, metric list, proxy route classes,
+  OpenAPI documents and benchmark figures are generated from the code and the archived
+  benchmark artifacts, and CI fails when any of them falls behind.
+
+### Breaking
+
+- **The migration tool is gone.** `POST /api/v1/migration/*` and its handler were removed.
+  Back up with `pg_dump` over the `queen` and `queen_streams` schemas.
+- **The retired engine's objects are dropped at boot.** Applying the 1.0.0 schema removes
+  the previous engine's tables and procedures. This is not a data migration: messages stored
+  by a 0.x broker do not carry over. Drain a queue before upgrading, or start fresh.
+- **Prometheus names moved.** The in-process counters are `queen_process_*`; the
+  `queen_cluster_*` namespace now means database-backed lifetime totals, identical on every
+  instance. Per-queue series sum across tenants, so the endpoint is not a per-tenant surface.
+- **`QUEEN_STATIC_DIR` no longer exists**, and several 0.x tuning variables
+  (`NUM_WORKERS`, `QUEEN_*_SLOTS`, `SIDECAR_*`, `RESPONSE_BATCH_*`) have no equivalent: the
+  Rust broker's concurrency is adaptive and sized from the connection pool.
+
+### Compatibility
+
+The HTTP message plane keeps the 0.16.0 contract: push, pop, ack, transaction and lease
+extension are unchanged on the wire, and an existing SDK keeps working against a 1.0.0
+broker for those calls. The SDKs are version-aligned at 1.0.0. Details, including which
+client methods target routes that no longer exist, are in
+[the compatibility reference](https://queenmq.com/reference/compatibility).
+
+Measured behaviour, with the configuration of every run attached, is at
+[queenmq.com/benchmarks](https://queenmq.com/benchmarks).
 
 ## Release History
+
+> Every row below **0.16.0 and including it** describes the retired C++ implementation and
+> its row-based storage engine. Those measurements and architecture notes do not describe
+> 1.0.0.
 
 **JS clients from version 0.12.0 can be run inside a browser**
 
 | Server Version | Description                                                                                                                     | Compatible Clients                                          |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| **1.0.0**      | **Rust broker on a segment-based log engine.** Offsets instead of row cursors, acknowledgement as an offset commit, exact windowed deduplication enforced before offset allocation, amortised commits via request fusion, an in-memory pop candidate ring, framed-TCP mesh, native multi-tenancy and a separate multi-tenant gateway. See the section above. | SDKs are version-aligned at 1.0.0; the message plane keeps the 0.16.0 wire contract |
 | **0.16.0**     | **Push-serialization architecture + SIMD JSON.** New function-split libqueen engine cluster (3 shared engines — push/ack, pop, rest — decoupled from `NUM_WORKERS`, sized by per-function connection slots). Per-partition push serialization (in-memory in-flight gate + `pg_advisory_xact_lock` + `clock_timestamp()`) makes `messages.created_at` **commit-ordered**, eliminating the cursor-skip where a message could commit behind an already-advanced pop cursor under high concurrent push. Data-path concurrency (push/pop/ack) is now **static** (Vegas retained for auxiliary lanes), and `partition_lookup` maintenance is coalesced Nagle-style. Hot-path JSON is parsed and assembled with **simdjson** (nlohmann/json fallback), cutting broker CPU on push result fan-out. Balanced ~110–120k msg/s push & pop concurrently, ~190k push-only, on a 32-core host. Validated by a 24-hour soak: **10.4 billion messages, ~119k msg/s balanced, zero loss, flat ~400 MB broker**. [See soak →](https://queenmq.com/benchmarks-0.16-soak.html) | All ≥0.14.0 clients work unchanged — HTTP contract is identical; 0.16.0 SDKs are a version-aligned release |
 | **0.15.5**     | Resolves **#30** (proxy compatible with Traefik forward-auth middleware), **#31** (write-only access role), **#32** (hardened Node base image). Robustness: malformed payloads can no longer crash a worker. Invalid UTF‑8 bytes and unpaired UTF‑16 surrogates — in a request body or in DB‑returned data — are serialized leniently and rejected with a clean **400** instead of throwing out of the event loop. Previously‑unguarded admin/metrics routes wrapped in error handling. | All ≥0.14.0 clients work unchanged |
 | **0.15.0**     | Cross-language streaming SDK: fluent `Stream` builder + `.gate()` rate limiter + tumbling/sliding/session/cron windows + event-time + watermarks shipping in `queen-mq` (JS), `queen-mq` (Python), and `client-go` — all backed by the same `/streams/v1/*` endpoints and three new stored procedures (`streams_register_query_v1`, `streams_cycle_v1`, `streams_state_get_v1`). Identical SHA-256 `config_hash` across runtimes so a query registered by one client can be resumed by a worker written in another. UUIDv7 stamping in `streams_cycle_v1` push items to preserve FIFO order in batched sink emits. | All ≥0.14.0 clients work unchanged — upgrade clients to 0.15.0 to use the streaming SDK |

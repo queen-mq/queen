@@ -3,40 +3,64 @@
 
     <!--
       ========================================================================
-      Top bar — range, autorefresh, drilldown chip, last-refresh ticker.
-      One slim row, no legend (per-row sparklines are self-evident).
+      Scope strip — whose numbers these are. Built from identity, never from a
+      fetch, so it renders during loading, during a failure and on an empty
+      page. `.scope-meta` carries the resolved range (precedence rule 2: this
+      view owns a range picker and hides no controls by role).
       ========================================================================
     -->
-    <div class="dash-bar">
-      <div class="seg">
-        <button
-          v-for="r in timeRanges"
-          :key="r.value"
-          :class="{ on: selectedRange === r.value }"
-          @click="selectedRange = r.value"
-        >{{ r.label }}</button>
-      </div>
+    <div class="scope-strip">
+      <span class="chip chip-mute">tenant scope</span>
+      <span class="scope-text">
+        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
+        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
+        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
+      </span>
+      <span class="scope-fill"></span>
+      <span class="scope-meta">{{ rangeLabel }}</span>
+    </div>
 
-      <div class="dash-live">
-        <span class="pulse" />
-        <span>live · 30s autorefresh</span>
-      </div>
+    <!--
+      ========================================================================
+      Filter card — row 1 is the range picker, the expand-all view switch, and
+      the live tick on the right. This view polls (useAutoRefresh), so the tick
+      is telling the truth; per-card `stamp()` carries panel-level freshness.
+      ========================================================================
+    -->
+    <div class="card filters">
+      <div class="card-body filter-rows">
+        <div class="filter-row">
+          <div class="filter-field">
+            <span class="label-xs">Range</span>
+            <div class="seg">
+              <button
+                v-for="r in timeRanges"
+                :key="r.value"
+                :class="{ on: selectedRange === r.value }"
+                @click="selectQuickRange(r.value)"
+              >{{ r.label }}</button>
+            </div>
+          </div>
 
-      <div class="dash-bar-right">
-        <button
-          class="dash-master-toggle"
-          @click="toggleAllRows"
-          :title="anyExpanded ? 'Collapse every metric chart' : 'Expand every metric into a full chart'"
-        >
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <!-- Two stacked rows + chevrons. Up-pointing chevrons when
-                 anything is expanded (so click "lifts up" / collapses);
-                 down-pointing when collapsed (click "drops down" / expands). -->
-            <path :d="anyExpanded ? 'M3 7l5-3 5 3M3 11l5-3 5 3' : 'M3 5l5 3 5-3M3 9l5 3 5-3'" />
-          </svg>
-          <span>{{ anyExpanded ? 'Collapse all' : 'Expand all' }}</span>
-        </button>
-        <span class="dash-refresh-tick">last refresh {{ refreshAgo }}</span>
+          <button
+            class="dash-master-toggle"
+            @click="toggleAllRows"
+            :title="anyExpanded ? 'Collapse every metric chart' : 'Expand every metric into a full chart'"
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <!-- Two stacked rows + chevrons. Up-pointing chevrons when
+                   anything is expanded (so click "lifts up" / collapses);
+                   down-pointing when collapsed (click "drops down" / expands). -->
+              <path :d="anyExpanded ? 'M3 7l5-3 5 3M3 11l5-3 5 3' : 'M3 5l5 3 5-3M3 9l5 3 5-3'" />
+            </svg>
+            <span>{{ anyExpanded ? 'Collapse all' : 'Expand all' }}</span>
+          </button>
+
+          <span class="live-tick filter-field-right">
+            <span class="pulse" />
+            <span>live · {{ refreshAgo }}</span>
+          </span>
+        </div>
       </div>
     </div>
 
@@ -51,6 +75,10 @@
     -->
     <div class="counts-strip">
       <div class="counts-group">
+        <!-- Point-in-time totals as of the last good fetch — the same label
+             QueueDetail's strip carries for the same kind of number. The
+             range picker above does not bound these. -->
+        <span class="count-item-label">now</span>
         <span class="count-item count-static" title="Messages currently stored for this tenant (retention has already swept the rest)">
           <strong>{{ overviewFailed ? '—' : formatNumber(overview?.messages?.total ?? 0) }}</strong>
           <span>stored</span>
@@ -92,7 +120,7 @@
         class="counts-group counts-group-right"
         :title="'Average rows per batch — push / pop / ack, across every tenant on this cell. Higher = healthier engine, less per-commit overhead.'"
       >
-        <span class="count-item-label">batch eff <i class="count-scope">cell</i></span>
+        <span class="count-item-label">batch eff <i class="cell-chip">cell</i></span>
         <template v-if="statusFailed">
           <span class="count-item count-static count-tight count-muted">
             <strong>—</strong><span class="count-suffix">unavailable</span>
@@ -302,8 +330,8 @@
            and each source is a route the proxy answers 404 for anyone else.
            ===================================================================== -->
       <template v-if="can('operator')">
-        <div class="metric-cell-head">
-          <span class="metric-cell-tag">CELL · OPERATOR</span>
+        <div class="cell-section cell-section-inline">
+          <span class="cell-tag">CELL · OPERATOR</span>
           <span>host and engine figures for the whole cell — every tenant on it, not just {{ actingTenantSlug || 'this tenant' }}</span>
         </div>
         <MetricRow
@@ -392,15 +420,16 @@
       <div class="card">
         <div class="card-header">
           <h3>Top queues by pending</h3>
-          <span class="muted">{{ queuesFailed ? '—' : `${enrichedQueues.length} queues` }}</span>
+          <span class="chip chip-mute">{{ queuesFailed ? '—' : `${enrichedQueues.length} queues` }}</span>
+          <span class="muted">{{ stamp(queuesQ) }}</span>
         </div>
 
         <div v-if="loadingQueues" class="card-body entity-list">
           <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:var(--r-card);" />
         </div>
 
-        <div v-else-if="queuesFailed" class="card-body entity-empty entity-failed">
-          {{ queuesErrorText }}
+        <div v-else-if="queuesFailed" class="card-body">
+          <div class="panel-err">{{ queuesErrorText }}</div>
         </div>
 
         <div v-else-if="topPendingQueues.length" class="card-body entity-list">
@@ -430,7 +459,7 @@
           </button>
         </div>
 
-        <div v-else class="card-body entity-empty">No queues</div>
+        <div v-else class="card-body"><div class="panel-msg">No queues</div></div>
 
         <div class="card-foot">
           <a class="card-foot-link" @click="$router.push('/queues')">See all queues →</a>
@@ -440,15 +469,16 @@
       <div class="card">
         <div class="card-header">
           <h3>Consumer groups by lag</h3>
-          <span class="muted">{{ consumersFailed ? '—' : `${consumers.length} total · ${laggingCount} lagging` }}</span>
+          <span class="chip chip-mute">{{ consumersFailed ? '—' : `${consumers.length} total · ${laggingCount} lagging` }}</span>
+          <span class="muted">{{ stamp(consumersQ) }}</span>
         </div>
 
         <div v-if="loadingConsumers" class="card-body entity-list">
           <div v-for="i in 6" :key="i" class="skeleton" style="height:48px; border-radius:var(--r-card);" />
         </div>
 
-        <div v-else-if="consumersFailed" class="card-body entity-empty entity-failed">
-          {{ consumersErrorText }}
+        <div v-else-if="consumersFailed" class="card-body">
+          <div class="panel-err">{{ consumersErrorText }}</div>
         </div>
 
         <div v-else-if="sortedConsumers.length" class="card-body entity-list">
@@ -482,7 +512,7 @@
           </button>
         </div>
 
-        <div v-else class="card-body entity-empty">No consumer groups</div>
+        <div v-else class="card-body"><div class="panel-msg">No consumer groups</div></div>
 
         <div class="card-foot">
           <a class="card-foot-link" @click="$router.push('/consumers')">See all consumer groups →</a>
@@ -493,7 +523,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import {
   resources,
   queues as queuesApi,
@@ -508,13 +538,18 @@ import {
 import { formatChartLabel } from '@/composables/useFormat'
 import { semanticColors } from '@/composables/useChartTheme'
 import { useAutoRefresh } from '@/composables/useRefresh'
+import { useRefreshAgo } from '@/composables/useRefreshAgo'
+import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
 import MetricRow from '@/components/MetricRow.vue'
 
-const { can, actingTenantSlug } = useIdentity()
+// The scope strip states all three slugs, so it is built from identity and
+// never from a fetch — it must survive a failed load and an empty tenant.
+const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 
 // ---------------------------------------------------------------------------
-// Range
+// Range. Quick ranges only — this view has no Custom mode, so there is no
+// custom sub-row and no applied/typed split to keep.
 // ---------------------------------------------------------------------------
 const selectedRange = ref('1h')
 const timeRanges = [
@@ -522,6 +557,9 @@ const timeRanges = [
   { label: '6h',  value: '6h',  minutes: 360 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
+const selectQuickRange = (value) => { selectedRange.value = value }
+// Resolved range, for the scope strip's free slot.
+const rangeLabel = computed(() => `last ${selectedRange.value}`)
 const getTimeRangeParams = () => {
   const r = timeRanges.find(x => x.value === selectedRange.value) || timeRanges[0]
   const now = new Date()
@@ -1238,18 +1276,12 @@ const fmtFillPct = (n) => {
 }
 
 // ---------------------------------------------------------------------------
-// Last-refresh ticker
+// Last-refresh ticker — drives the live tick in the filter card. One ticker
+// for the whole app (useRefreshAgo), so the four auto-polling views neither
+// each own a timer nor each spell the string their own way.
 // ---------------------------------------------------------------------------
 const lastRefreshAt = ref(null)
-const nowTick = ref(Date.now())
-const refreshAgo = computed(() => {
-  if (!lastRefreshAt.value) return '—'
-  const sec = Math.max(0, Math.floor((nowTick.value - lastRefreshAt.value) / 1000))
-  if (sec < 5) return 'just now'
-  if (sec < 60) return `${sec}s ago`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  return `${Math.floor(sec / 3600)}h ago`
-})
+const refreshAgo = useRefreshAgo(lastRefreshAt)
 
 // ---------------------------------------------------------------------------
 // Loading
@@ -1276,46 +1308,22 @@ watch(selectedRange, () => {
   if (can('operator')) { statusQ.refresh(); sysQ.refresh() }
 })
 
-let tickInterval = null
-onMounted(() => {
-  fetchAll()
-  tickInterval = setInterval(() => { nowTick.value = Date.now() }, 1000)
-})
-onUnmounted(() => {
-  if (tickInterval) clearInterval(tickInterval)
-})
+onMounted(fetchAll)
 </script>
 
 <style scoped>
 /* ---------------------------------------------------------------------------
-   Top bar
+   Filter card contents.
+
+   The card itself, its rows, its fields and the live tick are shared chrome
+   (.filters / .filter-rows / .filter-row / .filter-field / .filter-field-right
+   / .live-tick in style.css) — the old .dash-bar, .dash-live, .dash-bar-right
+   and .dash-refresh-tick rules were deleted with them.
+
+   The expand-all switch stays a local control: it is this view's only view
+   switch and the canon does not name it, so re-chroming it would be a
+   redesign rather than a de-duplication.
    --------------------------------------------------------------------------- */
-.dash-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-.dash-live {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
-  color: var(--text-mid);
-}
-.dash-bar-right {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.dash-refresh-tick {
-  font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
-  color: var(--text-low);
-}
 .dash-master-toggle {
   display: inline-flex;
   align-items: center;
@@ -1337,167 +1345,25 @@ onUnmounted(() => {
 }
 
 /* ---------------------------------------------------------------------------
-   Counts strip — cluster scope (left) + point-in-time perf stats (right).
-   Splits into two visual groups so the eye reads "what we have" separately
-   from "how the engine is performing right now". Both are snapshot stats,
-   no time series — they live here so the metric table below can be
-   exclusively about charts.
-   --------------------------------------------------------------------------- */
-.counts-strip {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 14px 24px;
-  padding: 12px 16px;
-  margin-bottom: 14px;
-  border: 1px solid var(--bd);
-  background: var(--ink-2);
-  border-radius: var(--r-card);
-}
-.counts-group {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.counts-group-right {
-  /* Slightly muted so the eye reads cluster counts first; perf stats
-     are still important but secondary. */
-  color: var(--text-low);
-}
-.count-item-label {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10.5px;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--text-low);
-  margin-right: 2px;
-}
-.count-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  background: transparent;
-  border: none;
-  padding: 0;
-  color: var(--text-mid);
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: color .12s var(--ease);
-}
-.count-item.count-static { cursor: default; }
-.count-item.count-tight { gap: 4px; }
-.count-item:not(:disabled):not(.count-static):hover { color: var(--text-hi); }
-.count-item:not(:disabled):not(.count-static):hover strong { color: var(--accent); }
-.count-item:disabled { opacity: .5; cursor: default; }
-.count-item strong {
-  font-family: 'JetBrains Mono', monospace;
-  font-variant-numeric: tabular-nums;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-hi);
-  letter-spacing: -.005em;
-}
-.counts-group-right .count-item strong {
-  /* Perf stats are secondary, so use medium contrast instead of high.
-     The numbers still read clearly but don't compete with the cluster
-     scope on the left. */
-  color: var(--text-mid);
-  font-size: 13px;
-}
-.count-suffix {
-  font-size: 10.5px;
-  font-family: 'JetBrains Mono', monospace;
-  color: var(--text-low);
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-.count-muted strong { color: var(--text-mid); }
-.count-sep {
-  color: var(--bd-hi);
-  font-size: 11px;
-  user-select: none;
-}
+   Hoisted out of this file by the uniform pass — see style.css:
 
-/* ---------------------------------------------------------------------------
-   Metric table — the heart of the redesign.
-   --------------------------------------------------------------------------- */
-.metric-table {
-  border: 1px solid var(--bd);
-  background: var(--ink-2);
-  border-radius: var(--r-card);
-  overflow: hidden;
-  margin-bottom: 14px;
-}
-.metric-head {
-  display: grid;
-  grid-template-columns: 14px 150px 160px 1fr 260px 24px;
-  gap: 16px;
-  padding: 9px 16px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--text-low);
-  border-bottom: 1px solid var(--bd);
-  background: color-mix(in srgb, var(--text-hi) 1.5%, transparent);
-}
-.metric-head .h-value { text-align: right; }
-.metric-head .h-spark { text-align: left; font-family: 'JetBrains Mono', monospace; letter-spacing: .04em; text-transform: lowercase; }
-@media (max-width: 1100px) {
-  .metric-head {
-    grid-template-columns: 14px 140px 140px 1fr 180px 24px;
-    gap: 12px;
-  }
-}
-@media (max-width: 900px) {
-  .metric-head {
-    grid-template-columns: 14px 1fr auto 110px 24px;
-  }
-  .metric-head > :nth-child(4) { display: none; }
-}
+     .counts-strip / .counts-group / .counts-group-right / .count-item-label /
+     .count-item / .count-static / .count-tight / .count-muted / .count-sep /
+     .count-suffix   — verbatim duplicate of QueueDetail's copy;
+     .metric-table / .metric-head / .h-spark (+ its two media queries)
+                     — verbatim duplicate of QueueDetail's copy;
+     .cell-section-inline / .cell-tag / .cell-chip
+                     — replace the local .metric-cell-head / .metric-cell-tag /
+                       .count-scope, which were a third spelling of the amber
+                       cell vocabulary QueueOperations and MetricRow also carry;
+     .panel-err / .panel-msg
+                     — replace .entity-failed / .entity-empty, which used to
+                       mean BOTH "we could not ask" and "we asked and it is
+                       nothing", separated only by italics.
 
-/* Cell section divider inside the metric table. Same amber vocabulary the
-   sidebar's CELL group uses, so "this is not your tenant's number" reads the
-   same wherever it appears. */
-.metric-cell-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-  font-size: 11px;
-  color: var(--text-low);
-  border-top: 1px solid var(--bd);
-  border-bottom: 1px solid var(--bd);
-  background: color-mix(in srgb, var(--warn-400) 5%, transparent);
-}
-.metric-cell-tag {
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: .12em;
-  color: var(--warn-400);
-  border: 1px solid var(--warn-400);
-  border-radius: var(--r-chip);
-  padding: 1px 5px;
-  white-space: nowrap;
-}
-.count-scope {
-  font-style: normal;
-  font-size: 9px;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  color: var(--warn-400);
-  border: 1px solid var(--warn-400);
-  border-radius: var(--r-chip);
-  padding: 0 3px;
-  margin-left: 4px;
-  opacity: .8;
-}
-.entity-failed {
-  color: var(--ember-400);
-  font-style: italic;
-}
+   The cell band keeps its in-table geometry (rules, not a rounded panel) via
+   .cell-section-inline: a card inside a table body reads as a nested card.
+   --------------------------------------------------------------------------- */
 
 /* The slot-defined value separators — used by compound rows like "avg / max" */
 :deep(.mr-sep) {
@@ -1606,13 +1472,6 @@ onUnmounted(() => {
   font-weight: 500;
   letter-spacing: .02em;
   margin-right: 2px;
-}
-
-.entity-empty {
-  padding: 32px 16px;
-  text-align: center;
-  color: var(--text-low);
-  font-size: 13px;
 }
 
 .card-foot {

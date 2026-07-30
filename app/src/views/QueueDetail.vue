@@ -2,44 +2,67 @@
   <div class="view-container">
 
     <!-- ======================================================================
-         Loading skeleton — shown only on first fetch; subsequent refreshes
-         leave the previous data on screen so the eye doesn't lose its place.
+         Scope strip — always first, always rendered. It is built from
+         useIdentity(), not from anything we fetched, so it still states which
+         tenant / cluster / cell these numbers belong to while the page is
+         loading and when the fetch failed.
          ====================================================================== -->
-    <div v-if="loading" style="display:flex; flex-direction:column; gap:14px;">
+    <div class="scope-strip">
+      <span class="chip chip-mute">tenant scope</span>
+      <span class="scope-text">
+        <strong>{{ actingTenantSlug || 'no tenant' }}</strong>
+        <span class="scope-sep">/</span>{{ actingClusterSlug || 'no cluster' }}
+        <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
+      </span>
+      <span class="scope-fill"></span>
+      <span class="scope-meta">{{ rangeLabel }}</span>
+    </div>
+
+    <!-- ======================================================================
+         Loading skeleton — first paint only; subsequent refreshes leave the
+         previous data on screen so the eye doesn't lose its place. The shape
+         mirrors the loaded page block for block (bar · actions · filters ·
+         counts · metric table · configuration) so nothing jumps on landing.
+         ====================================================================== -->
+    <div v-if="firstLoad" style="display:flex; flex-direction:column; gap:14px;">
       <div class="skeleton" style="height:34px; width:60%;" />
+      <div class="skeleton" style="height:30px; width:44%;" />
+      <div class="skeleton" style="height:56px; width:100%;" />
       <div class="skeleton" style="height:64px; width:100%;" />
       <div class="skeleton" style="height:360px; width:100%;" />
-      <div class="grid-2">
-        <div class="skeleton" style="height:240px;" />
-        <div class="skeleton" style="height:240px;" />
-      </div>
+      <div class="skeleton" style="height:200px; width:100%;" />
     </div>
 
     <!-- Error state. "Queue not found" is reserved for an actual 404: a 500 or
          a dropped connection is a different problem with a different fix, and
          telling the user their queue is gone is the worse of the two lies. -->
-    <div v-else-if="detailError" class="card" style="padding:24px;">
-      <p style="font-weight:600; margin-bottom:8px; color:var(--ember-400);">
-        {{ detailError.isNotFound ? 'Queue not found' : 'Cannot load this queue' }}
-      </p>
-      <p style="font-size:13px; color:var(--text-mid);">
-        <template v-if="detailError.isNotFound">
-          No queue named <strong class="font-mono">{{ queueName }}</strong> on
-          <strong>{{ actingClusterSlug || 'this cluster' }}</strong>.
-        </template>
-        <template v-else>{{ describeApiError(detailError) }}</template>
-      </p>
-      <div style="margin-top:16px; display:flex; gap:10px;">
-        <button class="btn btn-ghost" @click="fetchAll">Retry</button>
-        <button class="btn btn-ghost" @click="$router.push('/queues')">Back to queues</button>
+    <div v-else-if="detailError" class="card">
+      <div class="card-body">
+        <!-- Same block as QueueOperations' full-page failure: a card with the
+             ember-headlined `.empty-state`, because in this state there is
+             nothing else on screen for a banner to sit above. -->
+        <div class="empty-state empty-state-failed">
+          <h3>{{ detailError.isNotFound ? 'Queue not found' : 'Cannot load this queue' }}</h3>
+          <p>
+            <template v-if="detailError.isNotFound">
+              No queue named <strong class="font-mono">{{ queueName }}</strong> on
+              <strong>{{ actingClusterSlug || 'this cluster' }}</strong>.
+            </template>
+            <template v-else>{{ describeApiError(detailError) }}</template>
+          </p>
+          <button class="btn btn-ghost" @click="fetchAll">Retry</button>
+          <button class="btn btn-ghost" @click="$router.push('/queues')">Back to queues</button>
+        </div>
       </div>
     </div>
 
     <template v-else-if="statusData">
       <!-- ====================================================================
-           Detail bar — back · queue · meta · time-range · live · actions.
-           Same idiom as before, plus a Dashboard-style range selector and
-           a row of quick actions that turn this page into a launch pad.
+           Detail bar — back · queue · meta. This is page IDENTITY, not a
+           control: the breadcrumb cannot carry a queue's namespace, task and
+           partition count. The range picker and the live tick that used to
+           ride along on the right have moved into the filter card below,
+           where every other view keeps them.
            ==================================================================== -->
       <div class="qd-bar">
         <button @click="$router.push('/queues')" class="detail-back" title="Back to queues">
@@ -57,22 +80,6 @@
           <span v-if="queueData?.priority != null">· p{{ queueData.priority }}</span>
           <span v-if="queueData?.createdAt">· created {{ formatRelative(queueData.createdAt) }}</span>
         </span>
-
-        <div class="qd-bar-spacer" />
-
-        <div class="seg">
-          <button
-            v-for="r in timeRanges"
-            :key="r.value"
-            :class="{ on: selectedRange === r.value }"
-            @click="selectedRange = r.value"
-          >{{ r.label }}</button>
-        </div>
-
-        <div class="qd-live" :title="'last refresh ' + refreshAgo">
-          <span class="pulse" />
-          <span>live · {{ refreshAgo }}</span>
-        </div>
       </div>
 
       <!-- Quick actions — second row, separated so the bar above stays
@@ -110,26 +117,58 @@
         </button>
       </div>
 
+      <!-- ====================================================================
+           Page banners — facts about the whole page. Worst first: the failed
+           refresh, then the derived advisories in their own severity order.
+           ==================================================================== -->
       <!-- A refresh that failed while data is on screen: the counts and config
            below are the last good ones, not the current ones. -->
       <div v-if="detailStale" class="status-banner banner-bad view-banner">
         <span>
-          <strong>Live status did not refresh</strong> ·
-          {{ describeApiError(detailStale) }} — the counts and configuration
-          below are from {{ lastRefreshText }}.
+          <strong>Could not load live status</strong> ·
+          {{ describeApiError(detailStale) }} · showing the counts and
+          configuration that were on screen at {{ lastRefreshText }}.
         </span>
       </div>
 
+      <!-- Derived advisories — only when there's something to flag, so the
+           page is quiet on healthy queues. The tone is the severity and is
+           carried by the shared banner classes. -->
+      <div
+        v-for="(b, i) in banners"
+        :key="i"
+        class="status-banner view-banner"
+        :class="`banner-${b.tone}`"
+        @click="b.action && b.action()"
+      >
+        <span><strong>{{ b.title }}</strong> · {{ b.detail }}</span>
+        <span class="qd-banner-cta" v-if="b.cta">{{ b.cta }} →</span>
+      </div>
+
       <!-- ====================================================================
-           Banner row — appears only when there's something to flag, so the
-           page is quiet on healthy queues. Worst-first ordering.
+           Filter card — the page's only control is the range picker, so it is
+           row 1's first field; the live tick closes the row on the right.
            ==================================================================== -->
-      <div v-if="banners.length" class="qd-banners">
-        <div v-for="(b, i) in banners" :key="i" class="qd-banner" :class="`qd-banner-${b.tone}`" @click="b.action && b.action()">
-          <span class="qd-banner-dot" :class="`qd-banner-dot-${b.tone}`" />
-          <span class="qd-banner-title">{{ b.title }}</span>
-          <span class="qd-banner-detail">{{ b.detail }}</span>
-          <span class="qd-banner-cta" v-if="b.cta">{{ b.cta }} →</span>
+      <div class="card filters">
+        <div class="card-body filter-rows">
+          <div class="filter-row">
+            <div class="filter-field">
+              <span class="label-xs">Range</span>
+              <div class="seg">
+                <button
+                  v-for="r in timeRanges"
+                  :key="r.value"
+                  :class="{ on: selectedRange === r.value }"
+                  @click="selectedRange = r.value"
+                >{{ r.label }}</button>
+              </div>
+            </div>
+
+            <span class="live-tick filter-field-right">
+              <span class="pulse" />
+              <span>live · {{ refreshAgo }}</span>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -139,6 +178,10 @@
            ==================================================================== -->
       <div class="counts-strip">
         <div class="counts-group">
+          <!-- These are the totals as of the last good status fetch, exactly
+               like the rates on the right — the label was missing, not the
+               fact. -->
+          <span class="count-item-label">now</span>
           <span class="count-item count-static">
             <strong class="num" :class="pendingNumClass(totalMessages.pending)">{{ formatNumber(totalMessages.pending) }}</strong>
             <span>pending</span>
@@ -359,10 +402,17 @@
            Always at the bottom: config rarely changes, but is the canonical
            record when something is misbehaving.
            ==================================================================== -->
-      <div v-if="queueData?.config" class="card" style="margin-top:14px;">
+      <div v-if="queueData?.config" class="card">
         <div class="card-header">
           <h3>Configuration</h3>
-          <span class="muted">{{ queueData.namespace || '—' }} · {{ queueData.task || '—' }}</span>
+          <!-- Subtitle, not freshness: the right edge of a card header is the
+               freshness slot everywhere in the app. It is left empty here on
+               purpose — this page has no useApi panel to stamp, and
+               `lastRefreshAt` is the last refresh ATTEMPT (fetchAll bumps it
+               even when the detail fetch failed), so "as of / last good HH:MM"
+               would name a moment at which nothing was actually loaded. The
+               page's freshness is stated by the live tick instead. -->
+          <span class="card-sub">{{ queueData.namespace || '—' }} · {{ queueData.task || '—' }}</span>
         </div>
         <div class="card-body">
           <div class="qd-config-grid">
@@ -425,40 +475,39 @@
     <!-- ======================================================================
          Modals
          ====================================================================== -->
-    <div
-      v-if="showDeleteModal"
-      class="qd-modal-backdrop"
-      @click="showDeleteModal = false"
-    >
-      <div class="card animate-slide-up qd-modal" @click.stop>
-        <div class="card-header"><h3>Delete queue</h3></div>
-        <div class="card-body">
-          <p style="color:var(--text-mid);">
-            Delete <strong>{{ queueName }}</strong>? This permanently removes the queue,
-            all partitions ({{ partitions.length }}), and {{ formatNumber(totalMessages.total) }} messages.
-            This action cannot be undone.
-          </p>
-          <p v-if="deleteError" class="qd-modal-error">{{ deleteError }}</p>
-        </div>
-        <div class="qd-modal-foot">
-          <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
-          <button @click="deleteQueue" class="btn btn-danger" :disabled="deleting">
-            {{ deleting ? 'Deleting…' : 'Delete queue' }}
-          </button>
+    <Teleport to="body">
+      <div v-if="showDeleteModal" class="modal-backdrop" @click.self="closeDeleteModal">
+        <div class="card modal-card">
+          <div class="card-header"><h3>Delete queue</h3></div>
+          <div class="card-body">
+            <div v-if="deleteError" class="panel-err">{{ deleteError }}</div>
+            <p style="color:var(--text-mid);">
+              Delete <strong>{{ queueName }}</strong>? This permanently removes the queue,
+              all partitions ({{ partitions.length }}), and {{ formatNumber(totalMessages.total) }} messages.
+              This action cannot be undone.
+            </p>
+          </div>
+          <div class="modal-foot">
+            <button @click="closeDeleteModal" class="btn btn-ghost">Cancel</button>
+            <button @click="deleteQueue" class="btn btn-danger" :disabled="deleting">
+              {{ deleting ? 'Deleting…' : 'Delete queue' }}
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
 
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { analytics, queues as queuesApi, system as systemApi, describeApiError } from '@/api'
 import { formatNumber, formatDuration, toNum, latestFinite, trimIncompleteBuckets } from '@/composables/useApi'
 import { formatChartLabel } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
+import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { semanticColors } from '@/composables/useChartTheme'
@@ -467,7 +516,7 @@ import MetricRow from '@/components/MetricRow.vue'
 const route = useRoute()
 const router = useRouter()
 const queueName = computed(() => route.params.queueName)
-const { can, actingClusterSlug } = useIdentity()
+const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess } = useToast()
 
 // ---------------------------------------------------------------------------
@@ -497,20 +546,24 @@ const timeRanges = [
   { label: '6h',  value: '6h',  minutes: 360 },
   { label: '24h', value: '24h', minutes: 1440 },
 ]
+// The resolved window, restated once in the scope strip. There is no custom
+// range on this page, so it is always a quick range.
+const rangeLabel = computed(() => {
+  const r = timeRanges.find(t => t.value === selectedRange.value)
+  return `last ${r ? r.label : selectedRange.value}`
+})
+
+// Skeletons are first paint only: a refresh must leave the previous page on
+// screen. `loading` is only ever true with no statusData, but the guard is
+// written out so the rule is visible at the call site.
+const firstLoad = computed(() => loading.value && !statusData.value)
 
 const lastRefreshAt = ref(null)
-const nowTick = ref(Date.now())
 const lastRefreshText = computed(() =>
   lastRefreshAt.value ? new Date(lastRefreshAt.value).toLocaleTimeString() : 'an earlier load'
 )
-const refreshAgo = computed(() => {
-  if (!lastRefreshAt.value) return '—'
-  const sec = Math.max(0, Math.floor((nowTick.value - lastRefreshAt.value) / 1000))
-  if (sec < 5) return 'just now'
-  if (sec < 60) return `${sec}s ago`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  return `${Math.floor(sec / 3600)}h ago`
-})
+// Live tick, off the app's one shared ticker.
+const refreshAgo = useRefreshAgo(lastRefreshAt)
 
 // Per-row expand state — same Set-based pattern as Dashboard so the
 // metric table feels familiar from page to page.
@@ -1048,19 +1101,13 @@ watch(queueName, () => {
   fetchAll()
 })
 
-let tickInterval = null
-onMounted(() => {
-  fetchAll()
-  tickInterval = setInterval(() => { nowTick.value = Date.now() }, 1000)
-})
-onUnmounted(() => {
-  if (tickInterval) clearInterval(tickInterval)
-})
+onMounted(fetchAll)
 </script>
 
 <style scoped>
 /* ---------------------------------------------------------------------------
-   Detail bar — top row: back · name · meta · spacer · range · live
+   Detail bar — back · name · meta. Page identity only: the range picker and
+   the live tick now live in the shared filter card below.
    --------------------------------------------------------------------------- */
 .qd-bar {
   display: flex;
@@ -1070,12 +1117,6 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--bd);
   margin-bottom: 12px;
   flex-wrap: wrap;
-}
-.qd-bar-spacer { flex: 1 1 auto; }
-.qd-live {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 11px; font-family: 'JetBrains Mono', monospace;
-  color: var(--text-mid);
 }
 
 /* Quick-action row */
@@ -1097,153 +1138,25 @@ onUnmounted(() => {
 }
 
 /* ---------------------------------------------------------------------------
-   Banner row — only renders when something needs flagging
+   Advisory banners use the shared .status-banner / .banner-* / .view-banner
+   trio. Only the CTA affordance is local: a banner carrying one is a link,
+   the rest are statements.
    --------------------------------------------------------------------------- */
-.qd-banners {
-  display: flex; flex-direction: column; gap: 6px;
-  margin-bottom: 12px;
-}
-.qd-banner {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 14px;
-  border: 1px solid var(--bd);
-  border-radius: var(--r-card);
-  font-size: 12.5px;
-  background: var(--ink-2);
-  cursor: default;
+.view-banner:has(> .qd-banner-cta) {
+  cursor: pointer;
   transition: border-color .12s var(--ease);
 }
-.qd-banner:has(> .qd-banner-cta) { cursor: pointer; }
-.qd-banner:has(> .qd-banner-cta):hover { border-color: var(--bd-hi); }
-.qd-banner-warn {
-  background: color-mix(in srgb, var(--warn-400) 6%, transparent);
-  border-color: color-mix(in srgb, var(--warn-400) 22%, transparent);
-}
-.qd-banner-bad {
-  background: color-mix(in srgb, var(--ember-500) 6%, transparent);
-  border-color: color-mix(in srgb, var(--ember-500) 25%, transparent);
-}
-.qd-banner-dot {
-  width: 7px; height: 7px; border-radius: var(--r-pill);
-  flex-shrink: 0;
-}
-.qd-banner-dot-warn { background: var(--warn-400); }
-.qd-banner-dot-bad  { background: var(--ember-400); }
-.qd-banner-title { font-weight: 600; color: var(--text-hi); }
-.qd-banner-detail { color: var(--text-mid); }
+.view-banner:has(> .qd-banner-cta):hover { border-color: var(--bd-hi); }
 .qd-banner-cta {
   margin-left: auto;
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px; color: var(--text-mid);
 }
-.qd-banner-warn .qd-banner-title { color: var(--warn-400); }
-.qd-banner-bad  .qd-banner-title { color: var(--ember-400); }
 
-/* ---------------------------------------------------------------------------
-   Counts strip — same look as Dashboard's, scoped to this queue
-   --------------------------------------------------------------------------- */
-.counts-strip {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 14px 24px;
-  padding: 12px 16px;
-  margin-bottom: 14px;
-  border: 1px solid var(--bd);
-  background: var(--ink-2);
-  border-radius: var(--r-card);
-}
-.counts-group {
-  display: flex; align-items: baseline;
-  flex-wrap: wrap; gap: 10px;
-}
-.counts-group-right { color: var(--text-low); }
-.count-item-label {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10.5px; letter-spacing: .08em;
-  text-transform: uppercase; color: var(--text-low);
-  margin-right: 2px;
-}
-.count-item {
-  display: inline-flex; align-items: baseline; gap: 6px;
-  background: transparent; border: none; padding: 0;
-  color: var(--text-mid);
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: color .12s var(--ease);
-}
-.count-item.count-static { cursor: default; }
-.count-item.count-tight { gap: 4px; }
-.count-item:not(:disabled):not(.count-static):hover { color: var(--text-hi); }
-.count-item:not(:disabled):not(.count-static):hover strong { color: var(--accent); }
-.count-item:disabled { opacity: .5; cursor: default; }
-.count-item strong {
-  font-family: 'JetBrains Mono', monospace;
-  font-variant-numeric: tabular-nums;
-  font-size: 14px; font-weight: 600;
-  color: var(--text-hi);
-  letter-spacing: -.005em;
-}
-.counts-group-right .count-item strong {
-  color: var(--text-mid);
-  font-size: 13px;
-}
-.count-suffix {
-  font-size: 10.5px; font-family: 'JetBrains Mono', monospace;
-  color: var(--text-low); letter-spacing: .04em;
-  text-transform: uppercase;
-}
-.count-muted strong { color: var(--text-mid); }
-.count-sep {
-  color: var(--bd-hi); font-size: 11px;
-  user-select: none;
-}
-
-/* ---------------------------------------------------------------------------
-   Metric table — replicated from Dashboard so the visual language is
-   consistent: a row of dot · label · value · context · sparkline · expand.
-   --------------------------------------------------------------------------- */
-.metric-table {
-  border: 1px solid var(--bd);
-  background: var(--ink-2);
-  border-radius: var(--r-card);
-  overflow: hidden;
-  margin-bottom: 14px;
-}
-.metric-head {
-  display: grid;
-  grid-template-columns: 14px 150px 160px 1fr 260px 24px;
-  gap: 16px;
-  padding: 9px 16px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--text-low);
-  border-bottom: 1px solid var(--bd);
-  /* One step up from the card it sits in — the 1.5% white wash it used to
-     carry was hand-mixed against the old, lighter card. */
-  background: var(--ink-3);
-}
-.metric-head .h-value { text-align: right; }
-.metric-head .h-spark {
-  text-align: left;
-  font-family: 'JetBrains Mono', monospace;
-  letter-spacing: .04em; text-transform: lowercase;
-}
-@media (max-width: 1100px) {
-  .metric-head {
-    grid-template-columns: 14px 140px 140px 1fr 180px 24px;
-    gap: 12px;
-  }
-}
-@media (max-width: 900px) {
-  .metric-head {
-    grid-template-columns: 14px 1fr auto 110px 24px;
-  }
-  .metric-head > :nth-child(4) { display: none; }
-}
+/* Counts strip and metric table are shared idioms — .counts-strip / .count-*
+   and .metric-table / .metric-head / .h-spark now live in style.css so this
+   page and Dashboard cannot drift apart again. Only the MetricRow internals
+   this page reaches into stay here. */
 :deep(.mr-sep) { color: var(--text-low); margin: 0 4px; font-weight: 400; }
 :deep(.mr-unit) {
   font-style: normal; color: var(--text-low);
@@ -1280,38 +1193,7 @@ onUnmounted(() => {
   letter-spacing: .04em;
 }
 
-/* ---------------------------------------------------------------------------
-   Modals (kept local so the page is self-contained)
-   --------------------------------------------------------------------------- */
-.qd-modal-backdrop {
-  position: fixed; inset: 0; z-index: 50;
-  display: flex; align-items: center; justify-content: center;
-  padding: 16px;
-  background: rgba(0,0,0,.5);
-  backdrop-filter: blur(4px);
-}
-.qd-modal {
-  width: 100%; max-width: 460px;
-}
-.qd-modal-foot {
-  padding: 14px 16px;
-  border-top: 1px solid var(--bd);
-  display: flex; align-items: center;
-  justify-content: flex-end; gap: 12px;
-}
-/* Inline banner used inside a view (the shell's own strip is edge-to-edge). */
-.view-banner {
-  border: 1px solid currentColor;
-  border-radius: var(--r-card);
-  margin-bottom: 12px;
-}
-.qd-modal-error {
-  margin: 14px 0 0;
-  padding: 8px 10px;
-  border-radius: var(--r-control);
-  font-size: 12.5px;
-  color: var(--ember-400);
-  border: 1px solid var(--ember-400);
-  background: color-mix(in srgb, var(--ember-500) 8%, transparent);
-}
+/* The delete modal uses the shared shell — .modal-backdrop / .modal-card /
+   .modal-foot — and the shared .panel-err for its form error, so it is not a
+   fourth private ember box. Nothing modal-shaped is declared here any more. */
 </style>

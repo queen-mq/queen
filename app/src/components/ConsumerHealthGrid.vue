@@ -23,9 +23,14 @@
     </template>
 
     <!-- empty state -->
-    <div v-else-if="!consumers.length" class="chg-empty">
+    <div v-else-if="!consumers.length">
+      <!-- The slot owns the whole block, `.empty-state` padding included: a
+           wrapper that padded too meant the host view's empty state sat in
+           96px of air while every other empty state in the app sat in 48. -->
       <slot name="empty">
-        <p>No consumer groups match your filters.</p>
+        <div class="empty-state">
+          <h3>No consumer groups match your filters</h3>
+        </div>
       </slot>
     </div>
 
@@ -434,13 +439,9 @@ const displayed = computed(() => {
 }
 .caction svg { width: 12px; height: 12px; }
 
-/* empty state */
-.chg-empty {
-  padding: 48px 16px;
-  text-align: center;
-  color: var(--text-mid);
-  font-size: 13px;
-}
+/* Empty state: shared `.empty-state` block from style.css, supplied by the
+   host view through the #empty slot. Nothing local — the wrapper must not
+   pad, or the block pads twice. */
 
 /* Responsive: drop the Partitions column first at narrow widths since
    total partition count is the least operationally urgent of the three

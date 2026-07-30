@@ -1,0 +1,235 @@
+---
+title: Upgrades
+description: "The schema re-applies itself idempotently at every boot, so upgrading is replacing a binary: rolling replicas, what happens to in-flight leases, rollback, and why 0.16 is not a data migration."
+type: how-to
+tier: operate
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/src/schema.rs
+  - server/src/main.rs
+  - server/src/migrate.rs
+  - server/src/file_buffer.rs
+  - server/src/obs.rs
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/schema.sql
+  - server/build.rs
+---
+
+Upgrading a broker is replacing a binary. There is no migration command to run, no
+version table to bump, and no maintenance window required by the schema itself.
+The DDL and all 34 stored-procedure files are compiled into the binary and applied
+on every boot, so the version of the SQL in the database is always the version
+that the most recently booted broker carries.
+
+That single mechanism is what makes an upgrade simple, and it is also the source of
+the one sharp edge on this page. Both are below.
+
+## What happens at boot
+
+`schema::apply` runs before anything else touches the database:
+
+1. Take one connection from the pool and hold a **session** advisory lock,
+   `pg_advisory_lock(778120010)`. This serialises the apply cluster-wide, so
+   replicas restarting at the same moment cannot race each other through the DDL.
+2. Execute `sql/schema.sql`, then each `sql/procedures/*.sql` file in lexical
+   order — 35 batches in total. Every statement is idempotent:
+   `CREATE OR REPLACE FUNCTION`, `CREATE TABLE IF NOT EXISTS`,
+   `CREATE INDEX IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
+3. Release the lock on every exit path, success or failure.
+4. **Fail the process** on any DDL error, naming the file that failed
+   (`procedures/044_log_ack.sql: …`). A broker never serves a request against a
+   schema it could not bring to the expected shape.
+
+The lexical order is load-bearing. The log-engine files in the `04x` range
+redefine stored procedures created by the earlier `00x`–`02x` files, and `040`
+first drops the previous engine's functions so an older development database boots
+clean. Applying the files in any other order leaves superseded definitions in
+place.
+
+Column additions use `ADD COLUMN IF NOT EXISTS` with constant defaults, which on
+PostgreSQL 11 and later is a catalog-only change — no table rewrite, safe on a
+table with millions of rows. The per-table storage and autovacuum parameters are
+re-asserted on every boot as well, which is why they cannot drift.
+
+<Aside type="note">
+`QUEEN_APPLY_SCHEMA=0` skips all of the above. If you run that way, applying the
+new version's DDL before starting the new version's binary is your
+responsibility — see [PostgreSQL](/selfhost/postgres). Everything else on this
+page still applies.
+</Aside>
+
+## Rolling replicas
+
+Because brokers are stateless and every route is served by every replica, a
+rolling upgrade needs no coordination and no client changes.
+
+<Steps>
+
+1. **Start a broker on the new version** with the same configuration. It applies
+   its schema under the advisory lock and begins serving.
+
+2. **Wait for a real health check.** `GET /health` does a database round-trip, so
+   a 200 means this broker can serve. Do not proceed on process liveness alone.
+
+   ```bash
+   curl -sf http://new-broker:6632/health
+   ```
+
+3. **Take the old broker out of the load balancer**, then send it `SIGTERM`.
+   `axum` graceful shutdown drains in-flight requests before the process exits.
+   Acknowledgement requests park until their commit resolves, so a request that
+   completes during the drain either committed or returned an error — it does not
+   silently vanish.
+
+4. **Check the shutdown log.** If the spool still held events, the process logs a
+   warning on the `shutdown` target with the pending count. That volume is
+   node-local: it will only be replayed when a broker starts again against the
+   same `FILE_BUFFER_DIR`.
+
+5. **Repeat** for each remaining replica.
+
+</Steps>
+
+Startup on the new binary drains any leftover spool **before** the listener binds:
+crash-left partial files are finalised, then finished files are replayed
+oldest-first. It stops at the first failure and hands the rest to the background
+drain loop, and it gives up after an hour of continuous draining, so a large spool
+delays the port opening but a dead database does not block boot indefinitely.
+
+### The mixed-version window
+
+<Aside type="caution">
+Every broker re-applies its own SQL at every boot, and the redefinitions are
+`CREATE OR REPLACE`. **The last broker to boot decides which version of the stored
+procedures is in the database**, for every broker. During a rolling upgrade that
+means:
+
+- once the new broker has booted, the *old* broker is calling the *new*
+  procedures;
+- and if the old broker then restarts — a crash, an OOM kill, a probe-driven
+  restart — it re-applies the **old** SQL and reverts the definitions underneath
+  the new broker.
+
+Keep the window short, roll in one direction, and do not leave a mixed-version
+cluster running. If an old replica restarts during the roll, restart the new one
+afterwards so its SQL is the one in place.
+</Aside>
+
+## In-flight leases
+
+Leases are rows, not memory. A pop takes a lease on the span
+`(committed, batch_end]` by writing `worker_id`, `batch_end`,
+`lease_acquired_at` and an absolute `lease_expires_at` into
+`queen.log_consumers`. Restarting a broker does not touch those rows and does not
+release those leases.
+
+What follows is exactly the at-least-once contract, with no special upgrade case:
+
+- **The leased span stays invisible** to other consumers of that group. A pop only
+  claims a (partition, group) whose `worker_id` is null, or whose
+  `lease_expires_at` is null or already in the past.
+- **When the lease expires, the whole batch is redelivered.** Not the un-acked
+  tail — the whole span, because the cursor never moved.
+- **The redelivery is counted.** The consumer row remembers the start offset of
+  the previous non-auto-ack delivery; a delivery starting at that same offset is a
+  redelivery and increments the attempt count, rather than resetting it. Once the
+  queue's retry budget is exhausted, the head message dead-letters.
+- **A client holding a lease across the restart can still acknowledge it**, to any
+  replica, as long as the lease has not expired. The broker's in-memory ack fast
+  path is lost with the process, and the ack falls back to resolving the
+  transaction identifier through the hash sidecar in SQL. Same result, one extra
+  lookup.
+
+The practical consequence for planning: a consumer whose in-flight batch was
+interrupted will see those messages again after at most one lease time. Size
+`leaseTime` with that in mind — long enough that normal processing finishes,
+short enough that a redelivery after a restart is not an hour away.
+
+<Aside type="note">
+Consumers that pop with `autoAck=true` have nothing in flight to lose or to
+redeliver: the cursor is committed inside the pop transaction. That is at-most-once
+delivery, and a message in flight to a client when the broker stopped is lost.
+</Aside>
+
+## Rollback
+
+Running the previous binary again works, with one asymmetry created by the
+idempotent DDL. Stored procedures are `CREATE OR REPLACE`, so they **revert** to
+the older definitions the moment the older binary boots. Tables, columns and
+indexes are `IF NOT EXISTS`, so anything the newer version added is **not**
+removed — a rolled-back deployment carries extra columns the old code ignores.
+
+That is usually harmless and is the reason a rollback is possible at all. What it
+does not survive is a change in the *meaning* of existing data. Read the release
+notes before rolling back across a version that changed how a column is
+interpreted.
+
+## Coming from 0.16
+
+The previous Queen broker was a C++ implementation on a different storage engine.
+Version 1.0 is not an update of it, and **there is no data migration**.
+
+- The `queen-seg migrate` subcommand exists only to say so. It logs that migration
+  is not supported on the log engine and exits 1 without opening a database
+  connection.
+- The current engine's data lives in `queen.log_queues`, `log_partitions`,
+  `log_segments`, `log_txns`, `log_consumers` and `log_dlq`. The older
+  `queen.messages` table is still created by the schema — the column is kept so
+  the storage selector and the dual-engine guards have something to key off — but
+  the push and pop paths never read it. Rows left there are inert.
+- There is also nothing to convert on disk. The old broker's state was in
+  PostgreSQL too; it is in tables the new engine does not use.
+
+The supported cut-over is therefore an application-level one:
+
+<Steps>
+
+1. **Stop producing** to the 0.16 deployment.
+2. **Let its consumers drain** it to completion.
+3. **Stand up 1.0** against a fresh database, or a fresh database name on the same
+   server. It creates its own schema at first boot.
+4. **Point producers and consumers at the new broker.** Queues and partitions are
+   created by the first push that names them, so there is no provisioning step.
+
+</Steps>
+
+If you cannot drain — a backlog you must not lose — the only reliable path is to
+read the messages out through the old deployment's own API and push them into 1.0
+as new messages, giving each one a deterministic `transactionId` so a retry of
+your copy loop cannot duplicate it. Nothing in the broker does this for you.
+
+## Confirming which version you are running
+
+`server/server.json` is the single source of truth for the version: `build.rs`
+embeds it into the binary at compile time, `build.sh` uses it as the container
+image tag, and it is what `/health` and `queenctl version` report.
+
+```bash
+curl -s http://localhost:6632/health
+```
+
+The `boot` log line `listening` carries the same version alongside the resolved
+engine settings, which is the fastest way to confirm that the process you are
+looking at is the one you deployed.
+
+## Related
+
+<CardGrid>
+  <LinkCard
+    href="/selfhost/ha"
+    title="High availability"
+    description="Why any replica can serve any request, and which background jobs are leader-gated."
+  />
+  <LinkCard
+    href="/selfhost/kubernetes"
+    title="Kubernetes"
+    description="Probes that will not restart an old replica in the middle of your roll."
+  />
+  <LinkCard
+    href="/selfhost/postgres"
+    title="PostgreSQL"
+    description="Pre-applying the schema with a privileged role, and what the broker's DDL needs to own."
+  />
+</CardGrid>

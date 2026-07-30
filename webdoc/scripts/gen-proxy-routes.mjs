@@ -26,7 +26,7 @@ const MAIN = "server/src/main.rs";
 
 // Bump after re-reading the Rust when a guard trips.
 const CLASSIFY_FINGERPRINT = "06215a923e412832";
-const OPERATOR_FINGERPRINT = "52b500170c565d9f";
+const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
 
@@ -36,7 +36,10 @@ const OPERATOR_ROUTES = new Set([
   "/api/v1/analytics/system-metrics",
   "/api/v1/analytics/worker-metrics",
   "/api/v1/analytics/postgres-stats",
+  // Both maintenance kill switches, both halves. `/system/shared-state` is
+  // deliberately NOT here and stays blocked.
   "/api/v1/system/maintenance",
+  "/api/v1/system/maintenance/pop",
   "/metrics/prometheus",
 ]);
 
@@ -91,7 +94,7 @@ const CLASS_MEANING = [
   ["produce", "Counted against the message quota. May create queues and partitions implicitly."],
   ["consume", "Pop, ack and lease extension. A `wait=true` pop also holds a parked-consumer slot."],
   ["queue admin", "Configuration, deletions, seeks and subscription changes."],
-  ["read", "Listings, status, analytics, DLQ and message reads — all tenant-scoped."],
+  ["read", "Listings, status, analytics, DLQ and message reads, all tenant-scoped."],
   ["gated (streams)", "Available when the plan enables the streams feature."],
   ["gated (traces)", "Writing a trace is available when the plan enables the traces feature."],
   ["operator", "Cell-wide surfaces. Not tenant-scopable, so a tenant credential gets the same 404 a blocked route returns."],
@@ -179,6 +182,7 @@ function main() {
   return emitPartial({
     name: "proxy-route-classes",
     title: "proxy route classes",
+    description: "How the proxy classifies each broker route, and which ones a tenant credential can reach.",
     sources: [`${PROXY_ROUTES} (classify, is_operator_route)`, `${MAIN} (Router::new chain)`],
     body: lines.join("\n"),
     check,

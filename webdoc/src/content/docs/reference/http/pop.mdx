@@ -1,0 +1,271 @@
+---
+title: The pop routes
+description: "Claiming a leased batch: the three pop routes, every query parameter with its default, the response field by field, and what a popped message does not carry."
+type: reference
+sidebar:
+  order: 5
+  label: pop
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/src/handlers/mod.rs
+  - server/src/config.rs
+  - server/sql/procedures/043_log_pop.sql
+verifiedBy:
+  - clients/client-js/test-v2/pop.js
+  - clients/client-js/test-v2/consume.js
+  - clients/client-js/test-v2/semantics.js
+  - clients/client-py/tests/test_pop.py
+---
+
+A pop claims a **leased batch**: a contiguous span of offsets just past the consumer group's
+cursor in one or more partitions, held for a lease duration so no other worker in that group can
+take them. It never removes anything. All three routes are `GET`, take their parameters in the
+query string, have access level **read-write**, and return the same response shape.
+
+| Route | Scope |
+| --- | --- |
+| `GET /api/v1/pop/queue/:queue` | one queue; the broker picks which partitions to claim |
+| `GET /api/v1/pop/queue/:queue/partition/:partition` | exactly one partition |
+| `GET /api/v1/pop` | discovery across every queue matching `namespace` and/or `task` |
+
+## Query parameters
+
+| Parameter | Type | Default | Applies to |
+| --- | --- | --- | --- |
+| `batch` | integer | `200` | all three |
+| `partitions` | integer | `1` | queue-scoped and discovery |
+| `autoAck` | boolean | `false` | all three |
+| `wait` | boolean | `false` | all three |
+| `timeout` | integer, ms | `30000` | all three |
+| `leaseSeconds` | integer | the queue's `leaseTime`, else `60` | all three |
+| `consumerGroup` | string | `__QUEUE_MODE__` | all three |
+| `subscriptionMode` | string | `all` | all three |
+| `subscriptionFrom` | string | empty | all three |
+| `namespace` | string | empty | discovery only |
+| `task` | string | empty | discovery only |
+
+`batch` is the **total message budget for the call**, shared across every partition the pop
+touches — not a per-partition limit. The budget is consumed partition by partition until it runs
+out.
+
+`partitions` caps how many partitions one call may claim. `0` or a negative value means **no
+cap**. It is ignored by the single-partition route, which by definition claims one.
+
+`timeout` is the long-poll deadline in milliseconds. Its default comes from `DEFAULT_TIMEOUT`,
+falling back to `POP_DEFAULT_TIMEOUT_MS`, falling back to `30000`; `DEFAULT_TIMEOUT` wins when
+both are set. It only has an effect when `wait=true`.
+
+`leaseSeconds` overrides the queue's configured lease for this call only. Values of `0` or less
+are treated as absent, so the queue value applies: **60 seconds** for a queue created implicitly
+by a push, **300 seconds** for one created or updated through `/api/v1/configure`.
+
+`consumerGroup` omitted means queue mode, which is implemented as the reserved group name
+`__QUEUE_MODE__`. Queue mode is an ordinary group with a reserved name — it has its own cursor
+like any other, and two consumers that both omit `consumerGroup` share it.
+
+`subscriptionMode` and `subscriptionFrom` **seed a cursor that does not exist yet** and are
+ignored for a `(partition, group)` that has already been contacted. `subscriptionMode=all`
+(the default) starts at the oldest retained message; `new` skips the existing backlog.
+`subscriptionFrom` takes `now` or an ISO-8601 timestamp; an unparseable timestamp is ignored.
+Queue mode is deliberately excluded from seeding, so a queue-mode pop never skips backlog even
+if it carries these parameters. When a group registered a durable subscription, that record wins
+over the pop-carried intent.
+
+The discovery route requires at least one of `namespace` and `task`. With neither, it returns
+`400` with `{"success":false,"error":"namespace or task is required","messages":[]}` rather than
+scanning every queue.
+
+## Response
+
+`200 OK` when at least one message is delivered:
+
+```json
+{
+  "success": true,
+  "queue": "orders.created",
+  "partition": "customer-42",
+  "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+  "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
+  "consumerGroup": "billing",
+  "messages": [
+    {
+      "id": "0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83",
+      "transactionId": "order-8891-created",
+      "traceId": null,
+      "data": { "orderId": 8891, "total": 4200 },
+      "producerSub": null,
+      "createdAt": "2026-07-30T11:02:44.512873Z",
+      "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+      "partition": "customer-42",
+      "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
+      "consumerGroup": "billing"
+    }
+  ],
+  "partitionsClaimed": 1
+}
+```
+
+### Top-level fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `success` | boolean | always `true` on a 200 |
+| `queue` | string | the queue from the path; **empty string** on the discovery route, which spans queues |
+| `partition` | string | the name of the **first** claimed partition |
+| `partitionId` | string | the id of the **first** claimed partition |
+| `leaseId` | string | the lease covering every message in this response; empty string when `autoAck=true` |
+| `consumerGroup` | string | the group the pop used, `__QUEUE_MODE__` when you sent none |
+| `messages` | array | the delivered messages, in offset order within each partition |
+| `partitionsClaimed` | integer | how many partitions this call claimed |
+
+The top-level `partition` and `partitionId` describe only the first claimed partition. When a
+call claims several, they are **not** representative of the batch — always ack using each
+message's own `partitionId`.
+
+### Per-message fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | string (UUIDv7) | the message id assigned at push |
+| `transactionId` | string | the deduplication key, and the address you ack with |
+| `traceId` | string or `null` | `null` unless the message was written by a transaction that supplied one |
+| `data` | any JSON value | the payload, spliced back verbatim; decrypted transparently if it was encrypted |
+| `producerSub` | string or `null` | the `sub` of the JWT that pushed it, when authentication was on |
+| `createdAt` | string | the timestamp of the **segment** that holds this message |
+| `partitionId` | string | this message's partition id — the one to ack with |
+| `partition` | string | this message's partition name |
+| `leaseId` | string | repeated on every message for convenience; empty on `autoAck` |
+| `consumerGroup` | string | repeated on every message |
+
+### What a popped message does not carry
+
+These absences are deliberate and each one has a consequence:
+
+- **No offset or position.** The message's place in the partition is never exposed. You cannot
+  ack "up to offset N" over HTTP; you ack a `transactionId` and the broker resolves it to an
+  offset.
+- **No delivery or attempt count.** A handler cannot tell from the message whether this is the
+  first delivery or the fourth. Redelivery telemetry exists inside the broker, but it is not on
+  the wire. If your logic needs an attempt count, carry it in your own payload or read the
+  per-message management route.
+- **No lease expiry timestamp.** You know the lease id, not when it dies. Use `leaseSeconds` (or
+  the queue's `leaseTime`) as the budget you plan against, and
+  [extend the lease](/reference/http/lease) if you need more.
+- **No queue name.** Per message there is no `queue` field; on the queue-scoped routes the
+  top-level `queue` covers it, but on the **discovery** route the top-level `queue` is empty, so
+  a discovery consumer that needs to know which queue a message came from must map it from
+  `partitionId` itself.
+- **No headers or metadata envelope.** There is exactly one user-controlled field, `data`.
+- **No status, retry count, or DLQ flag.** Message state is not per-message state; it is a
+  cursor per `(partition, group)`.
+
+`createdAt` is the **segment's** creation timestamp, not the message's. A segment holds many
+frames, and the broker coalesces concurrent pushes to the same partition into one segment, so
+messages written by the same call — and messages from different calls that were coalesced —
+all report an identical `createdAt`. It orders segments, not messages inside a segment; ordering
+inside a partition is the offset order in which `messages` is returned. It is formatted by PostgreSQL
+with a literal `Z` suffix, and the broker does not set a session time zone — keep the database's
+`timezone` at UTC or the suffix will disagree with the value, including in the broker's own
+delivery-lag metric.
+
+### An empty pop is a 204 with no body
+
+When nothing is delivered, the response is `204 No Content` with **no body at all**. There is
+nothing to parse; check the status first. Three different situations all produce that same bare
+204:
+
+1. Nothing is available for this group.
+2. **Pop maintenance is on.** The handler builds `{"messages":[],"paused":true}`, and the flag is
+   dropped along with the body — consumers cannot distinguish a paused broker from an idle queue.
+3. The pop's stored procedure reported an error. The error text is discarded with the body.
+
+Transport-level failures do come back with a body: `500` with `{"error":"pool"}` when no
+database connection is available, or `{"error":"pop failed"}` when the statement timed out and
+was cancelled.
+
+| Code | When |
+| --- | --- |
+| `200` | at least one message delivered |
+| `204` | nothing delivered, pop maintenance, or a stored-procedure error — no body |
+| `400` | discovery pop with neither `namespace` nor `task`; a query parameter that fails to deserialize |
+| `403` | authentication is on and the token has no `read-write` role |
+| `500` | no pool connection, or a cancelled statement |
+
+## Leases and concurrency
+
+A non-`autoAck` pop takes a lease on the span `(committed, batch_end]` for the
+`(partition, group)` pair, and the lease id is the id the pop minted for itself. Exactly **one
+live leased batch exists per `(partition, group)`**. That is the ordering guarantee, and it is
+also the concurrency limit: a queue with one partition cannot be consumed in parallel by one
+group, no matter how many workers poll it. Parallelism comes from having more partitions.
+
+Other workers polling a leased partition are not blocked — they skip it and look elsewhere,
+which is why a wildcard pop with `partitions=1` and many hot partitions still spreads out
+across workers.
+
+When the lease expires without an ack, the batch becomes claimable again and redelivers. Lease
+expiry **never** consumes retry budget; only an explicit `failed` ack does. That is at-least-once
+delivery: design handlers to tolerate a repeat.
+
+`autoAck=true` is different in kind. The cursor is committed inside the pop's own transaction,
+before the response is written, and the response carries an empty `leaseId`. If the client dies
+after the commit and before it processes the batch, those messages are gone — at-most-once. Use
+it for throughput on data you can afford to lose, never for work you must not drop.
+
+## Long polling
+
+With `wait=false` (the default) a pop is a single attempt: it returns whatever is claimable now,
+otherwise 204.
+
+With `wait=true` the call parks until either messages arrive or `timeout` elapses. A push wakes
+parked pops immediately — on the queue-scoped routes, a push to that queue; on the discovery
+route, any push within the same scope. Between wakes the pop re-checks on an interval that backs
+off (`POP_WAIT_INITIAL_INTERVAL_MS` 100 ms, growing after `POP_WAIT_BACKOFF_THRESHOLD` 3
+consecutive empty waits by `POP_WAIT_BACKOFF_MULTIPLIER` 2.0, capped at
+`POP_WAIT_MAX_INTERVAL_MS` 1000 ms), and a wake resets the backoff. A parked pop holds **no
+PostgreSQL connection** — the connection is released before parking — so thousands of idle
+long-poll consumers do not consume pool capacity.
+
+A long poll that times out returns 204, not an error.
+
+## Visibility delays
+
+Two queue options can make a message that is committed still not deliverable:
+
+- `delayedProcessing` — only segments at least that many seconds old are delivered.
+- `windowBuffer` — if the partition received anything within that many seconds, the pop delivers
+  **nothing** from that partition, so writes can accumulate into fatter batches.
+
+Both are enforced in SQL, so they apply to every pop route. If a pop returns 204 on a queue you
+just wrote to, check these before anything else.
+
+A third option trades latency for commit efficiency rather than hiding messages:
+
+- `minPopWaitTime` — milliseconds a **non-empty but under-full** batch may be held back so that
+  one database commit carries more messages. It never delays an empty queue (that is the
+  long-poll's case), never applies when `wait=false` or `batch` is 1, ends as soon as the batch
+  fills, and never outlives the caller's `timeout`. It is `0` (off) by default, is clamped to
+  60000, and takes effect on the queue-scoped wildcard route.
+
+## Examples
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/js-pop" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/py-pop" />
+  </TabItem>
+</Tabs>
+
+The SDKs' higher-level consume loop pops, dispatches, acks and repeats:
+
+<Render file="snippets/js-consume" />
+
+Raw HTTP, one partition, leased for 120 seconds, long-polling for up to 10 seconds:
+
+```bash
+curl -sS -i 'http://localhost:6632/api/v1/pop/queue/orders.created?consumerGroup=billing&batch=50&partitions=4&wait=true&timeout=10000&leaseSeconds=120'
+```
+
+Then acknowledge what you processed with [`POST /api/v1/ack`](/reference/http/ack).

@@ -1,0 +1,179 @@
+---
+title: Replay and subscription modes
+description: "Where a consumer group starts reading, how to move its cursor backwards or forwards later, and why a timestamp seek lands on a segment boundary rather than an exact message."
+type: concept
+tier: use
+sidebar:
+  order: 9
+  label: Replay and seek
+sourceOfTruth:
+  - server/src/handlers/consumer_groups.rs
+  - server/sql/procedures/047_log_admin.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/008_consumer_groups.sql
+  - server/sql/procedures/041_log_schema.sql
+---
+
+Consuming a message does not remove it. A segment stays until retention deletes it, and a
+consumer group's progress is one number per partition. Replay is therefore not a special
+feature with its own storage — it is moving that number.
+
+Two mechanisms exist. **Subscription modes** decide where a group starts when it first meets a
+partition. **Seek** moves an existing cursor, forwards or backwards, at any time.
+
+## Where a new consumer group starts
+
+A pop carries two optional parameters:
+
+| Parameter | Values | Effect on a cursor being created |
+| --- | --- | --- |
+| `subscriptionMode` | `all` (default), `new` | `all` delivers the whole retained backlog; `new` skips it. |
+| `subscriptionFrom` | `now`, an ISO 8601 timestamp | `now` behaves like `new`; a timestamp starts at that point in the log. |
+
+The critical qualifier: **seeding happens only on the first contact between a consumer group
+and a partition.** Once the `(partition, group)` row exists, its cursor is never re-seeded.
+Passing `subscriptionMode=new` to a group that has already consumed changes nothing, and
+neither does removing it. If you need to move an existing cursor, that is what seek is for.
+
+What each mode writes:
+
+- `all` — the cursor lands just below the oldest retained offset, so the next message wanted
+  is the oldest one still stored.
+- `new` or `subscriptionFrom=now` — the cursor lands on the partition's current last offset,
+  so only messages pushed after this moment are delivered.
+- A timestamp — the cursor lands just below the first segment whose commit time is at or after
+  that timestamp. If nothing that recent exists yet, it lands on the current last offset,
+  which makes it a future-only cursor.
+
+An unparsable timestamp is treated as registration-time `new` rather than failing the pop.
+
+## The durable subscription record
+
+The first time a consumer group pops a queue, the broker writes a durable record of that
+group's subscription — the mode it registered with and the timestamp it registered at — and
+seeds the cursor of **every** partition of the queue in one set-based statement.
+
+That record matters for a partition created *later*. When the group first meets a new
+partition, the broker consults the stored subscription first, and seeds from the stored
+timestamp rather than from the partition's last offset. Without it, a partition that appears
+after a group subscribed would silently skip its own backlog.
+
+Consumer groups are also what subscription modes require. A pop with no `consumerGroup` uses
+the internal queue-mode cursor, which always registers as `all`: subscription modes are
+ignored there, and a queue-mode pop never skips a backlog.
+
+## Changing the stored subscription
+
+```http
+POST /api/v1/consumer-groups/:group/subscription
+```
+
+Body: `{"subscriptionTimestamp": "2026-07-30T00:00:00Z"}`. The field is required; omitting it
+is a `400`.
+
+Read what this does carefully, because it is narrower than it looks:
+
+- It updates the stored subscription timestamp for **every queue** that group has a record
+  for. There is no queue filter.
+- It clears the group's empty-scan watermarks, so partitions the group had already caught up
+  on become visible to its next poll again.
+- It does **not** move any existing cursor.
+
+So this route changes where *future* first contacts start, not where current consumers are.
+For an actual replay, use seek.
+
+## Seek
+
+Two routes, per queue and per partition:
+
+```http
+POST /api/v1/consumer-groups/:group/queues/:queue/seek
+```
+
+```http
+POST /api/v1/consumer-groups/:group/queues/:queue/partitions/:partition/seek
+```
+
+The body is either `{"toEnd": true}` or `{"timestamp": "2026-07-30T00:00:00Z"}`. A body with
+neither is rejected with `Must specify toEnd=true or a timestamp`, and unparsable JSON with a
+`bad body` error. The per-partition route accepts an **empty** body as `toEnd: true`; the
+per-queue route does not.
+
+The per-queue form applies to every partition of the queue and answers with
+`partitionsUpdated`. A queue that does not exist, or that has no partitions yet, is reported as
+a failure (`Queue not found or has no partitions`) rather than as a successful no-op — a
+misdirected seek should not look like it worked. The per-partition form answers with
+`updated: true`, or a not-found error.
+
+Every seek, on every partition it touches:
+
+- sets `committed` to the resolved position;
+- releases any live lease, so an in-flight batch is abandoned rather than acked;
+- resets the retry budget and the redelivery counters;
+- creates the `(partition, group)` row if the group had never popped that partition;
+- clears the group's empty-scan watermark so cold partitions are re-examined.
+
+Replay begins on the next poll: the broker re-seeds its in-memory candidate set from the new
+cursor position immediately after a successful seek, so a backward seek does not wait for a
+periodic rescan.
+
+A seek affects exactly one consumer group. Every other group's cursor on the same partitions
+is untouched — that independence is the point of keeping messages after consumption.
+
+## A timestamp seek is segment-granular
+
+Messages are stored in segments: one row holding many frames, packed and compressed together,
+carrying one commit timestamp for the whole row. A timestamp seek resolves by walking segments,
+not messages: the cursor is set to `base_offset - 1` of the first segment whose commit time is
+at or after your timestamp.
+
+You therefore land on a **segment boundary**, at the start of the segment that contains your
+timestamp — which means you will receive some messages committed slightly *before* it. The
+overshoot is bounded by one segment's frame count. Never treat a timestamp seek as an exact
+cut: if your replay must start precisely at an instant, seek a little early and filter in the
+consumer.
+
+The same granularity applies to the `subscriptionFrom` timestamp mode, which uses the same
+walk.
+
+## Why commit-ordered timestamps make this work
+
+A segment's `created_at` is stamped while the pushing transaction holds the partition's row
+lock — the same lock that allocates offsets. A later pusher can only stamp after that
+transaction commits and releases the lock, so within one partition `created_at` is **monotone
+in offset**, in commit order.
+
+That is what makes a timestamp meaningful as a position at all. Because time increases with
+offset, any timestamp corresponds to a contiguous prefix of the partition, and the broker can
+find its boundary with a single forward walk of the primary key rather than sorting or
+scanning. Time-based retention relies on the same invariant.
+
+Across partitions there is no such relationship. A timestamp seek on a queue positions each
+partition independently, and there is no global instant at which all partitions were "at" the
+same point — the ordering guarantee is per partition, as described on
+[Guarantees](/use/concepts/guarantees).
+
+## The floor: you can only replay what is retained
+
+Every walk starts at the partition's retention watermark. Consequences:
+
+- A timestamp older than the oldest retained segment resolves to that oldest segment. You get
+  everything still stored, and no error telling you the earlier data was already deleted.
+- Data that retention has deleted cannot be replayed by any means. The retained window *is*
+  the replay window.
+- A cursor left below the watermark — after retention removed segments it had not reached —
+  resumes at the next offset that still exists. The pop scan tolerates the gap.
+
+Which window you get, and how to choose it, is on [Retention](/use/concepts/retention).
+
+## Practical recipes
+
+- **Reprocess the last hour for one group.** Seek that group's queue to a timestamp one hour
+  back. Other groups keep their positions.
+- **Skip a backlog you no longer care about.** Seek the queue with `{"toEnd": true}`.
+- **Bring up a new consumer that must not see history.** Pop with `subscriptionMode=new` on
+  first contact — cheaper and simpler than seeking afterwards.
+- **Re-run a pipeline from scratch.** Use a *new* consumer group name. A fresh group with
+  `subscriptionMode=all` reads the whole retained log without disturbing the existing one.
+- **Give up on a stuck batch.** A seek releases the lease, so seeking is also the way to
+  abandon an in-flight claim without waiting for its expiry.

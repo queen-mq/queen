@@ -1,0 +1,181 @@
+---
+title: Flow control
+description: "The Vegas-style adaptive concurrency limiter: what it measures, how the limit moves, the separate push and pop lanes, and how it interacts with the connection pool."
+type: concept
+tier: internals
+sidebar:
+  order: 8
+sourceOfTruth:
+  - server/src/vegas.rs
+  - server/src/db.rs
+  - server/src/handlers/data.rs
+  - server/src/fusion.rs
+  - server/src/config.rs
+verifiedBy:
+  - server/src/vegas.rs
+---
+
+The broker does not let requests reach PostgreSQL as fast as they arrive. Each in-flight database
+operation on the hot paths holds a permit from an adaptive concurrency limiter, and the number of
+permits moves continuously based on observed round-trip times. The design is TCP Vegas applied to a
+database connection: infer queueing from latency, and back off before the queue forms.
+
+The reason to have it at all is that a connection pool is a poor admission controller. A pool of
+160 connections will happily put 160 statements into PostgreSQL, and if PostgreSQL can only usefully
+run twenty of them the other 140 are lock contention, `SKIP LOCKED` racing and fatter round trips:
+work that makes throughput worse while every gauge still looks unsaturated.
+
+## What it measures
+
+On every completion the limiter is handed the operation's round-trip time and computes an estimate
+of how much work is queued at PostgreSQL:
+
+```text
+queue = limit × (1 − rtt_base / rtt)
+```
+
+`rtt_base` is the limiter's idea of the unloaded round-trip time. If the current `rtt` equals it,
+`queue` is zero: nothing is waiting. As `rtt` grows above the base, `queue` approaches `limit`.
+
+The controller then moves the limit toward keeping that estimate inside a band:
+
+```text
+if queue <= alpha  → limit += step
+if queue >= beta   → limit -= step
+otherwise          → unchanged
+```
+
+`QUEEN_VEGAS_ALPHA` defaults to 3.0 and `QUEEN_VEGAS_BETA` to 6.0, so the target is "between three
+and six operations queued". The step is `max(ln(limit), 1.0)`. It is logarithmic, so the limit is not
+jerked around when it is already large.
+
+Two guards make it behave:
+
+**It only adjusts when it is being driven.** The update is skipped unless `in_flight >= limit - 1`.
+An idle system produces short round trips, which would otherwise ramp the limit upward for no
+reason, leaving a large permit count in place at the moment load arrives.
+
+**The base window expires.** `rtt_base` is not a slow-moving minimum; it is the minimum over a ring
+of 60 one-second slots, each holding that second's minimum. Slots older than 60 seconds are ignored.
+This matters because the base must be able to **rise**. When the workload shifts (a stream of tiny
+acks disappears and heavy pushes remain), a monotone minimum anchors the base to a round-trip time
+that no longer occurs, so every real operation reads as congestion and the limit collapses. With an
+expiring window the base rises within a minute. Both directions are covered by unit tests in
+`vegas.rs`: a cheaper operation lowers the base immediately, and once the window has rotated past the
+last cheap sample the base rises.
+
+If nothing has been recorded yet, the base is reported as 1 nanosecond so the division is never by
+zero.
+
+## How the limit is enforced
+
+The limit is materialised as a dynamically resized `tokio::sync::Semaphore`. Growing calls
+`add_permits`; shrinking calls `forget_permits`, which retires permits as they are returned rather
+than revoking one from an operation in flight. So a shrink takes effect as work drains, never by
+interrupting it.
+
+Two ways to take a permit:
+
+- **`acquire`** waits. This is what a pop does before its claim query.
+- **`try_acquire`** returns immediately with nothing if the lane is contended. The push fusion layer
+  uses this as its idleness signal: an available permit means the push lane is quiet enough to flush a
+  single low-rate push right now instead of arming the hold timer. The accounting is identical either
+  way, so a permit taken without waiting has the same lifecycle.
+
+That second use is the interesting one. The limiter is not only a brake: its permit availability is
+also the input to the fusion layer's fire-on-idle decision, which is how a lone push commits in about
+one round trip while a saturated broker builds large bundles instead.
+
+## Two lanes
+
+Push and pop have separate limiters with separate state and separate defaults.
+
+| Lane | Initial | Minimum | Maximum |
+| --- | --- | --- | --- |
+| Push | `QUEEN_SEG_PUSH_INIT` 16 | `QUEEN_SEG_PUSH_MIN` 4 | `QUEEN_SEG_PUSH_MAX` 64 |
+| Pop | `QUEEN_SEG_POP_INIT` 16 | `QUEEN_SEG_POP_MIN` 4 | `QUEEN_SEG_POP_MAX` 64 |
+
+`QUEEN_VEGAS_ALPHA` and `QUEEN_VEGAS_BETA` are shared.
+
+They are separate because their round-trip distributions are unrelated. A push commits a
+multi-segment transaction and pays an fsync; a pop runs a claim under `SKIP LOCKED` and returns
+blobs. Sharing one `rtt_base` between them would let the cheaper family define the base and make the
+expensive one read as permanent congestion.
+
+Both lanes are per process. In a multi-replica deployment each broker limits itself independently,
+and PostgreSQL sees the sum.
+
+Both gauges are on `/metrics/prometheus`:
+
+```text
+queen_seg_push_vegas_limit
+queen_seg_pop_vegas_limit
+```
+
+<Aside type="caution">
+Note the path. These are on `/metrics/prometheus`, not `/metrics`.
+</Aside>
+
+## How it interacts with the connection pool
+
+The permit and the pooled connection are two separate resources acquired in a fixed order: permit
+first, then connection. The pool (`DB_POOL_SIZE`, default 160) is the hard ceiling on concurrent
+PostgreSQL work; the limiter is the soft ceiling that normally binds first.
+
+Three ordering rules exist because getting them wrong produced real regressions:
+
+**A parked pop holds neither.** A long-poll releases the permit and returns the connection before it
+parks, and re-acquires both on wake. Otherwise every parked consumer would pin a connection, and the
+pool would be exhausted by consumers doing nothing.
+
+**A cheap in-memory check comes before the permit.** On the hot-list serve path, a pop whose ring has
+nothing ready returns empty without touching either resource. The reason is a starvation inversion:
+the rate of empty re-polls is proportional to the number of parked consumers, so taking the shared pop
+permit on every empty re-poll saturated the limiter (Vegas shrinks it under round-trip pressure),
+and a freshly woken *real* delivery then queued behind thousands of empty polls, with a wait that grew
+linearly in the queue count. The legacy path achieves the same thing with the cheap indexed
+`log_has_pending_v1` probe.
+
+**The minimum-pop-wait hold happens before the permit too.** Holding an under-full claim back is done
+in Rust, before either resource is taken. A `pg_sleep` inside the pop procedure would hold a
+connection, a permit, a PostgreSQL backend, and (after the first partition claim) row locks, for the
+whole window.
+
+Background jobs bypass the limiter entirely. Retention, the stats reconciler and the metrics collector
+each take a pooled connection directly, because they are bounded by construction (one step at a time,
+one cycle at a time) and gating them behind a limiter sized for request traffic would let request load
+starve maintenance.
+
+## Timeouts feed back into the limit
+
+Every hot-path database call is wrapped in `tokio::time::timeout(QUEEN_STMT_TIMEOUT_MS)`, 30000 ms by
+default, and the elapsed time is recorded to the limiter regardless of outcome. A timed-out operation
+therefore reports a very large round-trip time, `queue` approaches `limit`, and the lane shrinks. That
+is the desired coupling: a database that has started failing slowly should be offered less work, not
+the same amount.
+
+The timeout also has a server-side half. Dropping the client future does not stop the PostgreSQL
+backend, which keeps executing the statement and holding its locks. Under a first-contact lock convoy
+that is the terminal amplifier, because abandoned-but-still-running statements accumulate. So the
+broker sends an out-of-band cancel request on a fresh connection (negotiating the same TLS mode as the
+pool, so the cancel connection cannot disagree with it), and **quarantines** the pooled connection
+instead of recycling it to the next caller.
+
+## Tuning it
+
+The short version: read the gauge before changing anything.
+
+- **If the limit is not sitting at the maximum, the maximum is not your constraint.** Raising
+  `QUEEN_SEG_*_MAX` cannot help, because the controller never reaches it. The maximum is a safety
+  ceiling, not an operating point.
+- **Raising the minimum forces concurrency the controller has decided against.** More concurrency on
+  these paths means more `SKIP LOCKED` racing and more contention, which raises round-trip times, which
+  is exactly the signal the controller was reacting to.
+- **`alpha` and `beta` move the target queue depth.** They are the honest knobs, and they are the ones
+  to reach for if you have measured that the controller settles somewhere you can argue is wrong.
+- **A known bias worth keeping in mind:** fatter batches have longer round trips, and the controller
+  cannot distinguish "this operation carried more work" from "PostgreSQL is queueing". The expiring base
+  window limits how long that bias can persist, but it does not eliminate it.
+
+The generated [configuration reference](/reference) lists every one of these variables with the default
+the code applies.

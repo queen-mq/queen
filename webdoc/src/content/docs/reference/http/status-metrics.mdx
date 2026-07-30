@@ -1,0 +1,281 @@
+---
+title: Status, health and metrics
+description: "/health, /status, the /api/v1/status family, and the two metrics endpoints: what each one measures and how fresh it is."
+type: reference
+tier: operate
+sidebar:
+  order: 13
+  label: Status and metrics
+sourceOfTruth:
+  - server/src/handlers/status.rs
+  - server/src/handlers/analytics.rs
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/db.rs
+  - server/src/metrics.rs
+  - server/src/stats.rs
+  - server/src/syscollect.rs
+  - server/src/config.rs
+  - server/sql/procedures/013_stats.sql
+  - server/sql/procedures/014_worker_metrics.sql
+  - server/sql/procedures/018_prometheus.sql
+  - server/sql/procedures/048_log_stats.sql
+---
+
+Four different things are called "status" on this broker, and they answer different
+questions. `/health` asks whether PostgreSQL is reachable. `/status` asks whether
+the process is up. `/api/v1/status` is the dashboard's aggregate view of the whole
+cell. `/api/v1/status/queues` is the per-queue view, and the only one of the four
+that applies filters.
+
+## GET /health
+
+Public: no token required, even with JWT enabled.
+
+```json
+{ "status": "healthy", "database": "connected", "engine": "segments-rust", "version": "1.0.0" }
+```
+
+This is not a liveness ping. The handler takes a pooled connection and performs a
+real database round-trip; if the pool or the query fails it answers **503**:
+
+```json
+{ "status": "unhealthy", "database": "disconnected", "engine": "segments-rust", "version": "1.0.0" }
+```
+
+<Aside type="danger">
+Do not wire `/health` to a Kubernetes **liveness** probe. When PostgreSQL is
+unreachable the broker deliberately keeps accepting pushes and spools them to its
+disk buffer; a liveness probe on `/health` would kill exactly the process that is
+protecting those messages, and the spool would be lost with the pod. Use it as a
+**readiness** probe (stop sending traffic) and probe `/status` for liveness.
+</Aside>
+
+## GET /status
+
+Access level `read-only`, deliberately not public, so an unauthenticated caller
+cannot enumerate broker facts.
+
+```json
+{ "status": "ok", "engine": "segments-rust" }
+```
+
+No database access, no allocation of a connection. This is the correct liveness
+signal: it answers as long as the HTTP server is scheduling requests.
+
+## GET /api/v1/status
+
+Access level `read-only`. **Not tenant-scoped**: the handler resolves no tenant
+and the stored procedure aggregates across every tenant on the cell, by design
+(it blends cluster-wide worker health with queue throughput). On a shared cell,
+treat this as an operator route and do not expose it to a tenant.
+
+Filters: `from` (default `now() - 1 hour`), `to` (default `now()`), `queue`,
+`namespace`, `task`.
+
+The body carries a time-bucketed view plus current totals:
+
+| Field | Meaning |
+| --- | --- |
+| `timeRange` | The window actually used. |
+| `bucketMinutes` | Bucket width chosen from the window length: 1 up to 60 min, 5 up to 6 h, 15 up to 24 h, 60 up to 7 days, else 360. |
+| `pointCount` | Number of buckets returned. |
+| `throughput[]` | Per-bucket push/pop/ack counts, event-loop lag, CPU, RSS and DB pool gauges. |
+| `queues`, `messages`, `leases`, `deadLetterQueue` | Current aggregate counts. |
+| `workers[]`, `errors` | Per-replica health and error counts. |
+| `statsAge` | Age in seconds of the reconciled numbers, or `-1` when nothing has been reconciled. |
+
+When a `queue`, `namespace` or `task` filter is set, throughput comes from the
+per-queue counters and the system-health signals still come from the replica-wide
+tables, so you can read "this queue's throughput against the cell's health" in one
+response.
+
+## GET /api/v1/status/queues
+
+Access level `read-only`, tenant-scoped. Filters: `queue`, `namespace`, `task`,
+`from`, `to`, plus `limit` (default `100`) and `offset` (default `0`). Unlike
+`/api/v1/resources/queues`, the filters here are applied in SQL.
+
+```json
+{
+  "queues": [
+    {
+      "id": "0198...",
+      "name": "orders",
+      "namespace": "billing",
+      "task": "invoice",
+      "createdAt": "2026-07-30T09:12:44.011Z",
+      "partitions": 8,
+      "messages": { "total": 12904, "pending": 310, "processing": 24, "completed": 12570, "deadLetter": 0 }
+    }
+  ],
+  "pagination": { "limit": 100, "offset": 0 }
+}
+```
+
+Every number in `messages` comes from `queen.stats`, so it is as fresh as the last
+reconciler cycle. See "Where the numbers come from" below.
+
+## GET /api/v1/status/queues/:queue
+
+Access level `read-only`, tenant-scoped. The per-queue detail the dashboard's queue
+page renders: a `queue` object with its identity and a `config` block read off the
+queue row, one entry per partition (`messages`, `stats`, `cursor`, `lastActivity`,
+`oldestMessage`, `newestMessage`), and `totals`.
+
+Unlike the list route above, this one is computed **live** from the log tables per
+request (watermark arithmetic over `queen.log_partitions` and `queen.log_consumers`),
+so it does not wait for the reconciler. Three shape notes:
+
+- `pending` is measured against the lowest committed cursor across the queue's
+  groups, so one lagging group holds the number up for the whole partition.
+- `failed` is `null`, never `0`. The log engine keeps no per-partition failure
+  counter, and a literal `0` next to a live ack-failure chart would read as "no
+  failures".
+- `cursor.batchesConsumed` is always `0` (`queen.log_consumers` does not keep that
+  counter) and `lastActivity` is `MAX(lease_acquired_at)`, the closest activity
+  signal the log schema retains.
+
+A queue that does not exist for the tenant answers `404` with
+`{"error":"Queue not found"}`.
+
+## GET /api/v1/status/analytics
+
+Access level `read-only`, tenant-scoped. The message-volume time series: it buckets
+`queen.log_segments` by `created_at` and attributes each segment's frame count
+(`end_offset - base_offset + 1`, exact) to the bucket in which the segment was
+created.
+
+Filters: `from` (default `now() - 24 hours`), `to` (default `now()`), `interval`
+(`minute`, `hour` or `day`; anything else falls back to `hour`), `queue`,
+`namespace`, `task`.
+
+```json
+{
+  "dataPoints": [ { "timestamp": "2026-07-30T10:00:00.000Z", "messages": 41200 } ],
+  "interval": "hour",
+  "from": "2026-07-29T11:00:00.000Z",
+  "to": "2026-07-30T11:00:00.000Z"
+}
+```
+
+Granularity inside a segment is not recoverable, so a segment's whole frame count
+lands in one bucket. This is the one intentionally scan-shaped reader on the
+broker: cost is proportional to the number of segments in the range. It is a
+per-request dashboard endpoint with a time filter, not part of any refresh loop.
+Keep the range bounded.
+
+## GET /api/v1/status/buffers
+
+Access level `read-only`, **not** tenant-scoped: the disk spool is a property of the
+process.
+
+```json
+{ "pending": 0, "failed": 0, "dbHealthy": true, "worker": 0 }
+```
+
+`dbHealthy` is the file buffer's own reachability hint (flipped by push and drain
+attempts) **and** a fresh ping, so a `true` here means both that nothing has failed
+recently and that the database answers right now. `worker` is always `0`: this
+broker is a single async process.
+
+## GET /metrics
+
+Public. Returns **JSON**, not Prometheus text.
+
+```json
+{
+  "uptime": 8412,
+  "requests": { "total": 91002, "rate": 0 },
+  "messages": { "total": 402881, "rate": 0 },
+  "database": { "poolSize": 32, "idleConnections": 30, "waitingRequests": 0 },
+  "memory": { "rss": 6612574208, "heapTotal": 0, "heapUsed": 0, "external": 0, "arrayBuffers": 0 },
+  "cpu": { "user": 0, "system": 0 }
+}
+```
+
+The zeros are literal, not measurements: `requests.rate`, `messages.rate`,
+`waitingRequests`, every `heap*` field and both `cpu` fields are hard-coded `0` for
+shape compatibility. Only `uptime`, the two `total` counters, `poolSize`,
+`idleConnections` and `memory.rss` carry real values, and the totals are
+process-lifetime sums since this replica started. For anything you intend to graph,
+use `/metrics/prometheus`.
+
+## GET /metrics/prometheus
+
+Public. `Content-Type: text/plain; version=0.0.4; charset=utf-8`, with
+`Cache-Control: no-cache`. Every family carries `HELP` and `TYPE`.
+
+The body is assembled in two parts:
+
+1. **In-process gauges and counters**: `queen_process_*`, `queen_uptime_seconds`,
+   scheduler-lag and parked-poll gauges, the adaptive push/pop concurrency limits,
+   the DB pool gauges, the maintenance-mode flag and the file-buffer gauges. These
+   are always emitted.
+2. **A database-derived block**: cluster lifetime totals
+   (`queen_cluster_*`, read back out of PostgreSQL so every replica reports the same
+   value), per-queue minute rates, and DLQ depth. This part is **best effort**: if
+   the pool or the query fails, the response is still `200` with part 1 only. A
+   scrape that suddenly loses half its families means the database read failed, not
+   that the queues went quiet.
+
+The complete family list, generated from `server/src/metrics.rs` and the exposition
+code, is in the [reference section](/reference). Three caveats that the family list
+cannot express:
+
+- `queen_dlq_depth` and `queen_dlq_depth_by_queue` are computed from the
+  rows-engine dead-letter table, which this engine never writes, so they read `0`
+  on a log-engine deployment. For real DLQ depth use `GET /api/v1/dlq`
+  ([messages and DLQ](/reference/http/messages-dlq)) or the lifetime counter
+  `queen_cluster_dlq_total`, which is bumped on every dead-letter.
+- `queen_queue_depth_total` and `queen_queue_depth_pending` are formatted from a
+  `queue_depth` block that `queen.get_prometheus_metrics_v1` does not currently
+  return, so those two series are absent from the exposition.
+- Per-queue series carry a bare `queue` label and no tenant label. The query behind
+  them takes the most recent bucket per queue **name**, so on a cell where two
+  tenants use the same queue name one tenant's numbers are published under that
+  name.
+
+<Aside type="danger">
+Never expose `/metrics/prometheus` (or `/metrics`) to a tenant. Both are public,
+neither is tenant-scoped, and the per-queue series mix tenants under a shared queue
+name. On a multi-tenant cell, bind them to an operator-only network path or block
+them at the proxy.
+</Aside>
+
+## Where the numbers come from
+
+Nothing on this page is computed at scrape time except the process gauges and the
+`status/analytics` series. Three background loops fill the tables the rest of the
+routes read, and each has its own clock:
+
+| Loop | Cadence | Writes | Read by |
+| --- | --- | --- | --- |
+| Stats reconciler (`server/src/stats.rs`) | `STATS_INTERVAL_MS`, default `10000` ms, on whichever replica wins advisory lock `737002` | `queen.stats` (queue / namespace / task / system rows), from the log tables with watermark arithmetic | `/api/v1/status`, `/api/v1/status/queues`, `/api/v1/status/queues/:queue`, `/api/v1/resources/*` |
+| Metrics collector (`server/src/syscollect.rs`) | `METRICS_FLUSH_MS`, default `60000` ms, on **every** replica | `queen.worker_metrics`, `queen.system_metrics`, `queen.queue_lag_metrics`, `queen.queue_parked_replica` | `/api/v1/status` throughput, `/api/v1/analytics/*`, the `queen_cluster_*` and per-queue Prometheus families |
+| Retention / maintenance (`server/src/retention.rs`) | `RETENTION_INTERVAL`, default `5000` ms, under advisory lock `737001` | Deletes expired segments; also ages the metrics tables out at `METRICS_RETENTION_DAYS`, default `90` | none |
+
+Two consequences to plan around. First, a freshly started broker reports zeros on
+the analytics routes until the first collector flush a minute later. Second,
+`statsAge` is the honest freshness signal on the aggregate routes: a large value
+means the reconciler is not running (no replica is winning the lock, or the cycle is
+failing), not that traffic stopped.
+
+## Access levels
+
+| Route | Level | Tenant-scoped |
+| --- | --- | --- |
+| `GET /health` | public | no |
+| `GET /metrics` | public | no |
+| `GET /metrics/prometheus` | public | no |
+| `GET /status` | read-only | no |
+| `GET /api/v1/status` | read-only | no |
+| `GET /api/v1/status/queues` | read-only | yes |
+| `GET /api/v1/status/queues/:queue` | read-only | yes |
+| `GET /api/v1/status/analytics` | read-only | yes |
+| `GET /api/v1/status/buffers` | read-only | no |
+
+The per-queue analytics routes are on [Analytics](/reference/http/analytics); the
+operator-only surfaces, including the maintenance toggles this page's
+`queen_maintenance_mode_enabled` gauge reports, are on
+[System and internal routes](/reference/http/system).

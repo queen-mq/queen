@@ -1,0 +1,416 @@
+---
+title: Go
+description: "Install the Go client, construct it, and use the fluent API — including the Pop() that does not long-poll by default."
+type: how-to
+tier: use
+sidebar:
+  order: 15
+sourceOfTruth:
+  - clients/client-go/queen.go
+  - clients/client-go/queue_builder.go
+  - clients/client-go/push_builder.go
+  - clients/client-go/consume_builder.go
+  - clients/client-go/consumer_manager.go
+  - clients/client-go/http_client.go
+  - clients/client-go/operation_builder.go
+  - clients/client-go/defaults.go
+  - clients/client-go/types.go
+  - clients/client-go/go.mod
+verifiedBy:
+  - clients/client-go/tests/push_test.go
+  - clients/client-go/tests/pop_test.go
+  - clients/client-go/tests/consume_test.go
+  - clients/client-go/tests/transaction_test.go
+  - clients/client-go/retry429_test.go
+  - clients/client-go/ack_test.go
+---
+
+The Go client takes a `context.Context` on every network call and separates building from
+executing: a builder chain is inert until you call `Execute(ctx)`, `Pop(ctx)` or `Get(ctx)`.
+It requires Go 1.24 and depends only on `github.com/google/uuid` and `github.com/jackc/pgx/v5`.
+
+```bash
+go get github.com/smartpricing/queen/clients/client-go
+```
+
+```go
+import queen "github.com/smartpricing/queen/clients/client-go"
+```
+
+## Construct a client
+
+`New` accepts a `string`, a `[]string`, a `ClientConfig` or a `*ClientConfig`, and returns an
+error rather than panicking on a bad URL.
+
+```go
+client, err := queen.New("http://localhost:6632")
+if err != nil {
+    return err
+}
+defer client.Close(context.Background())
+```
+
+```go
+client, err := queen.New(queen.ClientConfig{
+    URLs:                  []string{"http://broker-a:6632", "http://broker-b:6632"},
+    BearerToken:           os.Getenv("QUEEN_TOKEN"),
+    TimeoutMillis:         30000,
+    LoadBalancingStrategy: "affinity",
+    EnableFailover:        true,
+})
+```
+
+Zero-valued numeric and string fields fall back to `ClientDefaults`, so a partially filled
+`ClientConfig` is safe.
+
+### Client options
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `URL` / `URLs` | — | Required. One backend or many. |
+| `TimeoutMillis` | `30000` | Per-request timeout. A long-poll pop adds 5 s of slack. |
+| `RetryAttempts` | `3` | Retries **after** the first attempt, for `5xx` and network failures — so `3` means four tries. A negative value means exactly one try. (The other SDKs count this as the total number of tries.) |
+| `RetryDelayMillis` | `1000` | First retry delay; doubles per attempt. |
+| `LoadBalancingStrategy` | `"affinity"` | `"round-robin"`, `"session"` or `"affinity"`. |
+| `AffinityHashRing` | `128` | Virtual nodes per backend on the affinity ring. |
+| `EnableFailover` | `false` on a bare struct | Try the next backend on `5xx` / network error. Set it explicitly. |
+| `HealthRetryAfterMillis` | `5000` | How long a backend stays marked unhealthy. |
+| `BearerToken` | `""` | Sent as `Authorization: Bearer <token>`. |
+| `Headers` | `nil` | Extra headers on every request. |
+| `MaxIdleConnsPerHost` | `256` | Go's own default is 2, which forces connection churn under concurrency. `MaxIdleConns` is set to four times this. |
+| `MaxConnsPerHost` | `0` (unlimited) | Hard cap on connections per host. |
+| `Retry429` | `nil` | `*Retry429Config{MaxAttempts, BaseMs, CapMs}`. |
+
+<Aside type="caution">
+`EnableFailover` is a plain `bool`, so its zero value is `false`, and the fallback in `New` only
+fires when the config carries no URLs at all — which `NewHttpClient` rejects anyway. So failover
+is **off unless you set it**, including when you construct from a `[]string`. With it off,
+`MarkUnhealthy` is a no-op: a failing backend is never taken out of rotation, so under the
+default `affinity` strategy every retry goes straight back to the broker that just failed. Set
+`EnableFailover: true` whenever you configure more than one URL.
+</Aside>
+
+## Push
+
+<Render file="snippets/go-push" />
+
+`Push` accepts one payload, a `[]interface{}` or a `[]map[string]interface{}`. Chain
+`.TransactionID(id)` and `.TraceID(id)` before `Execute`.
+
+```go
+responses, err := client.Queue("orders").
+    Partition("acct-42").
+    Push(map[string]interface{}{"id": 1}).
+    TransactionID("order-1-created").
+    Execute(ctx)
+```
+
+`Execute` returns `[]PushResponse`, one entry per item in request order, carrying the
+broker's `status` — `queued`, `duplicate`, `buffered` or `failed`. Supplying your own
+`TransactionID` is what makes a retry idempotent inside the queue's dedup window.
+
+<Aside type="caution">
+`TransactionID` applies to the **first item only**. When you push a slice, item 0 gets your
+ID and every other item gets a freshly minted UUIDv7 — so a multi-item push cannot be made
+idempotent through this method. Push items one at a time, or use
+[the HTTP API](/use/clients/http) where each item carries its own `transactionId`.
+</Aside>
+
+## Pop
+
+```go
+messages, err := client.Queue("orders").
+    Group("billing").
+    Batch(10).
+    Wait(true).
+    TimeoutMillis(10000).
+    Pop(ctx)
+```
+
+`Pop` returns `[]*Message` and propagates errors — unlike the JavaScript, Python and C++
+clients, which swallow a failed pop into an empty result.
+
+<Aside type="caution">
+**`Pop` does not long-poll by default.** `Wait` is a `*bool` that starts `nil`, and `Pop`
+falls back to `PopDefaults.Wait`, which is `false`. So a bare `Pop(ctx)` returns immediately
+with whatever is already available. Every other SDK initialises the flag from its *consume*
+defaults, where wait is `true`, and long-polls for 30 seconds. Call `.Wait(true)` explicitly
+when you want a long poll.
+</Aside>
+
+`.Batch(n)` caps the messages returned. `.Partitions(n)` claims up to `n` partitions in one
+call, with `Batch` acting as a global cap across them and one shared `LeaseID` — so a single
+`Renew` extends them all. `.AutoAck(true)` on a pop asks the server to commit the cursor
+inside the pop transaction, which is at-most-once delivery.
+
+<Aside type="note">
+`Message.Queue`, `Message.RetryCount` and `Message.ErrorMessage` stay at their zero values
+after a pop. The broker's pop response carries `queue` once at the top level and emits no
+per-message `retryCount` or `errorMessage`, so `parseMessages` never fills those fields.
+`Queue` *is* populated when you read a message out of the DLQ.
+</Aside>
+
+## Consume
+
+```go
+err := client.Queue("jobs").
+    Group("workers").
+    Concurrency(4).
+    Batch(1).
+    Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+        return process(ctx, msg.Data)
+    }).
+    Execute(ctx)
+```
+
+There are two handler shapes. `Consume` takes a `MessageHandler`
+(`func(context.Context, *Message) error`) and is called once per message. `ConsumeBatch` takes
+a `BatchMessageHandler` (`func(context.Context, []*Message) error`) and is called once per
+popped batch — except that with `Batch(1)` and a single message returned, the worker calls the
+batch handler with a one-element slice through the single-message path. `Execute(ctx)` starts
+`Concurrency` goroutines and blocks until they all stop; `Start(ctx)` is an alias.
+
+| Method | Default | Effect |
+| --- | --- | --- |
+| `.Group(name)` | queue mode | Consumer group whose cursor advances on ack. |
+| `.Concurrency(n)` | `1` | Worker goroutines, each with its own poll loop. |
+| `.Batch(n)` | `1` | Messages per pop. |
+| `.Partitions(n)` | `1` | Claim up to `n` partitions per pop; `Batch` is the global cap. |
+| `.Each()` | off | Process one message at a time, and abandon the rest of the batch after a nack. |
+| `.Limit(n)` | `0` (none) | Stop the worker after `n` messages. |
+| `.IdleMillis(n)` | `0` (none) | Stop the worker after `n` ms with no messages. |
+| `.AutoAck(bool)` | `true` | Ack on `nil`, nack on error — client-side. |
+| `.Wait(bool)` | `true` for consume | Long-poll the pop. |
+| `.TimeoutMillis(n)` | `30000` | Long-poll window. |
+| `.RenewLease(true, ms)` | off | Renew the batch's lease every `ms` from a goroutine while the handler runs. |
+| `.SubscriptionMode(m)` | `""` | `all` or `new`, applied only when the group's cursor is created. |
+| `.SubscriptionFrom(t)` | `""` | `now` or an ISO timestamp, same first-contact-only rule. |
+
+Cancel the `ctx` to stop every worker; the workers return `ctx.Err()`, which `Execute`
+filters out so a clean cancellation is not reported as a failure.
+
+<Aside type="note">
+The package exports `SubscriptionModeNewOnly = "new-only"` alongside `SubscriptionModeNew`, but
+the broker matches the string `new` exactly — `new-only` falls through to the `all` behaviour and
+seeds the cursor at the beginning of the partition. Use `queen.SubscriptionModeNew`.
+</Aside>
+
+`AutoAck` is client-side. The worker never sends `autoAck` to the server: it calls
+`POST /api/v1/ack` after your handler returns, with status `completed` on `nil` and `failed`
+on an error. Because an ack is an offset commit, a nack clamps the group's cursor at the
+failed message and everything after it in the popped batch is redelivered — so under
+`.Each()` the worker abandons the rest of the batch after a nack instead of producing
+duplicates and rejected acks.
+
+<Aside type="note">
+With `AutoAck` on, a handler error is nacked and swallowed: the worker keeps polling and
+`Execute` returns `nil`. With `AutoAck` off, a handler error propagates out of `Execute`. A
+pop error that is neither a timeout, a `429`, a network failure nor a `403` is logged and the
+loop continues, so transient broker errors do not kill the consumer.
+</Aside>
+
+Every delivered message carries a trace method that never panics:
+
+```go
+_, _ = msg.Trace(ctx, queen.TraceConfig{
+    TraceNames: []string{"tenant-acme"},
+    EventType:  "step",
+    Data:       map[string]interface{}{"stage": "charged"},
+})
+```
+
+## Acknowledge manually
+
+```go
+responses, err := client.Ack(ctx, messages, true, queen.AckOptions{ConsumerGroup: "billing"})
+```
+
+`Ack` accepts `*Message`, `Message`, `[]*Message` or `[]Message`. `success` maps to
+`completed` or `failed`; `AckOptions` carries `ConsumerGroup` and `Error` (the failure reason
+recorded on the DLQ row if the nack exhausts the retry budget). One message goes to
+`/api/v1/ack`, several to `/api/v1/ack/batch`.
+
+A rejected ack still arrives as HTTP 200 with `success: false` on the item, so check
+`responses[i].Success` — a `nil` error is not enough. The client compares the response length
+against the number of acks sent and errors out if they disagree, so a truncated response can
+never be attributed to the wrong message. `ValidateMessages` rejects an ack whose
+`PartitionID` is missing, because a `TransactionID` alone is not unique across partitions.
+
+## Transactions
+
+```go
+_, err := client.Transaction().
+    Queue("stage-2").Partition("acct-42").
+    Push([]interface{}{map[string]interface{}{"value": 2}}).
+    Ack(msg, queen.AckStatusCompleted, queen.AckOptions{ConsumerGroup: "billing"}).
+    Commit(ctx)
+```
+
+`Transaction()` bundles pushes and acks into one PostgreSQL transaction, all or nothing. Acked
+messages contribute their `LeaseID` to `requiredLeases`, so the commit fails if a lease
+expired in the meantime.
+
+<Aside type="note">
+A transaction is not exactly-once end to end. A lost response plus a retry duplicates the
+pushes unless the `transactionId`s are deterministic and still inside the dedup window.
+</Aside>
+
+## Lease renewal
+
+```go
+responses, err := client.Renew(ctx, messages)
+```
+
+`Renew` accepts a lease ID, a slice of lease IDs, or messages in any of the four shapes, and
+de-duplicates the IDs — a multi-partition pop shares one lease, so passing the whole slice
+issues one HTTP call.
+
+<Aside type="caution">
+`RenewResponse.NewExpiresAt` is always the zero `time.Time`. The broker answers
+`{"renewed":N,"expiresAt":"…"}` while the client reads `newExpiresAt`. The renewal happens;
+the reported expiry does not exist. Drive renewals from your own ticker, which is what
+`.RenewLease(true, ms)` does.
+</Aside>
+
+## Client-side buffering
+
+```go
+_, err := client.Queue("events").
+    Buffer(queen.BufferConfig{MessageCount: 500, TimeMillis: 200}).
+    Push(payload).
+    Execute(ctx)
+```
+
+With `Buffer`, `Execute` returns immediately with one `PushResponse{Status: "buffered"}` per
+item and the messages flush when the buffer reaches `MessageCount` (default `100`) or
+`TimeMillis` (default `1000`) elapses. Buffers are keyed per `queue/partition`.
+
+<Aside type="caution">
+A buffered push hides the broker's per-item verdict, and the buffer lives in process memory —
+an unflushed buffer is lost if the process dies without `Close`.
+</Aside>
+
+`client.Queue("events").FlushBuffer(ctx)` flushes one address, `client.FlushAllBuffers(ctx)`
+flushes everything, and `client.GetBufferStats()` reports the active buffers, total buffered
+messages, oldest buffer age and flush count.
+
+## Queue configuration
+
+```go
+_, err := client.Queue("orders").Config(queen.QueueConfig{
+    LeaseTime:  300,
+    RetryLimit: 5,
+}).Create().Execute(ctx)
+```
+
+<Aside type="caution">
+`/api/v1/configure` is a **full replace**: every key you omit is reset to its default,
+including `dedupWindowSeconds`, which falls back to 3600. `buildOptions` also omits any field
+left at its zero value, so `QueueConfig{LeaseTime: 300}` sends `leaseTime` and nothing else.
+Send the complete configuration you want on every call.
+</Aside>
+
+`Create().Execute(ctx)` sets `configured: true` on the returned map itself, for parity with the
+other SDKs. It is not the broker's verdict — the broker's own response is merged underneath it.
+
+## Admin
+
+```go
+overview, err := client.Admin().GetOverview(ctx)
+queues, err := client.Admin().ListQueues(ctx, queen.ListQueuesParams{Limit: 50})
+```
+
+`client.Admin()` covers the observability surface: resources, messages, traces, status and
+analytics, consumer groups, health, `/metrics`, `/metrics/prometheus`, the maintenance-mode
+switches, the DLQ listing, and the four per-queue analytics series. It is a superset of the
+JavaScript admin surface — `PrometheusMetrics`, `ListDLQ`, `SeekConsumerGroupPartition`,
+`GetQueueLagAnalytics`, `GetQueueOpsAnalytics`, `GetQueueParkedReplicas` and
+`GetRetentionAnalytics` have no JavaScript equivalent. The full route list with access levels
+is in [Reference](/reference).
+
+<Aside type="caution">
+`Admin().ClearQueue()` and `Admin().MoveMessageToDLQ()` call paths the broker does not
+register (`DELETE /api/v1/queues/:queue/clear` and
+`POST /api/v1/messages/:partitionId/:transactionId/dlq`) and return 404.
+`RetryMessage` and `DeleteMessage` are real.
+</Aside>
+
+## Dead-letter queue
+
+```go
+dlq, err := client.Queue("orders").DLQ("billing").Limit(50).Get(ctx)
+```
+
+DLQ messages *do* carry `Queue`, `RetryCount` and `ErrorMessage` — the DLQ query builds them
+from `queen.log_dlq`, unlike a pop.
+
+<Aside type="note">
+Three things about this call. `Get` swallows errors and returns an empty response with a
+`nil` error, so check `len(dlq.Messages)` rather than trusting the error. `dlq.Total` is
+always `0`: the broker answers `{"messages":[…],"pagination":{"limit":…,"offset":…}}` with no
+`total` field. And `.From()`, `.To()` and the partition are sent as query parameters that the
+broker's DLQ handler does not read — it collects only `queue`, `consumerGroup`, `limit` and
+`offset` — so they are silently ignored. Page with `Limit`/`Offset` and filter the rest
+client-side.
+</Aside>
+
+The broker does have a replay route that re-pushes a dead letter and drops its DLQ row, but
+this SDK does not reach it: `Admin.RetryMessage` returns an error without making a request.
+From Go, reprocess by reading the row and pushing the payload again — or call
+`POST /api/v1/messages/{partitionId}/{transactionId}/retry` directly. Either way the result is
+a new message at the tail of its partition, not the original one revived.
+
+## 429 and 403
+
+```go
+client, err := queen.New(queen.ClientConfig{
+    URL:         "https://cell.example",
+    BearerToken: token,
+    Retry429:    &queen.Retry429Config{MaxAttempts: 20, BaseMs: 500, CapMs: 30000},
+})
+```
+
+A `429` is retried in place against the same backend, honouring `Retry-After` (seconds) when
+present and otherwise backing off `BaseMs * 2^attempt` capped at `CapMs`, both with ±20 %
+jitter. `MaxAttempts` defaults to 10 for ordinary requests; a request marked with
+`WithLongPollRetry()` — which the pop and consume paths add automatically when `Wait` is true —
+retries unboundedly unless you set `MaxAttempts`, in which case it applies to both. A `429`
+never marks the backend unhealthy.
+
+Errors from a non-2xx response are `*HTTPError`:
+
+```go
+var httpErr *queen.HTTPError
+if errors.As(err, &httpErr) {
+    if httpErr.IsClusterSuspended() { return errStop }
+    log.Printf("queen %d %s: %s", httpErr.StatusCode, httpErr.Code, httpErr.Error())
+}
+```
+
+`StatusCode`, `Code`, `Body` and `RetryAfterSeconds` are all exposed, so you branch on the
+machine-readable code rather than on message text. A `403` is terminal — the consume worker
+returns it instead of retrying, because `cluster_suspended`, `storage_quota_exceeded`,
+`feature_gated` and `forbidden` cannot resolve themselves.
+
+## Logging
+
+Set `QUEEN_CLIENT_LOG` to `debug` / `true` / `1`, `info`, `warn` or `error` to enable the
+built-in logger; anything else (including unset) disables it. `queen.SetLogLevel(...)`
+changes it at runtime.
+
+## Shutdown
+
+```go
+defer client.Close(context.Background())
+```
+
+The Go client installs **no signal handlers**. `Close(ctx)` flushes every buffer and closes
+the HTTP client, and returns an error if a flush failed — so a `defer client.Close(ctx)` in
+`main` plus your own `signal.NotifyContext` is the pattern. If you cancel the context you pass
+to `Close`, the final flush cannot complete and the buffered messages are lost.
+
+## Streaming
+
+The windowed streaming SDK lives under `clients/client-go/streams/` in the same module and
+binds to a `*QueueBuilder` through `.AsStreamSource()`. Its concepts — windows, watermarks,
+gates, state — are documented separately in [Use Queen](/use).

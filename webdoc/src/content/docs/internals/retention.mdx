@@ -1,0 +1,337 @@
+---
+title: Retention internals
+description: "The retention loop as bounded autocommitting steps with no wrapping transaction, one partition lock per step, an advisory lock that elects a leader, the eviction watermarks, and the empty-partition cleanup phase."
+type: concept
+tier: internals
+sidebar:
+  order: 9
+sourceOfTruth:
+  - server/src/retention.rs
+  - server/sql/procedures/045_log_maintenance.sql
+  - server/src/config.rs
+---
+
+Retention deletes whole segments. It never deletes individual messages and never rewrites a blob. It
+does delete partitions, but only ones that are empty and have been untouched for
+`PARTITION_CLEANUP_DAYS` — a separate phase on its own slow clock, not part of the segment sweep. The
+interesting part is not the policy — that is three timestamps — but the shape of the work: **bounded
+autocommitting steps with no wrapping transaction**, each holding exactly one partition row lock for
+the duration of its own small batch.
+
+That shape is the answer to a specific failure. The retired engine's sweep was one call equalling one
+transaction over every partition, so a large backlog held one transaction — and its locks — open for
+the whole sweep, and pushes piled up behind it on `Lock:transactionid`. Every design decision below
+follows from not doing that.
+
+## The loop
+
+`retention.rs` runs one cycle every `RETENTION_INTERVAL` milliseconds — **5000**, not the 300000 the
+retired engine used — on one dedicated pooled connection.
+
+```text
+try session advisory lock 737001
+  → if not acquired: skip this cycle
+  → phase 1: retention rules 1 and 2, per partition, looped until done
+  → phase 2: log_txns hash-sidecar purge, per partition, looped until done
+  → phase 3: maxWaitTimeSeconds eviction, per eligible partition
+  → phase 4: empty-partition cleanup, batched — at most once a minute
+  → phase 5: metrics purge
+release advisory lock 737001 on every exit path
+```
+
+The cadence is measured from cycle start (`sleep = interval − elapsed`, clamped at zero), so a cycle
+that overruns does not compound.
+
+### The leader gate
+
+`pg_try_advisory_lock(737001)` — session-scoped, non-blocking. Behind a load balancer only one replica
+sweeps per cycle; a replica that cannot take the lock skips the cycle entirely, so replicas never
+double-delete.
+
+The lock is session-scoped rather than transaction-scoped because there is no cycle transaction to
+scope it to. That makes releasing it explicit, and the code releases it on every exit path including
+failure. If the release itself fails, the connection is almost certainly broken — the backend session
+then dies and PostgreSQL releases the lock with it, and deadpool recycles the connection — so the lock
+cannot leak. It is a `warn`, not an error, because a successful cycle should not be reported as a
+failure.
+
+Because every statement in the cycle autocommits, the connection can never go back to the pool in an
+aborted-transaction state, even after a mid-cycle error.
+
+### The work list
+
+One query per cycle builds the whole plan, with every cutoff computed server-side from a single
+`now()` so all steps in a cycle share one clock:
+
+| Column | Source | Meaning |
+| --- | --- | --- |
+| `all_cutoff` | `retention_enabled AND retention_seconds > 0` | rule 1 boundary; `NULL` disables it |
+| `completed_cutoff` | `retention_enabled AND completed_retention_seconds > 0` | rule 2 boundary; `NULL` disables it |
+| `txns_cutoff` | `GREATEST(dedup_window_seconds, completed_retention_seconds, 900)` | sidecar purge; never `NULL` |
+| `max_wait_cutoff` | `max_wait_time_seconds > 0` | eviction; `NULL` disables it |
+
+Policy therefore lives in Rust and SQL stays policy-free: a `NULL` cutoff simply disables that rule
+for the call. The rows are ordered by partition id.
+
+<Aside type="caution">
+The join between `queen.queues` and `queen.log_queues` carries `tenant_id` on both sides, and that is
+load-bearing rather than cosmetic. Queue identity is `(tenant_id, name)`; matching on name alone
+becomes a cross product the moment two tenants hold the same queue name, and one tenant's cutoffs
+would then be emitted against another tenant's partitions — which the step calls execute as deletes.
+A unit test pins the join text for exactly this reason. Single-tenant deployments are unaffected: the
+join is one-to-one either way.
+</Aside>
+
+## The retention step
+
+```sql
+queen.log_retention_step_v1(
+    p_pid              UUID,
+    p_all_cutoff       TIMESTAMPTZ,
+    p_completed_cutoff TIMESTAMPTZ,
+    p_max_rows         INT,
+    p_history_type     TEXT DEFAULT NULL
+) RETURNS JSONB   -- {"deleted":N,"new_log_start":X,"done":bool}
+```
+
+One call is one partition, at most `p_max_rows` segment rows, one transaction. Rust loops it until
+`done`, and `RETENTION_BATCH_SIZE` (default 1000) is `p_max_rows`.
+
+Inside, in order:
+
+1. **`SELECT log_start ... FOR UPDATE`** on the partition row. That lock is the same serializer the
+   push allocator uses, and it is held only until this call commits. A partition deleted underneath
+   (a queue drop) returns `done: true` immediately.
+
+2. **Rule 1 — time.** `log_retention_boundary_v1(pid, log_start, all_cutoff)` finds the smallest
+   `base_offset >= log_start` of a segment fresh enough to keep. Because `created_at` is monotone in
+   `base_offset`, that is a single forward primary-key walk from the previous watermark, not a sort.
+   When everything at or above the watermark is stale the boundary is `MAX(end_offset) + 1`. Rule 1
+   deletes regardless of consumption state — it is the explicit "drop unconsumed data after N seconds"
+   knob.
+
+3. **Rule 2 — consumed only.** The same time walk with `completed_cutoff`, but capped at
+   `MIN(committed) + 1` across the partition's `log_consumers` rows: the slowest group's next wanted
+   offset. A partition with **no** consumer rows has nothing consumed, so rule 2 contributes nothing
+   and old-but-unconsumed segments survive. That cap is exactly why unconsumed backlog is never lost
+   to rule 2.
+
+4. **Combine.** The boundary is the `GREATEST` of the applicable rules, starting from `log_start`, so
+   the watermark invariant — every offset below `log_start` is deleted — holds and repeated steps never
+   re-scan the dead head of the index.
+
+5. **Delete whole segments only.** Only segments *entirely* below the boundary (`end_offset < boundary`)
+   go. Rule 2's cap is a message offset and can fall mid-segment; the covering segment then survives
+   because its unconsumed tail is still needed, and `log_start` advances only to the last deleted
+   `end_offset + 1`, never to the mid-segment boundary. That preserves the invariant that `log_start`
+   is the first live segment's `base_offset`, which both the pop head probe and the O(partitions) stats
+   arithmetic depend on.
+
+6. **Bound the batch.** Locate the `p_max_rows` lowest `base_offset`s below the boundary, then issue
+   **one ranged `DELETE`** over `[log_start, max chosen base]`. That is correct because base and end
+   offsets are equi-monotone across disjoint ranges, so everything in that base range is in the chosen
+   batch.
+
+7. **Advance the watermark**, guarded so it never moves backwards, and write one
+   `queen.retention_history` row in the same transaction — so the audit row is committed if and only if
+   the delete was. `messages_deleted` is the **frame** count removed, not the segment-row count, because
+   the readers label it "messages evicted". `retention_type` names the rule that moved the boundary:
+   `retention`, `completed_retention`, or `max_wait_time_eviction` when the eviction wrapper called in.
+
+The Rust loop stops on `done` or on `deleted == 0`. The step contract already reports `done: true`
+whenever nothing was deleted, so the second condition is a defensive stop against a contract break
+looping forever.
+
+`queen.retention_history` needed one repair to work under this engine. Its `partition_id` foreign key
+pointed at `queen.partitions` — the rows-engine table, in which no log partition has a row — so it was
+dropped, exactly as the traces table was decoupled. The cascade it provided is replaced by the age
+purge in the worker-metrics cleanup, which also bounds the table's growth, and an index on
+`executed_at DESC` was added for the analytics reader. Before this, the Retention panel reported zero
+messages evicted while segments were being deleted continuously: a dead panel presented as a
+measurement.
+
+## The sidecar purge
+
+```sql
+queen.log_txns_purge_step_v1(p_pid UUID, p_cutoff TIMESTAMPTZ, p_max_rows INT)
+  RETURNS JSONB   -- {"deleted":N,"new_txns_start":X,"done":bool}
+```
+
+Same step pattern over `queen.log_txns` and its own watermark `txns_start`. It runs for **every** log
+partition, not only retention-enabled ones, because the 900-second floor in the cutoff makes the window
+always applicable.
+
+The cutoff is `now() - GREATEST(dedup_window_seconds, completed_retention_seconds, 900)`, so a row is
+never purged while the push deduplication probe or a plausible late ack could still need it. A hash that
+outlives even that window resolves as unknown on ack, which the ack path counts as *not acked* —
+redelivery over loss.
+
+The lock discipline matters here for a reason specific to this table: the push deduplication probe reads
+`txns_start` under the partition row lock, so moving the watermark under that same lock keeps the probe's
+lower bound stable within any push. Rows are whole (no mid-row cap can exist), so the boundary is always
+row-aligned and the watermark lands exactly on it when done.
+
+Because this purge runs on its own clock, the sidecar's steady-state size is `O(rate × window)` and is
+independent of retention policy and backlog depth.
+
+## maxWaitTimeSeconds eviction
+
+```sql
+queen.log_evict_max_wait_step_v1(p_pid UUID, p_cutoff TIMESTAMPTZ, p_max_rows INT)
+```
+
+It delegates to `log_retention_step_v1` with rule 2 disabled and the history type
+`max_wait_time_eviction`, so there is one delete-and-advance code path rather than two.
+
+### It deletes unconsumed messages for every consumer group
+
+Whole segments older than the cutoff are dropped regardless of whether anyone consumed them, **for every
+group, in-flight leases included**. A cursor left below the new `log_start` resumes at the next existing
+offset, because the pop scan tolerates gaps. The SQL header calls this data loss by design, and it is
+accurate: the option's purpose is to bound how long data may sit, not to preserve it.
+
+It also applies **regardless of `retentionEnabled`**. A queue configured with only
+`maxWaitTimeSeconds` is still swept. If you set it expecting a warning, an alert, or a move to the
+dead-letter queue, none of that happens — nothing is dead-lettered.
+
+## Empty-partition cleanup
+
+```sql
+queen.log_partition_cleanup_step_v1(p_cutoff TIMESTAMPTZ, p_max_rows INT)
+  RETURNS JSONB   -- {"deleted":N,"done":bool}
+```
+
+This phase restores what the retired engine's `cleanup_inactive_partitions()` did and this one had
+dropped: `PARTITION_CLEANUP_DAYS` (default **30**) used to be parsed and then ignored, so partition
+rows accumulated for the life of the database. It is the one step that is not per-partition — a single
+call selects, locks and deletes a whole batch — and it runs **last of the data phases**, so a partition
+that phases 1–3 just emptied is eligible in the same cycle.
+
+It also runs on its own clock: **at most once a minute**, regardless of `RETENTION_INTERVAL`. Its
+candidate scan is `O(partitions)` rather than proportional to the work done, which is the exact cost
+class that makes background maintenance scale with partition count instead of message rate; a window
+measured in days has no use for five-second resolution.
+
+Deleting the row cascades to `log_consumers` (the cursors) and `log_segments` (none, by definition).
+`queen.log_txns` has no foreign key, so the step deletes the sidecar rows **explicitly** — nothing else
+ever would, because the phase-2 purge is driven by the partition work list, and an orphaned sidecar row
+would leak forever.
+
+It is also the one phase that does not consume the cycle's work list, which is what keeps it out of the
+tenant-isolation hazard the join above carries: it selects partitions from `queen.log_partitions` by id
+and never resolves a queue by name, so there is no cross-product for a shared queue name to exploit.
+
+### What vetoes a delete
+
+A partition is eligible only when `created_at` and `last_write_at` are both older than the cutoff,
+there is no `log_segments` row, and none of these hold:
+
+| Veto | Why it is not just caution |
+| --- | --- |
+| A row in `queen.log_dlq` | Dead-lettered payloads, and retention never purges them. No foreign key, so the rows would survive the partition as unreachable garbage — the DLQ readers join through `log_partitions`. |
+| A row in `queen_streams.state` | The streams schema declines the foreign key deliberately, with the comment that a partition cleanup must not silently delete still-relevant state. |
+| A live lease — `batch_end IS NOT NULL` and the lease still unexpired | Someone is mid-batch, whatever the timestamps say. An **expired** lease deliberately does not veto: the engine treats expiry as "the batch is up for grabs", and on an empty partition no pop will ever arrive to clear a `batch_end` left behind by a dead worker, so vetoing on it would pin the row forever. |
+| Recent consumer activity | Any group whose `created_at`, `lease_acquired_at` or `lease_expires_at` falls inside the window — which still spares a lease that expired inside it. |
+
+The predicate lives in one place, `queen.log_partition_dead_v1`, because the candidate scan and the
+under-lock re-check must not drift apart.
+
+`queen.message_traces` is deliberately **not** a veto. It is keyed by `(partition_id,
+transaction_id)` with its foreign key dropped, and nothing purges it on any window — so vetoing on
+traces would mean a partition that was ever traced is never reclaimed, which is the whole feature
+gone. A trace is an already-consumed diagnostic record rather than work waiting for someone, and
+`get_message_traces_v1` keeps answering for a deleted partition's ids, so nothing a reader depends on
+is orphaned.
+
+<Aside type="caution">
+An auto-ack pop clears `lease_acquired_at`, so a group that only ever auto-acks leaves no activity
+trace. That is survivable rather than unhandled: `last_write_at` older than the cutoff means nothing has
+been pushed for the whole window, so such a group drained the partition long ago and its cursor
+addresses no data. What a delete costs it is `total_consumed`, not a position — the durable subscription
+record is per (queue, group), not per partition, so a partition recreated by a later push re-seeds from
+it exactly as a brand-new partition does.
+</Aside>
+
+### The lock, and the one race that remains
+
+The candidate scan takes each partition's row lock with `SKIP LOCKED`: a partition a pusher is holding
+is active by definition, and skipping it keeps retention off the push serializer's critical path instead
+of queueing in front of it. This is the one step that holds many partition locks at once, so it takes
+them in the same ascending-id order as `log_push_multi_v1` and `log_transaction_wire_v1`, in one
+statement — the global total order still holds.
+
+The predicate is then re-evaluated **under the held locks**, and that pass is the authoritative one: a
+push must take the same row lock before it can insert a segment or bump `last_write_at`. One pass would
+not be enough, because PostgreSQL's `EvalPlanQual` recheck covers the locked row's own columns, not the
+`NOT EXISTS` legs.
+
+What remains is a window on the other side — a push that resolved the partition id just before the
+delete committed. It fails loudly (`QMULTI resolved N of M segments`, or the segment insert trips its
+foreign key) and the client's retry re-provisions the partition under a new id, so no write is silently
+lost. Reaching it takes a push landing in the same instant as the delete, after the partition has been
+silent for the whole window.
+
+### What it records
+
+One `queen.retention_history` row per deleted partition, with `retention_type =
+'__partition_deleted__'` and `messages_deleted = 0`. The double-underscore prefix is the reserved
+partition-event shape, which `get_retention_timeseries_v1` filters out — the Retention panel counts
+deleted *messages*, and would otherwise gain a stream of zero-valued events. The cycle's `swept` log
+line carries `partitions_deleted`.
+
+Turn the phase off with `QUEEN_PARTITION_CLEANUP_ENABLED=false`. `PARTITION_CLEANUP_DAYS` keeps the
+C++ floor of one day, so `0` does not silently mean "delete everything quiet since a second ago".
+
+## The metrics purge
+
+The last phase trims `queen.worker_metrics` and friends through a stored procedure, and
+`queen.system_metrics` through a batched `DELETE`, on the `METRICS_RETENTION_DAYS` window (default 90),
+bounded by `RETENTION_BATCH_SIZE`.
+
+These are plain autocommit statements with no transaction and no savepoints. The savepoint bracketing
+that used to be here existed to stop a failed purge from poisoning the retention deletes — and there is
+no longer a shared transaction to protect, because the deletes committed statement by statement above. A
+purge error is logged, rate-limited to once a minute, and the cycle still reports success.
+
+## Lock order and deadlock freedom
+
+Every step takes **exactly one** `log_partitions` row lock, and holds it only for its own bounded
+transaction. Because no step ever holds two partition locks, the steps cannot deadlock against the
+multi-partition lockers — `log_push_multi_v1` and `log_transaction_wire_v1`, which pre-lock ascending by
+id — no matter what order retention iterates in. Retention still iterates ascending by id, so there is
+one global total order everywhere rather than an argument for why a second one is safe.
+
+## What retention does not touch
+
+- **`queen.log_dlq`.** Nothing in the retention cycle purges it. Dead-lettered rows accumulate until
+  something deletes them, and the only delete route is
+  `DELETE /api/v1/messages/:partitionId/:transactionId`.
+- **Partitions that still hold something.** Phase 4 deletes only empty ones, and only after
+  `PARTITION_CLEANUP_DAYS` of silence — a partition with segments, dead-letter rows, streams state or a
+  live lease is never touched by it.
+- **Queues.** Removing a queue is an explicit operation.
+- **Parallelism.** `RETENTION_PARALLELISM` is likewise read and ignored; retention runs one bounded step
+  at a time.
+
+## What you will see in the logs
+
+The `retention` target speaks at `info` only when a cycle actually deleted something, naming
+`queues`, `segments_deleted`, `txns_purged`, `max_wait_evicted`, `partitions_deleted`, the metrics-purge summary and
+`elapsed_ms`. An idle cycle logs at `debug`. This matters at a 5-second cadence: the earlier behaviour
+emitted an all-zero info line every five seconds on an idle cluster.
+
+A cycle error is rate-limited to one line every 30 seconds, so a sustained database outage does not
+produce twelve error lines a minute.
+
+## Configuring it
+
+Retention is **opt-in**: `retentionEnabled` plus a positive window. With `retentionEnabled` false, or
+both windows zero, phase 1 skips the partition entirely and data is kept forever. The sidecar purge still
+runs — it has to — and `maxWaitTimeSeconds` still evicts if set.
+
+Remember that `/configure` is a full replace: omitting `retentionEnabled` resets it to its default.
+
+Partition cleanup is the one phase that is **not** per-queue and not opt-in per queue: it is a broker-wide
+knob (`PARTITION_CLEANUP_DAYS`, off with `QUEEN_PARTITION_CLEANUP_ENABLED=false`), and it applies to every
+log partition regardless of `retentionEnabled`. A queue that keeps its data forever is unaffected in
+practice — its partitions hold segments, which is a veto.

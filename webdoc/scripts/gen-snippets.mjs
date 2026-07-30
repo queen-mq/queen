@@ -159,9 +159,10 @@ function main() {
       [
         "---",
         "params: []",
+        `description: "Verified snippet extracted from ${s.file}."`,
         "---",
         "",
-        `{/* GENERATED FILE — do not edit by hand.`,
+        `{/* GENERATED FILE. Do not edit by hand.`,
         `    Extracted from ${s.file} by webdoc/scripts/gen-snippets.mjs`,
         `    Regenerate with: pnpm --dir webdoc gen`,
         `*/}`,
@@ -184,7 +185,17 @@ function main() {
   ].join("\n");
   contents.set(
     "index.mdx",
-    ["---", "params: []", "---", "", "{/* GENERATED FILE — do not edit by hand. */}", "", index, ""].join("\n"),
+    [
+      "---",
+      "params: []",
+      'description: "Inventory of every verified code snippet published on this site."',
+      "---",
+      "",
+      "{/* GENERATED FILE. Do not edit by hand. */}",
+      "",
+      index,
+      "",
+    ].join("\n"),
   );
 
   if (check) {

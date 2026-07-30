@@ -18,6 +18,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "app", "run", "dev", "--", "--port", "4000"],
       "port": 4000
+    },
+    {
+      "name": "webdoc",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "webdoc", "dev", "--port", "4322", "--host"],
+      "port": 4322
     }
   ]
 }

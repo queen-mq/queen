@@ -1,0 +1,248 @@
+---
+title: Testing
+description: "One command builds the broker and every runner image, then runs each suite against each topology as an isolated Compose project and prints a matrix, plus what is green today and one defect in the harness itself."
+type: how-to
+tier: internals
+sidebar:
+  order: 15
+sourceOfTruth:
+  - test/run.sh
+  - test/compose/docker-compose.single.yml
+  - test/compose/docker-compose.ha.yml
+  - test/runners/common/wait-for-broker.sh
+  - test/runners/mesh/mesh-check.sh
+  - test/runners/tenancy/tenancy-check.sh
+  - test/runners/js/entrypoint.sh
+  - test/runners/go/entrypoint.sh
+  - test/runners/py/entrypoint.sh
+  - test/runners/cli/entrypoint.sh
+  - test/runners/cpp/entrypoint.sh
+  - .github/workflows/tests.yml
+verifiedBy:
+  - test/run.sh
+---
+
+`test/run.sh` is the whole thing. It builds a broker image from the current tree, builds one
+runner image per language, then runs every selected suite against every applicable topology as
+its own `docker compose` project on its own private network, in parallel, and prints a
+pass/fail matrix.
+
+```bash
+test/run.sh
+```
+
+Requirements are Docker and Compose v2. Nothing binds a host port and every PostgreSQL runs on
+`tmpfs`, so runs are disposable and cannot collide with each other or with a database you are
+using locally.
+
+## What it builds
+
+The broker image is built from `server/Dockerfile` and tagged `queen-seg:test`. Because that
+Dockerfile copies `server/webapp` into the build context rather than building the dashboard,
+the dashboard has to exist first. See
+[Building and developing](/internals/contributing). Runner images come from
+`test/runners/<suite>/Dockerfile`. `--no-build-broker` reuses an existing `queen-seg:test`,
+and `--no-build` reuses everything.
+
+## Suites
+
+| Suite | What it runs | Topologies |
+| --- | --- | --- |
+| `js` | `clients/client-js/test-v2`: the broker-free unit tests including the proxy 429 contract, then the integration run (`run.js`, human plus stream buckets in one process) | `single`, `ha`, `tenanted` |
+| `go` | the root-package unit tests, then `./tests/` and `./tests/streams_integration/` with `-count=1` so the cache never hides a live-broker failure | `single`, `ha`, `tenanted` |
+| `py` | the whole `pytest` tree under `clients/client-py/tests`, streams included | `single`, `ha`, `tenanted` |
+| `cli` | the `queenctl` end-to-end suite, which needs the Go workspace and `QUEEN_E2E=1` | `single`, `ha`, `tenanted` |
+| `cpp` | `test_retry429` (self-contained, no broker) then `test_client` against the broker | `single`, `ha`, `tenanted` |
+| `rust` | the broker's in-process unit tests, `cargo test`, no stack and no PostgreSQL | `unit` |
+| `mesh` | asserts the two brokers of an HA pair see each other with zero handshake failures | `ha` |
+| `tenancy` | two-tenant isolation over the HA pair with the trusted tenant header | `ha-tenanted` |
+
+Environment-variable naming diverges between suites. The JavaScript suite reads
+`QUEEN_SERVER_URL`, the Go and Python streams tests read `QUEEN_URL`, the CLI reads
+`QUEEN_SERVER`. Each runner's entrypoint maps one canonical set
+(`QUEEN_HTTP_URL`, `QUEEN_PG_*`) onto whatever its suite actually reads. Two of those mappings
+are the difference between running and silently passing: the CLI suite's `TestMain` exits 0
+having run nothing without `QUEEN_E2E=1`, and the Go streams tests target localhost and skip
+if only `QUEEN_SERVER_URL` is set.
+
+## Topologies
+
+| Topology | Stack | `QUEEN_TENANCY_HEADER` |
+| --- | --- | --- |
+| `single` | one PostgreSQL, one broker | off |
+| `ha` | one PostgreSQL, `queen-a` and `queen-b` as a framed-TCP mesh pair; client suites hit `queen-a` | off |
+| `tenanted` | the `single` stack, but the broker starts with native tenant scoping on while the suite sends **no** tenant header | on |
+| `ha-tenanted` | the `ha` pair with the flag on. Substrate for the `tenancy` suite only. | on |
+
+The `tenanted` lane exists to prove a negative. Turning native tenant scoping on must change
+nothing for a client that sends no tenant header: that is the default-tenant path, and it is
+what every cloud cell serves. So `run.sh` runs the unmodified suite on both lanes and compares
+them, printing a `TENANCY PARITY` verdict. The exit code is the hard gate; because an exit code
+is coarse (99 of 112 and 100 of 112 are both `rc=1`), it also parses each suite's printed pass
+tally where one exists and compares that too. A divergence fails the run **in either
+direction**. A behaviour change caused by the flag is a regression even when the flag-on side
+is the greener one.
+
+The `ha` and `ha-tenanted` compose files are the same file as `single` and `ha` respectively,
+with `QUEEN_TEST_TENANCY` exported by `run.sh`. Duplicating the stack definitions would let
+the two lanes drift, which is exactly what the parity gate exists to catch.
+
+## Isolation
+
+Each pair of suite and topology is its own Compose project, so it gets a private network and
+its own PostgreSQL and broker. This is not tidiness. The JavaScript, Go and Python suites all
+wipe the *same* test-queue name patterns (`test-%`, `edge-%`, `pattern-%`, `workflow-%`), and
+the CLI suite flips broker-global maintenance mode. On a shared stack they would corrupt each
+other's results. Parallelism is therefore per stack, four at a time by default (`-j N`, or
+`QUEEN_TEST_MAX_PARALLEL`).
+
+## How readiness is gated
+
+The runtime broker image is `debian:bookworm-slim` carrying only the `queen-seg` binary and none
+of the tooling a healthcheck would need, in particular no `curl`. So readiness cannot be a
+Compose healthcheck on the broker; it lives in the runner, which does have `curl`. Every runner
+entrypoint calls
+`test/runners/common/wait-for-broker.sh` first, which blocks on `curl -fsS` against each URL in
+`QUEEN_WAIT_URLS` until it succeeds, up to `QUEEN_WAIT_TIMEOUT` seconds (default 180), and
+exits 97 on timeout.
+
+That gate is stronger than it looks. The broker applies `schema.sql` and every stored procedure
+*before* it binds its HTTP listener, and `/health` performs a real database round-trip and
+answers 503 while PostgreSQL is unreachable. A 200 from `/health` therefore means broker plus
+PostgreSQL plus schema, all three, with no init SQL to mount.
+
+## Running a subset
+
+<Steps>
+
+1. One suite, all its topologies.
+
+   ```bash
+   test/run.sh --suite js
+   ```
+
+2. One suite on one topology.
+
+   ```bash
+   test/run.sh --suite py --topo single
+   ```
+
+3. The tenancy parity pair for a suite: the two lanes `run.sh` compares.
+
+   ```bash
+   test/run.sh --suite js --topo single,tenanted
+   ```
+
+4. The two-tenant isolation suite, which brings its own topology.
+
+   ```bash
+   test/run.sh --suite tenancy
+   ```
+
+5. Leave the stacks up afterwards to poke at them.
+
+   ```bash
+   test/run.sh --suite go --keep
+   ```
+
+</Steps>
+
+`--topo` filters only the client lanes; `mesh` and `tenancy` always supply their own topology.
+Logs for every cell land in a temporary directory printed at the start of the run, and the
+tail of every failing cell is echoed at the end.
+
+## What the tenancy suite actually asserts
+
+`test/runners/tenancy/tenancy-check.sh` drives the HA pair directly with the trusted
+`x-queen-tenant` header and no proxy in the picture. Every scenario deliberately uses the *same*
+queue name, the *same* partition name and the *same* consumer-group name for both tenants, with
+traffic on both brokers, so shared-name collisions are the default rather than the exception.
+It checks that queue identity and configuration are per-tenant and read back consistently on
+both brokers; that no message crosses tenants; that a foreign partition id cannot advance
+another tenant's cursor; that deduplication keys are per-tenant while within-tenant
+deduplication still fires; that listings are scoped; that a consumer-group *name* shared by two
+tenants keeps independent cursors; that one tenant's claim-and-ack cannot hide the other's
+pending message through the in-process hot-list ring; and that a push by one tenant delivers
+nothing to another's parked long poll.
+
+It also refuses to pass vacuously. A probe up front configures one queue name for two tenants
+with different lease times and aborts if the broker does not keep them apart, so the lane can
+never "pass" by comparing the default tenant with itself.
+
+Expected-but-harmless crosstalk is printed as `note` lines rather than asserted, because it is
+wasted work and not a correctness property: PostgreSQL is the authority on those paths and
+every stored-procedure call carries the tenant, so the cost is a re-query, not a leak.
+
+## What is green on this tree
+
+Verified green: the broker's in-process unit tests, `queen_proxy`'s own unit tests, the C++
+client suite plus its 14 proxy-contract assertions, the `mesh` suite, the `tenancy` suite at 45
+assertions and 0 failures, the JavaScript unit tests at 91 of 91, and the Go
+`./streams/...` package at 13 of 13. The core messaging surface (push, pop, ack, transactions,
+deduplication, consumer groups, dead-letter queue, subscription modes, watermarks and the ack
+window) is green in five languages.
+
+Two failures are known and deterministic: `TestGateTokenBucketBasic` in the Go client, and
+`TestLoad_BenchSmoke` in the CLI, which is a benchmark deadline rather than a semantic check.
+Streaming window arithmetic has been the noisy part of the suite historically; this site
+therefore makes no per-test verification claim about window arithmetic, and the pages that show
+streams do not claim a specific test proves them.
+
+<Aside type="note">
+Two counts in the tree are stale and will mislead you. `test/run.sh`'s header comment and
+`test/README.md` both say the `rust` suite is "50 in-process unit tests"; counting `#[test]`
+and `#[tokio::test]` attributes under `server/src` gives 169 today. `queen_proxy`'s suite is a
+similar size but is **not** part of `test/run.sh` at all. Run it with `cargo test` inside
+`queen_proxy/`.
+</Aside>
+
+## A defect in the harness
+
+Every stack cell runs:
+
+```bash
+docker compose -p "$proj" -f "$compose" up --abort-on-container-exit --exit-code-from runner
+```
+
+`--exit-code-from runner` propagates the runner's exit code, and `--abort-on-container-exit`
+tears the project down when *any* container exits. The two interact badly: a runner that is
+merely **stopped**, rather than having finished and exited non-zero, can yield exit code 0,
+and `run.sh` scores 0 as `PASS`. The matrix cell then says `PASS` for a suite that never
+finished.
+
+Two consequences for anyone reading a green matrix:
+
+- A cell that passes suspiciously fast is worth opening. `run.sh` prints each cell's duration
+  next to `PASS` precisely so an anomalously short run stands out.
+- The tenancy parity gate compares printed pass tallies as well as exit codes, so for the
+  suites that print a tally, a truncated run shows up as a tally mismatch rather than as a
+  silent pass. Suites that print no tally have no such backstop.
+
+The fix is to assert on the runner's own printed summary rather than on the Compose exit code.
+Until then, treat the matrix as a fast screen and the per-cell logs as the evidence.
+
+## In CI
+
+`.github/workflows/tests.yml` is the same harness. It compiles the broker once into an artifact
+so the matrix cells load an image instead of recompiling Rust six times, then runs one job per
+suite with `test/run.sh --suite <name> --no-build-broker -j 1`. The Rust unit tests run
+natively in their own job with `cargo test --manifest-path server/Cargo.toml --locked`.
+
+Two other workflows touch tests. `cli.yml` builds and unit-tests `queenctl` on Linux and macOS
+for every change under `clients/client-cli` or `clients/client-go`, and runs its heavier
+end-to-end suite only on pushes and manual dispatch. `cpp-server-build.yml` still exists,
+triggers on the `release` branch, and runs `make deps` and `make build-only` in `server/`,
+targets that no longer exist. It is dead and cannot pass.
+
+## Deeper gates, run by hand
+
+- `server/mesh-verify.sh` builds its own debug binary and drives two brokers on localhost to
+  check cross-replica wake latency, dead-peer detection and reconnection. The `mesh` suite only
+  asserts the pair is connected; this is the behavioural gate.
+- `queen_proxy/scripts/isolation-smoke.sh` runs two-tenant isolation *through* the proxy
+  against the development cell, asserting on response content rather than status codes, and
+  covering blocked operator surfaces, API-key scopes, revocation, storage quota and meters.
+  With `QUEEN_PROXY_ENFORCE=true` it adds live 429 checks; in shadow mode those are reported as
+  counted skips, never as silent passes.
+- `queen_proxy/scripts/sdk-smoke/run.sh` drives the JavaScript, Python and Go SDKs through the
+  proxy.

@@ -1,0 +1,298 @@
+---
+title: System and internal routes
+description: "Maintenance mode, shared state, the stats refresh trigger and the broker-to-broker /internal routes — all admin-gated operator surfaces."
+type: reference
+tier: operate
+status: internal
+sidebar:
+  order: 15
+  label: System and internal
+sourceOfTruth:
+  - server/src/handlers/maintenance.rs
+  - server/src/handlers/status.rs
+  - server/src/internal.rs
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/db.rs
+  - server/src/mesh.rs
+  - server/src/file_buffer.rs
+  - server/sql/procedures/013_stats.sql
+verifiedBy:
+  - clients/client-js/test-v2/maintenance.js
+---
+
+Everything on this page is an operator surface, not part of the client API. No SDK
+calls these routes, and a tenant on a shared cell must never reach them.
+
+`route_access_level` maps every path starting with `/api/v1/system/` or `/internal/`
+to **admin**, plus `/api/v1/stats/refresh` explicitly. That mapping only protects
+anything when JWT is on.
+
+<Aside type="danger">
+With `JWT_ENABLED=false` — the default — the authorization middleware is a
+transparent pass-through and every one of these routes is open to anyone who can
+reach the port. Two of them change how the whole broker behaves: maintenance mode
+stops all pushes reaching PostgreSQL, and pop maintenance stops all delivery. If the
+broker's port is reachable by anything you do not fully trust, enable JWT or put a
+proxy in front of it.
+</Aside>
+
+None of these routes are tenant-scoped, with one exception:
+`POST /internal/api/notify` resolves a tenant, because the wake gate it triggers is
+keyed by (tenant, queue). Maintenance mode is a property of the process and the cell,
+not of a tenant.
+
+## Maintenance mode
+
+Two independent flags, each with a `GET` and a `POST`. Both are stored twice: as an
+in-process `AtomicBool` (the source of truth for hot-path checks) and as a row in
+`queen.system_state` keyed `maintenance_mode` / `pop_maintenance_mode` with the value
+`{"enabled": bool}` (a best-effort mirror for restart and cluster propagation).
+
+### GET /api/v1/system/maintenance
+
+Reads both flags **fresh from `queen.system_state`**, so a change made on another
+replica is reflected immediately, and updates the local atomics to match. If the pool
+or the query fails it falls back to the in-process atomics rather than returning an
+error — this route never `500`s.
+
+```json
+{
+  "maintenanceMode": false,
+  "popMaintenanceMode": false,
+  "bufferedMessages": 0,
+  "bufferHealthy": true,
+  "bufferStats": {
+    "pendingCount": 0,
+    "failedCount": 0,
+    "dbHealthy": true,
+    "failedFiles": { "count": 0, "totalBytes": 0, "totalMB": 0.0, "failoverCount": 0, "qos0Count": 0 }
+  }
+}
+```
+
+`bufferStats.failedFiles` is read off the spool directory: `count` and `totalBytes`
+are the finalized `.buf` files still waiting to drain. `failoverCount` mirrors
+`count`; `qos0Count` is always `0`.
+
+### POST /api/v1/system/maintenance
+
+Body: `enabled` (boolean, required). A missing field is a `400`
+(`enabled (boolean) is required`).
+
+```json
+{ "enabled": true }
+```
+
+What enabling it does, in order: sets the in-process flag, mirrors it to
+`queen.system_state`, **pauses** the background spool drain so buffered pushes
+accumulate, and broadcasts a `MAINTENANCE_MODE_SET` frame to mesh peers. Disabling
+it force-finalizes the active spool file and resumes the drain, so the spool replays
+into PostgreSQL.
+
+```json
+{
+  "maintenanceMode": true,
+  "bufferedMessages": 0,
+  "bufferHealthy": true,
+  "message": "Maintenance mode ENABLED. All PUSHes routing to file buffer."
+}
+```
+
+The `message` strings are exact and stable (`Maintenance mode DISABLED. Background
+processor will drain buffer to DB.` on disable) because tooling greps for them.
+
+**Effect on pushes.** While the flag is on, `POST /api/v1/push` never touches
+PostgreSQL. Every item is written to the disk spool and reported with
+`status: "buffered"` at HTTP `201`; an item whose spool write failed reports
+`status: "failed"` and the whole response becomes `500`. A push that omitted
+`transactionId` gets one minted at buffer time, so the buffered result and the replay
+dedup key are both well defined.
+
+<Aside type="caution">
+Buffered messages have no offset, no position and no ordering guarantee relative to
+pushes that committed normally: they are replayed when the drain resumes, and they
+deduplicate on replay only if their transaction id is still inside the queue's dedup
+window. Anything that reads its own writes will not see a buffered message until the
+drain has caught up. `GET /api/v1/status/buffers` and the
+`queen_file_buffer_pending` gauge are the two ways to watch the backlog — see
+[Status, health and metrics](/reference/http/status-metrics).
+</Aside>
+
+### GET /api/v1/system/maintenance/pop
+
+```json
+{
+  "popMaintenanceMode": false,
+  "message": "Pop maintenance mode is OFF. Normal operation."
+}
+```
+
+Unlike the push-maintenance `GET`, this one reads only the **in-process** flag. On a
+multi-replica deployment it therefore answers for the replica you happened to reach;
+`GET /api/v1/system/maintenance` is the route that re-reads the database.
+
+### POST /api/v1/system/maintenance/pop
+
+Body: `enabled` (boolean, required).
+
+```json
+{
+  "popMaintenanceMode": true,
+  "message": "Pop maintenance mode ENABLED. All POP operations will return empty arrays."
+}
+```
+
+**Effect on pops.** Every pop route returns HTTP `204` immediately, before touching
+the database. The `204` carries **no body at all** — not even the `paused` flag the
+handler constructs — because announcing a content length on a body that hyper then
+elides poisoned strict HTTP/1.1 clients under empty-poll load. Clients treat `204` as
+"no messages" and retry, so a paused broker looks like an idle one to a consumer.
+That is deliberate, and it is why the flag has an explicit `GET`.
+
+The flip is mirrored to `queen.system_state` and broadcast to mesh peers as
+`POP_MAINTENANCE_MODE_SET`.
+
+## GET /api/v1/system/shared-state
+
+Returns a hard-coded single-node summary:
+
+```json
+{
+  "enabled": false,
+  "reason": "single_node_segments_broker",
+  "maintenance_mode": false,
+  "pop_maintenance_mode": false
+}
+```
+
+<Aside type="caution">
+`enabled` is a literal `false` in the handler. It reports `false` **even when a mesh
+is running with connected peers** — only the two maintenance flags in this body are
+live. Do not use it to decide whether clustering works. The real surface is
+`GET /internal/api/shared-state/stats` below, which reports the transport, the peer
+list and the frame counters.
+</Aside>
+
+## POST /api/v1/stats/refresh
+
+Access level **admin**. Runs `queen.log_refresh_all_stats_v1()` — the same reconciler the
+broker's own loop runs every `STATS_INTERVAL_MS` under advisory lock `737002` — and returns
+its summary JSON verbatim, labelled `engine: "segments"` with a `segPartitions` count.
+
+Use it to force a refresh instead of waiting out the interval. If the dashboard's numbers
+are stale rather than merely late, check whether that loop is running at all (a large
+`statsAge` on the status routes).
+
+<Aside type="caution">
+Before 2026-07-30 this route ran `queen.refresh_all_stats_v1(true)`, the rows-engine
+reconciler, which recomputes `queen.stats` from `queen.messages` / `queen.partitions` —
+empty on a log-engine deployment — and overwrote the live queue counters with zeros for up
+to one `STATS_INTERVAL_MS`. On an older build, leave the route alone.
+</Aside>
+
+## Internal broker-to-broker routes
+
+Three routes exist for the mesh layer. They are admin-gated and are not a public
+contract — treat their shapes as version-coupled to the broker.
+
+### POST /internal/api/notify
+
+Body: `queue` (required, non-empty), `partition` (optional). A missing queue is a
+`400`.
+
+```json
+{ "queue": "orders", "partition": "eu-1" }
+```
+
+Emits exactly the signal a local push emits: wakes this replica's parked long-poll
+pops for that (tenant, queue) and fans the signal out to mesh peers. Returns
+`{"status": "ok"}`. This is the HTTP fallback for a peer that has no mesh
+reachability, and the hook for an external system that wrote to the database out of
+band and wants parked consumers woken now instead of at the next poll interval.
+
+The tenant comes from the same `x-queen-tenant` header every other route uses;
+absent, it is the default tenant. The header is unauthenticated by design — the trust
+boundary for it is the proxy — which is another reason this path must not be
+reachable from outside the cell.
+
+### GET /internal/api/shared-state/stats
+
+### GET /internal/api/inter-instance/stats
+
+Identical bodies; the second is a legacy alias. With a mesh transport running:
+
+```json
+{
+  "server_id": "queen-0",
+  "transport": "tcp-mesh",
+  "port": 6633,
+  "peer_count": 1,
+  "peers": [
+    { "host": "queen-1", "port": 6633, "connected": true, "resolved": true, "resolved_ip": "10.0.0.12" }
+  ],
+  "servers_alive": 1,
+  "servers_dead": 0,
+  "messages_sent": 41022,
+  "messages_received": 40911,
+  "messages_dropped": 0,
+  "signature_failures": 0,
+  "handshake_failures": 0,
+  "sequence_rejections": 0,
+  "enabled": true,
+  "running": true,
+  "maintenance_mode": false,
+  "pop_maintenance_mode": false
+}
+```
+
+With no peers configured, or no transport:
+
+```json
+{
+  "enabled": false,
+  "reason": "no_peers",
+  "maintenance_mode": false,
+  "pop_maintenance_mode": false
+}
+```
+
+`signature_failures` and `handshake_failures` are the same counter under two names.
+`sequence_rejections` is always `0` — there is no sequence tracking.
+
+## Firewall the mesh port
+
+The mesh is framed TCP on `QUEEN_MESH_PORT` (default `6633`), dialled from
+`QUEEN_MESH_PEERS` (the older `QUEEN_UDP_*` variable names survive as aliases,
+which is why the default port comes from `QUEEN_UDP_NOTIFY_PORT` when the new name
+is unset). Its `HELLO` handshake is
+HMAC'd, but the nonce is generated by the dialer and never tracked, so a captured
+handshake is replayable — and after the handshake, frames are unauthenticated JSON.
+The frame set includes `MAINTENANCE_MODE_SET` and `POP_MAINTENANCE_MODE_SET`.
+
+Anyone who can open a TCP connection to that port can therefore stop the cell from
+accepting pushes or delivering messages, without any token. **Restricting the mesh
+port to the broker replicas themselves is a requirement, not a hardening tip.**
+
+## No migration routes
+
+There is no `/api/v1/migration/*` surface — those routes were removed. Backing up
+Queen is a plain `pg_dump` of the database, and the offline rows-to-segments
+conversion is a CLI subcommand of the binary, not an HTTP endpoint.
+
+## Access levels
+
+| Route | Level |
+| --- | --- |
+| `GET /api/v1/system/maintenance` | admin |
+| `POST /api/v1/system/maintenance` | admin |
+| `GET /api/v1/system/maintenance/pop` | admin |
+| `POST /api/v1/system/maintenance/pop` | admin |
+| `GET /api/v1/system/shared-state` | admin |
+| `POST /api/v1/stats/refresh` | admin |
+| `POST /internal/api/notify` | admin |
+| `GET /internal/api/shared-state/stats` | admin |
+| `GET /internal/api/inter-instance/stats` | admin |
+
+Deployment guidance for these surfaces — what to expose, where to terminate TLS, how
+the proxy classifies routes — is in the [self-hosting section](/selfhost).

@@ -1,0 +1,318 @@
+---
+title: Why Queen exists
+description: "The head-of-line problem Queen was built for, the eight design choices that follow from it, and what each one costs."
+type: concept
+tier: use
+sidebar:
+  order: 2
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/config.rs
+  - server/src/schema.rs
+  - server/src/handlers/data.rs
+  - server/src/file_buffer.rs
+  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/044_log_ack.sql
+  - README.md
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+  - clients/client-js/test-v2/consume.js
+  - clients/client-js/test-v2/transaction.js
+  - clients/client-js/test-v2/semantics.js
+  - clients/client-js/test-v2/ackwindow.js
+---
+
+Queen was built at Smartness to run Smartchat, and the shape of that workload
+explains every decision in it. A chat session is a strictly ordered stream of
+events: a message, a tool call, a tool result, a reply. Two events from the same
+session must never be processed out of order. Two events from *different*
+sessions have nothing to do with each other, and one session stuck behind a slow
+tool call must not delay anybody else's.
+
+That is a head-of-line blocking problem with an awkward cardinality. The set of
+live sessions is large, it changes constantly, and you do not know the next
+session id before it appears. The two standard answers both make you pay for
+entity count in a resource you have to provision in advance:
+
+- **One physical shard per entity.** Kafka gives you ordered partitions, but a
+  fixed number of them: entities are hashed onto the shards you allocated, so
+  two sessions that collide on the same partition block each other, and you
+  cannot create a partition per session on demand.
+- **One process or queue per entity.** RabbitMQ preserves order within a queue,
+  so per-entity ordering means a queue per entity, and every one of those is a
+  live server-side object with its own memory and bookkeeping.
+
+Queen's answer is that a partition should be a *logical* lane, not a physical
+one: a row, created the first time you push to it, carrying little more than a
+name and an offset counter. Ordering becomes a property of a row lock instead of
+a property of a file or a process. Everything below follows from that, including
+the parts that hurt.
+
+## 1. Unlimited dynamic FIFO partitions
+
+A partition is a row in `queen.log_partitions`. On the first push to a
+`(queue, partition)` pair that does not exist, the push procedure provisions the
+queue and the partition inside the same call and continues; there is no create
+step and no preallocation. Order inside a partition comes from taking that
+partition's row with `SELECT … FOR UPDATE` before allocating an offset, so
+`last_offset` advances one writer at a time and a message's position is a single
+monotone `BIGINT`.
+
+<Render file="snippets/js-push" />
+
+**What it buys.** Ordering at entity cardinality. Ten thousand sessions cost ten
+thousand rows, not ten thousand log files or Erlang processes. A consumer stuck
+on one lane holds up only that lane. You choose the partition key at push time,
+so the ordering domain is exactly the one your domain model has.
+
+**What it costs.**
+
+- The partition row lock is the write serializer, so a single partition is a
+  single-writer bottleneck. Throughput comes from *many* partitions; a queue
+  where everything lands in one partition is a queue with one lane.
+- Partitions are cheap but not free: their number is a cost the pop path carries,
+  and one is reclaimed only after 30 days of being empty and idle.
+- Exactly one in-flight leased batch exists per (partition, consumer group),
+  one row in `queen.log_consumers`, keyed
+  `(partition_id, consumer_group)`. So partition count is also your parallelism
+  ceiling inside a group. A single-partition queue cannot be consumed in
+  parallel by one group, no matter how many workers you start.
+- Ordering is per partition and nothing else. There is no global sequence and no
+  cross-partition ordering.
+
+## 2. A stateless broker and stateless clients
+
+The broker holds no cluster membership, no partition assignment and no consumer
+group roster. A pop is a *claim*, not an assignment: a consumer asks for work,
+the database hands it a leased span, and the lease lives in a row. Scale the
+broker by starting another copy against the same PostgreSQL and putting a load
+balancer in front. Scale consumers by starting more of them.
+
+**What it buys.** There is no rebalancing protocol, because there is nothing to
+rebalance. A worker that crashes does not trigger a group-wide reassignment; its
+lease expires and the span becomes claimable again. A worker that starts does
+not wait for a coordinator to admit it. It pops. Deploys are ordinary rolling
+restarts. Clients hold no coordination state, which is why a browser and a cron
+job are equally valid consumers.
+
+**What it costs.**
+
+- Coordination is paid per request, in PostgreSQL, as row locks and commits
+  rather than as in-memory state on a leader. That is the trade: no protocol, but
+  no free coordination either.
+- Consumers poll. There is long-polling (a pop can park and be woken), but there
+  is no server-initiated push and no persistent subscription stream.
+- Fairness and progress are properties of the SQL claim algorithm, not of an
+  assignment you can inspect. "Which worker owns partition X" is answered by a
+  lease row with an expiry, not by a stable mapping.
+
+## 3. PostgreSQL as the storage engine
+
+There is no second datastore. The schema and its 34 stored-procedure files are
+embedded into the binary with `include_str!` and applied at every boot under a
+session advisory lock, so the broker bootstraps its own schema. It needs
+`CREATE SCHEMA` and **no extensions**.
+
+**What it buys.** Durability, backup, point-in-time recovery, replication and
+monitoring are whatever your PostgreSQL already does, so you do not learn a second
+operational story. Backup is `pg_dump`. Introspection is SQL: the backlog, the
+cursors, the dead letters and the lag are all tables you can query with the
+client you already have. And an ack and the next stage's push can be committed
+together, because they are one PostgreSQL transaction.
+
+**What it costs.**
+
+- One PostgreSQL is one failure domain and the throughput ceiling. Everything
+  else in Queen scales horizontally; this does not.
+- Every message is WAL. You inherit fsync latency, checkpoint behaviour,
+  autovacuum and connection limits as first-class operational concerns.
+- Disk growth is yours. Retention is opt-in, so a queue with no retention
+  configured keeps its segments forever.
+- The broker uses **session-level** advisory locks: one to serialize schema
+  apply at boot, one (id 737001) to elect the single replica that runs the
+  retention sweep. A transaction-pooling proxy in front of PostgreSQL breaks
+  both, so the broker needs a session it keeps.
+
+## 4. High throughput on that substrate
+
+Three mechanisms do most of the work. Messages are packed into **segments**: one
+row holds many length-prefixed frames, packed and zstd-compressed, so a batch of
+messages is one insert rather than one insert per message. **Fusion** coalesces
+concurrent pushes to disjoint partitions into one transaction, so N segments cost
+one commit and one fsync; ack fusion does the same for cursor advances.
+And an **ack is a cursor update**, one number per (partition, group), so
+acknowledgement writes no per-message row and leaves nothing to clean up.
+
+These are the runs we publish. Each one is a specific configuration, and the
+configurations are not interchangeable.
+
+| Run | Result | Conditions that produced it |
+| --- | --- | --- |
+| 24-hour soak | 51,820,403,100 messages, ~600k msg/s per side, error rate 0.00012%, 0 restarts, broker resident memory flat at ~6.3 GB | Full production semantics: leases with **explicit async acks**, dedup on (60 s window), retention on. 32 vCPU / 62 GiB VM, broker at commit `615efdc` |
+| Peak push/pop, 600 s | 1M msg/s per side | **`autoAck`** (no explicit acks) and **deduplication off**. 99.914 % delivered: roughly 500k messages were never accepted (`pushErr=3032`) |
+| Ordered 4-stage pipeline, 600 s | 1000 partitions, 25k events/s, 88,503,408 messages verified, 0 duplicates, 0 gaps, 0 order violations | Dedup window 300 s, echoed by the loader. This is the ordering result, not a throughput result |
+
+**What it costs.** Batching buys commits at the price of latency: under load a
+message waits for its segment, and the fusion knobs are a latency-for-commits
+dial. A message is durable when its segment commits, not when the client hands it
+over. And the two throughput figures above were bought differently: one paid for
+explicit acks and exact deduplication, the other turned both off. Read
+[Benchmarks](/benchmarks) before quoting either.
+
+## 5. No operational bloat
+
+Queen is one Rust binary. It links Axum, tokio and a PostgreSQL pool; it embeds
+its own SQL; it embeds the dashboard's compiled assets. There is no JVM, no
+Erlang runtime, no ZooKeeper or KRaft, no separate metadata service, and no
+migration tool to run before it starts.
+
+**What it buys.** `docker run` plus a PostgreSQL is a working broker. Upgrading is
+replacing a binary. There is no cluster to bootstrap, so a second broker is a
+second copy of the same command.
+
+**What it costs.**
+
+- Applying DDL at boot means the broker's role is privileged by default. Running
+  it as a low-privilege user requires pre-applying the schema and setting
+  `QUEEN_APPLY_SCHEMA=0`.
+- The broker has **no TLS listener and no CORS layer**. It binds plain HTTP.
+  Terminating TLS is somebody else's job, the proxy's or a reverse proxy's.
+- The embedded dashboard boots by calling `GET /auth/me`, which the broker does
+  not serve. A broker-only deployment serves the dashboard's assets but the app
+  will not get past its boot gate.
+- With more than one broker, the inter-instance mesh port must be firewalled.
+  The HELLO handshake is HMAC'd but its nonce is generated by the dialer and
+  never tracked, so a captured handshake is replayable, and post-handshake frames
+  are unauthenticated JSON, including the frame that sets maintenance mode.
+
+## 6. Plain HTTP, no custom wire protocol
+
+The API is HTTP and JSON: push a body, pop with query parameters, ack a body.
+There is no broker-specific framing, no persistent protocol handshake and no
+client library requirement. The SDKs are conveniences over the same routes you
+can call with `curl`.
+
+**What it buys.** Anything that can make an HTTP request is a first-class client.
+Debugging is `curl -i`. Authentication is a bearer token your existing identity
+provider issues. Load balancers, proxies, service meshes and gateways all work
+because there is nothing exotic to pass through. Five language SDKs share one
+grammar, and a sixth language needs no SDK at all.
+
+**What it costs.**
+
+- Request/response means round trips: one for a pop, one for an ack, unless you
+  batch them or use `autoAck`.
+- **Payloads must be JSON.** The push path parses the payload as a JSON value.
+  Opaque binary is not a payload type; you encode it yourself.
+- Every `204` carries **no body at all**. That is deliberate (announcing a
+  content-length on a body the server then elides poisoned strict HTTP/1.1
+  clients), but it means an empty pop is a status code, not an empty array on the
+  wire.
+- There is no OpenAPI document. The route tables on this site are generated from
+  the router instead.
+
+## 7. Multi-tenancy and a dashboard in the tree
+
+Two extra pieces ship in the same repository under the same Apache-2.0 licence: a
+Vue dashboard, compiled into the broker binary, and `queen_proxy`, a separate
+Rust binary, one per cell, with its own PostgreSQL, API keys, per-tenant quotas,
+rate limits, metering and an operator console. On the broker side tenancy is one
+opaque scoping key: with `QUEEN_TENANCY_HEADER` on, queue identity becomes
+`(tenant_id, name)`.
+
+**What it buys.** A single cell can host many tenants with quotas and HTTP 429
+backpressure, and the thing terminating TLS is also the thing enforcing them. The
+measured shape of that: a 2-core cell held over 2400 msg/s through the proxy for
+one hour across 12 tenants with **zero cross-tenant deliveries**,
+deduplication off (`dedupWindowSeconds: 0`) and client 429 retry disabled
+(`retry429Attempts: 1`). The same raw sampler recorded 818 HTTP 502 and 4,392
+connection-refused errors against the proxy, and the ~1 % gap between pushes and
+deliveries is redelivery volume.
+
+**What it costs.**
+
+- The tenant header is **unauthenticated by design**. The trust boundary is the
+  network between proxy and broker plus the cell secret, so a tenant must never
+  be able to reach the broker directly.
+- The isolation is not total: `GET /api/v1/status` and everything under
+  `/streams/v1/*` are not tenant-scoped, and per-queue Prometheus series sum
+  across tenants, so `/metrics/prometheus` must never be exposed to a tenant.
+- The dashboard's dependency on the proxy is the reverse of a benefit for
+  self-hosters: see choice 5.
+
+## 8. Semantics deliberately mixed from Kafka and RabbitMQ
+
+Queen does not pick a side. From the log world it takes offsets, a cursor per
+consumer group, replay and fan-out: each group has its own `committed` offset per
+partition, every group sees every message, a new group can start from the
+beginning, from now, or from a timestamp, and a `seek` moves a group back to a
+timestamp or forward to the end. From the broker world it takes leases and
+nacks: a pop takes a lease with an expiry on the span
+`(committed, batch_end]`, statuses are `completed`, `failed`, `retry` and `dlq`,
+there is a retry budget, and exhausted retries land in a real dead-letter table.
+
+**What it buys.** One substrate does the work-queue job and the event-log job. The
+same stream that feeds today's workers can be replayed into a new consumer group
+tomorrow without republishing anything. And because both halves live in one
+database, an ack and the next stage's push commit together:
+
+<Render file="snippets/js-transaction" />
+
+**What it costs.** You have to learn the join between the two models, and it has
+one genuinely surprising consequence:
+
+<Aside type="caution">
+**Ack is an offset commit, not a per-message receipt.** Consumption state is one
+cursor per (partition, consumer group): `queen.log_consumers.committed`. There
+is no per-message state anywhere. Acknowledging message N therefore implicitly
+completes every earlier unacked message in that partition for that group.
+</Aside>
+
+The broker is honest about the edges of that model rather than hiding them, and
+the JavaScript suite asserts each of these as a contract:
+
+- **An explicit `failed`, `dlq` or `retry` is never skipped by a later
+  `completed` in the same call.** The cursor clamps at the lowest signalled
+  offset, so the signalled message and everything after it redelivers. Where two
+  signals resolve to the same offset, the ack procedure orders them `dlq`, then
+  `failed`, then `retry`.
+- **Acks that cannot move the cursor say so.** A `completed` ack that resolves
+  below the cursor succeeds but is flagged `noop: true`; a nack below the cursor
+  is rejected with "already committed"; an ack the broker cannot resolve at all
+  comes back with "unresolvable" and leaves the cursor untouched. None of them
+  quietly report success.
+
+Two more consequences worth internalising before you design around them.
+`autoAck=true` commits the cursor inside the pop transaction, which makes that
+path at-most-once rather than at-least-once. And a transaction is one PostgreSQL
+transaction, not end-to-end exactly-once: if the response is lost and the client
+retries, you get a duplicate unless the `transactionId` is deterministic and
+still inside the deduplication window.
+
+Deduplication is the tool for exactly that. It is exact, per partition, keyed on
+`transactionId`, bounded by `dedupWindowSeconds` (default 3600, on by default),
+and enforced in SQL by probing before an offset is allocated, so a duplicate
+writes nothing at all and comes back with the original message's id:
+
+<Render file="snippets/js-push-dedup" />
+
+## Where this leaves you
+
+Every choice above has a cost paragraph because the costs are the useful part. If
+you are evaluating Queen, the two pages that matter next are the ones that say
+what it will not do:
+
+<CardGrid>
+  <LinkCard
+    href="/start/limits"
+    title="Limits and non-goals"
+    description="Global ordering, priority, parallelism ceilings, the single failure domain, and who should not use Queen."
+  />
+  <LinkCard
+    href="/start/compare"
+    title="Compared to Kafka, RabbitMQ, SQS and pgmq"
+    description="The same design choices seen from the other side, architecturally and without performance claims."
+  />
+</CardGrid>

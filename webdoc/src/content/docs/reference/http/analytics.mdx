@@ -1,0 +1,287 @@
+---
+title: Analytics
+description: "The /api/v1/analytics/* time-series routes: what each returns, which are tenant-scoped, and which are cell-wide."
+type: reference
+tier: operate
+sidebar:
+  order: 14
+  label: Analytics
+sourceOfTruth:
+  - server/src/handlers/analytics.rs
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/db.rs
+  - server/src/syscollect.rs
+  - server/src/config.rs
+  - server/sql/procedures/009_status.sql
+  - server/sql/procedures/014_worker_metrics.sql
+  - server/sql/procedures/015_postgres_stats.sql
+  - server/sql/procedures/017_retention_analytics.sql
+---
+
+Seven routes live under `/api/v1/analytics/`. All are `read-only`, all dispatch one
+stored procedure and serve its JSON verbatim. The handlers add no envelope. None
+of them compute anything live: they read tables the metrics collector fills every
+`METRICS_FLUSH_MS` (default `60000` ms) on every replica, which is why a freshly
+started broker answers with empty series for about a minute.
+
+Four are scoped to the caller's tenant. Three are **cell-wide**: they aggregate
+across every tenant on the broker and must not be exposed to a tenant.
+
+| Route | Scope | Backing table |
+| --- | --- | --- |
+| `GET /api/v1/analytics/queue-lag` | tenant | `queen.queue_lag_metrics` |
+| `GET /api/v1/analytics/queue-ops` | tenant | `queen.queue_lag_metrics` |
+| `GET /api/v1/analytics/queue-parked-replicas` | tenant | `queen.queue_parked_replica` |
+| `GET /api/v1/analytics/retention` | tenant | `queen.retention_history` |
+| `GET /api/v1/analytics/system-metrics` | **cell-wide** | `queen.system_metrics` |
+| `GET /api/v1/analytics/worker-metrics` | **cell-wide** | `queen.worker_metrics` |
+| `GET /api/v1/analytics/postgres-stats` | **cell-wide** | `pg_stat_*` views |
+
+## The bucket rule
+
+Every time-series route here derives its bucket width from the length of the window
+you ask for, so a wide range does not return one point per minute per queue:
+
+| Window | Bucket |
+| --- | --- |
+| up to 60 minutes | 1 minute |
+| up to 6 hours | 5 minutes |
+| up to 24 hours | 15 minutes |
+| up to 7 days | 60 minutes |
+| longer | 360 minutes |
+
+Unless stated otherwise, `from` defaults to `now() - 1 hour` and `to` to `now()`.
+The envelope carries `bucketMinutes`; never assume 1-minute points.
+
+Gauges and counters are rolled up differently, on purpose. Counters are summed.
+`avg_lag_ms` is merged as a pop-weighted average (`SUM(avg × count) / SUM(count)`).
+The parked-consumer gauge is summed across replicas within a bucket and averaged
+across buckets.
+
+<Aside type="note">
+Lag is sampled **at pop**. A bucket with pushes but no pops holds no lag sample, and
+these routes emit `null` rather than `0` for it: "unmeasured" stays distinct from
+"zero". Render `null` as a gap, not as a reassuring flat line.
+</Aside>
+
+## GET /api/v1/analytics/queue-lag
+
+Tenant-scoped. Filters: `from`, `to`, `queue`. The response is a **bare JSON array**.
+There is no envelope, so the bucket width travels with every point.
+
+```json
+[
+  {
+    "queueName": "orders",
+    "popCount": 41200,
+    "avgLagMs": 18,
+    "maxLagMs": 412,
+    "bucketMinutes": 1,
+    "bucketTime": "2026-07-30T10:41:00Z"
+  }
+]
+```
+
+Ordered newest bucket first, then by queue name. `avgLagMs` and `maxLagMs` are
+`null` when the bucket held no pop sample.
+
+## GET /api/v1/analytics/queue-ops
+
+Tenant-scoped. Filters: `from`, `to`, `queue`. The per-queue operations series the
+dashboard's queue-operations view renders.
+
+```json
+{
+  "timeRange": { "from": "2026-07-30T09:44:00.000Z", "to": "2026-07-30T10:44:00.000Z" },
+  "bucketMinutes": 1,
+  "series": [
+    {
+      "bucket": "2026-07-30T10:41:00Z",
+      "queueName": "orders",
+      "pushRequests": 412,
+      "pushMessages": 41200,
+      "popMessages": 40980,
+      "popEmpty": 31,
+      "ackRequests": 402,
+      "ackSuccess": 40970,
+      "ackFailed": 10,
+      "transactions": 0,
+      "partitionsCreated": 0,
+      "partitionsDeleted": 0,
+      "partitionCount": 8,
+      "avgLagMs": 18,
+      "maxLagMs": 412,
+      "pushPerSecond": 686.67,
+      "popPerSecond": 683.0,
+      "ackPerSecond": 682.97,
+      "emptyPerSecond": 0.52,
+      "parkedCount": 12.5
+    }
+  ],
+  "queues": ["orders"]
+}
+```
+
+The `*PerSecond` fields are the counters divided by the bucket width, computed in
+SQL so a client cannot get the division wrong; `parkedCount` is a gauge and is
+deliberately not rate-normalised. `avgLagMs` and `maxLagMs` are `null` for a bucket
+with no pop sample. `queues` lists the queue names present in the window, so a chart
+can build its legend before the first datapoint arrives. Points are ordered oldest
+first.
+
+## GET /api/v1/analytics/queue-parked-replicas
+
+Tenant-scoped. Filters: `from`, `to`, `queue`. The same parked-consumer gauge as
+`queue-ops`, broken out by replica instead of aggregated.
+
+```json
+{
+  "timeRange": { "from": "2026-07-30T09:44:00.000Z", "to": "2026-07-30T10:44:00.000Z" },
+  "bucketMinutes": 1,
+  "series": [
+    {
+      "bucket": "2026-07-30T10:41:00Z",
+      "queueName": "orders",
+      "hostname": "queen-0",
+      "workerId": 0,
+      "parkedCount": 12.5
+    }
+  ],
+  "replicas": [ { "hostname": "queen-0", "workerId": 0 } ]
+}
+```
+
+Buckets line up exactly with `queue-ops`, so the two can share a time axis.
+`parkedCount` is a within-bucket average, rounded to two decimals: a broker that
+parks and wakes long-polls constantly will show fractional values. `workerId` is
+always `0`: one async process per replica. Rows are written only for a queue that
+actually had parked pops in the interval.
+
+## GET /api/v1/analytics/retention
+
+Tenant-scoped. Filters: `from`, `to`, `queue`. What retention and eviction actually
+deleted, split by rule.
+
+```json
+{
+  "timeRange": { "from": "2026-07-30T09:44:00.000Z", "to": "2026-07-30T10:44:00.000Z" },
+  "bucketMinutes": 1,
+  "series": [
+    {
+      "bucket": "2026-07-30T10:41:00Z",
+      "retentionMsgs": 40960,
+      "completedRetentionMsgs": 0,
+      "evictionMsgs": 0,
+      "totalMsgs": 40960,
+      "eventCount": 5
+    }
+  ],
+  "totals": { "retentionMsgs": 40960, "completedRetentionMsgs": 0, "evictionMsgs": 0, "totalMsgs": 40960, "eventCount": 5 }
+}
+```
+
+The three columns map to the three rules: `retentionMsgs` is age-based cleanup
+(`retentionSeconds`), `completedRetentionMsgs` is cleanup of segments every group has
+consumed past (`completedRetentionSeconds`), and `evictionMsgs` is
+`maxWaitTimeSeconds` eviction, which deletes messages regardless of whether anyone
+consumed them, see [queues](/reference/http/queues). Partition create/delete events
+are written to the same table with reserved type names and are filtered out here.
+
+A history row whose partition no longer resolves to a queue (the queue was deleted
+after the sweep) cannot be attributed and stays in the result rather than being
+dropped, so `totals` can exceed the sum of what the `queue` filter would show.
+
+`queen.retention_history` ages out with the other metrics tables at
+`METRICS_RETENTION_DAYS` (default `90`).
+
+## GET /api/v1/analytics/system-metrics
+
+**Cell-wide.** Filters: `from`, `to`, `hostname`, `workerId`. Host and process
+gauges per replica, re-aggregated into the window's buckets. Every numeric leaf is a
+`{avg, min, max, last}` object.
+
+Populated blocks: `cpu.user_us` and `cpu.system_us` (percent × 100, so divide by 100
+to plot a percentage), `memory.rss_bytes`, `database.pool_size` / `pool_idle` /
+`pool_active`, and `uptime_seconds`.
+
+<Aside type="note">
+Two blocks in this payload are not measurements of this broker. There is no
+`threadpool` family at all (the broker is a single async process with no worker
+pool or job queue), and the reader yields `null` for it, which a chart should draw as
+a gap. The `shared_state` block is present but reports `enabled: false` with zeroed
+sub-counters; its numbers exist for shape compatibility, and the flag inside the
+payload says so. For real mesh transport counters use the internal stats route on
+[System and internal routes](/reference/http/system).
+</Aside>
+
+## GET /api/v1/analytics/worker-metrics
+
+**Cell-wide.** Filters: `from`, `to`, `queue`, `hostname`, `workerId`. Per-replica
+throughput and health as a time series.
+
+```json
+{
+  "timeRange": { "from": "2026-07-30T09:44:00.000Z", "to": "2026-07-30T10:44:00.000Z" },
+  "bucketMinutes": 1,
+  "pointCount": 60,
+  "timeSeries": [],
+  "workers": [],
+  "queues": [],
+  "summary": {}
+}
+```
+
+Each `timeSeries` point carries `timestamp`, the interval deltas
+(`pushMessages`, `popMessages`, `ackMessages`, `pushRequests`, `popRequests`,
+`ackRequests`, `ackSuccess`, `ackFailed`, `dlqCount`, `dbErrors`), their
+`pushPerSecond` / `popPerSecond` / `ackPerSecond` normalisations, the scheduler
+("event loop") lag pair `avgEventLoopLagMs` / `maxEventLoopLagMs`, and the pop-lag
+triple `avgLagMs` / `maxLagMs` / `lagCount`.
+
+Four fields carry a different meaning than their names suggest, because the column
+set predates this broker: `dbConnections` is the number of **active** pooled
+connections at flush time, `avgFreeSlots` and `minFreeSlots` are both the **idle**
+pool count at that same instant, and `jobsDone` is written from the push-request
+counter, so it equals `pushRequests`. `avgJobQueueSize`, `maxJobQueueSize` and
+`backoffSize` have no producer at all and stay at their column default of `0`. Do
+not chart them.
+
+`workers` enumerates the replicas seen in the window, so a rolling deployment shows
+the old and new pods side by side. Rows are written by every replica independently,
+without leader election, so this is where per-replica skew that the cluster totals
+hide becomes visible.
+
+## GET /api/v1/analytics/postgres-stats
+
+**Cell-wide**, no parameters. A direct read of PostgreSQL's own statistics views for
+the current database, intended for debugging a slow broker.
+
+Keys: `timestamp`, `database`, `databaseCache` (block reads, cache hits, hit ratio),
+`tableCache` and `indexCache` (per relation in the `queen` schema), `cacheSummary`,
+`deadTuples`, `hotUpdates`, `activeQueries`, `autovacuumStatus`, `bufferConfig`,
+`bufferUsage` and `tableSizes`.
+
+<Aside type="caution">
+This route reports on the database, not on Queen: it exposes table names, sizes, and
+currently running query text for the whole database. It is an operator diagnostic:
+keep it off any tenant-reachable path, and do not poll it on a dashboard refresh
+interval.
+</Aside>
+
+## Access levels
+
+| Route | Level | Tenant-scoped |
+| --- | --- | --- |
+| `GET /api/v1/analytics/queue-lag` | read-only | yes |
+| `GET /api/v1/analytics/queue-ops` | read-only | yes |
+| `GET /api/v1/analytics/queue-parked-replicas` | read-only | yes |
+| `GET /api/v1/analytics/retention` | read-only | yes |
+| `GET /api/v1/analytics/system-metrics` | read-only | no |
+| `GET /api/v1/analytics/worker-metrics` | read-only | no |
+| `GET /api/v1/analytics/postgres-stats` | read-only | no |
+
+`read-only` here is the *route* level, not a tenancy boundary: the three cell-wide
+routes will happily serve one tenant's read-only token the whole cell's numbers.
+Restrict them at the proxy or the network. The aggregate status routes are on
+[Status, health and metrics](/reference/http/status-metrics).

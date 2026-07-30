@@ -329,14 +329,26 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
 // state (queen.partition_consumers) plus the shared coordination tables. These ADD to
 // the handlers above; they never touch push/pop/ack/transaction/configure.
 
-// POST /api/v1/stats/refresh — force the stats reconciler (no-op for segments,
-// wired for parity). ADMIN operation.
+// POST /api/v1/stats/refresh — force the stats reconciler NOW instead of waiting
+// out STATS_INTERVAL_MS. ADMIN operation.
+//
+// This used to call queen.refresh_all_stats_v1, the ROWS reconciler, described in
+// the comment here as "no-op for segments, wired for parity". It was neither: that
+// SP recomputes queen.stats from queen.partitions/queen.messages for EVERY queue
+// with no storage filter, and a log-engine queue has no rows there — so forcing a
+// refresh upserted zeros over the log-derived counters, and every reader of those
+// stat rows (/status, /status/queues, the dashboard overview) reported an empty
+// broker until the next stats cycle repaired it. Measured on a queue holding 3
+// pending messages: child_count 2 -> 0, total 3 -> 0, pending 3 -> 0.
+//
+// It now runs the same reconciler the stats loop does, which is what "force the
+// refresh" was always supposed to mean.
 pub async fn handle_stats_refresh(State(st): State<Arc<AppState>>) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::refresh_all_stats(&client).await {
+    match db::seg_refresh_all_stats(&client).await {
         Ok(txt) => sp_result_to_response(txt),
         Err(e) => json(
             StatusCode::INTERNAL_SERVER_ERROR,

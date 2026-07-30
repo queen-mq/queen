@@ -1,0 +1,320 @@
+---
+title: Deploying queen_proxy
+description: "Run the multi-tenant gateway: its own PostgreSQL, boot-applied migrations, TLS termination, the cell secret, the cache, and every variable."
+type: how-to
+tier: operate
+sidebar:
+  order: 20
+  label: Deploying the proxy
+sourceOfTruth:
+  - queen_proxy/src/main.rs
+  - queen_proxy/src/config.rs
+  - queen_proxy/src/db.rs
+  - queen_proxy/src/cache.rs
+  - queen_proxy/src/gateway.rs
+  - queen_proxy/src/registry.rs
+  - queen_proxy/CONTRACTS.md
+---
+
+`queen_proxy` is a separate Rust binary. One instance fronts one cell, and it needs
+its own PostgreSQL database: the control-plane store, called *pxdb* throughout the
+code. It is not the database the broker writes messages to.
+
+Keeping those two apart is structural. The cell's PostgreSQL holds one tenant's
+worth of messages per cluster and is sized for message throughput; pxdb holds the
+tenant, cluster, key, plan and usage tables for the whole fleet and is read almost
+entirely out of a 30-second in-process cache. A pxdb outage must not stop the data
+plane, and the cache is what makes that true.
+
+## Boot, in order
+
+Every step below can end the process, and each does so with a log line naming the
+cause. Nothing is retried at boot except the JWKS-style lazy work.
+
+<Steps>
+
+1. **Size the runtime.** Worker threads come from `QUEEN_PROXY_WORKER_THREADS` if
+   set, else from the cgroup-v2 `cpu.max` quota (rounded up, clamped to the host core
+   count), else from the host core count. On a CPU-capped shared cell that
+   distinction matters: spawning a worker per host core onto a two-core quota
+   oversubscribes the scheduler.
+
+2. **Connect pxdb.** With `PXDB_HOST` set, the pool is built and immediately proved
+   with a connect plus `SELECT 1`. Failure exits 1. Without `PXDB_HOST` *and* without
+   the dev-static fallback, the process exits 1: there is nothing to serve.
+
+3. **Apply migrations.** Failure exits 1. See below.
+
+4. **Build the upstream client.** A pooled plaintext HTTP/1.1 client toward the cell
+   broker, `TCP_NODELAY` on, at most 64 idle connections retained per host.
+
+5. **Start the background tasks:** the usage flush (which first recovers anything left
+   in the disk spool), the cache invalidation listener, the registry reconciler, the
+   revoked-token sweep, the usage roll-up, and the storage-quota pump that diffs the
+   reconciler's verdict every 10 seconds.
+
+6. **Resolve TLS material**, before the bind, so unusable certificates fail fast
+   rather than after the port is taken.
+
+7. **Bind `0.0.0.0:QUEEN_PROXY_PORT`** and log `queen-proxy up` with the resolved
+   `enforce` flag.
+
+</Steps>
+
+On shutdown the listener stops accepting, live connections are given their in-flight
+request to finish (10 seconds on the TLS path), and then the metering accumulators are
+flushed, bounded by `QUEEN_PROXY_SHUTDOWN_DRAIN_MS`, falling back to the disk spool,
+so a dead pxdb cannot hold a deploy open.
+
+## Migrations are applied at boot
+
+Six SQL files are embedded in the binary with `include_str!` and applied in order,
+each recorded by name in `queen_proxy.schema_migrations` and skipped if already
+recorded:
+
+| Migration | Contents |
+| --- | --- |
+| `001_init` | The schema: tenants, users, identities, plans, cells, clusters, cluster_roles, api_keys, queues, usage_minutes, operations, revoked_tokens, outbox (plus the four seeded plans) |
+| `002_functions` | The control-plane functions and `record_operation`, the single append-audit-and-notify primitive |
+| `003_limit_override` | `set_limit_override` |
+| `004_lifecycle` | Session revocation, role grants, `bootstrap_tenant`, `usage_days` and the roll-up |
+| `005_usage_prune` | `prune_usage_minutes` |
+| `006_operator` | The `users.is_operator` column and `set_operator` |
+
+Every statement is idempotent (`IF NOT EXISTS` / `OR REPLACE`), so the files are also
+safe to apply by hand with `psql` against an empty database. `001_init` runs
+`CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public`, so the role applying it
+needs that privilege. This is the one place the proxy differs from the broker, which
+requires no extensions at all.
+
+<Aside type="caution">
+The SQL is embedded at compile time. Editing a file under `queen_proxy/migrations/`
+changes nothing until you rebuild the binary.
+</Aside>
+
+## TLS termination
+
+The listener is HTTPS only when **both** variables are set:
+
+```bash
+QUEEN_PROXY_TLS_CERT=/etc/queen/origin.pem
+```
+
+```bash
+QUEEN_PROXY_TLS_KEY=/etc/queen/origin.key
+```
+
+One without the other is a misconfiguration the process refuses to start with, rather
+than silently serving the plaintext port. Details worth knowing before you generate
+the material:
+
+- The certificate file is read as a **full chain**, leaf first: every `CERTIFICATE`
+  block in the file is used, not just the first. A file with no `CERTIFICATE` block
+  is a fatal error.
+- The key may be `PRIVATE KEY` (PKCS#8), `RSA PRIVATE KEY` (PKCS#1) or
+  `EC PRIVATE KEY` (SEC1). The first key block found wins.
+- **ALPN advertises `http/1.1` only.** The TLS listener is hyper's HTTP/1 server, so
+  a client that negotiates h2 would fail; the proxy avoids that by never offering it.
+  If you need HTTP/2 at the edge, terminate it upstream and speak HTTP/1.1 to the
+  proxy.
+- rustls on the `ring` provider, the same crypto stack the outbound PostgreSQL
+  connector uses, so TLS adds no second backend.
+
+With both variables unset, the listener is plaintext and something in front of it is
+expected to terminate TLS.
+
+## The cell secret
+
+The proxy always **strips the client's `Authorization` header** before forwarding.
+The client's credential is spent at the proxy; the broker never sees it. In its place,
+if the cell row carries a `cell_secret`, the proxy sends
+`Authorization: Bearer <cell_secret>`.
+
+That is the whole of the broker-facing credential. Two consequences:
+
+- Whatever the broker requires, this one value must satisfy. If the cell's broker has
+  `JWT_ENABLED=true`, `cell_secret` has to be a token that broker's validator accepts.
+  And because the proxy forwards routes the broker classifies as `admin` (a queue
+  delete, a consumer-group delete), the token needs the broker's admin role. A key
+  with a narrower role will pass pushes and fail queue administration.
+- `cell_secret` is stored in plaintext in `queen_proxy.cells`. Anyone with read access
+  to pxdb holds the cell's broker credential. Treat pxdb as a secret store, and the
+  broker as reachable only from the proxy.
+  [Isolation](/selfhost/multi-tenant/isolation) explains why the second half of that
+  is not optional.
+
+The cell's `base_url` must be an `http://` URL. The data path would parse either, but
+the registry reconciler refuses anything else outright: a deliberate assertion
+that broker traffic is cell-internal plaintext, with TLS terminated at the proxy edge.
+
+## The cache, and what happens when pxdb is down
+
+Two caches back every request: `Host` slug → cluster context, and API-key sha256 →
+`(cluster, key id, scopes)`.
+
+| Entry | TTL |
+| --- | --- |
+| Cluster by slug or id | 30 s |
+| API key, found | 30 s |
+| API key, not found or revoked | 5 s |
+
+The short negative TTL is deliberate: a loop of garbage keys re-checks the database
+every five seconds rather than being answered from memory, because the database is the
+only authority on whether a hash exists, while still capping how hard that loop can
+hit pxdb.
+
+**Invalidation is push-based.** Every mutating control-plane function calls
+`record_operation`, which appends the audit row and fires
+`pg_notify('queen_proxy_inval', <cluster_id>)`. The proxy holds a dedicated
+PostgreSQL connection for `LISTEN` (deliberately not a pooled one, because the pool
+driver discards notifications) and drops every cached entry for that cluster on
+arrival. The connection reconnects with backoff from 1 s to 30 s, and the backoff
+resets to its floor once a session has stayed up at least 10 seconds.
+
+**When pxdb cannot answer**, the rule distinguishes two failures that look alike:
+
+| pxdb said | Cached entry | Result |
+| --- | --- | --- |
+| "No such row" | Anything | **Fail closed.** The expired entry is forgotten, and a key hash gets a negative entry so the grace window can never resurrect a revoked key |
+| Nothing (pool, query or decode error) | Present, inside the grace window | **Serve stale**, with a warning sampled to one line per 10 s |
+| Nothing | Absent, or grace window elapsed | Deny: `421` for a cluster, `401` for a key |
+
+The grace window is `QUEEN_PROXY_STALE_GRACE_MS`, default **600000** (10 minutes). It
+covers a managed-PostgreSQL failover, a restart or a migration. It is also the
+worst-case delay before a control-plane decision taken *during* the outage (a
+suspension, a deletion, a key revocation) takes effect, because nothing refreshes
+while pxdb is down. Setting it to `0` disables stale serving entirely.
+
+`api_keys.last_used_at` is bumped only on a cache miss, so it is accurate to within
+the 30-second positive TTL and costs nothing per request.
+
+## Configuration
+
+Only the literal string `true` is truthy, matching the proxy's own parser. Empty
+strings are treated as unset for the `Option` values.
+
+### Listener and control-plane database
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_PROXY_PORT` | `6711` | Listen port |
+| `QUEEN_PROXY_WORKER_THREADS` | *(cgroup quota, else host cores)* | Tokio worker threads |
+| `PXDB_HOST` | *(unset)* | pxdb host. Unset means dev-static mode or refusal to start |
+| `PXDB_PORT` | `5432` | |
+| `PXDB_USER` | `postgres` | |
+| `PXDB_PASSWORD` | *(empty)* | |
+| `PXDB_DB` | `queen_proxy` | |
+| `PXDB_USE_SSL` | `false` | TLS to pxdb |
+| `PXDB_SSL_REJECT_UNAUTHORIZED` | `true` | Validate the chain. Same two modes as the broker's, see [PostgreSQL TLS](/selfhost/security/postgres-tls) |
+| `PXDB_POOL_SIZE` | `16` | |
+| `QUEEN_PROXY_TLS_CERT` | *(unset)* | Certificate chain, PEM. Both or neither |
+| `QUEEN_PROXY_TLS_KEY` | *(unset)* | Private key, PEM |
+
+### Enforcement and upstream
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_PROXY_ENFORCE` | `false` | **Shadow mode by default**. See [Quotas](/selfhost/multi-tenant/quotas) |
+| `QUEEN_PROXY_TENANT_HEADER` | `true` | Inject `x-queen-tenant` upstream |
+| `QUEEN_PROXY_MAX_BODY_BYTES` | `16777216` | Hard ceiling on a buffered request body |
+| `QUEEN_PROXY_MAX_BATCH_ITEMS` | `10000` | Batch cap when the plan sets none |
+| `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` | `35000` | Upstream request timeout for non-long-poll calls |
+| `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | Ceiling on a client's requested long-poll wait |
+| `QUEEN_PROXY_LONGPOLL_MARGIN_MS` | `10000` | Added to the client's wait to get the upstream timeout |
+| `QUEEN_PROXY_CELL_MAX_PARKED` | `5000` | Cell-wide parked long-poll cap, across all clusters |
+| `QUEEN_PROXY_RECONCILE_MS` | `60000` | Broker inventory reconcile interval |
+| `QUEEN_PROXY_STALE_GRACE_MS` | `600000` | Cache grace window during a pxdb outage |
+
+### Identity
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_PROXY_JWT_ISS` | `queen-proxy` | `iss` on minted session tokens |
+| `QUEEN_PROXY_JWT_SECRET` | *(unset)* | HS256 secret, for development |
+| `QUEEN_PROXY_JWT_ED25519_PEM` | *(unset)* | Ed25519 PKCS#8 PEM. Wins over the HS secret when both are set |
+| `QUEEN_PROXY_JWT_TTL_S` | `86400` | Session token lifetime |
+| `QUEEN_PROXY_COOKIE_NAME` | `queen_session` | Session cookie name |
+| `QUEEN_PROXY_COOKIE_DOMAIN` | *(unset)* | Cookie `Domain`; setting it also forces `Secure` |
+| `QUEEN_PROXY_AUTH_HOST` | `false` | This instance is the auth host, for callback URL construction |
+| `QUEEN_PROXY_PUBLIC_URL` | *(unset)* | Explicit public base URL for OAuth callbacks |
+| `QUEEN_PROXY_OPERATOR_ENABLED` | `false` | Per-cell gate for the operator capability. Leave off on customer cells |
+| `QUEEN_PROXY_REVOCATION_STRICT` | `false` | Fail closed when the revocation lookup itself errors |
+| `QUEEN_PROXY_REVOCATION_SWEEP_MS` | `3600000` | Deny-list garbage collection; `0` disables |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | *(unset)* | Enables Google login |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | *(unset)* | Enables GitHub login |
+| `QUEEN_PROXY_OAUTH_STATE_SECRET` | *(falls back to the JWT HS secret, else a random per-process key)* | HMAC key for the signed OAuth `state` |
+| `QUEEN_PROXY_AUTOPROVISION` | `false` | Create a user on first OAuth login instead of refusing |
+| `QUEEN_PROXY_AUTOPROVISION_TENANT` | *(unset)* | Tenant **slug** new users are created under. Required when auto-provision is on |
+
+### Metering
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_PROXY_METER_FLUSH_MS` | `15000` | Closed-minute flush interval |
+| `QUEEN_PROXY_SPOOL_DIR` | `./queen-proxy-spool` | Disk spool for usage rows |
+| `QUEEN_PROXY_SHUTDOWN_DRAIN_MS` | `5000` | Budget for the final flush |
+| `QUEEN_PROXY_ROLLUP_MS` | `3600000` | Daily roll-up and monthly-quota tick; floored at 1000 |
+| `QUEEN_PROXY_QUOTA_WARN_PERCENT` | `80` | Monthly-quota warning threshold |
+| `QUEEN_PROXY_USAGE_KEEP_DAYS` | `90` | Minute-granularity retention after roll-up |
+
+### Development only
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `QUEEN_PROXY_DEV_INSECURE` | `false` | Skip authentication entirely and grant full scopes |
+| `QUEEN_PROXY_DEV_CELL_URL` | *(unset)* | Serve one static cluster with no pxdb at all |
+| `QUEEN_PROXY_DEV_CELL_TOKEN` | *(unset)* | Cell secret for that static cluster |
+| `QUEEN_PROXY_DEV_TENANT` | the default tenant UUID | `x-queen-tenant` for that static cluster |
+| `QUEEN_PROXY_DEFAULT_CLUSTER` | *(unset)* | Slug to fall back to when `Host` resolves to nothing (for `localhost` browsing) |
+
+`QUEEN_PROXY_DEV_INSECURE=true` hands every request a full-scope API-key principal
+before any credential is read. It also makes the cluster console permanently `403`,
+since that surface requires a human session and the bypass produces an API-key
+principal. Nothing about this mode belongs on a shared deployment.
+
+<Aside type="note">
+`QUEEN_PROXY_UPSTREAM_CONNECT_TIMEOUT_MS` (default 5000) is parsed into the
+configuration and is not applied to the upstream connector anywhere in the current
+tree. Connect delay is bounded by the overall request timeout, not by this variable.
+</Aside>
+
+## Endpoints the proxy owns
+
+Everything else is forwarded to the broker, so these are the paths that never leave
+the proxy:
+
+| Path | Purpose |
+| --- | --- |
+| `GET /healthz` | Liveness plus the two switches that change behaviour: `{"status":"ok","enforce":…,"tenant_header":…}`. Unauthenticated |
+| `GET /.well-known/jwks.json` | Public key for the session tokens this proxy mints |
+| `/auth/*` | Login, OAuth callbacks, `/auth/me`, `/auth/session-token`, logout |
+| `/api/console/*` | Cluster console API, human sessions only |
+| `/console`, `/console/*` | The console SPA |
+| `/` and anything not broker-shaped | The Queen dashboard, behind a mandatory live session |
+
+`/healthz` reporting `enforce` is there for a reason: enforcement used to be visible
+only in the boot log, which survives a restart, so a check that grepped the log could
+pass against a proxy that had since been replaced by a shadow-mode one.
+
+## Per cell, then
+
+<Steps>
+
+1. Run PostgreSQL for the broker and PostgreSQL for the proxy. They can be separate
+   instances or separate databases; they must not be the same database.
+
+2. Run the broker with `QUEEN_TENANCY_HEADER=true`, `JWT_ENABLED=true`, and a network
+   policy that admits only the proxy. See
+   [Broker-native tenancy](/selfhost/multi-tenant/broker-tenancy).
+
+3. Run the proxy with `PXDB_*` pointed at pxdb, TLS material if it is the edge, and
+   `QUEEN_PROXY_ENFORCE=true` once you have watched shadow mode for a while.
+
+4. Insert the `cells` row for this cell: `slug`, `region`, `base_url`, `class` and
+   `cell_secret`. There is no SQL function for it; cells are fleet infrastructure.
+   [Tenants, clusters and cells](/selfhost/multi-tenant/tenants) has the shape.
+
+5. Point a wildcard DNS record at the proxy, so every cluster slug on this cell
+   resolves to it.
+
+</Steps>
