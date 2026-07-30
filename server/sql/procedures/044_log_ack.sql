@@ -417,6 +417,12 @@ $$;
 -- Unresolvable hashes (txns row purged, or mis-sized hash) count as NOT acked:
 -- the cursor stops before their position and those frames redeliver —
 -- redelivery over data loss, by design (unchanged from the seg engine).
+-- 2026-07-30: they are additionally reported back in 'unresolvedHashes'
+-- (same 32-hex tokens as noop/stale) so the broker rejects those items
+-- explicitly — previously they appeared in NO list and the broker's
+-- default-success fill told the client the ack landed while the cursor
+-- never moved (silent redelivery livelock; a failed/dlq signal there
+-- vanished with no retry charge and no DLQ hand-off).
 --
 -- delta (total_consumed / 'acked') is pure arithmetic: new_committed -
 -- old_committed. The seg engine had to sum msg_counts across segment rows to
@@ -456,6 +462,8 @@ DECLARE
     -- below-cursor honesty
     v_noop JSONB := '[]'::jsonb;
     v_stale JSONB := '[]'::jsonb;
+    -- unresolvable honesty (2026-07-30): hashes with NO occurrence anywhere
+    v_unresolved JSONB := '[]'::jsonb;
 BEGIN
     IF p_statuses IS NOT NULL
        AND COALESCE(array_length(p_statuses, 1), 0) <> v_n THEN
@@ -556,12 +564,22 @@ BEGIN
             COALESCE(jsonb_agg(encode(r.hash, 'hex') ORDER BY r.in_idx) FILTER (
                 WHERE r.below AND r.eff IS NULL
                   AND r.status IN ('failed', 'dlq', 'retry')), '[]'::jsonb),
+            -- Unresolvable: no occurrence in the span AND none below the
+            -- cursor — the log_txns row was purged, or the txn never existed.
+            -- The cursor math already treats these as NOT acked (redelivery
+            -- over loss); this list makes the broker SAY so per item instead
+            -- of defaulting them to success (the silent-livelock bug: a
+            -- client acking beyond the hash window was told ok while the
+            -- cursor never moved, and a failed/dlq signal there vanished
+            -- without retry charge or DLQ hand-off).
+            COALESCE(jsonb_agg(encode(r.hash, 'hex') ORDER BY r.in_idx) FILTER (
+                WHERE r.eff IS NULL AND NOT r.below), '[]'::jsonb),
             MAX(r.eff) FILTER (
                 WHERE r.eff IS NOT NULL
                   AND r.status IN ('completed', 'success', 'acked', 'ok')
                   AND ((SELECT sig_off FROM sig) IS NULL
                        OR r.eff < (SELECT sig_off FROM sig)))
-        INTO v_sig_off, v_sig_kind, v_noop, v_stale, v_max_ok
+        INTO v_sig_off, v_sig_kind, v_noop, v_stale, v_unresolved, v_max_ok
         FROM resolved r;
     END IF;
 
@@ -599,7 +617,7 @@ BEGIN
             'ok', true, 'dlq', true,
             'partitionId', p_partition_id, 'group', p_group, 'worker', p_worker,
             'off', v_poison_off, 'acked', v_delta,
-            'noopHashes', v_noop, 'staleHashes', v_stale);
+            'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
     END IF;
 
     -- ------------------------------------------------------------------ (4)
@@ -633,7 +651,7 @@ BEGIN
                 total_consumed = total_consumed + v_delta
             WHERE partition_id = p_partition_id AND consumer_group = p_group;
             RETURN jsonb_build_object('ok', true, 'acked', v_delta, 'off', v_new,
-                                      'noopHashes', v_noop, 'staleHashes', v_stale);
+                                      'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
         ELSIF v_dlq_enabled THEN
             -- Budget exhausted + DLQ: hand the poison to the broker (keep the
             -- lease). Same return shape as the forced-DLQ branch.
@@ -645,7 +663,7 @@ BEGIN
                 'ok', true, 'dlq', true,
                 'partitionId', p_partition_id, 'group', p_group, 'worker', p_worker,
                 'off', v_poison_off, 'acked', v_delta,
-                'noopHashes', v_noop, 'staleHashes', v_stale);
+                'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
         ELSE
             -- Budget exhausted, no DLQ: DROP the poison — advance the cursor
             -- past it (committed = the poison offset), reset the counter,
@@ -661,7 +679,7 @@ BEGIN
             WHERE partition_id = p_partition_id AND consumer_group = p_group;
             RETURN jsonb_build_object('ok', true, 'dropped', true,
                 'acked', v_delta, 'off', v_new,
-                'noopHashes', v_noop, 'staleHashes', v_stale);
+                'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
         END IF;
     END IF;
 
@@ -677,7 +695,7 @@ BEGIN
             total_consumed = total_consumed + v_delta
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
         RETURN jsonb_build_object('ok', true, 'acked', v_delta, 'off', v_new,
-                                  'noopHashes', v_noop, 'staleHashes', v_stale);
+                                  'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
     END IF;
 
     -- ------------------------------------------------------------------ (6)
@@ -707,7 +725,7 @@ BEGIN
     END IF;
 
     RETURN jsonb_build_object('ok', true, 'acked', v_delta, 'off', v_new,
-                              'noopHashes', v_noop, 'staleHashes', v_stale);
+                              'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
 END;
 $$;
 

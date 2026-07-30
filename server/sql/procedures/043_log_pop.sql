@@ -347,7 +347,36 @@ BEGIN
         END LOOP;
     END IF;
 
-    IF v_taken = 0 THEN RETURN; END IF;
+    IF v_taken = 0 THEN
+        -- Empty-partition cursor seal (2026-07-30; port of the C++
+        -- pop_unified_batch_v4 starvation fix). A partition whose segments
+        -- were ALL removed by retention keeps last_offset > committed forever
+        -- (this empty return used to write nothing), so the (partition, group)
+        -- row stays "phantom pending": a permanent wildcard candidate, and —
+        -- through the v_claimed=0 re-check's identical predicate — it pins the
+        -- (queue, group) empty-scan watermark at epoch, forcing full
+        -- partition-set scans every long-poll. Seal the cursor to the
+        -- partition row's last_offset snapshot, ONLY when the partition holds
+        -- NO segments at all, UNFILTERED: v_taken = 0 also happens when
+        -- segments exist but are deferred (delayed_processing deadline), and
+        -- sealing past those would skip live messages. Race with a concurrent
+        -- push is safe: offsets are monotone, so anything pushed after our
+        -- v_last_offset snapshot stays above the seal and remains pending.
+        -- No lease/attempt fields are touched — this is a cursor seal, not a
+        -- claim; the row lock is already held (the FOR UPDATE claim above).
+        -- Nested IF: the caught-up common case (committed == last_offset)
+        -- must not even pay the EXISTS probe — parked long-polls stay
+        -- read-only on the segments PK.
+        IF v_last_offset > v_committed THEN
+            IF NOT EXISTS (SELECT 1 FROM queen.log_segments s
+                           WHERE s.partition_id = v_pid) THEN
+                UPDATE queen.log_consumers SET
+                    committed = v_last_offset
+                WHERE partition_id = v_pid AND consumer_group = p_group;
+            END IF;
+        END IF;
+        RETURN;
+    END IF;
 
     IF p_auto_ack THEN
         -- auto-ack: commit the whole delivery in the same transaction; no

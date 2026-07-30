@@ -2472,9 +2472,25 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                     };
                     let noop_hashes = hash_set("noopHashes");
                     let stale_hashes = hash_set("staleHashes");
-                    if !noop_hashes.is_empty() || !stale_hashes.is_empty() {
+                    // Unresolvable honesty (2026-07-30): hashes the SP could
+                    // not resolve at all (log_txns row purged, or a txn that
+                    // never existed). The cursor did not move for them, so
+                    // reporting them success would tell the client an ack
+                    // landed that never did — the silent redelivery livelock.
+                    let unresolved_hashes = hash_set("unresolvedHashes");
+                    if !noop_hashes.is_empty() || !stale_hashes.is_empty()
+                        || !unresolved_hashes.is_empty()
+                    {
                         for (k, &i) in idxs.iter().enumerate() {
-                            if stale_hashes.contains(&hexes[k]) {
+                            if unresolved_hashes.contains(&hexes[k]) {
+                                success[i] = false;
+                                dlq_flags[i] = false;
+                                lease_released[i] = false;
+                                errors[i] = Some(
+                                    "unresolvable: transaction not in the ack window (hash purged or never pushed); if leased, the message redelivers"
+                                        .to_string(),
+                                );
+                            } else if stale_hashes.contains(&hexes[k]) {
                                 success[i] = false;
                                 dlq_flags[i] = false;
                                 errors[i] = Some(

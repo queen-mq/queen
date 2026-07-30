@@ -16,6 +16,7 @@ import * as loggerTests from './logger.js'
 import * as watermarkTests from './watermark.js'
 import * as authTests from './auth.js'
 import * as semanticsTests from './semantics.js'
+import * as ackWindowTests from './ackwindow.js'
 import * as streamTests from './stream/index.js'
 import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
 
@@ -159,7 +160,8 @@ async function main() {
         loggerTests,
         watermarkTests,
         authTests,
-        semanticsTests
+        semanticsTests,
+        ackWindowTests
     ]
     
     const aiTests = [
