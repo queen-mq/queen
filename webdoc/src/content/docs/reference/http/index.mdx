@@ -1,6 +1,6 @@
 ---
 title: HTTP API conventions
-description: "Base URL, authentication and access levels, error bodies, the empty-204 rule and the body cap — the rules every Queen route follows."
+description: "Base URL, authentication and access levels, error bodies, the empty-204 rule and the body cap: the rules every Queen route follows."
 type: reference
 sidebar:
   order: 2
@@ -15,7 +15,7 @@ sourceOfTruth:
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no
-persistent session, and no client-side coordination state — anything that can issue an HTTP
+persistent session, and no client-side coordination state. Anything that can issue an HTTP
 request is a first-class client. The rules on this page hold for every route; the per-route
 pages only document what is specific to that route.
 
@@ -33,7 +33,7 @@ at `http://localhost:6632`.
 | everything else | the embedded dashboard SPA, served from assets compiled into the binary |
 
 There is exactly one API version, `v1`, and version 1.0.0 of the broker and of every client
-SDK are released together. A path is the version — there is no `Accept` header negotiation and
+SDK are released together. A path is the version: there is no `Accept` header negotiation and
 no version query parameter.
 
 <Aside type="caution">
@@ -43,7 +43,7 @@ expose port 6632 to a browser or to the internet directly. See [Self-hosting](/s
 </Aside>
 
 Anything the router does not match falls through to the dashboard. That fallback answers a
-JSON **404** — `{"error":"Not Found","code":"no_such_route"}` — for any path starting with
+JSON **404** (`{"error":"Not Found","code":"no_such_route"}`) for any path starting with
 `/api/` and for any non-`GET`/`HEAD` request, so a call to a route that does not exist fails
 loudly instead of returning the SPA's HTML with a 200.
 
@@ -67,8 +67,8 @@ Two failure codes, and they mean different things:
 
 | Code | Meaning |
 | --- | --- |
-| `401` | no token, unparseable token, bad signature, expired, not yet valid, or a rejected issuer/audience — body `{"error":"Authentication required"}` or a specific token message |
-| `403` | the token is valid but its roles do not satisfy the route's access level — body `{"error":"Insufficient permissions"}` |
+| `401` | no token, unparseable token, bad signature, expired, not yet valid, or a rejected issuer/audience. Body `{"error":"Authentication required"}` or a specific token message |
+| `403` | the token is valid but its roles do not satisfy the route's access level. Body `{"error":"Insufficient permissions"}` |
 
 ### Access levels are a role set, not a ladder
 
@@ -78,14 +78,14 @@ different capability. This matters most for producers.
 
 | Route's access level | Satisfied by role | Not satisfied by |
 | --- | --- | --- |
-| `public` | anyone, with or without a token | — |
+| `public` | anyone, with or without a token | nothing |
 | `read-only` | `read-only`, `read-write`, `admin` | `write-only` |
 | `write-only` | `write-only`, `read-write`, `admin` | `read-only` |
 | `read-write` | `read-write`, `admin` | `read-only`, `write-only` |
 | `admin` | `admin` | everything else |
 
 `POST /api/v1/push` is the only `write-only` route. So a token whose single role is
-`write-only` can produce and can do nothing else — every read route and every consume route
+`write-only` can produce and can do nothing else: every read route and every consume route
 (`/pop`, `/ack`, `/transaction`, `/lease/:leaseId/extend`) is `read-write` and returns 403 for
 it. Conversely a `read-only` token cannot pop, because popping takes a lease and mutates a
 cursor.
@@ -94,7 +94,7 @@ Role names come from the `role` claim and the `roles` array claim, and both the 
 the four role names are configurable. A path the access table does not recognise defaults to
 `read-write`.
 
-The public routes — reachable with no token even when authentication is on — are `/health`,
+The public routes, reachable with no token even when authentication is on, are `/health`,
 `/metrics`, `/metrics/prometheus`, `/`, `/assets/*` and `/favicon*`. `/metrics/prometheus` being
 public is deliberate for scraping and is a hazard in a multi-tenant deployment, where per-queue
 series sum across tenants; see [Self-hosting](/selfhost).
@@ -133,8 +133,8 @@ Successful API responses carry `Content-Type: application/json`. The exception i
 
 When a pop has nothing to deliver, the broker returns `204 No Content` with **no body and no
 `Content-Length`**. This is deliberate, and it is not cosmetic: announcing a content length for
-a body that hyper then elides makes strict HTTP/1.1 clients — Node's `undici`/`llhttp` in
-particular — treat the connection as poisoned and close it, which under empty-poll load
+a body that hyper then elides makes strict HTTP/1.1 clients (Node's `undici`/`llhttp` in
+particular) treat the connection as poisoned and close it, which under empty-poll load
 snowballs into `ECONNRESET` storms. The bodies that were dropped carried nothing a client read.
 
 Consequences you have to design around:
@@ -160,9 +160,9 @@ The message is JSON-escaped, so it is always parseable. There is no error code e
 
 ### Some routes return a stored procedure's JSON verbatim
 
-Queen's management surface is implemented in PostgreSQL. Many routes — `/api/v1/configure` and
+Queen's management surface is implemented in PostgreSQL. Many routes (`/api/v1/configure` and
 most of the `resources`, `status`, `analytics`, `consumer-groups`, `messages`, `dlq` and `traces`
-handlers — pass the stored procedure's JSON straight through without reshaping it, because
+handlers) pass the stored procedure's JSON straight through without reshaping it, because
 clients assert on those exact keys. Two things follow:
 
 - The shape of those responses is the stored procedure's shape, including keys that only make
@@ -183,7 +183,7 @@ element describes one item.
 
 | Route | Status on a processed call | Where the real outcome is |
 | --- | --- | --- |
-| `POST /api/v1/push` | `201` | each element's `status` — `queued`, `duplicate`, `buffered` or `failed` |
+| `POST /api/v1/push` | `201` | each element's `status`: `queued`, `duplicate`, `buffered` or `failed` |
 | `POST /api/v1/ack`, `/ack/batch` | `200` | each element's `success`, `error`, `noop`, `dlq`, `leaseReleased` |
 | `POST /api/v1/transaction` | `200` | top-level `success`; a failure is `success:false` with `error` and an empty `results` |
 
@@ -197,7 +197,7 @@ disk for replay) or `failed` (not stored anywhere).
 | --- | --- |
 | `200` | a pop that delivered messages; every ack; a lease extension; a transaction that was processed, including one that rolled back |
 | `201` | every push the broker processed, including one whose items were spooled to disk |
-| `204` | a pop with nothing to deliver, pop maintenance, or a pop whose stored procedure reported an error — no body |
+| `204` | a pop with nothing to deliver, pop maintenance, or a pop whose stored procedure reported an error. No body |
 | `400` | unparseable body, a missing required field, an unknown transaction operation type, a discovery pop with neither `namespace` nor `task`, or a malformed `x-queen-tenant` when tenancy is on |
 | `401` / `403` | authentication and authorization, as above |
 | `404` | a path the router does not match, or a stored-procedure error whose text contains `not found` |
@@ -226,7 +226,7 @@ The generated route table has a **Tenant-scoped** column. It records whether tha
 resolves a tenant identity for the request and threads it into the SQL that resolves queues by
 name. Native tenant scoping is **off by default**; with it off, every request resolves to a
 single default tenant and the column tells you which handlers would participate if it
-were on. It is an operator-level feature of multi-tenant deployments, not a client-facing one —
+were on. It is an operator-level feature of multi-tenant deployments, not a client-facing one.
 [Self-hosting](/selfhost) and [Internals](/internals) cover it, including which routes are
 *not* scoped and what that implies.
 

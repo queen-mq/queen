@@ -31,12 +31,12 @@ verifiedBy:
 A queue does not have to be created before it is used: the first push to a queue
 name creates the queue, one partition, and a `queen.log_queues` configuration row
 with engine defaults. It also derives `namespace` and `task` from a dotted queue
-name — `billing.invoice` becomes namespace `billing`, task `invoice` — so a
+name (`billing.invoice` becomes namespace `billing`, task `invoice`), so a
 push-only queue is still visible to namespace and task discovery pops.
 `POST /api/v1/configure` exists to set options that differ from the defaults, and to
 pre-create a queue so a consumer can attach before any producer runs.
 
-Two routes mutate queue state — `POST /api/v1/configure` (read-write) and
+Two routes mutate queue state: `POST /api/v1/configure` (read-write) and
 `DELETE /api/v1/resources/queues/:queue` (**admin**). Everything else on this page
 is a read at the `read-only` access level.
 

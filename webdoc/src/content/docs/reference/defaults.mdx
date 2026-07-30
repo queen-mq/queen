@@ -19,10 +19,10 @@ sourceOfTruth:
 A default reaches a message through one of three layers, and the layers are
 resolved in a fixed order:
 
-1. **Request parameter** — a query parameter or body field on one call.
-2. **Queue configuration** — a column on the queue's configuration rows, written
+1. **Request parameter**: a query parameter or body field on one call.
+2. **Queue configuration**: a column on the queue's configuration rows, written
    by `POST /api/v1/configure` or created implicitly by the first push.
-3. **Environment** — process-wide, read once at boot.
+3. **Environment**: process-wide, read once at boot.
 
 Where the same setting exists at two layers, the more specific one wins, but only
 when it is present *and positive*. That qualifier matters: a pop asking for
@@ -79,7 +79,7 @@ changes what a client observes.
 ## Queue option defaults
 
 Applied by `POST /api/v1/configure`, and by the column defaults for a queue
-created implicitly by a push. `/configure` is a **full replace** — an omitted key
+created implicitly by a push. `/configure` is a **full replace**: an omitted key
 is reset to the value in this table, not left alone. See
 [Queue options](/reference/queue-options) for what each one does.
 
@@ -90,7 +90,7 @@ is reset to the value in this table, not left alone. See
 | `leaseTime` | `300` (configure) / `60` (push-created) | Seconds. |
 | `retryLimit` | `3` | Explicit `failed` acks charged before dead-lettering. |
 | `deadLetterQueue` | `true` | Dead-lettering is on for an unconfigured queue. |
-| `dlqAfterMaxRetries` | `true` | Combined with the previous flag by `OR` — both must be `false` to disable dead-lettering. |
+| `dlqAfterMaxRetries` | `true` | Combined with the previous flag by `OR`. Both must be `false` to disable dead-lettering. |
 | `delayedProcessing` | `0` | Seconds of visibility delay; 0 is off. |
 | `windowBuffer` | `0` | Seconds of quiet before a partition is delivered; 0 is off. |
 | `retentionEnabled` | `false` | Retention is opt-in. |
@@ -113,8 +113,8 @@ is reset to the value in this table, not left alone. See
 | | `consumerGroup` | `__QUEUE_MODE__` |
 | | `subscriptionMode` | `all` |
 | | `leaseSeconds` | queue `leaseTime`, else 60 |
-| `GET /api/v1/pop/queue/:queue/partition/:partition` | same, except `partitions` | ignored — a specific pop is one partition |
-| `GET /api/v1/pop` (discovery) | `namespace` / `task` | none — a call with neither is a 400 |
+| `GET /api/v1/pop/queue/:queue/partition/:partition` | same, except `partitions` | ignored (a specific pop is one partition) |
+| `GET /api/v1/pop` (discovery) | `namespace` / `task` | none (a call with neither is a 400) |
 | `POST /api/v1/lease/:leaseId/extend` | `seconds` | `60`, also for an empty body |
 | `POST /api/v1/ack`, `/ack/batch` | `consumerGroup` | `__QUEUE_MODE__` |
 | | `status` | `completed` when absent; an unrecognised value is treated as `failed` |
@@ -126,7 +126,7 @@ is reset to the value in this table, not left alone. See
 | `GET /api/v1/consumer-groups/lagging` | `minLagSeconds` | `3600` |
 | `DELETE /api/v1/consumer-groups/:group` | `deleteMetadata` | `true` |
 | `POST …/queues/:queue/partitions/:partition/seek` | body | an empty body means `toEnd: true` |
-| `POST …/queues/:queue/seek` | body | required — `toEnd: true` or a `timestamp`, else 400 |
+| `POST …/queues/:queue/seek` | body | required (`toEnd: true` or a `timestamp`), else 400 |
 
 <Aside type="note">
 The queue-level seek and the partition-level seek differ here on purpose: the

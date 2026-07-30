@@ -15,7 +15,7 @@ sourceOfTruth:
 
 The broker ships with authentication off. `JWT_ENABLED` defaults to `false`, and
 with it off the middleware stamps an empty identity into every request and calls the
-handler — no header is read, nothing is rejected. Turning it on installs a real
+handler: no header is read, nothing is rejected. Turning it on installs a real
 per-request validator that verifies a signature, checks the temporal claims, and
 compares the token's roles against the level the route requires.
 
@@ -50,7 +50,7 @@ If the algorithm and the key material disagree, the broker does not start. See
 
 ## Algorithms and auto-detection
 
-`JWT_ALGORITHM` (default `HS256`) does not name the algorithm the broker uses — it
+`JWT_ALGORITHM` (default `HS256`) does not name the algorithm the broker uses. It
 names the set of algorithms an incoming token is *allowed* to declare in its header.
 The broker then dispatches on the token's own `alg`.
 
@@ -65,8 +65,8 @@ The broker then dispatches on the token's own `alg`.
 | `RS512` | `RS512` |
 | `EdDSA` | `EdDSA` |
 
-Two rows are worth reading twice. `RS256` is the widest of the RSA settings — it
-accepts `RS384` and `RS512` too — while `RS384` and `RS512` are exact. And `auto`
+Two rows are worth reading twice. `RS256` is the widest of the RSA settings (it
+accepts `RS384` and `RS512` too), while `RS384` and `RS512` are exact. And `auto`
 accepts *both* families at once, so with `auto` a deployment holding both an HS
 secret and an RSA public key will verify a token signed with either. Pin the
 algorithm explicitly unless you actually need the token to choose.
@@ -78,17 +78,17 @@ before any key lookup happens.
 
 The key is chosen per token, from the token's `alg`:
 
-- **HS256/384/512** — `JWT_SECRET`, used as raw bytes. An empty secret is a
+- **HS256/384/512**: `JWT_SECRET`, used as raw bytes. An empty secret is a
   `500 HS secret not configured`, not a `401`: the request was well-formed, the
   server is not.
-- **RS256/384/512** — `JWT_PUBLIC_KEY` if it is set, parsed as an RSA PEM. A PEM
+- **RS256/384/512**: `JWT_PUBLIC_KEY` if it is set, parsed as an RSA PEM. A PEM
   that will not parse is a `500 invalid RSA public key PEM`. If `JWT_PUBLIC_KEY` is
   empty, the JWKS cache is consulted by `kid`.
-- **EdDSA** — the same, with `JWT_PUBLIC_KEY` parsed as an Ed25519 PEM
+- **EdDSA**: the same, with `JWT_PUBLIC_KEY` parsed as an Ed25519 PEM
   (`500 invalid Ed public key PEM` on failure), otherwise the JWKS cache.
 
 A static PEM always wins over JWKS. There is no fallback from a bad PEM to the JWKS
-endpoint — fix the PEM or unset it.
+endpoint. Fix the PEM or unset it.
 
 ## A JWKS endpoint
 
@@ -110,7 +110,7 @@ Behaviour that matters in production:
   `401 Unknown key ID`.
 - **An empty `kid` matches any cached key.** A token with no `kid`, or a JWK set
   with unnamed keys, falls back to the first key in the cache. That is convenient
-  for a single-key set and imprecise for a rotating one — publish `kid` on both
+  for a single-key set and imprecise for a rotating one. Publish `kid` on both
   sides.
 - **A failed pre-fetch is not fatal.** Boot logs `JWKS pre-fetch failed (will retry
   on demand)` and carries on, so the broker starts even if the identity provider is
@@ -118,7 +118,7 @@ Behaviour that matters in production:
 - **Only two key types are read.** `RSA` (from the `n`/`e` components) and `OKP`
   with `crv: Ed25519` (from the raw 32-byte `x`). Every other entry in the JWK set
   is skipped silently, so a document that looks populated can yield zero usable
-  keys — check the key count in the boot log.
+  keys. Check the key count in the boot log.
 - **The body is capped at 1 MiB** and the response may be `Content-Length`d or
   chunked. HTTPS chains are verified against the root set bundled into the binary.
 - **`http://` is accepted and warned about.** Boot logs that signing keys fetched
@@ -160,28 +160,28 @@ write-only case behaves the way it does.
 | Level | Passed by |
 | --- | --- |
 | `public` | Everyone, token or not |
-| `read-only` | `read-only`, `read-write`, `admin` — **not** `write-only` |
-| `write-only` | `write-only`, `read-write`, `admin` — **not** `read-only` |
+| `read-only` | `read-only`, `read-write`, `admin`, but **not** `write-only` |
+| `write-only` | `write-only`, `read-write`, `admin`, but **not** `read-only` |
 | `read-write` | `read-write`, `admin` |
 | `admin` | `admin` |
 
 So a producer holding only `write-only` passes `POST /api/v1/push` and is rejected
-with `403 Insufficient permissions` on every read and every consume route — pop, ack,
+with `403 Insufficient permissions` on every read and every consume route: pop, ack,
 transaction, listings, all of it. That is the intended shape for a pure producer;
 it is also the single most common surprise when rolling authentication out.
 
 The route classification is prefix-based:
 
-- `public` — `/health`, `/metrics`, `/metrics/prometheus`, `/`, `/assets/*`,
+- `public`: `/health`, `/metrics`, `/metrics/prometheus`, `/`, `/assets/*`,
   `/favicon*`
-- `admin` — everything under `/api/v1/system/` and `/internal/`, every
+- `admin`: everything under `/api/v1/system/` and `/internal/`, every
   `DELETE /api/v1/consumer-groups/*`, every `DELETE /api/v1/resources/queues/*`,
   and `/api/v1/stats/refresh`
-- `read-only` — `GET` on `/status`, `/api/v1/status*`, `/api/v1/analytics*`,
+- `read-only`: `GET` on `/status`, `/api/v1/status*`, `/api/v1/analytics*`,
   `/api/v1/resources/*`, `/api/v1/messages*`, `/api/v1/consumer-groups*`,
   `/api/v1/dlq*`, `/api/v1/traces*`, plus `/streams/v1/state/get`
-- `write-only` — `POST /api/v1/push`, and only that
-- `read-write` — everything else, including pop, ack, transaction, lease extension,
+- `write-only`: `POST /api/v1/push`, and only that
+- `read-write`: everything else, including pop, ack, transaction, lease extension,
   `/configure`, seeks, subscription changes, `POST /api/v1/traces`, message deletes,
   and any route not listed above
 
@@ -200,7 +200,7 @@ with something that authenticates browsers, or add its prefixes to
 ## Remapping claims for an external identity provider
 
 The role names and the claims they live in are all configurable, so a token minted
-by an existing IdP usually needs no custom claims at all — only a mapping.
+by an existing IdP usually needs no custom claims at all, only a mapping.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -224,7 +224,7 @@ JWT_ROLE_WRITE_ONLY=queen.write
 ```
 
 Both claim names are looked up as literal top-level keys, not as JSON paths. A role
-buried in a nested object — the `realm_access.roles` shape, for instance — is
+buried in a nested object (the `realm_access.roles` shape, for instance) is
 invisible to the broker; the issuer has to lift it into a top-level claim.
 
 ## Skipping paths
@@ -266,8 +266,8 @@ and a failure exits the process with a message naming what is missing:
 - Any `JWT_ALGORITHM` value outside the supported list.
 
 This is the one authentication mistake the broker refuses to start with. Everything
-else — a wrong secret, an unreachable JWKS endpoint, a role mapping that matches
-nothing — starts cleanly and fails per request, so verify with a real token against
+else (a wrong secret, an unreachable JWKS endpoint, a role mapping that matches
+nothing) starts cleanly and fails per request, so verify with a real token against
 a real route before you cut traffic over.
 
 ## What this does not give you
@@ -279,5 +279,5 @@ a real route before you cut traffic over.
 - **No revocation.** There is no deny-list; a token is valid until `exp`. Keep
   lifetimes short, and remember `exp` is optional to the validator.
 - **No transport security.** The token travels in a header over whatever the
-  listener speaks, which is plaintext HTTP — see
+  listener speaks, which is plaintext HTTP. See
   [Trust boundaries](/selfhost/security).

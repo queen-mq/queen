@@ -26,7 +26,7 @@ segments have disjoint ranges, allocated in ascending order.
 ## The five tables
 
 All five are created by `041_log_schema.sql`, applied at every boot. `queen.log_dlq` is a
-sixth log table, created by the ack file — see [Ack internals](/internals/ack-internals).
+sixth log table, created by the ack file. See [Ack internals](/internals/ack-internals).
 
 ### queen.log_queues
 
@@ -49,8 +49,8 @@ column, so the effective default depends on how the queue came into existence. A
 `queen.queues` (`retention_enabled`, `retention_seconds`, `completed_retention_seconds`,
 `max_wait_time_seconds`), never from this column.
 
-`queen.log_queues` carries only engine-side options. Everything else about a queue — the retry
-limit, the DLQ flags, visibility delays, encryption, retention policy — lives on the
+`queen.log_queues` carries only engine-side options. Everything else about a queue (the retry
+limit, the DLQ flags, visibility delays, encryption, retention policy) lives on the
 `queen.queues` configuration row, which the first push creates alongside the log queue with
 `storage = 'segments'`.
 
@@ -81,7 +81,7 @@ The table is also tuned against churn, and the reasoning is worth knowing becaus
 class of latency spike. Every push updates this row, so between autovacuum passes the dead
 tuple count dwarfs the live row count. The table therefore sets `fillfactor = 70`,
 `autovacuum_vacuum_scale_factor = 0` with `autovacuum_vacuum_threshold = 500` (threshold-based
-triggering, so vacuum re-fires under churn), and — the important one —
+triggering, so vacuum re-fires under churn), and, the important one,
 `vacuum_truncate = off`. Heap truncation takes an `ACCESS EXCLUSIVE` lock, and on a table with
 a fixed row population it reclaims nothing while freezing every push and pop behind the lock
 for seconds. Turning it off removed the whole periodic-spike class.
@@ -129,7 +129,7 @@ The sidecar's size is `O(rate × window)`, independent of retention or backlog, 
 purged on its own clock. The retention loop purges rows older than
 `GREATEST(dedup_window_seconds, completed_retention_seconds, 900)` seconds and advances
 `txns_start`. A hash that outlives even that window resolves as unknown on ack, which the ack
-path treats as *not acked* — redelivery rather than loss.
+path treats as *not acked*: redelivery rather than loss.
 
 ### queen.log_consumers
 
@@ -141,7 +141,7 @@ model.
 | `partition_id`, `consumer_group` | composite primary key; queue-mode consumers use the group name `__QUEUE_MODE__` |
 | `committed` | **the cursor.** Last acked offset; everything at or below it is done. Starts at `-1`, so the next wanted offset is `committed + 1` |
 | `batch_end` | inclusive end of the currently leased batch; `NULL` means no lease |
-| `worker_id` | the lease holder — the same value the client receives as `leaseId` |
+| `worker_id` | the lease holder, the same value the client receives as `leaseId` |
 | `lease_expires_at`, `lease_acquired_at` | lease window |
 | `batch_retry_count` | the retry budget, charged only by an explicit `failed` ack |
 | `attempt_offset`, `attempt_count` | redelivery telemetry: the batch's first delivered offset and how many times that same start has been delivered |
@@ -153,7 +153,7 @@ is why exactly one in-flight leased batch exists per `(partition, group)` and a 
 queue cannot be consumed in parallel by one group.
 
 `attempt_count` is telemetry and never consumes budget: lease expiry increments it but does not
-spend a retry. The two counters are separate on purpose — a consumer crash must not eat the
+spend a retry. The two counters are separate on purpose: a consumer crash must not eat the
 retry budget an explicit failure is entitled to.
 
 Like `log_partitions`, this table sets `fillfactor = 50`, threshold-based autovacuum and

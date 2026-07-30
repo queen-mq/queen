@@ -19,8 +19,8 @@ sourceOfTruth:
 
 PostgreSQL is not a dependency of Queen; it is Queen's storage engine. Messages,
 consumer offsets, the deduplication index, queue configuration and the dead-letter
-table are all ordinary tables, and every queue semantic — offset allocation,
-leasing, acknowledgement, deduplication — is implemented in stored procedures that
+table are all ordinary tables, and every queue semantic (offset allocation,
+leasing, acknowledgement, deduplication) is implemented in stored procedures that
 run inside the database. The broker is the network layer in front of that.
 
 Two consequences follow immediately. Sizing PostgreSQL *is* sizing Queen. And the
@@ -47,7 +47,7 @@ extensions, that restriction is irrelevant here.
 By default the broker applies its own schema at every boot and therefore needs to
 be able to create it:
 
-- **`CREATE` on the database** — enough to run `CREATE SCHEMA IF NOT EXISTS queen`
+- **`CREATE` on the database**, enough to run `CREATE SCHEMA IF NOT EXISTS queen`
   and `CREATE SCHEMA IF NOT EXISTS queen_streams`.
 - **Ownership of the objects it creates**, because the DDL does more than create
   tables: it runs `ALTER TABLE … SET (fillfactor = …)` and a set of per-table
@@ -74,7 +74,7 @@ and let a privileged role apply the DDL out of band. With that variable off the
 broker logs `apply skipped (QUEEN_APPLY_SCHEMA=0)` and connects straight to
 serving.
 
-The schema is not shipped as a `.sql` file, though — it is compiled into the
+The schema is not shipped as a `.sql` file, though. It is compiled into the
 binary with `include_str!`. To pre-apply it, take the exact text the binary
 carries from the source tree: `server/sql/schema.sql` first, then every file in
 `server/sql/procedures/` in lexical order. That order is not cosmetic: the
@@ -85,7 +85,7 @@ in the order they must be applied.
 
 Once the schema exists, the broker's role needs `USAGE` on both schemas, DML
 (`SELECT, INSERT, UPDATE, DELETE`) on their tables, and the ability to take
-advisory locks — which any role has. Function execution needs no explicit grant:
+advisory locks, which any role has. Function execution needs no explicit grant:
 PostgreSQL grants `EXECUTE` on a new function to `PUBLIC` by default.
 
 <Aside type="caution">
@@ -113,7 +113,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON queen_streams.state TO PUBLIC;
 ```
 
 Every role that can log into that database can read and write registered stream
-queries and all stream state. Nothing purges `queen_streams.state` either — the
+queries and all stream state. Nothing purges `queen_streams.state` either: the
 maintenance cycle does not touch it, and rows are only removed when a query is
 re-registered with a reset or dropped. If you share the database with anything
 else, that is the fact to plan around.
@@ -125,16 +125,16 @@ connection. It will not work correctly behind a pooler in transaction or
 statement mode. Two reasons, both structural:
 
 **Session-scoped advisory locks.** The boot-time schema apply takes
-`pg_advisory_lock(778120010)` on one pooled connection, runs the entire DDL —
-`schema.sql` plus 24 procedure files, as 25 separate batches — and unlocks. The
+`pg_advisory_lock(778120010)` on one pooled connection, runs the entire DDL
+(`schema.sql` plus 24 procedure files, as 25 separate batches) and unlocks. The
 maintenance cycle takes `pg_advisory_lock(737001)` on one pooled connection, runs
 many autocommitting step calls across the cycle, and unlocks at the end; that is
 how exactly one replica sweeps per cycle. Both locks
 live on a *session*. A pooler that hands the next statement to a different backend
 breaks the schema serialisation and breaks the retention leader election.
 
-**Server-side prepared statements.** The hot paths use `prepare_cached` — 33
-distinct prepared statements across the data and admin paths — so a statement is
+**Server-side prepared statements.** The hot paths use `prepare_cached` (33
+distinct prepared statements across the data and admin paths), so a statement is
 parsed and planned once per connection and reused. Transaction-mode pooling
 invalidates the cache on every checkout, at which point the broker pays a parse
 and plan for every push, pop and ack.
@@ -157,7 +157,7 @@ replicas × DB_POOL_SIZE + superuser_reserved_connections + your own tooling ≤
 
 Three brokers at the default 160 want 480 connections; a stock PostgreSQL allows
 100. That mismatch shows up as requests answering `500` with
-`{"error":"pool"}` — the broker could not get a connection at all — long before
+`{"error":"pool"}` (the broker could not get a connection at all), long before
 anything looks like a query problem. The benchmark rig in
 `server/setup-broker.sh` runs `max_connections=600` for one broker at
 `DB_POOL_SIZE=300`; the test harness runs `DB_POOL_SIZE=32` against a small
@@ -183,7 +183,7 @@ matters:
 1. Wrap the query in a `tokio` timeout. On elapse the broker-side future is
    dropped.
 2. Fire a best-effort server-side cancellation on a fresh connection, because
-   dropping the future does not stop the backend — it keeps running and keeps
+   dropping the future does not stop the backend: it keeps running and keeps
    holding its locks.
 3. **Quarantine the pooled connection.** The connection whose in-flight statement
    was abandoned and cancelled is removed from the pool permanently and closed,
@@ -198,7 +198,7 @@ a 500.
 ## Server settings that matter for this workload
 
 The workload is append-heavy: a segment insert plus one allocator row update per
-push, one consumer-row update per pop and per ack, and — when retention is on —
+push, one consumer-row update per pop and per ack, and, when retention is on,
 a steady delete rate matching the insert rate. Everything below follows from that
 shape.
 
@@ -216,7 +216,7 @@ shape.
 <Aside type="note">
 Command-line settings outrank `ALTER SYSTEM`. A container started with
 `-c synchronous_commit=on` cannot be changed by `ALTER SYSTEM SET
-synchronous_commit = off` plus a reload — the command line wins. Check
+synchronous_commit = off` plus a reload. The command line wins. Check
 `pg_settings.source` when a setting refuses to change.
 </Aside>
 
@@ -243,12 +243,12 @@ re-enable it.
 ## What lives in the database
 
 Two schemas. `queen` holds the broker's own tables, of which six carry the log
-engine — `log_queues`, `log_partitions`, `log_segments`, `log_txns`,
-`log_consumers`, `log_dlq` — alongside queue configuration, traces, statistics and
+engine (`log_queues`, `log_partitions`, `log_segments`, `log_txns`,
+`log_consumers`, `log_dlq`), alongside queue configuration, traces, statistics and
 metrics tables. `queen_streams` holds the two stream tables described above.
 
 Because that is the entire state, backup is `pg_dump` and restore is
-`pg_restore`. There is no broker-side artefact to capture — with one exception:
+`pg_restore`. There is no broker-side artefact to capture, with one exception:
 the disk spool at `FILE_BUFFER_DIR` holds pushes accepted while PostgreSQL was
 unreachable and not yet replayed. Those are not in any dump until they drain.
 

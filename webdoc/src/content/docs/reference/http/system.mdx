@@ -1,6 +1,6 @@
 ---
 title: System and internal routes
-description: "Maintenance mode, shared state, the stats refresh trigger and the broker-to-broker /internal routes — all admin-gated operator surfaces."
+description: "Maintenance mode, shared state, the stats refresh trigger and the broker-to-broker /internal routes: all admin-gated operator surfaces."
 type: reference
 tier: operate
 status: internal
@@ -29,7 +29,7 @@ to **admin**, plus `/api/v1/stats/refresh` explicitly. That mapping only protect
 anything when JWT is on.
 
 <Aside type="danger">
-With `JWT_ENABLED=false` — the default — the authorization middleware is a
+With `JWT_ENABLED=false` (the default), the authorization middleware is a
 transparent pass-through and every one of these routes is open to anyone who can
 reach the port. Two of them change how the whole broker behaves: maintenance mode
 stops all pushes reaching PostgreSQL, and pop maintenance stops all delivery. If the
@@ -54,7 +54,7 @@ in-process `AtomicBool` (the source of truth for hot-path checks) and as a row i
 Reads both flags **fresh from `queen.system_state`**, so a change made on another
 replica is reflected immediately, and updates the local atomics to match. If the pool
 or the query fails it falls back to the in-process atomics rather than returning an
-error — this route never `500`s.
+error: this route never `500`s.
 
 ```json
 {
@@ -115,7 +115,7 @@ pushes that committed normally: they are replayed when the drain resumes, and th
 deduplicate on replay only if their transaction id is still inside the queue's dedup
 window. Anything that reads its own writes will not see a buffered message until the
 drain has caught up. `GET /api/v1/status/buffers` and the
-`queen_file_buffer_pending` gauge are the two ways to watch the backlog — see
+`queen_file_buffer_pending` gauge are the two ways to watch the backlog. See
 [Status, health and metrics](/reference/http/status-metrics).
 </Aside>
 
@@ -144,8 +144,8 @@ Body: `enabled` (boolean, required).
 ```
 
 **Effect on pops.** Every pop route returns HTTP `204` immediately, before touching
-the database. The `204` carries **no body at all** — not even the `paused` flag the
-handler constructs — because announcing a content length on a body that hyper then
+the database. The `204` carries **no body at all** (not even the `paused` flag the
+handler constructs), because announcing a content length on a body that hyper then
 elides poisoned strict HTTP/1.1 clients under empty-poll load. Clients treat `204` as
 "no messages" and retry, so a paused broker looks like an idle one to a consumer.
 That is deliberate, and it is why the flag has an explicit `GET`.
@@ -168,7 +168,7 @@ Returns a hard-coded single-node summary:
 
 <Aside type="caution">
 `enabled` is a literal `false` in the handler. It reports `false` **even when a mesh
-is running with connected peers** — only the two maintenance flags in this body are
+is running with connected peers**: only the two maintenance flags in this body are
 live. Do not use it to decide whether clustering works. The real surface is
 `GET /internal/api/shared-state/stats` below, which reports the transport, the peer
 list and the frame counters.
@@ -176,8 +176,8 @@ list and the frame counters.
 
 ## POST /api/v1/stats/refresh
 
-Access level **admin**. Runs `queen.log_refresh_all_stats_v1()` — the same reconciler the
-broker's own loop runs every `STATS_INTERVAL_MS` under advisory lock `737002` — and returns
+Access level **admin**. Runs `queen.log_refresh_all_stats_v1()` (the same reconciler the
+broker's own loop runs every `STATS_INTERVAL_MS` under advisory lock `737002`) and returns
 its summary JSON verbatim, labelled `engine: "segments"` with a `segPartitions` count.
 
 Use it to force a refresh instead of waiting out the interval. If the dashboard's numbers
@@ -186,15 +186,15 @@ are stale rather than merely late, check whether that loop is running at all (a 
 
 <Aside type="caution">
 Before 2026-07-30 this route ran `queen.refresh_all_stats_v1(true)`, the rows-engine
-reconciler, which recomputes `queen.stats` from `queen.messages` / `queen.partitions` —
-empty on a log-engine deployment — and overwrote the live queue counters with zeros for up
+reconciler, which recomputes `queen.stats` from `queen.messages` / `queen.partitions`
+(empty on a log-engine deployment) and overwrote the live queue counters with zeros for up
 to one `STATS_INTERVAL_MS`. On an older build, leave the route alone.
 </Aside>
 
 ## Internal broker-to-broker routes
 
 Three routes exist for the mesh layer. They are admin-gated and are not a public
-contract — treat their shapes as version-coupled to the broker.
+contract: treat their shapes as version-coupled to the broker.
 
 ### POST /internal/api/notify
 
@@ -212,8 +212,8 @@ reachability, and the hook for an external system that wrote to the database out
 band and wants parked consumers woken now instead of at the next poll interval.
 
 The tenant comes from the same `x-queen-tenant` header every other route uses;
-absent, it is the default tenant. The header is unauthenticated by design — the trust
-boundary for it is the proxy — which is another reason this path must not be
+absent, it is the default tenant. The header is unauthenticated by design, and the
+trust boundary for it is the proxy, which is another reason this path must not be
 reachable from outside the cell.
 
 ### GET /internal/api/shared-state/stats
@@ -258,7 +258,7 @@ With no peers configured, or no transport:
 ```
 
 `signature_failures` and `handshake_failures` are the same counter under two names.
-`sequence_rejections` is always `0` — there is no sequence tracking.
+`sequence_rejections` is always `0`: there is no sequence tracking.
 
 ## Firewall the mesh port
 
@@ -267,7 +267,7 @@ The mesh is framed TCP on `QUEEN_MESH_PORT` (default `6633`), dialled from
 which is why the default port comes from `QUEEN_UDP_NOTIFY_PORT` when the new name
 is unset). Its `HELLO` handshake is
 HMAC'd, but the nonce is generated by the dialer and never tracked, so a captured
-handshake is replayable — and after the handshake, frames are unauthenticated JSON.
+handshake is replayable. After the handshake, frames are unauthenticated JSON.
 The frame set includes `MAINTENANCE_MODE_SET` and `POP_MAINTENANCE_MODE_SET`.
 
 Anyone who can open a TCP connection to that port can therefore stop the cell from
@@ -276,7 +276,7 @@ port to the broker replicas themselves is a requirement, not a hardening tip.**
 
 ## No migration routes
 
-There is no `/api/v1/migration/*` surface — those routes were removed. Backing up
+There is no `/api/v1/migration/*` surface: those routes were removed. Backing up
 Queen is a plain `pg_dump` of the database, and the offline rows-to-segments
 conversion is a CLI subcommand of the binary, not an HTTP endpoint.
 
@@ -294,5 +294,5 @@ conversion is a CLI subcommand of the binary, not an HTTP endpoint.
 | `GET /internal/api/shared-state/stats` | admin |
 | `GET /internal/api/inter-instance/stats` | admin |
 
-Deployment guidance for these surfaces — what to expose, where to terminate TLS, how
-the proxy classifies routes — is in the [self-hosting section](/selfhost).
+Deployment guidance for these surfaces (what to expose, where to terminate TLS, how
+the proxy classifies routes) is in the [self-hosting section](/selfhost).

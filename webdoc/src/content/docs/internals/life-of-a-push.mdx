@@ -15,7 +15,7 @@ verifiedBy:
 ---
 
 A push request is not a transaction. It is a set of frames handed to a background layer that
-decides, per partition, when to commit — and then commits several partitions together. Under
+decides, per partition, when to commit, then commits several partitions together. Under
 load, one PostgreSQL transaction carries the writes of many concurrent HTTP requests across
 many partitions. That is where most of the broker's throughput comes from, and it is the single
 most important thing to understand about the write path.
@@ -34,7 +34,7 @@ immediately.
 For each item the handler:
 
 - mints a UUIDv7 message id;
-- resolves the transaction id — the client's `transactionId` if present, otherwise the minted
+- resolves the transaction id: the client's `transactionId` if present, otherwise the minted
   message id as a string, so every frame has one;
 - resolves the partition, defaulting to `Default`;
 - checks **layer-1 deduplication**: a map keyed on `queue \x1f partition \x1f transactionId`
@@ -64,8 +64,8 @@ segments.
 
 Three rules govern dispatch:
 
-**Fire-on-idle.** On arrival, if the push lane is uncontended — the shard is under its
-concurrent-bundle cap and a push Vegas permit is *immediately* available — the ready partitions
+**Fire-on-idle.** On arrival, if the push lane is uncontended (the shard is under its
+concurrent-bundle cap and a push Vegas permit is *immediately* available), the ready partitions
 dispatch right now, with no hold timer. A single low-rate push therefore commits in about one
 database round trip. If no permit is free, the lane is contended, so the group stays and keeps
 accumulating.
@@ -78,7 +78,7 @@ what makes that guarantee hold rather than merely usually hold.
 
 **Cross-partition bundling.** Each dispatch collects up to `QUEEN_V2_BUNDLE_MAX` ready,
 not-in-flight partitions and commits all of their segments in one `log_push_multi_v1`
-transaction — one commit and one fsync for N partitions. The in-flight gate *is* the bundle
+transaction: one commit and one fsync for N partitions. The in-flight gate *is* the bundle
 selector: it already guarantees the chosen partitions are disjoint. The bundle size auto-tunes
 to load. Idle means one ready partition and a bundle of one; busy means many partitions
 accumulate while permits are scarce, and a freed permit fires a large bundle. Commit rate is
@@ -104,7 +104,7 @@ and with the default the dispatch logic is byte-identical to having no floor at 
 
 ## 3. Building the segment
 
-For each group in the bundle, the flush does **layer-2 deduplication** — intra-flush, first-wins,
+For each group in the bundle, the flush does **layer-2 deduplication**: intra-flush, first-wins,
 comparing the 16-byte `xxh3_128` hashes rather than composed strings. This is the same identity
 SQL will compare, so a broker-local collision behaves exactly like a SQL one. The first frame
 carrying a hash is the leader and the only one that reaches the segment; later same-hash frames
@@ -122,8 +122,8 @@ allocation per message.
 
 ## 4. One transaction, N segments
 
-The bundle is sent as typed parallel arrays — `text[]`, `text[]`, `int4[]`, `bytea[]`, `int8[]`,
-`bytea[]`, `uuid[]` — to a `prepare_cached` statement. No JSONB is parsed on the hot path.
+The bundle is sent as typed parallel arrays (`text[]`, `text[]`, `int4[]`, `bytea[]`, `int8[]`,
+`bytea[]`, `uuid[]`) to a `prepare_cached` statement. No JSONB is parsed on the hot path.
 
 ```sql
 queen.log_push_multi_v1(
@@ -142,8 +142,8 @@ Inside, in order:
 1. **Alignment guard.** Any array of a different length raises. A silent misalignment would
    demux the wrong verdict to the wrong request.
 2. **Provisioning skip.** One cheap existence count over `unnest(queues, partitions, tenants)`.
-   Only if something is missing do the three `INSERT ... ON CONFLICT DO NOTHING` statements run
-   — `log_queues`, the `queen.queues` configuration row with `storage = 'segments'`, and
+   Only if something is missing do the three `INSERT ... ON CONFLICT DO NOTHING` statements run:
+   `log_queues`, the `queen.queues` configuration row with `storage = 'segments'`, and
    `log_partitions`. Each is `ORDER BY`-ed on its unique key, because `ON CONFLICT DO NOTHING`
    takes speculative locks in row order and two bundles creating overlapping partition sets in
    different orders would convoy exactly as unordered row locks do.
@@ -153,8 +153,8 @@ Inside, in order:
    those three can deadlock.
 4. **A bundle timestamp**, taken once after the locks.
 5. **Per segment, in ascending partition id order**, a call to `queen.log_push_one_v1` with the
-   partition id, deduplication window and tenant already resolved — the callee must not re-resolve
-   them per segment.
+   partition id, deduplication window and tenant already resolved (the callee must not re-resolve
+   them per segment).
 6. **A completeness guard.** Every input ordinal must produce exactly one result, or the whole
    bundle raises.
 
@@ -163,7 +163,7 @@ requests whose frames landed in that segment.
 
 ## 5. The allocator, under the partition lock
 
-`log_push_one_v1` is the single allocator code path — the transaction wire and the streams cycle
+`log_push_one_v1` is the single allocator code path: the transaction wire and the streams cycle
 call it too, so there is exactly one place where an offset is assigned.
 
 It first checks that the hash blob is `16 × msg_count` bytes and raises if not. A stride
@@ -180,7 +180,7 @@ SELECT last_offset, txns_start FROM queen.log_partitions WHERE id = v_pid FOR UP
 Stamp `clock_timestamp()` while holding it. Probe `queen.log_txns` over
 `(GREATEST(p_verified, txns_start - 1), last_offset]`, time-capped by the window, joining the
 stored hashes against the incoming ones. On a match, **return `duplicate` having written
-nothing** — no allocator bump, no inserts, and therefore no rollback and no savepoint. Other
+nothing**: no allocator bump, no inserts, and therefore no rollback and no savepoint. Other
 segments in the same bundle commit untouched. Only a clean probe proceeds to allocate.
 
 **Window zero.** Skip the probe entirely and go straight to the single
@@ -201,8 +201,8 @@ RETURNING last_offset;
 `base_offset = last_offset - msg_count + 1`. The `CASE` is the quantization that keeps the update
 HOT despite `last_write_at` being indexed.
 
-Finally two inserts: the segment, and the `log_txns` row — the latter unconditionally, because
-ack-by-`transactionId` resolves through it whether or not deduplication is on.
+Finally two inserts: the segment, and the `log_txns` row (the latter unconditionally, because
+ack-by-`transactionId` resolves through it whether or not deduplication is on).
 
 <Aside type="note">
 Because the timestamp is stamped while the partition row lock is held, `created_at` is monotone
@@ -218,12 +218,12 @@ request's result slot.
 
 - `queued` carries `baseOffset` and `createdAt`. Frame `k` of the segment is at offset
   `baseOffset + k`.
-- `duplicate` carries `dups: [{i, off}]` — the incoming frame index and the **original**
+- `duplicate` carries `dups: [{i, off}]`, the incoming frame index and the **original**
   occurrence's absolute offset. The broker then resolves the canonical message id by fetching the
   covering segment with `queen.log_segment_at_v1(pid, off)` and unpacking frame `off - base` in
   Rust. This is a rare path and uses plain, uncached queries. If retention already deleted that
   segment, the id is reported as the zero UUID.
-- A whole-bundle failure — pool exhaustion, statement timeout, an unparseable result — resolves
+- A whole-bundle failure (pool exhaustion, statement timeout, an unparseable result) resolves
   every participant to `error`.
 
 Once every group of a request has reported, the handler wakes, renders the per-item array and
@@ -232,13 +232,13 @@ answers `201`.
 Two things happen after that:
 
 **Discovery.** Each pushed `(tenant, queue, partition)` is marked pending on the hot-list rings,
-quietly — the local wake is coalesced into a 5 ms tick, so a hot queue costs at most one wake per
+quietly: the local wake is coalesced into a 5 ms tick, so a hot queue costs at most one wake per
 tick instead of one wake per push (each of which is itself proportional to the number of parked
 consumers). Peers still get an immediate batched `MESSAGE_AVAILABLE`. With `QUEEN_HOTLIST=0` the
 push instead wakes parked pops directly with partition hints.
 
-**Error spooling.** Items that came back `error` — meaning the transaction that would have stored
-them failed — are written to the disk spool and relabelled `buffered`, so a client that only
+**Error spooling.** Items that came back `error` (meaning the transaction that would have stored
+them failed) are written to the disk spool and relabelled `buffered`, so a client that only
 checks the HTTP status code does not silently lose them. The background drain replays them, and
 deduplication on the preserved `transactionId` makes the replay idempotent. A spool write failure
 downgrades the item to `failed`.
@@ -250,7 +250,7 @@ downgrades the item to `failed`.
 | Duplicate inside one request body | later items report `duplicate` with the first item's id | one copy |
 | Duplicate against a previous push, inside the window | `duplicate` plus the original message id | one copy; nothing was written |
 | Duplicate whose original segment was already retained away | `duplicate` with the zero UUID as `messageId` | one copy; the original is gone |
-| Statement timeout on the bundle | `error`, then `buffered` if the spool accepted it | nothing — the transaction rolled back |
+| Statement timeout on the bundle | `error`, then `buffered` if the spool accepted it | nothing: the transaction rolled back |
 | Statement timeout, spool write also failed | `failed` | nothing |
 | Maintenance mode | `buffered` for every item | nothing until the drain runs |
 
@@ -262,7 +262,7 @@ statements would keep holding their locks.
 ## Why bundling is the interesting part
 
 Throughput on this write path is `WAL flush rate × messages per flush`. An fsync costs roughly
-the same regardless of how much it carries, so the lever is messages per commit — and there are
+the same regardless of how much it carries, so the lever is messages per commit, and there are
 two ways to pull it. A client can push larger batches, which makes each segment bigger. Or many
 partitions can share one commit, which is what fusion does without the client knowing.
 

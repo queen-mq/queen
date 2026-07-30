@@ -29,7 +29,7 @@ rather than starting in a half-working state.
 
 ## Run the published image
 
-The image is `smartnessai/queen-mq:1.0.0`. Its runtime stage is `ubuntu:24.04`,
+The image is `ghcr.io/queen-mq/queen`. Its runtime stage is `ubuntu:24.04`,
 its working directory is `/app`, and its command is `./bin/queen-seg`.
 
 <Steps>
@@ -49,7 +49,7 @@ its working directory is `/app`, and its command is `./bin/queen-seg`.
    so a minimal run only needs the host, the port and the password.
 
    ```bash
-   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres smartnessai/queen-mq:1.0.0
+   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
    ```
 
 3. **Give the disk spool a real home.** `FILE_BUFFER_DIR` defaults to
@@ -58,7 +58,7 @@ its working directory is `/app`, and its command is `./bin/queen-seg`.
    so mount it if you want that durability to survive the container.
 
    ```bash
-   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PASSWORD=postgres -v queen-spool:/var/lib/queen/buffers smartnessai/queen-mq:1.0.0
+   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PASSWORD=postgres -v queen-spool:/var/lib/queen/buffers ghcr.io/queen-mq/queen:latest
    ```
 
 </Steps>
@@ -141,12 +141,25 @@ and the target directory.
 DOCKER_BUILDKIT=1 docker build -t queen-mq .
 ```
 
-`build.sh <registry>` is the publish path: it reads `name` and `version` from
-`server/server.json`, builds for `linux/amd64` with `QUEENCTL_VERSION` set to
-that version, tags the result `<registry>/<name>:<version>`, and pushes it. The
-version in `server/server.json` is therefore the single source of truth for the
+`build.sh` is the publish path, for both images:
+
+```bash
+./build.sh all --push --multiarch --latest
+```
+
+It defaults to `ghcr.io/queen-mq` (override with `--registry` or `$QUEEN_REGISTRY`)
+and builds `queen` from the root `Dockerfile`, `queen-proxy` from
+`queen_proxy/Dockerfile`. Without `--multiarch` it builds for the host
+architecture only and loads the result locally instead of pushing; `--multiarch`
+implies `--push` and needs a `docker-container` buildx builder, which the script
+checks for before starting rather than failing halfway through a Rust build.
+
+Each image takes its tag from its own manifest: the broker from
+`server/server.json`, the proxy from `queen_proxy/Cargo.toml`. The version in
+`server/server.json` is therefore the single source of truth for the broker's
 image tag, for what `/health` reports, and for what `queenctl version` reports.
-`server/build.rs` embeds it into the binary as `QUEEN_VERSION`.
+`server/build.rs` embeds it into the binary as `QUEEN_VERSION`, and `build.sh`
+passes the same string as `QUEENCTL_VERSION`.
 
 To build only the binary:
 
@@ -222,7 +235,7 @@ that catches a broker that accepts writes but cannot serve them.
    docker logs queen 2>&1 | grep -E 'schema|config:|listening'
    ```
 
-   If a setting appears not to have taken effect, this block is the answer — it
+   If a setting appears not to have taken effect, this block is the answer: it
    shows the value the broker understood, not the value you thought you set.
 
 3. **Push a message.** A queue and a partition are created by the first push that
@@ -248,7 +261,7 @@ that catches a broker that accepts writes but cannot serve them.
    ```
 
    The second call must answer **`HTTP/1.1 204 No Content`** with no body at all.
-   A 204 from this broker never carries a body — that is deliberate, because
+   A 204 from this broker never carries a body. That is deliberate, because
    announcing a content-length on an elided body poisoned Node and undici
    connections.
 

@@ -37,7 +37,7 @@ await Stream.from(queen.queue('orders'))
   .run({ queryId: 'orders.per_minute', url: 'http://localhost:6632' })
 ```
 
-The chain is immutable — every combinator returns a new stream — and it is finalised by `run`, which registers the query and starts the runtime loop. The same builder exists in three languages with the same operator set:
+The chain is immutable (every combinator returns a new stream) and it is finalised by `run`, which registers the query and starts the runtime loop. The same builder exists in three languages with the same operator set:
 
 | Stage | JavaScript | Python | Go |
 | --- | --- | --- | --- |
@@ -71,7 +71,7 @@ await stream.run({ queryId: 'orders.per_minute', url, reset: true })
 
 `reset: true` deletes the query's existing state rows before the upsert proceeds. That is the explicit consent step: changing a reducer's shape while keeping accumulators built by the old one would feed incompatible state into new code, so the default is to stop rather than to guess.
 
-The registration is otherwise idempotent — restarting the process, or running several workers of the same query, re-resolves the same `query_id`.
+The registration is otherwise idempotent: restarting the process, or running several workers of the same query, re-resolves the same `query_id`.
 
 ### The cycle
 
@@ -89,15 +89,15 @@ One cycle is:
 
 </Steps>
 
-The commit runs as one PostgreSQL transaction. The sink push goes through the same allocator path as an ordinary push — one code path, so sink messages get offsets, deduplication and ordering exactly like any other message — and the ack advances the source cursor. The broker packs your sink items into segments before the call, so the procedure receives ready-made frames.
+The commit runs as one PostgreSQL transaction. The sink push goes through the same allocator path as an ordinary push (one code path, so sink messages get offsets, deduplication and ordering exactly like any other message), and the ack advances the source cursor. The broker packs your sink items into segments before the call, so the procedure receives ready-made frames.
 
-`release_lease` in the cycle body controls what happens to the source lease. The default `true` acks the whole leased batch and releases. A gate operator passes `false`, which advances the cursor by exactly the number of messages it allowed and **retains** the lease on the un-acked tail — so denied messages and their successors are redelivered in their original order when the lease expires, with no side queue.
+`release_lease` in the cycle body controls what happens to the source lease. The default `true` acks the whole leased batch and releases. A gate operator passes `false`, which advances the cursor by exactly the number of messages it allowed and **retains** the lease on the un-acked tail, so denied messages and their successors are redelivered in their original order when the lease expires, with no side queue.
 
 An idle-flush timer runs alongside the loop. On a quiet partition it wakes, looks for windows whose close condition is now satisfied, and commits an emit-only cycle with no source ack. The default cadence is 5000 ms per window operator; `idleFlushMs: 0` disables it, at the cost of a window on a silent partition never closing.
 
 ## Windows
 
-All four window kinds take the same option set: `gracePeriod`, `idleFlushMs`, and — to switch from processing time to event time — `eventTime`, `allowedLateness` and `onLate`.
+All four window kinds take the same option set: `gracePeriod`, `idleFlushMs`, plus `eventTime`, `allowedLateness` and `onLate` to switch from processing time to event time.
 
 **Tumbling.** Fixed-size, non-overlapping buckets: `floor(time / seconds)`. One state row per key per window.
 
@@ -106,7 +106,7 @@ All four window kinds take the same option set: `gracePeriod`, `idleFlushMs`, an
 .windowTumbling({ seconds: 60, gracePeriod: 5 })
 ```
 
-**Sliding.** Overlapping windows of `size` that hop every `slide`. `size` must be an integer multiple of `slide`, which is enforced at construction to keep the per-event window count finite. Each event writes `size / slide` state rows per key — a one-hour window sliding every minute is 60 rows per event, which is the cost to budget for at high key cardinality.
+**Sliding.** Overlapping windows of `size` that hop every `slide`. `size` must be an integer multiple of `slide`, which is enforced at construction to keep the per-event window count finite. Each event writes `size / slide` state rows per key: a one-hour window sliding every minute is 60 rows per event, which is the cost to budget for at high key cardinality.
 
 ```js
 // Illustrative, not extracted from a test.
@@ -115,11 +115,11 @@ All four window kinds take the same option set: `gracePeriod`, `idleFlushMs`, an
 
 **Session.** Per-key activity windows: a session extends as long as events for that key keep arriving within `gap` seconds of each other.
 
-**Cron.** Wall-clock-aligned tumbling windows via the `every` shorthand — `second`, `minute`, `hour`, `day` or `week`. Day and week boundaries are UTC. Full cron expressions are not implemented; anything else is rejected at construction.
+**Cron.** Wall-clock-aligned tumbling windows via the `every` shorthand: `second`, `minute`, `hour`, `day` or `week`. Day and week boundaries are UTC. Full cron expressions are not implemented; anything else is rejected at construction.
 
 ### Processing time and event time
 
-Without an `eventTime` extractor, bucketing uses the message's `createdAt` — the broker-stamped commit time of the segment the message was written in. With an extractor, bucketing uses whatever it returns (a `Date`, epoch milliseconds, or an ISO string), and the runtime maintains a per-partition watermark from the timestamps it has seen.
+Without an `eventTime` extractor, bucketing uses the message's `createdAt`, the broker-stamped commit time of the segment the message was written in. With an extractor, bucketing uses whatever it returns (a `Date`, epoch milliseconds, or an ISO string), and the runtime maintains a per-partition watermark from the timestamps it has seen.
 
 In event-time mode, an event older than `watermark - allowedLateness` is late. `onLate: 'drop'` (the default) discards it. `onLate: 'include'` accumulates it anyway, which is best-effort: if the window has already been flushed, the late event recreates the state row and produces a second emit for that window when it closes again. The two accepted values are `drop` and `include`; anything else throws.
 
@@ -137,7 +137,7 @@ By default stateful operators key on the source `partition_id`, which is the nat
 ```
 
 <Aside type="caution">
-When the `keyBy` key does not line up with the partition, workers holding different partitions can write the same logical key, and the exclusivity argument above no longer holds — you get contention on shared state rows. The fix is to repartition: push to an intermediate queue partitioned by the key you want, and run the stateful stage on that queue.
+When the `keyBy` key does not line up with the partition, workers holding different partitions can write the same logical key, and the exclusivity argument above no longer holds: you get contention on shared state rows. The fix is to repartition: push to an intermediate queue partitioned by the key you want, and run the stateful stage on that queue.
 </Aside>
 
 Run several workers of the same query and they divide the source partitions between them, exactly as ordinary consumers in one group do. Parallelism is the partition count.
@@ -153,7 +153,7 @@ Two tables in their own schema, `queen_streams`, created and applied at boot lik
 
 Two facts to plan around.
 
-**Nothing purges stream state.** Retention operates on segments and never touches `queen_streams.state`. A query with unbounded key cardinality — a session window keyed on something that never repeats, a sliding window over high-cardinality keys — grows that table until you intervene. Closing a window deletes its own row, so bounded-cardinality queries reach a steady state; unbounded ones do not. Dropping the query (which cascades) or a `reset: true` re-registration are the ways to reclaim it.
+**Nothing purges stream state.** Retention operates on segments and never touches `queen_streams.state`. A query with unbounded key cardinality (a session window keyed on something that never repeats, a sliding window over high-cardinality keys) grows that table until you intervene. Closing a window deletes its own row, so bounded-cardinality queries reach a steady state; unbounded ones do not. Dropping the query (which cascades) or a `reset: true` re-registration are the ways to reclaim it.
 
 **The schema is granted to `PUBLIC`.** `queen_streams.queries` and `queen_streams.state` carry `SELECT`, `INSERT`, `UPDATE` and `DELETE` grants to `PUBLIC`, so any role that can connect to the database can read and modify stream state. Treat database access as equivalent to stream access.
 
@@ -174,17 +174,17 @@ Response rows are `key`, `value` and `updated_at`. The reducer stores its accumu
 
 **A lost response cannot double-consume or double-emit.** The sink push happens before the ack inside the transaction, and the ack aborts the per-element savepoint if the lease is invalid or expired. So a retried cycle after a lost reply packs a fresh sink segment, then finds the lease gone, and the rollback removes that sink write with it.
 
-**`foreach` is at-least-once.** The cycle acks the source only after your function resolves, so a crash during it redelivers — and your side effect may already have happened. If the external effect must not repeat, write to a sink queue and consume that queue with a dedicated worker instead.
+**`foreach` is at-least-once.** The cycle acks the source only after your function resolves, so a crash during it redelivers, and your side effect may already have happened. If the external effect must not repeat, write to a sink queue and consume that queue with a dedicated worker instead.
 
 **A cycle nack does not consume the pop-path retry budget.** An `ack.ok = false` cycle releases the lease and leaves the cursor untouched for a full redelivery; retry policy for streams is the runtime's business, not the broker's.
 
-**HTTP status codes on these routes are specific.** `queries` answers 409 on a config-hash mismatch. `state/get` answers 400 when the procedure reports failure and 500 on an embedded error. `cycle` answers **200 for any completed procedure call, including a failed cycle** — the body's `success` and `error` are the signal, and the SDKs raise on `success: false`. A 500 from `cycle` means an infrastructure or protocol error; because the whole call is one transaction, retrying it is safe.
+**HTTP status codes on these routes are specific.** `queries` answers 409 on a config-hash mismatch. `state/get` answers 400 when the procedure reports failure and 500 on an embedded error. `cycle` answers **200 for any completed procedure call, including a failed cycle**: the body's `success` and `error` are the signal, and the SDKs raise on `success: false`. A 500 from `cycle` means an infrastructure or protocol error; because the whole call is one transaction, retrying it is safe.
 
 ## Operational notes
 
 - The three `/streams/v1/*` routes are **not tenant-scoped**. That is why a proxy deployment treats streams as a plan-gated feature on a dedicated cell rather than something a shared cell exposes. Behind the proxy the class is visible in the route-class table in the [reference](/reference).
 - `queries` and `cycle` require read-write access; `state/get` requires read access. The generated route table in the [reference](/reference) lists the level for each.
-- The runtime requires an explicit broker URL in `run` — it constructs its own HTTP client for the `/streams/v1/*` calls rather than borrowing the one the queue builder uses.
+- The runtime requires an explicit broker URL in `run`: it constructs its own HTTP client for the `/streams/v1/*` calls rather than borrowing the one the queue builder uses.
 - Sink emits and source acks made by a cycle are attributed to per-queue and broker-wide metrics, so a streaming stage shows up on the same throughput charts as an ordinary producer and consumer.
 
 ## Next

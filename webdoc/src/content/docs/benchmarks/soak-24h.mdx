@@ -44,7 +44,7 @@ goload -mode openloop -> queue=segbench partitions=200 consumers=600 manualAck=t
 | Duration | 86,400 s, reported every 10 s | 8,640 interval lines in the archived stdout |
 
 <Aside type="note">
-The archived stdout does not record the deduplication window for this run — the open-loop
+The archived stdout does not record the deduplication window for this run: the open-loop
 loader prints only the completed-retention setting it configured. The session note claims a
 60-second window. This page therefore makes no claim about deduplication either way.
 </Aside>
@@ -97,7 +97,7 @@ From the 1 Hz host sampler, 87,500 samples, medians over the run after the first
 
 Broker memory is the number this run exists to produce. A leak at this rate would be obvious: at
 600,000 messages per second, a per-message overhead of even tens of bytes is gigabytes per hour.
-Across the last 19.5 hours the samples span 6,330 MB to 6,875 MB, with a median of 6,336 MB —
+Across the last 19.5 hours the samples span 6,330 MB to 6,875 MB, with a median of 6,336 MB:
 a 545 MB band, no trend. The watchdog, sampling every five minutes, recorded `restarts=0` on
 every line.
 
@@ -107,8 +107,8 @@ stopped, the watchdog's last lines show the database drained to 8,292 MB.
 
 ## Errors, in time order
 
-The single "error rate 0.00012%" figure is the sum of all three error counters — 15,742 plus 26
-plus 47,600, or 63,368 — over 51,820,403,100 accepted messages. It is worth decomposing,
+The single "error rate 0.00012%" figure is the sum of all three error counters (15,742 plus 26
+plus 47,600, or 63,368) over 51,820,403,100 accepted messages. It is worth decomposing,
 because those counters are not on the same scale and they did not accrue uniformly.
 
 Push and pop errors count failed **requests**; each push request carried 100 messages. Ack
@@ -138,7 +138,7 @@ to any counter is at 21.3 hours.
 ## Latency was not flat, and the excursions have a cause
 
 Whole-run p99 is 272 ms, and the median of the per-interval p99 values is 236 ms. But 43 of the
-8,640 ten-second intervals — one in 200 — reported a p99 above one second, and they cluster:
+8,640 ten-second intervals (one in 200) reported a p99 above one second, and they cluster:
 
 | Window | Intervals above 1 s | Worst p99 in the window |
 | --- | --- | --- |
@@ -147,7 +147,7 @@ Whole-run p99 is 272 ms, and the median of the per-interval p99 values is 236 ms
 | 17.8 h – 17.8 h | 3 | 26.3 s |
 
 The first cluster was diagnosed live and fixed during the run. The cause was autovacuum's
-**heap-truncation phase** on `queen.log_partitions` and `queen.log_consumers` — two
+**heap-truncation phase** on `queen.log_partitions` and `queen.log_consumers`, two
 fixed-population tables. Truncation takes an `ACCESS EXCLUSIVE` lock and freezes every push and
 pop for seconds while recovering nothing, because those tables do not shrink. It was caught with
 `pg_stat_progress_vacuum` at about the 2.7-hour mark and disabled with
@@ -159,7 +159,7 @@ minutes, close to back to back, and each excursion recovered on its own.
 
 Two lessons in that, and both are operational rather than about Queen. The
 `vacuum_truncate = off` setting on the log engine's fixed-population tables is load-bearing at
-this rate. And `max_wal_size` wants to be large enough to space checkpoints out — the residual
+this rate. And `max_wal_size` wants to be large enough to space checkpoints out. The residual
 blips are a checkpoint tuning artifact, not a broker one.
 
 ## What this run establishes

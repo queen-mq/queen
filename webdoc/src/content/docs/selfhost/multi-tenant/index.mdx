@@ -17,7 +17,7 @@ sourceOfTruth:
 
 The broker and the gateway in front of it are both Apache-2.0. Nothing in this
 repository is a hosted-only component, which means anyone can stand up the same
-multi-tenant service in-house — for internal teams, for customers, or for a product
+multi-tenant service in-house: for internal teams, for customers, or for a product
 built on top. This section documents how that system is put together, what it
 enforces, and where its edges are.
 
@@ -30,13 +30,13 @@ It is not a description of a commercial offering. It is the design of
 | --- | --- | --- |
 | **Tenant** | The organisation. Owns users and clusters, carries a lifecycle status, is what a bill would be addressed to | `queen_proxy.tenants` |
 | **Cluster** | The tenant-visible Queen: one hostname, one plan, one set of quotas, one queue namespace | `queen_proxy.clusters` |
-| **Cell** | One physical stack — a broker, its PostgreSQL, and a proxy — on one failure domain | `queen_proxy.cells` |
+| **Cell** | One physical stack (a broker, its PostgreSQL, and a proxy) on one failure domain | `queen_proxy.cells` |
 
 Users belong to a tenant; permissions do not. A user's role is granted per cluster
 (`queen_proxy.cluster_roles`), so one person can be admin on one cluster and a viewer
 on another inside the same organisation.
 
-A tenant may own many clusters — production, staging, one per region. Each cluster
+A tenant may own many clusters: production, staging, one per region. Each cluster
 is a separate namespace on the broker and a separate quota bundle.
 
 ## Cluster to cell
@@ -52,13 +52,13 @@ tenant "globex"
 
 The relationship is **N:1 on shared cells and 1:1 on dedicated ones**. Plans carry a
 `cell_class` of `shared` or `dedicated` and cells carry the same field, but the
-pairing is a placement decision made by whoever runs the fleet — there is no database
+pairing is a placement decision made by whoever runs the fleet. There is no database
 constraint that stops a shared cluster landing on a dedicated cell. See
 [Tenants, clusters and cells](/selfhost/multi-tenant/tenants) for what that means in
 practice, including the fact that placement is manual today.
 
 Each cluster also carries a `broker_tenant_uuid`, generated when the cluster is
-created. That UUID — not the tenant id — is what the proxy injects as
+created. That UUID, not the tenant id, is what the proxy injects as
 `x-queen-tenant` upstream, and it is what scopes queue identity inside the broker.
 
 ## One cluster lives on exactly one cell
@@ -79,13 +79,13 @@ traffic can only arrive at the one proxy that fronts its cell. Therefore:
 
 The cost of that design is honest and worth stating: the counters are process-local,
 so a proxy restart resets them. Token buckets start full, and the in-memory
-push-block flags are empty until the pumps that own them run again — the storage flag
+push-block flags are empty until the pumps that own them run again: the storage flag
 within about ten seconds of the next successful reconcile, the monthly-quota flag on
 the rollup task's first tick, which fires immediately at startup for exactly this
 reason.
 
-Running two proxies in front of one cell would break the exactness — each would
-enforce its own share of the limits. One proxy per cell is not a deployment
+Running two proxies in front of one cell would break the exactness, because each
+would enforce its own share of the limits. One proxy per cell is not a deployment
 convention, it is the assumption the code is written against.
 
 ## Routing is a DNS label
@@ -100,17 +100,17 @@ Host: Acme-Prod.eu1.example.com:6711  →  slug "acme-prod"
 The port is stripped when what follows the colon is all digits, and the label is
 lowercased because `clusters.slug` is stored lowercase and DNS is case-insensitive.
 A slug that resolves to no cluster answers `421` with
-`{"code":"cluster_unknown"}` — not `404`, because the request reached the wrong
+`{"code":"cluster_unknown"}`, not `404`, because the request reached the wrong
 endpoint rather than asking for a missing thing.
 
-`clusters.slug` is checked against `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$` — it is
+`clusters.slug` is checked against `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`. It is
 literally used as a DNS label, so it is validated as one, and it is globally unique
 across all tenants.
 
 One hostname per cluster is the normal shape. The dashboard is the exception: it is
 served from a single hostname for every cluster, so a browser has no label to route
 by. That case uses an explicit `x-queen-act-cluster` header, which is honoured for a
-human session and refused for an API key —
+human session and refused for an API key.
 [Credentials and authorization](/selfhost/multi-tenant/auth) has the matrix.
 
 ## What a request goes through
@@ -151,14 +151,14 @@ The order is load-bearing, and it is the order in the gateway:
   and roles happens through SQL functions in the `queen_proxy` schema. The proxy
   reads that data; it does not own its lifecycle. There is no HTTP endpoint that
   creates a tenant.
-- **Not a billing console.** It has a cluster console — usage, keys, members — and
+- **Not a billing console.** It has a cluster console (usage, keys, members) and
   nothing about invoices or payment.
 - **Not a second broker.** It parses request bodies to count and cap them and it
   never rewrites one. A refused `/configure` is an error the caller sees, not a
   silently clamped configuration.
 - **Not an isolation layer bolted onto an open broker.** The broker does its own
   tenant scoping natively when the flag is on. The proxy is what makes the header
-  that drives it trustworthy —
+  that drives it trustworthy.
   [Isolation](/selfhost/multi-tenant/isolation) draws the line precisely.
 
 ## The pieces

@@ -45,7 +45,7 @@ query string, have access level **read-write**, and return the same response sha
 | `task` | string | empty | discovery only |
 
 `batch` is the **total message budget for the call**, shared across every partition the pop
-touches — not a per-partition limit. The budget is consumed partition by partition until it runs
+touches, not a per-partition limit. The budget is consumed partition by partition until it runs
 out.
 
 `partitions` caps how many partitions one call may claim. `0` or a negative value means **no
@@ -60,7 +60,7 @@ are treated as absent, so the queue value applies: **60 seconds** for a queue cr
 by a push, **300 seconds** for one created or updated through `/api/v1/configure`.
 
 `consumerGroup` omitted means queue mode, which is implemented as the reserved group name
-`__QUEUE_MODE__`. Queue mode is an ordinary group with a reserved name — it has its own cursor
+`__QUEUE_MODE__`. Queue mode is an ordinary group with a reserved name: it has its own cursor
 like any other, and two consumers that both omit `consumerGroup` share it.
 
 `subscriptionMode` and `subscriptionFrom` **seed a cursor that does not exist yet** and are
@@ -119,7 +119,7 @@ scanning every queue.
 | `partitionsClaimed` | integer | how many partitions this call claimed |
 
 The top-level `partition` and `partitionId` describe only the first claimed partition. When a
-call claims several, they are **not** representative of the batch — always ack using each
+call claims several, they are **not** representative of the batch. Always ack using each
 message's own `partitionId`.
 
 ### Per-message fields
@@ -132,7 +132,7 @@ message's own `partitionId`.
 | `data` | any JSON value | the payload, spliced back verbatim; decrypted transparently if it was encrypted |
 | `producerSub` | string or `null` | the `sub` of the JWT that pushed it, when authentication was on |
 | `createdAt` | string | the timestamp of the **segment** that holds this message |
-| `partitionId` | string | this message's partition id — the one to ack with |
+| `partitionId` | string | this message's partition id, the one to ack with |
 | `partition` | string | this message's partition name |
 | `leaseId` | string | repeated on every message for convenience; empty on `autoAck` |
 | `consumerGroup` | string | repeated on every message |
@@ -161,10 +161,10 @@ These absences are deliberate and each one has a consequence:
 
 `createdAt` is the **segment's** creation timestamp, not the message's. A segment holds many
 frames, and the broker coalesces concurrent pushes to the same partition into one segment, so
-messages written by the same call — and messages from different calls that were coalesced —
+messages written by the same call (and messages from different calls that were coalesced)
 all report an identical `createdAt`. It orders segments, not messages inside a segment; ordering
 inside a partition is the offset order in which `messages` is returned. It is formatted by PostgreSQL
-with a literal `Z` suffix, and the broker does not set a session time zone — keep the database's
+with a literal `Z` suffix, and the broker does not set a session time zone. Keep the database's
 `timezone` at UTC or the suffix will disagree with the value, including in the broker's own
 delivery-lag metric.
 
@@ -176,7 +176,7 @@ nothing to parse; check the status first. Three different situations all produce
 
 1. Nothing is available for this group.
 2. **Pop maintenance is on.** The handler builds `{"messages":[],"paused":true}`, and the flag is
-   dropped along with the body — consumers cannot distinguish a paused broker from an idle queue.
+   dropped along with the body. Consumers cannot distinguish a paused broker from an idle queue.
 3. The pop's stored procedure reported an error. The error text is discarded with the body.
 
 Transport-level failures do come back with a body: `500` with `{"error":"pool"}` when no
@@ -186,7 +186,7 @@ was cancelled.
 | Code | When |
 | --- | --- |
 | `200` | at least one message delivered |
-| `204` | nothing delivered, pop maintenance, or a stored-procedure error — no body |
+| `204` | nothing delivered, pop maintenance, or a stored-procedure error (no body) |
 | `400` | discovery pop with neither `namespace` nor `task`; a query parameter that fails to deserialize |
 | `403` | authentication is on and the token has no `read-write` role |
 | `500` | no pool connection, or a cancelled statement |
@@ -199,7 +199,7 @@ live leased batch exists per `(partition, group)`**. That is the ordering guaran
 also the concurrency limit: a queue with one partition cannot be consumed in parallel by one
 group, no matter how many workers poll it. Parallelism comes from having more partitions.
 
-Other workers polling a leased partition are not blocked — they skip it and look elsewhere,
+Other workers polling a leased partition are not blocked. They skip it and look elsewhere,
 which is why a wildcard pop with `partitions=1` and many hot partitions still spreads out
 across workers.
 
@@ -209,7 +209,7 @@ delivery: design handlers to tolerate a repeat.
 
 `autoAck=true` is different in kind. The cursor is committed inside the pop's own transaction,
 before the response is written, and the response carries an empty `leaseId`. If the client dies
-after the commit and before it processes the batch, those messages are gone — at-most-once. Use
+after the commit and before it processes the batch, those messages are gone: at-most-once. Use
 it for throughput on data you can afford to lose, never for work you must not drop.
 
 ## Long polling
@@ -218,12 +218,12 @@ With `wait=false` (the default) a pop is a single attempt: it returns whatever i
 otherwise 204.
 
 With `wait=true` the call parks until either messages arrive or `timeout` elapses. A push wakes
-parked pops immediately — on the queue-scoped routes, a push to that queue; on the discovery
+parked pops immediately: on the queue-scoped routes, a push to that queue; on the discovery
 route, any push within the same scope. Between wakes the pop re-checks on an interval that backs
 off (`POP_WAIT_INITIAL_INTERVAL_MS` 100 ms, growing after `POP_WAIT_BACKOFF_THRESHOLD` 3
 consecutive empty waits by `POP_WAIT_BACKOFF_MULTIPLIER` 2.0, capped at
 `POP_WAIT_MAX_INTERVAL_MS` 1000 ms), and a wake resets the backoff. A parked pop holds **no
-PostgreSQL connection** — the connection is released before parking — so thousands of idle
+PostgreSQL connection** (the connection is released before parking), so thousands of idle
 long-poll consumers do not consume pool capacity.
 
 A long poll that times out returns 204, not an error.
@@ -232,8 +232,8 @@ A long poll that times out returns 204, not an error.
 
 Two queue options can make a message that is committed still not deliverable:
 
-- `delayedProcessing` — only segments at least that many seconds old are delivered.
-- `windowBuffer` — if the partition received anything within that many seconds, the pop delivers
+- `delayedProcessing`: only segments at least that many seconds old are delivered.
+- `windowBuffer`: if the partition received anything within that many seconds, the pop delivers
   **nothing** from that partition, so writes can accumulate into fatter batches.
 
 Both are enforced in SQL, so they apply to every pop route. If a pop returns 204 on a queue you
@@ -241,7 +241,7 @@ just wrote to, check these before anything else.
 
 A third option trades latency for commit efficiency rather than hiding messages:
 
-- `minPopWaitTime` — milliseconds a **non-empty but under-full** batch may be held back so that
+- `minPopWaitTime`: milliseconds a **non-empty but under-full** batch may be held back so that
   one database commit carries more messages. It never delays an empty queue (that is the
   long-poll's case), never applies when `wait=false` or `batch` is 1, ends as soon as the batch
   fills, and never outlives the caller's `timeout`. It is `0` (off) by default, is clamped to

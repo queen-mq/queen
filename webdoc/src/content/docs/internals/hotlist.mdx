@@ -14,7 +14,7 @@ sourceOfTruth:
 
 A wildcard pop has to answer "which of this queue's partitions might have work for my group?"
 before it can claim anything. Answering that in SQL means joining `log_partitions` against
-`log_consumers` and ordering randomly on every poll — a cost that scales with the partition count
+`log_consumers` and ordering randomly on every poll, a cost that scales with the partition count
 and is paid even when the queue is idle. The hot-list answers it from memory instead, and calls
 PostgreSQL only about the handful of partitions it names.
 
@@ -26,7 +26,7 @@ paths becomes a single branch on the flag.
 
 PostgreSQL remains the sole authority on claiming, leases, cursors and visibility. The hot-list
 is allowed to be wrong in exactly one direction: **stale in excess**. A partition in the ring that
-has nothing costs one empty `FOR UPDATE SKIP LOCKED` claim — a single indexed row-lock attempt that
+has nothing costs one empty `FOR UPDATE SKIP LOCKED` claim, a single indexed row-lock attempt that
 returns no rows. A partition
 *missing* from the ring would be a real defect, and the design closes that hole with a periodic
 reseed floor rather than with a claim that the ring is always right.
@@ -38,7 +38,7 @@ what the ring lost.
 
 Every ring is keyed on the composite `"<tenant>\x1f<queue>"`, never a bare queue name. On a shared
 cell the names `orders` and `workers` collide across tenants, and a shared ring would mean one
-tenant's pop checking out — and then clearing or wheeling — another tenant's candidate. The same
+tenant's pop checking out (and then clearing or wheeling) another tenant's candidate. The same
 composite key is used by the long-poll wake gates, and it must be byte-identical between the two:
 a mismatch is a silently lost wake.
 
@@ -72,14 +72,14 @@ accumulated mark count, a drained flag, and the two ring links. The state byte i
 
 | State | Meaning |
 | --- | --- |
-| `IDLE` | not tracked — not in the ready list, not in the wheel, not checked out |
+| `IDLE` | not tracked: not in the ready list, not in the wheel, not checked out |
 | `READY` | in the ready list, claimable now |
 | `WHEEL` | deferred or lease-parked; promoted to `READY` at `revisit_at` |
 | `INFLIGHT` | checked out by a pop whose SQL call is in flight |
 
 ## Marks: how a partition becomes a candidate
 
-A mark says "this partition just received data". It comes from four places: a local push (quiet —
+A mark says "this partition just received data". It comes from four places: a local push (quiet;
 see the wake tick below), a transaction commit or DLQ move (which wakes immediately), a peer's mesh
 dirty hint (wakes immediately, never re-broadcast), and a reseed row (local discovery, no
 broadcast).
@@ -92,7 +92,7 @@ Every mark increments the slot's epoch and adds the pushed frame count to `batch
 state decides:
 
 - **`IDLE`** with `delayedProcessing > 0`: schedule in the wheel at `now + D + 300 ms`. The
-  padding acknowledges that the broker clock only schedules the retry — PostgreSQL still enforces
+  padding acknowledges that the broker clock only schedules the retry. PostgreSQL still enforces
   the exact cut.
 - **`IDLE`** with `windowBuffer > 0`: hold until `first mark + W`, *unless* `batch_count` has already
   reached `QUEEN_HOTLIST_WINDOW_BATCH` (default 100), in which case promote immediately. The
@@ -101,7 +101,7 @@ state decides:
 - **`WHEEL`** on a `windowBuffer` queue: promote early if the batch has now fattened past the
   threshold. A `delayedProcessing` deadline is never shortened.
 - **`READY`**: nothing to do.
-- **`INFLIGHT`**: nothing but the epoch bump — which is exactly what makes the in-flight pop's
+- **`INFLIGHT`**: nothing but the epoch bump, which is exactly what makes the in-flight pop's
   check-in re-append the entry instead of clearing it.
 
 A queue with no group ring at all still counts as a transition for wake purposes. A
@@ -115,14 +115,14 @@ round-robin across sub-rings, marking each `INFLIGHT` and snapshotting its epoch
 uses `k = clamp(partitions × 8, 16, 256)`.
 
 Those names go to `queen.log_pop_list_v1(queue, group, names[], ...)`, which runs the same claim
-core as the wildcard pop — one `queen.log_pop_v1` call per candidate — and returns, alongside the
+core as the wildcard pop (one `queen.log_pop_v1` call per candidate) and returns, alongside the
 segments and blobs, a **tri-state verdict per evaluated candidate**:
 
 | Verdict | Cause | Ring action |
 | --- | --- | --- |
 | `took` | the claim delivered frames | leased: park in the wheel at lease expiry. Auto-ack: back to ready, or wheel by `windowBuffer` |
 | `empty` | zero frames, no live foreign lease | epoch-CAS clear (or a bounded revisit on a deferral queue) |
-| `leased` | zero frames because another worker holds a live lease until `T` | park in the wheel at `T + 300 ms` — **never** cleared |
+| `leased` | zero frames because another worker holds a live lease until `T` | park in the wheel at `T + 300 ms`, and **never** cleared |
 | `requeue` | the budget ran out before SQL evaluated this candidate | re-append to ready |
 
 The tri-state is what removes a second probe. The lease expiry is already on the consumer row the
@@ -149,7 +149,7 @@ if slot.epoch == verdict.epoch_snapshot { clear } else { re-append }
 ```
 
 The pop snapshotted the epoch when it checked the candidate out. If a push committed and marked the
-partition in between, the epoch moved, the compare-and-swap fails, and the entry stays — because
+partition in between, the epoch moved, the compare-and-swap fails, and the entry stays, because
 that push's data is real and nobody has claimed it. Every ordering of the race degrades to a false
 positive.
 
@@ -159,7 +159,7 @@ at all: it schedules a bounded revisit instead, between 50 ms and 1000 ms.
 ## Promote on ack
 
 When a full-batch ack releases a lease, the ack path calls into the hot-list with the partition id
-and group. If the entry is still pending — pushes arrived during the lease — it is promoted to
+and group. If the entry is still pending (pushes arrived during the lease) it is promoted to
 ready and the queue is woken, so the next batch is claimable immediately rather than at lease
 expiry.
 
@@ -170,11 +170,11 @@ ack. Using the mark count alone was measurably wrong: a thousand-message backlog
 hundred-message batches has no in-lease marks, yet nine hundred messages remain, and clearing the
 entry stalled every subsequent batch until the reseed floor fired.
 
-The promote can still lose a race — a pop whose SQL snapshot saw the lease live may re-park the
+The promote can still lose a race: a pop whose SQL snapshot saw the lease live may re-park the
 entry *after* the releasing ack already fired. That is why a lease park is capped at **1000 ms**
 rather than parked for the full lease. Without the cap, a lost promote left a partition dark until
-the original lease expiry, up to `leaseTime` — a multi-minute single-partition stall, observed on
-the bench VM. With the cap the worst case is one empty re-probe per second per still-leased
+the original lease expiry, up to `leaseTime` (a multi-minute single-partition stall, observed on
+the bench VM). With the cap the worst case is one empty re-probe per second per still-leased
 partition. Fast consumers rarely hit it: their ack's promote wins the race.
 
 ## Background ticks
@@ -187,7 +187,7 @@ partition. Fast consumers rarely hit it: their ack's promote wins the race.
 | Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS` (300 s) | drop rings and wake gates for queues nobody touched |
 
 The wake tick is why the push path marks quietly. Waking parked pops per push costs one
-`notify_waiters` — itself proportional to the number of parked consumers — for every single push.
+`notify_waiters` (itself proportional to the number of parked consumers) for every single push.
 Marking sets one atomic flag instead, and the tick issues one wake per marked queue, so a hot queue
 goes from one wake per push to at most one per tick. It is purely a latency optimisation: a parked
 pop re-polls on its own backoff regardless, so a late or stopped tick adds bounded latency and can
@@ -196,7 +196,7 @@ never strand a consumer.
 ## The reseed floor
 
 `queen.log_hotlist_reseed_v1` enumerates a `(queue, group)`'s probably-pending partitions the same
-way the SQL candidate scan does — `last_offset > committed` or no consumer row — but **keyset
+way the SQL candidate scan does (`last_offset > committed` or no consumer row), but **keyset
 paginated in id order** rather than `ORDER BY random()`, so the broker can walk a large set in
 bounded chunks. The handler walks pages of 10,000 with a cap of 200 pages, interning each name and
 remembering each id.
@@ -206,7 +206,7 @@ Three things about it are deliberate:
 - **It over-includes.** Lease-held partitions are returned, because a lease-held partition is still
   pending; the ring must hold it and the tri-state will mark it `leased`.
 - **It reclaims stranded entries.** An `INFLIGHT` entry whose pop was dropped between check-out and
-  check-in — a client disconnect — cannot be re-linked by a mark or a promote, which only bump the
+  check-in (a client disconnect) cannot be re-linked by a mark or a promote, which only bump the
   epoch. The reseed is its last resort. (The serve path also arms a drop guard that re-appends
   checked-out candidates if the future is dropped, so this is the second line of defence.)
 - **It is jittered.** Each `(queue, group)` gets a fixed random phase offset in the first 15
@@ -214,8 +214,8 @@ Three things about it are deliberate:
   scan storm.
 
 The periodic floor runs even when the ring is *non-empty*. That is the part that matters: it is what
-recovers a partition erroneously dropped from a busy ring — a cross-broker false clear, a
-stale-config hard clear, a missed mark, a dropped mesh hint — within one interval. The pop path also
+recovers a partition erroneously dropped from a busy ring (a cross-broker false clear, a
+stale-config hard clear, a missed mark, a dropped mesh hint) within one interval. The pop path also
 reseeds opportunistically when it finds the ring cold.
 
 ## Memory, and the idle sweep
@@ -230,21 +230,21 @@ exist: ring registration happens *after* the group-seeded check, which reads the
 idle sweep drops a queue's entire state when three conditions hold simultaneously, all checked
 while holding the map lock:
 
-1. A second-chance flag that every access sets and each sweep clears is false — nothing touched
+1. A second-chance flag that every access sets and each sweep clears is false: nothing touched
    this queue for a full sweep interval.
-2. The map is the only holder of the `Arc` — an exact test that nobody is mid-operation, since any
+2. The map is the only holder of the `Arc`, an exact test that nobody is mid-operation, since any
    concurrent operation cloned the handle out first.
-3. Every ring entry is `IDLE` — no ready candidate, no deferral, no lease park, no in-flight claim.
+3. Every ring entry is `IDLE`: no ready candidate, no deferral, no lease park, no in-flight claim.
 
 A queue is therefore dropped somewhere between one and two sweep intervals after its last use.
 Evicting is never a correctness event even if all three checks were somehow wrong, because the ring
 is a cache and the reseed floor rebuilds it on first contact. `QUEEN_HOTLIST_IDLE_SWEEP_MS=0`
-disables the sweep, which means unbounded growth — only sensible for a single-tenant deployment
+disables the sweep, which means unbounded growth, only sensible for a single-tenant deployment
 that wants the pre-eviction behaviour.
 
 Consumer-group deletion drops rings explicitly rather than waiting for the sweep: deleting a group
 for one queue drops that queue's ring for the group, and deleting it across all queues drops it
-everywhere *for that tenant only* — on a shared cell `workers` is a universal group name, and one
+everywhere *for that tenant only*. On a shared cell `workers` is a universal group name, and one
 tenant's delete must not cold-start every other tenant's ring. Over-forgetting is a harmless cold
 start; a surviving stale ring that hides the re-consume until the next floor is the real danger.
 
@@ -252,7 +252,7 @@ start; a surviving stale ring that hides the re-consume until the next floor is 
 
 The `hotlist` log target emits a `reseed floor` line about every 30 seconds with the reseed delta
 and rate, the number of live rings, total ready and wheel entries, and the local and remote mark
-counters — followed by one `ring` line per busiest non-empty ring, ranked by `ready + wheel` and
+counters. It then emits one `ring` line per busiest non-empty ring, ranked by `ready + wheel` and
 limited to `QUEEN_LOG_TOPN_QUEUES` (default 10). Ranking matters: an earlier version walked a hash
 map and showed an arbitrary, unstable subset.
 
@@ -263,8 +263,8 @@ breadcrumbs for matching queues. It is off by default and costs one `Option` che
 
 With peers configured, a local mark also enqueues a coalesced `(queue, partition)` dirty hint,
 flushed to peers as a batched frame. The enqueue happens on **every** local push, not only on a
-local ring transition, because the pushing broker usually has no consumer for the peers' groups —
-so no local ring and no transition — and the peers are exactly who need the hint. The coalescing
+local ring transition, because the pushing broker usually has no consumer for the peers' groups
+(so no local ring and no transition), and the peers are exactly who need the hint. The coalescing
 set deduplicates, so a partition pushed a thousand times in one flush window costs one hint. The
 set is bounded at 200,000 entries and drops beyond that; the loss is healed by the reseed floor.
 Received marks never re-broadcast. With no peers configured the whole mechanism is skipped, so a

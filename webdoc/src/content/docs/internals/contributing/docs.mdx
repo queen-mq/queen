@@ -82,7 +82,7 @@ exists without having to guess: the group holding the current page opens itself.
 
 `src/content/partials/` holds fragments that pages pull in with `<Render file="…" />`. Both of
 its subdirectories are machine-written: `generated/` by five of the generators and `snippets/`
-by the sixth. Editing a file in either is pointless — the next `pnpm gen` overwrites it, and
+by the sixth. Editing a file in either is pointless: the next `pnpm gen` overwrites it, and
 `gen-snippets` deletes and rewrites its whole directory so that removing a marker in the source
 removes the partial.
 
@@ -97,7 +97,7 @@ title: Short title
 description: "One sentence. Quote it if it contains a colon."
 type: concept          # overview|quickstart|tutorial|how-to|concept|reference|example|troubleshooting|changelog
 tier: use              # use|operate|internals
-status: stable         # stable|beta|preview|internal — defaults to stable
+status: stable         # stable|beta|preview|internal, defaults to stable
 sidebar:
   order: 3
   label: Shorter label
@@ -110,14 +110,14 @@ generated: false
 ```
 
 `title` is required and becomes the H1, so the body must not repeat it. `type` names the recipe
-the page follows — one page, one reader question. `tier` marks which reading tier it belongs to.
+the page follows: one page, one reader question. `tier` marks which reading tier it belongs to.
 `status` renders a badge for anything other than `stable`, so a reader never mistakes a preview
 for a contract.
 
 The last three are the traceability contract, and they are the part that matters most.
 `sourceOfTruth` lists the repo-relative paths of the code that governs the page: if that code
 changes, the page is in debt, and the list is what tells you which pages to re-read.
-`verifiedBy` lists tests or examples that execute what the page shows — a page claiming
+`verifiedBy` lists tests or examples that execute what the page shows. A page claiming
 "verified" has to name what verified it. `generated` marks machine-written content.
 
 Undeclared keys do not silently pass: `nimbus/frontmatter-shape` is configured as an error, so
@@ -143,7 +143,7 @@ Three more are warnings rather than errors: `nimbus/duplicate-heading-text`,
 `nimbus/heading-punctuation` and `nimbus/bare-url`.
 
 Beyond the linter, two MDX facts bite regularly. Components must be PascalCase **and**
-registered in `src/components.ts` — the registered set is `Accordion`, `AccordionContent`,
+registered in `src/components.ts`. The registered set is `Accordion`, `AccordionContent`,
 `AccordionGroup`, `AccordionTrigger`, `Aside`, `Badge`, `Card`, `CardGrid`, `Code`, `CodeGroup`,
 `FileTree`, `Frame`, `LinkButton`, `LinkCard`, `PackageManagers`, `Render`, `Step`, `Steps`,
 `TabItem` and `Tabs`, and nothing else is available without importing it. And remark or rehype
@@ -177,7 +177,7 @@ tenant-scoped when its handler takes `tenant::Tenant` or `Extension<Tenant>`.
 
 Two sanity gates protect against a silently broken parser. Fewer than 40 parsed routes is a
 hard error, and so is a handler that the router references but that does not exist under
-`server/src` — which is precisely the class of bug that produced the two imaginary routes on the
+`server/src`, which is precisely the class of bug that produced the two imaginary routes on the
 old site.
 
 ### Configuration
@@ -195,7 +195,7 @@ The generator reads that as variable `QUEEN_MESH_PORT`, also read as
 
 Three curated lists shape presentation only, never content. `GROUPS` decides which section a
 variable appears under; an unclassified variable still appears, in `Other`, so a new knob cannot
-ship undocumented. `EXPERIMENTAL` and `INERT` move a variable into its own labelled table —
+ship undocumented. `EXPERIMENTAL` and `INERT` move a variable into its own labelled table:
 `EXPERIMENTAL` for knobs the source itself calls experiment-only, `INERT` for variables the
 broker still parses and still prints in its boot log while wired to nothing. Both are still
 **published**, because silence about a live-looking variable is how the previous site went
@@ -207,7 +207,7 @@ The exposition is built in two places with two different shapes, so both are par
 calls in `metrics.rs`, and raw `# HELP` / `# TYPE` strings in `handlers/status.rs`, some of them
 templated over a nearby array of family names. Then every `"queen_*"` string literal in either
 file is checked against what was parsed. An unmatched family is reported on the console and
-published with no help text rather than dropped — the failure mode is a visibly incomplete row,
+published with no help text rather than dropped. The failure mode is a visibly incomplete row,
 never a missing one. Fewer than 25 families is a hard error.
 
 ### Proxy route classes
@@ -232,7 +232,7 @@ bodies from the struct the handler passes to `serde_json::from_slice`, resolved 
 response status codes from every `StatusCode` variant reachable in the handler body.
 
 Two things resist derivation and are marked rather than guessed. Success bodies on the hot paths
-are assembled by string concatenation, so their schema is left **unconstrained** — deliberately
+are assembled by string concatenation, so their schema is left **unconstrained**, deliberately
 not `type: object`, since some of those routes answer with a top-level array and asserting
 "object" would be a false statement. And some listing handlers forward their whole query map to
 a stored procedure, so their parameters cannot be recovered from Rust. Both cases carry an
@@ -240,7 +240,7 @@ a stored procedure, so their parameters cannot be recovered from Rust. Both case
 
 Before writing, the generator runs a structural self-check over both documents: duplicate
 operation ids, path parameters that are templated but not declared, dangling `$ref`s and
-Rust-style `:param` leftovers all abort the run. That check earned its place immediately — it
+Rust-style `:param` leftovers all abort the run. That check earned its place immediately: it
 caught `/console` and `/console/` collapsing onto one operation id on the first run.
 
 ### Benchmark figures
@@ -259,7 +259,7 @@ first pass:
   panels sharing an x-axis. The 24-hour figure would otherwise have plotted broker
   memory against PostgreSQL CPU on one plot and invented a correlation.
 - **A chart has to show what its caption claims.** The first throughput-ceiling
-  figure plotted offered against accepted to show a 0.086% shortfall — but at
+  figure plotted offered against accepted to show a 0.086% shortfall. But at
   per-second resolution the two lines sit exactly on top of each other, and the
   shortfall is a cumulative total. It became a single-series chart, and the
   shortfall stayed a number in the table where it belongs.
@@ -283,13 +283,13 @@ A snippet is a region of a real source file between two markers:
 // docs:end
 ```
 
-Marker syntax is comment-flavour agnostic — anything ending in `docs:start(<id>)` opens a
+Marker syntax is comment-flavour agnostic: anything ending in `docs:start(<id>)` opens a
 region and anything ending in `docs:end` closes it, so `//`, `#` and `--` all work. Each region
 becomes a partial carrying a header that names the file it came from, and pages include it with
 `<Render file="snippets/<id>" />`. A published snippet is therefore never a transcription; it is
 the code that ran.
 
-Ids must be unique across all sources and regions must be closed — both are hard errors, as is
+Ids must be unique across all sources and regions must be closed. Both are hard errors, as is
 a `docs:start` inside an already-open region. Common leading indentation is stripped so a
 snippet extracted from inside a test function reads as top-level code. An index partial lists
 the whole inventory.
@@ -299,7 +299,7 @@ The scanned directories are the JavaScript, Python, Go and C++ client test trees
 ## The drift guards
 
 Two of the generators cannot work by parsing alone: they need to *apply* a Rust rule, so they
-mirror it in JavaScript. A stale mirror would not fail — it would quietly publish a wrong table,
+mirror it in JavaScript. A stale mirror would not fail. It would quietly publish a wrong table,
 which is the worst possible outcome. So each mirrored function is fingerprinted.
 
 `fingerprint()` strips line and block comments, collapses all whitespace, hashes with SHA-256
@@ -328,7 +328,7 @@ build stops until a human has compared the two implementations.
 | `pnpm lint:docs:fix` | the same, applying the fixable rules |
 | `pnpm build` | static build into `dist/`, including the Pagefind index |
 | `pnpm typecheck` | `astro check` |
-| `pnpm verify` | `gen:check`, then `build`, then `lint:docs` — what to run before pushing |
+| `pnpm verify` | `gen:check`, then `build`, then `lint:docs` (what to run before pushing) |
 
 Run them from `webdoc/`, or with `pnpm --dir webdoc <script>` from the repository root.
 
@@ -338,16 +338,16 @@ Run them from `webdoc/`, or with `pnpm --dir webdoc <script>` from the repositor
 a page built from source can never be published behind that source. The order matters: the
 `nimbus/internal-link` rule resolves links against `.nimbus/routes.json`, which Astro
 materializes at `astro:build:done`, so linting before building checks links against a stale
-route map — or none at all on a clean checkout.
+route map, or none at all on a clean checkout.
 
 Its path filter is the other interesting part: because the generators read code, the workflow
 triggers on changes to `server/src/**`, `server/sql/**`, the proxy's router, console and auth
-modules, and the JavaScript, Python and Go client test directories — not only on changes under
+modules, and the JavaScript, Python and Go client test directories, not only on changes under
 `webdoc/**`.
 
 <Aside type="note">
 `gen-snippets.mjs` also scans `clients/client-cpp`, which the workflow's path filter does not
-include. No C++ file carries a marker today, so nothing is currently missed — but a snippet
+include. No C++ file carries a marker today, so nothing is currently missed. But a snippet
 added there would not be drift-checked until the filter is extended.
 </Aside>
 

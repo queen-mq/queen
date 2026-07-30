@@ -28,8 +28,8 @@ eight routes:
 | `POST` | `/api/v1/transaction` | Push and ack atomically |
 | `POST` | `/api/v1/lease/:leaseId/extend` | Extend a lease |
 
-Everything else — queue configuration, DLQ, traces, status, analytics, consumer group
-management — is documented with its access level in [Reference](/reference).
+Everything else (queue configuration, DLQ, traces, status, analytics, consumer group
+management) is documented with its access level in [Reference](/reference).
 
 ## Conventions
 
@@ -38,7 +38,7 @@ HTTPS you terminate TLS in front of it, either with the Queen proxy or with any 
 There is no CORS layer either, so a browser cannot call the broker directly across origins.
 
 **Content type.** Send `Content-Type: application/json` on every request with a body.
-Responses are `application/json` — including `/metrics`, which returns a JSON snapshot — except
+Responses are `application/json` (including `/metrics`, which returns a JSON snapshot) except
 `/metrics/prometheus`, which is `text/plain; version=0.0.4`.
 
 **Authentication.** One header:
@@ -54,7 +54,7 @@ generated into [Reference](/reference).
 <Aside type="caution">
 Access levels are a role **set**, not a ladder. `POST /api/v1/push` requires `write-only`, and a
 `write-only` token is *rejected* on every read and consume route. A producer credential cannot
-be reused for a consumer, and an admin token is not automatically a superset — check the table
+be reused for a consumer, and an admin token is not automatically a superset. Check the table
 before you mint a role.
 </Aside>
 
@@ -64,7 +64,7 @@ before you mint a role.
 and a `403` carries `{"code":"cluster_suspended"|"storage_quota_exceeded"|"feature_gated"|"forbidden"}`.
 Branch on `code`, not on the message text.
 
-**The bodiless 204.** An empty pop answers `204 No Content` with **no body at all** — not an
+**The bodiless 204.** An empty pop answers `204 No Content` with **no body at all**, not an
 empty JSON object, not a zero-length body with a `Content-Length`. This is deliberate:
 announcing a content length on a body that hyper then elides made strict HTTP/1.1 clients
 (Node's undici/llhttp in particular) treat the connection as poisoned and drop it, which under
@@ -92,7 +92,7 @@ shapes are the SQL's, not a hand-written DTO's.
 ```
 
 `queue` and `payload` are required per item. `partition` defaults to `Default`. `transactionId`
-is optional — the broker mints a UUIDv7 when it is absent, which makes the push
+is optional: the broker mints a UUIDv7 when it is absent, which makes the push
 non-idempotent. Supply a deterministic one to make a retry safe inside the queue's dedup
 window.
 
@@ -132,7 +132,7 @@ as `duplicate` carrying the winner's `message_id`. An empty `items` array is `20
 
 ## Pop
 
-`GET /api/v1/pop/queue/:queue` — or `.../partition/:partition` to pin one lane, or
+`GET /api/v1/pop/queue/:queue`, or `.../partition/:partition` to pin one lane, or
 `/api/v1/pop?namespace=…&task=…` to lease across every queue matching a namespace or task (at
 least one of the two is required there, otherwise it is a `400`).
 
@@ -145,8 +145,8 @@ least one of the two is required there, otherwise it is a `400`).
 | `consumerGroup` | queue mode | The group whose cursor advances. |
 | `autoAck` | false | Commit the cursor inside the pop transaction. At-most-once. |
 | `leaseSeconds` | queue's `leaseTime` | Per-request lease override, in seconds. No SDK exposes this. |
-| `subscriptionMode` | `all` | `all` or `new` — applied **only** when this `(partition, group)` cursor is created. |
-| `subscriptionFrom` | — | `now` or an ISO timestamp, same first-contact-only rule. |
+| `subscriptionMode` | `all` | `all` or `new`, applied **only** when this `(partition, group)` cursor is created. |
+| `subscriptionFrom` | none | `now` or an ISO timestamp, same first-contact-only rule. |
 
 A successful pop is `200`:
 
@@ -184,7 +184,7 @@ Points worth internalising:
 - All of the messages share one `leaseId`, even across partitions. One extend call renews the
   whole claim.
 - `producerSub` is the authenticated producer's JWT `sub`, stamped by the broker at push time.
-  A client cannot set it — that is how impersonation is prevented. It is `null` when JWT auth
+  A client cannot set it: that is how impersonation is prevented. It is `null` when JWT auth
   is off.
 - `createdAt` is the *segment's* timestamp: every message written by one push call shares it.
 - There is no per-message `queue`, `retryCount` or `errorMessage` field on a pop. Those appear
@@ -225,7 +225,7 @@ recorded on the DLQ row if this nack exhausts the retry budget.
 
 `status` is normalised server-side. `completed`, `success`, `acked`, `ok` and an absent status
 all mean `completed`; `retry` means `retry`; `dlq` means `dlq`; **anything else at all means
-`failed`**. A typo does not error — it nacks.
+`failed`**. A typo does not error: it nacks.
 
 Both routes answer `200` with a top-level array in request order, whatever the outcome:
 
@@ -237,13 +237,13 @@ Both routes answer `200` with a top-level array in request order, whatever the o
 ```
 
 <Aside type="caution">
-A rejected ack is **HTTP 200 with `success: false`** on its item — `"invalid or expired lease"`,
+A rejected ack is **HTTP 200 with `success: false`** on its item: `"invalid or expired lease"`,
 `"consumer not found"`, `"position beyond leased batch"`. The status code tells you nothing.
 Check every item's `success`, and check that the array length matches the number of acks you
 sent so a truncated response cannot be attributed to the wrong message.
 </Aside>
 
-`noop: true` means the ack was recognised but changed nothing — it landed below the cursor
+`noop: true` means the ack was recognised but changed nothing: it landed below the cursor
 ("already committed") or outside the transaction-hash window ("unresolvable"). That is reported
 rather than silently succeeding, which is the point: an ack you cannot resolve is not an ack
 that worked.
@@ -259,7 +259,7 @@ that partition for that group. Two consequences shape how you write a consumer:
 - **A negative ack clamps the cursor.** Within one call the cursor stops at the lowest signal,
   and `dlq` beats `failed` beats `retry` at the same offset. An explicit `failed` / `dlq` /
   `retry` is never skipped by a later `completed` in the same call. So everything after the
-  failed message in that batch will be redelivered — do not keep processing it.
+  failed message in that batch will be redelivered. Do not keep processing it.
 
 ## Extend a lease
 
@@ -276,14 +276,14 @@ best-effort:
 { "renewed": 2, "expiresAt": "2026-07-30T09:14:44.031Z" }
 ```
 
-`renewed` is how many `(partition, group)` lease rows the extend touched — one per claimed
-partition — and `expiresAt` is the **earliest** deadline across them, which is what you need to
+`renewed` is how many `(partition, group)` lease rows the extend touched (one per claimed
+partition), and `expiresAt` is the **earliest** deadline across them, which is what you need to
 schedule the next renewal. `{"renewed":0,"expiresAt":null}` means the lease is unknown, expired,
 or not yours.
 
 <Aside type="note">
 Every SDK reads `newExpiresAt` or `lease_expires_at` from this response and therefore reports
-`null`. Over plain HTTP you get the real value — read `expiresAt`.
+`null`. Over plain HTTP you get the real value: read `expiresAt`.
 </Aside>
 
 ## Transactions
@@ -321,7 +321,7 @@ pushes unless their `transactionId`s are deterministic and still inside the dedu
    ```
 
 2. Push two messages into one partition. The queue and the partition are created on first
-   push — there is no declaration step.
+   push: there is no declaration step.
 
    ```bash
    curl -s -X POST http://localhost:6632/api/v1/push -H 'Content-Type: application/json' -d '{"items":[{"queue":"demo","partition":"acct-42","transactionId":"evt-1","payload":{"n":1}},{"queue":"demo","partition":"acct-42","transactionId":"evt-2","payload":{"n":2}}]}'
@@ -342,13 +342,13 @@ pushes unless their `transactionId`s are deterministic and still inside the dedu
    ```
 
 5. Acknowledge both. Because an ack is an offset commit, acking `evt-2` alone would also
-   complete `evt-1` — send both when you have processed both.
+   complete `evt-1`. Send both when you have processed both.
 
    ```bash
    curl -s -X POST http://localhost:6632/api/v1/ack/batch -H 'Content-Type: application/json' -d '{"consumerGroup":"billing","acknowledgments":[{"transactionId":"evt-1","partitionId":"<partitionId>","leaseId":"<leaseId>","status":"completed"},{"transactionId":"evt-2","partitionId":"<partitionId>","leaseId":"<leaseId>","status":"completed"}]}'
    ```
 
-6. Pop again. The cursor is past both messages, so this returns `204` with an empty body —
+6. Pop again. The cursor is past both messages, so this returns `204` with an empty body,
    which `-i` makes visible.
 
    ```bash
@@ -376,7 +376,7 @@ The behaviours the five SDKs implement, in the order they matter:
 4. **Back off on `429`, in place.** Honour `Retry-After` in seconds; otherwise exponential
    backoff from 500 ms capped at 30 s, with jitter. Ten attempts for an ordinary request;
    unbounded for a long-poll pop, whose outer loop is already an indefinite wait. Never fail
-   over to a different backend on a `429` — it is a quota signal, not a health signal.
+   over to a different backend on a `429`: it is a quota signal, not a health signal.
 5. **Stop on `403`.** `cluster_suspended`, `storage_quota_exceeded`, `feature_gated` and
    `forbidden` cannot resolve themselves.
 6. **Give the long poll client-side slack.** The SDKs set their HTTP timeout to

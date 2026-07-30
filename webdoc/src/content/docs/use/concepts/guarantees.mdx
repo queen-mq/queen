@@ -1,6 +1,6 @@
 ---
 title: Guarantees
-description: "Exactly what Queen promises about ordering, durability and delivery — where duplicates still come from, what deduplication makes exact, and what a broker crash, a database failover and a client crash each look like."
+description: "Exactly what Queen promises about ordering, durability and delivery: where duplicates still come from, what deduplication makes exact, and what a broker crash, a database failover and a client crash each look like."
 type: concept
 tier: use
 sidebar:
@@ -32,7 +32,7 @@ never change.
 
 Because the lock serialises allocation, two properties hold inside a partition: offsets have no
 gaps in steady state, and commit timestamps increase with offset. The second is what makes
-time-based retention and timestamp seeks meaningful — see
+time-based retention and timestamp seeks meaningful. See
 [Replay and subscription modes](/use/concepts/replay).
 
 What is **not** promised:
@@ -49,7 +49,7 @@ What is **not** promised:
 Delivery order within a group is additionally serialised by the one-lease rule: since exactly
 one batch of a partition is leased per consumer group at a time, a group never processes two
 overlapping batches of the same lane concurrently. Ordering is preserved through failure only
-if your handlers are sequential — a nack rewinds to the failed message and redelivers
+if your handlers are sequential. A nack rewinds to the failed message and redelivers
 everything after it, so parallel processing inside one partition trades order for throughput.
 
 The ordering claim has been measured end to end: a four-stage pipeline over 1000 partitions,
@@ -76,7 +76,7 @@ PostgreSQL"**. An accepted push request answers `201` and reports the outcome pe
 The disk spool is the broker's answer to a database outage: rather than rejecting the push, the
 payload is appended to a local file and replayed oldest-first once the database is reachable,
 preserving the original transaction id so deduplication makes the replay idempotent. It is a
-real durability tier, but a different one — the data is on that broker's disk, not in your
+real durability tier, but a different one: the data is on that broker's disk, not in your
 replicated database. If the broker's disk is ephemeral, `buffered` is a warning, not a
 reassurance.
 
@@ -93,14 +93,14 @@ conditions are in [Benchmarks](/benchmarks).
 
 Two modes, and the choice is per pop.
 
-**At-least-once — leased pops (`autoAck=false`).** The pop claims a span under a lease and
+**At-least-once: leased pops (`autoAck=false`).** The pop claims a span under a lease and
 leaves the cursor where it was. The cursor moves only when you ack. If the consumer dies, the
 lease expires and the whole span is delivered again. Nothing is lost; some things arrive twice.
 This is the default and the right choice for work that matters.
 
-**At-most-once — server-side auto-ack (`autoAck=true`).** The pop commits the cursor inside the
+**At-most-once: server-side auto-ack (`autoAck=true`).** The pop commits the cursor inside the
 same transaction that reads the messages, and returns no lease. If the response is lost in
-flight, or the consumer crashes before processing, those messages are gone — the broker has
+flight, or the consumer crashes before processing, those messages are gone: the broker has
 already recorded them as consumed. Choose it only when losing a message is cheaper than handling
 it twice.
 
@@ -126,8 +126,8 @@ guarantee:
    offsets.
 
 Because the probe happens under the write serialiser, no concurrent push can slip a matching
-message into the probed range. A duplicate therefore writes **nothing at all** — no offset
-consumed, no rollback needed — and returns `status: "duplicate"` with the original message's id.
+message into the probed range. A duplicate therefore writes **nothing at all** (no offset
+consumed, no rollback needed) and returns `status: "duplicate"` with the original message's id.
 There is no probabilistic filter anywhere in the path, and no cache is allowed to decide the
 verdict: the broker's in-memory deduplication cache only supplies a watermark that narrows the
 SQL probe, and when it cannot vouch for a range it says so and the full window is probed.
@@ -156,7 +156,7 @@ Every one of these is normal operation, not a defect:
 
 - **Lease expiry.** A slow or dead consumer's whole leased span is redelivered.
 - **Any nack.** The cursor clamps at the lowest explicit failure in the call, so messages after
-  it — including ones you acked `completed` in that same call — come back.
+  it, including ones you acked `completed` in that same call, come back.
 - **A broker restart or a lost ack.** The lease outlives the process in the database and expires
   normally, redelivering the batch.
 - **An ack outside the hash window.** It is reported as `unresolvable`, and the message
@@ -178,7 +178,7 @@ retries collapse inside the deduplication window. Everything else is hope.
 The broker is stateless, so a crash costs no committed data. Concretely:
 
 - In-flight pushes that had not committed are lost from the client's point of view; it never got
-  a response. Retry them — with a deterministic transaction id, the retry is either accepted or
+  a response. Retry them. With a deterministic transaction id, the retry is either accepted or
   reported as a duplicate.
 - Leases held by that broker remain in the database with their expiry. They are not released
   early. Consumers see those spans again when the lease expires, so the redelivery delay after a
@@ -189,14 +189,14 @@ The broker is stateless, so a crash costs no committed data. Concretely:
 
 A clean stop is gentler than a crash but not different in kind: on `SIGTERM` the broker drains
 in-flight requests before exiting, so an ack already being processed still commits. It does not
-release the leases it was holding — those still wait out their expiry.
+release the leases it was holding, and those still wait out their expiry.
 
 ### A database failover or outage
 
 - Pushes fail their transaction and are spooled to local disk, reported as `buffered` under an
   HTTP `201`. Replay begins automatically once connections work again, preserving transaction
   ids.
-- Pops and acks fail outright. No cursor moves, so nothing is lost — every un-acked message is
+- Pops and acks fail outright. No cursor moves, so nothing is lost: every un-acked message is
   simply still un-acked, and leases expire in the meantime.
 - `GET /health` performs a real database round-trip and returns `503` while PostgreSQL is
   unreachable. That makes it an accurate readiness signal and a poor liveness probe: killing the
@@ -208,7 +208,7 @@ release the leases it was holding — those still wait out their expiry.
 
 ### A client crash
 
-- Messages leased but not acked are redelivered in full when the lease expires — including
+- Messages leased but not acked are redelivered in full when the lease expires, including
   messages the handler completed but had not acked. This is the case that makes idempotent
   handlers mandatory rather than advisable.
 - Messages acked before the crash stay acked; the cursor is durable.

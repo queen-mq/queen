@@ -1,6 +1,6 @@
 ---
 title: Go
-description: "Install the Go client, construct it, and use the fluent API — including the Pop() that does not long-poll by default."
+description: "Install the Go client, construct it, and use the fluent API, including the Pop() that does not long-poll by default."
 type: how-to
 tier: use
 sidebar:
@@ -67,9 +67,9 @@ Zero-valued numeric and string fields fall back to `ClientDefaults`, so a partia
 
 | Field | Default | What it does |
 | --- | --- | --- |
-| `URL` / `URLs` | — | Required. One backend or many. |
+| `URL` / `URLs` | none | Required. One backend or many. |
 | `TimeoutMillis` | `30000` | Per-request timeout. A long-poll pop adds 5 s of slack. |
-| `RetryAttempts` | `3` | Retries **after** the first attempt, for `5xx` and network failures — so `3` means four tries. A negative value means exactly one try. (The other SDKs count this as the total number of tries.) |
+| `RetryAttempts` | `3` | Retries **after** the first attempt, for `5xx` and network failures, so `3` means four tries. A negative value means exactly one try. (The other SDKs count this as the total number of tries.) |
 | `RetryDelayMillis` | `1000` | First retry delay; doubles per attempt. |
 | `LoadBalancingStrategy` | `"affinity"` | `"round-robin"`, `"session"` or `"affinity"`. |
 | `AffinityHashRing` | `128` | Virtual nodes per backend on the affinity ring. |
@@ -83,7 +83,7 @@ Zero-valued numeric and string fields fall back to `ClientDefaults`, so a partia
 
 <Aside type="caution">
 `EnableFailover` is a plain `bool`, so its zero value is `false`, and the fallback in `New` only
-fires when the config carries no URLs at all — which `NewHttpClient` rejects anyway. So failover
+fires when the config carries no URLs at all, which `NewHttpClient` rejects anyway. So failover
 is **off unless you set it**, including when you construct from a `[]string`. With it off,
 `MarkUnhealthy` is a no-op: a failing backend is never taken out of rotation, so under the
 default `affinity` strategy every retry goes straight back to the broker that just failed. Set
@@ -106,12 +106,12 @@ responses, err := client.Queue("orders").
 ```
 
 `Execute` returns `[]PushResponse`, one entry per item in request order, carrying the
-broker's `status` — `queued`, `duplicate`, `buffered` or `failed`. Supplying your own
+broker's `status`: `queued`, `duplicate`, `buffered` or `failed`. Supplying your own
 `TransactionID` is what makes a retry idempotent inside the queue's dedup window.
 
 <Aside type="caution">
 `TransactionID` applies to the **first item only**. When you push a slice, item 0 gets your
-ID and every other item gets a freshly minted UUIDv7 — so a multi-item push cannot be made
+ID and every other item gets a freshly minted UUIDv7, so a multi-item push cannot be made
 idempotent through this method. Push items one at a time, or use
 [the HTTP API](/use/clients/http) where each item carries its own `transactionId`.
 </Aside>
@@ -127,7 +127,7 @@ messages, err := client.Queue("orders").
     Pop(ctx)
 ```
 
-`Pop` returns `[]*Message` and propagates errors — unlike the JavaScript, Python and C++
+`Pop` returns `[]*Message` and propagates errors, unlike the JavaScript, Python and C++
 clients, which swallow a failed pop into an empty result.
 
 <Aside type="caution">
@@ -139,7 +139,7 @@ when you want a long poll.
 </Aside>
 
 `.Batch(n)` caps the messages returned. `.Partitions(n)` claims up to `n` partitions in one
-call, with `Batch` acting as a global cap across them and one shared `LeaseID` — so a single
+call, with `Batch` acting as a global cap across them and one shared `LeaseID`, so a single
 `Renew` extends them all. `.AutoAck(true)` on a pop asks the server to commit the cursor
 inside the pop transaction, which is at-most-once delivery.
 
@@ -166,7 +166,7 @@ err := client.Queue("jobs").
 There are two handler shapes. `Consume` takes a `MessageHandler`
 (`func(context.Context, *Message) error`) and is called once per message. `ConsumeBatch` takes
 a `BatchMessageHandler` (`func(context.Context, []*Message) error`) and is called once per
-popped batch — except that with `Batch(1)` and a single message returned, the worker calls the
+popped batch, except that with `Batch(1)` and a single message returned, the worker calls the
 batch handler with a one-element slice through the single-message path. `Execute(ctx)` starts
 `Concurrency` goroutines and blocks until they all stop; `Start(ctx)` is an alias.
 
@@ -179,7 +179,7 @@ batch handler with a one-element slice through the single-message path. `Execute
 | `.Each()` | off | Process one message at a time, and abandon the rest of the batch after a nack. |
 | `.Limit(n)` | `0` (none) | Stop the worker after `n` messages. |
 | `.IdleMillis(n)` | `0` (none) | Stop the worker after `n` ms with no messages. |
-| `.AutoAck(bool)` | `true` | Ack on `nil`, nack on error — client-side. |
+| `.AutoAck(bool)` | `true` | Client-side: ack on `nil`, nack on error. |
 | `.Wait(bool)` | `true` for consume | Long-poll the pop. |
 | `.TimeoutMillis(n)` | `30000` | Long-poll window. |
 | `.RenewLease(true, ms)` | off | Renew the batch's lease every `ms` from a goroutine while the handler runs. |
@@ -191,14 +191,14 @@ filters out so a clean cancellation is not reported as a failure.
 
 <Aside type="note">
 The package exports `SubscriptionModeNewOnly = "new-only"` alongside `SubscriptionModeNew`, but
-the broker matches the string `new` exactly — `new-only` falls through to the `all` behaviour and
+the broker matches the string `new` exactly. `new-only` falls through to the `all` behaviour and
 seeds the cursor at the beginning of the partition. Use `queen.SubscriptionModeNew`.
 </Aside>
 
 `AutoAck` is client-side. The worker never sends `autoAck` to the server: it calls
 `POST /api/v1/ack` after your handler returns, with status `completed` on `nil` and `failed`
 on an error. Because an ack is an offset commit, a nack clamps the group's cursor at the
-failed message and everything after it in the popped batch is redelivered — so under
+failed message and everything after it in the popped batch is redelivered, so under
 `.Each()` the worker abandons the rest of the batch after a nack instead of producing
 duplicates and rejected acks.
 
@@ -231,7 +231,7 @@ recorded on the DLQ row if the nack exhausts the retry budget). One message goes
 `/api/v1/ack`, several to `/api/v1/ack/batch`.
 
 A rejected ack still arrives as HTTP 200 with `success: false` on the item, so check
-`responses[i].Success` — a `nil` error is not enough. The client compares the response length
+`responses[i].Success`. A `nil` error is not enough. The client compares the response length
 against the number of acks sent and errors out if they disagree, so a truncated response can
 never be attributed to the wrong message. `ValidateMessages` rejects an ack whose
 `PartitionID` is missing, because a `TransactionID` alone is not unique across partitions.
@@ -262,7 +262,7 @@ responses, err := client.Renew(ctx, messages)
 ```
 
 `Renew` accepts a lease ID, a slice of lease IDs, or messages in any of the four shapes, and
-de-duplicates the IDs — a multi-partition pop shares one lease, so passing the whole slice
+de-duplicates the IDs: a multi-partition pop shares one lease, so passing the whole slice
 issues one HTTP call.
 
 <Aside type="caution">
@@ -286,7 +286,7 @@ item and the messages flush when the buffer reaches `MessageCount` (default `100
 `TimeMillis` (default `1000`) elapses. Buffers are keyed per `queue/partition`.
 
 <Aside type="caution">
-A buffered push hides the broker's per-item verdict, and the buffer lives in process memory —
+A buffered push hides the broker's per-item verdict, and the buffer lives in process memory:
 an unflushed buffer is lost if the process dies without `Close`.
 </Aside>
 
@@ -311,7 +311,7 @@ Send the complete configuration you want on every call.
 </Aside>
 
 `Create().Execute(ctx)` sets `configured: true` on the returned map itself, for parity with the
-other SDKs. It is not the broker's verdict — the broker's own response is merged underneath it.
+other SDKs. It is not the broker's verdict: the broker's own response is merged underneath it.
 
 ## Admin
 
@@ -323,7 +323,7 @@ queues, err := client.Admin().ListQueues(ctx, queen.ListQueuesParams{Limit: 50})
 `client.Admin()` covers the observability surface: resources, messages, traces, status and
 analytics, consumer groups, health, `/metrics`, `/metrics/prometheus`, the maintenance-mode
 switches, the DLQ listing, and the four per-queue analytics series. It is a superset of the
-JavaScript admin surface — `PrometheusMetrics`, `ListDLQ`, `SeekConsumerGroupPartition`,
+JavaScript admin surface: `PrometheusMetrics`, `ListDLQ`, `SeekConsumerGroupPartition`,
 `GetQueueLagAnalytics`, `GetQueueOpsAnalytics`, `GetQueueParkedReplicas` and
 `GetRetentionAnalytics` have no JavaScript equivalent. The full route list with access levels
 is in [Reference](/reference).
@@ -341,7 +341,7 @@ register (`DELETE /api/v1/queues/:queue/clear` and
 dlq, err := client.Queue("orders").DLQ("billing").Limit(50).Get(ctx)
 ```
 
-DLQ messages *do* carry `Queue`, `RetryCount` and `ErrorMessage` — the DLQ query builds them
+DLQ messages *do* carry `Queue`, `RetryCount` and `ErrorMessage`: the DLQ query builds them
 from `queen.log_dlq`, unlike a pop.
 
 <Aside type="note">
@@ -349,14 +349,14 @@ Three things about this call. `Get` swallows errors and returns an empty respons
 `nil` error, so check `len(dlq.Messages)` rather than trusting the error. `dlq.Total` is
 always `0`: the broker answers `{"messages":[…],"pagination":{"limit":…,"offset":…}}` with no
 `total` field. And `.From()`, `.To()` and the partition are sent as query parameters that the
-broker's DLQ handler does not read — it collects only `queue`, `consumerGroup`, `limit` and
-`offset` — so they are silently ignored. Page with `Limit`/`Offset` and filter the rest
+broker's DLQ handler does not read (it collects only `queue`, `consumerGroup`, `limit` and
+`offset`), so they are silently ignored. Page with `Limit`/`Offset` and filter the rest
 client-side.
 </Aside>
 
 The broker does have a replay route that re-pushes a dead letter and drops its DLQ row, but
 this SDK does not reach it: `Admin.RetryMessage` returns an error without making a request.
-From Go, reprocess by reading the row and pushing the payload again — or call
+From Go, reprocess by reading the row and pushing the payload again, or call
 `POST /api/v1/messages/{partitionId}/{transactionId}/retry` directly. Either way the result is
 a new message at the tail of its partition, not the original one revived.
 
@@ -373,7 +373,7 @@ client, err := queen.New(queen.ClientConfig{
 A `429` is retried in place against the same backend, honouring `Retry-After` (seconds) when
 present and otherwise backing off `BaseMs * 2^attempt` capped at `CapMs`, both with ±20 %
 jitter. `MaxAttempts` defaults to 10 for ordinary requests; a request marked with
-`WithLongPollRetry()` — which the pop and consume paths add automatically when `Wait` is true —
+`WithLongPollRetry()` (which the pop and consume paths add automatically when `Wait` is true)
 retries unboundedly unless you set `MaxAttempts`, in which case it applies to both. A `429`
 never marks the backend unhealthy.
 
@@ -388,7 +388,7 @@ if errors.As(err, &httpErr) {
 ```
 
 `StatusCode`, `Code`, `Body` and `RetryAfterSeconds` are all exposed, so you branch on the
-machine-readable code rather than on message text. A `403` is terminal — the consume worker
+machine-readable code rather than on message text. A `403` is terminal: the consume worker
 returns it instead of retrying, because `cluster_suspended`, `storage_quota_exceeded`,
 `feature_gated` and `forbidden` cannot resolve themselves.
 
@@ -405,12 +405,12 @@ defer client.Close(context.Background())
 ```
 
 The Go client installs **no signal handlers**. `Close(ctx)` flushes every buffer and closes
-the HTTP client, and returns an error if a flush failed — so a `defer client.Close(ctx)` in
+the HTTP client, and returns an error if a flush failed, so a `defer client.Close(ctx)` in
 `main` plus your own `signal.NotifyContext` is the pattern. If you cancel the context you pass
 to `Close`, the final flush cannot complete and the buffered messages are lost.
 
 ## Streaming
 
 The windowed streaming SDK lives under `clients/client-go/streams/` in the same module and
-binds to a `*QueueBuilder` through `.AsStreamSource()`. Its concepts — windows, watermarks,
-gates, state — are documented separately in [Use Queen](/use).
+binds to a `*QueueBuilder` through `.AsStreamSource()`. Its concepts (windows, watermarks,
+gates, state) are documented separately in [Use Queen](/use).

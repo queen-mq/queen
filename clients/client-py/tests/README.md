@@ -310,7 +310,7 @@ jobs:
           - 5432:5432
       
       queen:
-        image: smartnessai/queen-mq:latest
+        image: ghcr.io/queen-mq/queen:latest
         env:
           PG_HOST: postgres
           PG_PASSWORD: postgres

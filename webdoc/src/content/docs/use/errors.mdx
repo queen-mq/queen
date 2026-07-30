@@ -27,7 +27,7 @@ Every error body the broker produces is one JSON object with an `error` string:
 {"error":"Authentication required"}
 ```
 
-The proxy adds a machine-readable `code` alongside it, and that field is the one to branch on — the human text may change, the codes are a contract:
+The proxy adds a machine-readable `code` alongside it, and that field is the one to branch on. The human text may change, the codes are a contract:
 
 ```json
 {"error":"request rate limit exceeded","code":"rate_limited"}
@@ -35,7 +35,7 @@ The proxy adds a machine-readable `code` alongside it, and that field is the one
 
 Two conventions surround the envelope.
 
-**A `204` carries no body whatsoever.** Not an empty object, not a zero-length body with a declared length — nothing. This is deliberate: announcing a content length on a body the HTTP layer then elides made strict HTTP/1.1 clients (Node's undici) treat the connection as poisoned and drop it, which under empty-poll load turned into connection-reset storms. Every client already early-returns on 204, so the body was pure cost.
+**A `204` carries no body whatsoever.** Not an empty object, not a zero-length body with a declared length. Nothing. This is deliberate: announcing a content length on a body the HTTP layer then elides made strict HTTP/1.1 clients (Node's undici) treat the connection as poisoned and drop it, which under empty-poll load turned into connection-reset storms. Every client already early-returns on 204, so the body was pure cost.
 
 **An unknown route is a JSON 404, not the dashboard.** The broker's fallback serves the embedded single-page dashboard, but for any path under `/api/` and for any non-GET method it answers:
 
@@ -87,7 +87,7 @@ Before that guard existed, a call to a nonexistent endpoint came back HTTP 200 w
 
 </Steps>
 
-The SDKs handle all three: the JavaScript, Python and Go clients raise on `success: false` for transactions and cycles, and normalise ack results per item — a truncated or misaligned ack response fails loudly rather than being misattributed to the wrong message.
+The SDKs handle all three: the JavaScript, Python and Go clients raise on `success: false` for transactions and cycles, and normalise ack results per item, so a truncated or misaligned ack response fails loudly rather than being misattributed to the wrong message.
 
 ## Behind the proxy
 
@@ -95,31 +95,31 @@ A proxy deployment adds its own error surface in front of the broker. Every resp
 
 | Status | `code` | Cause | Terminal for the client |
 | --- | --- | --- | --- |
-| `401` | `unauthorized` | Missing bearer credential, unknown or revoked API key, invalidated session | Yes — fix the credential |
+| `401` | `unauthorized` | Missing bearer credential, unknown or revoked API key, invalidated session | Yes (fix the credential) |
 | `403` | `cluster_suspended` | The cluster is suspended or being deleted | Yes |
 | `403` | `storage_quota_exceeded` | Storage quota reached; pushes blocked | Yes |
 | `403` | `quota_exceeded` | Monthly message quota exhausted, or a queue/partition/retention ceiling refused | Yes |
 | `403` | `push_blocked` | Billing hold on the cluster | Yes |
 | `403` | `feature_gated` | The route belongs to a plan feature that is off (streams, traces) | Yes |
 | `404` | `route_blocked` | The route is never exposed to a tenant, or an operator route on a cell with the capability off | Yes |
-| `413` | `payload_too_large` | A single item over the plan's payload cap, a batch over the item cap, or a body over the instance cap | Yes — resize the request |
-| `421` | `cluster_unknown` | The request's Host does not resolve to a cluster | Yes — fix the endpoint |
-| `429` | `rate_limited` | Request-rate bucket, message-rate bucket, or parked-consumer slots exhausted | No — retry after backoff |
-| `502` | `bad_gateway` | Upstream unreachable, or a bad upstream URI | No — retriable |
-| `504` | `upstream_timeout` | The broker did not answer inside the proxy's timeout | No — retriable |
+| `413` | `payload_too_large` | A single item over the plan's payload cap, a batch over the item cap, or a body over the instance cap | Yes (resize the request) |
+| `421` | `cluster_unknown` | The request's Host does not resolve to a cluster | Yes (fix the endpoint) |
+| `429` | `rate_limited` | Request-rate bucket, message-rate bucket, or parked-consumer slots exhausted | No (retry after backoff) |
+| `502` | `bad_gateway` | Upstream unreachable, or a bad upstream URI | No (retriable) |
+| `504` | `upstream_timeout` | The broker did not answer inside the proxy's timeout | No (retriable) |
 
 <Aside type="caution">
-Both quota gates that block pushes — storage and monthly messages — are **hard** gates: they are enforced regardless of whether the proxy's rate limiting is in enforcing or shadow mode. A misconfigured monthly quota blocks production pushes on a cell that is otherwise only observing.
+Both quota gates that block pushes (storage and monthly messages) are **hard** gates: they are enforced regardless of whether the proxy's rate limiting is in enforcing or shadow mode. A misconfigured monthly quota blocks production pushes on a cell that is otherwise only observing.
 </Aside>
 
-Note the asymmetry in how quotas are reported. A *rate* over-limit is a `429` and you should wait. A *quota* over-limit is a `403` and waiting will not help — the number is not going to refill this month, and a queue-count ceiling will not raise itself. Retrying a `403` is a busy loop.
+Note the asymmetry in how quotas are reported. A *rate* over-limit is a `429` and you should wait. A *quota* over-limit is a `403` and waiting will not help: the number is not going to refill this month, and a queue-count ceiling will not raise itself. Retrying a `403` is a busy loop.
 
 ### The 429 and Retry-After contract
 
 Every `429` from the proxy carries a `Retry-After` header in **seconds**. Its value comes from the limiter that denied the request:
 
 - **Token-bucket denials** (request rate, message rate) compute `ceil(deficit / refill_rate)`, clamped to between 1 and 60 seconds. A denial never debits the bucket, so a shadow-mode deny does not distort later decisions.
-- **Parked-consumer denials** — too many concurrent long-poll pops holding slots — use a fixed 5 seconds.
+- **Parked-consumer denials** (too many concurrent long-poll pops holding slots) use a fixed 5 seconds.
 
 `Retry-After` is advice about when capacity returns, not a promise. Honour it, and add jitter.
 
@@ -133,13 +133,13 @@ The proxy enforces three separate size limits, and the message tells you which o
 | Batch item count | `batch of 20000 items exceeds max_batch_items (10000)` |
 | Request body, per instance | `request body exceeds cap` |
 
-The per-item cap is checked per item precisely so a batch of many small messages is not rejected by the single-item ceiling. The right response to a `413` is to reshape the request — smaller batches, or a payload that carries a reference instead of the blob — not to retry it. Note that the broker's own body limit (`QUEEN_MAX_BODY_BYTES`, 64 MiB) is separate and larger than the proxy's default request-body cap (16 MiB), so behind a proxy the proxy's cap is the one you meet first.
+The per-item cap is checked per item precisely so a batch of many small messages is not rejected by the single-item ceiling. The right response to a `413` is to reshape the request, not to retry it: send smaller batches, or a payload that carries a reference instead of the blob. Note that the broker's own body limit (`QUEEN_MAX_BODY_BYTES`, 64 MiB) is separate and larger than the proxy's default request-body cap (16 MiB), so behind a proxy the proxy's cap is the one you meet first.
 
 ## What the SDKs retry for you
 
 The JavaScript, Python and Go clients share the same two-layer policy, configured independently.
 
-**Layer one: 5xx and network failures.** `retryAttempts` (default 3) attempts with exponential backoff starting at `retryDelayMillis` (default 1000 ms). With several backend URLs configured, a 5xx or network failure also marks that backend unhealthy and fails over to another. **Any 4xx short-circuits this loop** — client errors are not retried.
+**Layer one: 5xx and network failures.** `retryAttempts` (default 3) attempts with exponential backoff starting at `retryDelayMillis` (default 1000 ms). With several backend URLs configured, a 5xx or network failure also marks that backend unhealthy and fails over to another. **Any 4xx short-circuits this loop**: client errors are not retried.
 
 **Layer two: 429 only.** A separate `retry429` policy retries in place, against the same backend, because a rate limit is not a backend-health signal and must not trigger failover.
 
@@ -151,7 +151,7 @@ The JavaScript, Python and Go clients share the same two-layer policy, configure
 
 The delay is `Retry-After × 1000` when the header is present, otherwise `min(capMs, baseMs × 2^attempt)`; either way it is jittered by ±20% to avoid a synchronised thundering herd.
 
-The unbounded default for long-poll pops is deliberate. A consumer's poll loop is already unbounded, so an individual `429` should be waited out rather than surfaced as a failure after a handful of tries. Ordinary requests — push, admin calls, non-waiting pops — get the bounded budget so a producer does not hang forever.
+The unbounded default for long-poll pops is deliberate. A consumer's poll loop is already unbounded, so an individual `429` should be waited out rather than surfaced as a failure after a handful of tries. Ordinary requests (push, admin calls, non-waiting pops) get the bounded budget so a producer does not hang forever.
 
 <Aside type="note">
 `pop()` in the JavaScript client swallows errors and returns an empty array. That covers an exhausted `429` budget and a terminal `403` alike: both are logged with their `.code` and reported as "no messages". If you need to distinguish "nothing to consume" from "your credential was revoked", read the logs or use the consume loop, which handles `429` and `403` explicitly.
@@ -164,7 +164,7 @@ The streams runtime uses its own smaller HTTP client for `/streams/v1/*`: up to 
 A push that cannot reach PostgreSQL is not simply an error. The broker appends it to an on-disk spool and a background loop replays it later; the same path handles maintenance mode, where every push is diverted and reported with per-item `status: "buffered"` at HTTP 201. A spool write that itself fails downgrades the response to 500 with the failing items marked `failed`.
 
 <Aside type="caution">
-`GET /health` performs a real database round-trip and returns `503` when PostgreSQL is unreachable. Wiring that endpoint to a Kubernetes liveness probe therefore kills the broker exactly when the disk spool exists to keep it useful — the pod is restarted while it is successfully buffering pushes. Use it as a readiness signal, or probe something that does not depend on the database.
+`GET /health` performs a real database round-trip and returns `503` when PostgreSQL is unreachable. Wiring that endpoint to a Kubernetes liveness probe therefore kills the broker exactly when the disk spool exists to keep it useful: the pod is restarted while it is successfully buffering pushes. Use it as a readiness signal, or probe something that does not depend on the database.
 </Aside>
 
 ## A checklist for a robust client

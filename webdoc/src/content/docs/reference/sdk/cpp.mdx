@@ -65,8 +65,8 @@ requests and unbounded for a long-poll pop; `base_millis` is 500; `cap_millis` i
 <Aside type="caution">
 The C++ `ClientConfig` is smaller than the other clients'. There is no custom-headers map, no
 `Host` override, no affinity strategy and no unhealthy-backend cooldown. `load_balancing_strategy`
-recognises exactly one non-default value, `"session"`; **anything else — including
-`"affinity"` — falls through to round-robin silently**.
+recognises exactly one non-default value, `"session"`; **anything else, including
+`"affinity"`, falls through to round-robin silently**.
 </Aside>
 
 ## `QueenClient`
@@ -96,13 +96,13 @@ queen::QueenClient client({"https://cell.example"}, config);
 | `renew` | `renew(const json& message_or_lease_id)` | `json` |
 | `flush_all_buffers` | `flush_all_buffers()` | `void` |
 | `get_buffer_stats` | `get_buffer_stats() const` | `json` |
-| `close` | `close()` | `void` — sets the shutdown flag, flushes buffers, cleans up |
-| `is_shutdown_requested` | `is_shutdown_requested() const` | `bool` — consumer workers poll this |
+| `close` | `close()` | `void` (sets the shutdown flag, flushes buffers, cleans up) |
+| `is_shutdown_requested` | `is_shutdown_requested() const` | `bool` (consumer workers poll this) |
 | `get_http_client` | `get_http_client() const` | `std::shared_ptr<HttpClient>` |
 
 <Aside type="danger">
 Both constructors install signal handlers, and neither is safe. The `SIGINT` handler prints a
-message and calls `exit(0)` **without flushing buffers** — anything buffered at that moment is
+message and calls `exit(0)` **without flushing buffers**: anything buffered at that moment is
 lost. The `SIGTERM` handler only prints; it does not stop consumers or flush. Install your own
 handlers after constructing the client if you need a clean shutdown, set a `std::atomic<bool>`
 stop signal for your consumers, and call `close()` yourself.
@@ -111,7 +111,7 @@ stop signal for your consumers, and call `close()` yourself.
 ### `ack`
 
 `message` is a message object, a transaction-id string, or a JSON array of either. `status` is
-`bool` only — `true` → `completed`, `false` → `failed`. `context` accepts a `group` key and an
+`bool` only: `true` → `completed`, `false` → `failed`. `context` accepts a `group` key and an
 `error` key.
 
 `partitionId` is required on every message object; without it the call throws
@@ -128,7 +128,7 @@ Return shape:
 
 <Aside type="caution">
 Two limits compared with the other clients. `status` is a `bool`, so `retry` and `dlq` are not
-reachable through `ack()` — post to the ack route directly for those. And the wrapper reports
+reachable through `ack()`. Post to the ack route directly for those. And the wrapper reports
 `success: true` for any HTTP 200: the broker's per-item `success` flags are inside `result` and are
 not inspected. A rejected ack looks like a successful call unless you read `result`.
 </Aside>
@@ -136,7 +136,7 @@ not inspected. A rejected ack looks like a successful call unless you read `resu
 ### `renew`
 
 Accepts a lease-id string, a message object, or an array of either. Lease ids are deduplicated in
-insertion order — with multi-partition pop one extend call renews every claimed partition, so
+insertion order: with multi-partition pop one extend call renews every claimed partition, so
 passing the whole message array issues one HTTP call. Returns an array of
 `{leaseId, success, newExpiresAt}` for an array input, or the single element for a scalar input.
 
@@ -158,9 +158,9 @@ passing the whole message array issues one HTTP call. Returns an array of
 
 | Method | Wire call | Returns |
 | --- | --- | --- |
-| `config(const QueueConfig&)` | — | `QueueBuilder&` |
+| `config(const QueueConfig&)` | none | `QueueBuilder&` |
 | `create()` | `POST /api/v1/configure` | `json` |
-| `del()` | `DELETE /api/v1/resources/queues/:queue` | `json` — named `del` because `delete` is a keyword |
+| `del()` | `DELETE /api/v1/resources/queues/:queue` | `json` (named `del` because `delete` is a keyword) |
 
 `QueueConfig` and its `to_json()` output:
 
@@ -172,10 +172,10 @@ passing the whole message array issues one HTTP call. Returns an array of
 | `window_buffer` | `windowBuffer` | `0` | seconds |
 | `retention_seconds` | `retentionSeconds` | `0` | seconds |
 | `completed_retention_seconds` | `completedRetentionSeconds` | `0` | seconds |
-| `encryption_enabled` | `encryptionEnabled` | `false` | — |
+| `encryption_enabled` | `encryptionEnabled` | `false` | n/a |
 
 `create()` always sends the complete set, so calling it without `config()` applies the struct's
-defaults — including `leaseTime: 300`, whereas a queue created implicitly by a first push gets a
+defaults, including `leaseTime: 300`, whereas a queue created implicitly by a first push gets a
 60-second lease. `to_json()` emits a fixed key set, so options outside that struct cannot be set
 through `config()`; post to `/api/v1/configure` yourself when you need one. And remember
 **`/configure` is a full replace**: keys absent from the body reset to the broker's defaults. The
@@ -210,14 +210,14 @@ client.queue("orders")
 | `auto_ack(bool)` | `true` | `true` | See the warning. |
 | `subscription_mode(const std::string&)` | `""` | `""` | `all` \| `new`. |
 | `subscription_from(const std::string&)` | `""` | `""` | `"now"` or an ISO timestamp. |
-| `concurrency(int)` | — | `1` | `consume()` only. Thread-pool workers. |
-| `limit(int)` | — | `0` (unlimited) | `consume()` only. |
-| `idle_millis(int)` | — | `0` (no timeout) | `consume()` only. |
-| `renew_lease(bool, int interval_millis = 60000)` | — | `false` | `consume()` only. See the note below. |
-| `each()` | — | batch mode | `consume()` only. One message per handler call. |
+| `concurrency(int)` | n/a | `1` | `consume()` only. Thread-pool workers. |
+| `limit(int)` | n/a | `0` (unlimited) | `consume()` only. |
+| `idle_millis(int)` | n/a | `0` (no timeout) | `consume()` only. |
+| `renew_lease(bool, int interval_millis = 60000)` | n/a | `false` | `consume()` only. See the note below. |
+| `each()` | n/a | batch mode | `consume()` only. One message per handler call. |
 
 <Aside type="danger">
-`pop()` never sends `autoAck` to the broker, whatever `auto_ack()` was set to — the parameter is
+`pop()` never sends `autoAck` to the broker, whatever `auto_ack()` was set to: the parameter is
 simply absent from the query it builds. So a C++ `pop()` is always a manual-ack pop, and you must
 ack or let the lease expire. On `consume()`, `auto_ack` defaults to `true` and drives the
 client-side ack/nack around your handler.
@@ -230,7 +230,7 @@ themselves before the lease expires.
 </Aside>
 
 <Aside type="note">
-`QueueBuilder` has no long-poll timeout setter — the other clients all have one. Both `pop()` and
+`QueueBuilder` has no long-poll timeout setter. The other clients all have one. Both `pop()` and
 `consume()` use the fixed 30000 ms. A consumer that needs to release its long-poll more often, so a
 shutdown flag is observed promptly, has to build the query itself through
 `get_http_client()->get(...)` with `RetryKind::Pop`.
@@ -238,7 +238,7 @@ shutdown flag is observed promptly, has to build the query itself through
 
 #### `pop()`
 
-`json pop()` — the `messages` array, or an empty array. Route selection: queue plus non-`Default`
+`json pop()` returns the `messages` array, or an empty array. Route selection: queue plus non-`Default`
 partition uses `/api/v1/pop/queue/:queue/partition/:partition`; queue alone uses
 `/api/v1/pop/queue/:queue`; namespace or task alone uses `/api/v1/pop`. None of the three throws.
 
@@ -276,7 +276,7 @@ Worker loop behaviour:
 - Any other `HttpError` or exception is re-thrown from the worker.
 
 <Aside type="note">
-In `each()` mode, a nack does **not** abandon the rest of the popped batch — the loop continues to
+In `each()` mode, a nack does **not** abandon the rest of the popped batch: the loop continues to
 the next message. The nack released the lease and clamped the broker cursor at the failed message,
 so the remaining messages will be redelivered and the acks for them will be rejected. If ordering
 matters, break out of the batch yourself by throwing from the handler on the first failure and
@@ -284,7 +284,7 @@ using `stop_signal`, or process with `batch(1)`.
 </Aside>
 
 <Aside type="note">
-There is no `message.trace()` in C++ — a JSON object cannot carry a method. The header's trace hook
+There is no `message.trace()` in C++: a JSON object cannot carry a method. The header's trace hook
 is an explicit no-op. Post to `/api/v1/traces` through `get_http_client()->post(...)` when you need
 tracing.
 </Aside>
@@ -304,7 +304,7 @@ tracing.
 | --- | --- |
 | `limit(int)` / `offset(int)` | Paging. |
 | `from(const std::string&)` / `to(const std::string&)` | Time filters. |
-| `get()` | `json` — `{"messages": [...], "total": n}` |
+| `get()` | `json`, shaped `{"messages": [...], "total": n}` |
 
 Read-only, and this client has no admin surface, so replay means reading the row and pushing the
 payload again, or calling `POST /api/v1/messages/{partitionId}/{transactionId}/retry` yourself.
@@ -342,8 +342,8 @@ queen::json overview = http->get("/api/v1/resources/overview");
 | `del` | `del(path, request_timeout_millis = 0, retry_kind = RetryKind::Default)` |
 | `get_load_balancer` | `get_load_balancer() const` |
 
-All four return `json` — `nullptr` for an empty body or a `204` (the broker sends no body at all
-on `204`) — and throw `HttpError` on any status `>= 400`. `request_timeout_millis` of `0` uses the
+All four return `json`, with `nullptr` for an empty body or a `204` (the broker sends no body at
+all on `204`), and throw `HttpError` on any status `>= 400`. `request_timeout_millis` of `0` uses the
 client default. Pass `RetryKind::Pop` for a long-poll request so a 429 backs off indefinitely
 instead of using the bounded budget.
 

@@ -1,6 +1,6 @@
 ---
 title: Endpoints a tenant can reach
-description: "Every broker route, classified into the seven classes the gateway enforces — produce, consume, queue admin, read, gated, operator, blocked."
+description: "Every broker route, classified into the seven classes the gateway enforces: produce, consume, queue admin, read, gated, operator, blocked."
 type: reference
 tier: operate
 sidebar:
@@ -17,8 +17,8 @@ matched against one classifier, which returns exactly one class, and the class d
 three things at once: which credential may use the route, which limits apply to it, and
 which usage class it meters as.
 
-The classifier is the enforcement spec. It runs on the URL path only — never the query
-string — and it is written to fail closed.
+The classifier is the enforcement spec. It runs on the URL path only, never the query
+string, and it is written to fail closed.
 
 ## How a path is classified
 
@@ -35,13 +35,13 @@ string — and it is written to fail closed.
    `/status`, and the queue-less discovery pop `GET /api/v1/pop`. Blocked for every
    principal on every cell.
 
-3. **Data plane, then queue admin, then gated features, then reads** — by exact path or
+3. **Data plane, then queue admin, then gated features, then reads**, by exact path or
    prefix, and for some routes by method: a `DELETE` under `/api/v1/resources/queues/`
    is queue admin, while a `GET` on the same prefix is a read.
 
 4. **Anything else under `/api/` is blocked.** An unrecognised API-shaped path is never
-   forwarded, so a broker route added upstream does not become reachable by accident —
-   it has to be classified here first.
+   forwarded, so a broker route added upstream does not become reachable by accident.
+   It has to be classified here first.
 
 5. **Everything else is a read.** That is the dashboard and static-asset fallback.
 
@@ -55,7 +55,7 @@ and is forbidden.
 
 **`produce`** is the only class whose request body is parsed. The body is buffered so
 items can be counted, per-item payload sizes checked, each `(queue, partition)` admitted
-against the plan caps, and message tokens taken. It is forwarded byte for byte — the
+against the plan caps, and message tokens taken. It is forwarded byte for byte: the
 proxy never rewrites a body.
 
 **`consume`** with `wait=true` holds a parked-consumer slot for the duration of the
@@ -74,14 +74,14 @@ clamped to `QUEEN_PROXY_LONGPOLL_MAX_MS`, plus `QUEEN_PROXY_LONGPOLL_MARGIN_MS`.
   `features` object, not by the credential's scopes.
 - `operator` and `blocked` are the two classes a tenant can never reach. They are
   cell-wide surfaces that the broker does not tenant-scope, which is precisely why the
-  proxy exists — [Isolation](/selfhost/multi-tenant/isolation) explains what each of
+  proxy exists. [Isolation](/selfhost/multi-tenant/isolation) explains what each of
   them would leak.
 
 ## Related
 
-- [Credentials and authorization](/selfhost/multi-tenant/auth) — the matrix of class
+- [Credentials and authorization](/selfhost/multi-tenant/auth): the matrix of class
   against principal.
-- [Quotas and rate limits](/selfhost/multi-tenant/quotas) — which limits attach to
+- [Quotas and rate limits](/selfhost/multi-tenant/quotas): which limits attach to
   which class.
 - The broker's own route table, with the access level each route requires, is in the
   [reference](/reference).

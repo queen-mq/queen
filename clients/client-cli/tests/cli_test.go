@@ -9,7 +9,7 @@
 //	docker run -d --name qpg -e POSTGRES_PASSWORD=postgres -p 5433:5432 postgres:16
 //	docker run -d --name queen --link qpg:qpg -p 6632:6632 \
 //	  -e PG_HOST=qpg -e PG_PORT=5432 -e PG_PASSWORD=postgres \
-//	  smartnessai/queen-mq:0.14.3
+//	  ghcr.io/queen-mq/queen:latest
 //	cd clients/client-cli && make build
 //	QUEEN_E2E=1 \
 //	  QUEEN_SERVER=http://localhost:6632 \

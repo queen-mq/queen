@@ -19,7 +19,7 @@ verifiedBy:
 ---
 
 You need Docker and about five minutes. At the end you will have a PostgreSQL, a
-broker, and one message that went in and came out — first through the JavaScript
+broker, and one message that went in and came out: first through the JavaScript
 SDK, then through `curl`, so you can see the wire.
 
 The broker creates its own schema at boot: it embeds the DDL and the stored
@@ -50,10 +50,10 @@ migration step to run, and no extensions to install into PostgreSQL.
    to `6632`.
 
    ```bash
-   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres smartnessai/queen-mq:1.0.0
+   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
    ```
 
-4. **Check that it is up.** `/health` is not a static answer — it takes a
+4. **Check that it is up.** `/health` is not a static answer: it takes a
    connection from the pool and does a real database round-trip, so a healthy
    response means the broker and PostgreSQL are both working.
 
@@ -67,7 +67,7 @@ migration step to run, and no extensions to install into PostgreSQL.
 
    If PostgreSQL is unreachable you get HTTP 503 and
    `{"status":"unhealthy","database":"disconnected",…}` instead. Check the
-   broker's logs with `docker logs queen` — it prints the configuration it
+   broker's logs with `docker logs queen`. It prints the configuration it
    actually resolved at boot, including the PostgreSQL host it is dialling.
 
 </Steps>
@@ -83,7 +83,7 @@ deployment like this one will not get past the dashboard's login gate. See
 
 There is nothing to create first. A queue and a partition are provisioned by the
 first push that names them, so the only decision you make here is the partition
-key — the thing whose events must stay in order relative to each other.
+key, the thing whose events must stay in order relative to each other.
 
 <Tabs>
 <TabItem label="JavaScript">
@@ -100,7 +100,7 @@ import { Queen } from 'queen-mq'
 const client = new Queen('http://localhost:6632')
 ```
 
-Push a message. `data` is your payload — it must be JSON. The blocks below are
+Push a message. `data` is your payload, and it must be JSON. The blocks below are
 extracted verbatim from the files the JavaScript suite executes, which is why the
 queue names look like test fixtures; substitute your own:
 
@@ -163,8 +163,8 @@ curl -i -X POST http://localhost:6632/api/v1/ack -H 'Content-Type: application/j
 [{"index":0,"transactionId":"019842f1-...","success":true,"error":null,"leaseReleased":true,"dlq":false,"noop":false}]
 ```
 
-The ack response is HTTP 200 even when an individual ack was rejected — a stale
-lease, an offset already committed — so the per-item `success` flag is the signal
+The ack response is HTTP 200 even when an individual ack was rejected (a stale
+lease, an offset already committed), so the per-item `success` flag is the signal
 to check, not the status code.
 
 </TabItem>
@@ -184,8 +184,8 @@ HTTP/1.1 204 No Content
 ```
 
 <Aside type="caution">
-**An empty pop is a bodiless 204.** Not an empty array, not `{"messages":[]}` —
-no body at all. This is deliberate: announcing a content-length on a body the
+**An empty pop is a bodiless 204.** Not an empty array, not `{"messages":[]}`.
+No body at all. This is deliberate: announcing a content-length on a body the
 server then elides made strict HTTP/1.1 clients treat the connection as poisoned
 and drop it, which under empty-poll load turned into connection-reset storms.
 Every `204` the broker returns is bodiless, so a client must branch on the status
@@ -219,12 +219,12 @@ docker network rm queen
   <LinkCard
     href="/use"
     title="Use Queen"
-    description="The model in depth — partitions, consumer groups, acks as offset commits, leases, retries, transactions and replay."
+    description="The model in depth: partitions, consumer groups, acks as offset commits, leases, retries, transactions and replay."
   />
   <LinkCard
     href="/reference"
     title="Reference"
-    description="Every route, every environment variable, every metric — generated from the source."
+    description="Every route, every environment variable, every metric, generated from the source."
   />
   <LinkCard
     href="/selfhost"

@@ -127,14 +127,14 @@ The route forces the cycle above to run now instead of waiting out `STATS_INTERV
 same `queen.log_refresh_all_stats_v1()` the loop calls, and returns its summary.
 
 <Aside type="caution">
-Until 2026-07-30 it called `queen.refresh_all_stats_v1(true)` — the **rows-engine** reconciler — and
+Until 2026-07-30 it called `queen.refresh_all_stats_v1(true)` (the **rows-engine** reconciler), and
 the handler comment described that as a no-op wired for parity. It was not a no-op. That procedure
 computes partition statistics from `queen.messages`, `queen.partitions`, `queen.partition_consumers`
 and `queen.dead_letter_queue`, all empty under the log engine, and its second step
 (`aggregate_queue_stats_v2`) then rebuilt the `queue` rows from the missing `partition` rows with
 `COALESCE(..., 0)`. Both refreshers key those rows identically (`stat_type = 'queue'`,
 `stat_key = queues.id`), so hitting the route **blanked the live counters** until the next background
-cycle repaired them — measured on a queue holding three pending messages: `child_count` 2 → 0,
+cycle repaired them. Measured on a queue holding three pending messages: `child_count` 2 → 0,
 `total_messages` 3 → 0, `pending_messages` 3 → 0, with `/api/v1/status/queues` reporting an idle
 queue throughout that window.
 
@@ -151,8 +151,8 @@ readers aggregate across replicas.
 Each cycle it:
 
 - diffs the in-process operation counters since the last flush and inserts one
-  `queen.worker_metrics` row of per-minute deltas — an `AFTER INSERT` trigger rolls it into
-  `queen.worker_metrics_summary`, which is where the dashboard's lifetime totals come from;
+  `queen.worker_metrics` row of per-minute deltas (an `AFTER INSERT` trigger rolls it into
+  `queen.worker_metrics_summary`, which is where the dashboard's lifetime totals come from);
 - samples host and process gauges (CPU from `getrusage` as a delta over the interval, RSS,
   deadpool's pool status) and inserts one `queen.system_metrics` row whose `metrics` JSONB matches
   the shape the reader re-aggregates;
@@ -161,7 +161,7 @@ Each cycle it:
 ### Per-queue rates
 
 `queen.queue_lag_metrics` is keyed `(bucket_time, queue_name, tenant_id)` on one-minute buckets, and
-the upsert **sums** on conflict — so several replicas writing the same minute aggregate into one
+the upsert **sums** on conflict, so several replicas writing the same minute aggregate into one
 cluster-wide row. Each bucket carries pop count, push request and message counts, empty-pop count,
 transaction count, and ack request, success and failure counts.
 
@@ -185,10 +185,10 @@ messages are being delivered.
 
 `/metrics/prometheus` mixes three kinds of series, and the prefix tells you which:
 
-- **`queen_process_*`** — what *this* broker instance did since it started. Reset on restart.
-- **`queen_cluster_*`** — lifetime totals read back out of PostgreSQL, so every instance reports the
+- **`queen_process_*`**: what *this* broker instance did since it started. Reset on restart.
+- **`queen_cluster_*`**: lifetime totals read back out of PostgreSQL, so every instance reports the
   same value.
-- **Gauges** — live in-process readings: the two Vegas limits, pool active/idle/size, spool pending
+- **Gauges** are live in-process readings: the two Vegas limits, pool active/idle/size, spool pending
   and failed, fusion items per batch, the pop fill-wait counters.
 
 The full list is generated from the source; see the [Prometheus reference](/reference).
@@ -199,7 +199,7 @@ tenant on a shared cell.
 </Aside>
 
 Two collection details worth knowing because they affect what the numbers mean. `autoAck` deliveries
-are counted as acks — they *are* acknowledgements, so the ack throughput and completed totals reflect
+are counted as acks: they *are* acknowledgements, so the ack throughput and completed totals reflect
 auto-acked consumption. And a push whose transaction failed is counted in the database-error series
 *before* the spool relabels those items `buffered`, so spooling never hides the failure.
 
@@ -216,4 +216,4 @@ auto-acked consumption. And a push whose transaction failed is counted in the da
   not a tally of acks.
 - **One queue-detail field is honestly zero.** `cursor.batchesConsumed` reads 0 because
   `queen.log_consumers` does not carry the retired per-batch counter, and `lastActivity` is
-  `MAX(lease_acquired_at)` — the closest activity signal the log schema keeps.
+  `MAX(lease_acquired_at)`, the closest activity signal the log schema keeps.

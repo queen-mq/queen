@@ -17,7 +17,7 @@ sourceOfTruth:
 Queen can encrypt message payloads before they are written to PostgreSQL, so a
 database dump, a stolen backup or a read-only replica does not yield message
 contents. It is AES-256-GCM, it is opt-in per queue, and it needs exactly two things
-to be true at once — a key on the process and a flag on the queue.
+to be true at once: a key on the process and a flag on the queue.
 
 The rest of this page is mostly about what happens when only one of them is true,
 because that case fails quietly.
@@ -42,7 +42,7 @@ because that case fails quietly.
    encryption service initialized (AES-256-GCM)
    ```
 
-   If that line is absent, encryption is off — see
+   If that line is absent, encryption is off. See
    [the silent failure](#a-bad-key-silently-stores-plaintext).
 
 4. Flag each queue that should be encrypted, with `encryptionEnabled` in the options
@@ -64,12 +64,12 @@ queue and caches the answer, keyed by tenant and queue name.
 Encryption applies when the key is loaded **and** the queue's flag is true. Four
 write paths consult the same flag: `POST /api/v1/push`, `POST /api/v1/transaction`,
 the stream emit path, and the disk spool the broker falls back to when PostgreSQL is
-unreachable — so a payload buffered to local disk during an outage is enveloped
+unreachable, so a payload buffered to local disk during an outage is enveloped
 before it is written, not after it is replayed.
 
 Two cases resolve to "no encryption", both without an error:
 
-- The queue has no `queen.queues` row yet — it was created implicitly by a push and
+- The queue has no `queen.queues` row yet: it was created implicitly by a push and
   never `/configure`d. The flag reads as `false`.
 - The flag lookup could not reach the database. The flag reads as `false`.
 
@@ -92,7 +92,7 @@ An encrypted payload is stored as a JSON object:
 
 Standard base64 with padding, `authTag` in camelCase. The envelope stores all 16 IV
 bytes but only the **first 12** are fed to the cipher, because that is what the
-previous OpenSSL-based implementation did — it never set the GCM IV length, so it
+previous OpenSSL-based implementation did. It never set the GCM IV length, so it
 silently used OpenSSL's default 12-byte nonce. Matching that byte for byte is what
 makes messages written by 0.16.0 readable here, and vice versa.
 
@@ -120,7 +120,7 @@ Three refusals, all of which return the payload **as stored**:
 <Aside type="caution">
 A decrypt failure is never an error to a consumer. It is a message whose body happens
 to be an envelope. Any client that assumes its own schema will fail on the field
-names, not on a status code — so if you rely on encryption, assert on the decrypted
+names, not on a status code, so if you rely on encryption, assert on the decrypted
 shape in your consumer, and alert on it.
 </Aside>
 
@@ -141,8 +141,8 @@ accepting pushes and stores every payload in plaintext. The push succeeds. The
 response says `queued`. Nothing on the data path mentions it again.
 
 The same design covers a runtime cipher failure: if encryption is on and the cipher
-call fails for an individual message, the broker warns — sampled at one line per
-10,000 occurrences, so it cannot flood stderr at ingest rate — and stores that
+call fails for an individual message, the broker warns (sampled at one line per
+10,000 occurrences, so it cannot flood stderr at ingest rate) and stores that
 message in plaintext rather than failing the push.
 
 The practical consequence is that "the queue is flagged" is not evidence of
@@ -158,7 +158,7 @@ anything. Verify at the deployment level:
 
 3. Make that check part of the deploy, not a one-off. A key that arrives from a
    secret store as an empty string, or with a trailing newline, produces exactly the
-   64-character check failure above — and 65 characters is a wrong length.
+   64-character check failure above, and 65 characters is a wrong length.
 
 </Steps>
 
@@ -169,15 +169,15 @@ tries only that key. Rotating means: every broker in the group restarts with the
 key at the same moment, and every message still in the log that was written under the
 old key becomes an undecryptable envelope from that instant.
 
-If you need to rotate, drain the affected queues first — consume to the head, or let
-retention age the old segments out — and only then change the key. Verify the drain
+If you need to rotate, drain the affected queues first (consume to the head, or let
+retention age the old segments out) and only then change the key. Verify the drain
 with the queue's own depth, not with elapsed time.
 
 ## Related
 
-- [Trust boundaries](/selfhost/security) — what else is and is not protected in a
+- [Trust boundaries](/selfhost/security): what else is and is not protected in a
   Queen deployment.
-- [PostgreSQL TLS](/selfhost/security/postgres-tls) — protecting the payload in
+- [PostgreSQL TLS](/selfhost/security/postgres-tls): protecting the payload in
   transit to the database, which is a different problem from protecting it at rest.
 - The `QUEEN_ENCRYPTION_KEY` entry, and the boot block that masks it, are in the
   [reference](/reference).

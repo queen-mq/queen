@@ -72,8 +72,15 @@ ARG QUEENCTL_COMMIT=none
 
 WORKDIR /src
 
-# Copy only the two Go modules queenctl needs. client-go's path is
-# referenced via the replace directive in client-cli/go.mod.
+# Copy only the two Go modules queenctl needs, plus the workspace file that
+# binds them together. go.work is NOT optional here: client-cli/go.mod requires
+# `client-go v0.15.0` from the public proxy, and the local `replace` directive
+# that used to override it was deliberately removed (it broke downstream
+# `go install`) in favour of this workspace. Without go.work the build resolves
+# the published v0.15.0, which predates HTTPError.Code and three QueueConfig
+# fields the CLI uses, and the compile fails. The paths inside go.work are
+# ./clients/... relative to the workspace root, which is why it lands in /src.
+COPY go.work ./
 COPY clients/client-go/ ./clients/client-go/
 COPY clients/client-cli/ ./clients/client-cli/
 

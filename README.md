@@ -22,6 +22,21 @@
 
 </div>
 
+> **Looking for the C++ implementation?** Version 1.0.0 replaced it with a Rust broker on a new
+> storage engine, and the C++ tree is not in this branch any more. It is still there in history:
+> browse the repository as it stood at
+> [`70de0aa`](https://github.com/queen-mq/queen/tree/70de0aa954d9b0e7cb7ffafd60bf5f5289e5c11a),
+> the last commit before the merge, or check out the last released C++ version,
+> [`v0.16.0`](https://github.com/queen-mq/queen/tree/v0.16.0). Nothing was deleted, and both stay
+> reachable:
+>
+> ```bash
+> git checkout 70de0aa954d9b0e7cb7ffafd60bf5f5289e5c11a
+> ```
+>
+> Its documentation described that implementation and does not describe 1.0.0. See
+> [the changelog](CHANGELOG.md) for what changed and what breaks.
+
 Queen MQ is a message queue that keeps its data in PostgreSQL. A queue is split into
 **partitions**, one per entity, created the first time you push to one. Each partition is a
 strictly ordered lane that a consumer group drains independently, so ten thousand partitions
@@ -60,7 +75,7 @@ docker run --name qpg --network queen -e POSTGRES_PASSWORD=postgres -p 5433:5432
 ```
 
 ```bash
-docker run -p 6632:6632 --network queen -e PG_HOST=qpg -e PG_PASSWORD=postgres smartnessai/queen-mq:1.0.0
+docker run -p 6632:6632 --network queen -e PG_HOST=qpg -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
 ```
 
 The broker creates its own schema on boot. Then push and consume with the JavaScript SDK

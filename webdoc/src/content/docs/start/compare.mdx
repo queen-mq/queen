@@ -1,6 +1,6 @@
 ---
 title: Compared to Kafka, RabbitMQ, SQS and pgmq
-description: "Architectural differences only — how each system gets per-entity ordering, and what that costs. No performance comparisons."
+description: "Architectural differences only: how each system gets per-entity ordering, and what that costs. No performance comparisons."
 type: concept
 tier: use
 sidebar:
@@ -48,7 +48,7 @@ quorum, and a JVM.
 
 - **Entities are hash-modded onto shards.** Because the partition count is fixed
   and much smaller than the number of entities, many entities share a partition.
-  A consumer stuck on one entity stalls every entity it happens to collide with —
+  A consumer stuck on one entity stalls every entity it happens to collide with,
   which is exactly the head-of-line problem Queen exists to avoid. Queen's
   partitions are logical, so an entity gets its own lane and a stall is contained
   to it.
@@ -56,11 +56,11 @@ quorum, and a JVM.
   partitions, but that changes the key-to-partition mapping, so ordering across
   the change is not preserved for existing keys. In Queen the number of lanes is
   whatever your data produced; there is nothing to resize.
-- **Rebalancing is a protocol you wait out.** Queen has no assignment at all — a
+- **Rebalancing is a protocol you wait out.** Queen has no assignment at all: a
   pop is a claim on a span, recorded as a lease with an expiry. A worker that dies
   does not trigger a group-wide reassignment; its lease lapses.
 - **Kafka replicates itself; Queen does not.** Kafka's durability and failover are
-  its own. Queen's are PostgreSQL's — which is an advantage if you already run
+  its own. Queen's are PostgreSQL's, which is an advantage if you already run
   PostgreSQL well and a limitation if you wanted the message broker to be
   independently replicated. One PostgreSQL is one failure domain.
 - **Ecosystem.** Kafka has connectors, stream-processing frameworks and a very
@@ -72,7 +72,7 @@ quorum, and a JVM.
 **The shape.** Producers publish to exchanges; bindings route messages into
 queues; consumers take messages from queues with per-message acknowledgement,
 negative acknowledgement and dead-letter exchanges. Order is a property of a
-queue, and it holds when that queue is drained by a single consumer — competing
+queue, and it holds when that queue is drained by a single consumer. Competing
 consumers on one queue interleave, and requeues reorder. Queues are live
 server-side objects with their own state on the broker.
 
@@ -93,7 +93,7 @@ server-side objects with their own state on the broker.
   you need content-based routing, Queen will not give it to you.
 - **Where Queen borrowed from RabbitMQ.** Leases with expiry, explicit
   `completed` / `failed` / `retry` / `dlq` outcomes, a retry budget and a real
-  dead-letter table are all recognisably from this side of the family — with one
+  dead-letter table are all recognisably from this side of the family, with one
   difference that matters more than it sounds: Queen's ack is an offset commit,
   not a per-message receipt, so acking a message implicitly completes every
   earlier unacked message in that partition for that group.
@@ -114,8 +114,8 @@ with per-queue throughput quotas that standard queues do not have.
 - **There is no server, and that is the whole point.** Nothing to run, nothing to
   size, nothing to back up. Queen cannot match that: it is a binary plus a
   PostgreSQL you operate. If the appeal is "no infrastructure", stop here.
-- **No consumer groups.** Fan-out is a topology you assemble — a topic in front of
-  several queues — and each subscriber gets its own copy stored separately. In
+- **No consumer groups.** Fan-out is a topology you assemble (a topic in front of
+  several queues), and each subscriber gets its own copy stored separately. In
   Queen fan-out is a second `consumerGroup` string on the pop, reading the same
   stored messages through its own cursor.
 - **No replay.** A deleted message is gone; there is no cursor to rewind and no
@@ -124,10 +124,10 @@ with per-queue throughput quotas that standard queues do not have.
   `dedupWindowSeconds` is a per-queue setting, keyed on the `transactionId` you
   supply, enforced inside the database before an offset is allocated.
 - **You cannot query the backlog.** Queen's queues, partitions, cursors, dead
-  letters and lag are tables — you can `SELECT` them with the client you already
+  letters and lag are tables: you can `SELECT` them with the client you already
   have, and take a `pg_dump` of the whole thing.
 - **Ordering domain limits are different in kind.** SQS constrains FIFO
-  throughput per queue and per group by quota; Queen constrains it by physics —
+  throughput per queue and per group by quota; Queen constrains it by physics:
   one partition is one writer and one in-flight leased batch per group.
 
 ## pgmq
@@ -138,14 +138,14 @@ the right place to keep messages.
 **The shape.** A PostgreSQL extension. Creating a queue creates a table (plus an
 archive table). Sending inserts a row. Reading updates the row to set a
 visibility timeout and returns it; deleting removes it; archiving moves it. There
-is no broker process — clients connect to PostgreSQL and call SQL functions.
+is no broker process: clients connect to PostgreSQL and call SQL functions.
 
 **Where it diverges from Queen.**
 
 - **Fan-out.** pgmq has no consumer-group concept, so delivering the same stream
   to several independent consumers means a queue per consumer, and one stored copy
   of every message per consumer. Queen stores each message once and gives each
-  consumer group its own cursor over it — the group is a string on the pop, and
+  consumer group its own cursor over it: the group is a string on the pop, and
   adding one writes no additional message data.
 - **Ordering per entity.** Rows carry monotone ids, but concurrent readers taking
   rows under visibility timeouts do not preserve per-key order, so per-entity FIFO
@@ -153,7 +153,7 @@ is no broker process — clients connect to PostgreSQL and call SQL functions.
   partitions are rows inside one queue.
 - **Per-message row state versus a cursor.** pgmq tracks delivery per message: an
   `UPDATE` to lease it, a `DELETE` or a move to archive to finish it. Queen keeps
-  no per-message state at all — acknowledgement advances one `committed` offset
+  no per-message state at all: acknowledgement advances one `committed` offset
   per (partition, group). That is why Queen has no per-message delete to do, and
   also why it cannot delete one message on request.
 - **Extension versus schema.** pgmq is installed as an extension, which some
@@ -163,7 +163,7 @@ is no broker process — clients connect to PostgreSQL and call SQL functions.
   HTTP clients in any language, long-polling, and the coalescing of many
   concurrent pushes into shared commits. It is also a process to run, a network
   hop that pgmq does not have, and one more thing that can be misconfigured.
-  pgmq's answer — no broker — is genuinely simpler when your consumers are all
+  pgmq's answer (no broker) is genuinely simpler when your consumers are all
   happy speaking SQL.
 
 ## Choosing something else
@@ -173,11 +173,11 @@ Each of these systems is the right answer to a question Queen answers badly.
 | Choose | When |
 | --- | --- |
 | **Kafka** | Your ordering domains are few and stable rather than one-per-entity; you want the broker to replicate itself independently of a database; you need the connector and stream-processing ecosystem; you already operate a JVM cluster well |
-| **RabbitMQ** | You need real routing — exchanges, topic patterns, header matching — or protocol breadth beyond HTTP; ordering per queue is enough and you do not need replay |
+| **RabbitMQ** | You need real routing (exchanges, topic patterns, header matching) or protocol breadth beyond HTTP; ordering per queue is enough and you do not need replay |
 | **Amazon SQS** | You want no server and no database to operate at all; your fan-out is built from a topic plus several queues; your ordering domains fit FIFO's quotas; you never need to re-read history |
 | **pgmq** | You want PostgreSQL-backed queuing with no broker process; your consumers can all speak SQL; a work queue with visibility timeouts is enough, without consumer groups or replay; you can install extensions |
 | **Queen** | You need strict FIFO per entity at high and unpredictable cardinality, where one slow entity must not block others; consumer groups with replay over the same stored messages; ack-and-push in one PostgreSQL transaction; one binary and no cluster, next to a PostgreSQL you already run |
 
-Before committing either way, read [Limits and non-goals](/start/limits) — it is
+Before committing either way, read [Limits and non-goals](/start/limits). It is
 the honest inverse of this page, and it will disqualify Queen faster than any
 comparison table.

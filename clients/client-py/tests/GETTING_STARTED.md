@@ -17,7 +17,7 @@ docker run --name postgres \
 docker run -p 6632:6632 \
   -e PG_HOST=host.docker.internal \
   -e PG_PASSWORD=postgres \
-  smartnessai/queen-mq:latest
+  ghcr.io/queen-mq/queen:latest
 ```
 
 Or use docker-compose (see main README).

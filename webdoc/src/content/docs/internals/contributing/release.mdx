@@ -61,28 +61,40 @@ you which broker it was released against without a compatibility matrix.
 The numbers in the tree have not been aligned yet. `server/server.json` still reads
 `1.0.0-alpha-01`, the JavaScript client `0.16.1`, the Python client `0.15.0` and the dashboard
 `0.15.1`. Aligning them at `1.0.0` is part of cutting the release, not something already done.
-`README.md` also still advertises `smartnessai/queen-mq:0.16.0` and 0.16-era numbers.
+`README.md` now points at `ghcr.io/queen-mq/queen:latest`, but its prose still carries 0.16-era
+numbers.
 </Aside>
 
 ## What CI publishes
 
-### The broker image
+### The container images
 
-`.github/workflows/docker-build.yml` builds the root `Dockerfile` for `linux/amd64` and
-`linux/arm64` and pushes two tags (the version from `server.json` and `latest`) to the
-registry named by the `DOCKER_REGISTRY` secret, with `DOCKER_USERNAME` and `DOCKER_PASSWORD` as
-credentials. It passes `QUEENCTL_VERSION` (the same version string) and `QUEENCTL_COMMIT` (the
-short SHA) as build arguments so that `queenctl version` inside the container matches what the
-broker reports. Layer caching is GitHub Actions cache.
+`.github/workflows/docker-build.yml` publishes **two** images to GHCR, as a matrix over the two
+Dockerfiles:
 
-The trigger is a push to the **`release` branch**, not a tag. A pull request against `release`
-builds without pushing.
+| Image | Dockerfile | Version from |
+| --- | --- | --- |
+| `ghcr.io/queen-mq/queen` | `Dockerfile` | `server/server.json` |
+| `ghcr.io/queen-mq/queen-proxy` | `queen_proxy/Dockerfile` | `queen_proxy/Cargo.toml` |
 
-<Aside type="caution">
-That workflow still contains a "Test Docker Hub login" step which logs in a second time, echoes
-the username and registry into the build log, and pushes a `hello-world` image to
-`<registry>/test:latest` on every release build. It is debug scaffolding that was never removed.
-It does not affect the published image, but it does write a stray repository into the registry.
+Both build for `linux/amd64` and `linux/arm64` from the repository root: the proxy crate embeds
+`../server/webapp/dist`, so its context cannot be `queen_proxy/`. Each gets three tags: its own
+version, `sha-<short>`, and `latest`. The broker also receives `QUEENCTL_VERSION` and
+`QUEENCTL_COMMIT` as build arguments so that `queenctl version` inside the container matches what
+the broker reports.
+
+Authentication is the workflow's own `GITHUB_TOKEN` under `permissions: packages: write`, so there
+are no registry secrets to rotate. Layer caching is the GitHub Actions cache, **scoped per image**
+(`scope=${{ matrix.image }}`); a shared scope would make the two matrix legs evict each other's
+layers and cold-build every run.
+
+Triggers are a push to the **`release` branch**, a **`v*` tag**, or `workflow_dispatch`. A pull
+request against `release` builds both images without pushing.
+
+<Aside type="note">
+A GHCR package is **private** the first time it is published. Flip it once, by hand, under
+[the org's packages](https://github.com/orgs/queen-mq/packages) → the package → Package settings.
+Until then `docker pull` fails for everyone but the org.
 </Aside>
 
 ### The CLI

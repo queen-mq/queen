@@ -40,7 +40,7 @@ if ! curl -s http://localhost:6632/health > /dev/null 2>&1; then
     echo -e "${RED}❌ Queen server not running on http://localhost:6632${NC}"
     echo ""
     echo "Start the server:"
-    echo "  docker run -p 6632:6632 -e PG_HOST=... smartnessai/queen-mq"
+    echo "  docker run -p 6632:6632 -e PG_HOST=... ghcr.io/queen-mq/queen:latest"
     echo ""
     exit 1
 fi

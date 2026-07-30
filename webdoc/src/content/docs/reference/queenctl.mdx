@@ -73,9 +73,9 @@ Bound to the root command, so they work on every subcommand.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--context <name>` | — | Named context from the config file. Overrides `current-context`. |
-| `--server <url>` | — | Broker URL. Overrides the context; same as `$QUEEN_SERVER`. |
-| `--token <token>` | — | Bearer token. Overrides the context; same as `$QUEEN_TOKEN`. |
+| `--context <name>` | none | Named context from the config file. Overrides `current-context`. |
+| `--server <url>` | none | Broker URL. Overrides the context; same as `$QUEEN_SERVER`. |
+| `--token <token>` | none | Bearer token. Overrides the context; same as `$QUEEN_TOKEN`. |
 | `-o`, `--output <fmt>` | `table` on a TTY, `json` on a pipe | See the formats table. |
 | `--no-color` | `false` | Disable ANSI colour. |
 | `--color` | `false` | Force ANSI colour. |
@@ -96,7 +96,7 @@ Bound to the root command, so they work on every subcommand.
 | `raw` | The body as returned. |
 | `jsonpath=<expr>`, `json-path=<expr>` | Extract one value, e.g. `-o jsonpath=.messages[0].transactionId`. |
 
-`pop` and `tail` always emit NDJSON regardless of `-o` — they are designed to be piped.
+`pop` and `tail` always emit NDJSON regardless of `-o`: they are designed to be piped.
 
 ### Exit codes
 
@@ -108,7 +108,7 @@ Bound to the root command, so they work on every subcommand.
 | `3` | Authentication or authorization failure. |
 | `4` | Successful no-op: an empty pop, no DLQ rows, nothing applied. |
 
-Code `4` is the only one whose message is not printed to stderr — it is not a failure, so scripts
+Code `4` is the only one whose message is not printed to stderr. It is not a failure, so scripts
 can treat it as "nothing to do".
 
 <Aside type="note">
@@ -125,7 +125,7 @@ what to run instead, and exit `1`.
 1. **Context name**: `--context`, then `$QUEEN_CONTEXT`, then `current-context` from the file.
 2. **Server**: the context's `server`, then `$QUEEN_SERVER`, then `--server`.
 3. **Token**: the context's `token-ref` resolved, then `$QUEEN_TOKEN`, then `--token`.
-4. **Insecure**: the context's `insecure`, then `--insecure` — only when the flag was actually
+4. **Insecure**: the context's `insecure`, then `--insecure`, but only when the flag was actually
    passed, so an absent flag never overrides the file with `false`.
 
 With no server resolved, every command that talks to a broker fails with
@@ -142,7 +142,7 @@ With no server resolved, every command that talks to a broker fails with
 
 ### Config file
 
-`~/.queen/config.yaml`, kubectl-shaped. A missing file is not an error — first-run users get the
+`~/.queen/config.yaml`, kubectl-shaped. A missing file is not an error: first-run users get the
 environment-only experience.
 
 ```yaml
@@ -166,7 +166,7 @@ contexts:
 | `file:///abs/path` | Read from a file. |
 | `literal:<token>` | The token itself, in the config file. For CI; not recommended. |
 
-Writes are atomic — a `.tmp` file renamed over the target — with the file at `0600` and the parent
+Writes are atomic (a `.tmp` file renamed over the target), with the file at `0600` and the parent
 directory at `0700`.
 
 ## Authentication
@@ -176,17 +176,17 @@ directory at `0700`.
 | Flag | Default | Effect |
 | --- | --- | --- |
 | `--method <m>` | inferred | `token`, `password`, `google` or `github`. |
-| `-u`, `--user <email>` | — | Email for the password flow. |
-| `--password <pw>` | — | Password. Prefer the interactive prompt. |
-| `--token <token>` | — | JWT or `qk_` API key to store, skipping the prompt. |
+| `-u`, `--user <email>` | none | Email for the password flow. |
+| `--password <pw>` | none | Password. Prefer the interactive prompt. |
+| `--token <token>` | none | JWT or `qk_` API key to store, skipping the prompt. |
 | `--context <name>` | active context | Which context to bind the credential to. |
 | `--no-browser` | `false` | Do not auto-open the browser for the OAuth flows. |
 
 With no `--method`: `--token` implies `token`, `--user` implies `password`, otherwise `token`.
-The context must already exist — run `config set-context` first. An unknown `--method` exits `1`.
+The context must already exist: run `config set-context` first. An unknown `--method` exits `1`.
 
 The captured credential goes into the OS keychain and the config file keeps only
-`keychain://<context>`. If the keychain is unavailable — a CI container, a headless box — the CLI
+`keychain://<context>`. If the keychain is unavailable (a CI container, a headless box), the CLI
 prints a warning to stderr and falls back to `literal:<token>` **in the config file**.
 
 | Method | What happens |
@@ -198,7 +198,7 @@ prints a warning to stderr and falls back to `literal:<token>` **in the config f
 <Aside type="caution">
 The three interactive flows all yield short-lived credentials. The password flow's session JWT
 expires with the proxy's configured session lifetime, 24 hours by default. The browser flows can only
-hand back the bearer from `/auth/session-token`, which lasts **15 minutes** — the session cookie is
+hand back the bearer from `/auth/session-token`, which lasts **15 minutes**. The session cookie is
 `httpOnly` and the proxy accepts no loopback redirect target, so the CLI cannot capture the session
 itself. For unattended use create a cluster API key and store it with `--method token`: it does not
 expire.
@@ -215,13 +215,13 @@ Reads NDJSON from stdin by default, one JSON object per line, and pushes in batc
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--partition <name>` | — | Static partition for every message. |
-| `--partition-key <path>` | — | JSON path inside each payload to use as the partition, e.g. `user_id`, `order.id`. One ordered lane per distinct key. |
+| `--partition <name>` | none | Static partition for every message. |
+| `--partition-key <path>` | none | JSON path inside each payload to use as the partition, e.g. `user_id`, `order.id`. One ordered lane per distinct key. |
 | `--batch <n>` | `100` | Messages per HTTP request. |
-| `--data <json>` | — | A single inline payload; skips stdin. |
-| `-f`, `--file <path>` | — | Read NDJSON from a file instead of stdin. |
-| `--trace-id <uuid>` | — | Attach this UUID as the trace id. |
-| `--transaction-id <id>` | — | Explicit `transactionId` for the first item. |
+| `--data <json>` | none | A single inline payload; skips stdin. |
+| `-f`, `--file <path>` | none | Read NDJSON from a file instead of stdin. |
+| `--trace-id <uuid>` | none | Attach this UUID as the trace id. |
+| `--transaction-id <id>` | none | Explicit `transactionId` for the first item. |
 | `--wrapped` | `false` | Input lines are full SDK items: `{transactionId?, traceId?, partition?, data}`. |
 | `--dry-run` | `false` | Parse and group the input, send nothing. |
 
@@ -234,30 +234,30 @@ partition and transaction id, so dedup stays meaningful on the receiving side.
 
 ### `queenctl pop [queue]`
 
-One-shot pop, printed as NDJSON. The queue argument is optional — omit it and use
+One-shot pop, printed as NDJSON. The queue argument is optional: omit it and use
 `--namespace` / `--task`.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--cg <name>` | — | Consumer group. |
-| `--partition <name>` | — | A specific partition. |
+| `--cg <name>` | none | Consumer group. |
+| `--partition <name>` | none | A specific partition. |
 | `-n`, `--limit <n>` | `1` | Maximum messages printed. |
 | `--batch <n>` | `--limit` | Batch size sent to the broker. |
 | `--max-partitions <n>` | `1` | Claim up to N partitions in one call. |
 | `--auto-ack` | `false` | Ack server-side, inside the pop transaction. |
 | `--wait` | `true` | Long-poll until messages arrive or the timeout fires. |
 | `--timeout <dur>` | `10s` | Long-poll timeout. |
-| `--namespace <name>` | — | Filter the queue-less pop by namespace. |
-| `--task <name>` | — | Filter the queue-less pop by task. |
-| `--from-mode <mode>` | — | Subscription mode: `all`, `new`, `new-only`. |
-| `--since <t>` | — | Subscription start: `now`, RFC3339, `5m ago`. |
+| `--namespace <name>` | none | Filter the queue-less pop by namespace. |
+| `--task <name>` | none | Filter the queue-less pop by task. |
+| `--from-mode <mode>` | none | Subscription mode: `all`, `new`, `new-only`. |
+| `--since <t>` | none | Subscription start: `now`, RFC3339, `5m ago`. |
 
 Each emitted line carries `queue`, `partition`, `transactionId`, `partitionId`, `createdAt`,
 `retryCount` and `data`, plus `leaseId` and `producerSub` when present. An empty pop exits `4`.
 
 <Aside type="danger">
 `--auto-ack` commits the cursor inside the pop transaction. If your shell pipeline dies after the
-pop and before you have processed the output, those messages are gone — nothing will redeliver
+pop and before you have processed the output, those messages are gone, and nothing will redeliver
 them. Omit it and ack explicitly with `queenctl ack --batch`.
 </Aside>
 
@@ -274,8 +274,8 @@ Live-tail, always NDJSON on stdout regardless of `-o`.
 | `--batch <n>` | `0` | Messages per long-poll round-trip. |
 | `--max-partitions <n>` | `1` | Claim up to N partitions per pop. |
 | `--auto-ack` | `false` | Ack server-side as messages are emitted. |
-| `--from <mode>` | — | Subscription mode: `all`, `new`, `new-only`. |
-| `--since <t>` | — | Subscription start. |
+| `--from <mode>` | none | Subscription mode: `all`, `new`, `new-only`. |
+| `--since <t>` | none | Subscription start. |
 | `--idle-millis <n>` | `0` | Stop after N ms with no messages. |
 | `--concurrency <n>` | `0` | Parallel handlers. |
 | `--timeout <dur>` | `0` → 30 s, or `--idle-millis` when smaller | Per-pop long-poll timeout. |
@@ -288,22 +288,22 @@ queenctl tail src --auto-ack | queenctl push dst --batch 100
 `queenctl-tail` is a real consumer group with a real cursor. Tailing without `--cg` advances that
 shared group, and every `queenctl tail` on the same queue competes for the same lease. Use a
 dedicated `--cg` when you do not want to disturb anything, and remember the group's cursor persists
-after the command exits — clean it up with `queenctl cg delete`.
+after the command exits. Clean it up with `queenctl cg delete`.
 </Aside>
 
 ### `queenctl ack [transactionId]`
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--partition-id <uuid>` | — | Internal partition UUID, as printed by `pop` / `tail`. |
-| `--lease-id <uuid>` | — | Lease UUID returned at pop time. |
-| `--cg <name>` | — | Consumer group. |
-| `--error <msg>` | — | Attach an error message; use with `--failed`. |
+| `--partition-id <uuid>` | none | Internal partition UUID, as printed by `pop` / `tail`. |
+| `--lease-id <uuid>` | none | Lease UUID returned at pop time. |
+| `--cg <name>` | none | Consumer group. |
+| `--error <msg>` | none | Attach an error message; use with `--failed`. |
 | `--failed` | `false` | Mark as failed instead of completed. |
-| `--batch <file>` | — | Ack many messages from an NDJSON file; `-` for stdin. |
+| `--batch <file>` | none | Ack many messages from an NDJSON file; `-` for stdin. |
 
 Each line of a `--batch` file must be a JSON object with at least `transactionId`, `partitionId`
-and `leaseId` — exactly the shape `pop` and `tail` emit.
+and `leaseId`, exactly the shape `pop` and `tail` emit.
 
 ```bash
 queenctl tail q --cg c -n 100 | queenctl ack --batch -
@@ -317,12 +317,12 @@ exhausted, the dead-letter path.
 
 ### `queenctl tx -f <bundle.json>`
 
-Posts a bundle to `/api/v1/transaction` — pushes and acks in one PostgreSQL transaction.
+Posts a bundle to `/api/v1/transaction`: pushes and acks in one PostgreSQL transaction.
 
 | Flag | Default |
 | --- | --- |
 | `-f`, `--file <path>` | required; `-` for stdin |
-| `--dry-run` | `false` — parse and count, do not commit |
+| `--dry-run` | `false` (parse and count, do not commit) |
 
 The file shape maps directly to the route:
 
@@ -345,15 +345,15 @@ Renews one lease, `POST /api/v1/lease/:leaseId/extend`. No flags of its own.
 
 ## Queues and partitions
 
-### `queenctl queue` — aliases `queues`, `q`
+### `queenctl queue` (aliases `queues`, `q`)
 
 | Subcommand | Aliases | Arguments |
 | --- | --- | --- |
-| `list` | `ls` | — |
+| `list` | `ls` | none |
 | `describe <queue>` | `get`, `show` | exactly one |
-| `configure <queue>` | — | exactly one |
+| `configure <queue>` | none | exactly one |
 | `delete <queue>` | `rm` | exactly one |
-| `stats` | — | — |
+| `stats` | none | none |
 
 `queue list` flags: `--namespace`, `--task`, `--limit` (`0`), `--offset` (`0`).
 `queue stats` flags: `--namespace`, `--task`.
@@ -363,8 +363,8 @@ Renews one lease, `POST /api/v1/lease/:leaseId/extend`. No flags of its own.
 
 | Flag | Default | Wire key |
 | --- | --- | --- |
-| `--namespace <name>` | — | `namespace` |
-| `--task <name>` | — | `task` |
+| `--namespace <name>` | none | `namespace` |
+| `--task <name>` | none | `task` |
 | `--lease-time <s>` | `0` | `leaseTime` |
 | `--retry-limit <n>` | `0` | `retryLimit` |
 | `--delayed-processing <s>` | `0` | `delayedProcessing` |
@@ -395,39 +395,39 @@ others. Use `queenctl apply` with a complete manifest when a queue's configurati
 With `-o json` or `-o yaml`, `configure` renders the full response including the echoed `options`
 block, which is what to assert against in tests. Without `-o`, it prints `configured "<queue>"`.
 
-### `queenctl partition` — aliases `partitions`, `p`
+### `queenctl partition` (aliases `partitions`, `p`)
 
 | Subcommand | Aliases | Arguments | Flags |
 | --- | --- | --- | --- |
-| `list <queue>` | `ls` | exactly one | — |
-| `describe <queue> <partition>` | `get`, `show` | exactly two | — |
-| `seek <queue> <partition>` | — | exactly two | `--cg` (required), `--to` (default `end`) |
+| `list <queue>` | `ls` | exactly one | none |
+| `describe <queue> <partition>` | `get`, `show` | exactly two | none |
+| `seek <queue> <partition>` | none | exactly two | `--cg` (required), `--to` (default `end`) |
 
 `partition seek` only supports seek-to-end: the stored procedure behind
 `POST /api/v1/consumer-groups/:cg/queues/:q/partitions/:p/seek` takes no timestamp. `--to` accepts
 `end`, `now`, `latest` or an empty value; anything else exits `1`. For a timestamp, use
 `queenctl cg seek`, which is queue-wide.
 
-### `queenctl namespace` — aliases `namespaces`, `ns`
+### `queenctl namespace` (aliases `namespaces`, `ns`)
 
 `namespace list` (alias `ls`) lists namespaces with their queues. No flags.
 
-### `queenctl task` — alias `tasks`
+### `queenctl task` (alias `tasks`)
 
 `task list` (alias `ls`) lists tasks with their queues. No flags.
 
 ## Consumer groups
 
-### `queenctl cg` — aliases `consumer-group`, `consumer-groups`
+### `queenctl cg` (aliases `consumer-group`, `consumer-groups`)
 
 | Subcommand | Aliases | Arguments | Flags |
 | --- | --- | --- | --- |
-| `list` | `ls` | — | — |
-| `describe <name>` | `get`, `show` | exactly one | — |
-| `lag` | — | — | `--min-seconds` (`0`) |
-| `seek <cg> <queue>` | — | exactly two | `--to`, `--dry-run` |
+| `list` | `ls` | none | none |
+| `describe <name>` | `get`, `show` | exactly one | none |
+| `lag` | none | none | `--min-seconds` (`0`) |
+| `seek <cg> <queue>` | none | exactly two | `--to`, `--dry-run` |
 | `delete <cg>` | `rm` | exactly one | `--queue`, `--metadata`, `--yes` |
-| `refresh-stats` | — | — | — |
+| `refresh-stats` | none | none | none |
 
 `cg delete` without `--queue` deletes the group everywhere; with it, only for that queue.
 `--metadata` also removes the subscription metadata rows. `--yes` is required.
@@ -451,7 +451,7 @@ Moves a consumer group's cursor so the next pop returns messages from `--to` onw
 
 | Form | Result |
 | --- | --- |
-| `now`, `end`, `latest` | `{toEnd: true}` — jump past the latest message. |
+| `now`, `end`, `latest` | `{toEnd: true}`. Jumps past the latest message. |
 | `beginning`, `earliest`, `start` | Timestamp `1970-01-01T00:00:00Z`. The route takes `toEnd` or a timestamp, so "beginning" is expressed as the epoch. |
 | `5m ago`, `2h ago`, `1d ago`, `1w ago` | Relative to now. Bare forms like `30s` are also read as "ago". |
 | RFC3339, `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, unix seconds | Absolute. Date-only is UTC midnight. |
@@ -460,19 +460,19 @@ Moves a consumer group's cursor so the next pop returns messages from `--to` onw
 
 <Aside type="note">
 Replay is segment-granular. Seeking to a timestamp rewinds to a segment boundary at or before it,
-so a replay can start slightly earlier than the instant you named — never later.
+so a replay can start slightly earlier than the instant you named, never later.
 </Aside>
 
 ## Messages, DLQ and traces
 
-### `queenctl messages` — aliases `msg`, `msgs`
+### `queenctl messages` (aliases `msg`, `msgs`)
 
 | Subcommand | Aliases | Arguments |
 | --- | --- | --- |
-| `list` | `ls` | — |
+| `list` | `ls` | none |
 | `get <partitionId> <transactionId>` | `describe`, `show` | exactly two |
 | `delete <partitionId> <transactionId>` | `rm` | exactly two |
-| `traces <partitionId> <transactionId>` | — | exactly two |
+| `traces <partitionId> <transactionId>` | none | exactly two |
 
 `messages list` flags: `--queue`, `--partition`, `--status` (`pending`, `processing`, `completed`,
 `failed`), `--cg`, `--limit` (`100`), `--offset` (`0`).
@@ -482,9 +482,9 @@ so a replay can start slightly earlier than the instant you named — never late
 
 | Subcommand | Aliases | Arguments |
 | --- | --- | --- |
-| `list` | `ls` | — |
+| `list` | `ls` | none |
 | `describe <partitionId> <transactionId>` | `get` | exactly two |
-| `drain` | — | — |
+| `drain` | none | none |
 
 `list` and `drain` share the filters: `--queue`, `--cg`, `--partition`, `--from`, `--to`,
 `--limit` (`0`), `--offset` (`0`). `drain` adds `--dry-run` and `--yes`, and refuses to run without
@@ -501,9 +501,9 @@ is destructive and nothing else. To replay dead-lettered messages, read them wit
 
 | Subcommand | Aliases | Arguments | Flags |
 | --- | --- | --- | --- |
-| `names` | `list`, `ls` | — | `--limit` (`100`), `--offset` (`0`) |
-| `by-name <name>` | — | exactly one | `--limit` (`100`), `--offset` (`0`) |
-| `by-message <partitionId> <transactionId>` | — | exactly two | — |
+| `names` | `list`, `ls` | none | `--limit` (`100`), `--offset` (`0`) |
+| `by-name <name>` | none | exactly one | `--limit` (`100`), `--offset` (`0`) |
+| `by-message <partitionId> <transactionId>` | none | exactly two | none |
 
 `traces by-message` is the same as `messages traces`.
 
@@ -511,13 +511,13 @@ is destructive and nothing else. To replay dead-lettered messages, read them wit
 
 ### `queenctl status [queue]`
 
-No argument prints the cluster view — queues with depth, completed, failed and lag. With a queue
+No argument prints the cluster view: queues with depth, completed, failed and lag. With a queue
 name it prints the detailed view.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--namespace <name>` | — | Filter. |
-| `--task <name>` | — | Filter. |
+| `--namespace <name>` | none | Filter. |
+| `--task <name>` | none | Filter. |
 | `--partitions` | `false` | Include per-partition detail. |
 
 ### `queenctl ping`
@@ -531,7 +531,7 @@ otherwise. Prints status, database, version and measured latency.
 
 <Aside type="caution">
 `/health` performs a real database round-trip and returns 503 when PostgreSQL is unreachable. That
-makes `ping` a good readiness check and a poor liveness check — wiring it to a liveness probe
+makes `ping` a good readiness check and a poor liveness check. Wiring it to a liveness probe
 restarts a broker that is deliberately spooling writes to disk while the database is away.
 </Aside>
 
@@ -550,19 +550,19 @@ queenctl metrics --prometheus | grep queue_pop_messages
 ```
 
 <Aside type="caution">
-Both endpoints are process-wide — host CPU, worker lifetimes, PostgreSQL internals — and cannot be
+Both endpoints are process-wide (host CPU, worker lifetimes, PostgreSQL internals) and cannot be
 scoped to one tenant, so a proxy refuses them to tenant credentials. When that happens the command
 says so and points at `queenctl analytics queue-ops` / `queue-lag`, which are per-queue.
 </Aside>
 
-### `queenctl analytics` — aliases `a`, `an`
+### `queenctl analytics` (aliases `a`, `an`)
 
 Every subcommand takes `--from` and `--to` (both empty by default), which accept the same time
 forms as `replay --to`.
 
 | Subcommand | Route |
 | --- | --- |
-| `overview` | `GET /api/v1/status/analytics` — composite dashboard data |
+| `overview` | `GET /api/v1/status/analytics` (composite dashboard data) |
 | `queue-lag` | `GET /api/v1/analytics/queue-lag` |
 | `queue-ops` | `GET /api/v1/analytics/queue-ops` |
 | `queue-parked` | `GET /api/v1/analytics/queue-parked-replicas` |
@@ -583,9 +583,9 @@ Operations are idempotent and tolerant of resources that already exist.
 | Flag | Default |
 | --- | --- |
 | `-f`, `--file <path>` | required; `-` for stdin |
-| `--dry-run` | `false` — parse and validate only |
+| `--dry-run` | `false` (parse and validate only) |
 
-Two kinds, flat — no `apiVersion` dance. `kind` defaults to `Queue`; a document with no `name` is
+Two kinds, flat, with no `apiVersion` dance. `kind` defaults to `Queue`; a document with no `name` is
 skipped, and an unknown `kind` exits `1`.
 
 ```yaml
@@ -612,13 +612,13 @@ The zero-value omission described under `queue configure` applies to the `config
 you set to `0` or `false` is not sent, and `/configure` replaces the whole configuration. Spell out
 every option you care about with a non-zero value.
 
-### `queenctl maintenance` — alias `maint`
+### `queenctl maintenance` (alias `maint`)
 
 | Subcommand | Flags |
 | --- | --- |
-| `get` | — |
+| `get` | none |
 | `on` | `--yes` (required) |
-| `off` | — |
+| `off` | none |
 
 `--pop` is a persistent flag on the parent, so it applies to all three: it scopes the operation to
 pop-only maintenance (`/api/v1/system/maintenance/pop`) instead of push maintenance
@@ -648,7 +648,7 @@ It reports the push wall time, the pop wall time, and per-message residency perc
 Residency is `pop timestamp − push timestamp`. It is **not** a network round-trip: it includes the
 time a message sat in the queue waiting for a consumer. For a latency figure, run
 `--producers=1 --consumers=1 --batch=1 --partitions=1`. Numbers from this command describe your
-laptop or your rig, not the product — the published figures and the conditions attached to them are
+laptop or your rig, not the product. The published figures and the conditions attached to them are
 in [Benchmarks](/benchmarks).
 </Aside>
 
@@ -658,20 +658,20 @@ in [Benchmarks](/benchmarks).
 
 | Subcommand | Aliases | Arguments |
 | --- | --- | --- |
-| `view` | — | — |
-| `current-context` | `current` | — |
-| `get-contexts` | `list`, `ls` | — |
-| `set-context <name>` | — | exactly one |
-| `use-context <name>` | — | exactly one |
+| `view` | none | none |
+| `current-context` | `current` | none |
+| `get-contexts` | `list`, `ls` | none |
+| `set-context <name>` | none | exactly one |
+| `use-context <name>` | none | exactly one |
 | `delete-context <name>` | `rm` | exactly one |
 
 `set-context` flags:
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--server <url>` | — | Broker URL. |
-| `--token <token>` | — | Bearer token, stored in the keychain by default. |
-| `--token-ref <ref>` | — | Explicit reference: `env`, `keychain://<id>`, `file:///abs`, `literal:<value>`. |
+| `--server <url>` | none | Broker URL. |
+| `--token <token>` | none | Bearer token, stored in the keychain by default. |
+| `--token-ref <ref>` | none | Explicit reference: `env`, `keychain://<id>`, `file:///abs`, `literal:<value>`. |
 | `--insecure` | `false` | Skip TLS verification. |
 | `--no-keychain` | `false` | Store `--token` literally in the config file. Less secure. |
 
@@ -690,7 +690,7 @@ Prints a list of documentation links, with `--open` to launch the site in the de
 ## Related
 
 <CardGrid>
-  <LinkCard href="/reference/sdk/go" title="Go client" description="The package queenctl is built on — same defaults, same error types." />
+  <LinkCard href="/reference/sdk/go" title="Go client" description="The package queenctl is built on, with the same defaults and the same error types." />
   <LinkCard href="/reference" title="HTTP reference" description="Every route the commands here call, with access levels." />
   <LinkCard href="/selfhost" title="Self-hosting" description="Running the broker these commands talk to." />
 </CardGrid>
