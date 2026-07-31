@@ -3,6 +3,11 @@
 # The pages below were indexed under the previous documentation site (flat
 # .html files at the root). Keep them reachable: an indexed URL that 404s costs
 # more than the redirect does.
+# The old site published its sitemap at /sitemap.xml and that URL is what
+# Search Console has had on file since 2026-06-24. Astro emits
+# /sitemap-index.xml instead, so the registered URL started 404ing the moment
+# this site went up. Same rule as the pages below.
+/sitemap.xml              /sitemap-index.xml               301
 /index.html               /                                301
 /quickstart               /start/quickstart                301
 /quickstart.html          /start/quickstart                301
