@@ -1,0 +1,28 @@
+{
+  // Deploy target for the documentation site (queenmq.com).
+  //
+  // The Worker `queen` carries STATIC ASSETS ONLY: no script, no bindings, no
+  // triggers. `pnpm build` emits dist/ (117 pages plus the Pagefind search
+  // index, fonts, images and the published OpenAPI documents), and
+  // `wrangler deploy` uploads all of it.
+  //
+  // This replaces updating the site through the dashboard's static-file
+  // uploader, which accepts only HTML, CSS and JS: that dropped the Pagefind
+  // index, the fonts, the favicon, the OpenAPI JSON and the sitemap, and left
+  // every page below the homepage unreachable.
+  //
+  // Routing is deliberately NOT declared here. The custom domain queenmq.com is
+  // attached to the Worker in the dashboard; omitting `routes` means a deploy
+  // updates the assets and leaves the domain binding untouched.
+  "name": "queen",
+  // Held at the Worker's existing date so a deploy changes the content and
+  // nothing about the runtime.
+  "compatibility_date": "2026-06-19",
+  "assets": {
+    "directory": "./dist",
+    // Astro emits directory-style pages (`/start/` -> `/start/index.html`) and
+    // a 404.html for anything unmatched.
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}
