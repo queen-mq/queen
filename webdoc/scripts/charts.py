@@ -38,6 +38,11 @@ from matplotlib.ticker import FuncFormatter  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 BENCH = REPO / "benchmark-queen"
 
+# What the browser should render. Substituted into the SVG after saving; the
+# figures themselves are laid out with DejaVu Sans so the geometry does not
+# depend on which fonts the rendering machine happens to have. See style().
+WEB_FONT_STACK = "'Inter', 'Helvetica Neue', 'Arial', sans-serif"
+
 
 # --------------------------------------------------------------------------
 # Theme
@@ -83,7 +88,17 @@ def style(theme: Theme) -> None:
             "svg.fonttype": "none",
             "svg.hashsalt": "queenmq",
             "font.family": "sans-serif",
-            "font.sans-serif": ["Inter", "Helvetica Neue", "Arial", "sans-serif"],
+            # DejaVu Sans ships INSIDE matplotlib, so it resolves identically on
+            # every machine. That matters because `svg.fonttype: "none"` keeps
+            # the text as text but matplotlib still measures each string with
+            # whatever font it resolved, and those measurements are written into
+            # the file as coordinates. Naming the page's own stack here made the
+            # geometry depend on what happened to be installed: macOS resolved
+            # 'Helvetica Neue', the Ubuntu runner had none of the three and fell
+            # back to DejaVu, and `gen:check` reported permanent drift. The web
+            # stack is substituted back into the SVG after saving, so the browser
+            # still renders Inter.
+            "font.sans-serif": ["DejaVu Sans"],
             "font.size": 9,
             "figure.facecolor": "none",
             "axes.facecolor": "none",
@@ -155,6 +170,11 @@ def save(fig, out: Path, name: str, theme: Theme) -> None:
     text = path.read_text()
     text = re.sub(r"<metadata>.*?</metadata>\s*", "", text, flags=re.S)
     text = re.sub(r"<!-- Created with matplotlib.*?-->\s*", "", text, flags=re.S)
+    # Put the page's font stack back. The figure was laid out with DejaVu Sans
+    # (see style()) so the geometry is reproducible; the browser should still
+    # render Inter. Every string in these figures uses the one family, so
+    # rewriting all of them is the whole substitution.
+    text = re.sub(r"font-family:[^;\"]*", f"font-family: {WEB_FONT_STACK}", text)
     path.write_text(text)
 
 
