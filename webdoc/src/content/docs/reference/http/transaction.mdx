@@ -7,8 +7,8 @@ sidebar:
   label: transaction
 sourceOfTruth:
   - server/src/handlers/data.rs
-  - server/sql/procedures/044_log_ack.sql
-  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/005_log_ack.sql
+  - server/sql/procedures/003_log_push.sql
 verifiedBy:
   - clients/client-js/test-v2/transaction.js
   - clients/client-js/test-v2/semantics.js
@@ -126,7 +126,6 @@ A transaction rolls back when:
 | a **duplicate push** | any pushed `transactionId` that already exists in its partition inside the deduplication window aborts the bundle with a `QDUP` error. Unlike `/api/v1/push`, where a duplicate is a per-item `duplicate` status, here it is a rollback |
 | an **ack the broker cannot resolve** | the broker checks up front that every acked `transactionId` resolves in its partition's index; one that does not fails the call with `QTXN ack references unknown transactionId; transaction rolled back` before the writing transaction runs at all, so nothing is written |
 | a **rejected ack** | an invalid or expired lease, or a position beyond the leased batch |
-| **mixed storage engines** | a push or ack that names a queue not on the segment engine |
 | a **foreign partition** | multi-tenant deployments: an acked `partitionId` that belongs to another tenant |
 
 Intra-bundle duplicate pushes are the one exception, and they are resolved before SQL: two push

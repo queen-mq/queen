@@ -152,7 +152,12 @@ Two behaviours worth knowing:
 | `max_queues` | Each distinct queue named in a produce request or created by `/configure` |
 | `max_partitions_per_queue` | Each distinct `(queue, partition)` pair |
 
-Both matter because **a push creates queues and partitions implicitly**. The proxy
+Both matter because **a push creates queues and partitions implicitly**. And a push
+is not the only implicit creator: on the broker, a wildcard pop or a subscription
+registration against a queue that does not exist provisions its `queen.queues`
+config row too, because subscribing before the first push has to work, so a consumer
+typo creates a queue row where it previously left only an orphan cursor. Such a
+row carries no partitions until something is pushed to it. The proxy
 keeps the exact pairs it has admitted for the cluster in memory: a known pair is a set
 lookup with no database round trip, and a new one is evaluated under one lock and then
 recorded.

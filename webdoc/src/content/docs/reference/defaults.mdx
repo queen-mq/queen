@@ -13,14 +13,14 @@ sourceOfTruth:
   - server/src/handlers/queues.rs
   - server/sql/schema.sql
   - server/sql/procedures/012_configure.sql
-  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/001_log_schema.sql
 ---
 
 A default reaches a message through one of three layers, and the layers are
 resolved in a fixed order:
 
 1. **Request parameter**: a query parameter or body field on one call.
-2. **Queue configuration**: a column on the queue's configuration rows, written
+2. **Queue configuration**: a column on the queue's `queen.queues` row, written
    by `POST /api/v1/configure` or created implicitly by the first push.
 3. **Environment**: process-wide, read once at boot.
 
@@ -36,8 +36,8 @@ number exists for each.
 
 | Setting | Effective default | The other number, and why |
 | --- | --- | --- |
-| Lease time | **60 s** on a queue created implicitly by a push; **300 s** after an explicit `/configure` | Two different rows. `queen.log_queues.lease_time` defaults to 60; `/configure` computes `leaseTime` with a default of 300 and writes it into that same column. So the value depends on how the queue came into existence. |
-| Deduplication window | **3600 s, on** | Deduplication is not opt-in. `queen.log_queues.dedup_window_seconds` defaults to 3600 and `/configure` re-applies 3600 whenever `dedupWindowSeconds` is omitted. Only an explicit `0` disables it. |
+| Lease time | **60 s** on a queue created implicitly by a push; **300 s** after an explicit `/configure` | One column, two writers. `queen.queues.lease_time` has a column default of 60, which is what an implicitly created queue gets; `/configure` computes `leaseTime` with a default of 300 and writes it explicitly into that same column. So the value depends on how the queue came into existence, and what the config display shows is what the pop path leases with. |
+| Deduplication window | **3600 s, on** | Deduplication is not opt-in. `queen.queues.dedup_window_seconds` defaults to 3600 and `/configure` re-applies 3600 whenever `dedupWindowSeconds` is omitted. Only an explicit `0` disables it. |
 | `RETENTION_INTERVAL` | **5000 ms** | 300000 was the retired engine's monolithic five-minute sweep. The log engine runs bounded autocommitting steps, so the cadence is 5 s. |
 | Pop long-poll timeout | **30000 ms** | Read from `DEFAULT_TIMEOUT` first, then `POP_DEFAULT_TIMEOUT_MS`, then 30000. Both names exist; `DEFAULT_TIMEOUT` takes precedence, so setting only `POP_DEFAULT_TIMEOUT_MS` while `DEFAULT_TIMEOUT` is also set has no effect. |
 
@@ -99,7 +99,7 @@ is reset to the value in this table, not left alone. See
 | `maxWaitTimeSeconds` | `0` | Age eviction. Runs whether or not `retentionEnabled` is set. |
 | `minPopWaitTime` | `0` | Milliseconds a non-empty under-full pop may wait to fatten. Clamped to 0–60000. |
 | `encryptionEnabled` | `false` | Requires a valid `QUEEN_ENCRYPTION_KEY` to have any effect. |
-| `dedupWindowSeconds` | `3600` | Segments-only, stored on the engine's queue row. Not echoed in the `/configure` response. |
+| `dedupWindowSeconds` | `3600` | Stored on `queen.queues` like every other option, and echoed in the `/configure` response. |
 
 ## Request parameter defaults
 
@@ -141,7 +141,7 @@ accepted there and rejected on the queue-wide form.
 | `Default` | The partition name used when a push names none. |
 | `__QUEUE_MODE__` | The consumer group used when a pop or ack names none. Its cursor is real state, like any other group's. |
 | `00000000-0000-0000-0000-000000000001` | The default tenant. Used for every request when `QUEEN_TENANCY_HEADER` is off, and when it is on but the header is absent or empty. |
-| `60` s | The lease floor used when the queue has no engine row yet, or the lookup could not reach the database. |
+| `60` s | The lease floor used when the queue's configuration row cannot be read (the lookup could not reach the database, or the row is somehow absent). It equals the `queen.queues.lease_time` column default on purpose. |
 | `30` s | How long the broker caches a queue's `delayedProcessing`, `windowBuffer` and `minPopWaitTime` for its in-memory scheduler, so a `/configure` change to those three takes effect within that window rather than instantly. |
 | `737001` | The advisory lock that elects one instance per maintenance cycle. |
 | `778120010` | The advisory lock that serialises the boot-time schema apply across instances. |

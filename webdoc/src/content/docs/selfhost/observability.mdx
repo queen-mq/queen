@@ -246,9 +246,11 @@ Then saturation and errors:
   overshoot. Sustained growth means the runtime or the host is starved.
 - `queen_queue_pop_lag_milliseconds{stat="max"}` per queue, together with
   `queen_queue_metrics_age_seconds` so a stale bucket is not read as recovery.
-- `rate(queen_cluster_dlq_total)`, the broker's own count of dead-letter
-  transitions. Prefer it over `queen_dlq_depth`, which counts rows in the table
-  the retired engine wrote and reads 0 on a current deployment.
+- `rate(queen_cluster_dlq_total)` for dead-letter *transitions*, and
+  `queen_dlq_depth` (with its per-queue `queen_dlq_depth_by_queue`) for the
+  standing row count in `queen.log_dlq`. The depth only falls when someone
+  deletes dead letters, so it is the hygiene signal, and the rate is the
+  incident signal.
 
 Finally, a few log conditions have no metric at all and are worth a
 log-based rule: `target=panic` at any level, `target=encryption` reporting

@@ -75,13 +75,11 @@ func TestMain(m *testing.M) {
 //
 // Mirrors the Python (tests/conftest.py) and JS (test-v2/run.js) suites. The
 // tables live in the `queen` schema, which is NOT on the default search_path,
-// so every statement is schema-qualified. The log engine keeps its own
-// queue/partition rows plus tables with no FK by design (log_txns, log_dlq);
-// log_partitions/log_segments/log_consumers cascade from log_queues. The prior
-// implementation deleted unqualified `partitions`/`queues` with a retired
-// `queue_name` column (rows-engine leftovers) — those relations don't exist on
-// the log/segment broker, so cleanup errored on the first statement and, being
-// only warned about in TestMain, never actually ran.
+// so every statement is schema-qualified. Queue identity is now the
+// queen.queues id (log_queues was merged away): log_partitions,
+// consumer_watermarks, consumer_groups_metadata and queue_lag_metrics all
+// cascade from the queues row. Only log_txns/log_dlq have no FK by design,
+// so they get an explicit purge keyed via log_partitions first.
 func cleanupTestData(ctx context.Context) error {
 	if dbPool == nil {
 		return nil
@@ -97,30 +95,21 @@ func cleanupTestData(ctx context.Context) error {
 	// test-ackwindow-* (plus the legacy edge/pattern/workflow leftovers).
 	patterns := []string{"test-go-%", "test-auth-go-%", "test-ackwindow-%", "edge-%", "pattern-%", "workflow-%"}
 
-	// Log-engine cleanup, best-effort: a rows-only server without the log
-	// schema errors on the first statement, so we stop and fall through to the
-	// rows-engine cleanup below rather than failing the whole run.
-	logStmts := []string{
-		`WITH parts AS (
-			SELECT lp.id FROM queen.log_partitions lp
-			JOIN queen.log_queues lq ON lq.id = lp.queue_id
-			WHERE lq.name LIKE ANY($1::text[])
-		),
-		d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
-		d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
-		SELECT 1`,
-		`DELETE FROM queen.consumer_watermarks WHERE queue_name LIKE ANY($1::text[])`,
-		`DELETE FROM queen.consumer_groups_metadata WHERE queue_name LIKE ANY($1::text[])`,
-		`DELETE FROM queen.log_queues WHERE name LIKE ANY($1::text[])`,
-	}
-	for _, stmt := range logStmts {
-		if _, err := dbPool.Exec(ctx, stmt, patterns); err != nil {
-			break // log-engine schema not installed (rows-only server)
-		}
-	}
+	// FK-less log tables first, best-effort: a rows-only server without the
+	// log schema errors here, so we ignore it and fall through to the queues
+	// delete below rather than failing the whole run.
+	logTxnsPurge := `WITH parts AS (
+		SELECT lp.id FROM queen.log_partitions lp
+		JOIN queen.queues q ON q.id = lp.queue_id
+		WHERE q.name LIKE ANY($1::text[])
+	),
+	d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
+	d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
+	SELECT 1`
+	_, _ = dbPool.Exec(ctx, logTxnsPurge, patterns) // err: log schema not installed (rows-only server)
 
-	// Rows-engine cleanup. A log push also writes a config row into
-	// queen.queues, so this runs for both engines and cascades to its children.
+	// Deleting the queues rows cascades to everything else
+	// (partitions/watermarks/metadata/lag-metrics).
 	if _, err := dbPool.Exec(ctx, `DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])`, patterns); err != nil {
 		return err
 	}

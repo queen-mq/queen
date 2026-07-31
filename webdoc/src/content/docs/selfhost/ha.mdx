@@ -28,7 +28,7 @@ deduplication index, queue configuration, leases and the DLQ all live there.
 
 Availability of the *database* is therefore a separate problem, solved with
 PostgreSQL's own tooling. Running three brokers protects you against a broker
-process dying, a rolling upgrade, and a single node's network. It does not protect
+process dying, a rolling restart, and a single node's network. It does not protect
 you against losing PostgreSQL.
 
 ## The shape
@@ -241,7 +241,7 @@ throughput stops improving, the answer is in PostgreSQL, not in another broker.
   <LinkCard
     href="/selfhost/upgrade"
     title="Upgrades"
-    description="Rolling replicas through a version change, and what happens to in-flight leases."
+    description="Why an upgrade is a fresh database plus a cutover, and what a restart does to in-flight leases."
   />
   <LinkCard
     href="/selfhost/kubernetes"

@@ -1,11 +1,12 @@
 //! `queen migrate ...` subcommand — RETIRED on the log engine.
 //!
 //! The seg-era big-bang OFFLINE rows→segments migration was built on the
-//! `028_storage_v2_migrate.sql` SQL family (seg_migration_progress bookkeeping,
-//! explicit-seq segment writes, cursor seeding), all of which was deleted with
-//! the seg engine (18-log-engine.md §1: "028_storage_v2_migrate.sql (rows→seg
-//! migration) is retired; a rows→log migration can be written later if ever
-//! needed"). The log engine is greenfield — dev contract, no data migration —
+//! retired seg engine's `storage_v2_migrate` SQL family (seg_migration_progress
+//! bookkeeping, explicit-seq segment writes, cursor seeding), all of which was
+//! deleted with the seg engine (18-log-engine.md §1: the storage_v2_migrate
+//! rows→seg migration file "is retired; a rows→log migration can be written
+//! later if ever needed"). The log engine is greenfield — dev contract, no data
+//! migration —
 //! so this module is a stub: it keeps the CLI entry compiling and returns a
 //! clear error WITHOUT touching the DB.
 

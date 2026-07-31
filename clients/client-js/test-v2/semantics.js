@@ -388,10 +388,11 @@ export async function leasedBacklogNotStrandedByEmptyPolls(client) {
 
     // Defeat the 2-minute candidate-filter grace so a wrongly-advanced
     // watermark actually hides the partition (same trick as watermark.js).
+    // Queue identity is now the queen.queues id (log_queues merged away).
     await dbPool.query(`
         UPDATE queen.log_partitions p
         SET last_write_at = last_write_at - interval '10 minutes'
-        FROM queen.log_queues q
+        FROM queen.queues q
         WHERE p.queue_id = q.id AND q.name = $1
     `, [queue])
 
@@ -445,9 +446,19 @@ export async function pushOnlyQueueIsDiscoverable(client) {
         if (!found) await sleep(200)
     }
 
-    // Cleanup: dotted name doesn't match the harness' 'test-%' LIKE, so drop it here.
+    // Cleanup: queue identity is now the queen.queues id, and deleting the
+    // queues row cascades partitions/watermarks/metadata/lag-metrics. Only
+    // log_txns/log_dlq are FK-less by design → explicit purge via partitions.
+    await dbPool.query(`
+        WITH parts AS (
+          SELECT lp.id FROM queen.log_partitions lp
+          JOIN queen.queues q ON q.id = lp.queue_id
+          WHERE q.name = $1
+        ),
+        d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
+        d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
+        SELECT 1`, [queue])
     await dbPool.query(`DELETE FROM queen.queues WHERE name = $1`, [queue])
-    await dbPool.query(`DELETE FROM queen.log_queues WHERE name = $1`, [queue])
 
     if (!found) {
         return { success: false, message: 'Namespace discovery pop never found the push-only queue' }

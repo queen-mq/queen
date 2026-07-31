@@ -11,9 +11,9 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/auth.rs
   - server/src/db.rs
-  - server/sql/procedures/008_consumer_groups.sql
-  - server/sql/procedures/043_log_pop.sql
-  - server/sql/procedures/047_log_admin.sql
+  - server/sql/procedures/014_consumer_groups.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/010_log_admin.sql
 verifiedBy:
   - clients/client-js/test-v2/watermark.js
   - test/runners/tenancy/tenancy-check.sh
@@ -278,8 +278,7 @@ empty-scan watermarks, plus (when `deleteMetadata`) its
 }
 ```
 
-`deletedPartitions` is the number of cursor rows removed, summed across both
-storage engines.
+`deletedPartitions` is the number of `queen.log_consumers` cursor rows removed.
 
 ### DELETE /api/v1/consumer-groups/:group/queues/:queue
 

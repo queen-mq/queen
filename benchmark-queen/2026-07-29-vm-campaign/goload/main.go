@@ -483,6 +483,7 @@ func runOpenLoopMode(args []string) {
 	ackInflight := fs.Int("ack-inflight", 256, "with -ack-async: cap on concurrently in-flight async acks (a global buffered-channel semaphore). When full the consumer BLOCKS until a slot frees — an ack is NEVER shed; blocking is the honest backpressure. Only used with -ack-async.")
 	authToken := fs.String("token", "", "Bearer token (tenant API key). Set it to aim the run at queen_proxy instead of the broker; empty = straight to the broker, the historical shape")
 	hostHeader := fs.String("host-header", "", "Host header the proxy routes on (cluster slug). Only meaningful together with -token")
+	minPopWait := fs.Int("min-pop-wait", 0, "minPopWaitTime ms set by goload's own t=0 configure (0 = off): broker holds an under-full pop up to this window so serves carry near-full batches")
 	_ = fs.String("mode", "openloop", "run mode: max | app | openloop")
 	_ = fs.Parse(args)
 
@@ -565,6 +566,12 @@ func runOpenLoopMode(args []string) {
 			"leaseTime":                 30,
 			"dedupWindowSeconds":        *dedupWindow,
 			"encryptionEnabled":         os.Getenv("GOLOAD_ENCRYPT") == "1",
+			// TASK M lever: hold an under-full pop back up to this window so
+			// serves stay near-full batches (0 = off, the historical shape).
+			// Set HERE, at goload's own t=0 configure, because /configure is a
+			// full REPLACE (COALESCE to defaults): a partial mid-run configure
+			// would silently reset dedupWindowSeconds and the retention knobs.
+			"minPopWaitTime":            *minPopWait,
 		},
 	}); cerr != nil {
 		fmt.Printf("[configure] WARNING: %v\n", cerr)

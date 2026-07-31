@@ -229,9 +229,10 @@ const DEDUP_SKEW_SLACK_MS: i64 = 5_000;
 // Doubles as the TTL meta refresh. prepare_cached: runs every ~30s/partition.
 // Track B (§5): scoped by tenant ($3) so two tenants' same-named (queue, partition)
 // resolve to their OWN pid + dedup window (else the dedup cache would hydrate/vouch
-// across tenants).
+// across tenants). Queue identity is now the queen.queues id (log_partitions
+// references it directly; dedup_window_seconds lives on queen.queues).
 const PART_META_SQL: &str = "SELECT q.dedup_window_seconds, p.id::text, p.last_offset \
-     FROM queen.log_queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
+     FROM queen.queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
      WHERE q.name = $1 AND p.name = $2 AND q.tenant_id = $3::text::uuid";
 
 // Hydration statement (b): the partition's in-window log_txns rows (epoch ms so
@@ -246,7 +247,7 @@ const HYDRATE_SQL: &str = "SELECT t.base_offset, t.end_offset, \
 // Rare-path pid lookup for duplicate-mid resolution when the dedup meta cache
 // has no entry (cache disabled, or the meta fetch degraded this flush).
 const PART_PID_SQL: &str = "SELECT p.id::text \
-     FROM queen.log_queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
+     FROM queen.queues q JOIN queen.log_partitions p ON p.queue_id = q.id \
      WHERE q.name = $1 AND p.name = $2 AND q.tenant_id = $3::text::uuid";
 
 // Rare-path covering-segment fetch for duplicate-mid resolution (§4).
@@ -1400,7 +1401,7 @@ enum PushOutcome {
     Duplicate(Vec<(usize, i64)>),
 }
 
-// Parse ONE segment result object (042 contract).
+// Parse ONE segment result object (003_log_push contract).
 // {"status":"queued","baseOffset":B,"createdAt":".."} -> Queued;
 // {"status":"duplicate","dups":[{"i":..,"off":..}]} -> Duplicate. None on an
 // unexpected status or a queued result without a baseOffset (treated as a

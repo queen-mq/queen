@@ -46,7 +46,7 @@ async function partitionRow(queue, partition = 'Default') {
     const r = await dbPool.query(
         `SELECT p.id::text AS id, p.last_offset::bigint AS last_offset, p.log_start::bigint AS log_start
          FROM queen.log_partitions p
-         JOIN queen.log_queues lq ON lq.id = p.queue_id
+         JOIN queen.queues lq ON lq.id = p.queue_id
          WHERE lq.name = $1 AND p.name = $2 AND lq.tenant_id = $3::uuid`,
         [queue, partition, TENANT])
     return r.rows[0] || null

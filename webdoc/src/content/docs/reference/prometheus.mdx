@@ -11,7 +11,7 @@ sourceOfTruth:
   - server/src/handlers/status.rs
   - server/src/auth.rs
   - server/src/syscollect.rs
-  - server/sql/procedures/018_prometheus.sql
+  - server/sql/procedures/023_prometheus.sql
 ---
 
 `GET /metrics/prometheus` returns exposition text with content type
@@ -134,7 +134,7 @@ leaks other tenants' queue names and volumes. The proxy classifies it as an
 operator route for exactly this reason.
 </Aside>
 
-## Three families you cannot alert on
+## Two families you cannot alert on
 
 `queen_queue_depth_total` and `queen_queue_depth_pending` appear in the
 exposition code, gated on a `queue_depth` key in the aggregator's JSON. No
@@ -142,13 +142,13 @@ stored procedure in this tree produces that key, so neither family is present on
 a real scrape. Do not build a backlog alert on them; use
 `queen_queue_pop_lag_milliseconds` and the consumer-group lag endpoints instead.
 
-`queen_dlq_depth` and `queen_dlq_depth_by_queue` are emitted, but they count
-rows in `queen.dead_letter_queue`, the table the retired rows engine wrote. The
-log engine dead-letters into `queen.log_dlq`, so both gauges read 0 on a healthy
-current deployment even while `GET /api/v1/dlq` returns rows (that endpoint reads
-both tables). For a working dead-letter signal use
-`queen_cluster_dlq_total{scope="cluster"}`, which accumulates the broker's own
-count of dead-letter transitions, or the DLQ listing endpoint.
+`queen_dlq_depth` and `queen_dlq_depth_by_queue` do work: they count
+`queen.log_dlq` rows, cluster total and per queue name, with an index-only scan
+per scrape. (Until 2026-07-31 they read the retired rows engine's dead-letter
+table and were pinned at 0; if a dashboard predates that, its DLQ panel was
+lying.) `queen_cluster_dlq_total{scope="cluster"}` remains the lifetime counter
+of dead-letter transitions; the depth gauges shrink when DLQ rows are deleted or
+replayed, the counter does not.
 
 ## The families
 

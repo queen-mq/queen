@@ -1,0 +1,8 @@
+goload -mode openloop -> http://10.114.0.2:6682 queue=segbench partitions=100 consumers=850 manualAck=false ackAsync=false ackInflight=256
+  offered: rate=1000000 msg/s | push-batch=100 -> 10000.0 req/s across 64 pacer workers (156.25 req/s each) | max-inflight=20000 | payload=256B
+[configure] queue=segbench completedRetentionSeconds=300
+[08:20:45] offered=   500600/s achieved=   491813/s shed=        0/s inflight=  1325 | p50=  72.19 p99=  250.88 p999=  313.34 ms | push=7377200 pop=6978100 lag=399100 | errs push=0 pop=0 empty=447186 gor=6441
+[08:21:00] offered=   999920/s achieved=   996113/s shed=        0/s inflight=  1891 | p50= 148.48 p99=  391.17 p999=  501.76 ms | push=22318900 pop=19499100 lag=2819800 | errs push=0 pop=0 empty=661801 gor=6959
+[08:21:15] offered=   999953/s achieved=   995820/s shed=        0/s inflight=  1991 | p50= 185.34 p99= 1875.97 p999= 2277.38 ms | push=37256200 pop=28922700 lag=8333500 | errs push=518 pop=0 empty=1046849 gor=7142
+[08:21:30] offered=   999967/s achieved=  1001567/s shed=        0/s inflight=  1752 | p50= 142.34 p99=  387.07 p999=  497.66 ms | push=52279700 pop=41040900 lag=11238800 | errs push=518 pop=0 empty=1253545 gor=7497
+[final] offered=675072 achieved=673509 shed=0 (msgs: offered=67507200 achieved=67350900 shed=0) pushErr=1017 | pushed=67350900 popped=50843700 lag=16507200 | popErr=0 empty=1580658 | overall p50=148.48 p99=1482.75 p999=2023.42 ms

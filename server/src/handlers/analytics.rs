@@ -131,8 +131,8 @@ pub async fn handle_queue_parked_replicas(
 
 // -------------------------------------------- GET /api/v1/analytics/retention
 // Track B (§5): tenant injected into the filters JSON. queen.retention_history is
-// written by the log engine's retention/eviction steps (045); 017 resolves the
-// queue through either partition table.
+// written by the log engine's retention/eviction steps (006_log_maintenance);
+// 022_retention_analytics resolves the queue through queen.log_partitions.
 pub async fn handle_retention(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,

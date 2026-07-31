@@ -146,7 +146,7 @@ Every item below was checked against the current source and the broker's router.
 listed here so a green call does not mislead you.
 
 - **`renew()` never reports the new expiry.** The broker's `POST /api/v1/lease/:leaseId/extend`
-  returns `{"renewed":N,"expiresAt":"..."}` (`server/sql/procedures/044_log_ack.sql`), while
+  returns `{"renewed":N,"expiresAt":"..."}` (`server/sql/procedures/005_log_ack.sql`), while
   every SDK reads `newExpiresAt` or `lease_expires_at`. The renewal itself happens; the
   expiry field you get back is `null` (JavaScript, Python, PHP), the zero time (Go) or
   `null` (C++). Schedule the next renewal from your own clock, not from the response.

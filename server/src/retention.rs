@@ -4,7 +4,7 @@
 //! ms — now defaulting to 5000 — on ONE dedicated pooled connection, gated by
 //! advisory lock 737001), but the shape of the work is inverted: instead of one
 //! `seg_retention_sweep_v1()` call = one giant transaction over EVERY partition,
-//! each cycle loops the bounded STEP functions of 045_log_maintenance.sql:
+//! each cycle loops the bounded STEP functions of 006_log_maintenance.sql:
 //!
 //!   * `queen.log_retention_step_v1(pid, all_cutoff, completed_cutoff, max_rows)`
 //!     — rules 1+2 (retention_seconds / completed_retention_seconds), at most
@@ -31,7 +31,8 @@
 //! lock hold, and pushes interleave between batches. Cutoffs are computed
 //! CALLER-side from one `now()` (one consistent clock per cycle); a NULL cutoff
 //! disables that rule. Partitions are iterated in ascending id order — the one
-//! global total order shared with the multi-partition lockers (045 header) —
+//! global total order shared with the multi-partition lockers
+//! (006_log_maintenance header) —
 //! though with single-row locks per step the steps cannot deadlock regardless.
 //!
 //! The advisory lock is now SESSION-scoped (`pg_try_advisory_lock`) because
@@ -69,32 +70,30 @@ const PARTITION_SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// One consistent `now()` per cycle: the work-list query computes every cutoff
 /// as `timestamptz::text` server-side (all columns of one statement share one
 /// `now()`), and the step calls cast the text back. A NULL column = that rule is
-/// disabled for the queue (the 026-era `retention_seconds > 0` gating, decided
-/// here, not in SQL — 045 header).
+/// disabled for the queue (the `retention_seconds > 0` gating inherited from
+/// the retired seg engine's retention sweep, decided here, not in SQL —
+/// 006_log_maintenance header).
 ///
-/// Queue identity is (tenant_id, name) on BOTH sides of the queues→log_queues
-/// join (schema.sql, 041_log_schema.sql), so the join predicate MUST carry
-/// tenant_id: matching on name alone is a cross product as soon as two tenants
-/// hold the same queue name, and one tenant's cutoffs would then be emitted
-/// against another tenant's partitions — which the step calls below execute as
-/// deletes. Single-tenant deployments are unaffected (the join is 1:1 either
-/// way).
+/// Queue identity is now the queen.queues id: log_partitions.queue_id
+/// references queen.queues(id) directly, so partitions join their config row
+/// BY ID — there is no name+tenant bridge left to get wrong, and one tenant's
+/// cutoffs can never be emitted against another tenant's partitions (which the
+/// step calls below execute as deletes). Every queue is a log queue, so there
+/// is no engine filter either.
 const WORK_LIST_SQL: &str = "\
     SELECT p.id::text, \
-           lq.id::text, \
+           qq.id::text, \
            CASE WHEN qq.retention_enabled AND COALESCE(qq.retention_seconds, 0) > 0 \
                 THEN (now() - make_interval(secs => qq.retention_seconds))::text END, \
            CASE WHEN qq.retention_enabled AND COALESCE(qq.completed_retention_seconds, 0) > 0 \
                 THEN (now() - make_interval(secs => qq.completed_retention_seconds))::text END, \
-           (now() - make_interval(secs => GREATEST(lq.dedup_window_seconds, \
+           (now() - make_interval(secs => GREATEST(qq.dedup_window_seconds, \
                                                    COALESCE(qq.completed_retention_seconds, 0), \
                                                    900)))::text, \
            CASE WHEN COALESCE(qq.max_wait_time_seconds, 0) > 0 \
                 THEN (now() - make_interval(secs => qq.max_wait_time_seconds))::text END \
     FROM queen.queues qq \
-    JOIN queen.log_queues lq ON lq.name = qq.name AND lq.tenant_id = qq.tenant_id \
-    JOIN queen.log_partitions p ON p.queue_id = lq.id \
-    WHERE qq.storage = 'segments' \
+    JOIN queen.log_partitions p ON p.queue_id = qq.id \
     ORDER BY p.id";
 
 /// Launch the retention/eviction background loop. Non-blocking: spawns a detached
@@ -292,9 +291,10 @@ async fn cycle_body(
         .collect();
     let max_rows = knobs.max_rows();
 
-    // Phase 1: retention rules 1+2 (queues gated 026-style: retention_enabled
+    // Phase 1: retention rules 1+2 (queues gated as in the retired seg
+    // engine's retention sweep: retention_enabled
     // AND a positive window — encoded as at least one non-NULL cutoff). The
-    // swept-queue count is keyed by log_queues.id, not name: names repeat across
+    // swept-queue count is keyed by queues.id, not name: names repeat across
     // tenants, so a name-keyed set would collapse distinct queues into one.
     let mut segments_deleted: i64 = 0;
     let mut retention_queues: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -315,7 +315,8 @@ async fn cycle_body(
                 .await?;
             let (deleted, done) = step_result(row.get(0));
             segments_deleted += deleted;
-            // The step contract (045) is done:true whenever nothing was deleted,
+            // The step contract (006_log_maintenance) is done:true whenever
+            // nothing was deleted,
             // so `!done` implies progress; the deleted==0 arm is a defensive
             // stop against a contract break looping us forever.
             if done || deleted == 0 {
@@ -325,7 +326,7 @@ async fn cycle_body(
     }
 
     // Phase 2: log_txns hash-sidecar purge — EVERY log partition (the 900s floor
-    // in the cutoff makes the window always applicable; 041 header).
+    // in the cutoff makes the window always applicable; 001_log_schema header).
     let mut txns_purged: i64 = 0;
     let stmt = client
         .prepare_cached(
@@ -482,14 +483,16 @@ mod tests {
 
     /// Shape guard only — the cycle itself needs a live pool, so behavioural
     /// coverage lives in the two-tenant isolation smoke. What this pins down is
-    /// the one property that silently turns the work list into a cross-tenant
-    /// delete: joining queues to log_queues on name without tenant_id.
+    /// the invariant that keeps the work list tenant-safe now that queues has
+    /// absorbed the old log_queues table: partitions join their config row BY
+    /// ID (p.queue_id = qq.id), never through a (name, tenant) bridge that a
+    /// same-named queue of another tenant could cross.
     #[test]
-    fn work_list_join_is_tenant_scoped() {
-        assert!(WORK_LIST_SQL.contains("lq.name = qq.name AND lq.tenant_id = qq.tenant_id"));
-        // The partition leg must stay keyed on the (already tenant-resolved)
-        // log_queues row, never re-resolved by name.
-        assert!(WORK_LIST_SQL.contains("queen.log_partitions p ON p.queue_id = lq.id"));
+    fn work_list_joins_by_id() {
+        assert!(WORK_LIST_SQL.contains("JOIN queen.log_partitions p ON p.queue_id = qq.id"));
+        // The dead name-join must not resurface in any form.
+        assert!(!WORK_LIST_SQL.contains("log_queues"));
+        assert!(!WORK_LIST_SQL.contains("lq.name"));
     }
 
     /// The flag and the window must not be able to disagree: an enabled=false
@@ -515,7 +518,7 @@ mod tests {
     /// or streams state, or leak the log_txns sidecar forever.
     #[test]
     fn partition_cleanup_predicate_keeps_its_vetoes() {
-        let sql = include_str!("../sql/procedures/045_log_maintenance.sql");
+        let sql = include_str!("../sql/procedures/006_log_maintenance.sql");
         let (_, pred) = sql
             .split_once("CREATE OR REPLACE FUNCTION queen.log_partition_dead_v1")
             .expect("predicate function present");

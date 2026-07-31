@@ -6,9 +6,8 @@
 -- This file contains the complete current schema for Queen MQ.
 -- It is designed to be idempotent (safe to run multiple times).
 --
--- Usage:
--- - Fresh install: Run this file once to create all objects
--- - Upgrades: Apply migrations from server/migrations/ with version > 0
+-- Usage: applied at every boot, together with procedures/001..023.
+-- Deployments are always-virgin — there is no upgrade/migration path.
 --
 -- ============================================================================
 
@@ -23,14 +22,19 @@ CREATE TABLE IF NOT EXISTS queen.queues (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
     -- Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): opaque tenant scoping key on queue
-    -- identity. NOT NULL DEFAULT the fixed default tenant = a catalog-only change
-    -- on existing tables (no backfill/rewrite). Uniqueness is (tenant_id, name),
-    -- established by the migration block below (idempotent for existing DBs).
+    -- identity. Uniqueness is (tenant_id, name), enforced by the
+    -- queues_tenant_name_uk index below.
     tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     namespace VARCHAR(255),
     task VARCHAR(255),
     priority INTEGER DEFAULT 0,
-    lease_time INTEGER DEFAULT 300,
+    -- 60, not 300 (2026-07-31, queue-identity merge): 60 is what an implicitly
+    -- push-created queue has ALWAYS leased at — the pop path read it from
+    -- log_queues (default 60) while this column's old 300 was only ever shown
+    -- by the config display, which therefore lied. /configure still writes an
+    -- explicit 300 when leaseTime is omitted, so configured queues are
+    -- unchanged. One column, one truth.
+    lease_time INTEGER DEFAULT 60,
     retry_limit INTEGER DEFAULT 3,
     retry_delay INTEGER DEFAULT 1000,
     ttl INTEGER DEFAULT 3600,
@@ -55,47 +59,34 @@ CREATE TABLE IF NOT EXISTS queen.queues (
     -- ends early the instant the ring holds the requested batch size.
     -- 0 = OFF = every existing deployment byte-identical.
     min_pop_wait_time INTEGER DEFAULT 0,
+    -- Absorbed from queen.log_queues (2026-07-31 queue-identity merge): the
+    -- push dedup probe window. 0 disables the probe.
+    dedup_window_seconds INTEGER NOT NULL DEFAULT 3600,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- The rows engine's tables (queen.partitions, queen.messages,
--- queen.partition_consumers, queen.messages_consumed, queen.dead_letter_queue,
--- queen.partition_lookup) were REMOVED on 2026-07-30. This is a log-engine-only
--- broker: messages live in queen.log_segments, partitions in
--- queen.log_partitions, cursors in queen.log_consumers and dead letters in
--- queen.log_dlq (041/044). 050_drop_rows_tables.sql removes the tables from
--- databases that already have them.
+-- This is a log-engine-only broker: messages live in queen.log_segments,
+-- partitions in queen.log_partitions, cursors in queen.log_consumers and dead
+-- letters in queen.log_dlq (001/005). The rows engine's tables and the
+-- migration files that used to clean them up are gone: deployments start from
+-- an EMPTY database, so this file plus procedures/001..023 IS the schema —
+-- there is no upgrade path to carry.
 
--- Storage engine selector. Storage v2 "segments" is the engine this (Rust) broker
--- serves; the engine itself lives in procedures/023..028_storage_v2*.sql. This is a
--- segments-only broker, so new queues default to 'segments' (the rows engine and its
--- hot-path procedures are retired). The column is kept (rather than dropped) so the
--- dual-engine observability guards in 026/027 and the rows→segments migration can key
--- off it. Catalog-only change on PG >= 11: constant default, no table rewrite.
-ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS storage VARCHAR(16) NOT NULL DEFAULT 'segments';
-
--- MINIMUM POP WAIT (TASK M): idempotent upgrade for existing installations.
--- Nullable-with-constant-default ⇒ catalog-only on PG >= 11 (no table rewrite),
--- and DEFAULT 0 means an upgraded deployment behaves exactly as before.
-ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS min_pop_wait_time INTEGER DEFAULT 0;
-
--- RUSTFIX item 2: flip the DLQ column defaults to TRUE on existing tables too
--- (CREATE TABLE IF NOT EXISTS above does not alter an existing table's defaults).
--- This only changes the default for FUTURE inserts — existing rows keep whatever
--- explicit value they were configured with, and the load-bearing parity fix is the
--- COALESCE(...,true) in 024 which covers NULL columns and absent queen.queues rows.
-ALTER TABLE queen.queues ALTER COLUMN dead_letter_queue SET DEFAULT TRUE;
-ALTER TABLE queen.queues ALTER COLUMN dlq_after_max_retries SET DEFAULT TRUE;
+-- There is no `storage` engine-selector column: one engine, nothing to
+-- select. The wire contract still echoes storage:"segments" as a literal
+-- (012/010/011).
 
 CREATE TABLE IF NOT EXISTS queen.consumer_groups_metadata (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- Track B: subscription metadata is per-queue (queue_name), so it collides
-    -- across tenants sharing a name — scope it. Uniqueness becomes
-    -- (tenant_id, consumer_group, queue_name, partition_name, namespace, task),
-    -- established by the migration block below (the old 5-col UNIQUE is dropped).
+    -- Queue identity is queen.queues(id) — 2026-07-31 merge. queue_id is NULL
+    -- only for namespace/task DISCOVERY subscriptions, which genuinely name no
+    -- queue; a queue-scoped registration upserts the queues row first (a group
+    -- may subscribe before any push creates the queue), so the FK always
+    -- resolves. tenant_id survives for the namespace/task rows, which have no
+    -- queue row to inherit scoping from.
     tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     consumer_group TEXT NOT NULL,
-    queue_name TEXT NOT NULL DEFAULT '',
+    queue_id UUID REFERENCES queen.queues(id) ON DELETE CASCADE,
     partition_name TEXT NOT NULL DEFAULT '',
     namespace TEXT NOT NULL DEFAULT '',
     task TEXT NOT NULL DEFAULT '',
@@ -104,8 +95,12 @@ CREATE TABLE IF NOT EXISTS queen.consumer_groups_metadata (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_consumer_groups_metadata_lookup 
-ON queen.consumer_groups_metadata(consumer_group, queue_name, namespace, task);
+-- NULLS NOT DISTINCT (PG >= 15): two discovery rows with queue_id NULL and the
+-- same (group, namespace, task) must collide, or re-registration duplicates.
+CREATE UNIQUE INDEX IF NOT EXISTS cgm_identity_uk
+    ON queen.consumer_groups_metadata(tenant_id, consumer_group, queue_id, partition_name, namespace, task)
+    NULLS NOT DISTINCT;
+CREATE INDEX IF NOT EXISTS idx_cgm_queue ON queen.consumer_groups_metadata(queue_id);
 
 -- Watermark tracking for efficient wildcard POP discovery
 -- Tracks the timestamp of the last "empty scan" per (queue, consumer_group)
@@ -113,15 +108,14 @@ ON queen.consumer_groups_metadata(consumer_group, queue_name, namespace, task);
 -- On next POP, we only scan partitions updated since the watermark
 -- This avoids expensive full scans for up-to-date consumers
 CREATE TABLE IF NOT EXISTS queen.consumer_watermarks (
-    -- Track B: the empty-scan floor is per (queue_name, group) — colliding across
-    -- tenants sharing a name would let one tenant's "queue is empty since T" floor
-    -- hide another tenant's fresh partitions. Scope by tenant_id (part of the PK).
-    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    queue_name VARCHAR(255) NOT NULL,
+    -- Keyed by queue ID, not name (2026-07-31 merge): the tenant scoping the
+    -- old (tenant_id, queue_name) pair provided is inherited from the queues
+    -- row itself, and the cascade clears the floor when the queue goes.
+    queue_id UUID NOT NULL REFERENCES queen.queues(id) ON DELETE CASCADE,
     consumer_group VARCHAR(255) NOT NULL DEFAULT '__QUEUE_MODE__',
     last_empty_scan_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01 00:00:00+00',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tenant_id, queue_name, consumer_group)
+    PRIMARY KEY (queue_id, consumer_group)
 );
 
 CREATE TABLE IF NOT EXISTS queen.retention_history (
@@ -149,7 +143,7 @@ CREATE TABLE IF NOT EXISTS queen.system_metrics (
 CREATE TABLE IF NOT EXISTS queen.message_traces (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- No FKs: these carry log-engine ids (queen.log_partitions), and a trace must
-    -- outlive the segment it describes. 047 drops the constraints on existing DBs.
+    -- outlive the segment it describes.
     message_id UUID,
     partition_id UUID,
     transaction_id VARCHAR(255) NOT NULL,
@@ -173,52 +167,11 @@ CREATE TABLE IF NOT EXISTS queen.system_state (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- ============================================================================
--- Track B (PLAN_QUEEN_PROXY_CLOUD.md §5) — native tenant scoping migration.
--- ============================================================================
--- Brings EXISTING databases to the (tenant_id, name) queue-identity shape the
--- CREATE TABLEs above already have on fresh installs. Every step is catalog-only
--- (NOT NULL DEFAULT constant column, index/constraint swap) — no table rewrite,
--- so it is safe on tables with millions of rows and idempotent on re-apply.
--- log_queues is migrated in 041 (its own file); the two shared coordination
--- tables + queen.queues are handled here.
-
--- queen.queues: add the column, drop the rows-engine name FK that pinned name
--- unique (partition_lookup no longer references it), drop the old UNIQUE(name),
--- establish UNIQUE(tenant_id, name) so two tenants can hold the same queue name.
-ALTER TABLE queen.queues ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
-ALTER TABLE queen.queues DROP CONSTRAINT IF EXISTS queues_name_key;
+-- Queue identity is (tenant_id, name), enforced here — the composite unique
+-- index every by-name resolve relies on. (Formerly established by a Track B
+-- migration block; deployments are always-virgin now, so the CREATE TABLE
+-- above plus this index ARE the shape.)
 CREATE UNIQUE INDEX IF NOT EXISTS queues_tenant_name_uk ON queen.queues(tenant_id, name);
-
--- queen.consumer_watermarks: add tenant_id, re-key the PK to include it (a shared
--- empty-scan floor across tenants would strand a tenant's fresh partitions).
-ALTER TABLE queen.consumer_watermarks ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
-DO $$
-BEGIN
-    IF EXISTS (SELECT 1 FROM pg_constraint
-               WHERE conrelid = 'queen.consumer_watermarks'::regclass AND contype = 'p'
-                 AND array_length(conkey, 1) = 2) THEN
-        ALTER TABLE queen.consumer_watermarks DROP CONSTRAINT consumer_watermarks_pkey;
-        ALTER TABLE queen.consumer_watermarks ADD PRIMARY KEY (tenant_id, queue_name, consumer_group);
-    END IF;
-END $$;
-
--- queen.consumer_groups_metadata: add tenant_id, swap the 5-col UNIQUE for the
--- 6-col one. The old constraint is auto-named, so drop every unique constraint
--- on the table (there is only ever the one) and re-establish the scoped index.
-ALTER TABLE queen.consumer_groups_metadata ADD COLUMN IF NOT EXISTS tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001';
-DO $$
-DECLARE r record;
-BEGIN
-    FOR r IN SELECT conname FROM pg_constraint
-             WHERE conrelid = 'queen.consumer_groups_metadata'::regclass AND contype = 'u'
-    LOOP
-        EXECUTE format('ALTER TABLE queen.consumer_groups_metadata DROP CONSTRAINT %I', r.conname);
-    END LOOP;
-END $$;
-CREATE UNIQUE INDEX IF NOT EXISTS cgm_tenant_uk
-    ON queen.consumer_groups_metadata(tenant_id, consumer_group, queue_name, partition_name, namespace, task);
-
 
 -- ============================================================================
 -- TABLES
@@ -250,8 +203,9 @@ CREATE TABLE IF NOT EXISTS queen.stats (
     -- octet_length(log_segments.blob) over the queue's LIVE (retained) segments,
     -- i.e. the compressed (zstd) on-the-wire payload bytes as stored — TOAST
     -- bookkeeping, indexes, WAL and the log_txns hash sidecar are NOT counted.
-    -- Populated at the stats-refresh cadence by log_refresh_all_stats_v1 (048),
-    -- so it lags one refresh interval (the proxy storage quota is hysteretic).
+    -- Populated at the stats-refresh cadence by log_refresh_all_stats_v1
+    -- (011_log_stats), so it lags one refresh interval (the proxy storage
+    -- quota is hysteretic).
     retained_bytes BIGINT NOT NULL DEFAULT 0,
 
     -- Time bounds (for lag calculations)
@@ -289,9 +243,6 @@ CREATE INDEX IF NOT EXISTS idx_stats_type ON queen.stats(stat_type);
 CREATE INDEX IF NOT EXISTS idx_stats_queue_id ON queen.stats(queue_id) WHERE queue_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_partition_id ON queen.stats(partition_id) WHERE partition_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_stats_computed ON queen.stats(last_computed_at);
--- Track B / storage quota (§6.1): retained payload bytes per stat row. Catalog-
--- only migration for existing DBs (no backfill; the next refresh cycle populates it).
-ALTER TABLE queen.stats ADD COLUMN IF NOT EXISTS retained_bytes BIGINT NOT NULL DEFAULT 0;
 
 -- Time-series history for throughput charts
 CREATE TABLE IF NOT EXISTS queen.stats_history (
@@ -318,34 +269,12 @@ CREATE TABLE IF NOT EXISTS queen.stats_history (
 
 CREATE INDEX IF NOT EXISTS idx_stats_history_time ON queen.stats_history(bucket_time DESC);
 CREATE INDEX IF NOT EXISTS idx_stats_history_lookup ON queen.stats_history(stat_type, stat_key, bucket_time DESC);
--- ============================================================================
--- Legacy index cleanup (safe to re-run; see DISCOVERY.md finding #3)
--- ============================================================================
--- These two indexes were discovered to be redundant with
--- messages_partition_transaction_unique (partition_id, transaction_id):
---   - idx_messages_transaction_id       (transaction_id)           → prefix
---   - idx_messages_txn_partition        (transaction_id, partition_id) → reversed columns
---
--- Neither is referenced by any hot query path (push's ON CONFLICT uses the
--- UNIQUE, pop's cursor scan uses idx_messages_partition_created). On
--- long-running instances these grew to 3–4 GB each, pushing the total
--- messages index footprint above shared_buffers and causing cache thrashing.
---
--- The DROPs below are idempotent (IF EXISTS). On fresh databases they are
--- no-ops; on existing databases they reclaim the space at server startup.
--- Schema apply takes an AccessExclusive lock per DROP — acceptable because
--- it runs at Queen boot before workload resumes.
-DROP INDEX IF EXISTS queen.idx_messages_transaction_id;
-DROP INDEX IF EXISTS queen.idx_messages_txn_partition;
 
 -- ============================================================================
 -- Indexes
 -- ============================================================================
 
 CREATE INDEX IF NOT EXISTS idx_queues_name ON queen.queues(name);
--- NOTE: idx_messages_partition_created_id removed - duplicate of idx_messages_partition_created
--- NOTE: idx_messages_transaction_id removed - see "Legacy index cleanup" above.
-
 
 CREATE INDEX IF NOT EXISTS idx_retention_history_partition ON queen.retention_history(partition_id);
 CREATE INDEX IF NOT EXISTS idx_retention_history_executed ON queen.retention_history(executed_at);
@@ -377,4 +306,5 @@ ALTER TABLE queen.stats SET (
 
 -- No triggers are defined here. The rows engine's partition-lookup trigger and
 -- its function went with the rows tables on 2026-07-30; the log engine's own
--- partition-lifecycle counters live on queen.log_partitions (014).
+-- partition-lifecycle counters live on queen.log_partitions
+-- (019_worker_metrics; attachment in 020_log_partition_counters).

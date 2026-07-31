@@ -29,12 +29,12 @@ use crate::vegas::Vegas;
 // POST /api/v1/configure — create/update a queue. The JS/Go builders send
 //   {queue, namespace?, task?, options:{...15 opts...}}
 // but raw callers may put the options top-level. We normalize to a single options
-// object, run queen.configure_queue_v1 (which persists all 15 columns on
-// queen.queues and echoes them back), then — because this is the segments engine —
-// pin storage='segments' and materialize a queen.seg_queues row so the pop path
-// reads the configured leaseTime. The configure_queue_v1 JSON is returned verbatim;
-// the JS `configureQueue` test asserts res.configured===true and round-trips every
-// options[key], so we MUST NOT reshape it.
+// object and run queen.configure_queue_v1, which owns ALL config writes on
+// queen.queues (queue identity is the queues id now — there is no second queue
+// table to mirror, and dedupWindowSeconds/leaseTime persist from the options
+// blob like every other option). The configure_queue_v1 JSON is returned
+// verbatim; the JS `configureQueue` test asserts res.configured===true and
+// round-trips every options[key], so we MUST NOT reshape it.
 pub async fn handle_configure(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
@@ -77,14 +77,8 @@ pub async fn handle_configure(
             }
         }
     }
-    // dedupWindowSeconds is segments-only (persisted to seg_queues, not queen.queues).
-    // Read it from the options if provided; else keep the seg_queues default (3600).
-    let dedup_window: i32 = opts
-        .get("dedupWindowSeconds")
-        .and_then(|x| x.as_i64())
-        .map(|v| v.max(0) as i32)
-        .unwrap_or(3600);
-
+    // dedupWindowSeconds travels IN the options blob: configure_queue_v1
+    // persists it to queen.queues.dedup_window_seconds (DDL default 3600).
     let opts_json = serde_json::Value::Object(opts).to_string();
 
     let client = match st.pool.get().await {
@@ -103,49 +97,13 @@ pub async fn handle_configure(
     };
 
     // RUSTFIX item 25: if the SP echo carries an {"error":...}, surface it as
-    // 500/404 and short-circuit BEFORE the side-effecting seg_queues writes.
+    // 500/404 and short-circuit BEFORE the cache invalidations below.
     if cfg_txt.contains("\"error\"") {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cfg_txt) {
             if v.get("error").filter(|e| !e.is_null()).is_some() {
                 return sp_result_to_response(cfg_txt);
             }
         }
-    }
-
-    // Pull the resolved (defaulted) leaseTime/retentionSeconds from the SP echo so
-    // the seg_queues row matches queen.queues exactly.
-    let cfg_val: serde_json::Value =
-        serde_json::from_str(&cfg_txt).unwrap_or(serde_json::Value::Null);
-    let lease_time = cfg_val
-        .pointer("/options/leaseTime")
-        .and_then(|x| x.as_i64())
-        .unwrap_or(300) as i32;
-    let retention_seconds = cfg_val
-        .pointer("/options/retentionSeconds")
-        .and_then(|x| x.as_i64())
-        .unwrap_or(0) as i32;
-
-    // Segments engine: be explicit about storage, and ensure the seg_queues row.
-    if let Err(e) = db::mark_queue_segments(&client, &queue, tenant.as_str()).await {
-        return json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json_err("configure(storage) failed: ", &e),
-        );
-    }
-    if let Err(e) = db::upsert_seg_queue(
-        &client,
-        &queue,
-        tenant.as_str(),
-        lease_time,
-        retention_seconds,
-        dedup_window,
-    )
-    .await
-    {
-        return json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json_err("configure(seg_queue) failed: ", &e),
-        );
     }
 
     // Invalidate the cached lease so a leaseTime change is reflected on next pop.
@@ -160,9 +118,11 @@ pub async fn handle_configure(
 }
 
 // -------------------------------------------------------------- delete queue
-// DELETE /api/v1/resources/queues/:queue — drop the queue. Removes the rows-side
-// coordination data (queen.delete_queue_v1) AND the segment data (seg_queues
-// cascade). Response is the SP JSON at HTTP 200 (a 204 would make the JS client
+// DELETE /api/v1/resources/queues/:queue — drop the queue. ONE SP call:
+// queen.delete_queue_v1 owns the whole delete (the FK-less log_txns/log_dlq
+// purge + the cascading queen.queues delete — queue identity is the queues id
+// now, so log_partitions and everything under it cascade from that one row).
+// Response is the SP JSON at HTTP 200 (a 204 would make the JS client
 // return null and fail res.deleted===true), with `deleted` reflecting whether a
 // queue was actually removed — see the existed:false guard below.
 pub async fn handle_delete_queue(
@@ -184,13 +144,6 @@ pub async fn handle_delete_queue(
             )
         }
     };
-    // Best-effort segment-data drop (independent of the rows-side delete).
-    if let Err(e) = db::delete_seg_queue(&client, &queue, tenant.as_str()).await {
-        return json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json_err("delete(seg) failed: ", &e),
-        );
-    }
 
     let qkey = crate::handlers::tenant_queue_key(tenant.as_str(), &queue);
     st.lease_cache.lock().unwrap().remove(&qkey);

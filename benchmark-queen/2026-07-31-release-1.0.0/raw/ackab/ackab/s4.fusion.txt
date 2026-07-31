@@ -1,0 +1,1 @@
+2026-07-31T12:05:31.049272297Z  INFO boot: config: engine fusion_shards=24 fusion_frames=500 fusion_hold_ms=30 dedup_cache=true dedup_cache_mb=20480 ack_registry=true ack_registry_mb=64 ack_fusion=true ack_fusion_shards=4 ack_fusion_hold_ms=3 hotlist=true hotlist_shards=24 hotlist_window_batch=100 hotlist_reseed_ms=30000 hotlist_idle_sweep_ms=300000 zstd_level=3

@@ -7,8 +7,8 @@ sidebar:
   order: 12
 sourceOfTruth:
   - server/sql/schema.sql
-  - server/sql/procedures/041_log_schema.sql
-  - server/sql/procedures/019_streams_schema.sql
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/002_streams_schema.sql
   - server/src/schema.rs
   - server/src/migrate.rs
   - server/src/file_buffer.rs
@@ -76,9 +76,14 @@ pg_restore --no-owner --no-privileges -d "postgresql://postgres@host:5432/queen_
 `--no-owner` and `--no-privileges` are deliberate: the boot-time schema applier
 re-issues the `GRANT` statements the broker needs, so you do not have to reproduce
 the source cluster's roles. Start a broker against the restored database with
-`QUEEN_APPLY_SCHEMA` at its default of true and it will bring the restored schema
-up to whatever the binary expects, which also means a restore into a newer broker
-version needs no manual migration step.
+`QUEEN_APPLY_SCHEMA` at its default of true and its idempotent re-apply verifies
+the restored schema and re-asserts the per-table parameters.
+
+Restore into the **same broker version** that produced the dump. The deployment
+model is always-virgin: the boot DDL only creates, it never reshapes existing
+tables, so a restored older-version schema is exactly the "database built by a
+different version" case that is unsupported. Moving data across versions is a
+cutover, not a restore; see [Upgrades](/selfhost/upgrade).
 
 <Aside type="danger">
 Do not restore into a database a broker is still connected to. A restore while

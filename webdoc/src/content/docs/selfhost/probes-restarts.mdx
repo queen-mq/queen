@@ -12,8 +12,8 @@ sourceOfTruth:
   - server/src/auth.rs
   - server/src/schema.rs
   - server/src/file_buffer.rs
-  - server/sql/procedures/043_log_pop.sql
-  - server/sql/procedures/044_log_ack.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/005_log_ack.sql
 ---
 
 The broker is one stateless process. Every piece of durable state is in
@@ -179,8 +179,9 @@ That makes a rolling restart safe by construction, with three things to get righ
 
 If you pre-apply the DDL with a privileged role and run the broker as a
 low-privilege user, set `QUEEN_APPLY_SCHEMA=0`. The boot then logs
-`apply skipped` and touches no catalog, which also means an upgrade that ships
-new procedures will not take effect until you apply them yourself.
+`apply skipped` and touches no catalog, which also means the schema in the
+database is entirely yours: the definitions serving requests are the ones you
+applied, not the ones the binary carries.
 
 ## Related pages
 

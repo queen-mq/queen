@@ -54,11 +54,14 @@ func TestWatermark_SeekBackwardsAllowsReconsume(t *testing.T) {
 	if pg != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// Watermarks are keyed by queue_id now (queue identity is the
+		// queen.queues id), so resolve the name through a join.
 		_, _ = pg.Exec(ctx, `
-			UPDATE queen.consumer_watermarks
+			UPDATE queen.consumer_watermarks w
 			   SET last_empty_scan_at = NOW() + interval '10 minutes',
 			       updated_at         = NOW() + interval '10 minutes'
-			 WHERE queue_name = $1 AND consumer_group = $2
+			  FROM queen.queues q
+			 WHERE w.queue_id = q.id AND q.name = $1 AND w.consumer_group = $2
 		`, q, cg)
 	}
 
@@ -103,11 +106,14 @@ func TestWatermark_DeleteCGAllowsReconsume(t *testing.T) {
 	if pg != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// Watermarks are keyed by queue_id now (queue identity is the
+		// queen.queues id), so resolve the name through a join.
 		_, _ = pg.Exec(ctx, `
-			UPDATE queen.consumer_watermarks
+			UPDATE queen.consumer_watermarks w
 			   SET last_empty_scan_at = NOW() + interval '10 minutes',
 			       updated_at         = NOW() + interval '10 minutes'
-			 WHERE queue_name = $1 AND consumer_group = $2
+			  FROM queen.queues q
+			 WHERE w.queue_id = q.id AND q.name = $1 AND w.consumer_group = $2
 		`, q, cg)
 	}
 

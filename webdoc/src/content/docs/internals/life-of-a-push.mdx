@@ -9,7 +9,7 @@ sourceOfTruth:
   - server/src/handlers/data.rs
   - server/src/fusion.rs
   - server/src/frames.rs
-  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/003_log_push.sql
 verifiedBy:
   - clients/client-js/test-v2/push.js
 ---
@@ -163,11 +163,12 @@ Inside, in order:
 1. **Alignment guard.** Any array of a different length raises. A silent misalignment would
    demux the wrong verdict to the wrong request.
 2. **Provisioning skip.** One cheap existence count over `unnest(queues, partitions, tenants)`.
-   Only if something is missing do the three `INSERT ... ON CONFLICT DO NOTHING` statements run:
-   `log_queues`, the `queen.queues` configuration row with `storage = 'segments'`, and
-   `log_partitions`. Each is `ORDER BY`-ed on its unique key, because `ON CONFLICT DO NOTHING`
-   takes speculative locks in row order and two bundles creating overlapping partition sets in
-   different orders would convoy exactly as unordered row locks do.
+   Only if something is missing do the two `INSERT ... ON CONFLICT DO NOTHING` statements run:
+   **one** insert into `queen.queues` (the queue's identity and configuration are one row; the
+   namespace and task are derived from the dotted name), then `log_partitions`, whose `queue_id`
+   references that row. Each insert is `ORDER BY`-ed on its unique key, because
+   `ON CONFLICT DO NOTHING` takes speculative locks in row order and two bundles creating
+   overlapping partition sets in different orders would convoy exactly as unordered row locks do.
 3. **One set-based pre-lock.** A single statement locks every partition row in the bundle,
    `ORDER BY p.id FOR UPDATE OF p`. Ascending `log_partitions.id` is the one global lock order,
    shared with the transaction wire and the retention steps, and it is why no combination of

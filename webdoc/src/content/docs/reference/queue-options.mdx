@@ -9,11 +9,11 @@ sourceOfTruth:
   - server/sql/procedures/012_configure.sql
   - server/src/handlers/queues.rs
   - server/sql/schema.sql
-  - server/sql/procedures/041_log_schema.sql
-  - server/sql/procedures/042_log_push.sql
-  - server/sql/procedures/043_log_pop.sql
-  - server/sql/procedures/044_log_ack.sql
-  - server/sql/procedures/045_log_maintenance.sql
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/003_log_push.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/005_log_ack.sql
+  - server/sql/procedures/006_log_maintenance.sql
   - server/src/retention.rs
   - server/src/hotlist.rs
 ---
@@ -47,27 +47,23 @@ queue name. `namespace` and `task` are read from the options object, and are als
 accepted at the top level. Anything else at the top level is treated as an option
 when no `options` object is present.
 
-The response is HTTP 200 with `configured: true`, the queue and default partition
-ids, the queue name, its namespace and task, and an `options` object echoing the
-resolved values. One option is missing from that echo: `dedupWindowSeconds` lives
-on the storage engine's own row, so it is applied but not reflected back, and no
-read endpoint reports it either. Keep the value you sent; the API will not tell
-you what it is.
+The response is HTTP 200 with `configured: true`, the queue id (`partitionId` is
+always `null`: configuring creates no partition, the first push does), the queue
+name, its namespace and task, and an `options` object echoing the resolved
+values, `dedupWindowSeconds` included.
 
 ## Where the values live
 
-Two rows are written on every `/configure` call, and knowing which is which
-explains most of the timing behaviour below.
+One row, `queen.queues`, holds every option on this page, and
+`queen.configure_queue_v1` is its single writer. The pop path reads it for the
+lease time and the visibility rules, the ack path for the retry budget and
+dead-lettering, the push path for the deduplication window, and the maintenance
+service for the retention cutoffs, all joined by the queue's id.
 
-The **configuration row** holds everything in this page except the deduplication
-window. It is what the pop path reads for visibility rules, what the ack path
-reads for the retry budget and dead-lettering, and what the maintenance service
-reads for retention cutoffs.
-
-The **engine row** holds the lease time and the deduplication window: the two
-values the hot push and pop paths need without a join. `/configure` copies the
-resolved lease time into it, which is why the lease default differs depending on
-how the queue was created.
+The one asymmetry left is the lease default: the column default is **60**, which
+is what a queue created implicitly by a push gets, while `/configure` writes an
+explicit **300** whenever `leaseTime` is omitted. That is why the lease in
+effect depends on how the queue was created.
 
 ## At a glance
 
@@ -114,24 +110,24 @@ name has no dot). Same change semantics as `namespace`.
 
 ## leaseTime
 
-**Type** integer, seconds. **Default** `300` from `/configure`; the engine row's
-column default of **60** applies to a queue created by a push.
+**Type** integer, seconds. **Default** `300` from `/configure`; the
+`queen.queues` column default of **60** applies to a queue created by a push.
 
 How long a leased batch stays invisible to other consumers in the same group. A
 pop resolves its lease as: the request's `leaseSeconds` when positive, else this
-value, else 60 if the queue has no engine row or the lookup could not reach the
-database.
+value, else 60 if the lookup could not reach the database.
 
 Changing it affects **new** pops only. Leases already issued keep the expiry they
 were given. The broker that served the `/configure` drops its cached copy
 immediately, and notifies its peers; a peer that misses the notification picks up
 the change within `QUEEN_CACHE_REFRESH_INTERVAL_MS` (60 s by default).
 
-<Aside type="caution">
-The queue detail endpoint reports `leaseTime` from the configuration row, while
-the pop path reads it from the engine row. On a queue created by a push and never
-configured, those disagree: the detail view says 300 and the actual lease is 60.
-One `/configure` call makes them agree, because it writes both.
+<Aside type="note">
+The display tells the truth now. The queue detail endpoint and the pop path read
+the same `queen.queues.lease_time` column, so a push-created queue displays **60**
+and leases at 60. Before the queue-identity merge (2026-07-31) the display read a
+separate configuration row and could say 300 while pops actually leased at 60;
+the lease behaviour did not change, the display did.
 </Aside>
 
 Set it longer than your slowest realistic message handler. A lease that expires
@@ -342,8 +338,8 @@ encryption before you start producing, not while.
 
 ## dedupWindowSeconds
 
-**Type** integer, seconds. **Default** `3600`. Stored on the engine row, and not
-echoed in the `/configure` response.
+**Type** integer, seconds. **Default** `3600`. Stored on `queen.queues` like
+every other option, and echoed in the `/configure` response.
 
 The window within which a repeated `transactionId` is recognised as a duplicate
 for the same partition. Deduplication is **on by default**; only an explicit `0`

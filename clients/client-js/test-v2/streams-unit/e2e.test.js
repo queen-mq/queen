@@ -12,7 +12,10 @@
  *
  * Prerequisites:
  *   - Queen running on QUEEN_URL (default http://localhost:6632)
- *   - The schema procedures (019..022) applied (auto-loaded on Queen boot)
+ *   - The streams procedures applied (auto-loaded on Queen boot):
+ *     002_streams_schema, 007_log_streams, 008_streams_register_query_v1,
+ *     009_streams_state_get_v1 (the retired rows-era streams cycle's role
+ *     now lives in 007_log_streams' log_streams_cycle_v1)
  *
  * Run:
  *   QUEEN_URL=http://localhost:6632 node --test test/e2e.test.js

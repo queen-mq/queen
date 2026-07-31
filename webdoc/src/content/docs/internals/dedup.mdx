@@ -6,7 +6,7 @@ tier: internals
 sidebar:
   order: 6
 sourceOfTruth:
-  - server/sql/procedures/042_log_push.sql
+  - server/sql/procedures/003_log_push.sql
   - server/src/dedup.rs
   - server/src/fusion.rs
   - server/src/util.rs
@@ -19,7 +19,7 @@ configured window, a `transactionId` that has already been stored writes nothing
 `status: "duplicate"` with the original message's id. There is no Bloom filter, no sampling and
 no "best effort" qualifier.
 
-It is also on by default. `queen.log_queues.dedup_window_seconds` defaults to 3600, and only an
+It is also on by default. `queen.queues.dedup_window_seconds` defaults to 3600, and only an
 explicit `0` disables it.
 
 Here is the observable behaviour:

@@ -1,0 +1,11 @@
+goload -mode openloop -> http://10.114.0.2:6682 queue=segbench partitions=100 consumers=850 manualAck=false ackAsync=false ackInflight=256
+  offered: rate=1000000 msg/s | push-batch=100 -> 10000.0 req/s across 64 pacer workers (156.25 req/s each) | max-inflight=20000 | payload=256B
+[configure] queue=segbench completedRetentionSeconds=300
+[10:13:47] offered=   500690/s achieved=   496153/s shed=        0/s inflight=  1359 | p50=  44.80 p99=  226.30 p999=  544.77 ms | push=14884600 pop=14865800 lag=18800 | errs push=2 pop=0 empty=128091 gor=6661
+[10:14:17] offered=   999977/s achieved=   979530/s shed=        0/s inflight=  5292 | p50= 448.51 p99= 1679.36 p999= 2211.84 ms | push=44270500 pop=44238400 lag=32100 | errs push=2202 pop=0 empty=184040 gor=11516
+[10:14:47] offered=   999927/s achieved=  1000220/s shed=        0/s inflight=  3703 | p50= 444.42 p99= 1990.66 p999= 2637.82 ms | push=74277100 pop=74254000 lag=23100 | errs push=3704 pop=0 empty=236274 gor=9863
+[10:15:17] offered=  1000033/s achieved=   996557/s shed=        0/s inflight=  4206 | p50= 692.22 p99= 2408.45 p999= 3063.81 ms | push=104173800 pop=104075400 lag=98400 | errs push=4244 pop=0 empty=261366 gor=18691
+[10:15:47] offered=  1000437/s achieved=   994723/s shed=        0/s inflight=  5409 | p50= 577.54 p99= 2473.98 p999= 3325.95 ms | push=134015500 pop=133974200 lag=41300 | errs push=4758 pop=0 empty=298208 gor=15721
+[10:16:17] offered=   999600/s achieved=  1005963/s shed=        0/s inflight=  2388 | p50= 489.47 p99= 1515.52 p999= 2056.19 ms | push=164194400 pop=164103400 lag=91000 | errs push=5867 pop=0 empty=345713 gor=10675
+[10:16:47] offered=   999937/s achieved=   983593/s shed=        0/s inflight=  5953 | p50= 569.34 p99= 1761.28 p999= 2211.84 ms | push=193702200 pop=193637800 lag=64400 | errs push=7204 pop=0 empty=392940 gor=12537
+[final] offered=1950184 achieved=1939287 shed=0 (msgs: offered=195018400 achieved=193928700 shed=0) pushErr=7204 | pushed=193928700 popped=193899200 lag=29500 | popErr=0 empty=393064 | overall p50=477.18 p99=2211.84 p999=2768.90 ms

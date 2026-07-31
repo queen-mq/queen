@@ -80,8 +80,10 @@ flag is switched on.
   hot-list rings, long-poll wake gates, per-queue metric counters, parked gauges.
 - **Mesh frames carry the tenant**, so a cross-broker invalidation or wake targets one
   tenant's queue rather than every queue with that name.
-- **Row deletions are scoped**, so a retention or delete path cannot reach another
-  tenant's rows through a name match.
+- **Row deletions are scoped structurally.** Retention and the delete paths reach
+  configuration through `queen.log_partitions.queue_id`, a foreign key to
+  `queen.queues(id)`; there is no name-based join anywhere between data and
+  config, so a name match cannot reach another tenant's rows even in principle.
 
 What does **not** change: the JWT access levels. Authentication and tenancy are
 orthogonal mechanisms. A token's role decides which routes it may call; the header

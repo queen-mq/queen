@@ -50,7 +50,7 @@ pub struct AppState {
     // zstd level for broker-packed segments on the transaction push path (the
     // fusion path carries its own copy).
     pub zstd_level: i32,
-    // Per-queue configured lease time (seconds), read from queen.seg_queues on
+    // Per-queue configured lease time (seconds), read from queen.queues on
     // first use. No invalidation for now (queue-config invalidation is a later
     // slice); a reconfigure of leaseTime is not reflected until restart.
     pub lease_cache: Mutex<HashMap<String, i32>>,
@@ -83,7 +83,7 @@ pub struct AppState {
     // never go stale; the map is only size-capped.
     pub partition_queue: Mutex<HashMap<String, String>>,
     // Phase 2 first-contact safety (targeted pop). Monotonic positive cache of
-    // (queue -> {group}) pairs whose group-first-contact BULK SEED (043
+    // (queue -> {group}) pairs whose group-first-contact BULK SEED (004_log_pop's
     // log_pop_wildcard_*_v1 / log_pop_discover_wire_v1) is known committed — i.e.
     // the single-row consumer_groups_metadata marker exists. Until a (queue,
     // group) is seeded, a woken pop's hint-driven targeted single-partition pop
@@ -131,7 +131,7 @@ const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
 // Cap on the confirmed-ownership positive cache (see `ownership_ok`).
 const OWNERSHIP_CACHE_CAP: usize = 500_000;
 
-// RUSTFIX item 18: fallback lease when a queue has no seg_queues row / DB is
+// RUSTFIX item 18: fallback lease when a queue has no queen.queues row / DB is
 // unreachable — the "60" floor of COALESCE(request, queue.lease_time, 60).
 const DEFAULT_LEASE_SECONDS: i32 = 60;
 
@@ -166,7 +166,7 @@ pub(crate) fn split_tenant_queue(key: &str) -> (&str, &str) {
 
 impl AppState {
     // Resolve the queue's lease time, caching the lookup. Falls back to
-    // DEFAULT_LEASE_SECONDS when the queue has no seg_queues row yet or the DB
+    // DEFAULT_LEASE_SECONDS when the queue has no queen.queues row yet or the DB
     // is unreachable. The std Mutex guard is always dropped before the .await.
     async fn lease_time_for(&self, queue: &str, tenant: &str) -> i32 {
         let key = tenant_queue_key(tenant, queue);
@@ -206,7 +206,7 @@ impl AppState {
     }
 
     // Phase 2 first-contact safety: has this (queue, group)'s group-first-contact
-    // bulk seed committed (043)? Fast path = the monotonic positive cache (zero
+    // bulk seed committed (004_log_pop)? Fast path = the monotonic positive cache (zero
     // DB, no allocation on a hit). On a miss, ONE indexed marker lookup
     // (db::group_seed_marker_exists); a positive result is cached so the
     // steady-state targeted pop path never reads again. A pool/DB error, or an

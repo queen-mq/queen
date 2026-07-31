@@ -1075,9 +1075,6 @@
                   "options": {
                     "description": "See the reference page for this route."
                   },
-                  "dedupWindowSeconds": {
-                    "description": "See the reference page for this route."
-                  },
                   "error": {
                     "description": "See the reference page for this route."
                   }

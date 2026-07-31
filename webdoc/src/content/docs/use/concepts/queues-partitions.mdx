@@ -8,11 +8,11 @@ sidebar:
   label: Queues and partitions
 sourceOfTruth:
   - server/src/handlers/queues.rs
-  - server/sql/procedures/041_log_schema.sql
-  - server/sql/procedures/042_log_push.sql
-  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/003_log_push.sql
+  - server/sql/procedures/004_log_pop.sql
   - server/sql/procedures/012_configure.sql
-  - server/sql/procedures/013_stats.sql
+  - server/sql/procedures/018_stats.sql
 verifiedBy:
   - clients/client-js/test-v2/push.js
 ---
@@ -21,22 +21,27 @@ A queue is a named container with a configuration. A partition is an ordered lan
 Neither has to be declared before use: pushing to a queue and partition that do not exist
 creates both, inside the same transaction that stores the message.
 
-## A queue is created in one of two ways
+## A queue is created in one of three ways
 
-**By a push.** The first push to a name provisions the engine-side queue row, a configuration
-row, and the partition named in the request. Nothing else happens: no schema change, no file,
-no background job.
+**By a push.** The first push to a name provisions the queue's `queen.queues`
+configuration row and the partition named in the request. Nothing else happens: no schema
+change, no file, no background job.
 
 **By `POST /api/v1/configure`.** This creates the queue if it is missing and rewrites its
-configuration if it exists. It also materialises the `Default` partition on the configuration
-side.
+configuration if it exists. It creates no partition: partitions appear on first push.
 
-The two paths do not produce identical queues. The lease time differs, because the two code
-paths resolve their default from different places:
+**By a pop.** A queue-scoped pop on a name that does not exist creates the configuration row
+too, with column defaults, so a consumer group can subscribe before the first push ever runs.
+The flip side: a typo in a consumer's queue name now creates an empty queue rather than
+nothing.
+
+The paths do not produce identical queues. The lease time differs, because the
+`queen.queues.lease_time` column default is 60 while `/configure` writes an explicit 300 when
+`leaseTime` is omitted:
 
 | Queue created by | `leaseTime` in effect |
 | --- | --- |
-| A push | 60 seconds |
+| A push or a pop | 60 seconds |
 | `/configure` with no `leaseTime` | 300 seconds |
 
 <Aside type="caution">

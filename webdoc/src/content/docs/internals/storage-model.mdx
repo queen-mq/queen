@@ -1,13 +1,14 @@
 ---
 title: The storage model
-description: "Segments, offsets and the log: the five log tables, what each row holds, and the invariants that make offset arithmetic safe."
+description: "Segments, offsets and the log: the log tables, the queue row they hang off, what each row holds, and the invariants that make offset arithmetic safe."
 type: concept
 tier: internals
 sidebar:
   order: 2
 sourceOfTruth:
-  - server/sql/procedures/041_log_schema.sql
-  - server/sql/procedures/042_log_push.sql
+  - server/sql/schema.sql
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/003_log_push.sql
   - server/src/frames.rs
   - server/src/util.rs
 ---
@@ -42,15 +43,23 @@ Offsets 0 to 3 are gone, deleted by retention, which is why `log_start` sits at 
 Segment lengths differ because nothing chose them, and each dashed sidecar row mirrors the
 range of the one segment it hangs off.
 
-## The five tables
+## The tables
 
-All five are created by `041_log_schema.sql`, applied at every boot. `queen.log_dlq` is a
-sixth log table, created by the ack file. See [Ack internals](/internals/ack-internals).
+Four log tables are created by `001_log_schema.sql`, applied at every boot; `queen.log_dlq` is a
+fifth, created by the ack file (005_log_ack). See [Ack internals](/internals/ack-internals). All of
+them hang off `queen.queues` (created by `schema.sql`), which is both the queue's identity and its
+configuration.
 
-### queen.log_queues
+### queen.queues
 
-One row per queue. Queue identity is `(tenant_id, name)`, established by the unique index
-`log_queues_tenant_name_uk`, so two tenants can hold the same queue name on one broker.
+One row per queue, and queue identity **is** this row's `id`. On the wire a queue is named by
+`(tenant_id, name)`, established by the unique index `queues_tenant_name_uk`, so two tenants can
+hold the same queue name on one broker; internally, every partition-to-config join is by id, because
+`queen.log_partitions.queue_id` references `queen.queues(id)` with `ON DELETE CASCADE`. There is no
+separate engine-side queue table: the same row carries the full configuration (the retry limit, the
+DLQ flags, visibility delays, encryption, retention policy) plus the two engine-side options below.
+A queue that was never `/configure`d exists anyway: the first push, or an early subscription,
+provisions the row with its defaults.
 
 | Column | Meaning |
 | --- | --- |
@@ -58,20 +67,17 @@ One row per queue. Queue identity is `(tenant_id, name)`, established by the uni
 | `tenant_id` | opaque scoping key; defaults to the fixed default tenant |
 | `name` | the queue name as clients send it |
 | `lease_time` | default lease seconds for pops on this queue; **defaults to 60** |
-| `retention_seconds` | written by `/configure`, not read by any code path on this tree |
-| `dedup_window_seconds` | deduplication window; **defaults to 3600**, and `0` disables |
+| `dedup_window_seconds` | deduplication window; `INT NOT NULL`, **defaults to 3600**, and `0` disables |
 
-Two of those need care. `lease_time` defaults to 60 on a row created implicitly by a push, but
+`lease_time` needs care. It defaults to 60 on a row created implicitly by a push, but
 `POST /api/v1/configure` computes `leaseTime` with a default of 300 and writes it into the same
-column, so the effective default depends on how the queue came into existence. And
-`retention_seconds` here is a dead mirror: the retention loop reads its policy from
-`queen.queues` (`retention_enabled`, `retention_seconds`, `completed_retention_seconds`,
-`max_wait_time_seconds`), never from this column.
+column, so the effective default depends on how the queue came into existence. The 60 is a truth
+fix, not a behaviour change: implicitly created queues always leased at 60 (the pop path read that
+default), while the old config display showed a 300 the pop path never used. One column, one truth,
+and what the configuration shows is now the lease actually granted.
 
-`queen.log_queues` carries only engine-side options. Everything else about a queue (the retry
-limit, the DLQ flags, visibility delays, encryption, retention policy) lives on the
-`queen.queues` configuration row, which the first push creates alongside the log queue with
-`storage = 'segments'`.
+There is no `storage` engine-selector column. One engine, nothing to select; the wire still echoes
+`storage: "segments"` as a hard-coded literal.
 
 ### queen.log_partitions
 
@@ -81,7 +87,7 @@ three watermarks plus bookkeeping.
 | Column | Meaning |
 | --- | --- |
 | `id` | primary key; every other log table keys on it |
-| `queue_id` | owning queue |
+| `queue_id` | owning queue; references `queen.queues(id)` with `ON DELETE CASCADE` |
 | `name` | partition name; defaults to `Default` |
 | `last_offset` | **the allocator.** Highest allocated offset; starts at `-1`, so the next base offset is `last_offset + 1` |
 | `log_start` | segment retention watermark: every offset below it has been deleted |

@@ -4,10 +4,8 @@
 -- Creates or updates queue configuration with all options
 -- ============================================================================
 
--- Track B (§5): p_tenant scopes the config row's identity. DROP the (TEXT, JSONB)
--- form so the scoped (TEXT, JSONB, UUID) is unambiguous; the broker passes the
+-- Track B (§5): p_tenant scopes the config row's identity; the broker passes the
 -- resolved tenant (default when the feature is off ⇒ byte-identical).
-DROP FUNCTION IF EXISTS queen.configure_queue_v1(TEXT, JSONB);
 CREATE OR REPLACE FUNCTION queen.configure_queue_v1(
     p_queue_name TEXT,
     p_options JSONB DEFAULT '{}'::jsonb,
@@ -35,6 +33,7 @@ DECLARE
     v_encryption_enabled BOOLEAN;
     v_max_wait_time_seconds INTEGER;
     v_min_pop_wait_time INTEGER;
+    v_dedup_window_seconds INTEGER;
     v_queue_id UUID;
 BEGIN
     -- Parse options with defaults
@@ -65,18 +64,24 @@ BEGIN
     -- deadline, so this only stops a typo (e.g. seconds passed as ms) from
     -- parking a delivery for an absurd window.
     v_min_pop_wait_time := LEAST(GREATEST(COALESCE((p_options->>'minPopWaitTime')::integer, 0), 0), 60000);
-    
+    -- Dedup window now lives on queen.queues (queue-identity merge): the SP is
+    -- the single writer, replacing the handler's separate log-queue upsert.
+    -- Default 3600 = the column default; clamped at 0 like the handler used to.
+    v_dedup_window_seconds := GREATEST(COALESCE((p_options->>'dedupWindowSeconds')::integer, 3600), 0);
+
     -- Insert or update queue (Track B: identity is (tenant_id, name)).
     INSERT INTO queen.queues (
         tenant_id, name, namespace, task, priority, lease_time, retry_limit, retry_delay,
         max_queue_size, ttl, dead_letter_queue, dlq_after_max_retries, delayed_processing,
         window_buffer, retention_seconds, completed_retention_seconds,
-        retention_enabled, encryption_enabled, max_wait_time_seconds, min_pop_wait_time
+        retention_enabled, encryption_enabled, max_wait_time_seconds, min_pop_wait_time,
+        dedup_window_seconds
     ) VALUES (
         p_tenant, p_queue_name, v_namespace, v_task, v_priority, v_lease_time, v_retry_limit, v_retry_delay,
         v_max_size, v_ttl, v_dead_letter_queue, v_dlq_after_max_retries, v_delayed_processing,
         v_window_buffer, v_retention_seconds, v_completed_retention_seconds,
-        v_retention_enabled, v_encryption_enabled, v_max_wait_time_seconds, v_min_pop_wait_time
+        v_retention_enabled, v_encryption_enabled, v_max_wait_time_seconds, v_min_pop_wait_time,
+        v_dedup_window_seconds
     )
     ON CONFLICT (tenant_id, name) DO UPDATE SET
         namespace = EXCLUDED.namespace,
@@ -96,7 +101,8 @@ BEGIN
         retention_enabled = EXCLUDED.retention_enabled,
         encryption_enabled = EXCLUDED.encryption_enabled,
         max_wait_time_seconds = EXCLUDED.max_wait_time_seconds,
-        min_pop_wait_time = EXCLUDED.min_pop_wait_time
+        min_pop_wait_time = EXCLUDED.min_pop_wait_time,
+        dedup_window_seconds = EXCLUDED.dedup_window_seconds
     RETURNING id INTO v_queue_id;
     
     -- The legacy "ensure a Default partition row" write went away with the rows
@@ -112,6 +118,10 @@ BEGIN
         'queue', p_queue_name,
         'namespace', v_namespace,
         'task', v_task,
+        -- Wire-compat literal: the storage engine-selector column is gone (one
+        -- engine), but the wire keeps echoing 'segments' (same as
+        -- 010_log_admin/011_log_stats).
+        'storage', 'segments',
         'options', jsonb_build_object(
             'priority', v_priority,
             'leaseTime', v_lease_time,
@@ -128,7 +138,8 @@ BEGIN
             'retentionEnabled', v_retention_enabled,
             'encryptionEnabled', v_encryption_enabled,
             'maxWaitTimeSeconds', v_max_wait_time_seconds,
-            'minPopWaitTime', v_min_pop_wait_time
+            'minPopWaitTime', v_min_pop_wait_time,
+            'dedupWindowSeconds', v_dedup_window_seconds
         )
     );
 END;

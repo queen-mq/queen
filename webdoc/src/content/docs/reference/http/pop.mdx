@@ -9,7 +9,7 @@ sourceOfTruth:
   - server/src/handlers/data.rs
   - server/src/handlers/mod.rs
   - server/src/config.rs
-  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/004_log_pop.sql
 verifiedBy:
   - clients/client-js/test-v2/pop.js
   - clients/client-js/test-v2/consume.js
@@ -74,6 +74,12 @@ over the pop-carried intent.
 The discovery route requires at least one of `namespace` and `task`. With neither, it returns
 `400` with `{"success":false,"error":"namespace or task is required","messages":[]}` rather than
 scanning every queue.
+
+One side effect to know about: a queue-scoped pop on a queue that does not exist **creates its
+`queen.queues` configuration row** (column defaults, `namespace` and `task` derived from the
+dotted name) before answering 204. That is deliberate, because a group may subscribe before the
+first push and its durable subscription record hangs off the queue's id. It does mean a typo in a
+consumer's queue name now leaves an empty queue behind rather than nothing.
 
 ## Response
 

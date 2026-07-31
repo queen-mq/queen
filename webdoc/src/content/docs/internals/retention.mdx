@@ -7,7 +7,7 @@ sidebar:
   order: 9
 sourceOfTruth:
   - server/src/retention.rs
-  - server/sql/procedures/045_log_maintenance.sql
+  - server/sql/procedures/006_log_maintenance.sql
   - server/src/config.rs
 ---
 
@@ -73,13 +73,14 @@ One query per cycle builds the whole plan, with every cutoff computed server-sid
 Policy therefore lives in Rust and SQL stays policy-free: a `NULL` cutoff simply disables that rule
 for the call. The rows are ordered by partition id.
 
-<Aside type="caution">
-The join between `queen.queues` and `queen.log_queues` carries `tenant_id` on both sides, and that is
-load-bearing rather than cosmetic. Queue identity is `(tenant_id, name)`; matching on name alone
-becomes a cross product the moment two tenants hold the same queue name, and one tenant's cutoffs
-would then be emitted against another tenant's partitions, which the step calls execute as deletes.
-A unit test pins the join text for exactly this reason. Single-tenant deployments are unaffected: the
-join is one-to-one either way.
+<Aside type="note">
+The work list joins `queen.log_partitions` against `queen.queues` **by id** (`p.queue_id = qq.id`):
+queue identity *is* the `queen.queues` id, and partitions reference it directly with a foreign key.
+There is no name-plus-tenant bridge in the join, so the hazard that shape carried (two tenants
+holding the same queue name turning a name-only match into a cross product, with one tenant's
+cutoffs executed as deletes against another tenant's partitions) is structurally unrepresentable. A
+unit test in `retention.rs` pins the by-id invariant: it asserts the join text is
+`p.queue_id = qq.id` and that no name-bridge table appears in the query.
 </Aside>
 
 ## The retention step
@@ -142,13 +143,12 @@ The Rust loop stops on `done` or on `deleted == 0`. The step contract already re
 whenever nothing was deleted, so the second condition is a defensive stop against a contract break
 looping forever.
 
-`queen.retention_history` needed one repair to work under this engine. Its `partition_id` foreign key
-pointed at `queen.partitions` (the rows-engine table, in which no log partition has a row), so it was
-dropped, exactly as the traces table was decoupled. The cascade it provided is replaced by the age
-purge in the worker-metrics cleanup, which also bounds the table's growth, and an index on
-`executed_at DESC` was added for the analytics reader. Before this, the Retention panel reported zero
-messages evicted while segments were being deleted continuously: a dead panel presented as a
-measurement.
+`queen.retention_history.partition_id` deliberately carries **no foreign key**: the audit row must
+outlive the partition it describes (the cleanup phase below writes one `__partition_deleted__` row
+as it deletes the partition), so a cascade would erase the evidence in the act of creating it. The
+cleanup a cascade would otherwise provide comes from the age purge in the worker-metrics phase,
+which also bounds the table's growth, and the table is indexed on `executed_at` for the analytics
+reader.
 
 ## The sidecar purge
 
@@ -217,9 +217,9 @@ Deleting the row cascades to `log_consumers` (the cursors) and `log_segments` (n
 ever would, because the phase-2 purge is driven by the partition work list, and an orphaned sidecar row
 would leak forever.
 
-It is also the one phase that does not consume the cycle's work list, which is what keeps it out of the
-tenant-isolation hazard the join above carries: it selects partitions from `queen.log_partitions` by id
-and never resolves a queue by name, so there is no cross-product for a shared queue name to exploit.
+It is also the one phase that does not consume the cycle's work list: it needs no per-queue cutoffs
+(the window is one broker-wide knob), so it selects its candidates straight from
+`queen.log_partitions` by id. Like the work list itself, it never resolves a queue by name.
 
 ### What vetoes a delete
 
@@ -309,7 +309,11 @@ one global total order everywhere rather than an argument for why a second one i
 - **Partitions that still hold something.** Phase 4 deletes only empty ones, and only after
   `PARTITION_CLEANUP_DAYS` of silence: a partition with segments, dead-letter rows, streams state or a
   live lease is never touched by it.
-- **Queues.** Removing a queue is an explicit operation.
+- **Queues.** Removing a queue is an explicit operation, and it is **one call**:
+  `queen.delete_queue_v1` (013_analytics) first deletes the queue's `log_txns` and `log_dlq` rows
+  explicitly (both tables are foreign-key-less by design, so no cascade can reach them), then
+  deletes the `queen.queues` row, whose cascade takes the partitions, segments, cursors, watermarks,
+  queue-scoped subscription rows and per-queue metrics with it.
 - **Parallelism.** `RETENTION_PARALLELISM` is likewise read and ignored; retention runs one bounded step
   at a time.
 

@@ -7,7 +7,7 @@ sidebar:
   order: 4
 sourceOfTruth:
   - server/src/handlers/data.rs
-  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/004_log_pop.sql
   - server/src/db.rs
 verifiedBy:
   - clients/client-js/test-v2/pop.js
@@ -26,13 +26,24 @@ The client side looks like this:
 | Route | Scope | Stored procedure |
 | --- | --- | --- |
 | `GET /api/v1/pop/queue/:queue` | across the queue's partitions | `log_pop_wildcard_bin_v1` or `log_pop_list_v1` |
-| `GET /api/v1/pop/queue/:queue/partition/:partition` | one named partition | `log_pop_v1` |
+| `GET /api/v1/pop/queue/:queue/partition/:partition` | one named partition | `log_pop_specific_v1` |
 | `GET /api/v1/pop?namespace=&task=` | across every matching queue | `log_pop_discover_wire_v1` |
 
 All three funnel into `queen.log_pop_v1`, once per partition. The claim algorithm below is
 therefore the same in all cases; only candidate selection differs. A discovery pop requires at
 least one of `namespace` or `task`: a bare `GET /api/v1/pop` is a `400` rather than an
 unbounded scan of every queue.
+
+The single-partition route carries one wire subtlety worth recording. Its response assembly lives
+inside `queen.log_pop_specific_v1` (004_log_pop), a `VOLATILE` plpgsql function that calls
+`log_pop_v1` first and resolves the reported `partitionId` **afterwards**, in a later command of
+the same function, whose snapshot is therefore at least as new as anything the claim saw. The
+previous shape resolved the partitionId in the outer statement, under a snapshot taken *before*
+the claim ran; because the volatile claim sees fresh snapshots internally, a pop racing the
+partition-creating push's commit could deliver a genuinely **leased** batch whose every message
+carried `partitionId: ""`, and the client's mandatory-partitionId ack guard then threw. Moving the
+assembly inside the function makes the ordering airtight by snapshot monotonicity. The wire shape
+is unchanged.
 
 <pre class="mermaid">{`
 sequenceDiagram
@@ -91,6 +102,15 @@ it is deliberate:
 A first-ever pop for a `(queue, group)` is routed through the SQL wildcard procedure instead,
 because that one carries the group-first-contact bulk seed. After the seed marker exists, every
 subsequent pop uses the ring.
+
+<Aside type="note">
+That first SQL pop is also a **provisioning** call: a wildcard pop, like a subscription
+registration, on a queue that does not exist creates its `queen.queues` config row. It has to.
+The durable subscription marker carries a foreign key to the queue row, and a group may
+legitimately subscribe before the first push creates the queue, so without the upsert the FK would
+reject exactly those early subscribers. The honest flip side of that widening: a consumer typo now
+creates a queue row, where it previously left only an orphan watermark.
+</Aside>
 
 ### Without the hot-list
 

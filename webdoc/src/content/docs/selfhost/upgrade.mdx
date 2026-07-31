@@ -1,6 +1,6 @@
 ---
 title: Upgrades
-description: "The schema re-applies itself idempotently at every boot, so upgrading is replacing a binary: rolling replicas, what happens to in-flight leases, rollback, and why 0.16 is not a data migration."
+description: "The deployment model is always-virgin: the boot-time DDL only creates, so an upgrade is a fresh database plus a traffic cutover, not an in-place migration. Rolling restarts, in-flight leases, and what that model rules out."
 type: how-to
 tier: operate
 sidebar:
@@ -11,20 +11,25 @@ sourceOfTruth:
   - server/src/migrate.rs
   - server/src/file_buffer.rs
   - server/src/obs.rs
-  - server/sql/procedures/043_log_pop.sql
-  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/001_log_schema.sql
   - server/sql/schema.sql
   - server/build.rs
 ---
 
-Upgrading a broker is replacing a binary. There is no migration command to run, no
-version table to bump, and no maintenance window required by the schema itself.
-The DDL and all 34 stored-procedure files are compiled into the binary and applied
-on every boot, so the version of the SQL in the database is always the version
-that the most recently booted broker carries.
+Queen's deployment model is **always-virgin**: a deployment starts from an empty
+database, and the DDL the broker applies at boot only *creates*. There are no
+migration files, no version table, and no upgrade ALTERs: `CREATE TABLE`
+declares the final shape, once. The consequence is stated plainly up front
+because the whole page follows from it:
 
-That single mechanism is what makes an upgrade simple, and it is also the source of
-the one sharp edge on this page. Both are below.
+**There is no in-place upgrade path. Upgrading a deployment means standing up
+the new version against a fresh database and cutting traffic over.** Pointing a
+new build at a database created by an earlier version is unsupported: the boot
+apply will not reshape existing tables, and nothing else will either.
+
+What *is* routine and coordination-free is restarting or replacing replicas of
+the same version. Both halves are below.
 
 ## What happens at boot
 
@@ -34,41 +39,54 @@ the one sharp edge on this page. Both are below.
    `pg_advisory_lock(778120010)`. This serialises the apply cluster-wide, so
    replicas restarting at the same moment cannot race each other through the DDL.
 2. Execute `sql/schema.sql`, then each `sql/procedures/*.sql` file in lexical
-   order, 35 batches in total. Every statement is idempotent:
-   `CREATE OR REPLACE FUNCTION`, `CREATE TABLE IF NOT EXISTS`,
-   `CREATE INDEX IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
+   order (23 procedure files, 24 batches in total). Every statement is
+   idempotent (`CREATE OR REPLACE FUNCTION`, `CREATE TABLE IF NOT EXISTS`,
+   `CREATE INDEX IF NOT EXISTS`), so re-applying on every boot is safe.
 3. Release the lock on every exit path, success or failure.
 4. **Fail the process** on any DDL error, naming the file that failed
-   (`procedures/044_log_ack.sql: …`). A broker never serves a request against a
+   (`procedures/005_log_ack.sql: …`). A broker never serves a request against a
    schema it could not bring to the expected shape.
 
-The lexical order is load-bearing. The log-engine files in the `04x` range
-redefine stored procedures created by the earlier `00x`–`02x` files, and `040`
-first drops the previous engine's functions so an older development database boots
-clean. Applying the files in any other order leaves superseded definitions in
-place.
+Each function and table is defined exactly once, by exactly one file. The
+lexical order is still load-bearing, for a narrower reason than redefinition:
+the table files (`001_log_schema`, `002_streams_schema`) must run before the
+SQL-language function bodies that resolve those tables at creation time, and the
+partition-counter trigger attachment (`020_log_partition_counters`) must run
+after both the table it attaches to and the functions it binds.
 
-Column additions use `ADD COLUMN IF NOT EXISTS` with constant defaults, which on
-PostgreSQL 11 and later is a catalog-only change: no table rewrite, safe on a
-table with millions of rows. The per-table storage and autovacuum parameters are
-re-asserted on every boot as well, which is why they cannot drift.
+Because every statement only creates, the apply has exactly two outcomes worth
+naming: on an empty database it builds the full schema; on a database the same
+version already initialised it verifies and re-asserts (the per-table storage
+and autovacuum parameters are re-applied on every boot, which is why they cannot
+drift). What it cannot do is bring a database built by a *different* version to
+this version's shape. That is the always-virgin contract, not an accident.
 
 <Aside type="note">
-`QUEEN_APPLY_SCHEMA=0` skips all of the above. If you run that way, applying the
-new version's DDL before starting the new version's binary is your
+`QUEEN_APPLY_SCHEMA=0` skips all of the above. If you run that way, applying
+this version's DDL to the (empty) database before the first boot is your
 responsibility. See [PostgreSQL](/selfhost/postgres). Everything else on this
 page still applies.
 </Aside>
 
-## Rolling replicas
+<Aside type="caution">
+The stored-procedure definitions are `CREATE OR REPLACE`, so **the last broker
+to boot decides which version of the procedures is in the database**, for
+every broker connected to it. That is harmless when all replicas run the same
+version, and it is one of the reasons two versions must never share a database:
+each restart of either would silently rewrite the procedures underneath the
+other. One database, one version, always.
+</Aside>
 
-Because brokers are stateless and every route is served by every replica, a
-rolling upgrade needs no coordination and no client changes.
+## Restarting and replacing replicas (same version)
+
+Brokers are stateless and every route is served by every replica, so restarting
+replicas (or replacing their binaries with the *same version*, as in a node
+drain or an image re-pull) needs no coordination and no client changes.
 
 <Steps>
 
-1. **Start a broker on the new version** with the same configuration. It applies
-   its schema under the advisory lock and begins serving.
+1. **Start the replacement broker** with the same configuration. It re-applies
+   its schema under the advisory lock (a no-op verify) and begins serving.
 
 2. **Wait for a real health check.** `GET /health` does a database round-trip, so
    a 200 means this broker can serve. Do not proceed on process liveness alone.
@@ -92,32 +110,13 @@ rolling upgrade needs no coordination and no client changes.
 
 </Steps>
 
-Startup on the new binary drains any leftover spool **before** the listener binds:
-crash-left partial files are finalised, then finished files are replayed
-oldest-first. It stops at the first failure and hands the rest to the background
-drain loop, and it gives up after an hour of continuous draining, so a large spool
-delays the port opening but a dead database does not block boot indefinitely.
+Startup drains any leftover spool **before** the listener binds: crash-left
+partial files are finalised, then finished files are replayed oldest-first. It
+stops at the first failure and hands the rest to the background drain loop, and
+it gives up after an hour of continuous draining, so a large spool delays the
+port opening but a dead database does not block boot indefinitely.
 
-### The mixed-version window
-
-<Aside type="caution">
-Every broker re-applies its own SQL at every boot, and the redefinitions are
-`CREATE OR REPLACE`. **The last broker to boot decides which version of the stored
-procedures is in the database**, for every broker. During a rolling upgrade that
-means:
-
-- once the new broker has booted, the *old* broker is calling the *new*
-  procedures;
-- and if the old broker then restarts (a crash, an OOM kill, a probe-driven
-  restart), it re-applies the **old** SQL and reverts the definitions underneath
-  the new broker.
-
-Keep the window short, roll in one direction, and do not leave a mixed-version
-cluster running. If an old replica restarts during the roll, restart the new one
-afterwards so its SQL is the one in place.
-</Aside>
-
-## In-flight leases
+### In-flight leases
 
 Leases are rows, not memory. A pop takes a lease on the span
 `(committed, batch_end]` by writing `worker_id`, `batch_end`,
@@ -125,7 +124,7 @@ Leases are rows, not memory. A pop takes a lease on the span
 `queen.log_consumers`. Restarting a broker does not touch those rows and does not
 release those leases.
 
-What follows is exactly the at-least-once contract, with no special upgrade case:
+What follows is exactly the at-least-once contract, with no special restart case:
 
 - **The leased span stays invisible** to other consumers of that group. A pop only
   claims a (partition, group) whose `worker_id` is null, or whose
@@ -153,52 +152,67 @@ redeliver: the cursor is committed inside the pop transaction. That is at-most-o
 delivery, and a message in flight to a client when the broker stopped is lost.
 </Aside>
 
-## Rollback
+## Upgrading a deployment: fresh database + cutover
 
-Running the previous binary again works, with one asymmetry created by the
-idempotent DDL. Stored procedures are `CREATE OR REPLACE`, so they **revert** to
-the older definitions the moment the older binary boots. Tables, columns and
-indexes are `IF NOT EXISTS`, so anything the newer version added is **not**
-removed. A rolled-back deployment carries extra columns the old code ignores.
-
-That is usually harmless and is the reason a rollback is possible at all. What it
-does not survive is a change in the *meaning* of existing data. Read the release
-notes before rolling back across a version that changed how a column is
-interpreted.
-
-## Coming from 0.16
-
-The previous Queen broker was a C++ implementation on a different storage engine.
-Version 1.0 is not an update of it, and **there is no data migration**.
-
-- The `queen migrate` subcommand exists only to say so. It logs that migration
-  is not supported on the log engine and exits 1 without opening a database
-  connection.
-- The current engine's data lives in `queen.log_queues`, `log_partitions`,
-  `log_segments`, `log_txns`, `log_consumers` and `log_dlq`. The older
-  `queen.messages` table is still created by the schema (the column is kept so
-  the storage selector and the dual-engine guards have something to key off), but
-  the push and pop paths never read it. Rows left there are inert.
-- There is also nothing to convert on disk. The old broker's state was in
-  PostgreSQL too; it is in tables the new engine does not use.
-
-The supported cut-over is therefore an application-level one:
+An upgrade to a new version is an application-level cutover, the same shape
+whatever versions are involved:
 
 <Steps>
 
-1. **Stop producing** to the 0.16 deployment.
-2. **Let its consumers drain** it to completion.
-3. **Stand up 1.0** against a fresh database, or a fresh database name on the same
-   server. It creates its own schema at first boot.
-4. **Point producers and consumers at the new broker.** Queues and partitions are
-   created by the first push that names them, so there is no provisioning step.
+1. **Stop producing** to the old deployment.
+
+2. **Let its consumers drain it** to completion. In-flight leases resolve
+   exactly as described above: acked work commits, expired leases redeliver
+   within the old deployment until the backlog is empty.
+
+3. **Stand up the new version against a fresh database**, or a fresh database
+   name on the same server. It creates its own schema at first boot. Do not
+   point it at the old database: the boot apply only creates, and an old
+   database is not empty.
+
+4. **Point producers and consumers at the new broker.** Queues and partitions
+   are created by the first push that names them, so there is no provisioning
+   step. Queue options set via `/configure` on the old deployment must be
+   re-applied to the new one, because configuration lives in the database you
+   just left behind.
 
 </Steps>
 
 If you cannot drain (a backlog you must not lose), the only reliable path is to
-read the messages out through the old deployment's own API and push them into 1.0
-as new messages, giving each one a deterministic `transactionId` so a retry of
-your copy loop cannot duplicate it. Nothing in the broker does this for you.
+read the messages out through the old deployment's own API and push them into
+the new one as new messages, giving each one a deterministic `transactionId` so
+a retry of your copy loop cannot duplicate it. Nothing in the broker does this
+for you.
+
+### Rollback
+
+The cutover model makes rollback an argument for patience rather than a
+procedure: the old deployment and its database still exist until you retire
+them. Keep both running (producers stopped, consumers drained) until you are
+confident in the new deployment; rolling back is pointing clients back at the
+old broker. Once you have deleted the old database, there is nothing to roll
+back to: messages pushed to the new deployment in the meantime would need the
+same copy-loop treatment in reverse.
+
+## Coming from 0.16
+
+The previous Queen broker was a C++ implementation on a different storage engine.
+Version 1.0 is not an update of it, and **there is no data migration**, which
+is the always-virgin model again, not a special case.
+
+- The `queen migrate` subcommand exists only to say so. It logs that migration
+  is not supported on the log engine and exits 1 without opening a database
+  connection.
+- The current engine's data lives in `queen.queues` (queue identity and
+  configuration in one table) and the five log tables: `log_partitions`,
+  `log_segments`, `log_txns`, `log_consumers` and `log_dlq`. None of the old
+  broker's tables are created by this schema, and none of its data is read.
+- There is also nothing to convert on disk. The old broker's state was in
+  PostgreSQL too; it is in tables the new engine does not use.
+
+The cut-over is the standard one above: drain the 0.16 deployment, stand up the
+new version against a fresh database, repoint clients, with the same copy-loop
+escape hatch if the backlog cannot be drained.
 
 ## Confirming which version you are running
 
@@ -225,7 +239,7 @@ looking at is the one you deployed.
   <LinkCard
     href="/selfhost/kubernetes"
     title="Kubernetes"
-    description="Probes that will not restart an old replica in the middle of your roll."
+    description="Probes that will not restart a replica in the middle of a node drain."
   />
   <LinkCard
     href="/selfhost/postgres"

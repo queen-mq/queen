@@ -1,0 +1,931 @@
+diff --git a/server/src/handlers/data.rs b/server/src/handlers/data.rs
+index 4bd01b6..be388ba 100644
+--- a/server/src/handlers/data.rs
++++ b/server/src/handlers/data.rs
+@@ -528,7 +528,7 @@ struct ListState {
+     until: Option<String>,
+     /// took only: the partition's allocator watermark read at the claim —
+     /// compared with the served batch_end to derive `drained` (spec §2
+-    /// clear-su-ack; see 043 log_pop_list_v1).
++    /// clear-su-ack; see 004_log_pop's log_pop_list_v1).
+     #[serde(rename = "lastOff", default)]
+     last_off: Option<i64>,
+ }
+@@ -685,7 +685,7 @@ pub async fn handle_pop(
+                 // fall through to the wildcard backstop on the next iteration.
+                 // Phase 2 first-contact safety: only take the targeted
+                 // single-partition path once this (queue, group)'s
+-                // group-first-contact BULK SEED has committed (043). Before that,
++                // group-first-contact BULK SEED has committed (004_log_pop). Before that,
+                 // targeted pops would drive queen.log_pop_v1's per-partition lazy
+                 // first-contact INSERT en masse and re-form the transactionid
+                 // convoy the seed prevents (51e50c4) — the merge regression that
+@@ -1242,11 +1242,20 @@ async fn hotlist_pop_attempt(
+     }
+ 
+     // Take candidates; reseed (bounded, throttled) if the ring is cold.
+-    let k = ((max_parts.max(1) as usize) * 8).clamp(16, 256);
+-    let mut cands = st.hotlist.take_batch(qkey, group, k, now_ms);
++    //
++    // Budget-aware claim (2026-07-31): take_batch stops claiming once the ring's
++    // own mark estimate covers `batch`, so under a deep backlog a serve holds 1-2
++    // partitions instead of a fixed over-claim. `k` is only the sparse-ring cap -
++    // the old `max_parts x 8, clamp(16, 256)` held 16-80 partitions INFLIGHT for
++    // the serve's whole SQL leg and capped a 100-partition T1 ring at ~6
++    // concurrent serves (measured: 806 serves/s x 863 msg avg = the entire ~700k
++    // pop ceiling; July's pre-hotlist SQL claim held ONE partition per pop).
++    let k = ((max_parts.max(1) as usize) * 2).clamp(2, 64);
++    let want = batch.max(1) as u32;
++    let mut cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
+     if cands.is_empty() && need_reseed {
+         hotlist_reseed_scan(&st.hotlist, &client, qkey, group, now_ms).await;
+-        cands = st.hotlist.take_batch(qkey, group, k, now_ms);
++        cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
+     }
+     if cands.is_empty() {
+         drop(client);
+@@ -1563,7 +1572,7 @@ pub struct PopDiscoverParams {
+     wait: Option<bool>,
+     timeout: Option<u64>,
+     // RUSTFIX item 18: per-request lease override; 0/absent lets each discovered
+-    // partition use its own queue's log_queues.lease_time (else 60).
++    // partition use its own queue's queues.lease_time (else 60).
+     #[serde(rename = "leaseSeconds")]
+     lease_seconds: Option<i32>,
+     #[serde(rename = "consumerGroup")]
+@@ -1613,7 +1622,7 @@ pub async fn handle_pop_discover(
+     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+     // No single queue to read a lease from: the SP leases each partition with its
+     // own queue's configured lease_time; this is only the fallback for a matching
+-    // queue that has no log_queues.lease_time.
++    // queue that has no configured queues.lease_time.
+     // RUSTFIX item 18: pass the RAW request override (0 = none) so the discover SP
+     // resolves COALESCE(NULLIF(request,0), sq.lease_time, 60) PER partition.
+     let lease_seconds = p.lease_seconds.filter(|v| *v > 0).unwrap_or(0);
+@@ -2433,7 +2442,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
+                     // the poison frame's payload, and file the queen.log_dlq row
+                     // (log_dlq_head_v1 then advances the cursor + releases the
+                     // lease). 'off' carries the poison OFFSET in this return —
+-                    // not the cursor (044 contract).
++                    // not the cursor (005_log_ack contract).
+                     if v.get("dlq").and_then(|x| x.as_bool()).unwrap_or(false) {
+                         let off = v.get("off").and_then(|x| x.as_i64()).unwrap_or(0);
+                         match dlq_file_head(client.as_ref().unwrap(), &pid, group, &worker, off, &acks, &idxs)
+@@ -2740,7 +2749,7 @@ struct RenewBody {
+ const RENEW_OWNED_SQL: &str = "SELECT (queen.log_renew_lease_v1($1, $2::int))::text \
+      WHERE EXISTS (SELECT 1 FROM queen.log_consumers c \
+                    JOIN queen.log_partitions p ON p.id = c.partition_id \
+-                   JOIN queen.log_queues q ON q.id = p.queue_id \
++                   JOIN queen.queues q ON q.id = p.queue_id \
+                    WHERE c.worker_id = $1 \
+                      AND q.tenant_id = $3::text::uuid \
+                      AND c.lease_expires_at IS NOT NULL \
+@@ -3264,7 +3273,7 @@ pub async fn handle_transaction(
+     }
+ 
+     // ------------------------------------------------ build the SP payload
+-    // 044 transaction wire: pushes carry {queue, partition, count, hashesHex
++    // 005_log_ack transaction wire: pushes carry {queue, partition, count, hashesHex
+     // (32-hex per frame, frame order — hex of the 16*count hash bytes), blobB64,
+     // verified}. verified = -1 means "no broker dedup vouching — probe the whole
+     // window" (always correct; the transaction path is rare and skips the
+@@ -3350,7 +3359,7 @@ pub async fn handle_transaction(
+                 // queen.log_dlq row — exactly what process_acks does on the direct
+                 // path. Without this the DLQ entry is delayed until lease expiry + a
+                 // later direct nack. Runs post-commit on the same pooled client.
+-                // 'off' in the dlq:true entry carries the poison OFFSET (044).
++                // 'off' in the dlq:true entry carries the poison OFFSET (005_log_ack).
+                 let mut dlq_indices: std::collections::HashSet<usize> =
+                     std::collections::HashSet::new();
+                 if let Some(arr) = v.get("acks").and_then(|x| x.as_array()) {
+diff --git a/server/src/hotlist.rs b/server/src/hotlist.rs
+index 46a1763..c28f7b9 100644
+--- a/server/src/hotlist.rs
++++ b/server/src/hotlist.rs
+@@ -888,7 +888,28 @@ impl HotList {
+     /// across sub-rings), marking them INFLIGHT. Drains due wheel entries first.
+     /// Returns the candidates (name + epoch snapshot for the CAS). An empty
+     /// return means the ring is empty (the caller parks / reseeds).
+-    pub fn take_batch(&self, qkey: &str, group: &str, k: usize, now_ms: i64) -> Vec<Candidate> {
++    /// Claim up to `k` ready candidates for one pop serve, stopping EARLY once
++    /// the accumulated mark estimate of the claimed entries covers `want`
++    /// messages (budget-aware claim, 2026-07-31). Every claimed candidate is
++    /// held INFLIGHT for the serve's entire SQL leg, so the claim SIZE is what
++    /// bounds concurrent serves: the old fixed over-claim (max_parts x 8,
++    /// floor 16) let one serve hold 16-80 partitions of a 100-partition ring -
++    /// ~6 serves in flight, measured as the whole T1 pop ceiling (806 serves/s
++    /// x 863 msg avg ~ 700k/s while push ran at 1M). Summing `batch_count` -
++    /// the same estimate `ready_est` trusts, and biased LOW by construction
++    /// (a reseeded backlog carries count 1) - lets a deep partition satisfy
++    /// the budget alone (claim 1-2, tens of serves in flight) while a sparse
++    /// ring still claims up to `k` exactly as before: a low estimate degrades
++    /// to the pre-fix behaviour, never past it. At least one candidate is
++    /// always claimed when the ring has one, whatever `want` says.
++    pub fn take_batch(
++        &self,
++        qkey: &str,
++        group: &str,
++        k: usize,
++        want: u32,
++        now_ms: i64,
++    ) -> Vec<Candidate> {
+         if !self.enabled || k == 0 {
+             return Vec::new();
+         }
+@@ -905,10 +926,12 @@ impl HotList {
+             }
+         }
+         let intern = s.intern.lock().unwrap();
++        let want = want.max(1) as u64;
++        let mut got: u64 = 0;
+         let mut out = Vec::with_capacity(k);
+         let mut cursor = *ring.take_cursor.lock().unwrap();
+         let mut empty_streak = 0usize;
+-        while out.len() < k && empty_streak < self.shards {
++        while out.len() < k && (out.is_empty() || got < want) && empty_streak < self.shards {
+             let sh = cursor % self.shards;
+             cursor = cursor.wrapping_add(1);
+             let mut sub = ring.subs[sh].lock().unwrap();
+@@ -920,19 +943,22 @@ impl HotList {
+                     // claim's Took checkin can re-assert it. Without the reset a
+                     // racing Leased checkin (10 concurrent poppers, one winner)
+                     // can park the entry while a STALE drained=true from an older
+-                    // cycle survives — the next covered ack would then clear a
++                    // cycle survives - the next covered ack would then clear a
+                     // backlogged partition (measured 2026-07-24: the intermittent
+                     // testConsumerOrderingConcurrency stall).
+                     sub.drained[local as usize] = false;
+                     let ep = sub.epoch[local as usize];
+                     let global = local * self.shards as u32 + sh as u32;
+                     if let Some(name) = intern.name_of(global) {
++                        // The budget reads the same mark estimate ready_est
++                        // walks; saturating, a pathological count cannot wrap.
++                        got = got.saturating_add(sub.batch_count[local as usize] as u64);
+                         out.push(Candidate {
+                             name: name.to_string(),
+                             epoch: ep,
+                         });
+                     } else {
+-                        // interning lost the name (should not happen) — drop it.
++                        // interning lost the name (should not happen) - drop it.
+                         sub.state[local as usize] = IDLE;
+                     }
+                 }
+@@ -1435,7 +1461,7 @@ impl HotList {
+     /// OF ONE TENANT (the delete-consumer-group admin op, all queues). Same rationale
+     /// as [`forget_group`], applied to every queue that currently holds a ring for the
+     /// group; each such queue is woken. Tenant-scoped to match the SQL delete
+-    /// (008_consumer_groups.sql) and the `seeded_groups` purge beside it: on a shared
++    /// (014_consumer_groups.sql) and the `seeded_groups` purge beside it: on a shared
+     /// cell `workers` is a universal group name, and one tenant's DELETE must not
+     /// cold-start every other tenant's ring.
+     pub fn forget_group_all_queues(&self, tenant: &str, group: &str) {
+@@ -1597,6 +1623,34 @@ mod tests {
+         h.ensure_group(q, g);
+     }
+ 
++    #[test]
++    fn take_batch_budget_stops_at_covered_backlog() {
++        // Budget-aware claim (2026-07-31): a partition whose accumulated marks
++        // already cover the requested batch satisfies the claim ALONE, leaving
++        // the rest of the ring claimable by CONCURRENT serves - the fixed
++        // over-claim held every claimed partition INFLIGHT for the serve's
++        // whole SQL leg and was the T1 pop concurrency ceiling.
++        let h = hl1();
++        reg(&h, "q", "g");
++        for p in 0..4 {
++            h.mark_local("q", &format!("p{p}"), 2_000, 0); // deep: 2k marks each
++        }
++        let c = h.take_batch("q", "g", 10, 1_000, 0);
++        assert_eq!(names(&c), vec!["p0"], "deep head partition covers the budget alone");
++        // The other three are claimable RIGHT NOW by concurrent serves.
++        assert_eq!(names(&h.take_batch("q", "g", 10, 1_000, 0)), vec!["p1"]);
++        assert_eq!(names(&h.take_batch("q", "g", 10, 1_000, 0)), vec!["p2"]);
++
++        // Sparse ring (marks far below want): claims up to k exactly as before.
++        let h2 = hl1();
++        reg(&h2, "q", "g");
++        for p in 0..6 {
++            h2.mark_local("q", &format!("s{p}"), 10, 0);
++        }
++        let c2 = h2.take_batch("q", "g", 4, 1_000, 0);
++        assert_eq!(c2.len(), 4, "sparse marks: claim up to k as before");
++    }
++
+     // Two distinct tenants sharing every NAME — the shared-cell shape (free tier).
+     const TA: &str = "11111111-1111-1111-1111-111111111111";
+     const TB: &str = "22222222-2222-2222-2222-222222222222";
+@@ -1616,7 +1670,7 @@ mod tests {
+         let h = HotList::new(false, 4, 100, true, false);
+         h.ensure_group("q", "g");
+         h.mark_local("q", "p0", 1, 0);
+-        assert!(h.take_batch("q", "g", 10, 0).is_empty());
++        assert!(h.take_batch("q", "g", 10, u32::MAX, 0).is_empty());
+         assert!(h.drain_dirty(10).is_empty());
+         assert!(!h.reseed_due("q", "g", 0, 1000));
+     }
+@@ -1639,11 +1693,11 @@ mod tests {
+         // reseed on first poll (§8). This is the cold-start contract.
+         let h = hl1();
+         h.mark_local("q", "p0", 1, 0); // no "g" ring yet → lost
+-        assert!(h.take_batch("q", "g", 10, 0).is_empty());
++        assert!(h.take_batch("q", "g", 10, u32::MAX, 0).is_empty());
+         // reseed is what recovers it
+         h.reseed_row("q", "g", "id0", "p0", 0);
+         h.reseed_done("q", "g", 0);
+-        assert_eq!(names(&h.take_batch("q", "g", 10, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 10, u32::MAX, 0)), vec!["p0"]);
+     }
+ 
+     #[test]
+@@ -1652,7 +1706,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+         h.mark_local("q", "p1", 1, 0);
+-        let c = h.take_batch("q", "g", 10, 0);
++        let c = h.take_batch("q", "g", 10, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0", "p1"]); // FIFO order, single shard
+     }
+ 
+@@ -1670,7 +1724,7 @@ mod tests {
+         assert!(h.has_ready("q", "g", 0));
+         // Peeking does NOT consume it: still ready, and take_batch still returns it.
+         assert!(h.has_ready("q", "g", 0));
+-        assert_eq!(names(&h.take_batch("q", "g", 10, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 10, u32::MAX, 0)), vec!["p0"]);
+         // Once checked out (INFLIGHT) it is no longer ready.
+         assert!(!h.has_ready("q", "g", 0));
+     }
+@@ -1704,7 +1758,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+         h.mark_local("q", "p0", 1, 0); // already pending
+-        let c = h.take_batch("q", "g", 10, 0);
++        let c = h.take_batch("q", "g", 10, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0"]); // no duplicate ring entry
+     }
+ 
+@@ -1715,7 +1769,7 @@ mod tests {
+         for i in 0..3 {
+             h.mark_local("q", &format!("p{i}"), 1, 0);
+         }
+-        let c = h.take_batch("q", "g", 3, 0);
++        let c = h.take_batch("q", "g", 3, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0", "p1", "p2"]);
+         // all took → re-appended to tail in the same order
+         let res: Vec<CheckinResult> = c
+@@ -1728,7 +1782,7 @@ mod tests {
+             })
+             .collect();
+         h.checkin("q", "g", res, 0, true, 60_000);
+-        let c2 = h.take_batch("q", "g", 3, 0);
++        let c2 = h.take_batch("q", "g", 3, u32::MAX, 0);
+         assert_eq!(names(&c2), vec!["p0", "p1", "p2"]);
+     }
+ 
+@@ -1742,7 +1796,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0"]);
+         // leased Took (auto_ack=false, lease 60s)
+         h.checkin(
+@@ -1759,10 +1813,10 @@ mod tests {
+             60_000,
+         );
+         // not immediately re-claimable (we hold the lease)
+-        assert!(h.take_batch("q", "g", 1, 200).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 200).is_empty());
+         // our ack releases the lease → promote pulls it back at once
+         h.promote_ack("q", "g", "id0", 300, false);
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 300)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 300)), vec!["p0"]);
+     }
+ 
+     // Spec §2 clear-su-ack: covered ack + nothing arrived during the lease ⇒
+@@ -1774,7 +1828,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0"]);
+         h.checkin(
+             "q",
+@@ -1786,7 +1840,7 @@ mod tests {
+         );
+         h.promote_ack("q", "g", "id0", 300, true);
+         assert!(
+-            h.take_batch("q", "g", 1, 400).is_empty(),
++            h.take_batch("q", "g", 1, u32::MAX, 400).is_empty(),
+             "caught-up partition must not be re-probed after a covered ack"
+         );
+     }
+@@ -1804,7 +1858,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0"]);
+         // SQL snapshot says a foreign lease is held until 300s from epoch.
+         h.checkin(
+@@ -1821,11 +1875,11 @@ mod tests {
+             60_000,
+         );
+         // Not claimable inside the cap window (the lease may be genuinely held)...
+-        assert!(h.take_batch("q", "g", 1, 500).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 500).is_empty());
+         // ...but re-probed at the cap (claim now_ms 100 + MAX_LEASE_REVISIT_MS),
+         // NOT held to the reported 300s expiry.
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 100 + MAX_LEASE_REVISIT_MS + 1)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 100 + MAX_LEASE_REVISIT_MS + 1)),
+             vec!["p0"],
+             "a possibly-stale foreign lease must be re-probed within the cap, not at lease expiry"
+         );
+@@ -1845,7 +1899,7 @@ mod tests {
+         // Cycle 1: single message, clean drain — entry ends IDLE with
+         // drained=true persisted at its Took.
+         h.mark_local("q", "p0", 1, 0);
+-        let c1 = h.take_batch("q", "g", 1, 0);
++        let c1 = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.checkin("q", "g",
+             vec![CheckinResult { name: "p0".into(), epoch: c1[0].epoch, verdict: Verdict::Took, drained: true }],
+             10, false, 60_000);
+@@ -1854,7 +1908,7 @@ mod tests {
+         // the race to a concurrent popper's Leased verdict (ownership gate has
+         // already been passed by the Leased one in this simulation).
+         h.mark_local("q", "p0", 100, 30);
+-        let c2 = h.take_batch("q", "g", 1, 30);
++        let c2 = h.take_batch("q", "g", 1, u32::MAX, 30);
+         h.checkin("q", "g",
+             vec![CheckinResult { name: "p0".into(), epoch: c2[0].epoch, verdict: Verdict::Leased(60_030), drained: false }],
+             40, false, 60_000);
+@@ -1862,7 +1916,7 @@ mod tests {
+         // 1 must NOT cause a clear — the entry must come back claimable.
+         h.promote_ack("q", "g", "id0", 50, true);
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 60)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 60)),
+             vec!["p0"],
+             "stale drained from a previous cycle must not clear a backlogged partition"
+         );
+@@ -1878,7 +1932,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1000, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.checkin(
+             "q",
+             "g",
+@@ -1889,7 +1943,7 @@ mod tests {
+         );
+         h.promote_ack("q", "g", "id0", 300, true);
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 400)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 400)),
+             vec!["p0"],
+             "undrained backlog must be claimable immediately after the covered ack"
+         );
+@@ -1901,7 +1955,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.checkin(
+             "q",
+             "g",
+@@ -1913,7 +1967,7 @@ mod tests {
+         h.mark_local("q", "p0", 1, 150); // push lands during the lease
+         h.promote_ack("q", "g", "id0", 300, true);
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 400)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 400)),
+             vec!["p0"],
+             "in-lease content must be claimable immediately after the covered ack"
+         );
+@@ -1928,7 +1982,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.mark_local("q", "p0", 1, 50); // races the in-flight pop
+         h.checkin(
+             "q",
+@@ -1940,7 +1994,7 @@ mod tests {
+         );
+         h.promote_ack("q", "g", "id0", 300, true);
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 400)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 400)),
+             vec!["p0"],
+             "raced mark must survive the Took batch_count reset"
+         );
+@@ -1952,7 +2006,7 @@ mod tests {
+         let h = hl1();
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0); // snapshots epoch, INFLIGHT
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0); // snapshots epoch, INFLIGHT
+         assert_eq!(names(&c), vec!["p0"]);
+         // a push commits + marks during dispatch (epoch bumps)
+         h.mark_local("q", "p0", 1, 0);
+@@ -1970,7 +2024,7 @@ mod tests {
+             true,
+             60_000,
+         );
+-        let c2 = h.take_batch("q", "g", 1, 0);
++        let c2 = h.take_batch("q", "g", 1, u32::MAX, 0);
+         assert_eq!(names(&c2), vec!["p0"], "raced mark must keep the entry");
+     }
+ 
+@@ -1980,7 +2034,7 @@ mod tests {
+         let h = hl1();
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.checkin(
+             "q",
+             "g",
+@@ -1994,7 +2048,7 @@ mod tests {
+             true,
+             60_000,
+         );
+-        assert!(h.take_batch("q", "g", 1, 0).is_empty(), "clean empty clears");
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(), "clean empty clears");
+     }
+ 
+     // §4 interleaving 3: mark delayed PAST the clear ⇒ clear passes, late mark re-adds.
+@@ -2003,7 +2057,7 @@ mod tests {
+         let h = hl1();
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.checkin(
+             "q",
+             "g",
+@@ -2017,10 +2071,10 @@ mod tests {
+             true,
+             60_000,
+         );
+-        assert!(h.take_batch("q", "g", 1, 0).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty());
+         // a late mark (the delayed push) re-adds
+         h.mark_local("q", "p0", 1, 0);
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 0)), vec!["p0"]);
+     }
+ 
+     #[test]
+@@ -2028,7 +2082,7 @@ mod tests {
+         let h = hl1();
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 1000);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 1000);
+         h.checkin(
+             "q",
+             "g",
+@@ -2043,11 +2097,11 @@ mod tests {
+             60_000,
+         );
+         // not cleared, not immediately claimable: it is parked in the wheel.
+-        assert!(h.take_batch("q", "g", 1, 1500).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 1500).is_empty());
+         // re-probed at the bounded cap (claim now_ms 1000 + MAX_LEASE_REVISIT_MS),
+         // NOT held to the reported 5000ms lease expiry (2026-07-29 re-arm fix).
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 1000 + MAX_LEASE_REVISIT_MS + 1)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 1000 + MAX_LEASE_REVISIT_MS + 1)),
+             vec!["p0"]
+         );
+     }
+@@ -2058,7 +2112,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.checkin(
+             "q",
+             "g",
+@@ -2072,10 +2126,10 @@ mod tests {
+             true,
+             60_000,
+         );
+-        assert!(h.take_batch("q", "g", 1, 100).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 100).is_empty());
+         // ack releases the lease early → promote by id
+         h.promote_ack("q", "g", "id0", 100, false);
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 100)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 100)), vec!["p0"]);
+     }
+ 
+     #[test]
+@@ -2085,13 +2139,13 @@ mod tests {
+         h.set_queue_cfg("q", 2, 0, 0, 0); // delayed 2s
+         h.mark_local("q", "p0", 1, 0);
+         // held in the wheel — not claimable immediately
+-        assert!(h.take_batch("q", "g", 1, 500).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 500).is_empty());
+         // tick before deadline → still nothing
+         h.tick(1000);
+-        assert!(h.take_batch("q", "g", 1, 1000).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 1000).is_empty());
+         // after commit_ts + D + pad
+         h.tick(2400);
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 2400)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 2400)), vec!["p0"]);
+     }
+ 
+     #[test]
+@@ -2102,13 +2156,13 @@ mod tests {
+         h.set_queue_cfg("q", 0, 5, 0, 0);
+         // small batch: held until the window expires
+         h.mark_local("q", "p0", 10, 0);
+-        assert!(h.take_batch("q", "g", 1, 1000).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 1000).is_empty());
+         h.tick(5100);
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 5100)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 5100)), vec!["p0"]);
+ 
+         // fat batch on a fresh partition: promoted early (before the window)
+         h.mark_local("q", "p1", 100, 10_000); // batch_count >= threshold
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 10_050)), vec!["p1"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 10_050)), vec!["p1"]);
+     }
+ 
+     #[test]
+@@ -2117,9 +2171,9 @@ mod tests {
+         reg(&h, "q", "g");
+         h.set_queue_cfg("q", 0, 5, 0, 0);
+         h.mark_local("q", "p0", 40, 0); // below threshold → wheel
+-        assert!(h.take_batch("q", "g", 1, 100).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 100).is_empty());
+         h.mark_local("q", "p0", 70, 100); // now batch_count=110 ≥ 100 → early promote
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 200)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 200)), vec!["p0"]);
+     }
+ 
+     #[test]
+@@ -2130,7 +2184,7 @@ mod tests {
+         // put p0 ready via the wheel firing
+         h.mark_local("q", "p0", 1, 0);
+         h.tick(2400);
+-        let c = h.take_batch("q", "g", 1, 2400);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 2400);
+         assert_eq!(names(&c), vec!["p0"]);
+         // empty verdict on a deferral queue must NOT hard-clear — it revisits
+         h.checkin(
+@@ -2147,9 +2201,9 @@ mod tests {
+             60_000,
+         );
+         // still tracked (in the wheel), reappears after the backoff
+-        assert!(h.take_batch("q", "g", 1, 2400).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 2400).is_empty());
+         h.tick(10_000);
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 10_000)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 10_000)), vec!["p0"]);
+     }
+ 
+     #[test]
+@@ -2178,7 +2232,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.mark_local_quiet("q", "p0", 1, 0);
+         // ring is populated — a subsequent take (as a woken pop would do) sees it.
+-        assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 0)), vec!["p0"]);
+         // the mesh dirty hint is still enqueued (peers, if any, get it).
+         assert_eq!(h.drain_dirty(10), vec![("q".to_string(), "p0".to_string())]);
+     }
+@@ -2227,7 +2281,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+         // still marks the ring (discovery works locally)…
+-        assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 0)), vec!["p0"]);
+         // …but nothing was queued for a mesh that isn't there.
+         assert!(h.drain_dirty(10).is_empty());
+     }
+@@ -2237,7 +2291,7 @@ mod tests {
+         let h = hl1();
+         reg(&h, "q", "g");
+         h.mark_remote("q", "p9", 0);
+-        assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p9"]);
++        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 0)), vec!["p9"]);
+     }
+ 
+     // Regression (P1 — periodic floor under load). A partition IDLE-cleared while it
+@@ -2256,7 +2310,7 @@ mod tests {
+         h.reseed_done("q", "g", base);
+         h.mark_local("q", "p_keep", 1, base); // a continuously-written partition
+         h.mark_local("q", "p_lost", 1, base); // has backlog, about to be falsely cleared
+-        let c = h.take_batch("q", "g", 2, base);
++        let c = h.take_batch("q", "g", 2, u32::MAX, base);
+         assert_eq!(names(&c), vec!["p_keep", "p_lost"]);
+         // p_keep took (→ ready), p_lost false-empty (→ IDLE-cleared). No mark raced,
+         // so the epoch-CAS clears p_lost.
+@@ -2288,7 +2342,7 @@ mod tests {
+         // p_lost (exactly what log_hotlist_reseed_v1 returns: last_offset>committed).
+         h.reseed_row("q", "g", "id_lost", "p_lost", due_at);
+         h.reseed_done("q", "g", due_at);
+-        let got: HashSet<String> = names(&h.take_batch("q", "g", 5, due_at)).into_iter().collect();
++        let got: HashSet<String> = names(&h.take_batch("q", "g", 5, u32::MAX, due_at)).into_iter().collect();
+         assert!(
+             got.contains("p_lost"),
+             "periodic reseed must recover the cleared partition; got {got:?}"
+@@ -2306,7 +2360,7 @@ mod tests {
+         h.set_queue_cfg("q", 0, 5, 0, 0); // windowBuffer 5s, no delayed
+         h.mark_local("q", "p0", 10, 0); // small batch → wheel
+         h.tick(5100); // window fires → ready
+-        let c = h.take_batch("q", "g", 1, 5100);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 5100);
+         assert_eq!(names(&c), vec!["p0"]);
+         // auto-ack Took: must re-arm the window (wheel at 5100+5000), NOT go READY.
+         h.checkin(
+@@ -2318,12 +2372,12 @@ mod tests {
+             60_000,
+         );
+         assert!(
+-            h.take_batch("q", "g", 1, 5200).is_empty(),
++            h.take_batch("q", "g", 1, u32::MAX, 5200).is_empty(),
+             "windowBuffer must re-arm, not re-probe immediately"
+         );
+         // Claimable again only after the next window.
+         h.tick(10_300);
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 10_300)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 10_300)), vec!["p0"]);
+     }
+ 
+     // Guard: a NON-window queue's auto-ack Took still re-appends to READY at once
+@@ -2333,7 +2387,7 @@ mod tests {
+         let h = hl1();
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         h.checkin(
+             "q",
+             "g",
+@@ -2342,7 +2396,7 @@ mod tests {
+             true,
+             60_000,
+         );
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 0)), vec!["p0"], "no window ⇒ immediate READY");
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 0)), vec!["p0"], "no window ⇒ immediate READY");
+     }
+ 
+     #[test]
+@@ -2352,7 +2406,7 @@ mod tests {
+         h.reseed_row("q", "g", "id0", "p0", 1000);
+         h.reseed_row("q", "g", "id1", "p1", 1000);
+         h.reseed_done("q", "g", 1000);
+-        assert_eq!(names(&h.take_batch("q", "g", 5, 1000)), vec!["p0", "p1"]);
++        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 1000)), vec!["p0", "p1"]);
+         assert!(!h.reseed_due("q", "g", 1000, 30_000)); // just reseeded
+         assert!(h.reseed_due("q", "g", 40_000, 30_000)); // stale again
+     }
+@@ -2365,7 +2419,7 @@ mod tests {
+         for i in 0..40 {
+             h.mark_local("q", &format!("p{i}"), 1, 0);
+         }
+-        let c = h.take_batch("q", "g", 40, 0);
++        let c = h.take_batch("q", "g", 40, u32::MAX, 0);
+         assert_eq!(c.len(), 40);
+         // all distinct
+         let set: HashSet<String> = names(&c).into_iter().collect();
+@@ -2383,17 +2437,17 @@ mod tests {
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+         // take_batch marks p0 INFLIGHT; we deliberately never checkin (leak).
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0"]);
+         // Stuck: not claimable, and a fresh mark cannot re-link an INFLIGHT entry.
+-        assert!(h.take_batch("q", "g", 1, 0).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty());
+         h.mark_local("q", "p0", 1, 0); // epoch bump only — still not in the ring
+-        assert!(h.take_batch("q", "g", 1, 0).is_empty(), "mark cannot re-add INFLIGHT");
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(), "mark cannot re-add INFLIGHT");
+         // The reseed floor re-adds the still-pending partition (last_offset>committed).
+         h.reseed_row("q", "g", "id0", "p0", 0);
+         h.reseed_done("q", "g", 0);
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 0)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 0)),
+             vec!["p0"],
+             "reseed floor must reclaim a leaked INFLIGHT partition"
+         );
+@@ -2408,12 +2462,12 @@ mod tests {
+         let h = hl1();
+         reg(&h, "q", "g");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0); // p0 INFLIGHT, epoch snapshot
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0); // p0 INFLIGHT, epoch snapshot
+         // reseed reclaims it back to READY while the "pop" is still in flight.
+         h.reseed_row("q", "g", "id0", "p0", 0);
+         h.reseed_done("q", "g", 0);
+         // A second pop can now take it (redundant probe — allowed).
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 0)), vec!["p0"]);
+         // The original pop finally checks in Took: state is INFLIGHT (the 2nd pop's),
+         // NOT the one it checked out — checkin acts on it once, no corruption. Then
+         // the ring is consistent: exactly one entry, takeable after re-append.
+@@ -2426,7 +2480,7 @@ mod tests {
+             60_000,
+         );
+         // Whatever the interleaving, p0 appears at most once (no duplicate links).
+-        let got = names(&h.take_batch("q", "g", 5, 0));
++        let got = names(&h.take_batch("q", "g", 5, u32::MAX, 0));
+         assert!(got == vec!["p0"] || got.is_empty(), "no duplicate ring entry: {got:?}");
+     }
+ 
+@@ -2441,7 +2495,7 @@ mod tests {
+         reg(&h, "q", "g");
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0);
+-        let c = h.take_batch("q", "g", 1, 0);
++        let c = h.take_batch("q", "g", 1, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0"]);
+         // Leased Took → WHEEL at now + lease (300s) — the retries lease.
+         h.checkin(
+@@ -2454,14 +2508,14 @@ mod tests {
+         );
+         // Not claimable yet: parked in the wheel (the bounded revisit at
+         // now + MAX_LEASE_REVISIT_MS has not fired at t=500).
+-        assert!(h.take_batch("q", "g", 1, 500).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 500).is_empty());
+         // The reseed floor reports p0 pending (last_offset > committed) and MUST
+         // reclaim the stale wheel entry — a secondary backstop below the bounded
+         // re-probe, for entries stranded by other paths (e.g. a dropped INFLIGHT
+         // pop) that the lease cap does not cover.
+         h.reseed_row("q", "g", "id0", "p0", 500);
+         assert_eq!(
+-            names(&h.take_batch("q", "g", 1, 500)),
++            names(&h.take_batch("q", "g", 1, u32::MAX, 500)),
+             vec!["p0"],
+             "reseed floor must reclaim a stale lease-parked wheel entry"
+         );
+@@ -2476,15 +2530,15 @@ mod tests {
+         h.set_queue_cfg("q", 0, 5, 0, 0); // window_buffer = 5s ⇒ deferral queue
+         h.note_partition_id("q", "p0", "id0");
+         h.mark_local("q", "p0", 1, 0); // parked in the wheel at 5000ms (window)
+-        assert!(h.take_batch("q", "g", 1, 1_000).is_empty());
++        assert!(h.take_batch("q", "g", 1, u32::MAX, 1_000).is_empty());
+         // Reseed must leave the deferral deadline intact.
+         h.reseed_row("q", "g", "id0", "p0", 1_000);
+         assert!(
+-            h.take_batch("q", "g", 1, 1_000).is_empty(),
++            h.take_batch("q", "g", 1, u32::MAX, 1_000).is_empty(),
+             "deferral wheel entry must stay parked until its window is due"
+         );
+         // Still delivered once the window elapses.
+-        assert_eq!(names(&h.take_batch("q", "g", 1, 6_000)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 6_000)), vec!["p0"]);
+     }
+ 
+     #[test]
+@@ -2494,10 +2548,10 @@ mod tests {
+         reg(&h, "q", "g2");
+         // a mark reaches BOTH registered group rings
+         h.mark_local("q", "p0", 1, 0);
+-        assert_eq!(names(&h.take_batch("q", "g1", 5, 0)), vec!["p0"]);
+-        assert_eq!(names(&h.take_batch("q", "g2", 5, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g1", 5, u32::MAX, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g2", 5, u32::MAX, 0)), vec!["p0"]);
+         // g1 draining (checkin empty) does not affect g2
+-        let c = h.take_batch("q", "g1", 5, 0); // empty (already taken above)
++        let c = h.take_batch("q", "g1", 5, u32::MAX, 0); // empty (already taken above)
+         assert!(c.is_empty());
+     }
+ 
+@@ -2566,7 +2620,7 @@ mod tests {
+         h.forget_group_all_queues(crate::config::DEFAULT_TENANT, "still-unknown");
+         // The registered ring is still intact and usable.
+         h.mark_local("q", "p0", 1, 0);
+-        assert_eq!(names(&h.take_batch("q", "g", 5, 0)), vec!["p0"]);
++        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 0)), vec!["p0"]);
+     }
+ 
+     // ---------------------------------------------------------------- tenancy
+@@ -2581,8 +2635,8 @@ mod tests {
+         reg(&h, &k(TB, "orders"), "workers");
+         h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+         // B has nothing pending: its take must not see A's candidate.
+-        assert!(h.take_batch(&k(TB, "orders"), "workers", 10, 0).is_empty());
+-        assert_eq!(names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)), vec!["p0"]);
++        assert!(h.take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 0).is_empty());
++        assert_eq!(names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 0)), vec!["p0"]);
+     }
+ 
+     // The headline shared-cell defect: with one shared ring, tenant B's pop checks
+@@ -2596,7 +2650,7 @@ mod tests {
+         reg(&h, &k(TB, "orders"), "workers");
+         h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+         // B pops its own (empty) ring and checks in whatever it got.
+-        let cb = h.take_batch(&k(TB, "orders"), "workers", 10, 0);
++        let cb = h.take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 0);
+         let back: Vec<CheckinResult> = cb
+             .iter()
+             .map(|c| CheckinResult {
+@@ -2608,7 +2662,7 @@ mod tests {
+             .collect();
+         h.checkin(&k(TB, "orders"), "workers", back, 0, true, 60_000);
+         assert_eq!(
+-            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)),
++            names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 0)),
+             vec!["p0"],
+             "tenant B's empty verdict must not clear tenant A's candidate"
+         );
+@@ -2623,7 +2677,7 @@ mod tests {
+         reg(&h, &k(TA, "orders"), "workers");
+         reg(&h, &k(TB, "orders"), "workers");
+         h.mark_local(&k(TA, "orders"), "p0", 1, 0);
+-        let cb = h.take_batch(&k(TB, "orders"), "workers", 10, 0);
++        let cb = h.take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 0);
+         let back: Vec<CheckinResult> = cb
+             .iter()
+             .map(|c| CheckinResult {
+@@ -2636,7 +2690,7 @@ mod tests {
+         // auto_ack=false ⇒ wheel_schedule(now + lease + pad).
+         h.checkin(&k(TB, "orders"), "workers", back, 0, false, 300_000);
+         assert_eq!(
+-            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)),
++            names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 0)),
+             vec!["p0"],
+             "tenant B's lease must not wheel tenant A's candidate"
+         );
+@@ -2654,7 +2708,7 @@ mod tests {
+         // Park both in the wheel: mark, take, leased-Took checkin.
+         for t in [TA, TB] {
+             h.mark_local(&k(t, "orders"), "shared-part", 1, 0);
+-            let c = h.take_batch(&k(t, "orders"), "workers", 10, 0);
++            let c = h.take_batch(&k(t, "orders"), "workers", 10, u32::MAX, 0);
+             let back: Vec<CheckinResult> = c
+                 .iter()
+                 .map(|x| CheckinResult {
+@@ -2670,17 +2724,17 @@ mod tests {
+         // resolve it to the same dense index and promote A's entry.
+         h.promote_ack(&k(TA, "orders"), "workers", "id-b", 1, false);
+         assert!(
+-            h.take_batch(&k(TA, "orders"), "workers", 10, 1).is_empty(),
++            h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 1).is_empty(),
+             "another tenant's partition id must not promote this tenant's entry"
+         );
+         // A's own ack releases A's lease — and only A's.
+         h.promote_ack(&k(TA, "orders"), "workers", "id-a", 1, false);
+         assert_eq!(
+-            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 1)),
++            names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 1)),
+             vec!["shared-part"]
+         );
+         assert!(
+-            h.take_batch(&k(TB, "orders"), "workers", 10, 1).is_empty(),
++            h.take_batch(&k(TB, "orders"), "workers", 10, u32::MAX, 1).is_empty(),
+             "tenant B's entry must stay wheeled until B's own ack"
+         );
+     }
+@@ -2735,7 +2789,7 @@ mod tests {
+         assert!(!h.skip_window(&k(TA, "orders")));
+         assert!(h.skip_window(&k(TB, "orders")));
+         assert_eq!(
+-            names(&h.take_batch(&k(TA, "orders"), "workers", 10, 0)),
++            names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 0)),
+             vec!["p0"],
+             "A must be claimable now — B's window may not wheel it"
+         );
+@@ -2838,7 +2892,7 @@ mod tests {
+         h.evict_idle();
+         assert_eq!(h.queue_count(), 1, "a READY candidate blocks eviction");
+ 
+-        let c = h.take_batch("q", "g", 5, 0);
++        let c = h.take_batch("q", "g", 5, u32::MAX, 0);
+         assert_eq!(names(&c), vec!["p0"]);
+         // Now INFLIGHT (checked out by a pop, checkin still to come) — also protected.
+         h.evict_idle();
+@@ -2865,7 +2919,7 @@ mod tests {
+         h.evict_idle();
+         h.evict_idle();
+         assert_eq!(h.queue_count(), 1);
+-        assert_eq!(names(&h.take_batch("q", "g", 5, 6000)), vec!["p0"], "the deferral survived");
++        assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 6000)), vec!["p0"], "the deferral survived");
+     }
+ 
+     // Eviction must take the fan-out index with it, or the index becomes the second leak
+@@ -2984,7 +3038,7 @@ mod tests {
+         h.mark_local("q", "p0", 5, 0);
+         assert_eq!(h.ready_est("q", "g", 0), 12);
+         // Checked-out (INFLIGHT) candidates are NOT claimable by another pop.
+-        let c = h.take_batch("q", "g", 10, 0);
++        let c = h.take_batch("q", "g", 10, u32::MAX, 0);
+         assert_eq!(c.len(), 2);
+         assert_eq!(h.ready_est("q", "g", 0), 0);
+     }

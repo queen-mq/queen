@@ -167,6 +167,16 @@ The deep behavioral gate â€” cross-replica WAKE latency, DEAD detection, RECON â
 remains [`server/mesh-verify.sh`](../server/mesh-verify.sh), which builds its
 own debug binary and drives two brokers on localhost. Run it directly for that.
 
+## The targeted-pop gate
+
+Phase 2 partition-hinted pops (`server/src/notify.rs` hint mailbox +
+`handlers/data.rs` `handle_pop`) have their own manual acceptance script,
+[`server/pop-targeted-verify.sh`](../server/pop-targeted-verify.sh): a parked
+long-poll consumer served by a single hinted push must take the targeted path
+(`queen_pop_targeted_total`), while flowing data with no parked consumer must
+still fall back to the wildcard scan (`queen_pop_wildcard_total`), with no
+regression on the throughput path. Run it directly, same as the mesh gate.
+
 ## Tenancy baseline on branch `rustproxy` (2026-07-29)
 
 First run of the two new lanes, against a freshly built `queen:test`.

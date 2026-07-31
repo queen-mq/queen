@@ -8,8 +8,8 @@ sidebar:
 sourceOfTruth:
   - server/src/schema.rs
   - server/sql/schema.sql
-  - server/sql/procedures/019_streams_schema.sql
-  - server/sql/procedures/041_log_schema.sql
+  - server/sql/procedures/002_streams_schema.sql
+  - server/sql/procedures/001_log_schema.sql
   - server/src/db.rs
   - server/src/retention.rs
   - server/src/stats.rs
@@ -29,12 +29,15 @@ statement channel.
 
 ## Version
 
-**PostgreSQL 14 or newer.** The schema uses `gen_random_uuid()` as a column
-default, which is built into PostgreSQL from 13 onwards, and per-table storage
-parameters including `autovacuum_vacuum_insert_scale_factor` (13) and
-`vacuum_truncate` (12). The repository's test harness and the benchmark rigs both
-run `postgres:16`; the published broker image ships the PostgreSQL 18 client
-tools. Anything from 14 up satisfies the DDL.
+**PostgreSQL 15 or newer.** The hard floor is a unique index declared `NULLS NOT
+DISTINCT` (on `queen.consumer_groups_metadata`, where namespace/task discovery
+rows legitimately carry NULLs that must still collide), and that clause exists
+from PostgreSQL 15. The rest of the DDL asks for less: `gen_random_uuid()` as a
+column default (13), per-table storage parameters including
+`autovacuum_vacuum_insert_scale_factor` (13) and `vacuum_truncate` (12). The
+repository's test harness and the benchmark rigs both run `postgres:16`; the
+published broker image ships the PostgreSQL 18 client tools. Anything from 15 up
+satisfies the DDL; 14 fails at the index.
 
 ## No extensions
 
@@ -53,7 +56,7 @@ be able to create it:
   tables: it runs `ALTER TABLE … SET (fillfactor = …)` and a set of per-table
   autovacuum parameters, and `ALTER TABLE … ALTER COLUMN blob SET STORAGE
   EXTERNAL`. Those require table ownership.
-- **`GRANT` capability**, because `019_streams_schema.sql` issues grants (see
+- **`GRANT` capability**, because `002_streams_schema.sql` issues grants (see
   below).
 
 Simplest correct setup: give the broker its own database and its own role that
@@ -77,11 +80,14 @@ serving.
 The schema is not shipped as a `.sql` file, though. It is compiled into the
 binary with `include_str!`. To pre-apply it, take the exact text the binary
 carries from the source tree: `server/sql/schema.sql` first, then every file in
-`server/sql/procedures/` in lexical order. That order is not cosmetic: the
-log-engine files in the `04x` range redefine stored procedures that the earlier
-files create, so applying them out of order leaves the wrong definitions in
-place. `server/src/schema.rs` holds the authoritative list of 26 procedure files
-in the order they must be applied.
+`server/sql/procedures/` in lexical order. Each function and table is defined
+exactly once, by exactly one file, but the order is still not cosmetic: tables
+come first (`001_log_schema`, `002_streams_schema`) because SQL-language function
+bodies resolve the tables they reference at creation time, and the
+partition-counter trigger attachment (`020_log_partition_counters`) must run
+after both the table it attaches to and the functions it binds.
+`server/src/schema.rs` holds the authoritative list of 23 procedure files in the
+order they must be applied.
 
 Once the schema exists, the broker's role needs `USAGE` on both schemas, DML
 (`SELECT, INSERT, UPDATE, DELETE`) on their tables, and the ability to take
@@ -89,16 +95,17 @@ advisory locks, which any role has. Function execution needs no explicit grant:
 PostgreSQL grants `EXECUTE` on a new function to `PUBLIC` by default.
 
 <Aside type="caution">
-`QUEEN_APPLY_SCHEMA=0` means **you** own keeping the schema current across
-upgrades. The broker's normal contract is that a new version's DDL is applied
-before that version serves a request; with the flag off, a version whose SQL
-expects a column you have not added will fail at runtime rather than at boot. See
-[Upgrades](/selfhost/upgrade).
+`QUEEN_APPLY_SCHEMA=0` means **you** own matching the schema to the binary. The
+broker's normal contract is that a version's own DDL is in place before that
+version serves a request; with the flag off, a binary whose SQL expects an
+object you have not created will fail at runtime rather than at boot. And the
+deployment model is always-virgin: the DDL only creates, on the assumption of
+an empty database. See [Upgrades](/selfhost/upgrade).
 </Aside>
 
 ### `queen_streams` is granted to PUBLIC
 
-`019_streams_schema.sql` ends with three grants:
+`002_streams_schema.sql` ends with three grants:
 
 ```sql
 GRANT USAGE ON SCHEMA queen_streams TO PUBLIC;
@@ -126,7 +133,7 @@ statement mode. Two reasons, both structural:
 
 **Session-scoped advisory locks.** The boot-time schema apply takes
 `pg_advisory_lock(778120010)` on one pooled connection, runs the entire DDL
-(`schema.sql` plus 26 procedure files, as 27 separate batches) and unlocks. The
+(`schema.sql` plus 23 procedure files, as 24 separate batches) and unlocks. The
 maintenance cycle takes `pg_advisory_lock(737001)` on one pooled connection, runs
 many autocommitting step calls across the cycle, and unlocks at the end; that is
 how exactly one replica sweeps per cycle. Both locks
@@ -242,10 +249,12 @@ re-enable it.
 
 ## What lives in the database
 
-Two schemas. `queen` holds the broker's own tables, of which six carry the log
-engine (`log_queues`, `log_partitions`, `log_segments`, `log_txns`,
-`log_consumers`, `log_dlq`), alongside queue configuration, traces, statistics and
-metrics tables. `queen_streams` holds the two stream tables described above.
+Two schemas. `queen` holds the broker's own tables, of which five carry the log
+engine (`log_partitions`, `log_segments`, `log_txns`, `log_consumers`,
+`log_dlq`), alongside `queen.queues`, the single table that is both queue
+identity and queue configuration (`log_partitions.queue_id` is a foreign key to
+it), plus traces, statistics and metrics tables. `queen_streams` holds the two
+stream tables described above.
 
 Because that is the entire state, backup is `pg_dump` and restore is
 `pg_restore`. There is no broker-side artefact to capture, with one exception:

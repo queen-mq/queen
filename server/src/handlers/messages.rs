@@ -142,7 +142,8 @@ pub async fn handle_get_message(
         serde_json::from_slice(&f.payload).unwrap_or(serde_json::Value::Null)
     };
 
-    // RUSTFIX item 23: the full ~20-field detail shape (010_messages.sql parity):
+    // RUSTFIX item 23: the full ~20-field detail shape (parity with the retired
+    // rows-era get_message_v1, once in the messages SQL file):
     // queue/namespace/task, queueConfig, mode, consumerGroups, status, errorMessage,
     // retryCount, leaseExpiresAt. Missing detail (partition gone) degrades to nulls.
     // seg_message_detail's `seq` argument carries the ABSOLUTE offset in the log
@@ -156,7 +157,8 @@ pub async fn handle_get_message(
     let boolf = |k: &str| detail.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
     let bus_groups = detail.get("busGroups").and_then(|x| x.as_i64()).unwrap_or(0);
     let is_dlq = boolf("isDlq");
-    // status: dead_letter | completed | processing | pending (010:203-224 semantics).
+    // status: dead_letter | completed | processing | pending (the status
+    // derivation of the retired rows-era get_message_v1).
     let status = if is_dlq {
         "dead_letter"
     } else if (bus_groups > 0 && boolf("busAllPassed")) || (bus_groups == 0 && boolf("qmodePassed")) {
@@ -400,10 +402,11 @@ pub async fn handle_retry_message(
 
 // Enrich a list_messages_v1 result: log-queue entries come back with
 // payloadAvailable:false + segment:{seq,frameIdx} — seq carries the covering
-// segment's base_offset and frameIdx carries (offset - base_offset), per 047's
-// §11 key contract. Fetch each referenced segment once (log_segments PK),
-// decode, and fill data/payload/id/transactionId/traceId/producerSub for the
-// addressed frame — 047 emits id/transactionId as NULL for log entries because
+// segment's base_offset and frameIdx carries (offset - base_offset), per
+// 010_log_admin's §11 key contract. Fetch each referenced segment once
+// (log_segments PK), decode, and fill
+// data/payload/id/transactionId/traceId/producerSub for the addressed frame —
+// 010_log_admin emits id/transactionId as NULL for log entries because
 // mids and txn text live only inside the blob. Segments are cached per
 // (partitionId, seq) so a page that spans one segment decodes it exactly once.
 async fn enrich_segment_payloads(
@@ -461,7 +464,7 @@ async fn enrich_segment_payloads(
                 };
                 obj.insert("data".to_string(), payload.clone());
                 obj.insert("payload".to_string(), payload);
-                // 047's log branch emits id (and transactionId) as null — the
+                // 010_log_admin's log entries carry id (and transactionId) as null — the
                 // frame is the only carrier of the mid; fill both from it.
                 obj.insert("id".to_string(), serde_json::Value::String(f.message_id.clone()));
                 obj.insert("transactionId".to_string(), serde_json::Value::String(f.txn.clone()));

@@ -126,7 +126,7 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
 }
 
 // POST /streams/v1/cycle — atomic streaming cycle commit on the log engine
-// (queen.log_streams_cycle_v1, 046). This is the packing handler: it converts the
+// (queen.log_streams_cycle_v1, 007_log_streams). This is the packing handler: it converts the
 // SDK's high-level push_items into broker-prepacked `sink_segments` (txn hashes +
 // base64 zstd blob, exactly like handle_transaction packs `pushes`) and maps the
 // SDK ack {transactionId, leaseId, status, count} to the SP's ack {ok, count}
@@ -137,12 +137,12 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
 //    ack:{transactionId, leaseId, status, count}|null, release_lease}
 // Each push_item (SinkOperator.buildPushItems): {queue, partition, payload}.
 //
-// SP element (046):
+// SP element (007_log_streams):
 //   {idx:0, query_id, partition_id, consumer_group, worker, release_lease,
 //    state_ops, sink_segments:[{queue, partition, hashesB64, blobB64, count}],
 //    ack:{ok, count}|null}
 // hashesB64 = base64 of the concatenated 16-byte xxh3_128 txn hashes, frame
-// order (046's replacement for the seg-era metas:[{i,mid,txn}]) — the log
+// order (007_log_streams's replacement for the seg-era metas:[{i,mid,txn}]) — the log
 // engine's only per-frame SQL metadata (§3: the broker hashes, SQL stores
 // bytea); mids and txn text live only inside the blob.
 //
@@ -155,8 +155,8 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
 // (hot-list mark on each sink partition + promote-on-ack for the released source
 // lease) — see the block at the bottom. The SP commits everything internally, so
 // no push/ack fast path runs it for us; skipping it strands sink emits until the
-// 30s reseed floor. This is the log-engine form of 021's inline
-// update_partition_lookup_v1.
+// 30s reseed floor. This is the log-engine form of the retired rows-era
+// streams cycle's inline update_partition_lookup_v1.
 pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -286,7 +286,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
             .collect();
         // 16B xxh3_128 per frame, concatenated in frame order then base64'd —
         // a misaligned length fails the element loudly via log_push_one_v1's
-        // stride guard rather than silently mis-addressing acks (046).
+        // stride guard rather than silently mis-addressing acks (007_log_streams).
         let mut hashes: Vec<u8> = Vec::with_capacity(frames.len() * 16);
         for f in frames {
             hashes.extend_from_slice(&txn_hash128(&f.txn));
@@ -305,7 +305,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
     // ---- map the SDK ack -> SP ack {ok,count} + top-level worker (= leaseId) ----
     let mut ack_ok = false;
     // The REQUESTED ack item count, kept for the post-commit ack metric: on a nack
-    // 046 forces its own `ack_result.count` to 0 (it advances no cursor), so the
+    // 007_log_streams forces its own `ack_result.count` to 0 (it advances no cursor), so the
     // failed-item count has to come from the request or a nacked batch of N would
     // report neither an ok nor a failed ack. See the metric block below.
     let mut ack_req_count: u64 = 0;
@@ -360,8 +360,8 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
             // (QUEEN_HOTLIST_RESEED_MS, 30s) sweeps it up, and the source partition
             // stays parked in the wheel until its lease expires even though the ack
             // just released it — a window emit that lands in PG in milliseconds is
-            // not deliverable for tens of seconds. This is 021's inline
-            // update_partition_lookup_v1 (rows engine) in its log-engine form: the
+            // not deliverable for tens of seconds. This is the retired rows-era
+            // streams cycle's inline update_partition_lookup_v1 in its log-engine form: the
             // broker owns discoverability now, so it is a Rust-side call, not SQL.
             //
             // Gated on the element's success: the SP wraps each element in a
@@ -413,7 +413,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                 }
 
                 // Source ack, attributed to the SOURCE queue — which is precisely
-                // what 046 resolves and returns `queueName` for (its comment names
+                // what 007_log_streams resolves and returns `queueName` for (its comment names
                 // record_ack_with_queue, the C++ counterpart of add_ack). ack_result
                 // is JSON null on an idle-flush cycle that carried no ack.
                 if let Some(ar) = result.get("ack_result").filter(|a| !a.is_null()) {
@@ -443,7 +443,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                     // Broker-wide ack counters (worker_metrics ack_request +
                     // ack_{success,failed}_count), bumped even if queueName came back
                     // NULL so the rollup never under-counts what the per-queue view
-                    // could not attribute. No dlq_moved: 046 hard-codes
+                    // could not attribute. No dlq_moved: 007_log_streams hard-codes
                     // ack_result.dlq=false — a cycle has no dead-letter path.
                     st.metrics.ack.record_request((ok + failed) as usize);
                     st.metrics.ack_success.fetch_add(ok, Ordering::Relaxed);

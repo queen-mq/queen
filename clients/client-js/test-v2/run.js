@@ -102,28 +102,23 @@ export const cleanupTestData = async () => {
         // queen_streams schema not installed — ignore.
       }
 
-      // LOG ENGINE cleanup. Deleting queen.queues (below) only cascades
-      // through the rows-engine tables; the log engine keeps its own
-      // queue/partition rows plus tables with NO foreign keys (log_txns,
-      // log_dlq, consumer_watermarks, consumer_groups_metadata). Without
-      // purging these, every suite run inherits the previous run's messages,
-      // cursors, and dedup window entries — fixed-transactionId tests report
-      // 'duplicate' on their FIRST push, and delayed/window/buffer tests pop
-      // stale messages. log_partitions/log_segments/log_consumers cascade
-      // from log_queues; log_txns and log_dlq are explicit (no FK by design).
+      // Queue identity is now the queen.queues id (log_queues was merged
+      // away): log_partitions, consumer_watermarks, consumer_groups_metadata
+      // and queue_lag_metrics all cascade from the queues row. Only log_txns
+      // and log_dlq have NO foreign key by design, so they get an explicit
+      // purge keyed via log_partitions first. Without it, every suite run
+      // inherits the previous run's messages and dedup window entries —
+      // fixed-transactionId tests report 'duplicate' on their FIRST push.
       try {
         await dbPool.query(`
           WITH parts AS (
             SELECT lp.id FROM queen.log_partitions lp
-            JOIN queen.log_queues lq ON lq.id = lp.queue_id
-            WHERE lq.name LIKE ANY($1::text[])
+            JOIN queen.queues q ON q.id = lp.queue_id
+            WHERE q.name LIKE ANY($1::text[])
           ),
           d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
           d2 AS (DELETE FROM queen.log_dlq  WHERE partition_id IN (SELECT id FROM parts))
           SELECT 1`, [patterns]);
-        await dbPool.query(`DELETE FROM queen.consumer_watermarks WHERE queue_name LIKE ANY($1::text[])`, [patterns]);
-        await dbPool.query(`DELETE FROM queen.consumer_groups_metadata WHERE queue_name LIKE ANY($1::text[])`, [patterns]);
-        await dbPool.query(`DELETE FROM queen.log_queues WHERE name LIKE ANY($1::text[])`, [patterns]);
       } catch (e) {
         // Log-engine schema not installed (rows-only server) — ignore.
       }

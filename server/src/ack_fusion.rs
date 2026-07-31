@@ -9,7 +9,7 @@
 // group) to 200 implies everything through 200 (incl. an earlier ack to 100) is
 // committed — so many independent cursor advances FUSE into ONE transaction with
 // NO loss of semantics. This module buffers full-batch acks per shard and commits
-// them via queen.log_ack_multi_v1 (044): one commit for N cursors.
+// them via queen.log_ack_multi_v1 (005_log_ack): one commit for N cursors.
 //
 // FIRE-ON-IDLE (mirrors the push fusion, server/src/fusion.rs). At most ONE flush
 // per shard is ever in flight. On arrival, if the shard has no flush in flight, it

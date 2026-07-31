@@ -7,7 +7,7 @@ sidebar:
   order: 10
 sourceOfTruth:
   - server/src/stats.rs
-  - server/sql/procedures/048_log_stats.sql
+  - server/sql/procedures/011_log_stats.sql
   - server/src/syscollect.rs
   - server/src/db.rs
   - server/src/handlers/status.rs
@@ -103,14 +103,15 @@ the retired engine's numbers had the same artifact for the same reason.
 
 ### Rollups
 
-The `namespace`, `task` and `system` rows are produced by the *existing* aggregators from 013, which
-read the `queue` rows and never touch `partition_id`. One value has to be corrected afterwards: the
-system aggregator sets `child_count` from `COUNT(queen.partitions)`, the rows-engine table, which is
-near-empty here, so the refresh overwrites it with the live `COUNT(queen.log_partitions)`.
+The `namespace`, `task` and `system` rows are produced by the shared aggregators in 018_stats, which
+read the `queue` rows and never touch `partition_id`. The system aggregator counts
+`queen.log_partitions` for `child_count`, and the refresh then re-writes the same value from its own
+`COUNT(queen.log_partitions)`. That overwrite is belt and braces rather than a correction: it is
+cheap, authoritative, and pins the value at this cycle's snapshot.
 
 The summary the procedure returns keeps the labels `engine: "segments"` and `segPartitions`. Those
-are telemetry labels aligned with the `queen.queues.storage` compatibility value, not a claim about
-which engine is running. See [Retired objects](/internals/legacy).
+are hard-coded literals, the same compatibility echo as the `storage: "segments"` the queue wire
+still reports: there is one engine and no engine-selector column, so the label selects nothing.
 
 The `stats` log target prints that summary verbatim with `elapsed_ms`. A cycle that updated no
 queues logs at `debug` so a quiet leader stops emitting `info` every ten seconds.
@@ -160,9 +161,11 @@ Each cycle it:
 
 ### Per-queue rates
 
-`queen.queue_lag_metrics` is keyed `(bucket_time, queue_name, tenant_id)` on one-minute buckets, and
-the upsert **sums** on conflict, so several replicas writing the same minute aggregate into one
-cluster-wide row. Each bucket carries pop count, push request and message counts, empty-pop count,
+`queen.queue_lag_metrics` is keyed `(bucket_time, queue_id)` on one-minute buckets: queue identity
+is the `queen.queues` id, the row carries a cascading foreign key to it (a deleted queue's metric
+rows go with the queue), and readers join `queen.queues` when they need the name. The upsert
+**sums** on conflict, so several replicas writing the same minute aggregate into one cluster-wide
+row. Each bucket carries pop count, push request and message counts, empty-pop count,
 transaction count, and ack request, success and failure counts.
 
 Two columns merge differently because summing them would be wrong. Lag merges as a weighted average
@@ -208,8 +211,8 @@ auto-acked consumption. And a push whose transaction failed is counted in the da
 - **Numbers are up to one interval stale.** Counters lag by up to `STATS_INTERVAL_MS`; per-queue
   throughput lags by up to `METRICS_FLUSH_MS` and is bucketed by minute.
 - **A rate dip right after a sweep is expected.** See the retained-count note above.
-- **Zeros everywhere mean the reconciler is not running**, or something called the rows-engine
-  refresh route.
+- **Zeros everywhere mean the reconciler is not running** or, on an older build, something called
+  the retired rows-engine refresh route.
 - **`pending` counts retained data only.** Messages deleted by retention are not pending and not
   completed; they are gone, and `total` shrinks with them.
 - **`completed` is a residual**, not an event count: `total - pending - dlq`, floored at zero. It is

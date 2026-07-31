@@ -74,7 +74,7 @@ project's is not. That is the main thing this page is for.
 | Path | What it is |
 | --- | --- |
 | `server/` | The broker. Crate `queen`, binary `queen`. Axum 0.7 + tokio + deadpool-postgres. |
-| `server/sql/` | `schema.sql` plus 34 `procedures/*.sql` files. All queue semantics live here, and all of it is embedded in the binary. |
+| `server/sql/` | `schema.sql` plus 23 `procedures/*.sql` files (001–023). All queue semantics live here, and all of it is embedded in the binary. |
 | `server/webapp/dist/` | The built dashboard the binary embeds. Gitignored, so a clean clone does not have it. |
 | `server/server.json` | Name and version. The single source of the version string. |
 | `proxy/` | The multi-tenant gateway, one per cell. Binary `queen-proxy`, its own PostgreSQL schema under `migrations/`. |
@@ -158,8 +158,8 @@ into the binary:
 const SCHEMA_SQL: &str = include_str!("../sql/schema.sql");
 
 const PROCEDURES: &[(&str, &str)] = &[
-    ("007_analytics.sql", include_str!("../sql/procedures/007_analytics.sql")),
-    // ... 24 more, in the order they must be applied
+    ("001_log_schema.sql", include_str!("../sql/procedures/001_log_schema.sql")),
+    // ... 22 more, in the order they must be applied
 ];
 ```
 
@@ -173,10 +173,13 @@ so a hand-applied `psql` fix is silently reverted by the next restart. Always
 The applier runs at every boot, in the lexical order of the list above, under a session
 advisory lock so replicas serialise rather than race. Every statement is idempotent
 (`CREATE OR REPLACE`, `IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), which is what makes
-re-applying on every boot safe. Note the ordering intent baked into the list: the `04x`
-log-engine files deliberately land after the `007`–`018` originals whose stored procedures
-they redefine, so lexical order is not cosmetic. Setting `QUEEN_APPLY_SCHEMA=0` skips the
-whole step.
+re-applying on every boot safe. It only ever **creates**: the deployment model is always-virgin
+(a deployment starts from an empty database, and there are no migration files), so each table
+and function is defined exactly once, by exactly one file. Lexical order is still not cosmetic:
+the table files (`001_log_schema`, `002_streams_schema`) must land before the SQL-language
+function bodies that resolve those tables at creation time, and the partition-counter trigger
+attachment (`020_log_partition_counters`) must land after both the table it attaches to and the
+functions it binds (`019_worker_metrics`). Setting `QUEEN_APPLY_SCHEMA=0` skips the whole step.
 
 The dashboard has the opposite failure mode and it is worth knowing the difference: a `debug`
 `rust_embed` build reads assets from disk, so a dashboard change *appears* to take effect

@@ -1,0 +1,17 @@
+########## arm=off ACKFUSION=0 12:02:18
+/root/ackab.sh: line 25: 21818 Killed                  nohup /root/bench-sampler.sh "$OUT/$name/bench.csv" $((DUR + 90)) > /dev/null 2>&1
+[final] offered=1485461 achieved=1483191 shed=0 (msgs: offered=148546100 achieved=148319100 shed=0) pushErr=1151 | pushed=148319100 popped=84104100 lag=64215000 | popErr=0 empty=1739869 | overall p50=222.21 p99=1056.77 p999=1630.21 ms | acked=84031600 ackErr=44000 ackLag=64287500 ackAvg=112.60ms
+
+########## arm=s4 ACKFUSION=1 ACKSHARDS=4 12:05:23
+/root/ackab.sh: line 25: 32658 Killed                  nohup /root/bench-sampler.sh "$OUT/$name/bench.csv" $((DUR + 90)) > /dev/null 2>&1
+[final] offered=1485140 achieved=1483154 shed=0 (msgs: offered=148514000 achieved=148315400 shed=0) pushErr=1078 | pushed=148315400 popped=84124700 lag=64190700 | popErr=0 empty=2042182 | overall p50=207.87 p99=1105.92 p999=1744.90 ms | acked=84048700 ackErr=54000 ackLag=64266700 ackAvg=122.64ms
+
+########## arm=s24 ACKFUSION=1 ACKSHARDS=24 12:08:33
+/root/ackab.sh: line 25: 43749 Killed                  nohup /root/bench-sampler.sh "$OUT/$name/bench.csv" $((DUR + 90)) > /dev/null 2>&1
+[final] offered=1485171 achieved=1482413 shed=0 (msgs: offered=148517100 achieved=148241300 shed=0) pushErr=2028 | pushed=148241300 popped=78372800 lag=69868500 | popErr=1 empty=2020979 | overall p50=214.02 p99=1073.15 p999=1662.98 ms | acked=78268300 ackErr=71000 ackLag=69973000 ackAvg=120.86ms
+
+########## arm=s60 ACKFUSION=1 ACKSHARDS=60 12:11:43
+/root/ackab.sh: line 25: 55118 Killed                  nohup /root/bench-sampler.sh "$OUT/$name/bench.csv" $((DUR + 90)) > /dev/null 2>&1
+[final] offered=1485242 achieved=1483014 shed=0 (msgs: offered=148524200 achieved=148301400 shed=0) pushErr=1381 | pushed=148301400 popped=83059500 lag=65241900 | popErr=0 empty=1978944 | overall p50=207.87 p99=987.14 p999=1417.22 ms | acked=82967500 ackErr=59500 ackLag=65333900 ackAvg=114.73ms
+
+########## done 12:14:53

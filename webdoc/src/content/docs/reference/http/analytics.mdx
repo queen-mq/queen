@@ -13,10 +13,10 @@ sourceOfTruth:
   - server/src/db.rs
   - server/src/syscollect.rs
   - server/src/config.rs
-  - server/sql/procedures/009_status.sql
-  - server/sql/procedures/014_worker_metrics.sql
-  - server/sql/procedures/015_postgres_stats.sql
-  - server/sql/procedures/017_retention_analytics.sql
+  - server/sql/procedures/015_status.sql
+  - server/sql/procedures/019_worker_metrics.sql
+  - server/sql/procedures/021_postgres_stats.sql
+  - server/sql/procedures/022_retention_analytics.sql
 ---
 
 Seven routes live under `/api/v1/analytics/`. All are `read-only`, all dispatch one

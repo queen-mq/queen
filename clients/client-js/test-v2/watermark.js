@@ -51,11 +51,12 @@ const QUEUE_NAME_DELETE = 'test-queue-v2-watermark-delete'
  */
 async function advanceWatermark(queueName, consumerGroup, minutesForward = 10) {
     const result = await dbPool.query(`
-        UPDATE queen.consumer_watermarks
+        UPDATE queen.consumer_watermarks w
         SET last_empty_scan_at = NOW() + interval '${minutesForward} minutes',
             updated_at = NOW() + interval '${minutesForward} minutes'
-        WHERE queue_name = $1 AND consumer_group = $2
-        RETURNING *
+        FROM queen.queues q
+        WHERE w.queue_id = q.id AND q.name = $1 AND w.consumer_group = $2
+        RETURNING w.*
     `, [queueName, consumerGroup])
     return result.rows[0]
 }
@@ -65,8 +66,9 @@ async function advanceWatermark(queueName, consumerGroup, minutesForward = 10) {
  */
 async function getWatermark(queueName, consumerGroup) {
     const result = await dbPool.query(`
-        SELECT * FROM queen.consumer_watermarks
-        WHERE queue_name = $1 AND consumer_group = $2
+        SELECT w.* FROM queen.consumer_watermarks w
+        JOIN queen.queues q ON q.id = w.queue_id
+        WHERE q.name = $1 AND w.consumer_group = $2
     `, [queueName, consumerGroup])
     return result.rows[0]
 }
@@ -400,7 +402,7 @@ export async function deleteConsumerGroupForQueueAllowsReconsume(client) {
         await client.admin.deleteConsumerGroupForQueue(consumerGroup, queueName, true)
         // Also clean up any orphaned watermark from previous runs
         await dbPool.query(
-            'DELETE FROM queen.consumer_watermarks WHERE queue_name = $1 AND consumer_group = $2',
+            'DELETE FROM queen.consumer_watermarks w USING queen.queues q WHERE w.queue_id = q.id AND q.name = $1 AND w.consumer_group = $2',
             [queueName, consumerGroup]
         )
     } catch (e) {

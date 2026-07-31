@@ -8,7 +8,7 @@ sidebar:
 sourceOfTruth:
   - server/src/hotlist.rs
   - server/src/handlers/data.rs
-  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/004_log_pop.sql
   - server/src/config.rs
 ---
 
@@ -224,10 +224,14 @@ The rings are the one broker structure an untrusted client can grow by naming th
 looping `GET /api/v1/pop/queue/<random-name>` would otherwise pin one interning table and one set
 of rings per distinct name for the life of the process.
 
-Two mechanisms bound it. First, the serve path does not create a ring for a queue that does not
-exist: ring registration happens *after* the group-seeded check, which reads the committed
-`consumer_groups_metadata` marker, so a pop for a nonexistent queue allocates nothing. Second, the
-idle sweep drops a queue's entire state when three conditions hold simultaneously, all checked
+Ring registration happens *after* the group-seeded check, which reads the committed
+`consumer_groups_metadata` marker, so the first pop of a name allocates no ring in memory. But that
+first pop is routed through the SQL wildcard procedure, and that procedure **provisions**: a pop on
+a queue that does not exist creates its `queen.queues` config row and the seed marker (a
+subscription may legitimately precede the first push, so the marker's foreign key to the queue row
+forces the upsert; see [Life of a pop](/internals/life-of-a-pop)). From the second pop on, the
+queue exists and the ring is registered. What actually bounds ring memory is therefore the idle
+sweep, which drops a queue's entire state when three conditions hold simultaneously, all checked
 while holding the map lock:
 
 1. A second-chance flag that every access sets and each sweep clears is false: nothing touched

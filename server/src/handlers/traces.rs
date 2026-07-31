@@ -28,8 +28,9 @@ use crate::vegas::Vegas;
 // ------------------------------------------------------------ POST /api/v1/traces
 // Engine-agnostic (queen.message_traces). Mirrors the C++ traces route: require
 // transactionId/partitionId/data, default consumerGroup/eventType, pass through
-// traceNames. record_trace_v1 is segment-aware via 030 (resolves message_id from
-// seg_dedup, records with NULL message_id past the dedup window).
+// traceNames. record_trace_v1 is log-aware (010_log_admin): message_id stays
+// NULL for log messages, whose mids live inside segment blobs. (Its retired
+// seg-era form resolved message_id from the seg engine's dedup sidecar.)
 pub async fn handle_record_trace(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,

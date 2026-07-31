@@ -1,6 +1,6 @@
 ---
 title: Versions and compatibility
-description: "What 1.0.0 covers, why the HTTP API is the only compatibility surface, what applying the schema at every boot means for upgrades, and why coming from 0.16 is not a data migration."
+description: "What 1.0.0 covers, why the HTTP API is the only compatibility surface, what the boot-time schema apply does and does not do, and why coming from 0.16 means a fresh database."
 type: reference
 tier: operate
 sidebar:
@@ -10,9 +10,8 @@ sourceOfTruth:
   - server/src/schema.rs
   - server/src/migrate.rs
   - server/src/main.rs
-  - server/sql/procedures/040_log_drop_legacy.sql
-  - server/sql/procedures/041_log_schema.sql
-  - server/sql/procedures/043_log_pop.sql
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/004_log_pop.sql
   - server/build.rs
 ---
 
@@ -48,9 +47,9 @@ tokens to hand back is correct; a client that does arithmetic on them is not.
 
 ## The schema is applied at every boot
 
-The broker owns its own schema. It embeds `schema.sql` and 34 stored-procedure
-files into the binary at compile time and applies all of them on every start,
-in lexical file order, before it accepts a request.
+The broker owns its own schema. It embeds `schema.sql` and 23 stored-procedure
+files (`001`–`023`) into the binary at compile time and applies all of them on
+every start, in lexical file order, before it accepts a request.
 
 Three properties make that safe to do on every boot:
 
@@ -63,28 +62,37 @@ Three properties make that safe to do on every boot:
   message. A broker never serves against a schema it could not bring to the
   expected shape.
 
-Order is load-bearing rather than incidental: the `04x` log-engine files
-deliberately redefine shared procedures that the earlier `007`–`018` files
-create. That is why the applier walks the whole list every time instead of
-tracking a migration version.
+The apply **only creates**. Every table and every function is defined exactly
+once, by exactly one file, in its final shape: nothing is dropped, migrated or
+folded at boot, and `schema.sql` carries no upgrade `ALTER`s: the
+`CREATE TABLE`s declare the final columns directly. Order in the file list is
+load-bearing only where a function body has to resolve a table at creation time.
+The table files come first, and the partition-counter trigger attachment comes
+after both the table it attaches to and the functions it binds.
 
-### What that means for an upgrade
+### The deployment model is always-virgin
 
-Deploy the new binary. It brings the schema forward itself; there is no migration
-step, no version table, and nothing to run by hand.
+A deployment starts from an **empty database** (or an empty schema): the boot
+apply *is* the schema, not a migration engine. There is no migration step, no
+version table, and nothing to run by hand, because there is nothing to migrate.
+Restarting the same version re-applies the same definitions as a no-op, and a
+rolling restart of identical binaries is safe.
 
-Two details are worth knowing before rolling several instances at once. A
-redefinition that changes a procedure's return type cannot be a
-`CREATE OR REPLACE`, so those are expressed as a drop followed by a create. The
-pop family is the notable case. And the advisory lock only serialises applies
-against each other: it does not stop an older instance from continuing to serve
-while a newer one rewrites shared procedures. Roll instances one at a time, and
-do not point two different broker versions at one database as a steady state.
+What the apply does **not** do is bring an existing database forward. A
+`CREATE TABLE IF NOT EXISTS` against a table that already exists in an older
+shape leaves the older shape in place, so pointing a newer build at a database
+created by a different build is unsupported: stand up a fresh database and cut
+over. The same applies to a **downgrade**: an older broker would re-apply its
+own older definitions over a schema it does not understand. Roll back by
+restoring a dump into a fresh database, not by restarting an older image against
+the current one.
 
-A **downgrade** is not covered by any of this. An older broker boots and
-re-applies its *own* older definitions over the newer ones, and the drop step
-described below is not reversible. Roll back by restoring a dump, not by
-restarting an older image.
+One rolling-restart detail survives from the file mechanics: a definition whose
+return type changed between builds cannot be a `CREATE OR REPLACE`, so a few are
+expressed as a drop followed by a create (the pop family is the notable case),
+and the advisory lock does not stop an older instance from serving while a newer
+one applies. Roll instances one at a time, and do not point two different broker
+versions at one database as a steady state.
 
 ### Running as a low-privilege user
 
@@ -96,8 +104,9 @@ missing object, not at boot.
 
 With the apply enabled, the database user needs `CREATE SCHEMA` and nothing else.
 The schema requires **no extensions**: `gen_random_uuid()` is used as a core
-built-in, not the `pgcrypto` function. The test matrix runs against
-PostgreSQL 16.
+built-in, not the `pgcrypto` function. It does require **PostgreSQL 15 or
+newer**, because one unique index is declared `NULLS NOT DISTINCT`. The test
+matrix runs against PostgreSQL 16.
 
 ## Coming from the retired 0.16 broker
 
@@ -110,27 +119,20 @@ compiles, and all it does is log
 `migration is not supported on the log engine` and exit 1. It never opens a
 database connection. There are no migration HTTP endpoints either.
 
-**The boot apply deletes the retired segments engine's objects.** The first
-log-engine file runs before the new schema is created and, driven off the system
-catalogs rather than a hardcoded list, drops every `queen.seg_*` function (with
-`CASCADE`) and every `queen.seg_*` table, then drops the cursor columns that
-engine had grafted onto `queen.partition_consumers`. On a database that never had
-them it is a no-op. On one that does, it is a full teardown (including the
-message data in those tables) and it is not reversible.
+**The boot apply does not touch old objects.** It only creates: nothing is
+dropped, altered or folded at boot, whatever the database already holds. That is
+not a compatibility promise, it is the always-virgin model: 1.0.0 expects an
+empty database, and against one carrying an earlier broker's tables it would
+simply create its own objects alongside data it will never read or reconcile.
 
 <Aside type="danger">
-Point 1.0.0 at a database that still carries `queen.seg_*` tables and their
-contents are dropped during boot, before the broker serves a request. Take a
-`pg_dump` first, and prefer a fresh database or a fresh schema for the new broker.
+Pointing 1.0.0 at a database that carries any earlier broker's schema (the 0.16
+engine's tables, or any pre-release build of this one) is **unsupported**. The
+boot will not drop the old data, but nothing reads it, nothing migrates it, and
+same-named tables left in an older shape make the broker's behaviour undefined.
+Give 1.0.0 a fresh database, full stop, and keep a `pg_dump` of the old one as
+the record.
 </Aside>
-
-**The rows-era tables survive, and stay unread by the message plane.**
-`schema.sql` still creates `queen.messages` and its neighbours, and their contents
-are left alone. A few management readers still consult them: the dead-letter
-listing, for instance, unions the old dead-letter table with the log engine's own,
-so an old row there is not hidden. But the log engine writes and reads messages
-only in its own `queen.log_*` tables, and nothing copies rows across. Old messages
-in `queen.messages` are therefore invisible to push, pop and ack.
 
 The practical upgrade is therefore a cutover, not an in-place migration: stand up
 1.0.0 against a clean database, move producers over, let the old consumers drain

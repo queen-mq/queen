@@ -16,10 +16,10 @@ sourceOfTruth:
   - server/src/stats.rs
   - server/src/syscollect.rs
   - server/src/config.rs
-  - server/sql/procedures/013_stats.sql
-  - server/sql/procedures/014_worker_metrics.sql
-  - server/sql/procedures/018_prometheus.sql
-  - server/sql/procedures/048_log_stats.sql
+  - server/sql/procedures/018_stats.sql
+  - server/sql/procedures/019_worker_metrics.sql
+  - server/sql/procedures/023_prometheus.sql
+  - server/sql/procedures/011_log_stats.sql
 ---
 
 Four different things are called "status" on this broker, and they answer different
@@ -223,11 +223,11 @@ The complete family list, generated from `server/src/metrics.rs` and the exposit
 code, is in the [reference section](/reference). Three caveats that the family list
 cannot express:
 
-- `queen_dlq_depth` and `queen_dlq_depth_by_queue` are computed from the
-  rows-engine dead-letter table, which this engine never writes, so they read `0`
-  on a log-engine deployment. For real DLQ depth use `GET /api/v1/dlq`
-  ([messages and DLQ](/reference/http/messages-dlq)) or the lifetime counter
-  `queen_cluster_dlq_total`, which is bumped on every dead-letter.
+- `queen_dlq_depth` and `queen_dlq_depth_by_queue` count `queen.log_dlq` rows
+  per scrape (until 2026-07-31 they read the retired rows engine's dead-letter
+  table and were pinned at `0`). The lifetime counter `queen_cluster_dlq_total`
+  is still the monotonic alternative: it is bumped on every dead-letter and never
+  shrinks when DLQ rows are deleted or replayed.
 - `queen_queue_depth_total` and `queen_queue_depth_pending` are formatted from a
   `queue_depth` block that `queen.get_prometheus_metrics_v1` does not currently
   return, so those two series are absent from the exposition.

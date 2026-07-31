@@ -7,65 +7,109 @@ sidebar:
   order: 12
 sourceOfTruth:
   - server/sql/schema.sql
-  - server/sql/procedures/040_log_drop_legacy.sql
-  - server/sql/procedures/041_log_schema.sql
-  - server/sql/procedures/042_log_push.sql
-  - server/sql/procedures/043_log_pop.sql
-  - server/sql/procedures/044_log_ack.sql
-  - server/sql/procedures/045_log_maintenance.sql
-  - server/sql/procedures/046_log_streams.sql
-  - server/sql/procedures/047_log_admin.sql
-  - server/sql/procedures/048_log_stats.sql
-  - server/sql/procedures/049_drop_rows_message_plane.sql
-  - server/sql/procedures/050_drop_rows_tables.sql
-  - server/sql/procedures/051_log_partition_counters.sql
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/003_log_push.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/005_log_ack.sql
+  - server/sql/procedures/006_log_maintenance.sql
+  - server/sql/procedures/007_log_streams.sql
+  - server/sql/procedures/010_log_admin.sql
+  - server/sql/procedures/011_log_stats.sql
+  - server/sql/procedures/013_analytics.sql
+  - server/sql/procedures/019_worker_metrics.sql
+  - server/sql/procedures/020_log_partition_counters.sql
   - server/src/schema.rs
 ---
 
 Everything here lives in the PostgreSQL schema `queen`, created by `server/sql/schema.sql`. That
-file plus 26 files under `server/sql/procedures/` are embedded in the binary with `include_str!` and
-applied at every boot in lexical order under session advisory lock `778120010`. All of it is
-idempotent, so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the step entirely.
+file plus exactly 23 files under `server/sql/procedures/` (`001`–`023`) are embedded in the binary
+with `include_str!` and applied at every boot in lexical order under session advisory lock
+`778120010`. All of it is idempotent, so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the
+step entirely.
 
-The engine needs `CREATE SCHEMA` and **no extensions**.
+The apply **only creates**. There are no teardown files, no migration blocks and no upgrade
+`ALTER`s: a deployment starts from an empty database, and `schema.sql`'s `CREATE TABLE`s declare
+the final shape directly. Pointing this build at a database written by an earlier schema is
+unsupported (fresh database, full stop). See [Retired objects](/internals/legacy) for the history.
 
-The files numbered `040`–`048` are the log engine. `049` and `050` drop what the rows engine left
-behind, its functions and then its tables, and `051` attaches the partition-lifecycle counters to
-`queen.log_partitions` once both have run. The surviving files in the `007`–`022` range are the
-shared management plane: configure, consumer groups, stats readers, metrics, traces, streams. A
-subset of their procedures is superseded by later redefinitions, which is why they are still applied.
-The rows engine is gone entirely as of 2026-07-30. See [Retired objects](/internals/legacy).
+The engine needs `CREATE SCHEMA` and **no extensions**, with one floor worth naming: the
+`cgm_identity_uk` index below uses `NULLS NOT DISTINCT`, which needs **PostgreSQL 15 or newer**.
+
+The file map: `001_log_schema` and `002_streams_schema` are the DDL, `003_log_push` through
+`007_log_streams` are the engine's write, read, ack, maintenance and streaming paths,
+`008`/`009` are the streams registry calls, `010_log_admin` and `011_log_stats` are the log-native
+admin and stats surface, and `012`–`023` (minus `020`) are the shared management plane: configure,
+queue deletion, consumer groups, status, messages, traces, stats readers, metrics, Prometheus.
+`020_log_partition_counters` is a special case: it only attaches triggers, and its position after
+both `001` (the table) and `019` (the trigger functions) is the point of it.
 
 <Aside type="note">
 The SQL is `include_str!`-embedded at compile time. Editing a `.sql` file and restarting is not
 enough: you must rebuild the binary for the change to reach the database.
 </Aside>
 
-## Log tables
+## Queue identity: queen.queues (schema.sql)
 
-### queen.log_queues (`041`)
+One row per queue, and the **single queue identity** in the system: `queen.log_partitions.queue_id`
+references `queues(id)` `ON DELETE CASCADE` directly, so every partition→config join is by id.
+There is no separate log-engine queue table and no `(tenant_id, name)` bridge join between
+configuration and data, which makes the cross-tenant name-join hazard class structurally
+unrepresentable (the retention work list joins by id).
 
-One row per queue. Identity is `(tenant_id, name)`, enforced by the unique index
-`log_queues_tenant_name_uk`; the older `UNIQUE(name)` constraint is dropped on re-apply.
+Identity is `(tenant_id, name)`, enforced by the unique index `queues_tenant_name_uk`. The columns
+the engine reads directly:
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | `UUID` | PK. `log_partitions.queue_id` references it `ON DELETE CASCADE` |
+| `id` | `UUID` | PK. `log_partitions.queue_id`, `consumer_watermarks.queue_id`, `consumer_groups_metadata.queue_id`, `queue_lag_metrics.queue_id` and `stats.queue_id` all reference it `ON DELETE CASCADE` |
 | `tenant_id` | `UUID` | default `00000000-0000-0000-0000-000000000001` |
-| `name` | `TEXT` | not null |
-| `lease_time` | `INTEGER` | default 60; `/configure` writes 300 when `leaseTime` is omitted |
-| `retention_seconds` | `INTEGER` | default 3600; written by `/configure`, read by nothing on this tree |
-| `dedup_window_seconds` | `INTEGER` | default 3600; `0` disables the probe |
+| `name` | `VARCHAR(255)` | not null; `(tenant_id, name)` unique |
+| `lease_time` | `INTEGER` | default **60**; `/configure` writes an explicit 300 when `leaseTime` is omitted |
+| `dedup_window_seconds` | `INTEGER NOT NULL` | default 3600; `0` disables the push dedup probe |
+| `namespace`, `task` | `VARCHAR(255)` | derived from the dotted name on implicit creation |
 | `created_at` | `TIMESTAMPTZ` | |
 
-### queen.log_partitions (`041`)
+The rest of the row is the queue configuration `/configure` writes: retry limit and delay, DLQ
+flags, `delayed_processing`, `window_buffer`, the retention policy columns, encryption,
+`max_wait_time_seconds`, `max_queue_size`, `min_pop_wait_time`. See
+[Queue options](/reference/queue-options).
+
+Two things about this table are worth being precise about:
+
+- **The `lease_time` default of 60 is a truth fix, not a behaviour change.** An implicitly
+  push-created queue has *always* leased at 60 (the pop path read that default) while the config
+  display used to show 300 from a column the pop path never read. The display lied; now the one
+  column both paths share tells the one truth. `/configure` still writes an explicit 300 when
+  `leaseTime` is omitted, so configured queues are unchanged.
+- **There is no `storage` column.** One engine, nothing to select. The wire still echoes
+  `storage: "segments"` as a hard-coded literal (`012_configure`, `010_log_admin`,
+  `011_log_stats`) for compatibility.
+
+A queue row is created by the first push (`003_log_push` provisioning), by `/configure`
+(`012_configure`), by the transaction wire (`005_log_ack`), by a streams sink (`007_log_streams`),
+and by a **wildcard pop or subscription registration on a queue that does not exist yet**
+(`004_log_pop`). That last one is a deliberate widening: the pop writes a durable queue-scoped
+`consumer_groups_metadata` row, whose FK needs the queue row, and subscribe-before-first-push is
+legitimate, so the FK must not turn an early subscriber into an error. The honest flip side: a
+consumer typo now creates a queue row, where it previously left only an orphan watermark.
+
+Queue deletion is **one call**: `queen.delete_queue_v1` (`013_analytics`) resolves the id, deletes
+the queue's `log_txns` and `log_dlq` rows explicitly (both FK-less by design, the cascade cannot
+reach them), then deletes the `queues` row and lets the FK cascade take
+`log_partitions` → `log_segments`/`log_consumers`, `consumer_watermarks`, the queue-scoped
+`consumer_groups_metadata` rows, `queue_lag_metrics` and `stats`. Previously this was two
+non-atomic steps (the SQL delete plus a broker-side log-table teardown).
+
+## Log tables
+
+### queen.log_partitions (`001_log_schema`)
 
 One row per partition, and the per-partition write serializer.
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `UUID` | PK; every other log table keys on it |
-| `queue_id` | `UUID` | FK to `log_queues`, cascading |
+| `queue_id` | `UUID` | FK to `queen.queues(id)`, cascading |
 | `name` | `TEXT` | default `Default`; `UNIQUE (queue_id, name)` |
 | `last_offset` | `BIGINT` | allocator, default `-1`; next base is `last_offset + 1` |
 | `log_start` | `BIGINT` | segment retention watermark, default 0 |
@@ -83,7 +127,7 @@ definition) and `log_consumers`, so the group cursors go with it; a later push r
 partition under a new `id`, allocating from `last_offset = -1` again. See
 [Retention internals](/internals/retention).
 
-### queen.log_segments (`041`)
+### queen.log_segments (`001_log_schema`)
 
 The messages.
 
@@ -99,7 +143,7 @@ The messages.
 `blob` is `SET STORAGE EXTERNAL`. Autovacuum: scale factor 0.1, insert scale factor 0.3, cost limit
 4000, cost delay 0, with the same values mirrored onto the TOAST table.
 
-### queen.log_txns (`041`)
+### queen.log_txns (`001_log_schema`)
 
 The hash sidecar. Written on **every** push, whether deduplication is enabled or not, because
 ack-by-`transactionId` resolves through it.
@@ -113,11 +157,12 @@ ack-by-`transactionId` resolves through it.
 | `hashes` | `BYTEA` | `16 × msg_count` bytes: `xxh3_128` big-endian, frame order |
 
 The missing foreign key keeps FK-trigger cost off the purge path, at the price of one obligation:
-whatever deletes a partition must delete these rows itself. The purge phase walks live partitions, so
-a row orphaned by a partition delete would be unreachable forever. `log_partition_cleanup_step_v1` is
-the only other thing that deletes partitions, and it deletes the sidecar explicitly.
+whatever deletes a partition must delete these rows itself. The purge phase walks live partitions,
+so a row orphaned by a partition delete would be unreachable forever. Exactly two things delete
+partitions, `log_partition_cleanup_step_v1` and `delete_queue_v1`, and both delete the sidecar
+explicitly first.
 
-### queen.log_consumers (`041`)
+### queen.log_consumers (`001_log_schema`)
 
 Coordination state per `(partition, consumer_group)`.
 
@@ -139,7 +184,7 @@ Coordination state per `(partition, consumer_group)`.
 Storage parameters: `fillfactor = 50`, `autovacuum_vacuum_scale_factor = 0`,
 `autovacuum_vacuum_threshold = 500`, `autovacuum_vacuum_cost_delay = 0`, `vacuum_truncate = off`.
 
-### queen.log_dlq (`044`)
+### queen.log_dlq (`005_log_ack`)
 
 Dead-lettered frames, as snapshots.
 
@@ -161,22 +206,24 @@ Index: `idx_log_dlq_partition_failed_at (partition_id, failed_at DESC)`.
 Nothing in the retention cycle purges this table. Because these rows have no foreign key either, a
 partition that still holds one is never reclaimed by the cleanup phase: dropping the partition would
 leave the snapshots unreachable rather than clean them up, since every DLQ reader joins through
-`log_partitions`.
+`log_partitions`. (`delete_queue_v1` does clear them, explicitly, as part of deleting the queue.)
 
 ## Shared tables the log engine uses
 
-These are created by `schema.sql` and are not engine-specific.
+These are created by `schema.sql` (and `019_worker_metrics` for the metrics tables) and are not
+engine-specific. Since the queue-identity merge they key on `queen.queues(id)` wherever they used
+to carry a queue name, so a deleted queue cascades its shared rows away.
 
 | Table | Role under the log engine |
 | --- | --- |
-| `queen.queues` | the configuration row: retry limit, DLQ flags, `delayed_processing`, `window_buffer`, retention policy, encryption, `max_wait_time_seconds`, `min_pop_wait_time`. Created by the first push with `storage = 'segments'` |
-| `queen.consumer_groups_metadata` | durable subscription registration (mode + timestamp) and the group-first-contact seed marker |
-| `queen.consumer_watermarks` | the per-`(queue, group)` empty-scan watermark and its verification time |
-| `queen.stats` | output of the stats reconciler: `queue`, `namespace`, `task` and `system` rows |
-| `queen.retention_history` | one audit row per retention step that deleted something, plus one `__partition_deleted__` row per partition the cleanup phase reclaimed. The `__%__` prefix keeps partition events out of the messages-evicted timeseries |
-| `queen.message_traces`, `queen.message_trace_names` | tracing; the `partition_id` FK is decoupled because log partitions have no row in `queen.partitions` |
+| `queen.consumer_groups_metadata` | durable subscription registration (mode + timestamp) and the group-first-contact seed marker. `queue_id UUID NULL` FK to `queues(id)`, cascading, with `NULL` only for namespace/task discovery rows, which name no queue and keep their own `tenant_id` for scoping. Uniqueness is `cgm_identity_uk (tenant_id, consumer_group, queue_id, partition_name, namespace, task) NULLS NOT DISTINCT` (PG ≥ 15, so two discovery rows with `NULL` queue ids collide instead of duplicating) |
+| `queen.consumer_watermarks` | the per-`(queue, group)` empty-scan watermark and its verification time. `PRIMARY KEY (queue_id, consumer_group)`, FK cascade; tenant scoping is inherited from the queue row |
+| `queen.stats` | output of the stats reconciler: `queue`, `namespace`, `task` and `system` rows. `queue_id` FK to `queues(id)`, cascading; `partition_id` carries a `log_partitions` id with no FK |
+| `queen.retention_history` | one audit row per retention step that deleted something, plus one `__partition_deleted__` row per partition the cleanup phase reclaimed. The `__%__` prefix keeps partition events out of the messages-evicted timeseries. `partition_id` has no FK: the audit row is written by the very step that deletes the partition |
+| `queen.message_traces`, `queen.message_trace_names` | tracing; `partition_id` and `message_id` carry log-engine ids with no FK, because a trace must outlive the segment it describes |
 | `queen.system_state` | the two maintenance flags, as `{"enabled": bool}` JSONB rows |
-| `queen.worker_metrics`, `queen.worker_metrics_summary`, `queen.system_metrics`, `queen.queue_lag_metrics` | the metrics collector's output |
+| `queen.worker_metrics`, `queen.worker_metrics_summary`, `queen.system_metrics` | the metrics collector's output |
+| `queen.queue_lag_metrics` | per-queue ops counters and lifecycle events. `queue_id UUID NOT NULL` FK to `queues(id)`, cascading; `UNIQUE (bucket_time, queue_id)`. Readers join `queues` for display names; a deleted queue's metric rows cascade away |
 | `queen_streams.queries`, `queen_streams.state` | streaming query registry and state |
 
 <Aside type="caution">
@@ -193,39 +240,32 @@ Every function below is in the schema `queen`. Where a signature ends in
 unscoped caller lands on the default tenant, and the older signature is explicitly dropped on
 re-apply so no ambiguous overload survives.
 
-### 040_log_drop_legacy.sql (teardown)
+### 001_log_schema.sql (tables)
 
-Defines no functions. It drops the retired `seg_*` engine: a dynamic sweep over `pg_proc` for every
-`queen.seg_%` function (signatures reconstructed so overloads each get their own `DROP`), an explicit
-plus dynamic sweep over `pg_class` for every `seg_%` table, and a `DROP COLUMN IF EXISTS` fold-back of
-nine columns from `queen.partition_consumers`. Everything is catalogue-driven or `IF EXISTS`, so it is
-a no-op on a fresh database. Full detail on [Retired objects](/internals/legacy).
-
-### 041_log_schema.sql (tables)
-
-The five tables above, plus one helper.
+The four `log_*` tables above (`log_dlq` lives in `005_log_ack`), plus one helper.
 
 | Function | Role |
 | --- | --- |
 | `log_unnest_hashes(p BYTEA) RETURNS TABLE (idx INT, h BYTEA)` | explode a 16-byte-stride blob into zero-based `(index, hash)` rows. `IMMUTABLE` pure byte slicing, so PostgreSQL inlines it into the push probe and ack resolution |
 
-### 042_log_push.sql (push)
+### 003_log_push.sql (push)
 
 | Function | Role |
 | --- | --- |
-| `log_push_one_v1(p_queue TEXT, p_partition TEXT, p_msg_count INT, p_hashes BYTEA, p_verified BIGINT, p_blob BYTEA, p_pid UUID DEFAULT NULL, p_window INT DEFAULT NULL, p_tenant UUID DEFAULT …) RETURNS JSONB` | the single allocator code path. Validates the hash stride, provisions on first contact, probes before allocating under the partition row lock, allocates, inserts the segment and the `log_txns` row. Returns `{"status":"queued","baseOffset":B,"createdAt":…}` or `{"status":"duplicate","dups":[{"i":k,"off":O}]}` |
+| `log_push_one_v1(p_queue TEXT, p_partition TEXT, p_msg_count INT, p_hashes BYTEA, p_verified BIGINT, p_blob BYTEA, p_pid UUID DEFAULT NULL, p_window INT DEFAULT NULL, p_tenant UUID DEFAULT …) RETURNS JSONB` | the single allocator code path. Validates the hash stride, provisions the queue and partition rows on first contact, probes before allocating under the partition row lock, allocates, inserts the segment and the `log_txns` row. Returns `{"status":"queued","baseOffset":B,"createdAt":…}` or `{"status":"duplicate","dups":[{"i":k,"off":O}]}` |
 | `log_push_multi_v1(p_queues TEXT[], p_partitions TEXT[], p_msg_counts INT[], p_hashes BYTEA[], p_verified INT8[], p_blobs BYTEA[], p_tenants UUID[] DEFAULT NULL) RETURNS JSONB` | bundle N disjoint partitions' segments into one transaction. Alignment guards, provisioning skip, one set-based pre-lock ascending by `log_partitions.id`, then `log_push_one_v1` per segment. Returns a JSON array in input order |
 | `log_segment_at_v1(p_pid UUID, p_off BIGINT) RETURNS TABLE (r_base BIGINT, r_end BIGINT, r_created TIMESTAMPTZ, r_blob BYTEA)` | fetch the segment covering an absolute offset. One descending PK probe with the covering test applied outside the `LIMIT`, so a miss cannot walk the partition head. Zero rows when retention removed it |
 
 `log_push_one_v1` is also called by the transaction wire and the streams cycle, so there is exactly
 one place in the system where an offset is assigned.
 
-### 043_log_pop.sql (pop)
+### 004_log_pop.sql (pop)
 
 | Function | Role |
 | --- | --- |
 | `log_pop_v1(p_queue TEXT, p_partition TEXT, p_group TEXT, p_budget INTEGER, p_lease_seconds INTEGER, p_worker TEXT, p_auto_ack BOOLEAN DEFAULT FALSE, p_sub_mode TEXT DEFAULT 'all', p_sub_from TEXT DEFAULT '', p_skip_window_debounce BOOLEAN DEFAULT FALSE, p_tenant UUID DEFAULT …) RETURNS TABLE (r_base BIGINT, r_start_idx INTEGER, r_take INTEGER, r_msg_count INTEGER, r_created_at TIMESTAMPTZ, r_blob BYTEA)` | **the claim core.** Every other pop variant calls it once per partition. Visibility gates, first-contact subscription seeding, claim-first `FOR UPDATE SKIP LOCKED`, head probe plus forward scan, empty-partition cursor seal, then auto-ack or lease |
-| `log_pop_wildcard_wire_v1(p_queue, p_group, p_budget, p_lease_seconds, p_worker, p_auto_ack, p_max_partitions, p_sub_mode, p_sub_from, p_tenant) RETURNS JSONB` | SQL candidate scan across a queue's partitions; blobs base64-encoded inside the JSON. Carries the group-first-contact bulk seed and the empty-scan watermark maintenance |
+| `log_pop_specific_v1(p_queue, p_partition, p_group, p_budget, p_lease_seconds, p_worker, p_auto_ack, p_sub_mode, p_sub_from, p_tenant) RETURNS JSONB` | the single-partition pop's **wire assembly**, `VOLATILE` plpgsql: one `log_pop_v1` claim, then the `partitionId` resolution in a *later command*, whose snapshot is at least as new as anything the claim saw. The old shape (the broker's outer statement resolving `partitionId` under an older snapshot than the claim's internals) could deliver a leased batch whose every message carried `partitionId ""` when the pop raced the partition-creating push commit, and the client's mandatory-`partitionId` ack guard then threw. Wire shape unchanged |
+| `log_pop_wildcard_wire_v1(p_queue, p_group, p_budget, p_lease_seconds, p_worker, p_auto_ack, p_max_partitions, p_sub_mode, p_sub_from, p_tenant) RETURNS JSONB` | SQL candidate scan across a queue's partitions; blobs base64-encoded inside the JSON. Carries the group-first-contact bulk seed, the empty-scan watermark maintenance, and the subscribe-before-first-push queue provisioning described above |
 | `log_pop_wildcard_bin_v1(… same args …) RETURNS TABLE(meta JSONB, blobs BYTEA[])` | identical claim logic with blobs as a native `bytea[]` out of band: no `encode()` on the server, no base64 decode on the broker. The default wildcard path |
 | `log_pop_discover_wire_v1(p_namespace TEXT, p_task TEXT, p_group, p_budget, p_lease_seconds, p_worker, p_auto_ack, p_max_partitions, p_sub_mode, p_sub_from, p_tenant) RETURNS JSONB` | namespace/task discovery pop across matching queues, each partition leased with its own queue's `lease_time` |
 | `log_has_pending_v1(p_queue TEXT, p_group TEXT, p_tenant UUID DEFAULT …) RETURNS BOOLEAN` | cheap indexed superset probe: does any partition have `last_offset > COALESCE(committed, -1)`. Coarse on retention gaps by contract; the pop resolves the truth under the row lock |
@@ -236,7 +276,9 @@ one place in the system where an offset is assigned.
 part of the signature and `OR REPLACE` refuses return-type changes, which would brick the boot
 re-apply.
 
-### 044_log_ack.sql (ack, lease renewal, DLQ, transactions)
+### 005_log_ack.sql (ack, lease renewal, DLQ, transactions)
+
+Also creates `queen.log_dlq` (above).
 
 | Function | Role |
 | --- | --- |
@@ -246,10 +288,13 @@ re-apply.
 | `log_ack_by_hash_v1(p_partition_id UUID, p_group TEXT, p_worker TEXT, p_hashes BYTEA[], p_statuses TEXT[]) RETURNS JSONB` | **the authoritative ack contract.** One join resolves hashes to offsets; implements implicit ack, explicit-signal clamping, the retry budget, DLQ hand-off, and the `noopHashes` / `staleHashes` / `unresolvedHashes` honesty lists |
 | `log_renew_lease_v1(p_worker TEXT, p_seconds INTEGER) RETURNS JSONB` | renew every live lease held by a worker. `GREATEST` so it never shortens; reports the minimum expiry |
 | `log_dlq_head_v1(p_partition_id UUID, p_group TEXT, p_worker TEXT, p_off BIGINT, p_message_id UUID, p_txn TEXT, p_payload JSONB, p_error TEXT) RETURNS JSONB` | file the poison frame's snapshot, advance the cursor past it, reset attempt and retry state, release the lease. Idempotent on a second call (the lease is gone) |
-| `get_dlq_messages_v1(p_filters JSONB DEFAULT '{}')` | DLQ browsing. Also redefined in `047`, which loads later and wins |
-| `log_transaction_wire_v1(p JSONB) RETURNS JSONB` | atomic push plus ack. Guards against mixed-engine batches and cross-tenant partition ids, pre-locks partitions ascending by id, then acks ascending by `(partition_id, group)`. Every failure raises, so the whole batch rolls back |
+| `log_transaction_wire_v1(p JSONB) RETURNS JSONB` | atomic push plus ack. Guards against cross-tenant partition ids, pre-locks partitions ascending by id, then acks ascending by `(partition_id, group)`. Every failure raises, so the whole batch rolls back |
 
-### 045_log_maintenance.sql (retention steps)
+`get_dlq_messages_v1` used to be defined here too; it is not any more. `010_log_admin` applies
+after this file and redefines the same signature, so the copy here was overwritten at every boot
+and never ran. `010_log_admin` owns it now.
+
+### 006_log_maintenance.sql (retention steps)
 
 | Function | Role |
 | --- | --- |
@@ -260,20 +305,21 @@ re-apply.
 | `log_partition_dead_v1(p_pid UUID, p_cutoff TIMESTAMPTZ) RETURNS BOOLEAN` | the empty-partition eligibility predicate, in one place so the candidate scan and the under-lock re-check cannot drift: no segments, no `log_dlq` row, no `queen_streams.state` row, no live lease, no consumer activity since the cutoff, and both partition timestamps older than it |
 | `log_partition_cleanup_step_v1(p_cutoff TIMESTAMPTZ, p_max_rows INT) RETURNS JSONB` | deletes up to `p_max_rows` eligible partitions in one transaction: locks the batch ascending by id with `SKIP LOCKED`, re-checks the predicate under the locks, purges the FK-less `log_txns` rows explicitly, writes one `__partition_deleted__` history row each, then deletes the rows (cascading to `log_consumers`). The only step here that is not per-partition |
 
-This file also drops the `retention_history.partition_id` foreign key (it pointed at the rows-engine
-`queen.partitions`) and adds `idx_retention_history_executed_at (executed_at DESC)`.
+This file also adds `idx_retention_history_executed_at (executed_at DESC)`, the index the retention
+analytics readers scan.
 
-### 046_log_streams.sql (streaming)
+### 007_log_streams.sql (streaming)
 
 | Function | Role |
 | --- | --- |
 | `log_streams_cycle_v1(p_requests JSONB) RETURNS JSONB` | one atomic streaming-cycle commit per request element: state upserts, sink pushes through `log_push_one_v1`, and the source ack as a cursor advance over the leased span. A gate partial-ack walks K frames forward and retains the lease on the tail. Sink segments arrive broker-prepacked as `hashesB64` plus `blobB64` |
 
-### 047_log_admin.sql (admin and observability)
+### 010_log_admin.sql (admin and observability)
 
-Ported from the retired consumer-group, observability and traces files. Every redefinition here keeps
-the rows-engine body verbatim for `storage = 'rows'` queues and adds a log branch guarded on
-`storage = 'segments'`, so a rows queue's output is byte-identical to the original.
+Ported from the retired seg-era consumer-group, observability and traces files. The rows-engine
+legs those redefinitions once carried are gone. There is one engine, so every body here runs
+unconditionally, and the join to `queen.queues` on `p.queue_id` is itself the queue-existence
+guard (it supplies namespace, task, priority and tenant scoping in the same touch).
 
 | Function | Role |
 | --- | --- |
@@ -284,7 +330,7 @@ the rows-engine body verbatim for `storage = 'rows'` queues and adds a log branc
 | `get_consumer_groups_v4(p_tenant UUID DEFAULT …) RETURNS JSONB` | consumer-group listing |
 | `list_messages_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | message browsing; a segment `seq` carries `base_offset` and `frameIdx` carries `offset - base_offset` |
 | `get_dlq_messages_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | DLQ browsing over `log_dlq`; payload comes from the snapshot, `createdAt` is `failed_at` (per-frame enqueue time is not recoverable from an opaque blob), `producerSub` is null |
-| `record_trace_v1(p_data JSONB) RETURNS JSONB` | trace recording, plus the `message_traces` FK decoupling |
+| `record_trace_v1(p_data JSONB) RETURNS JSONB` | trace recording (this file owns the redefinition; `017_traces` no longer defines it) |
 | `get_lagging_partitions_v1(p_min_lag_seconds INTEGER DEFAULT 0, p_tenant UUID DEFAULT …) RETURNS JSONB` | lagging-partition report |
 | `get_consumer_group_details_v1(p_consumer_group TEXT, p_tenant UUID DEFAULT …) RETURNS JSONB` | per-group detail |
 
@@ -292,48 +338,24 @@ Three procedures from the retired observability file were deliberately **not** p
 have no Rust call site: `get_queue_messages_v1`, `has_pending_messages` and
 `get_prometheus_metrics_v1`.
 
-### 048_log_stats.sql (stats and analytics)
+### 011_log_stats.sql (stats and analytics)
 
 | Function | Role |
 | --- | --- |
 | `log_oldest_pending_at_v1(p_pid UUID, p_wanted BIGINT) RETURNS TIMESTAMPTZ` | `created_at` of the segment holding an offset, or of the next existing segment when it fell into a retention gap. Two bounded PK probes, never a filtered backward scan |
-| `log_refresh_all_stats_v1() RETURNS JSONB` | recompute `queen.stats` `queue` rows from the log tables by watermark arithmetic, then reuse the existing namespace, task and system rollups and correct the system partition count. Returns a summary labelled `engine: "segments"` |
-| `get_queue_detail_v2(p_queue_name TEXT, p_tenant UUID DEFAULT …) RETURNS JSONB` | dual-mode queue detail. On the log branch `cursor.batchesConsumed` is 0 and `lastActivity` is `MAX(lease_acquired_at)` |
-| `get_queue_v2_rows(p_queue_name TEXT, p_tenant UUID DEFAULT …) RETURNS JSONB` | the rows-engine body, extracted under its own name so the dual-mode entry point can delegate without duplicating it |
-| `get_queue_v2(p_queue_name TEXT, p_tenant UUID DEFAULT …) RETURNS JSONB` | dual-mode entry point. On the log branch `failed` is `NULL`, not 0. There is no per-partition failure counter |
+| `log_refresh_all_stats_v1() RETURNS JSONB` | recompute `queen.stats` `queue` rows from the log tables by watermark arithmetic, then reuse the existing namespace, task and system rollups and correct the system partition count. Returns a summary labelled `engine: "segments"`, a literal wire-compat telemetry label, since no table carries a storage column |
+| `get_queue_detail_v2(p_queue_name TEXT, p_tenant UUID DEFAULT …) RETURNS JSONB` | log-native queue detail (this file owns it; `018_stats` no longer defines it). `cursor.batchesConsumed` is 0 and `lastActivity` is `MAX(lease_acquired_at)` |
+| `get_queue_v2(p_queue_name TEXT, p_tenant UUID DEFAULT …) RETURNS JSONB` | log-native queue summary, same watermark arithmetic. `failed` is `NULL`, not 0: there is no per-partition failure counter |
 | `get_analytics_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | the message-volume series, bucketing `log_segments` by `created_at` and attributing each segment's frame count to its creation bucket. Deliberately `O(segments in range)`, since it is a per-request dashboard read with a time filter, not the refresh loop |
 | `log_queue_message_stats_v1(p_queue TEXT, p_tenant UUID DEFAULT …) RETURNS TABLE (segments BIGINT, messages BIGINT)` | per-queue counters for queue detail: messages by watermark arithmetic, segments by an index-only count |
 | `log_queue_stats_all_v1(p_tenant UUID DEFAULT …) RETURNS TABLE (queue_name TEXT, partitions BIGINT, segments BIGINT, messages BIGINT)` | the same accounting broker-wide, for queue listing (the live view, since `queen.stats` can lag one refresh cadence). Segment counts are pre-aggregated per partition before the queue join, or the watermark row would fan out once per segment and over-count |
 
-### 049_drop_rows_message_plane.sql (teardown)
-
-Defines no functions. The counterpart of `040` for the rows engine's message plane: a dynamic sweep
-over `pg_proc` for sixteen named functions (push, the four pop generations, ack, transaction,
-lease renewal, pending probe, the two `partition_lookup` maintainers, and `streams_cycle_v1`), with
-signatures reconstructed so overloads each get their own `DROP`. It removes them from databases that
-applied the files before they were deleted; on a fresh database it is a no-op.
-
-Unlike `040` it uses **no `CASCADE`**. Nothing should depend on these any more, so a dependency error
-is information rather than an obstacle. Better a loud boot failure than a silently amputated
-dependant.
-
-### 050_drop_rows_tables.sql (teardown)
-
-Defines no functions. Drops the six rows-engine tables (`messages`, `partitions`,
-`partition_consumers`, `dead_letter_queue`, `messages_consumed`, `partition_lookup`) after first
-detaching every foreign key that pointed at them from a table that SURVIVES (`stats`,
-`retention_history`, `message_traces`), by name and then by a `pg_constraint` sweep so an
-older schema's differently-named constraint cannot block the drop. Those three keep their
-`partition_id` / `message_id` COLUMNS, which now carry log-engine ids. `CASCADE` is used on the
-`DROP TABLE`s themselves, deliberately: the six reference each other, so dropping the set in full
-with `CASCADE` is exact rather than lazy.
-
-### 051_log_partition_counters.sql (triggers)
+### 020_log_partition_counters.sql (triggers)
 
 Defines no functions; attaches `trg_partitions_created_counter` and
 `trg_partitions_deleted_counter` to `queen.log_partitions`. It is a separate file for two reasons.
-`014`, where the trigger functions live, is applied *before* `041` creates the table, so an
-attachment there is skipped on the whole first boot of a fresh database. And the attachment is
+It must run *after* both `001_log_schema` (the table) and `019_worker_metrics` (the trigger
+functions), so a fresh database gets the attachment on its very first boot. And the attachment is
 **conditional on the trigger being absent**: `DROP TRIGGER` takes `ACCESS EXCLUSIVE` and
 `CREATE TRIGGER` takes `SHARE ROW EXCLUSIVE` on the engine's hottest table, so re-running the pair
 every boot would stall every push and pop behind each rolling restart. The trade-off is that
@@ -347,8 +369,8 @@ on restart, since `CREATE OR REPLACE FUNCTION` rebinds it without touching the t
 | `778120010` | session | boot-time schema apply, serialising DDL across replicas |
 | `737001` | session | the retention cycle leader |
 | `737002` | transaction | the stats reconciler leader |
-| `7868669787` | transaction | inside `refresh_all_stats_v1`, which nothing routes to any more |
 | `hashtextextended(partition_id || '/' || group, 42)` | transaction | non-blocking first-contact consumer-row creation in `log_pop_v1` |
+| `hashtextextended(query_id || ':' || partition_id, 0)` | transaction | streams cycle commit serialisation per `(query, partition)` state shard, taken by `log_streams_cycle_v1` (`007_log_streams`) so concurrent cycles and idle-flush sweeps on the same shard commit one at a time |
 
 ## The one global lock order
 

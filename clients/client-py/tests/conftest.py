@@ -51,31 +51,23 @@ async def cleanup_test_data(db_pool):
     async def cleanup():
         patterns = ["test-%", "edge-%", "pattern-%", "workflow-%"]
         try:
-            # LOG ENGINE cleanup (mirrors the JS suite's cleanupTestData):
-            # deleting queen.queues only cascades the retired rows-engine tables;
-            # the log engine keeps its own queue/partition rows plus tables with
-            # no FK by design (log_txns, log_dlq, watermarks, subscriptions).
-            # log_partitions/log_segments/log_consumers cascade from log_queues.
+            # Queue identity is now the queen.queues id (log_queues merged
+            # away, mirrors the JS suite's cleanupTestData): log_partitions,
+            # consumer_watermarks, consumer_groups_metadata and
+            # queue_lag_metrics all cascade from the queues row. Only
+            # log_txns/log_dlq have no FK by design → explicit purge keyed
+            # via log_partitions before the queues delete.
             try:
                 await db_pool.execute(
                     """WITH parts AS (
                            SELECT lp.id FROM queen.log_partitions lp
-                           JOIN queen.log_queues lq ON lq.id = lp.queue_id
-                           WHERE lq.name LIKE ANY($1::text[])
+                           JOIN queen.queues q ON q.id = lp.queue_id
+                           WHERE q.name LIKE ANY($1::text[])
                        ),
                        d1 AS (DELETE FROM queen.log_txns WHERE partition_id IN (SELECT id FROM parts)),
                        d2 AS (DELETE FROM queen.log_dlq WHERE partition_id IN (SELECT id FROM parts))
                        SELECT 1""",
                     patterns,
-                )
-                await db_pool.execute(
-                    "DELETE FROM queen.consumer_watermarks WHERE queue_name LIKE ANY($1::text[])", patterns
-                )
-                await db_pool.execute(
-                    "DELETE FROM queen.consumer_groups_metadata WHERE queue_name LIKE ANY($1::text[])", patterns
-                )
-                await db_pool.execute(
-                    "DELETE FROM queen.log_queues WHERE name LIKE ANY($1::text[])", patterns
                 )
             except Exception:
                 pass  # log-engine schema not installed (rows-only server)

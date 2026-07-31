@@ -282,7 +282,8 @@ impl PerQueue {
 //
 // C++ sampled the currently-parked long-poll POPs per queue at ~1Hz and flushed
 // the minute-average into queue_lag_metrics.parked_count (a gauge: SUM across
-// workers, AVG across buckets — see 014_worker_metrics.sql:104-135). Here:
+// workers, AVG across buckets — see the parked_count gauge notes in
+// 019_worker_metrics.sql). Here:
 // each parked pop holds a ParkedGuard for the duration of its wait; a 1 Hz
 // sampler (spawn_samplers) accumulates the instantaneous per-queue gauge, and
 // syscollect drains sum/samples once per flush to compute the same average.

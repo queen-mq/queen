@@ -528,7 +528,7 @@ struct ListState {
     until: Option<String>,
     /// took only: the partition's allocator watermark read at the claim —
     /// compared with the served batch_end to derive `drained` (spec §2
-    /// clear-su-ack; see 043 log_pop_list_v1).
+    /// clear-su-ack; see 004_log_pop's log_pop_list_v1).
     #[serde(rename = "lastOff", default)]
     last_off: Option<i64>,
 }
@@ -685,7 +685,7 @@ pub async fn handle_pop(
                 // fall through to the wildcard backstop on the next iteration.
                 // Phase 2 first-contact safety: only take the targeted
                 // single-partition path once this (queue, group)'s
-                // group-first-contact BULK SEED has committed (043). Before that,
+                // group-first-contact BULK SEED has committed (004_log_pop). Before that,
                 // targeted pops would drive queen.log_pop_v1's per-partition lazy
                 // first-contact INSERT en masse and re-form the transactionid
                 // convoy the seed prevents (51e50c4) — the merge regression that
@@ -1242,11 +1242,20 @@ async fn hotlist_pop_attempt(
     }
 
     // Take candidates; reseed (bounded, throttled) if the ring is cold.
-    let k = ((max_parts.max(1) as usize) * 8).clamp(16, 256);
-    let mut cands = st.hotlist.take_batch(qkey, group, k, now_ms);
+    //
+    // Budget-aware claim (2026-07-31): take_batch stops claiming once the ring's
+    // own mark estimate covers `batch`, so under a deep backlog a serve holds 1-2
+    // partitions instead of a fixed over-claim. `k` is only the sparse-ring cap -
+    // the old `max_parts x 8, clamp(16, 256)` held 16-80 partitions INFLIGHT for
+    // the serve's whole SQL leg and capped a 100-partition T1 ring at ~6
+    // concurrent serves (measured: 806 serves/s x 863 msg avg = the entire ~700k
+    // pop ceiling; July's pre-hotlist SQL claim held ONE partition per pop).
+    let k = ((max_parts.max(1) as usize) * 2).clamp(2, 64);
+    let want = batch.max(1) as u32;
+    let mut cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
     if cands.is_empty() && need_reseed {
         hotlist_reseed_scan(&st.hotlist, &client, qkey, group, now_ms).await;
-        cands = st.hotlist.take_batch(qkey, group, k, now_ms);
+        cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
     }
     if cands.is_empty() {
         drop(client);
@@ -1563,7 +1572,7 @@ pub struct PopDiscoverParams {
     wait: Option<bool>,
     timeout: Option<u64>,
     // RUSTFIX item 18: per-request lease override; 0/absent lets each discovered
-    // partition use its own queue's log_queues.lease_time (else 60).
+    // partition use its own queue's queues.lease_time (else 60).
     #[serde(rename = "leaseSeconds")]
     lease_seconds: Option<i32>,
     #[serde(rename = "consumerGroup")]
@@ -1613,7 +1622,7 @@ pub async fn handle_pop_discover(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     // No single queue to read a lease from: the SP leases each partition with its
     // own queue's configured lease_time; this is only the fallback for a matching
-    // queue that has no log_queues.lease_time.
+    // queue that has no configured queues.lease_time.
     // RUSTFIX item 18: pass the RAW request override (0 = none) so the discover SP
     // resolves COALESCE(NULLIF(request,0), sq.lease_time, 60) PER partition.
     let lease_seconds = p.lease_seconds.filter(|v| *v > 0).unwrap_or(0);
@@ -2433,7 +2442,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                     // the poison frame's payload, and file the queen.log_dlq row
                     // (log_dlq_head_v1 then advances the cursor + releases the
                     // lease). 'off' carries the poison OFFSET in this return —
-                    // not the cursor (044 contract).
+                    // not the cursor (005_log_ack contract).
                     if v.get("dlq").and_then(|x| x.as_bool()).unwrap_or(false) {
                         let off = v.get("off").and_then(|x| x.as_i64()).unwrap_or(0);
                         match dlq_file_head(client.as_ref().unwrap(), &pid, group, &worker, off, &acks, &idxs)
@@ -2740,7 +2749,7 @@ struct RenewBody {
 const RENEW_OWNED_SQL: &str = "SELECT (queen.log_renew_lease_v1($1, $2::int))::text \
      WHERE EXISTS (SELECT 1 FROM queen.log_consumers c \
                    JOIN queen.log_partitions p ON p.id = c.partition_id \
-                   JOIN queen.log_queues q ON q.id = p.queue_id \
+                   JOIN queen.queues q ON q.id = p.queue_id \
                    WHERE c.worker_id = $1 \
                      AND q.tenant_id = $3::text::uuid \
                      AND c.lease_expires_at IS NOT NULL \
@@ -3264,7 +3273,7 @@ pub async fn handle_transaction(
     }
 
     // ------------------------------------------------ build the SP payload
-    // 044 transaction wire: pushes carry {queue, partition, count, hashesHex
+    // 005_log_ack transaction wire: pushes carry {queue, partition, count, hashesHex
     // (32-hex per frame, frame order — hex of the 16*count hash bytes), blobB64,
     // verified}. verified = -1 means "no broker dedup vouching — probe the whole
     // window" (always correct; the transaction path is rare and skips the
@@ -3350,7 +3359,7 @@ pub async fn handle_transaction(
                 // queen.log_dlq row — exactly what process_acks does on the direct
                 // path. Without this the DLQ entry is delayed until lease expiry + a
                 // later direct nack. Runs post-commit on the same pooled client.
-                // 'off' in the dlq:true entry carries the poison OFFSET (044).
+                // 'off' in the dlq:true entry carries the poison OFFSET (005_log_ack).
                 let mut dlq_indices: std::collections::HashSet<usize> =
                     std::collections::HashSet::new();
                 if let Some(arr) = v.get("acks").and_then(|x| x.as_array()) {

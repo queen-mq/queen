@@ -100,6 +100,31 @@
 //       sizes the sealed ring from the row count so a full-window load allocates
 //       each block once.
 //
+//   (4) BLOOM FRONT. Probing "absent" — the overwhelmingly common answer under
+//       unique traffic — used to cost a linear scan of `hot` plus one binary
+//       search PER sealed block: thousands of memory touches per hash once a
+//       high-rate window accumulated hundreds of blocks (measured 2026-07-31:
+//       60% of broker CPU at 1M msg/s × 300 s window, the T1 shape). Each entry
+//       now fronts the exact ring with a temporal ring of GENERATIONAL BLOCKED
+//       BLOOM FILTERS (`gens`): 16 bits/hash, k=7, all 7 probe bits inside one
+//       64-byte cache line, so a definitive "absent" costs one line per live
+//       generation (a handful) and skips `hot` and `sealed` entirely; a "maybe"
+//       falls through to the exact path, which stays the sole authority for
+//       LocalDuplicate. Soundness is unchanged: a bloom has NO false negatives,
+//       every hash is inserted into the newest generation in the same
+//       `append_run` that adds it to `hot`, and a generation is dropped only
+//       when its `max_created_ms` watermark is entirely pre-window — the
+//       whole-block expiry rule of invariant 2 at coarser grain, so any
+//       in-window hash keeps its generation alive. A pre-window hash lingering
+//       in a boundary-spanning block (or in `hot`) may answer "absent" once its
+//       generation drops; that is CORRECT — vouching a pre-window hash cannot
+//       admit an in-window duplicate — where the old behaviour (false
+//       LocalDuplicate → extra SQL probe) was merely the slower sound answer.
+//       A false positive costs one exact check. Generation capacities tier up
+//       ×8 from `block_cap` to 1 M hashes (2 MiB of filter), so an idle
+//       partition carries one tiny filter and a full-rate window settles at
+//       ~3-4 live generations (~2 B/hash on top of the exact 16).
+//
 // hydrate() ALWAYS rebuilds the entry from the rows it is given, which the caller
 // (fusion.rs hydrate_partition) always fetches as the FULL window
 // (`created_at >= now()-window ORDER BY base_offset`). The old incremental
@@ -178,6 +203,15 @@ pub enum HydrationNeed {
 const BYTES_PER_HASH: usize = 16; // one u128 in a sealed block or in `hot`
 const BYTES_PER_BLOCK: usize = 48; // Box fat-ptr + 2×i64 header + deque slot
 const BYTES_PER_ENTRY: usize = 192; // fixed Entry overhead
+const BYTES_PER_GEN: usize = 64; // BloomGen fixed overhead (fat ptr + counters + slot)
+
+// Bloom-front generation sizing (invariant 4). A generation's filter is
+// `cap / 32` cache-line blocks = `cap × 2` bytes (16 bits per expected hash,
+// k=7). Capacities tier up ×8 per generation from `block_cap` so an idle
+// partition pays one tiny filter while a full-rate 300 s window converges to a
+// few 2 MiB generations (probe cost: one cache line each).
+const GEN_TIER_FACTOR: usize = 8;
+const GEN_CAP_MAX: usize = 1 << 20;
 
 // Default accumulation-block capacity in hashes. A block is `block_cap * 16`
 // bytes; MUST be a power of two so the hot buffer's doubling lands exactly on it
@@ -236,6 +270,81 @@ struct Block {
     max_end_offset: i64,
 }
 
+/// One generation of the bloom front (invariant 4): a register-blocked bloom
+/// filter — `nblocks` 64-byte blocks, k=7 probe bits all inside the one block a
+/// hash maps to — plus the same expiry watermark a sealed `Block` carries. The
+/// filter is append-only while the generation is open (`len < cap`) and
+/// immutable afterwards; expiry drops whole generations from the front exactly
+/// like blocks, so the no-false-negative guarantee reduces to the same
+/// "watermark entirely pre-window" argument.
+struct BloomGen {
+    /// `nblocks × 8` u64 words; block `b` = words[b*8 .. b*8+8].
+    words: Box<[u64]>,
+    nblocks: u64,
+    /// Hashes inserted so far; at `cap` the generation is full and the next
+    /// insert opens a new one.
+    len: usize,
+    /// Insert capacity this filter was sized for (16 bits/hash at `cap`).
+    cap: usize,
+    /// Newest constituent commit time — same expiry semantics as Block.
+    max_created_ms: i64,
+}
+
+impl BloomGen {
+    fn new(cap: usize) -> BloomGen {
+        let cap = cap.max(32); // at least one 512-bit block
+        let nblocks = cap / 32; // cap × 16 bits ÷ 512 bits per block
+        BloomGen {
+            words: vec![0u64; nblocks * 8].into_boxed_slice(),
+            nblocks: nblocks as u64,
+            len: 0,
+            cap,
+            max_created_ms: i64::MIN,
+        }
+    }
+
+    /// Word index of the first word of `h`'s block. The block is picked by
+    /// multiply-shift range reduction on the LOW 64 bits; the 7 probe bits come
+    /// from disjoint 9-bit fields of the HIGH 64 bits, so block choice and bit
+    /// choice never correlate. The input is already a content hash — no extra
+    /// mixing is needed.
+    #[inline]
+    fn block_base(&self, h: u128) -> usize {
+        ((((h as u64) as u128) * (self.nblocks as u128)) >> 64) as usize * 8
+    }
+
+    #[inline]
+    fn insert(&mut self, h: u128, created_ms: i64) {
+        let base = self.block_base(h);
+        let hi = (h >> 64) as u64;
+        for i in 0..7 {
+            let p = ((hi >> (9 * i)) & 511) as usize;
+            self.words[base + (p >> 6)] |= 1u64 << (p & 63);
+        }
+        self.len += 1;
+        if created_ms > self.max_created_ms {
+            self.max_created_ms = created_ms;
+        }
+    }
+
+    #[inline]
+    fn maybe(&self, h: u128) -> bool {
+        let base = self.block_base(h);
+        let hi = (h >> 64) as u64;
+        for i in 0..7 {
+            let p = ((hi >> (9 * i)) & 511) as usize;
+            if self.words[base + (p >> 6)] & (1u64 << (p & 63)) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn bytes(&self) -> usize {
+        self.words.len() * 8 + BYTES_PER_GEN
+    }
+}
+
 struct Entry {
     /// Offsets strictly greater than this are fully known to the cache.
     hydrated_from: i64,
@@ -255,6 +364,13 @@ struct Entry {
     /// Running max offset of the segments currently in `hot` (i64::MIN when
     /// empty) — frozen into the block's `max_end_offset` on seal.
     hot_max_end_offset: i64,
+    /// Bloom front (invariant 4): time-ordered generations, front = oldest.
+    /// Superset of the in-window hashes of `hot` ∪ `sealed` — a definitive
+    /// bloom miss short-circuits `contains` without touching either.
+    gens: VecDeque<BloomGen>,
+    /// Capacity for the NEXT generation (tiering state). 0 = start over from
+    /// `block_cap` (fresh entry, or every generation expired).
+    gen_next_cap: usize,
     /// Some((from, to)) = an interleave gap of unknown offsets; the entry can't
     /// vouch (-1) until it is rebuilt. Widened, never shrunk, by further
     /// interleaves; cleared by a (re)hydration.
@@ -289,6 +405,8 @@ impl Entry {
             hot: Vec::new(),
             hot_max_created_ms: i64::MIN,
             hot_max_end_offset: i64::MIN,
+            gens: VecDeque::new(),
+            gen_next_cap: 0,
             needs_topup: None,
             needs_full: false,
             bytes: 0,
@@ -304,6 +422,7 @@ impl Entry {
             + self.sealed.len() * BYTES_PER_BLOCK
             + sealed_hashes * BYTES_PER_HASH
             + self.hot.capacity() * BYTES_PER_HASH
+            + self.gens.iter().map(|g| g.bytes()).sum::<usize>()
     }
 
     fn hash_count(&self) -> usize {
@@ -313,11 +432,44 @@ impl Entry {
     /// Membership: present in some surviving block, or in the hot buffer. No
     /// false negatives (soundness of the vouch rests on this); false positives
     /// are tolerated (a stale-but-retained hash routes its segment to SQL).
+    ///
+    /// The bloom front answers the common case: a definitive miss across every
+    /// live generation proves absence (the generations are a superset of the
+    /// in-window content of `hot` ∪ `sealed` — invariant 4) without touching
+    /// the hot scan or a single block's binary search. Only a "maybe" pays the
+    /// exact path.
     fn contains(&self, h: u128) -> bool {
+        if !self.gen_maybe(h) {
+            return false;
+        }
         if self.hot.contains(&h) {
             return true;
         }
         self.sealed.iter().any(|b| b.hashes.binary_search(&h).is_ok())
+    }
+
+    /// Bloom-front probe: could `h` be present? Newest generation first —
+    /// a real duplicate is most likely recent.
+    #[inline]
+    fn gen_maybe(&self, h: u128) -> bool {
+        self.gens.iter().rev().any(|g| g.maybe(h))
+    }
+
+    /// Insert one hash into the newest generation, opening (and tiering) a new
+    /// one when the current is full. Called by `append_run` for every hash that
+    /// enters the entry — the source of the superset invariant.
+    fn gen_insert(&mut self, h: u128, created_ms: i64, block_cap: usize) {
+        let need_new = match self.gens.back() {
+            Some(g) => g.len >= g.cap,
+            None => true,
+        };
+        if need_new {
+            let cap = if self.gen_next_cap == 0 { block_cap } else { self.gen_next_cap };
+            let g = BloomGen::new(cap);
+            self.gen_next_cap = (g.cap * GEN_TIER_FACTOR).min(GEN_CAP_MAX);
+            self.gens.push_back(g);
+        }
+        self.gens.back_mut().unwrap().insert(h, created_ms);
     }
 
     /// Seal the hot buffer into an immutable sorted block. Called the instant hot
@@ -350,6 +502,7 @@ impl Entry {
     /// resize is ever proportional to the whole window.
     fn append_run(&mut self, start_off: i64, created_ms: i64, hs: &[u128], block_cap: usize) {
         for (i, &h) in hs.iter().enumerate() {
+            self.gen_insert(h, created_ms, block_cap);
             self.hot.push(h);
             let off = start_off + i as i64;
             if created_ms > self.hot_max_created_ms {
@@ -811,7 +964,7 @@ impl DedupCache {
             cap_mb,
             suppressed,
             knob = "QUEEN_DEDUP_CACHE_MB",
-            sizing = "needed_mb ≈ 16 × msg_rate × window_seconds / 1e6",
+            sizing = "needed_mb ≈ 18 × msg_rate × window_seconds / 1e6",
             "cap pressure — degraded to SQL probes (sound, slower); raise QUEEN_DEDUP_CACHE_MB"
         );
     }
@@ -841,6 +994,19 @@ impl DedupCache {
                 }
                 let block = e.sealed.pop_front().unwrap();
                 e.hydrated_from = e.hydrated_from.max(block.max_end_offset);
+            }
+            // Bloom generations expire by the same whole-unit rule: a front
+            // generation goes only when EVERYTHING it covers is pre-window, so
+            // no in-window hash ever loses its bloom coverage (invariant 4). An
+            // emptied ring restarts the capacity tiering from block_cap.
+            while let Some(front) = e.gens.front() {
+                if front.max_created_ms >= cutoff {
+                    break;
+                }
+                e.gens.pop_front();
+            }
+            if e.gens.is_empty() {
+                e.gen_next_cap = 0;
             }
             e.bytes = e.approx_bytes();
             let new_b = e.bytes;
@@ -1442,5 +1608,105 @@ mod tests {
             "resident set bounded by working set, not history: {} bytes",
             total_bytes(&c)
         );
+    }
+
+    // -------------------------------------------------------------- bloom front
+
+    #[test]
+    fn bloom_front_never_hides_a_present_hash() {
+        // Superset invariant end-to-end: block_cap=1 forces one block per hash
+        // and a small first-tier generation (32), so 200 committed hashes span
+        // many sealed blocks AND several generations. Every one must still be
+        // reported as a LocalDuplicate (bloom "maybe" → exact hit), and a
+        // never-committed hash must vouch — the exact path stays the authority
+        // on every "maybe".
+        let c = DedupCache::with_params(64 << 20, true, 1);
+        c.hydrate("p1", vec![], 0, -1, T0);
+        let hs: Vec<[u8; 16]> = (0..200u16).map(|i| hb(0, i as u8)).collect();
+        c.on_push_committed("p1", 0, &hs, 1_000);
+        {
+            let arc = entry(&c, "p1");
+            let e = arc.lock().unwrap();
+            assert!(e.gens.len() >= 2, "several generations live: {}", e.gens.len());
+        }
+        for (i, x) in hs.iter().enumerate() {
+            assert_eq!(
+                c.verified_for_push("p1", &[*x], T0),
+                PushCheck::LocalDuplicate(vec![0]),
+                "hash {i} must stay visible through the bloom front"
+            );
+        }
+        assert_eq!(
+            c.verified_for_push("p1", &[hb(9, 201)], T0),
+            PushCheck::Verified(199)
+        );
+    }
+
+    #[test]
+    fn gen_expiry_drops_only_prewindow_coverage() {
+        // Two runs far apart in time. After an expiry whose cutoff falls between
+        // them: the old run's blocks AND its fully-pre-window generation are
+        // gone, the shared generation survives on the new run's watermark, so
+        // every in-window hash stays a LocalDuplicate and every pre-window hash
+        // correctly vouches as absent (whether its generation was dropped or a
+        // surviving generation yields a false positive, the exact path settles
+        // it — the assertion is deterministic either way).
+        let c = DedupCache::with_params(64 << 20, true, 1);
+        let old: Vec<[u8; 16]> = (0..40u16).map(|i| hb(1, i as u8)).collect();
+        let new: Vec<[u8; 16]> = (0..5u16).map(|i| hb(2, i as u8)).collect();
+        c.hydrate("p1", vec![], 0, -1, T0);
+        c.on_push_committed("p1", 0, &old, 1_000);
+        c.on_push_committed("p1", 40, &new, 50_000);
+        {
+            let arc = entry(&c, "p1");
+            let e = arc.lock().unwrap();
+            assert!(e.gens.len() >= 2, "two generations before expiry");
+        }
+        // Window 10 s at t=55 s → cutoff 45 s: the t=1 s run is pre-window whole.
+        c.expire("p1", 10_000, 55_000);
+        {
+            let arc = entry(&c, "p1");
+            let e = arc.lock().unwrap();
+            assert_eq!(e.gens.len(), 1, "pre-window generation dropped");
+            assert!(e.gens.front().unwrap().max_created_ms >= 45_000);
+        }
+        for x in &new {
+            assert_eq!(
+                c.verified_for_push("p1", &[*x], 55_000),
+                PushCheck::LocalDuplicate(vec![0]),
+                "in-window hash must survive generation expiry"
+            );
+        }
+        for x in &old {
+            assert_eq!(
+                c.verified_for_push("p1", &[*x], 55_000),
+                PushCheck::Verified(44),
+                "pre-window hash vouches as absent"
+            );
+        }
+    }
+
+    #[test]
+    fn bloom_bytes_are_accounted() {
+        // Generation filters are resident bytes: they must flow through
+        // approx_bytes into the global budget, and expiring generations must
+        // release them (with the tiering reset for the next fill).
+        let c = DedupCache::with_params(64 << 20, true, 1);
+        c.hydrate("p1", vec![], 0, -1, T0);
+        let hs: Vec<[u8; 16]> = (0..64u16).map(|i| hb(3, i as u8)).collect();
+        c.on_push_committed("p1", 0, &hs, 1_000);
+        assert_eq!(total_bytes(&c), sum_entry_bytes(&c), "gens included in budget");
+        let before = total_bytes(&c);
+        // Everything pre-window → all blocks and all generations drop; hot is
+        // empty (block_cap=1 seals every hash), so only fixed overhead remains.
+        c.expire("p1", 1_000, 1_000_000);
+        {
+            let arc = entry(&c, "p1");
+            let e = arc.lock().unwrap();
+            assert!(e.gens.is_empty(), "all generations expired");
+            assert_eq!(e.gen_next_cap, 0, "tiering reset for the next fill");
+        }
+        assert_eq!(total_bytes(&c), sum_entry_bytes(&c), "after expiry");
+        assert!(total_bytes(&c) < before, "filter bytes released");
     }
 }

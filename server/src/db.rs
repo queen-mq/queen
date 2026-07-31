@@ -160,7 +160,7 @@ fn hex16(b: &[u8; 16]) -> String {
 
 // ------------------------------------------------------------------------ ack
 // NEW (log engine): positional ack — advance the (queue, partition, group)
-// cursor to the absolute offset `upto` via queen.log_ack_v1 (044). `ok=false`
+// cursor to the absolute offset `upto` via queen.log_ack_v1 (005_log_ack). `ok=false`
 // releases the lease without advancing (full redelivery). Returns the SP JSON
 // as text: {"ok":bool,"off":i64,"acked":i64,...} or {"ok":false,"error":..}.
 #[allow(clippy::too_many_arguments)]
@@ -186,7 +186,7 @@ pub async fn ack_position(
 }
 
 // ACK REGISTRY fast path (server/src/ack_registry.rs): partition-id-addressed
-// positional ack via queen.log_ack_at_v1 (044) — the pid-keyed twin of
+// positional ack via queen.log_ack_at_v1 (005_log_ack) — the pid-keyed twin of
 // log_ack_v1. The registry HIT already proved (worker matches, whole batch
 // completed), so this is a single positional cursor advance to `upto`
 // (= batch_end) with NO hash resolution. log_ack_at_v1 STILL re-validates the
@@ -216,7 +216,7 @@ pub async fn ack_at(
 }
 
 // ACK FUSION (server/src/ack_fusion.rs): N positional full-batch cursor advances
-// in ONE transaction via queen.log_ack_multi_v1 (044) — the ack-side twin of
+// in ONE transaction via queen.log_ack_multi_v1 (005_log_ack) — the ack-side twin of
 // log_push_multi_v1. Each row is the pid-keyed log_ack_at_v1 decision (p_ok=true,
 // upto=batch_end); one commit / one fsync collapses the ack commit rate under
 // load. All five arrays are index-aligned; the SP returns
@@ -243,9 +243,9 @@ pub async fn ack_multi(
 }
 
 // NEW (log engine): hash-addressed ack for ONE (partition, group, worker) via
-// queen.log_ack_by_hash_v1 (044). `hashes` are the 16-byte xxh3_128 txn hashes
-// (crate::util::txn_hash128), index-aligned with `statuses`
-// (completed|failed|retry|dlq). Returns the SP JSON as text — the 044 contract:
+// queen.log_ack_by_hash_v1 (005_log_ack). `hashes` are the 16-byte xxh3_128 txn
+// hashes (crate::util::txn_hash128), index-aligned with `statuses`
+// (completed|failed|retry|dlq). Returns the SP JSON as text — the 005_log_ack contract:
 // {ok, off, acked, dlq?/dropped?, noopHashes:[32-hex], staleHashes:[32-hex],
 // error?}; the CALLER maps hex hashes back to txn strings (it has the request's
 // txn list). $1::text::uuid pins $1 to TEXT so a &str binds.
@@ -340,7 +340,7 @@ pub async fn ack_by_txn(
 }
 
 // Dead-letter the poison HEAD frame of a leased batch via queen.log_dlq_head_v1
-// (044). Called by the broker after the ack SP signalled `dlq:true` on a nack
+// (005_log_ack). Called by the broker after the ack SP signalled `dlq:true` on a nack
 // whose delivery attempt exceeded the queue's retry_limit: the broker alone can
 // decompress the frame, so it extracts (message_id, txn, payload) from the
 // leased segment and passes them here as a SNAPSHOT. Under the still-held lease
@@ -385,14 +385,21 @@ pub async fn seg_dlq_head(
     Ok(row.get(0))
 }
 
-// Specific-partition pop (+auto-ack when auto_ack). queen.log_pop_v1 (043)
-// returns raw segment rows; the single-partition wire JSON the callers expect
-// is assembled here in SQL, byte-compatible with the retired seg-engine
-// specific-pop wire shape:
+// Specific-partition pop (+auto-ack when auto_ack). queen.log_pop_specific_v1
+// (004_log_pop) claims via queen.log_pop_v1 and assembles the single-partition
+// wire JSON INSIDE the same VOLATILE function, byte-compatible with the retired
+// seg-engine specific-pop wire shape:
 // {"segments":[{seq,startOff,take,msgCount,createdAt,blob}],"partitionId":..,"attempt":..}.
 // `seq` carries base_offset and `startOff` the start frame index (§11 opaque
-// tokens). The r_attempt column is gone from the log pop (043: the display
-// delivery count is broker-owned) — "attempt" is emitted as 0 for shape compat.
+// tokens). "attempt" is emitted as 0 for shape compat (the display delivery
+// count is broker-owned).
+// In-SQL assembly is load-bearing: when this JSON was built by the OUTER
+// statement here, the partitionId subquery ran under the outer statement's
+// snapshot while the volatile log_pop_v1 claimed under fresh per-command
+// snapshots (READ COMMITTED) — a pop racing the commit that CREATES the
+// partition could deliver messages with "partitionId":"", which the JS
+// client's mandatory-partitionId ack guard turns into a thrown error (the
+// js/ha consumerGroupWithPartition 149/150 failure, 2026-07-31).
 #[allow(clippy::too_many_arguments)]
 pub async fn pop_specific(
     client: &deadpool_postgres::Client,
@@ -407,26 +414,12 @@ pub async fn pop_specific(
     sub_from: &str,
     tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    // Track B (§5): $10 = tenant, threaded into log_pop_v1 (as its p_tenant, after
-    // the FALSE p_skip_window_debounce) AND the partition-id resolution.
+    // Track B (§5): $10 = tenant, threaded into log_pop_specific_v1 (which
+    // forwards it to log_pop_v1's p_tenant AND uses it for the partition-id
+    // resolution — now ordered AFTER the claim inside the volatile function).
     let stmt = client
         .prepare_cached(
-            "WITH seg AS ( \
-                 SELECT * FROM queen.log_pop_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9, FALSE, $10::text::uuid) \
-             ) \
-             SELECT (jsonb_build_object( \
-                 'segments', COALESCE((SELECT jsonb_agg(jsonb_build_object( \
-                     'seq', s.r_base, \
-                     'startOff', s.r_start_idx, \
-                     'take', s.r_take, \
-                     'msgCount', s.r_msg_count, \
-                     'createdAt', to_char(s.r_created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), \
-                     'blob', encode(s.r_blob, 'base64') \
-                 ) ORDER BY s.r_base) FROM seg s), '[]'::jsonb), \
-                 'partitionId', COALESCE((SELECT p.id::text FROM queen.log_partitions p \
-                     JOIN queen.log_queues q ON q.id = p.queue_id \
-                     WHERE q.name = $1 AND p.name = $2 AND q.tenant_id = $10::text::uuid), ''), \
-                 'attempt', 0))::text",
+            "SELECT (queen.log_pop_specific_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9, $10::text::uuid))::text",
         )
         .await?;
     let row = client
@@ -550,27 +543,30 @@ pub async fn has_pending(
 
 // Phase 2 first-contact safety: does the group-first-contact bulk-seed MARKER
 // exist for (queue, group)? The marker is the single partition_name='' row that
-// queen.log_pop_wildcard_*_v1 / log_pop_discover_wire_v1 (043) insert on a
+// queen.log_pop_wildcard_*_v1 / log_pop_discover_wire_v1 (004_log_pop) insert on a
 // (queue, group)'s FIRST wildcard contact, in the SAME transaction as the
 // set-based cursor seed of every existing partition. Its presence therefore
 // means that seed has committed, so a targeted single-partition pop
 // (queen.log_pop_v1) can no longer trigger the per-partition first-contact
-// INSERT storm the seed prevents. One indexed point lookup on the
-// (consumer_group, queue_name, partition_name, ...) unique index; non-locking.
+// INSERT storm the seed prevents. One indexed point lookup on the cgm_identity_uk
+// (tenant_id, consumer_group, queue_id, partition_name, …) unique index, keyed by
+// the queue id resolved through queen.queues; non-locking.
 pub async fn group_seed_marker_exists(
     client: &deadpool_postgres::Client,
     queue: &str,
     group: &str,
     tenant: &str,
 ) -> Result<bool, tokio_postgres::Error> {
-    // Track B (§5): consumer_groups_metadata is now (tenant_id, …)-keyed, so the
-    // seed marker probe must scope by tenant — else tenant A's seed would gate
+    // Queue identity is now the queen.queues id: the marker row carries queue_id,
+    // so the probe resolves the (name, tenant) pair through queen.queues — tenant
+    // scoping is inherited from the queue row, and tenant A's seed can never gate
     // tenant B's targeted-pop fast path on a same-named (queue, group).
     let stmt = client
         .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM queen.consumer_groups_metadata \
-             WHERE consumer_group = $1 AND queue_name = $2 AND partition_name = '' \
-               AND tenant_id = $3::text::uuid)",
+            "SELECT EXISTS(SELECT 1 FROM queen.consumer_groups_metadata m \
+             JOIN queen.queues q ON q.id = m.queue_id \
+             WHERE m.consumer_group = $1 AND q.name = $2 AND m.partition_name = '' \
+               AND q.tenant_id = $3::text::uuid)",
         )
         .await?;
     let row = client.query_one(&stmt, &[&group, &queue, &tenant]).await?;
@@ -578,7 +574,8 @@ pub async fn group_seed_marker_exists(
 }
 
 // Renew every live lease held by `worker` via queen.log_renew_lease_v1
-// (044). Returns the SP result JSON as text: {"renewed":n,"expiresAt":iso|null}.
+// (005_log_ack). Returns the SP result JSON as text:
+// {"renewed":n,"expiresAt":iso|null}.
 pub async fn renew_lease(
     client: &deadpool_postgres::Client,
     worker: &str,
@@ -591,8 +588,9 @@ pub async fn renew_lease(
     Ok(row.get(0))
 }
 
-// Atomic multi-op push+ack via queen.log_transaction_wire_v1 (044). `payload`
-// is the already-built {"pushes":[...],"acks":[...]} JSON (044 wire: pushes
+// Atomic multi-op push+ack via queen.log_transaction_wire_v1 (005_log_ack).
+// `payload` is the already-built {"pushes":[...],"acks":[...]} JSON
+// (005_log_ack wire: pushes
 // carry hashesHex/blobB64/verified; acks are positional or hash-form). Returns
 // the SP result JSON as text: {"ok":bool,...} or raises on rollback
 // (duplicate/ack failure).
@@ -610,7 +608,8 @@ pub async fn transaction(
 }
 
 // ---------------------------------------------------------------- configure
-// Create/update a queue's options via queen.configure_queue_v1 (012). `opts_json`
+// Create/update a queue's options via queen.configure_queue_v1 (012_configure).
+// `opts_json`
 // is the options object as JSON text. Returns the SP result JSON as text:
 // {configured, queueId, partitionId, queue, namespace, task, options:{all 15}}.
 pub async fn configure_queue(
@@ -626,54 +625,13 @@ pub async fn configure_queue(
     Ok(row.get(0))
 }
 
-// Pin this queue to the log engine. The public /configure contract keeps the
-// storage value 'segments' (§11 wire compat), which is what routes queues to
-// the log push/pop paths. Track B: scoped to the tenant's queue.
-pub async fn mark_queue_segments(
-    client: &deadpool_postgres::Client,
-    queue: &str,
-    tenant: &str,
-) -> Result<(), tokio_postgres::Error> {
-    client
-        .execute(
-            "UPDATE queen.queues SET storage='segments' WHERE name=$1 AND tenant_id=$2::text::uuid",
-            &[&queue, &tenant],
-        )
-        .await?;
-    Ok(())
-}
-
-// Ensure a queen.log_queues row exists with the queue's lease/retention/dedup so
-// the log pop path reads the configured lease_time (and retention/dedup for the
-// maintenance/push paths). Upsert so a reconfigure updates in place.
-pub async fn upsert_seg_queue(
-    client: &deadpool_postgres::Client,
-    queue: &str,
-    tenant: &str,
-    lease_time: i32,
-    retention_seconds: i32,
-    dedup_window_seconds: i32,
-) -> Result<(), tokio_postgres::Error> {
-    // Track B (§5): queue identity is (tenant_id, name); the conflict target is the
-    // composite unique index (default tenant when the feature is off).
-    let stmt = "INSERT INTO queen.log_queues(tenant_id, name, lease_time, retention_seconds, dedup_window_seconds) \
-                VALUES($5::text::uuid, $1, $2, $3, $4) \
-                ON CONFLICT(tenant_id, name) DO UPDATE SET \
-                    lease_time = EXCLUDED.lease_time, \
-                    retention_seconds = EXCLUDED.retention_seconds, \
-                    dedup_window_seconds = EXCLUDED.dedup_window_seconds";
-    client
-        .execute(
-            stmt,
-            &[&queue, &lease_time, &retention_seconds, &dedup_window_seconds, &tenant],
-        )
-        .await?;
-    Ok(())
-}
-
 // ------------------------------------------------------------------- delete
-// Drop a queue + all rows-side coordination data via queen.delete_queue_v1 (007).
-// Returns the SP result JSON as text: {deleted:true, queue, existed}.
+// Drop a queue COMPLETELY via queen.delete_queue_v1 (013_analytics). Queue identity is
+// now the queen.queues id, and log_partitions cascades from it, so the SP owns
+// the whole delete: the FK-less log_txns/log_dlq purge + the cascading
+// queen.queues delete (log_partitions -> log_segments / log_consumers /
+// consumer_watermarks / consumer_groups_metadata / queue_lag_metrics). Returns
+// the SP result JSON as text: {deleted:true, queue, existed}.
 pub async fn delete_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
@@ -684,47 +642,8 @@ pub async fn delete_queue(
     Ok(row.get(0))
 }
 
-// Drop the queue's log-engine data. Deleting the log_queues row cascades to
-// log_partitions -> log_segments / log_consumers (FKs, 041). queen.log_txns and
-// queen.log_dlq deliberately carry NO FK (the purge path must never pay
-// FK-trigger cost), so their rows are removed explicitly FIRST, while
-// log_partitions still resolves the queue.
-pub async fn delete_seg_queue(
-    client: &deadpool_postgres::Client,
-    queue: &str,
-    tenant: &str,
-) -> Result<(), tokio_postgres::Error> {
-    // Track B: scope every delete to the tenant's queue so a same-named queue of
-    // another tenant is untouched.
-    client
-        .execute(
-            "DELETE FROM queen.log_txns t \
-             USING queen.log_partitions p \
-             JOIN queen.log_queues q ON q.id = p.queue_id \
-             WHERE t.partition_id = p.id AND q.name = $1 AND q.tenant_id = $2::text::uuid",
-            &[&queue, &tenant],
-        )
-        .await?;
-    client
-        .execute(
-            "DELETE FROM queen.log_dlq d \
-             USING queen.log_partitions p \
-             JOIN queen.log_queues q ON q.id = p.queue_id \
-             WHERE d.partition_id = p.id AND q.name = $1 AND q.tenant_id = $2::text::uuid",
-            &[&queue, &tenant],
-        )
-        .await?;
-    client
-        .execute(
-            "DELETE FROM queen.log_queues WHERE name=$1 AND tenant_id=$2::text::uuid",
-            &[&queue, &tenant],
-        )
-        .await?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------- get
-// Basic queue detail via queen.get_queue_v2 (013). Returns the SP result JSON as
+// Basic queue detail via queen.get_queue_v2 (011_log_stats). Returns the SP result JSON as
 // text: {id,name,namespace,task,createdAt,partitions,totals} or {error:..} when
 // the queue does not exist in queen.queues.
 pub async fn get_queue(
@@ -738,7 +657,7 @@ pub async fn get_queue(
 }
 
 // Segment counts for a queue: (#segments, live message count) via
-// queen.log_queue_message_stats_v1 (048). Used to enrich the get_queue_v2
+// queen.log_queue_message_stats_v1 (011_log_stats). Used to enrich the get_queue_v2
 // detail (whose stats come from queen.stats, refreshed on a cadence).
 pub async fn seg_queue_message_stats(
     client: &deadpool_postgres::Client,
@@ -799,7 +718,7 @@ pub async fn get_tasks(
 }
 
 // Per-queue live stats for the whole broker: name -> (partitions, segments,
-// messages) via queen.log_queue_stats_all_v1 (048). Used to enrich the queue
+// messages) via queen.log_queue_stats_all_v1 (011_log_stats). Used to enrich the queue
 // LIST endpoint between queen.stats refreshes.
 pub async fn seg_queue_stats_all(
     client: &deadpool_postgres::Client,
@@ -821,8 +740,9 @@ pub async fn seg_queue_stats_all(
         .collect())
 }
 
-// Configured lease time (seconds) for a queue, from queen.log_queues by name.
-// None when the queue has no log_queues row yet (caller defaults to 300).
+// Configured lease time (seconds) for a queue, from queen.queues by (name,
+// tenant). None when the queue has no queen.queues row yet (caller falls back
+// to its default).
 pub async fn queue_lease_time(
     client: &deadpool_postgres::Client,
     queue: &str,
@@ -832,14 +752,14 @@ pub async fn queue_lease_time(
     // for the requesting tenant's queue (else the cache would hand tenant B the
     // lease time tenant A configured on a same-named queue).
     let stmt = client
-        .prepare_cached("SELECT lease_time FROM queen.log_queues WHERE name = $1 AND tenant_id = $2::text::uuid")
+        .prepare_cached("SELECT lease_time FROM queen.queues WHERE name = $1 AND tenant_id = $2::text::uuid")
         .await?;
     let rows = client.query(&stmt, &[&queue, &tenant]).await?;
     Ok(rows.first().map(|r| r.get::<_, i32>(0)))
 }
 
 // RUSTFIX item 8: per-queue at-rest encryption flag. Lives on queen.queues
-// (written by 012_configure from options.encryptionEnabled), NOT log_queues.
+// (written by 012_configure from options.encryptionEnabled).
 // None when the queue has no queen.queues row yet (caller treats as false).
 pub async fn queue_encryption_enabled(
     client: &deadpool_postgres::Client,
@@ -883,7 +803,7 @@ pub async fn log_resolve_position(
 }
 
 // NEW (log engine): fetch the segment COVERING an absolute offset via
-// queen.log_segment_at_v1 (042): (base_offset, end_offset, blob). The caller
+// queen.log_segment_at_v1 (003_log_push): (base_offset, end_offset, blob). The caller
 // decodes frame (off - base_offset) in Rust. None when retention already
 // deleted the covering segment (duplicate-push mid resolution then reports the
 // zero uuid) or the offset sits in a retention gap / beyond the tail.
@@ -926,13 +846,12 @@ pub async fn seg_scan_segments(
 // the only implementation) — queue/namespace/task, queueConfig, the
 // per-group consumerGroups + leaseExpiresAt, DLQ error, and the flags to derive
 // `status`. Returns the assembled JSON as text (or None if the partition is
-// gone). Tolerates a missing queen.queues row (item 26) via COALESCE +
-// split_part; that config LEFT JOIN matches on (name, tenant_id) because queue
-// identity is the PAIR (Track B §5) — name alone would match another tenant's
-// same-named queue and yield its config, or duplicate the row. Signature kept
-// from the seg engine: the message position travels in `seq` (the absolute
-// OFFSET); `frame_idx` is vestigial and ignored (pass 0).
-// Scalar cursor semantics: consumed = offset <= committed.
+// gone). Queue identity is now the queen.queues id: log_partitions.queue_id
+// references queen.queues directly, so the config row is reached by id (no
+// name+tenant bridge to a second queue table). COALESCEs on the config columns
+// stay as defensive defaults. Signature kept from the seg engine: the message
+// position travels in `seq` (the absolute OFFSET); `frame_idx` is vestigial and
+// ignored (pass 0). Scalar cursor semantics: consumed = offset <= committed.
 pub async fn seg_message_detail(
     client: &deadpool_postgres::Client,
     partition_id: &str,
@@ -941,18 +860,17 @@ pub async fn seg_message_detail(
 ) -> Result<Option<String>, tokio_postgres::Error> {
     let stmt = "\
         WITH q AS ( \
-            SELECT lq.name AS queue, lp.name AS partition, \
-                   COALESCE(NULLIF(qq.namespace, ''), split_part(lq.name, '.', 1)) AS namespace, \
-                   COALESCE(NULLIF(qq.task, ''), CASE WHEN position('.' in lq.name) > 0 \
-                        THEN split_part(lq.name, '.', 2) ELSE '' END) AS task, \
+            SELECT qq.name AS queue, lp.name AS partition, \
+                   COALESCE(NULLIF(qq.namespace, ''), split_part(qq.name, '.', 1)) AS namespace, \
+                   COALESCE(NULLIF(qq.task, ''), CASE WHEN position('.' in qq.name) > 0 \
+                        THEN split_part(qq.name, '.', 2) ELSE '' END) AS task, \
                    COALESCE(qq.lease_time, 60) AS lease_time, \
                    COALESCE(qq.retry_limit, 3) AS retry_limit, \
                    COALESCE(qq.retry_delay, 1000) AS retry_delay, \
                    COALESCE(qq.ttl, 3600) AS ttl, \
                    COALESCE(qq.priority, 0) AS priority \
             FROM queen.log_partitions lp \
-            JOIN queen.log_queues lq ON lq.id = lp.queue_id \
-            LEFT JOIN queen.queues qq ON qq.name = lq.name AND qq.tenant_id = lq.tenant_id \
+            JOIN queen.queues qq ON qq.id = lp.queue_id \
             WHERE lp.id = $1::text::uuid ), \
         d AS ( SELECT error, COALESCE(retry_count, 0) AS retry_count FROM queen.log_dlq dl \
                WHERE dl.partition_id = $1::text::uuid AND dl.\"offset\" = $2::bigint LIMIT 1 ), \
@@ -1013,7 +931,7 @@ pub async fn seg_fetch_segment(
 }
 
 // ------------------------------------------------------------- messages / dlq
-// List messages (dual-engine 047). `filters_json` is the JSON filter bag
+// List messages (queen.list_messages_v1, 010_log_admin). `filters_json` is the JSON filter bag
 // ({queue,partition,namespace,task,status,from,to,limit,offset}). Log-queue
 // entries carry payloadAvailable:false + segment:{seq,frameIdx} where seq =
 // base_offset and frameIdx = offset - base_offset — the broker decodes their
@@ -1029,7 +947,7 @@ pub async fn list_messages(
         .unwrap_or_else(|| "{\"messages\":[]}".to_string()))
 }
 
-// DLQ messages (dual-engine 047). queen.log_dlq stores payload SNAPSHOTS, so no
+// DLQ messages (010_log_admin). queen.log_dlq stores payload SNAPSHOTS, so no
 // decode is needed. `filters_json` = {queue,consumerGroup,limit,offset}. Returns
 // {messages:[...], pagination:{...}} as text.
 pub async fn get_dlq_messages(
@@ -1057,7 +975,7 @@ pub async fn dlq_row_for_replay(
     let stmt = "SELECT q.name, p.name, COALESCE(d.payload, 'null'::jsonb)::text \
                 FROM queen.log_dlq d \
                 JOIN queen.log_partitions p ON p.id = d.partition_id \
-                JOIN queen.log_queues q ON q.id = p.queue_id \
+                JOIN queen.queues q ON q.id = p.queue_id \
                 WHERE d.partition_id = $1::text::uuid AND d.transaction_id = $2 \
                 ORDER BY d.failed_at DESC LIMIT 1";
     let rows = client.query(stmt, &[&partition_id, &txn]).await?;
@@ -1101,9 +1019,9 @@ pub async fn delete_message(
 
 // ------------------------------------------------------------------- traces
 // All four trace SPs are engine-agnostic (queen.message_traces keyed by
-// transaction_id) — no blob decode. record_trace_v1 is made log-aware in 047
-// (message_id stays NULL for log messages, whose mids live inside segment
-// blobs).
+// transaction_id) — no blob decode. record_trace_v1 is log-aware
+// (010_log_admin): message_id stays NULL for log messages, whose mids live
+// inside segment blobs.
 pub async fn record_trace(
     client: &deadpool_postgres::Client,
     data_json: &str,
@@ -1174,7 +1092,7 @@ pub async fn get_status_queues(
     Ok(row.get(0))
 }
 
-// Prometheus DB metrics blob (018). Returns the SP JSON as text; the handler
+// Prometheus DB metrics blob (023_prometheus). Returns the SP JSON as text; the handler
 // formats a subset into Prometheus exposition lines.
 pub async fn get_prometheus_metrics(
     client: &deadpool_postgres::Client,
@@ -1195,10 +1113,10 @@ pub async fn ping(client: &deadpool_postgres::Client) -> Result<(), tokio_postgr
 // Analytics / metrics read wrappers (dashboard System / Analytics / QueueOps).
 // Each returns the stored-procedure JSON as raw text; the handler serves it
 // verbatim (the C++ routes did the same — no envelope). All the SPs already
-// ship in sql/procedures/{009,013,014,015,017,048}; these just dispatch them.
+// ship in sql/procedures/{011,015,018,019,021,022}; these just dispatch them.
 // ============================================================================
 
-// get_queue_detail_v2 (log-aware in 048) — /api/v1/status/queues/:queue.
+// get_queue_detail_v2 (011_log_stats) — /api/v1/status/queues/:queue.
 pub async fn get_queue_detail(
     client: &deadpool_postgres::Client,
     queue: &str,
@@ -1211,7 +1129,7 @@ pub async fn get_queue_detail(
     Ok(row.get(0))
 }
 
-// get_analytics_v1 (log-aware in 048) — /api/v1/status/analytics.
+// get_analytics_v1 (011_log_stats) — /api/v1/status/analytics.
 pub async fn get_analytics(
     client: &deadpool_postgres::Client,
     filters_json: &str,
@@ -1314,7 +1232,7 @@ pub async fn get_postgres_stats(
 // Background collector writes (stats.rs / syscollect.rs).
 // ============================================================================
 
-// Log-native queen.stats refresh (048). Returns the SP summary JSON. Rust name
+// Log-native queen.stats refresh (011_log_stats). Returns the SP summary JSON. Rust name
 // kept from the seg engine (pinned db.rs API); the SQL home moved to
 // queen.log_refresh_all_stats_v1.
 pub async fn seg_refresh_all_stats(
@@ -1402,7 +1320,7 @@ pub async fn insert_worker_metrics(
 }
 
 // NEW (log engine): multi-segment typed-array push via queen.log_push_multi_v1
-// (042). Arrays are index-aligned per segment: `counts[i]` frames, `hashes[i]`
+// (003_log_push). Arrays are index-aligned per segment: `counts[i]` frames, `hashes[i]`
 // = 16*counts[i] bytes of xxh3_128 (frame order, big-endian), `verified[i]` =
 // the broker dedup watermark (-1 = no cache, probe the whole window),
 // `blobs[i]` = the packed+zstd frame blob. Returns the SP JSONB (input-order
@@ -1457,14 +1375,16 @@ pub async fn insert_system_metrics(
 }
 
 // RUSTFIX item 24: accumulate one replica's per-minute per-queue throughput into
-// queen.queue_lag_metrics (UNIQUE(bucket_time, queue_name)). ON CONFLICT SUMs, so
+// queen.queue_lag_metrics (UNIQUE(bucket_time, queue_id)). ON CONFLICT SUMs, so
 // several replicas writing the same minute bucket aggregate cluster-wide (matching
 // the "aggregated across all workers" semantics the readers expect).
 // Lag merges as a weighted average (SUM(avg*count)/SUM(count), the same identity
 // the read-side SPs use across buckets), max as GREATEST, parked additively (a
-// gauge SUMmed across workers — 014_worker_metrics.sql:104-111).
-// Track B (§5): $14 = tenant. Two tenants sharing a queue NAME write separate
-// rows (UNIQUE(bucket_time, queue_name, tenant_id)); the readers filter by tenant.
+// gauge SUMmed across workers — the parked_count gauge notes in
+// 019_worker_metrics.sql).
+// Queue identity is now the queen.queues id: the Rust-side key stays (tenant,
+// name) and the id is resolved IN the insert's SELECT — a row for a
+// since-deleted queue simply doesn't insert (no FK error, no orphan).
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_queue_lag_metrics(
     client: &deadpool_postgres::Client,
@@ -1484,11 +1404,12 @@ pub async fn upsert_queue_lag_metrics(
     parked_count: i32,
 ) -> Result<(), tokio_postgres::Error> {
     let stmt = "INSERT INTO queen.queue_lag_metrics \
-        (bucket_time, queue_name, tenant_id, pop_count, push_request_count, push_message_count, \
+        (bucket_time, queue_id, pop_count, push_request_count, push_message_count, \
          pop_empty_count, transaction_count, ack_request_count, ack_success_count, \
          ack_failed_count, avg_lag_ms, max_lag_ms, lag_count, parked_count) \
-        VALUES (date_trunc('minute', NOW()), $1, $14::text::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
-        ON CONFLICT (bucket_time, queue_name, tenant_id) DO UPDATE SET \
+        SELECT date_trunc('minute', NOW()), q.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13 \
+        FROM queen.queues q WHERE q.name = $1 AND q.tenant_id = $14::text::uuid \
+        ON CONFLICT (bucket_time, queue_id) DO UPDATE SET \
             pop_count = queen.queue_lag_metrics.pop_count + EXCLUDED.pop_count, \
             push_request_count = queen.queue_lag_metrics.push_request_count + EXCLUDED.push_request_count, \
             push_message_count = queen.queue_lag_metrics.push_message_count + EXCLUDED.push_message_count, \
@@ -1570,7 +1491,7 @@ pub async fn partition_belongs_to_tenant(
     let stmt = client
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM queen.log_partitions p \
-             JOIN queen.log_queues q ON q.id = p.queue_id \
+             JOIN queen.queues q ON q.id = p.queue_id \
              WHERE p.id = $1::text::uuid AND q.tenant_id = $2::text::uuid)",
         )
         .await?;
@@ -1586,7 +1507,7 @@ pub async fn partition_queue_name(
     let stmt = client
         .prepare_cached(
             "SELECT q.name FROM queen.log_partitions p \
-             JOIN queen.log_queues q ON q.id = p.queue_id \
+             JOIN queen.queues q ON q.id = p.queue_id \
              WHERE p.id = $1::text::uuid",
         )
         .await?;
@@ -1636,7 +1557,7 @@ pub async fn cleanup_system_metrics(
 
 // Wildcard pop (+auto-ack when auto_ack). Returns the SP result JSON as text.
 // sub_mode / sub_from carry the caller's subscription intent ('all' | 'new' |
-// timestamp) through to queen.log_pop_wildcard_wire_v1 (043), which seeds a NEW
+// timestamp) through to queen.log_pop_wildcard_wire_v1 (004_log_pop), which seeds a NEW
 // (partition, group) cursor accordingly on first contact (existing cursors are
 // never re-seeded).
 #[allow(clippy::too_many_arguments)]
@@ -1709,8 +1630,8 @@ pub async fn pop_wildcard_bin(
 // filter, returning the SAME {"partitions":[...]} shape as pop_wildcard. Empty
 // `namespace`/`task` disable that side of the filter (the handler guards against
 // both being empty). `lease_seconds` is only the fallback lease when a matching
-// queue has no log_queues.lease_time; each partition is otherwise leased with its
-// own queue's configured leaseTime inside the SP.
+// queue has no configured queues.lease_time; each partition is otherwise leased
+// with its own queue's configured leaseTime inside the SP.
 #[allow(clippy::too_many_arguments)]
 pub async fn pop_discover(
     client: &deadpool_postgres::Client,
@@ -1744,8 +1665,8 @@ pub async fn pop_discover(
 }
 
 // ------------------------------------------------------ consumer groups
-// GET /api/v1/consumer-groups -> queen.get_consumer_groups_v4() (047 redefined
-// it dual-engine; the log branch reads queen.log_consumers). Returns the SP
+// GET /api/v1/consumer-groups -> queen.get_consumer_groups_v4()
+// (010_log_admin; reads queen.log_consumers). Returns the SP
 // result JSON array as text.
 pub async fn get_consumer_groups(
     client: &deadpool_postgres::Client,
@@ -1759,7 +1680,7 @@ pub async fn get_consumer_groups(
 }
 
 // GET /api/v1/consumer-groups/lagging -> queen.get_lagging_partitions_v1($1)
-// (047 redefined it dual-engine).
+// (010_log_admin).
 pub async fn get_lagging_partitions(
     client: &deadpool_postgres::Client,
     min_lag_seconds: i32,
@@ -1775,7 +1696,7 @@ pub async fn get_lagging_partitions(
 }
 
 // GET /api/v1/consumer-groups/:group -> queen.get_consumer_group_details_v1($1)
-// (047 redefined it dual-engine).
+// (010_log_admin).
 pub async fn get_consumer_group_details(
     client: &deadpool_postgres::Client,
     group: &str,
@@ -1793,7 +1714,7 @@ pub async fn get_consumer_group_details(
 // queen.delete_consumer_group_v1 clears consumer_watermarks and (when
 // delete_metadata) consumer_groups_metadata. Its rows-engine leg went with the
 // rows tables on 2026-07-30; the log cursors are cleared by
-// queen.log_delete_consumer_group_v1 (047).
+// queen.log_delete_consumer_group_v1 (010_log_admin).
 pub async fn delete_consumer_group_rows(
     client: &deadpool_postgres::Client,
     group: &str,
@@ -1809,7 +1730,7 @@ pub async fn delete_consumer_group_rows(
     Ok(row.get(0))
 }
 
-// Log-side delete: queen.log_delete_consumer_group_v1 (047) clears
+// Log-side delete: queen.log_delete_consumer_group_v1 (010_log_admin) clears
 // queen.log_consumers (all partitions) + consumer_watermarks for the group.
 pub async fn delete_consumer_group_seg(
     client: &deadpool_postgres::Client,
@@ -1837,14 +1758,14 @@ pub async fn delete_consumer_group_for_queue_seg(
     queue: &str,
     tenant: &str,
 ) -> Result<u64, tokio_postgres::Error> {
-    // Track B (§5): scope both DELETEs to the tenant's queue — the log_consumers
-    // clear via the (tenant, name)-scoped log_queues join, and the shared
-    // consumer_watermarks row by tenant_id.
+    // Queue identity is now the queen.queues id: both DELETEs resolve the
+    // tenant's queue ONCE by (name, tenant_id) and key everything else by id
+    // (log_partitions.queue_id / consumer_watermarks.queue_id).
     let n = client
         .execute(
             "DELETE FROM queen.log_consumers c \
              USING queen.log_partitions p \
-             JOIN queen.log_queues q ON q.id = p.queue_id \
+             JOIN queen.queues q ON q.id = p.queue_id \
              WHERE c.partition_id = p.id \
                AND c.consumer_group = $1 \
                AND q.name = $2 \
@@ -1854,8 +1775,10 @@ pub async fn delete_consumer_group_for_queue_seg(
         .await?;
     client
         .execute(
-            "DELETE FROM queen.consumer_watermarks \
-             WHERE queue_name = $1 AND consumer_group = $2 AND tenant_id = $3::text::uuid",
+            "DELETE FROM queen.consumer_watermarks w \
+             USING queen.queues q \
+             WHERE w.queue_id = q.id AND w.consumer_group = $2 \
+               AND q.name = $1 AND q.tenant_id = $3::text::uuid",
             &[&queue, &group, &tenant],
         )
         .await?;
@@ -1900,7 +1823,7 @@ pub async fn update_consumer_group_subscription(
 }
 
 // POST /api/v1/consumer-groups/:group/queues/:queue/seek -> seek the LOG cursor
-// of every partition of the queue (047). timestamp is an optional ISO string
+// of every partition of the queue (010_log_admin). timestamp is an optional ISO string
 // bound as TEXT and cast to timestamptz SQL-side (NULL when seeking to end).
 pub async fn seg_seek_consumer_group(
     client: &deadpool_postgres::Client,
@@ -1940,7 +1863,8 @@ pub async fn seg_seek_partition(
 // body in a one-element array (idx:0) and unwrap [0].result, mirroring the C++
 // streams routes. `requests_json` is that already-built one-element array.
 
-// POST /streams/v1/queries -> queen.streams_register_query_v1 (020, unchanged).
+// POST /streams/v1/queries -> queen.streams_register_query_v1
+// (008_streams_register_query_v1, unchanged from the seg era).
 // Returns the SP result array JSON as text.
 pub async fn streams_register(
     client: &deadpool_postgres::Client,
@@ -1952,7 +1876,8 @@ pub async fn streams_register(
     Ok(row.get(0))
 }
 
-// POST /streams/v1/state/get -> queen.streams_state_get_v1 (022, unchanged).
+// POST /streams/v1/state/get -> queen.streams_state_get_v1
+// (009_streams_state_get_v1, unchanged from the seg era).
 // Read-only. Returns the SP result array JSON as text.
 pub async fn streams_state_get(
     client: &deadpool_postgres::Client,
@@ -1963,7 +1888,7 @@ pub async fn streams_state_get(
     Ok(row.get(0))
 }
 
-// POST /streams/v1/cycle -> queen.log_streams_cycle_v1 (046, log engine).
+// POST /streams/v1/cycle -> queen.log_streams_cycle_v1 (007_log_streams, log engine).
 // `requests_json` is the one-element array whose sink frames are ALREADY
 // broker-packed (metas + base64 zstd blob). Returns the SP result array JSON as
 // text: [{idx, result:{success, query_id, partition_id, queueName,

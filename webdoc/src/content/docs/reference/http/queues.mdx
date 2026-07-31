@@ -14,14 +14,14 @@ sourceOfTruth:
   - server/src/retention.rs
   - server/src/stats.rs
   - server/sql/procedures/012_configure.sql
-  - server/sql/procedures/007_analytics.sql
-  - server/sql/procedures/013_stats.sql
-  - server/sql/procedures/014_worker_metrics.sql
-  - server/sql/procedures/041_log_schema.sql
-  - server/sql/procedures/043_log_pop.sql
-  - server/sql/procedures/044_log_ack.sql
-  - server/sql/procedures/045_log_maintenance.sql
-  - server/sql/procedures/048_log_stats.sql
+  - server/sql/procedures/013_analytics.sql
+  - server/sql/procedures/018_stats.sql
+  - server/sql/procedures/019_worker_metrics.sql
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/005_log_ack.sql
+  - server/sql/procedures/006_log_maintenance.sql
+  - server/sql/procedures/011_log_stats.sql
 verifiedBy:
   - clients/client-js/test-v2/queue.js
   - clients/client-js/test-v2/retention.js
@@ -29,12 +29,18 @@ verifiedBy:
 ---
 
 A queue does not have to be created before it is used: the first push to a queue
-name creates the queue, one partition, and a `queen.log_queues` configuration row
-with engine defaults. It also derives `namespace` and `task` from a dotted queue
+name creates the queue, one partition, and a `queen.queues` configuration row
+with column defaults. It also derives `namespace` and `task` from a dotted queue
 name (`billing.invoice` becomes namespace `billing`, task `invoice`), so a
 push-only queue is still visible to namespace and task discovery pops.
 `POST /api/v1/configure` exists to set options that differ from the defaults, and to
 pre-create a queue so a consumer can attach before any producer runs.
+
+A **pop can create the row too**: a queue-scoped pop on a name that does not
+exist creates the `queen.queues` row with column defaults, because a consumer
+group may legitimately subscribe before the first push and its durable
+subscription record hangs off the queue's id. The practical consequence is that
+a consumer-side typo now creates an empty queue rather than nothing.
 
 Two routes mutate queue state: `POST /api/v1/configure` (read-write) and
 `DELETE /api/v1/resources/queues/:queue` (**admin**). Everything else on this page
@@ -91,8 +97,8 @@ can predict the behaviour change from setting it.
 | --- | --- | --- |
 | `namespace` | `""` | Stored on `queen.queues`; selects queues for the discovery pop and for `namespace` filters on the listings and analytics routes. |
 | `task` | `""` | Same as `namespace`, on the `task` axis. |
-| `leaseTime` | `300` (seconds) | Written to `queen.log_queues.lease_time`; the pop path uses `COALESCE(request leaseSeconds, queue lease_time, 60)` for the lease it takes. |
-| `retryLimit` | `3` | The per-(partition, group) retry budget charged by an explicit `failed` ack (`044_log_ack.sql`). Below the limit the batch redelivers; at the limit the head frame is dead-lettered or dropped. |
+| `leaseTime` | `300` (seconds) | Written to `queen.queues.lease_time`; the pop path uses `COALESCE(request leaseSeconds, queue lease_time, 60)` for the lease it takes. |
+| `retryLimit` | `3` | The per-(partition, group) retry budget charged by an explicit `failed` ack (`005_log_ack.sql`). Below the limit the batch redelivers; at the limit the head frame is dead-lettered or dropped. |
 | `deadLetterQueue` | `true` | With `dlqAfterMaxRetries`, decides whether an exhausted retry budget writes `queen.log_dlq`. |
 | `dlqAfterMaxRetries` | `true` | See the note below: the two flags are OR-ed. |
 | `delayedProcessing` | `0` (seconds) | Pop visibility: only segments at least this old are delivered. In-flight backlog is bounded by rate × delay. |
@@ -103,23 +109,27 @@ can predict the behaviour change from setting it.
 | `completedRetentionSeconds` | `0` | Rule 2 cutoff: segments every group has consumed past. Also widens the `queen.log_txns` purge window (`GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900)`). |
 | `maxWaitTimeSeconds` | `0` | **Deletes whole segments older than the cutoff for every consumer group, in-flight leases included.** Independent of `retentionEnabled`. See below. |
 | `encryptionEnabled` | `false` | Stored on `queen.queues` and read at push time; payloads are stored as an encrypted envelope when a key is configured. |
-| `dedupWindowSeconds` | `3600` (seconds) | Written to `queen.log_queues.dedup_window_seconds`. The push path probes `queen.log_txns` within this window before allocating an offset. `0` disables the probe entirely. |
+| `dedupWindowSeconds` | `3600` (seconds) | Written to `queen.queues.dedup_window_seconds`. The push path probes `queen.log_txns` within this window before allocating an offset. `0` disables the probe entirely. |
 
 Values are stored as given. The broker does not validate ranges, apart from the
 SQL clamp on `minPopWaitTime` and a `max(0)` floor on `dedupWindowSeconds`.
 
 <Aside type="note">
 The effective `leaseTime` depends on how the queue came to exist. A queue created
-implicitly by a push gets the `queen.log_queues` column default, **60 seconds**. A
-queue that has been through `/configure` at least once gets the option's default,
-**300 seconds**. Both are overridable per request with `?leaseSeconds=`. Every other
-option has the same default either way, because the `queen.queues` column defaults
-and the `/configure` defaults agree.
+implicitly by a push or a pop gets the `queen.queues` column default, **60 seconds**.
+A queue that has been through `/configure` at least once gets the option's default,
+**300 seconds** (`/configure` writes an explicit 300 when `leaseTime` is omitted).
+Both are overridable per request with `?leaseSeconds=`. Because there is a single
+`lease_time` column, the value the queue detail endpoint displays is the value the
+pop path leases with. Before 2026-07-31 the display could say 300 on an
+implicitly created queue whose pops actually leased at 60. Every other option has
+the same default either way, because the `queen.queues` column defaults and the
+`/configure` defaults agree.
 </Aside>
 
 #### Disabling the dead-letter queue takes both flags
 
-`044_log_ack.sql` computes the DLQ switch as
+`005_log_ack.sql` computes the DLQ switch as
 `COALESCE(dead_letter_queue, true) OR COALESCE(dlq_after_max_retries, true)`.
 Setting only one of them to `false` leaves dead-lettering on. Send both as
 `false` to turn it off, at which point an exhausted retry budget drops the
@@ -148,9 +158,13 @@ the intent.
   "queue": "orders",
   "namespace": "billing",
   "task": "invoice",
-  "options": { "leaseTime": 120, "retryLimit": 5 }
+  "storage": "segments",
+  "options": { "leaseTime": 120, "retryLimit": 5, "dedupWindowSeconds": 600 }
 }
 ```
+
+`storage` is a hard-coded literal. There is no engine-selector column behind it
+(there is only one engine); the key is kept so the response shape does not change.
 
 `partitionId` is **always `null`**. Configuring a queue does not create a partition:
 partitions are created by the first push that names one. The key used to carry the id of
@@ -159,20 +173,19 @@ the rows-engine table that held it. The key itself is kept so the response shape
 change.
 
 The `options` object echoes the resolved configuration: the values actually
-stored, after defaulting. Clients assert on `configured === true` and round-trip
-the option keys, so the body is never reshaped by the broker.
+stored, after defaulting, `dedupWindowSeconds` included. Clients assert on
+`configured === true` and round-trip the option keys, so the body is never
+reshaped by the broker.
 
-After the stored procedure returns, the handler does three more things, in order:
-pins `queen.queues.storage = 'segments'`, upserts the `queen.log_queues` row with
-the resolved `leaseTime`, `retentionSeconds` and `dedupWindowSeconds`, and drops
-this queue's cached lease time (locally, and on mesh peers via a
-`QUEUE_CONFIG_SET` frame), so a `leaseTime` change is visible on the next pop. If
-the stored procedure returns a body carrying an `error` key, the handler
-short-circuits before those writes.
+`queen.configure_queue_v1` owns every configuration write: one row,
+`queen.queues`, carries the whole configuration including `lease_time` and
+`dedup_window_seconds`. After the stored procedure returns, the handler does one
+more thing: it drops this queue's cached lease time (locally, and on mesh peers
+via a `QUEUE_CONFIG_SET` frame), so a `leaseTime` change is visible on the next
+pop. If the stored procedure returns a body carrying an `error` key, the handler
+short-circuits before that invalidation.
 
-Failures are `500` with `{"error":"configure failed: ..."}`,
-`configure(storage) failed:` or `configure(seg_queue) failed:` depending on which
-step failed.
+Failures are `500` with `{"error":"configure failed: ..."}`.
 
 ## GET /api/v1/resources/queues
 
@@ -254,12 +267,17 @@ on the stats cadence. A queue with no `queen.queues` row answers `404` with
 
 ## DELETE /api/v1/resources/queues/:queue
 
-Access level **admin**. Removes, in order, the queue's `queen.log_txns` and
-`queen.log_dlq` rows (neither carries a foreign key, so they are deleted
-explicitly while the partitions still resolve), then the `queen.log_queues` row
-(which cascades to `log_partitions`, `log_segments` and `log_consumers`), plus the
-rows-side coordination state and consumer watermarks via
-`queen.delete_queue_v1`.
+Access level **admin**. One call to `queen.delete_queue_v1`
+(`013_analytics`) owns the whole delete. It removes, in order, the queue's
+`queen.log_txns` and `queen.log_dlq` rows (neither carries a foreign key by
+design, because the purge path must never pay FK-trigger cost, so they are
+deleted explicitly while the partitions still resolve), then the single `queen.queues`
+row. That one delete cascades to everything else: `queen.log_partitions` and,
+under it, `log_segments` and `log_consumers`, plus the consumer watermarks,
+queue-scoped consumer-group metadata, lag metrics and `queen.stats` rows.
+Before the queue-identity merge this was two non-atomic steps (a stored
+procedure plus a broker-side teardown of the engine tables); it is now one
+transaction.
 
 The response is `200` with a JSON body, never `204`: the SDKs read
 `res.deleted === true` and a bodyless response would make them see `null`.

@@ -11,8 +11,8 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/auth.rs
   - server/src/db.rs
-  - server/sql/procedures/011_traces.sql
-  - server/sql/procedures/047_log_admin.sql
+  - server/sql/procedures/017_traces.sql
+  - server/sql/procedures/010_log_admin.sql
 verifiedBy:
   - proxy/scripts/isolation-smoke.sh
 ---
@@ -63,12 +63,12 @@ Success is `201` with `{"success": true, "traceId": "0198..."}`. A stored-proced
 body carrying `success: false` or a non-null `error` is served as `500`.
 
 <Aside type="caution">
-Nothing checks that the message exists. On the log engine a message's id lives
-inside a compressed segment blob and is invisible to SQL, so `record_trace_v1`
-resolves `message_id` from the rows-engine table, finds nothing, and inserts the
-trace with `message_id = NULL`. A trace posted for a transaction id that was never
-pushed is stored and returned by the read routes exactly like a real one. Traces
-are evidence you produce, not evidence the broker corroborates.
+Nothing checks that the message exists. A message's id lives inside a compressed
+segment blob and is invisible to SQL, so `record_trace_v1` (`010_log_admin`)
+stores the trace with `message_id = NULL` and keys it by
+`(partition_id, transaction_id)`. A trace posted for a transaction id that was
+never pushed is stored and returned by the read routes exactly like a real one.
+Traces are evidence you produce, not evidence the broker corroborates.
 </Aside>
 
 With `QUEEN_TENANCY_HEADER` enabled the `partitionId` is checked against the
@@ -108,7 +108,7 @@ leaks nothing about whether the partition exists elsewhere.
 ## GET /api/v1/traces/by-name/:traceName
 
 Every trace carrying one label, oldest first, with the queue and partition names
-resolved and the rows-engine payload joined in where there is one.
+resolved through `queen.log_partitions` and `queen.queues`.
 
 Query: `limit` (default `100`), `offset` (default `0`).
 
@@ -135,14 +135,14 @@ Query: `limit` (default `100`), `offset` (default `0`).
 }
 ```
 
-`message_payload` is `null` for log-engine messages: it comes from the rows-engine
-`queen.messages` join, which log messages have no row in. Use
-`GET /api/v1/messages/:partitionId/:transactionId` to fetch the payload. See
-[messages and DLQ](/reference/http/messages-dlq).
+`message_payload` is `null` **by construction**: payloads live inside compressed
+segment blobs that SQL cannot open, and the key is kept only so the JSON shape
+does not change. Use `GET /api/v1/messages/:partitionId/:transactionId` to fetch
+the payload. See [messages and DLQ](/reference/http/messages-dlq).
 
 This route is name-addressed, so there is no partition id to gate on. Ownership is
-resolved per trace through its partition (looked up in both the log and rows
-partition tables), and only traces belonging to the caller's tenant are counted
+resolved per trace through its partition (`queen.log_partitions.queue_id` is the
+`queen.queues` id), and only traces belonging to the caller's tenant are counted
 and returned. `total` here **is** a real count of the tenant-scoped match set, not
 the page length.
 

@@ -29,10 +29,18 @@ in front of a broker with tenancy off would route every tenant into the same nam
 
 ## What the broker scopes natively
 
-With `QUEEN_TENANCY_HEADER=true`, `queen.log_queues` carries a `tenant_id` and queue
+With `QUEEN_TENANCY_HEADER=true`, `queen.queues` carries a `tenant_id` and queue
 identity becomes `(tenant, name)` rather than `name`. Two tenants can both own a queue
 called `orders` and they are different queues, with different partitions, different
 offsets, and different consumer-group cursors.
+
+Queue identity is one table: `queen.queues(id)` is both the configuration row and the
+identity every data row hangs off, and `queen.log_partitions.queue_id` is a foreign key
+to it. There is no name-based bridge between configuration and data anywhere in the
+schema, so a whole class of cross-tenant hazard (a join on queue *name* that matches
+another tenant's same-named queue) is structurally unrepresentable, not merely
+guarded against. The retention work list, the analytics readers and the ownership gate
+below all join by id.
 
 Forty of the broker's sixty registered handlers resolve a tenant from the request and
 thread it into the SQL name-resolution functions. That covers the whole queue-shaped
@@ -51,7 +59,7 @@ So the handler checks ownership first, before the procedure runs:
 ```sql
 SELECT EXISTS(
   SELECT 1 FROM queen.log_partitions p
-  JOIN queen.log_queues q ON q.id = p.queue_id
+  JOIN queen.queues q ON q.id = p.queue_id
   WHERE p.id = $1::text::uuid AND q.tenant_id = $2::text::uuid
 )
 ```
@@ -88,8 +96,8 @@ are keyed by a `(tenant, queue)` composite instead:
 | Parked-consumer gauges | Same |
 
 Cross-broker mesh frames carry the tenant, so an invalidation removes exactly one
-entry. A frame from a peer that predates tenancy (a rolling upgrade) has no tenant,
-and is fanned out to every tenant holding that queue name. That is an over-invalidation
+entry. A frame that arrives without a tenant (the pre-tenancy frame shape is still
+parsed) is fanned out to every tenant holding that queue name. That is an over-invalidation
 and an over-wake, both harmless; attributing it to the default tenant instead would
 silently drop the signal for every other tenant.
 

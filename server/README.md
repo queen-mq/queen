@@ -44,14 +44,14 @@ Boot log:
 
 ```
 schema: applied schema.sql + 37 procedures
-queen v1.0.0-alpha-01 listening on 0.0.0.0:6632 (...)
+queen v1.0.0-beta.1 listening on 0.0.0.0:6632 (...)
 ```
 
 Quick check:
 
 ```bash
 curl localhost:6632/health
-# {"status":"ok","database":"connected","engine":"segments-rust","version":"1.0.0-alpha-01"}
+# {"status":"ok","database":"connected","engine":"segments-rust","version":"1.0.0-beta.1"}
 ```
 
 ## Configuration

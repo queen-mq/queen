@@ -160,7 +160,7 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
         Err(_) => return,
     };
     // RUSTFIX item 24: DB-backed cluster-LIFETIME totals (queen.worker_metrics_summary,
-    // populated by the 014 trigger from syscollect.rs) under the CANONICAL
+    // populated by the 019_worker_metrics trigger from syscollect.rs) under the CANONICAL
     // queen_cluster_* names — the same names a v0.16.0 dashboard's max(queen_cluster_*)
     // panels use. (The in-process live counters were renamed queen_process_* in
     // metrics.rs, vacating this namespace.) Every family gets HELP/TYPE.
@@ -323,11 +323,12 @@ pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
 }
 
 // ========================================================= consumer groups
-// Management surface for consumer groups on the segments engine. list/lagging/
-// details are read-only over queen.get_consumer_groups_v4 (dual-engine, 027) and
-// the 008 lag/detail readers; delete/subscription/seek mutate the segment cursor
-// state (queen.partition_consumers) plus the shared coordination tables. These ADD to
-// the handlers above; they never touch push/pop/ack/transaction/configure.
+// Management surface for consumer groups. list/lagging/details are read-only
+// over queen.get_consumer_groups_v4 and its sibling readers (010_log_admin);
+// delete/subscription/seek mutate the log cursor state (queen.log_consumers,
+// via 010_log_admin) plus the shared coordination tables (014_consumer_groups).
+// These ADD to the handlers above; they never touch
+// push/pop/ack/transaction/configure.
 
 // POST /api/v1/stats/refresh — force the stats reconciler NOW instead of waiting
 // out STATS_INTERVAL_MS. ADMIN operation.

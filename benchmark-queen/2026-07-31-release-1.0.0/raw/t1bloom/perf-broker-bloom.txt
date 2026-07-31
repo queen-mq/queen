@@ -1,0 +1,14 @@
+     3.89%  tokio-rt-worker  libc.so.6          [.] malloc
+     3.70%  tokio-rt-worker  queen              [.] _RNvXs0_NtNtNtCs4NRVxsYgnAr_4core4iter8adapters3mapINtB5_3MapINtNtB7_6filter6FilterINtNtB7_9enumerate9EnumerateINtNtNtBb_5slice4iter4IterAhj10_EENCNvMs0_NtCs9Mg7vMGrwJX_5queen5dedupNtB2q_10DedupCache17verified_for_push0ENCB2k_s_0ENtNtNtB9_6traits8iterator8Iterator4nextB2s_
+     2.89%  tokio-rt-worker  libc.so.6          [.] 0x00000000000ac098
+     2.83%  tokio-rt-worker  queen              [.] ZSTD_compressBlock_doubleFast
+     2.36%  tokio-rt-worker  libc.so.6          [.] cfree
+     2.12%  tokio-rt-worker  libc.so.6          [.] 0x00000000000ab30d
+     1.79%  tokio-rt-worker  queen              [.] _RNCNvNtNtCs9Mg7vMGrwJX_5queen8handlers4data11handle_push0B7_
+     1.60%  tokio-rt-worker  queen              [.] _RINvYINtNtNtCs4NRVxsYgnAr_4core5slice4iter4IterNtNtCs9Mg7vMGrwJX_5queen5dedup8BloomGenENtNtNtNtBa_4iter6traits12double_ended19DoubleEndedIterator9try_rfolduQNCINvNvNtNtB1r_8iterator8Iterator3any5checkRBJ_NCNvMs_BL_NtBL_5Entry9gen_maybe0E0INtNtNtBa_3ops12control_flow11ControlFlowuEEBN_
+     1.52%  tokio-rt-worker  queen              [.] _RNCNvNtCs9Mg7vMGrwJX_5queen6fusion18spawn_bundle_flush0B5_
+     1.50%  tokio-rt-worker  queen              [.] _RNvNtCs9Mg7vMGrwJX_5queen6fusion16json_escape_into
+     1.31%  tokio-rt-worker  libc.so.6          [.] 0x0000000000198953
+     1.27%  tokio-rt-worker  libc.so.6          [.] 0x0000000000198c89
+     1.25%  tokio-rt-worker  libc.so.6          [.] 0x00000000000ac532
+     1.24%  tokio-rt-worker  queen              [.] _RNvMs3_NtCseH2Ll9PBhmd_10serde_json4readNtB5_9SliceRead14skip_to_escape
