@@ -30,7 +30,7 @@ idempotent, so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the step en
 The engine needs `CREATE SCHEMA` and **no extensions**.
 
 The files numbered `040`–`048` are the log engine. `049` and `050` drop what the rows engine left
-behind — its functions and then its tables — and `051` attaches the partition-lifecycle counters to
+behind, its functions and then its tables, and `051` attaches the partition-lifecycle counters to
 `queen.log_partitions` once both have run. The surviving files in the `007`–`022` range are the
 shared management plane: configure, consumer groups, stats readers, metrics, traces, streams. A
 subset of their procedures is superseded by later redefinitions, which is why they are still applied.
@@ -319,8 +319,8 @@ dependant.
 
 ### 050_drop_rows_tables.sql (teardown)
 
-Defines no functions. Drops the six rows-engine tables — `messages`, `partitions`,
-`partition_consumers`, `dead_letter_queue`, `messages_consumed`, `partition_lookup` — after first
+Defines no functions. Drops the six rows-engine tables (`messages`, `partitions`,
+`partition_consumers`, `dead_letter_queue`, `messages_consumed`, `partition_lookup`) after first
 detaching every foreign key that pointed at them from a table that SURVIVES (`stats`,
 `retention_history`, `message_traces`), by name and then by a `pg_constraint` sweep so an
 older schema's differently-named constraint cannot block the drop. Those three keep their

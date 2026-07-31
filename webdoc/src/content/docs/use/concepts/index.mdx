@@ -34,6 +34,35 @@ Neither half involves the client in coordination. The broker hands out no partit
 assignments, there is no rebalancing protocol, and a consumer that dies is recovered by its
 lease expiring rather than by a group membership change.
 
+<pre class="mermaid">{`
+flowchart LR
+  subgraph Q["queue: orders"]
+    direction TB
+    P1["partition customer-1<br/>offsets 0,1,2,3"]
+    P2["partition customer-2<br/>offsets 0,1"]
+    P3["partition customer-3<br/>offsets 0,1,2"]
+  end
+
+  PR["producers"] --> Q
+
+  Q --> G1
+  Q --> G2
+
+  subgraph G1["consumer group: billing"]
+    direction TB
+    C1["cursor per partition<br/>1 / 0 / 2"]
+  end
+
+  subgraph G2["consumer group: audit"]
+    direction TB
+    C2["cursor per partition<br/>3 / 1 / 0"]
+  end
+`}</pre>
+
+One queue, one ordered lane per entity, and one independent cursor per lane per group. The two
+groups above have both read the same messages and are simply at different positions. Nothing is
+copied for the second group, and neither group can hold the other up.
+
 ## The vocabulary
 
 | Term | What it is |

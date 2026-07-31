@@ -73,10 +73,12 @@ migration step to run, and no extensions to install into PostgreSQL.
 </Steps>
 
 <Aside type="note">
-The broker serves the dashboard's compiled assets, but the dashboard boots by
-calling `GET /auth/me`, which only `queen_proxy` serves. A broker-only
-deployment like this one will not get past the dashboard's login gate. See
-[Self-hosting](/selfhost).
+The broker also serves its dashboard: open `http://localhost:6632` in a
+browser. With auth off (the default, and this deployment) it boots straight
+into a standalone operator identity: no login, every view live, because the
+API underneath is already open. What each view shows, and what changes when
+JWT auth or the proxy enter the picture, is on
+[the dashboard page](/selfhost/dashboard).
 </Aside>
 
 ## Push and consume

@@ -3,6 +3,8 @@
  */
 
 import * as logger from '../utils/logger.js'
+import { generateUUID } from './QueueBuilder.js'
+import { isValidUUID } from '../utils/validation.js'
 
 export class TransactionBuilder {
   #httpClient
@@ -82,14 +84,24 @@ export class TransactionBuilder {
               payloadValue = item
             }
 
+            // Same contract as QueueBuilder.push: the caller's transactionId is
+            // what makes a retried transaction idempotent inside the dedup
+            // window, so it has to reach the wire. Absent, mint one here rather
+            // than leaving the broker to do it, so the id is knowable client
+            // side either way.
             const result = {
               queue: queueName,
-              payload: payloadValue
+              payload: payloadValue,
+              transactionId: item.transactionId || generateUUID()
             }
-            
+
             // Add partition if set
             if (partition !== null) {
               result.partition = partition
+            }
+
+            if (item.traceId && isValidUUID(item.traceId)) {
+              result.traceId = item.traceId
             }
 
             return result

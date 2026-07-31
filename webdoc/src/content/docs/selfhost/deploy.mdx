@@ -275,9 +275,11 @@ distinguish "paused" from "empty". `GET /api/v1/system/maintenance/pop` reports
 the flag.
 
 <Aside type="note">
-The dashboard's assets are served, but the SPA boots by calling `GET /auth/me`,
-which only `queen_proxy` serves. A broker-only deployment will not get past the
-dashboard's gate. That is a known gap, not a misconfiguration on your side.
+The broker serves its dashboard too: with auth off (the default) it boots
+straight into a standalone operator identity, no proxy involved. With
+`JWT_ENABLED=true` the dashboard is deliberately unavailable broker-direct,
+and `/auth/login` explains why on screen. Details on
+[the dashboard page](/selfhost/dashboard).
 </Aside>
 
 ## Compose, for a two-broker stack

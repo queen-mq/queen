@@ -33,15 +33,23 @@ you against losing PostgreSQL.
 
 ## The shape
 
-```text
-        clients
-           │
-     load balancer
-      ╱    │    ╲
- broker-a broker-b broker-c      ← identical, stateless, every route on every one
-      ╲    │    ╱   ↕ mesh (framed TCP, best-effort hints only)
-       PostgreSQL                ← the only source of truth
-```
+<pre class="mermaid">{`
+flowchart TB
+  CL["clients"] --> LB["load balancer"]
+  LB --> A["broker-a"]
+  LB --> B["broker-b"]
+  LB --> C["broker-c"]
+  A -. "mesh hints" .- B
+  B -.- C
+  A -.- C
+  A --> PG["PostgreSQL<br/>messages, offsets, leases, dedup, queue config"]
+  B --> PG
+  C --> PG
+`}</pre>
+
+Everything a client sends travels the solid path and ends in the single database
+at the bottom. The dotted links are the mesh, and a frame dropped on one costs a
+parked pop some latency and nothing else.
 
 Every replica serves every route. A client can be routed to any of them on any
 request; there is no session affinity to maintain and no notion of a partition

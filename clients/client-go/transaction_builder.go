@@ -145,15 +145,43 @@ func (tqb *TransactionQueueBuilder) Push(payload interface{}) *TransactionBuilde
 		payloads = []interface{}{payload}
 	}
 
-	// Build push items
+	// Build push items.
+	//
+	// A caller who passes a PushItem controls its own TransactionID, which is
+	// what makes a retried transaction idempotent inside the dedup window.
+	// Anything else is treated as a bare payload and gets a minted id, which
+	// is the previous behaviour.
 	items := make([]PushItem, len(payloads))
 	for i, p := range payloads {
-		items[i] = PushItem{
+		item := PushItem{
 			Queue:         tqb.queueName,
 			Partition:     tqb.partition,
 			Payload:       p,
 			TransactionID: GenerateUUID(),
 		}
+		switch v := p.(type) {
+		case PushItem:
+			item.Payload = v.Payload
+			if v.TransactionID != "" {
+				item.TransactionID = v.TransactionID
+			}
+			item.TraceID = v.TraceID
+			if v.Partition != "" {
+				item.Partition = v.Partition
+			}
+		case *PushItem:
+			if v != nil {
+				item.Payload = v.Payload
+				if v.TransactionID != "" {
+					item.TransactionID = v.TransactionID
+				}
+				item.TraceID = v.TraceID
+				if v.Partition != "" {
+					item.Partition = v.Partition
+				}
+			}
+		}
+		items[i] = item
 	}
 
 	// Add push operation

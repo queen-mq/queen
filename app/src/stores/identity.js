@@ -1,10 +1,13 @@
 // Identity store — module singleton, the ONE source of truth for who the user
 // is, what they may do, and which cluster the UI is acting on.
 //
-// Hydrated from GET /auth/me (proxy/src/oauth.rs), which is
-// cookie-authenticated and deliberately needs no cluster of its own. No view
-// may re-derive a permission from anything else: not from a role string it
-// parsed itself, not from whether a call happened to 403.
+// Hydrated from GET /auth/me, which is deliberately answered by WHOEVER serves
+// the SPA: the proxy's cookie-authenticated session endpoint
+// (proxy/src/oauth.rs), or the broker's fixed standalone identity when served
+// broker-direct with auth off (server/src/handlers/standalone.rs,
+// `standalone: true`). Same shape either way — the app never sniffs which
+// binary answered. No view may re-derive a permission from anything else: not
+// from a role string it parsed itself, not from whether a call happened to 403.
 //
 // ACT-AS-CLUSTER. `/auth/me` names the header (`act_cluster_header`) — it is
 // read from there and never hardcoded twice. Picking a cluster sets it on
@@ -129,7 +132,18 @@ export function ensureIdentity() {
       bootstrapping = null
       throw new Error(`/auth/me failed: HTTP ${res.status}`)
     }
-    const me = await res.json()
+    let me
+    try {
+      me = await res.json()
+    } catch {
+      // A 200 that is not JSON means whatever served this page has no identity
+      // endpoint at all (a pre-standalone broker's SPA fallback answers
+      // /auth/me with index.html). Fail the boot loudly, not mid-parse.
+      status.value = 'error'
+      loadError.value = 'no identity endpoint on this server'
+      bootstrapping = null
+      throw new Error('/auth/me did not return JSON')
+    }
     identity.value = me
     acting.value = pickInitialCluster(me)
     if (acting.value) storeCluster(me.user_id, acting.value.id)
@@ -210,6 +224,10 @@ export function currentEpoch() { return epoch.value }
 
 const clusters = computed(() => identity.value?.clusters || [])
 const email = computed(() => identity.value?.email || null)
+// Broker-direct with auth off (server/src/handlers/standalone.rs): one
+// synthetic cluster, no session behind the identity — the shell hides the
+// session UI (logout, cluster selector) because both would be lies here.
+const standalone = computed(() => identity.value?.standalone === true)
 const isOperator = computed(() => identity.value?.is_operator === true)
 const operatorEnabled = computed(() => identity.value?.operator_enabled === true)
 /** Operator AND the cell honours it — the only flag that grants anything. */
@@ -266,6 +284,7 @@ export function useIdentity() {
     loadError,
     clusters,
     email,
+    standalone,
     isOperator,
     operatorEnabled,
     operatorLive,

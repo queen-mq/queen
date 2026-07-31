@@ -50,6 +50,24 @@ The spool trades a small crash window for not blocking the push path on disk.
 
 There are exactly two entry points.
 
+<pre class="mermaid">{`
+flowchart TB
+  P["POST /api/v1/push"] --> MM{"maintenance mode"}
+  MM -->|"off"| T{"push transaction"}
+  MM -->|"on"| SP{"append to the spool<br/>FILE_BUFFER_DIR"}
+  T -->|"committed"| Q["status: queued"]
+  T -->|"PostgreSQL unreachable"| SP
+  SP -->|"write ok"| BUF["status: buffered"]
+  SP -->|"write fails"| FA["status: failed, the item is lost"]
+  BUF --> DR["drain cycle every 100 ms,<br/>oldest .buf file first"]
+  DR --> RP["replay keeps the original transactionId"]
+  RP --> DUP["stored, or duplicate if it already committed"]
+`}</pre>
+
+Both entry points land in the same append-only file, and the per-item status is
+the only place a caller can tell them apart. The drain at the bottom only makes
+progress while the database is reachable and maintenance mode is off.
+
 The first is failure. A push whose database transaction failed (a connection
 error, a statement timeout, a pool acquisition failure) comes back from the write
 path with per-item status `error`, meaning nothing was committed. The broker

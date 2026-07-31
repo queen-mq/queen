@@ -1,0 +1,190 @@
+---
+params: []
+description: "Verified snippet extracted from examples/full/go/produce-consume/main.go."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/full/go/produce-consume/main.go by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```go title="examples/full/go/produce-consume/main.go"
+// Produce and consume: the smallest complete Queen loop.
+//
+// Create a queue, push five messages, read them back through a consumer group,
+// acknowledge them, and prove that every message arrived exactly once.
+//
+// Run it with:
+//
+//	QUEEN_URL=http://localhost:6699 go run ./produce-consume
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
+)
+
+const (
+	// A consumer group is a named cursor over the queue. Two groups reading the
+	// same queue each receive every message once, independently of each other.
+	consumerGroup = "ex-go-billing"
+
+	messageCount = 5
+)
+
+// Queue names carry a per-language prefix so the JavaScript, Python and Go
+// examples can run against the same broker without colliding, and a per-run
+// suffix so every run starts from a queue that has never existed before: no
+// messages, no consumer group cursor, no deduplication history.
+var queueName = fmt.Sprintf("ex-go-produce-consume-%d", time.Now().UnixMilli())
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("OK: %d messages produced, consumed and acked exactly once\n", messageCount)
+}
+
+func run(ctx context.Context) error {
+	brokerURL := os.Getenv("QUEEN_URL")
+	if brokerURL == "" {
+		brokerURL = "http://localhost:6699"
+	}
+
+	client, err := queen.New(brokerURL)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	// The Go client installs no signal handlers, so shutting it down is your
+	// job. Close flushes anything still held client side.
+	defer client.Close(context.Background())
+
+	fmt.Printf("broker: %s\n", brokerURL)
+
+	// Creating a queue is a full replace of its configuration: every option you
+	// leave out returns to the broker default, so send what you actually want.
+	if _, err := client.Queue(queueName).Config(queen.QueueConfig{
+		LeaseTime:  60, // seconds a popped message stays hidden from other consumers
+		RetryLimit: 3,  // failed deliveries tolerated before the message is dead lettered
+	}).Create().Execute(ctx); err != nil {
+		return fmt.Errorf("create queue: %w", err)
+	}
+	fmt.Printf("queue %q ready\n", queueName)
+
+	// Produce.
+	//
+	// pending maps every transactionId we pushed to whether we have seen it
+	// come back. It is the ledger the assertions at the end are built on.
+	pending := make(map[string]bool, messageCount)
+	for i := 1; i <= messageCount; i++ {
+		payload := map[string]interface{}{
+			"orderId": fmt.Sprintf("order-%d", i),
+			"amount":  10 * i,
+		}
+
+		responses, err := client.Queue(queueName).Push(payload).Execute(ctx)
+		if err != nil {
+			return fmt.Errorf("push %d: %w", i, err)
+		}
+		if len(responses) != 1 {
+			return fmt.Errorf("push %d: expected 1 response, got %d", i, len(responses))
+		}
+		// The broker answers with one status per item, in request order.
+		if responses[0].Status != "queued" {
+			return fmt.Errorf("push %d: expected status queued, got %q (%s)",
+				i, responses[0].Status, responses[0].Error)
+		}
+
+		// When you do not supply one, the client mints a UUIDv7 transactionId.
+		// That id is the message identity: dedup and acknowledgement key on it.
+		pending[responses[0].TransactionID] = false
+		fmt.Printf("pushed order-%d as %s\n", i, responses[0].TransactionID)
+	}
+
+	// Consume.
+	consumed := 0
+	deadline := time.Now().Add(30 * time.Second)
+	for consumed < messageCount && time.Now().Before(deadline) {
+		// Pop does not long poll by default in Go. Wait(true) is what makes the
+		// broker hold the request open until something is available.
+		msgs, err := client.Queue(queueName).
+			Group(consumerGroup).
+			Batch(messageCount).
+			Wait(true).
+			TimeoutMillis(5000).
+			Pop(ctx)
+		if err != nil {
+			return fmt.Errorf("pop: %w", err)
+		}
+		if len(msgs) == 0 {
+			continue // the long poll expired with an empty queue
+		}
+
+		for _, msg := range msgs {
+			seen, known := pending[msg.TransactionID]
+			if !known {
+				return fmt.Errorf("consumed a message nobody pushed: %s", msg.TransactionID)
+			}
+			if seen {
+				return fmt.Errorf("message %s was delivered twice", msg.TransactionID)
+			}
+			pending[msg.TransactionID] = true
+			consumed++
+			fmt.Printf("consumed %v (%s)\n", msg.Data["orderId"], msg.TransactionID)
+		}
+
+		// The ack is the commit. It advances this consumer group's cursor past
+		// the messages; without it the lease expires and they are redelivered.
+		acks, err := client.Ack(ctx, msgs, true, queen.AckOptions{ConsumerGroup: consumerGroup})
+		if err != nil {
+			return fmt.Errorf("ack: %w", err)
+		}
+		// A rejected ack still arrives as HTTP 200 with success=false on its
+		// item, so a nil error is not enough. Check every entry.
+		for i, ack := range acks {
+			if !ack.Success {
+				return fmt.Errorf("ack rejected for %s: %s", msgs[i].TransactionID, ack.Error)
+			}
+		}
+		fmt.Printf("acked %d message(s)\n", len(msgs))
+	}
+
+	if consumed != messageCount {
+		return fmt.Errorf("expected %d messages, consumed %d", messageCount, consumed)
+	}
+	for txID, seen := range pending {
+		if !seen {
+			return fmt.Errorf("message %s was never delivered", txID)
+		}
+	}
+
+	// The cursor is committed to the end of the queue, so a further pop must
+	// come back empty. Wait(false) returns immediately with whatever is there.
+	leftovers, err := client.Queue(queueName).
+		Group(consumerGroup).
+		Batch(messageCount).
+		Wait(false).
+		Pop(ctx)
+	if err != nil {
+		return fmt.Errorf("drain check: %w", err)
+	}
+	if len(leftovers) != 0 {
+		return fmt.Errorf("expected nothing left after acking, got %d message(s)", len(leftovers))
+	}
+
+	// Housekeeping, not part of the lesson: drop the queue this run created.
+	if _, err := client.Queue(queueName).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete queue: %w", err)
+	}
+
+	return nil
+}
+```

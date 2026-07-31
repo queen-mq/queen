@@ -154,6 +154,26 @@ message is dead-lettered, with the counter reset every time a batch gets through
 Because the counter is shared by the whole lane, a partition that keeps failing on different
 messages consumes the same budget.
 
+<pre class="mermaid">{`
+stateDiagram-v2
+  state "waiting at committed + 1" as W
+  state "leased" as L
+  state "committed" as C
+  state "dead-lettered" as D
+  state "dropped" as X
+  [*] --> W
+  W --> L: pop claims the span
+  L --> C: ack completed
+  L --> W: ack retry, budget untouched
+  L --> W: ack failed, budget charged
+  L --> W: lease expires, budget untouched
+  L --> D: ack dlq, or failed with no budget left
+  L --> X: failed with no budget left, dead-lettering off
+`}</pre>
+
+Three arrows come straight back to where they started, and only one of them moves the budget.
+Nothing escalates on its own, so the loop through expiry has no exit.
+
 ## Transition to the dead-letter queue
 
 When a `failed` ack arrives with the budget already exhausted, or when you ack with status

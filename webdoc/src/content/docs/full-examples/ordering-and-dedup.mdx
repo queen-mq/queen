@@ -1,0 +1,48 @@
+---
+title: Ordering and deduplication
+description: "One partition per entity keeps each entity's messages in order while the global stream interleaves, and a repeated transactionId is refused rather than stored twice."
+type: example
+tier: use
+sidebar:
+  order: 3
+verifiedBy:
+  - examples/full/js/02-ordering-and-dedup.mjs
+  - examples/full/py/02_ordering_and_dedup.py
+  - examples/full/go/ordering-and-dedup/main.go
+---
+
+This is the pair of properties Queen exists for.
+
+The program pushes messages for three customers, interleaved, into one queue but one partition
+per customer. When it reads them back, each customer's messages are in the order they were
+pushed, even though the interleaving across customers is not the order anything was written. That
+is what a partition buys: an ordered lane per entity, and a slow reader on one lane never holds up
+another.
+
+Then it pushes the same message a second time with the same \`transactionId\`. The broker answers
+\`duplicate\` and stores nothing. The check happens inside the database, under the partition's own
+lock, before an offset is allocated, so it is exact rather than best effort.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/full-js-ordering-dedup" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/full-py-ordering-dedup" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/full-go-ordering-dedup" />
+  </TabItem>
+</Tabs>
+
+## What to take away
+
+Ordering is per partition and never global. If you need two messages to be ordered relative to
+each other, they must share a partition, which usually means partitioning by the entity the
+messages are about.
+
+Deduplication is bounded by a window (one hour by default). Outside it, the same
+\`transactionId\` is a new message again, so the window has to be longer than your longest
+retry.
+
+Next: [the transactional pipeline](/full-examples/pipeline).

@@ -284,5 +284,12 @@ function setup() {
 	if (diagrams.length > 0) render();
 }
 
-// Fires on initial load and after every client-side navigation.
+// This site navigates with full page loads (no ClientRouter), so `astro:page-load`
+// never fires. Bootstrap on the document instead, and keep the router hook so the
+// integration keeps working if a ClientRouter is adopted later.
+if (document.readyState === "loading") {
+	document.addEventListener("DOMContentLoaded", setup, { once: true });
+} else {
+	setup();
+}
 document.addEventListener("astro:page-load", setup);

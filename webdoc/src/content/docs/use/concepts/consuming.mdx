@@ -144,6 +144,27 @@ throws". That is still a leased, at-least-once pop. The server-side `autoAck=tru
 choice, described below.
 </Aside>
 
+<pre class="mermaid">{`
+sequenceDiagram
+  participant C as consumer
+  participant B as broker
+  participant PG as PostgreSQL
+  C->>B: GET pop with batch and consumerGroup
+  B->>PG: claim the partition row for the group, read from committed + 1
+  PG->>PG: write worker_id, lease_expires_at, batch_end
+  PG-->>B: the claimed span, cursor unmoved
+  B-->>C: 200 with messages and leaseId
+  C->>C: handler runs
+  C->>B: POST ack with leaseId and status
+  B->>PG: resolve the transaction ids, advance committed
+  PG-->>B: cursor moved, lease released
+  B-->>C: 200, one result per acknowledgement
+`}</pre>
+
+The cursor stands still for the whole stretch in the middle: the pop wrote a claim, not a
+commit. The lease is the clock running underneath your handler, and nothing else is watching
+it.
+
 ## Long-poll
 
 With `wait=true` a pop that finds nothing parks instead of returning. It releases its PostgreSQL
@@ -200,6 +221,18 @@ one `batch_end` and one `worker_id`, so:
   number of workers. Twenty workers on a single-partition queue in one group give you one
   worker's throughput and nineteen idle pollers.
 - Different groups never interfere, because they are different rows.
+
+<pre class="mermaid">{`
+flowchart LR
+  W1["worker 1"] --> R1["row (p1, billing)<br/>leased"]
+  W2["worker 2"] --> R2["row (p2, billing)<br/>leased"]
+  W3["worker 3"] -.->|"leased, skipped"| R1
+  W3 -.->|"leased, skipped"| R2
+  W4["worker in group analytics"] --> R3["row (p1, analytics)<br/>leased"]
+`}</pre>
+
+Worker 3 is not queued behind anything, it just finds nothing free and polls again. The
+analytics worker reads the same lane at the same time because it arrives at a different row.
 
 If you want more concurrency, add partitions. If your work has no natural key to partition on,
 you are choosing between ordering and parallelism. Queen gives ordering per lane, and the lane

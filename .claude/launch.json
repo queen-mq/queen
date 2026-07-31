@@ -24,6 +24,12 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["--dir", "webdoc", "dev", "--port", "4322", "--host"],
       "port": 4322
+    },
+    {
+      "name": "webdoc-4323",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--dir", "webdoc", "dev", "--port", "4323", "--host"],
+      "port": 4323
     }
   ]
 }

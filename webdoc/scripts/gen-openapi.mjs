@@ -330,6 +330,8 @@ function accessLevel(method, path) {
   const m = method.toUpperCase();
   if (path === "/health" || path === "/metrics" || path === "/metrics/prometheus") return "public";
   if (path === "/" || path.startsWith("/assets/") || path.startsWith("/favicon")) return "public";
+  // Broker-direct dashboard identity — public by design (see gen-routes.mjs).
+  if (path === "/auth/me" || path === "/auth/login" || path === "/auth/logout") return "public";
   if (path.startsWith("/api/v1/system/") || path.startsWith("/internal/")) return "admin";
   if (m === "DELETE" && path.startsWith("/api/v1/consumer-groups/")) return "admin";
   if (m === "DELETE" && path.startsWith("/api/v1/resources/queues/")) return "admin";
@@ -359,6 +361,7 @@ const TAGS = [
     ["/health", "/status", "/metrics", "/metrics/prometheus"].includes(p)],
   ["Streams", (p) => p.startsWith("/streams/")],
   ["Operator", (p) => p.startsWith("/api/v1/system")],
+  ["Dashboard identity", (p) => p.startsWith("/auth/")],
   ["Internal", (p) => p.startsWith("/internal/")],
 ];
 

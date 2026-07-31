@@ -321,7 +321,7 @@ from Go means reading the row and pushing the payload again, or calling
 | Method | Notes |
 | --- | --- |
 | `Ack(messages interface{}, status string, opts AckOptions) *TransactionBuilder` | Same message forms as `Queen.Ack`. A `LeaseID` is collected into `requiredLeases`. |
-| `Queue(name string) *TransactionQueueBuilder` | Sub-builder with `Partition(name)` and `Push(payload) *TransactionBuilder`. |
+| `Queue(name string) *TransactionQueueBuilder` | Sub-builder with `Partition(name)` and `Push(payload) *TransactionBuilder`. Pass a `PushItem` to control that item's `TransactionID`, `TraceID` and `Partition`; pass anything else and it is treated as a bare payload with a minted id. |
 | `Commit(ctx) (*TransactionResponse, error)` | `POST /api/v1/transaction`. Check `resp.Success` as well as `err`. |
 
 ```go

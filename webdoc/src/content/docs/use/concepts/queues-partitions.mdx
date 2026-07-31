@@ -132,6 +132,21 @@ A discovery pop resolves every queue whose configuration row matches the namespa
 and wildcard-pops across their partitions in one call. At least one of the two must be present:
 a request with neither is rejected with `400`.
 
+<pre class="mermaid">{`
+flowchart LR
+  POP["discovery pop<br/>namespace=orders"] --> Q1
+  POP --> Q2
+
+  Q1["queue orders.email<br/>namespace orders, task email"] --> P1["partition Default<br/>offsets 0,1,2"]
+  Q1 --> P2["partition cust-42<br/>offsets 0,1"]
+  Q2["queue orders.invoice<br/>namespace orders, task invoice"] --> P3["partition Default<br/>offsets 0,1,2,3"]
+  Q3["queue orders.audit<br/>namespace empty, task empty"] --> P4["partition Default"]
+`}</pre>
+
+The labels select queues, they do not contain them: only a queue holds lanes, and the dotted
+name is just the string the labels were derived from. The unlabelled queue sits in the same
+system and is reachable by name, but no discovery pop will ever land on it.
+
 The labels are set in two different ways, and the interaction between them is the sharpest
 edge on this page.
 

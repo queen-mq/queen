@@ -36,13 +36,14 @@ const showSections = sections.length >= 2;
     <div class="flex items-center gap-3">
       <a href="/" class="group flex items-center gap-2">
         {/*
-          The same badge the dashboard puts in its sidebar (app/src/components/
-          Sidebar.vue), so the two surfaces carry one mark. It is full colour and
-          reads on either surface, so it needs no per-theme variant. The favicon
-          stays the monochrome line-mark, again matching the app.
+          The black-disc master (assets/queen-logo-black.svg): the disc keeps
+          the mark readable on the light theme, and on the dark theme it melts
+          into the page, leaving the duck, so one file covers both with no
+          per-theme variant. The dashboard (always dark) carries the same duck
+          via the transparent variant.
         */}
         <img
-          src="/queen-badge-open.svg"
+          src="/queen-logo-black.png"
           alt=""
           width="22"
           height="22"

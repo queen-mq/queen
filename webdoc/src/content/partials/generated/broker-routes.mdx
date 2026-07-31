@@ -11,7 +11,7 @@ description: "Every HTTP route the broker registers, with its access level and w
       - server/src/handlers/*.rs (Tenant extension)
 */}
 
-Queen's broker registers **60 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
+Queen's broker registers **63 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
 
 ### Message plane
 
@@ -104,6 +104,14 @@ Queen's broker registers **60 method + path pairs**. Every row below is read out
 | `GET` | `/api/v1/system/maintenance/pop` | admin | no |
 | `POST` | `/api/v1/system/maintenance/pop` | admin | no |
 | `GET` | `/api/v1/system/shared-state` | admin | no |
+
+### Dashboard identity (broker-direct)
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `GET` | `/auth/login` | public | no |
+| `POST` | `/auth/logout` | public | no |
+| `GET` | `/auth/me` | public | no |
 
 ### Internal (broker-to-broker)
 

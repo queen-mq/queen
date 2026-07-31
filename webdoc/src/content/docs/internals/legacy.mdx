@@ -33,7 +33,7 @@ The current engine is the **log engine**, files `040`–`051`.
 
 The rows engine went in two steps, both on 2026-07-30.
 
-**Its message plane** — push, the four generations of pop, ack, transaction, lease renewal, the
+**Its message plane**, meaning push, the four generations of pop, ack, transaction, lease renewal, the
 pending probe, the two `partition_lookup` maintainers and `streams_cycle_v1`. A call-graph closure
 over `server/src` and the surviving SQL found **zero callers** for all sixteen functions; the only
 references left in the tree were comments. Eleven files and 4,662 lines went, and
@@ -50,7 +50,7 @@ defects** where the empty-or-phantom table changed a number somebody read.
 Dropping the tables was safe because this broker has no importer and no in-place upgrade: a
 deployment starts from a clean database, so they were empty by construction. See
 [Compatibility](/reference/compatibility). If you point this build at a database that did carry
-rows-engine data, take a dump first — the boot apply removes it.
+rows-engine data, take a dump first: the boot apply removes it.
 </Aside>
 
 ### The six defects the rows tables were still causing
@@ -64,7 +64,7 @@ writer that table had.
 | `GET /resources/namespaces` and `/resources/tasks`, field `partitions` | the count of `/configure`-created rows, so **0** for any queue created by push | the live log-partition count |
 | `queue_lag_metrics.partitions_created`, plotted as "Partitions Created" | one event per `/configure` call | partitions actually allocated by push |
 | `queue_lag_metrics.partitions_deleted` | never moved | partitions reclaimed by the retention cleanup |
-| `/configure` response, `partitionId` | a uuid resolving to nothing | `null` — partitions are created by the first push |
+| `/configure` response, `partitionId` | a uuid resolving to nothing | `null`, because partitions are created by the first push |
 | `queen_dlq_depth` (Prometheus) | **no sample at all**, because it read the empty rows DLQ | the live `queen.log_dlq` depth |
 
 The last one is the one to remember: DLQ alerting could never fire, while `GET /api/v1/dlq` listed
@@ -75,13 +75,13 @@ the same rows correctly the whole time.
 Everything in `schema.sql` today is either the log engine's or genuinely shared: `queen.queues` (the
 configuration row), `consumer_groups_metadata`, `consumer_watermarks`, `stats`, `stats_history`,
 `retention_history`, `message_traces`, `message_trace_names`, `system_state`, `system_metrics`, the
-worker-metrics tables and `queue_lag_metrics`. Do not assume that anything defined there is retired —
-after this change, nothing is.
+worker-metrics tables and `queue_lag_metrics`. Do not assume that anything defined there is retired: after this
+change, nothing is.
 
 Three of them keep a `partition_id` column that now carries a **`queen.log_partitions` id with no
 foreign key**: `stats`, `retention_history` and `message_traces`. The constraints were dropped
 because a log partition never had a row in the rows table, and they stay dropped because each of
-those rows must be able to outlive its partition — a retention audit row is written by the very step
+those rows must be able to outlive its partition: a retention audit row is written by the very step
 that deletes the partition.
 
 ## Why `queen.stats` reports engine "segments"
@@ -94,7 +94,7 @@ The chain is:
 1. `POST /api/v1/configure` accepts and returns `storage: "segments"`. That is part of the wire
    contract and did not change when the engine did.
 2. The first push creates the `queen.queues` configuration row with `storage = 'segments'`.
-3. Two admin readers still join on `storage = 'segments'` — not to select an engine (there is only
+3. Two admin readers still join on `storage = 'segments'`, not to select an engine (there is only
    one) but as a queue-existence guard. See the header of `047_log_admin.sql`.
 4. `log_refresh_all_stats_v1` selects the queues to refresh with `WHERE q.storage = 'segments'` and
    labels its summary `engine: "segments"` with a `segPartitions` count, so the label stays aligned
@@ -125,7 +125,7 @@ replacement with no migration.
 
 **Nine columns from `queen.partition_consumers`.** The `seg_*` engine grafted its cursor onto the rows
 engine's coordination table. That table is itself gone as of `050`, so on any database this build has
-booted the block is a permanent no-op — it is guarded on the table existing and stays only for a
+booted the block is a permanent no-op. It is guarded on the table existing and stays only for a
 database coming straight from the `seg_*` era, where the columns are dropped with
 `DROP COLUMN IF EXISTS`, taking their dependent indexes and constraints with them:
 
@@ -160,5 +160,5 @@ There is no rows-to-log migration on this tree. The log engine boots its own sch
 Nothing, in normal operation. One rule survives the cleanup:
 
 - **When reading the database, start from the `log_*` tables.** They are the only place the engine
-  keeps data. Everything else you find is shared infrastructure — configuration, stats, metrics,
-  traces — not an artefact of a retired engine. There are no longer any of those.
+  keeps data. Everything else you find is shared infrastructure (configuration, stats, metrics,
+  traces) rather than an artefact of a retired engine. There are no longer any of those.

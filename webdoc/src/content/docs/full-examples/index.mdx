@@ -1,0 +1,65 @@
+---
+title: Full examples
+description: "Three complete programs, simple to complex, in JavaScript, Python and Go: the whole file, not a fragment, and every one of them is run before it ships."
+type: overview
+tier: use
+sidebar:
+  order: 1
+verifiedBy:
+  - examples/full/run.sh
+---
+
+The rest of this site shows the smallest fragment that makes a point. This section shows whole
+programs: imports at the top, assertions at the bottom, nothing hidden. Copy one into a file and
+it runs.
+
+Three of them, in the order they are worth reading:
+
+<CardGrid>
+  <LinkCard
+    href="/full-examples/produce-consume"
+    title="1. Produce and consume"
+    description="The smallest complete loop. Create a queue, push, consume with a group, acknowledge, and check every message arrived exactly once."
+  />
+  <LinkCard
+    href="/full-examples/ordering-and-dedup"
+    title="2. Ordering and deduplication"
+    description="One partition per entity, so each entity keeps its own order. Then the same push twice, and the broker refusing the second."
+  />
+  <LinkCard
+    href="/full-examples/pipeline"
+    title="3. Transactional pipeline"
+    description="Acknowledge one stage and push the next in a single database transaction, and watch a failed message come back rather than vanish."
+  />
+</CardGrid>
+
+Each is written three times, once per language, so you can read the one you use and compare it
+against the one you do not.
+
+## What "run before it ships" means here
+
+The nine programs live in `examples/full/` in the repository. They are not transcribed into these
+pages: the build extracts each file between its first and last line and includes it verbatim, so
+what you read is the file that ran.
+
+Every program asserts its own outcome and exits non-zero when an assertion fails. That is the
+part that makes this claim worth anything: a program that only printed "ok" would prove nothing.
+
+To run all nine yourself against a broker of your own:
+
+```bash
+QUEEN_URL=http://localhost:6632 examples/full/run.sh
+```
+
+The script checks the broker answers, installs the JavaScript dependencies on first use, and
+prints a pass or fail line per program. It needs Node 22, Python 3.9 with `httpx`, and Go 1.24,
+and it takes the clients from this repository rather than from the registries, so it exercises
+the code in the tree rather than the last release.
+
+<Aside type="note">
+These programs use a queue name with a unique suffix per run rather than deleting and recreating
+a fixed one. That is deliberate and worth knowing about: deleting a queue and immediately
+recreating it under the same name currently leaves the broker with stale partition state for up
+to 30 seconds, during which deduplication silently does not deduplicate. Use fresh names, or wait,
+until that is fixed.
+</Aside>

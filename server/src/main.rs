@@ -153,6 +153,14 @@ async fn main() {
                 }
             });
         }
+    } else {
+        // Not a warning — this is the documented default (dev / single-tenant
+        // self-host) — but it must be SAID: with auth off, the API and the
+        // dashboard served at / are both open to anyone who can reach the port.
+        tracing::info!(
+            target: "auth",
+            "JWT auth disabled — API and dashboard are open (standalone); set JWT_ENABLED=true to require tokens"
+        );
     }
 
     // LOGGING_PLAN.md Phase 3/4: one consolidated config block instead of banners
@@ -310,6 +318,8 @@ async fn main() {
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         tenancy_enabled: cfg.tenancy_header,
         ownership_ok: std::sync::Mutex::new(std::collections::HashSet::new()),
+        auth_enabled: cfg.auth.enabled,
+        server_id: cfg.sync.server_id.clone(),
     });
 
     // LOGGING_PLAN.md Phase 1: periodic `rates` + `sizes` aggregate blocks —
@@ -724,6 +734,14 @@ async fn main() {
         .route("/metrics/prometheus", get(handlers::handle_prometheus))
         .route("/status", get(handlers::handle_status))
         .route("/metrics", get(handlers::handle_metrics))
+        // ------------------------------------- broker-direct dashboard identity
+        // The SPA boots from /auth/me wherever it is served. Under the proxy
+        // these paths never reach the broker; served broker-direct the broker
+        // answers them itself (standalone identity with auth off, a terminal
+        // explanation page with auth on). See handlers/standalone.rs.
+        .route("/auth/me", get(handlers::handle_auth_me))
+        .route("/auth/login", get(handlers::handle_auth_login))
+        .route("/auth/logout", post(handlers::handle_auth_logout))
         // SPA dashboard: any request not matching a route above is served from the
         // assets embedded at compile time (server/webapp/dist — there is no
         // runtime static-dir override), falling back to index.html for

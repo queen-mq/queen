@@ -34,6 +34,25 @@ decide delivery are `committed` (last acked offset), `batch_end` (the inclusive 
 currently leased span, `NULL` when no lease is held), `worker_id` and `lease_expires_at`
 (who holds the lease and until when), and `batch_retry_count` (the retry budget consumed).
 
+<pre class="mermaid">{`
+flowchart LR
+  subgraph PM["Per-message acking"]
+    direction TB
+    A1["ack 102"] --> A2["102 has a receipt"]
+    A2 --> A3["101 stays outstanding"]
+    A2 --> A4["state: one row per message"]
+  end
+  subgraph QN["Queen"]
+    direction TB
+    B1["ack 102"] --> B2["committed = 102"]
+    B2 --> B3["101 is complete, silently"]
+    B2 --> B4["state: one integer per<br/>partition and group"]
+  end
+`}</pre>
+
+The left side can hold that hole open for as long as it likes. The right side has nowhere to
+put one, which is why the rest of this page reads the way it does.
+
 Two consequences are worth internalising before you write a consumer:
 
 - **An ack costs the same whether it carries one message or ten thousand.** The write is one
@@ -148,6 +167,20 @@ Within one ack call the broker finds the **lowest** offset carrying an explicit
 `failed`, `retry` or `dlq`, and clamps the cursor below it, even if a higher offset in the
 same call was acked `completed`. That lowest signal also decides what happens next. When two
 signals resolve to the same offset, `dlq` beats `failed` beats `retry`.
+
+<pre class="mermaid">{`
+flowchart LR
+  A["one ack call,<br/>mixed statuses"] --> B["lowest explicit<br/>failed, retry or dlq"]
+  A --> F["offsets you never mentioned"]
+  B --> C["cursor clamped below that offset"]
+  C --> D["highest completed ack below it<br/>becomes the new cursor"]
+  C --> E["that offset and everything<br/>above it redelivers"]
+  F --> G["implicitly completed"]
+`}</pre>
+
+Silence and a signal are read in opposite directions inside the same call: a gap you skipped
+is treated as done, a signal drags the commit back below itself. A completed ack that sits
+above the signal does not survive that.
 
 So this batch ack:
 

@@ -1,37 +1,49 @@
 #!/usr/bin/env python3
-"""Regenerate every derived QueenMQ brand asset from the two master line-marks.
+"""Regenerate every derived QueenMQ brand asset from the two master logos.
 
 Masters (the only hand-made sources — edit those, not the outputs):
-  assets/queen-duck-black-linemark.png   black line-art duck, transparent  (LIGHT backgrounds)
-  assets/queen-duck-white-linemark.png   white line-art duck, transparent  (DARK backgrounds)
+  assets/queen-logo-black.svg        colour duck on a black disc   (backgrounds that can be WHITE)
+  assets/queen-logo-transparent.svg  colour duck, no disc          (backgrounds that are already DARK)
+
+Both masters are Affinity exports that wrap one high-resolution PNG; the
+pipeline works on those embedded rasters. Every output is quantised to a
+128-colour palette — the art is flat-colour, so this is visually lossless at
+the sizes anything renders it, and 4-5x smaller.
 
 Outputs (all regenerated, do not hand-edit):
-  docs/assets/favicon.svg                 theme-adaptive favicon (currentColor via prefers-color-scheme)
-  app/public/favicon.svg                  same, for the webapp
-  docs/assets/favicon-32.png              32px raster fallback (white duck on opaque dark)
-  docs/assets/apple-touch-icon.png        180px iOS home-screen icon (opaque dark, padded)
-  docs/assets/queen_head_64.png           64px nav mark (white, transparent)
-  docs/assets/queen-duck-white-linemark.png   hero/source copy for the dark docs site
-  app/public/queen-duck-white-linemark.png    sidebar mark for the dark webapp
-  docs/assets/og-card.png                 1200x630 social share card
+  app/public/favicon.svg                  webapp tab icon: black-disc logo, 160px PNG inlined in SVG
+  app/public/favicon-32.png               32px raster fallback
+  app/public/queen-logo-transparent.png   512px mark: dashboard sidebar + boot screen, and the
+                                          proxy sign-in badge (proxy/src/oauth.rs inlines it
+                                          out of the embedded webapp)
+  webdoc/public/favicon.svg               same tab icon for the docs
+  webdoc/public/favicon-32.png
+  webdoc/public/favicon.ico               16/32/48 fallback for browsers that ignore SVG icons
+  webdoc/public/apple-touch-icon.png      180px iOS icon: transparent duck on opaque dark, padded
+  webdoc/public/queen-logo-black.png      512px mark for the docs header (light theme exists, so
+                                          the disc; on the dark theme the disc melts into the page)
+  assets/queen-logo-black.png             512px mark for the repo README (GitHub can be white)
 
 Run:  python3 assets/generate-brand.py
+Then: cd app && npm run build     (server/webapp/dist is the artifact BOTH the
+      broker and the proxy embed at compile time — a Rust rebuild ships it)
 """
-import base64, io, os
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import base64, io, os, re
+from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def P(*p): return os.path.join(ROOT, *p)
 
-BLACK = Image.open(P('assets/queen-duck-black-linemark.png')).convert('RGBA')
-WHITE = Image.open(P('assets/queen-duck-white-linemark.png')).convert('RGBA')
+def master(name):
+    """The high-res PNG wrapped inside an Affinity SVG export."""
+    svg = open(P('assets', name)).read()
+    b64 = re.search(r'base64,([^"]+)"', svg).group(1)
+    return Image.open(io.BytesIO(base64.b64decode(b64))).convert('RGBA')
 
-DARK   = (17, 17, 17, 255)      # #111111  — og-card / icon background
-CYAN   = (34, 221, 238, 255)    # #22DDEE  — site accent
-GREY   = (136, 136, 136, 255)   # subtitle
-LIGHT_TAB = '#141415'           # favicon colour on light browser chrome
-DARK_TAB  = '#ffffff'           # favicon colour on dark browser chrome
+BLACK = master('queen-logo-black.svg')        # duck on black disc
+TRANS = master('queen-logo-transparent.svg')  # duck alone, transparent
+
+DARK = (17, 17, 17, 255)  # #111111 — apple-touch-icon background
 
 def contain(src, size, bg=(0, 0, 0, 0), pad=0.0):
     """src centred & contained on a square `size` canvas, `pad` fraction of margin."""
@@ -41,129 +53,50 @@ def contain(src, size, bg=(0, 0, 0, 0), pad=0.0):
     canvas.alpha_composite(s, ((size - s.width) // 2, (size - s.height) // 2))
     return canvas
 
+def quant(img):
+    return img.quantize(colors=128, method=Image.FASTOCTREE, dither=Image.Dither.NONE)
+
 def save(img, *path):
     out = P(*path); os.makedirs(os.path.dirname(out), exist_ok=True)
-    img.save(out); print('  ', os.path.relpath(out, ROOT), img.size)
+    quant(img).save(out, optimize=True)
+    print('  ', os.path.relpath(out, ROOT), img.size, f'{os.path.getsize(out)//1024}KB')
 
-print('favicons (theme-adaptive SVG + raster fallback)')
-# SVG: the white line-mark's alpha drives a <rect> filled with currentColor;
-# currentColor flips black<->white via prefers-color-scheme. No autotrace.
-mask = contain(WHITE, 160)
-buf = io.BytesIO(); mask.save(buf, format='PNG', optimize=True)
+print('favicons (black-disc logo: reads on light and dark tab strips)')
+# SVG wrapper around a small inlined PNG: full-colour art, so no currentColor
+# tricks — the disc itself is the contrast guarantee.
+buf = io.BytesIO(); quant(contain(BLACK, 160)).save(buf, format='PNG', optimize=True)
 b64 = base64.b64encode(buf.getvalue()).decode()
 svg = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160">'
-    f'<style>:root{{color:{LIGHT_TAB}}}'
-    f'@media(prefers-color-scheme:dark){{:root{{color:{DARK_TAB}}}}}</style>'
-    '<mask id="d"><image width="160" height="160" '
-    f'href="data:image/png;base64,{b64}"/></mask>'
-    '<rect width="160" height="160" fill="currentColor" mask="url(#d)"/></svg>'
+    f'<image width="160" height="160" href="data:image/png;base64,{b64}"/></svg>'
 )
-for dest in ('docs/assets/favicon.svg', 'app/public/favicon.svg', 'proxy/public/favicon.svg',
-             'webdoc/public/favicon.svg'):
-    out = P(dest); open(out, 'w').write(svg)
+for dest in ('app/public/favicon.svg', 'webdoc/public/favicon.svg'):
+    open(P(dest), 'w').write(svg)
     print('  ', dest, f'{len(svg)} bytes')
 
-fav32 = contain(WHITE, 32, bg=DARK, pad=0.10)
-save(fav32, 'docs/assets/favicon-32.png')
-save(fav32, 'app/public/favicon-32.png')
-save(fav32, 'proxy/public/favicon-32.png')
-save(fav32, 'webdoc/public/favicon-32.png')
-apple = contain(WHITE, 180, bg=DARK, pad=0.14)
-save(apple, 'docs/assets/apple-touch-icon.png')
-save(apple, 'webdoc/public/apple-touch-icon.png')
+for dest in ('app/public/favicon-32.png', 'webdoc/public/favicon-32.png'):
+    save(contain(BLACK, 32), dest)
+ico = quant(contain(BLACK, 256))
+ico.save(P('webdoc/public/favicon.ico'), sizes=[(16, 16), (32, 32), (48, 48)])
+print('  ', 'webdoc/public/favicon.ico', f"{os.path.getsize(P('webdoc/public/favicon.ico'))//1024}KB")
+save(contain(TRANS, 180, bg=DARK, pad=0.14), 'webdoc/public/apple-touch-icon.png')
 
-print('badge (hand-made master, copied verbatim to every surface that shows it)')
-# Not derived from the line-marks: this is its own master. It is copied rather
-# than regenerated so the dashboard sidebar, the docs header and assets/ can
-# never drift apart — they were three hand-kept copies before.
-import shutil
-for dest in ('app/public/queen-badge-open.svg', 'webdoc/public/queen-badge-open.svg'):
-    out = P(dest); os.makedirs(os.path.dirname(out), exist_ok=True)
-    shutil.copyfile(P('assets/queen-badge-open.svg'), out)
-    print('  ', dest)
-
-print('nav / sidebar / login marks (white, transparent)')
-save(contain(WHITE, 64), 'docs/assets/queen_head_64.png')
-save(contain(WHITE, 64), 'webdoc/public/queen_head_64.png')
-save(WHITE, 'docs/assets/queen-duck-white-linemark.png')
-save(WHITE, 'app/public/queen-duck-white-linemark.png')
-save(WHITE, 'proxy/public/queen-duck-white-linemark.png')
-save(WHITE, 'webdoc/public/queen-duck-white-linemark.png')
-
-print('rainbow-crest variant (warm -> cyan), masked to mohawk + crown')
-# The crest (mohawk + crown) is one connected stroke with the head, so it can't be
-# isolated topologically. We mask it with a hand-traced polygon whose edges run
-# through the transparent negative space between crest and face -> no visible seam.
-# LARGE-SIZE USE ONLY (hero / og-card); the mono white mark stays for favicon/nav.
-_wa = np.asarray(WHITE).astype(np.float32)
-_alpha = _wa[..., 3] / 255.0
-_ink = _alpha > 0.05
-CREST = [(300,20),(560,20),(720,70),(905,230),(905,400),(855,445),
-         (560,405),(360,395),(315,350),(300,430),(250,520),(255,640),
-         (305,705),(150,730),(20,690),(10,380),(70,190),(170,70)]
-_pm = Image.new('L', WHITE.size, 0); ImageDraw.Draw(_pm).polygon(CREST, fill=255)
-_region = np.asarray(_pm.filter(ImageFilter.GaussianBlur(1.5))).astype(np.float32) / 255.0
-_crest = np.clip(_region * _ink, 0, 1)[..., None]
-_xs = np.where((_region > 0.5) & _ink)[1]; _x0, _x1 = _xs.min(), _xs.max()
-_t = np.clip((np.indices(_alpha.shape)[1] - _x0) / max(1, _x1 - _x0), 0, 1)
-STOPS = np.array([(255,86,92),(255,150,70),(250,205,95),(80,205,165),(34,221,238)], np.float32)
-_seg = _t * (len(STOPS) - 1); _i = np.clip(_seg.astype(int), 0, len(STOPS) - 2); _f = (_seg - _i)[..., None]
-_rain = STOPS[_i] * (1 - _f) + STOPS[_i + 1] * _f
-_rgb = np.array([235., 235, 235]) * (1 - _crest) + _rain * _crest
-_rainbow = Image.fromarray(np.dstack([_rgb, _alpha * 255]).clip(0, 255).astype('uint8'))
-save(_rainbow, 'assets/queen-duck-rainbow-linemark.png')
-save(_rainbow, 'docs/assets/queen-duck-rainbow-linemark.png')
-
-# FULL-rainbow variant: every stroke coloured, gradient across the whole duck,
-# no white/dark strokes left. No mask needed (the whole line-art is recoloured).
-_fxs = np.where(_ink)[1]; _fx0, _fx1 = _fxs.min(), _fxs.max()
-_tf = np.clip((np.indices(_alpha.shape)[1] - _fx0) / max(1, _fx1 - _fx0), 0, 1)
-_sf = _tf * (len(STOPS) - 1); _fi = np.clip(_sf.astype(int), 0, len(STOPS) - 2); _ff = (_sf - _fi)[..., None]
-_rainf = STOPS[_fi] * (1 - _ff) + STOPS[_fi + 1] * _ff
-_full = Image.fromarray(np.dstack([_rainf, _alpha * 255]).clip(0, 255).astype('uint8'))
-save(_full, 'assets/queen-duck-rainbow-full-linemark.png')
-save(_full, 'docs/assets/queen-duck-rainbow-full-linemark.png')
-
-print('og-card 1200x630')
-def font(bold, size):
-    paths = ([
-        '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
-        '/System/Library/Fonts/HelveticaNeue.ttc',
-    ] if bold else [
-        '/System/Library/Fonts/Supplemental/Arial.ttf',
-        '/System/Library/Fonts/Helvetica.ttc',
-    ])
-    for p in paths:
-        try: return ImageFont.truetype(p, size)
-        except Exception: pass
-    return ImageFont.load_default()
-
-card = Image.new('RGBA', (1200, 630), DARK)
-d = ImageDraw.Draw(card)
-d.rounded_rectangle([92, 128, 152, 138], radius=4, fill=CYAN)          # accent dash
-d.text((90, 158), 'Queen MQ', font=font(True, 132), fill=(255, 255, 255, 255))
-d.text((95, 322), 'Partitioned message queue', font=font(False, 40), fill=GREY)
-d.text((95, 372), 'on PostgreSQL',             font=font(False, 40), fill=GREY)
-d.text((95, 476), 'queenmq.com', font=font(True, 34), fill=CYAN)
-duck = WHITE.copy(); duck.thumbnail((400, 400), Image.LANCZOS)         # mark on the right
-card.alpha_composite(duck, (775, 315 - duck.height // 2))
-save(card.convert('RGBA'), 'docs/assets/og-card.png')
+print('marks (512px, plenty for the 22-120px they render at)')
+save(contain(TRANS, 512), 'app/public/queen-logo-transparent.png')   # dark webapp + proxy sign-in
+save(contain(BLACK, 512), 'webdoc/public/queen-logo-black.png')      # docs header
+save(contain(BLACK, 512), 'assets/queen-logo-black.png')             # README
 
 # ---- verification contact sheet (not committed) ----
 def comp(img, bg, sz=210):
     t = img.copy(); t.thumbnail((sz, sz)); c = Image.new('RGBA', t.size, bg)
     c.alpha_composite(t); return c.convert('RGB')
-fav = Image.open(P('docs/assets/favicon-32.png'))
-ath = Image.open(P('docs/assets/apple-touch-icon.png'))
-nav = Image.open(P('docs/assets/queen_head_64.png'))
-ogc = Image.open(P('docs/assets/og-card.png'))
-tiles = [comp(fav, (240, 240, 240, 255)), comp(ath, (240, 240, 240, 255)),
-         comp(nav, (17, 17, 17, 255)), comp(nav, (240, 240, 240, 255))]
-row = Image.new('RGB', (sum(t.width for t in tiles) + 40, 230), (128, 128, 128))
+tiles = [comp(contain(BLACK, 32), (240, 240, 240, 255)),
+         comp(Image.open(P('webdoc/public/apple-touch-icon.png')).convert('RGBA'), (240, 240, 240, 255)),
+         comp(Image.open(P('app/public/queen-logo-transparent.png')).convert('RGBA'), (17, 17, 17, 255)),
+         comp(Image.open(P('webdoc/public/queen-logo-black.png')).convert('RGBA'), (255, 255, 255, 255))]
+row = Image.new('RGB', (sum(t.width for t in tiles) + 50, 230), (128, 128, 128))
 x = 10
 for t in tiles:
     row.paste(t, (x, 10)); x += t.width + 10
 row.save(P('_brand_preview_icons.png'))
-ogc.convert('RGB').save(P('_brand_preview_og.png'))
-print('previews: _brand_preview_icons.png, _brand_preview_og.png')
+print('preview: _brand_preview_icons.png')

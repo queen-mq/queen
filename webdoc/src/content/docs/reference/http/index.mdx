@@ -95,9 +95,12 @@ the four role names are configurable. A path the access table does not recognise
 `read-write`.
 
 The public routes, reachable with no token even when authentication is on, are `/health`,
-`/metrics`, `/metrics/prometheus`, `/`, `/assets/*` and `/favicon*`. `/metrics/prometheus` being
-public is deliberate for scraping and is a hazard in a multi-tenant deployment, where per-queue
-series sum across tenants; see [Self-hosting](/selfhost).
+`/metrics`, `/metrics/prometheus`, `/`, `/assets/*`, `/favicon*`, and the three
+dashboard-identity routes `/auth/me`, `/auth/login` and `/auth/logout`. The last three are
+public so they can answer the auth question themselves: with JWT on, `/auth/me` returns `401`
+from its own handler and `/auth/login` serves the page that says the dashboard needs the proxy.
+`/metrics/prometheus` being public is deliberate for scraping and is a hazard in a multi-tenant
+deployment, where per-queue series sum across tenants; see [Self-hosting](/selfhost).
 
 A second, independent exemption list is `JWT_SKIP_PATHS`, which defaults to
 `/health,/metrics/prometheus,/metrics,/`. Entries match a path exactly, or as a prefix when the

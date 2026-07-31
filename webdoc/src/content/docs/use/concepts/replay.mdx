@@ -127,6 +127,18 @@ carrying one commit timestamp for the whole row. A timestamp seek resolves by wa
 not messages: the cursor is set to `base_offset - 1` of the first segment whose commit time is
 at or after your timestamp.
 
+<pre class="mermaid">{`
+flowchart LR
+  S1["segment base 0<br/>created 10:00"] --> S2["segment base 100<br/>created 10:05"] --> S3["segment base 200<br/>created 10:10"]
+  T["seek to 10:05"] -->|"first commit time at or after it"| S2
+  S2 -->|"base_offset - 1"| C["committed = 99<br/>next poll starts at 100"]
+  OLD["cursor was 250"] -.->|"moves backward"| C
+`}</pre>
+
+The walk compares your timestamp against one stamp per segment, so the only positions it can
+resolve to are the marks between the boxes above. Nothing in the rule can stop the cursor
+partway through a box.
+
 You therefore land on a **segment boundary**, at the start of the segment that contains your
 timestamp, which means you will receive some messages committed slightly *before* it. The
 overshoot is bounded by one segment's frame count. Never treat a timestamp seek as an exact

@@ -34,6 +34,31 @@ therefore the same in all cases; only candidate selection differs. A discovery p
 least one of `namespace` or `task`: a bare `GET /api/v1/pop` is a `400` rather than an
 unbounded scan of every queue.
 
+<pre class="mermaid">{`
+sequenceDiagram
+  participant C as consumer
+  participant H as pop handler
+  participant R as hot-list ring
+  participant PG as PostgreSQL
+  C->>H: GET pop with batch, partitions, wait
+  H->>R: ask for candidate partitions
+  R-->>H: k names, or nothing ready
+  H->>PG: log_pop_list_v1, one log_pop_v1 per candidate
+  PG->>PG: claim log_consumers FOR UPDATE SKIP LOCKED
+  PG->>PG: head probe backwards, then forward scan to the budget
+  alt autoAck
+    PG->>PG: advance committed, no lease
+  else leased
+    PG->>PG: set worker_id, batch_end, lease_expires_at
+  end
+  PG-->>H: segment rows plus slicing bounds
+  H->>H: decompress each blob, slice the frames
+  H-->>C: 200 with messages, or 204 and park
+`}</pre>
+
+Two placements carry most of the design. The ring is consulted before any permit or pooled
+connection is taken, and the frame walk happens after PostgreSQL has answered, never inside it.
+
 The request parameters and their defaults: `batch` 200, `partitions` 1, `autoAck` false,
 `wait` false, `timeout` from `DEFAULT_TIMEOUT` (30000 ms), `consumerGroup` defaulting to the
 sentinel group `__QUEUE_MODE__`, `subscriptionMode` `all`, `subscriptionFrom` empty. The lease
@@ -188,6 +213,23 @@ So the claim is claim-first, and only a genuinely missing row takes the creation
    creates the row and every concurrent pop skips this partition for one cycle. A hash collision
    false-skips an unrelated partition for one cycle, which is harmless.
 3. Insert the row seeded per step 3, then re-claim.
+
+<pre class="mermaid">{`
+flowchart TB
+  A["claim FOR UPDATE SKIP LOCKED"] -->|row returned| S["scan and deliver"]
+  A -->|nothing returned| B["re-probe without the lease filter"]
+  B -->|row present| K["skip this partition for one cycle"]
+  B -->|row missing| T["try the advisory xact lock"]
+  T -->|not acquired| K
+  T -->|acquired| I["insert the row, seeded per step 3"]
+  I --> RC["re-claim"]
+  RC -->|row returned| S
+  RC -->|nothing returned| K
+`}</pre>
+
+Every edge that is not the happy path leaves immediately. None of them waits on another
+transaction, which matters because a wildcard pop keeps its transaction open across the whole
+candidate loop.
 
 ## Step 5: the head probe and the forward scan
 

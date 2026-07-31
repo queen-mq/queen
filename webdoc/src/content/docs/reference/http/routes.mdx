@@ -30,6 +30,10 @@ How to read the columns:
   multi-tenant deployments, covered in [Self-hosting](/selfhost).
 - **Internal (broker-to-broker)** routes are not a client API. They exist so brokers sharing a
   database can notify each other, and they require `admin`.
+- **Dashboard identity (broker-direct)** is the small `/auth` surface the broker answers when
+  it serves the dashboard itself. The routes are `public` by design; `/auth/me` enforces the
+  auth state in its own handler. [The dashboard page](/selfhost/dashboard) explains the
+  standalone identity it returns.
 
 The five message-plane routes have a page each documenting their request and response
 fields: [push](/reference/http/push), [pop](/reference/http/pop),

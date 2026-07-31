@@ -374,6 +374,14 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     if path == "/" || path.starts_with("/assets/") || path.starts_with("/favicon") {
         return Public;
     }
+    // Broker-direct dashboard identity surface (handlers/standalone.rs). Public
+    // by design: /auth/me answers 401 ITSELF when auth is enabled, and
+    // /auth/login is the page that explains auth — it must render to an
+    // unauthenticated browser or it explains nothing. /auth/logout is a
+    // session no-op (the broker holds no sessions).
+    if path == "/auth/me" || path == "/auth/login" || path == "/auth/logout" {
+        return Public;
+    }
 
     // -------- ADMIN --------
     if path.starts_with("/api/v1/system/") || path.starts_with("/internal/") {

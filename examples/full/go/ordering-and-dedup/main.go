@@ -1,0 +1,295 @@
+// docs:start(full-go-ordering-dedup)
+// Ordering and deduplication: the two properties people come to Queen for.
+//
+// Part one gives every customer its own partition, pushes their events
+// interleaved, and shows that each customer's events come back in the order
+// they were pushed even though the global stream is interleaved.
+//
+// Part two pushes the same transactionId twice and shows the broker answering
+// "duplicate" and storing nothing new.
+//
+// Run it with:
+//
+//	QUEEN_URL=http://localhost:6699 go run ./ordering-and-dedup
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
+)
+
+const (
+	consumerGroup = "ex-go-audit"
+
+	eventsPerCustomer = 4
+
+	// The dedup demonstration gets its own partition so that popping it does
+	// not disturb the ordering assertions above.
+	dedupPartition = "payments"
+)
+
+// A per-run suffix gives every run a queue that has never existed before: no
+// messages, no consumer group cursor and, for the second half of this example,
+// no deduplication history.
+var runID = time.Now().UnixMilli()
+
+var queueName = fmt.Sprintf("ex-go-ordering-dedup-%d", runID)
+
+// A transactionId you choose yourself is what makes a push idempotent: the
+// broker rejects a second push carrying an id it has already accepted inside
+// the queue's dedup window. Derive it from your own data (here, the payment it
+// stands for) so that a retry recomputes the same id.
+var paymentTxID = fmt.Sprintf("ex-go-payment-%d", runID)
+
+// One partition per customer. A partition is the unit of ordering, so this is
+// the choice that buys per-customer FIFO and cross-customer parallelism at the
+// same time.
+var customers = []string{"customer-a", "customer-b", "customer-c"}
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	if err := run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("OK: per partition order held and the duplicate push was rejected")
+}
+
+func run(ctx context.Context) error {
+	brokerURL := os.Getenv("QUEEN_URL")
+	if brokerURL == "" {
+		brokerURL = "http://localhost:6699"
+	}
+
+	client, err := queen.New(brokerURL)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	defer client.Close(context.Background())
+
+	fmt.Printf("broker: %s\n", brokerURL)
+
+	if _, err := client.Queue(queueName).Config(queen.QueueConfig{
+		LeaseTime:  60,
+		RetryLimit: 3,
+	}).Create().Execute(ctx); err != nil {
+		return fmt.Errorf("create queue: %w", err)
+	}
+	fmt.Printf("queue %q ready\n", queueName)
+
+	if err := showOrdering(ctx, client); err != nil {
+		return err
+	}
+	if err := showDedup(ctx, client); err != nil {
+		return err
+	}
+
+	// Housekeeping, not part of the lesson: drop the queue this run created.
+	if _, err := client.Queue(queueName).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete queue: %w", err)
+	}
+	return nil
+}
+
+// showOrdering pushes interleaved events for three customers and checks that
+// each customer's events come back in push order.
+func showOrdering(ctx context.Context, client *queen.Queen) error {
+	total := len(customers) * eventsPerCustomer
+
+	// Push round by round, so the queue as a whole sees a-1, b-1, c-1, a-2, ...
+	var pushOrder []string
+	for seq := 1; seq <= eventsPerCustomer; seq++ {
+		for _, customer := range customers {
+			responses, err := client.Queue(queueName).
+				Partition(customer).
+				Push(map[string]interface{}{"customer": customer, "seq": seq}).
+				Execute(ctx)
+			if err != nil {
+				return fmt.Errorf("push %s#%d: %w", customer, seq, err)
+			}
+			if responses[0].Status != "queued" {
+				return fmt.Errorf("push %s#%d: expected status queued, got %q",
+					customer, seq, responses[0].Status)
+			}
+			pushOrder = append(pushOrder, fmt.Sprintf("%s#%d", customer, seq))
+		}
+	}
+	fmt.Printf("pushed:   %s\n", strings.Join(pushOrder, " "))
+
+	delivered := make(map[string][]int, len(customers))
+	var deliveryOrder []string
+
+	consumed := 0
+	deadline := time.Now().Add(30 * time.Second)
+	for consumed < total && time.Now().Before(deadline) {
+		// Partitions(3) claims up to three partitions in one call and Batch is
+		// the global budget across them, so a single round trip can carry
+		// several customers. They share one lease.
+		msgs, err := client.Queue(queueName).
+			Group(consumerGroup).
+			Partitions(len(customers)).
+			Batch(total).
+			Wait(true).
+			TimeoutMillis(5000).
+			Pop(ctx)
+		if err != nil {
+			return fmt.Errorf("pop: %w", err)
+		}
+		if len(msgs) == 0 {
+			continue
+		}
+
+		for _, msg := range msgs {
+			// JSON numbers arrive as float64 in the untyped payload map.
+			seq, ok := msg.Data["seq"].(float64)
+			if !ok {
+				return fmt.Errorf("message %s has no numeric seq", msg.TransactionID)
+			}
+			if msg.Partition == dedupPartition {
+				return fmt.Errorf("unexpected message from the %s partition", dedupPartition)
+			}
+			delivered[msg.Partition] = append(delivered[msg.Partition], int(seq))
+			deliveryOrder = append(deliveryOrder, fmt.Sprintf("%s#%d", msg.Partition, int(seq)))
+			consumed++
+		}
+
+		acks, err := client.Ack(ctx, msgs, true, queen.AckOptions{ConsumerGroup: consumerGroup})
+		if err != nil {
+			return fmt.Errorf("ack: %w", err)
+		}
+		for i, ack := range acks {
+			if !ack.Success {
+				return fmt.Errorf("ack rejected for %s: %s", msgs[i].TransactionID, ack.Error)
+			}
+		}
+	}
+	fmt.Printf("consumed: %s\n", strings.Join(deliveryOrder, " "))
+
+	if consumed != total {
+		return fmt.Errorf("expected %d messages, consumed %d", total, consumed)
+	}
+
+	// The guarantee is per partition, not global: the interleaving above may
+	// differ from the push order, but each customer's own sequence may not.
+	for _, customer := range customers {
+		seqs := delivered[customer]
+		if len(seqs) != eventsPerCustomer {
+			return fmt.Errorf("%s: expected %d events, got %d", customer, eventsPerCustomer, len(seqs))
+		}
+		for i, seq := range seqs {
+			if seq != i+1 {
+				return fmt.Errorf("%s: out of order, expected seq %d at position %d, got %d",
+					customer, i+1, i, seq)
+			}
+		}
+		fmt.Printf("%s: in order %v\n", customer, seqs)
+	}
+
+	return nil
+}
+
+// showDedup pushes the same transactionId twice and checks that the second
+// push is rejected as a duplicate without storing anything.
+func showDedup(ctx context.Context, client *queen.Queen) error {
+	first, err := client.Queue(queueName).
+		Partition(dedupPartition).
+		Push(map[string]interface{}{"paymentId": "payment-42", "amount": 100}).
+		TransactionID(paymentTxID).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("first payment push: %w", err)
+	}
+	if first[0].Status != "queued" {
+		return fmt.Errorf("first payment push: expected status queued, got %q", first[0].Status)
+	}
+	fmt.Printf("first push of %s: %s\n", paymentTxID, first[0].Status)
+
+	// Same id, different payload: this is the retry of a producer that never
+	// saw the first response. The broker must not charge the customer twice.
+	second, err := client.Queue(queueName).
+		Partition(dedupPartition).
+		Push(map[string]interface{}{"paymentId": "payment-42", "amount": 999}).
+		TransactionID(paymentTxID).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("second payment push: %w", err)
+	}
+	if second[0].Status != "duplicate" {
+		return fmt.Errorf("second payment push: expected status duplicate, got %q", second[0].Status)
+	}
+	fmt.Printf("second push of %s: %s\n", paymentTxID, second[0].Status)
+
+	// "Duplicate" has to mean nothing was stored, so read the partition back:
+	// exactly one message, carrying the first payload rather than the second.
+	msgs, err := popPayments(ctx, client)
+	if err != nil {
+		return err
+	}
+	if len(msgs) != 1 {
+		return fmt.Errorf("expected exactly 1 payment message, got %d", len(msgs))
+	}
+	if msgs[0].TransactionID != paymentTxID {
+		return fmt.Errorf("expected transactionId %s, got %s", paymentTxID, msgs[0].TransactionID)
+	}
+	amount, ok := msgs[0].Data["amount"].(float64)
+	if !ok || amount != 100 {
+		return fmt.Errorf("expected the first payload (amount 100), got %v", msgs[0].Data["amount"])
+	}
+	fmt.Printf("stored payment: amount %v\n", msgs[0].Data["amount"])
+
+	acks, err := client.Ack(ctx, msgs[0], true, queen.AckOptions{ConsumerGroup: consumerGroup})
+	if err != nil {
+		return fmt.Errorf("ack payment: %w", err)
+	}
+	if !acks[0].Success {
+		return fmt.Errorf("ack rejected for %s: %s", msgs[0].TransactionID, acks[0].Error)
+	}
+
+	// And nothing else is hiding behind it.
+	leftovers, err := client.Queue(queueName).
+		Partition(dedupPartition).
+		Group(consumerGroup).
+		Batch(10).
+		Wait(false).
+		Pop(ctx)
+	if err != nil {
+		return fmt.Errorf("payment drain check: %w", err)
+	}
+	if len(leftovers) != 0 {
+		return fmt.Errorf("expected the payments partition to be empty, got %d message(s)", len(leftovers))
+	}
+
+	return nil
+}
+
+// popPayments reads the payments partition. Naming a partition other than the
+// default switches the pop to the partition scoped route, so only that
+// customer's lane is touched.
+func popPayments(ctx context.Context, client *queen.Queen) ([]*queen.Message, error) {
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		msgs, err := client.Queue(queueName).
+			Partition(dedupPartition).
+			Group(consumerGroup).
+			Batch(10).
+			Wait(true).
+			TimeoutMillis(5000).
+			Pop(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("pop payments: %w", err)
+		}
+		if len(msgs) > 0 {
+			return msgs, nil
+		}
+	}
+	return nil, fmt.Errorf("no payment message was delivered")
+}
+
+// docs:end

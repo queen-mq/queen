@@ -173,7 +173,10 @@ it is also the single most common surprise when rolling authentication out.
 The route classification is prefix-based:
 
 - `public`: `/health`, `/metrics`, `/metrics/prometheus`, `/`, `/assets/*`,
-  `/favicon*`
+  `/favicon*`, plus the three dashboard-identity routes `/auth/me`,
+  `/auth/login` and `/auth/logout`, public so they can *answer* the auth
+  question rather than be blocked by it (with JWT on, `/auth/me` returns `401`
+  from its own handler)
 - `admin`: everything under `/api/v1/system/` and `/internal/`, every
   `DELETE /api/v1/consumer-groups/*`, every `DELETE /api/v1/resources/queues/*`,
   and `/api/v1/stats/refresh`
@@ -190,11 +193,14 @@ not to `public`. The per-route table with the level for every registered route i
 the [reference](/reference).
 
 <Aside type="note">
-The dashboard's client-side routes fall into that default. `/` is `public`, but a
-deep link such as `/queues/orders` is classified `read-write`, so reloading the
-dashboard on an inner route answers `401` once JWT is on. Either front the dashboard
-with something that authenticates browsers, or add its prefixes to
-`JWT_SKIP_PATHS`.
+Turning JWT on turns the broker-served dashboard off, deliberately. The app
+sends no bearer token, and the broker holds no accounts to mint one for a
+browser: `/auth/me` answers `401`, and the app's login redirect lands on
+`/auth/login`, where the broker serves a static page saying to use the proxy.
+`JWT_SKIP_PATHS` cannot rescue this: it would let the shell load, only for
+every `/api/v1/*` call behind it to answer `401`. A dashboard with sessions
+belongs behind `queen_proxy`; with auth off, the broker serves the open
+[standalone dashboard](/selfhost/dashboard) instead.
 </Aside>
 
 ## Remapping claims for an external identity provider

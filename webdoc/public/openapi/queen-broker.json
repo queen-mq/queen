@@ -39,6 +39,9 @@
       "name": "Operator"
     },
     {
+      "name": "Dashboard identity"
+    },
+    {
       "name": "Internal"
     },
     {
@@ -3777,6 +3780,97 @@
         "x-queen-access-level": "public",
         "x-queen-tenant-scoped": false,
         "x-queen-handler": "server/src/handlers/status.rs::handle_metrics",
+        "x-queen-query-params": "none"
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "operationId": "auth_me",
+        "tags": [
+          "Dashboard identity"
+        ],
+        "summary": "GET /auth/me",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "401": {
+            "description": "Missing or invalid credentials (only when JWT authentication is enabled).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "public",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/standalone.rs::handle_auth_me",
+        "x-queen-query-params": "none"
+      }
+    },
+    "/auth/login": {
+      "get": {
+        "operationId": "auth_login",
+        "tags": [
+          "Dashboard identity"
+        ],
+        "summary": "GET /auth/login",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "public",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/standalone.rs::handle_auth_login",
+        "x-queen-query-params": "none"
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "auth_logout",
+        "tags": [
+          "Dashboard identity"
+        ],
+        "summary": "POST /auth/logout",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "public",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/standalone.rs::handle_auth_logout",
         "x-queen-query-params": "none"
       }
     }

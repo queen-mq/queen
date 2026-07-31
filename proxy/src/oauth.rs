@@ -1457,16 +1457,17 @@ padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
     )
 }
 
-/// The brand badge as a `data:` URI — the SAME built asset the sidebar shows
-/// (`app/public/queen-badge-open.svg`), pulled out of the embedded webapp so
-/// the sign-in page and the app it fronts can never drift apart, and so
+/// The brand mark as a `data:` URI — the SAME built asset the sidebar shows
+/// (`app/public/queen-logo-transparent.png`, the dark-background variant of
+/// the logo — this page is dark), pulled out of the embedded webapp so the
+/// sign-in page and the app it fronts can never drift apart, and so
 /// regenerating the brand (assets/generate-brand.py + `npm run build`) updates
 /// this page too.
 ///
 /// It is inlined rather than linked because webapp.rs's gate is deliberately
 /// absolute — not one byte without a live session — so a plain
-/// `<img src="/queen-badge-open.svg">` here would 302 back to this very page.
-/// Encoded once: the bytes are fixed for the life of the process.
+/// `<img src="/queen-logo-transparent.png">` here would 302 back to this very
+/// page. Encoded once: the bytes are fixed for the life of the process.
 ///
 /// Empty when the webapp is not built. The page then renders without a mark
 /// rather than with a broken one; `the_login_brand_is_embedded` fails the build
@@ -1474,33 +1475,29 @@ padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
 fn brand_badge_data_uri() -> &'static str {
     static URI: OnceLock<String> = OnceLock::new();
     URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_BADGE) {
+        Some(bytes) => format!("data:image/png;base64,{}", B64.encode(bytes)),
+        None => String::new(),
+    })
+}
+
+/// The tab icon: the webapp's own favicon (the black-disc variant of the logo,
+/// a 160px raster wrapped in SVG — full colour, so nothing to resolve).
+///
+/// Deliberately the SMALL asset rather than the 512px mark above: the data URI
+/// would otherwise be repeated in full — the page carries it twice, once here
+/// and once in `<img>`.
+fn favicon_data_uri() -> &'static str {
+    static URI: OnceLock<String> = OnceLock::new();
+    URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_FAVICON) {
         Some(bytes) => format!("data:image/svg+xml;base64,{}", B64.encode(bytes)),
         None => String::new(),
     })
 }
 
-/// The tab icon, from the monochrome line-art mark rather than the badge above.
-///
-/// Deliberately the SMALL asset: at 16px the badge's detail is mush, and the
-/// data URI would otherwise be repeated in full — the page carries it twice,
-/// once here and once in `<img>`. `currentColor` has to be resolved first: a
-/// favicon inherits no colour, so it would fall back to black and disappear
-/// into a dark tab strip.
-fn favicon_data_uri() -> &'static str {
-    static URI: OnceLock<String> = OnceLock::new();
-    URI.get_or_init(|| match crate::webapp::embedded_asset(BRAND_MARK) {
-        Some(bytes) => {
-            let svg = String::from_utf8_lossy(&bytes).replace("currentColor", "#e6e6e6");
-            format!("data:image/svg+xml;base64,{}", B64.encode(svg))
-        }
-        None => String::new(),
-    })
-}
-
 /// Brand art inside the built webapp (`app/public/` is copied to the Vite
-/// output root): the colour badge the sidebar shows, and the line-art mark.
-const BRAND_BADGE: &str = "queen-badge-open.svg";
-const BRAND_MARK: &str = "queen-mark.svg";
+/// output root): the dark-surface mark the sidebar shows, and the tab icon.
+const BRAND_BADGE: &str = "queen-logo-transparent.png";
+const BRAND_FAVICON: &str = "favicon.svg";
 
 #[cfg(test)]
 mod tests {
@@ -1725,21 +1722,22 @@ mod tests {
     #[test]
     fn the_login_brand_is_embedded() {
         // The sign-in page can only inline what the build actually embedded.
-        // If `app/public/queen-badge-open.svg` is renamed or the webapp is not
-        // built, fail HERE rather than shipping a login page with no mark.
+        // If `app/public/queen-logo-transparent.png` is renamed or the webapp
+        // is not built, fail HERE rather than shipping a login page with no
+        // mark.
         let uri = brand_badge_data_uri();
-        let b64 = uri.strip_prefix("data:image/svg+xml;base64,").expect("svg data URI");
-        let svg = String::from_utf8(B64.decode(b64).expect("valid base64")).unwrap();
-        assert!(svg.contains("<svg"), "decodes back to the badge the sidebar shows");
-        // Inlining is pointless if the art then reaches for a URL of its own:
-        // webapp.rs would answer that with a 302 back to this page.
-        assert!(!svg.contains("xlink:href"), "no external refs inside the badge");
+        let b64 = uri.strip_prefix("data:image/png;base64,").expect("png data URI");
+        let png = B64.decode(b64).expect("valid base64");
+        assert!(png.starts_with(b"\x89PNG"), "decodes back to the mark the sidebar shows");
 
         let icon = favicon_data_uri();
         let b64 = icon.strip_prefix("data:image/svg+xml;base64,").expect("svg data URI");
         let svg = String::from_utf8(B64.decode(b64).expect("valid base64")).unwrap();
-        assert!(svg.contains("<svg"), "decodes back to the mark");
-        assert!(!svg.contains("currentColor"), "a favicon has no colour to inherit");
-        assert!(svg.contains("#e6e6e6"), "resolved to the app's high-contrast ink");
+        assert!(svg.contains("<svg"), "decodes back to the tab icon");
+        // Inlining is pointless if the art then reaches for a URL of its own:
+        // webapp.rs would answer that with a 302 back to this page. The raster
+        // inside the favicon must be a data: URI, not a same-origin path.
+        assert!(svg.contains("href=\"data:image/png"), "favicon raster is inlined");
+        assert!(!svg.contains("href=\"/"), "no same-origin refs inside the icon");
     }
 }

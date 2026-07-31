@@ -47,8 +47,12 @@ npm run dev
 The app will be available at `http://localhost:4000`, proxying `/api`, `/auth`,
 `/health` and `/metrics` to the queen-proxy dev cell on `:6711`
 (`proxy/scripts/dev-cell.sh up`). Set `QUEEN_DEV_UPSTREAM=http://localhost:6632`
-to talk to a broker directly instead — that mode exercises no auth, no tenancy,
-no role checks and no 429s, so do not develop against it by default.
+to talk to a broker directly instead — the STANDALONE mode: the broker answers
+`/auth/me` itself with a fixed operator identity (`standalone: true`, one
+synthetic `local` cluster; server/src/handlers/standalone.rs) and the shell
+hides the session UI. It exercises no sessions, no tenancy, no role checks and
+no 429s, so develop against the proxy unless standalone is the thing you are
+working on.
 
 ### Build for Production
 

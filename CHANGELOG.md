@@ -46,6 +46,12 @@ is what makes tens of thousands of partitions cheap.
   PostgreSQL remains the only source of truth. **The mesh port must be firewalled.**
 - **The dashboard is compiled into the binary** (`rust_embed`). There is no
   `QUEEN_STATIC_DIR` and no on-disk assets at runtime.
+- **The dashboard works broker-direct.** With auth off (the default) the broker answers
+  `GET /auth/me` itself with a standalone operator identity, so the full dashboard runs
+  with no proxy: every view live, session controls hidden. With `JWT_ENABLED=true` the
+  broker serves an explanation page at `/auth/login` instead; a dashboard with logins and
+  roles remains `queen-proxy`'s. Documented at
+  [queenmq.com/selfhost/dashboard](https://queenmq.com/selfhost/dashboard).
 - **New documentation.** [queenmq.com](https://queenmq.com) is rewritten from the current
   source. Its route table, environment-variable reference, metric list, proxy route classes,
   OpenAPI documents and benchmark figures are generated from the code and the archived

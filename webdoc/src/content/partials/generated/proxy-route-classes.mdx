@@ -79,6 +79,9 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/api/v1/traces/:partitionId/:transactionId` |
 | `GET` | `/api/v1/traces/by-name/:traceName` |
 | `GET` | `/api/v1/traces/names` |
+| `GET` | `/auth/login` |
+| `POST` | `/auth/logout` |
+| `GET` | `/auth/me` |
 | `GET` | `/health` |
 
 ### gated (streams)
@@ -123,4 +126,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-42 of the broker's 60 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+45 of the broker's 63 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

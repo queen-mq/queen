@@ -5,6 +5,8 @@ Transaction builder for atomic operations
 from typing import Any, Dict, List, Optional, Union
 
 from ..utils import logger
+from ..utils.uuid_gen import generate_uuid
+from ..utils.validation import is_valid_uuid
 
 
 class TransactionBuilder:
@@ -184,11 +186,24 @@ class TransactionQueueBuilder:
             else:
                 payload_value = item
 
-            result: Dict[str, Any] = {"queue": self._queue_name, "payload": payload_value}
+            # Same contract as QueueBuilder.push: the caller's transactionId is
+            # what makes a retried transaction idempotent inside the dedup
+            # window, so it has to reach the wire. Absent, mint one here rather
+            # than leaving the broker to do it, so the id is knowable client
+            # side either way.
+            result: Dict[str, Any] = {
+                "queue": self._queue_name,
+                "payload": payload_value,
+                "transactionId": item.get("transactionId") or generate_uuid(),
+            }
 
             # Add partition if set
             if self._partition is not None:
                 result["partition"] = self._partition
+
+            trace_id = item.get("traceId")
+            if trace_id and is_valid_uuid(trace_id):
+                result["traceId"] = trace_id
 
             formatted_items.append(result)
 

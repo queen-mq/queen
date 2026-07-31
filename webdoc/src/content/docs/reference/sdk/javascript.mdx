@@ -386,8 +386,9 @@ The DLQ is read-only through this builder. Replay lives on the admin façade:
 <Render file="snippets/js-transaction" />
 
 Lease ids are deduplicated before `requiredLeases` is sent. Item payloads follow the same
-`data` / `payload` / bare-object rule as `push()`, but the transaction path does **not** mint a
-`transactionId` for you. Omit it and the broker mints one.
+`data` / `payload` / bare-object rule as `push()`, and so does the id: a `transactionId` you set
+on the item is sent, and one you omit is minted client side. That id is the deduplication key of
+the pushed message, so setting it deterministically is what makes a retried transaction safe.
 
 <Aside type="note">
 A transaction is atomic, not exactly-once end to end. A lost response plus a client retry still

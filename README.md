@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/queen-badge-open.svg" alt="Queen MQ" width="120">
+  <img src="assets/queen-logo-black.png" alt="Queen MQ" width="120">
 </div>
 
 # Queen MQ

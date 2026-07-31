@@ -60,13 +60,17 @@ function parseRoutes(text) {
 // ---------------------------------------------------------------------------
 
 // Bump this after re-reading the Rust when the guard trips.
-const ACCESS_FINGERPRINT = "005e50e72627c0dc";
+const ACCESS_FINGERPRINT = "479566289425dc1a";
 
 function accessLevel(method, path) {
   const m = method;
 
   if (path === "/health" || path === "/metrics" || path === "/metrics/prometheus") return "public";
   if (path === "/" || path.startsWith("/assets/") || path.startsWith("/favicon")) return "public";
+  // Broker-direct dashboard identity (handlers/standalone.rs): public by
+  // design — /auth/me 401s ITSELF when auth is enabled, /auth/login is the
+  // page that explains auth, /auth/logout is a session no-op.
+  if (path === "/auth/me" || path === "/auth/login" || path === "/auth/logout") return "public";
 
   if (path.startsWith("/api/v1/system/") || path.startsWith("/internal/")) return "admin";
   if (m === "DELETE" && path.startsWith("/api/v1/consumer-groups/")) return "admin";
@@ -124,6 +128,7 @@ const GROUPS = [
     ["/health", "/status", "/metrics", "/metrics/prometheus"].includes(p)],
   ["Streams", (p) => p.startsWith("/streams/")],
   ["Operator surfaces", (p) => p.startsWith("/api/v1/system")],
+  ["Dashboard identity (broker-direct)", (p) => p.startsWith("/auth/")],
   ["Internal (broker-to-broker)", (p) => p.startsWith("/internal/")],
 ];
 

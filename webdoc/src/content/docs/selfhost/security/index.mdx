@@ -56,9 +56,9 @@ the absence of CORS headers.
 The router's fallback serves the dashboard assets that `rust_embed` compiled into
 the binary. Any request that matches no route is answered from those assets, with
 `index.html` as the last resort so client-side routes work. Two guards keep that
-from swallowing API mistakes: a path under `/api/` and any method other than `GET`
-or `HEAD` get a JSON `404 {"error":"Not Found","code":"no_such_route"}` instead of
-`index.html`.
+from swallowing API mistakes: a path under `/api/` or `/auth/`, and any method
+other than `GET` or `HEAD`, get a JSON
+`404 {"error":"Not Found","code":"no_such_route"}` instead of `index.html`.
 
 The consequence for security is that you cannot expose the API without also
 exposing the dashboard shell, and you cannot firewall the dashboard without also
@@ -71,18 +71,25 @@ front of the broker.
 transparent pass-through: it stamps an empty identity into the request and calls
 the handler. Every route (including `DELETE /api/v1/resources/queues/:queue` and
 `POST /api/v1/system/maintenance`) is open to anything that can open a TCP
-connection.
+connection. The [dashboard](/selfhost/dashboard) makes that state visible: it
+boots as a standalone operator identity, so anyone who can reach the port gets a
+full admin UI over the API they could already call. The broker's boot log states
+this mode in one line.
 
 Turning it on gives you a per-route access level and five roles that are a *set*,
 not a ladder. [Broker authentication](/selfhost/security/jwt) covers the algorithms,
 JWKS rotation, the role model and the boot-time validation.
 
-Two things stay open even with JWT on:
+Three things stay open even with JWT on:
 
 - `/health`, `/metrics`, `/metrics/prometheus` are classified `public` by the
   route table, and are also listed in the `JWT_SKIP_PATHS` default.
 - `/`, `/assets/*` and `/favicon*` are classified `public` so the dashboard shell
   can load.
+- `/auth/me`, `/auth/login` and `/auth/logout` are classified `public` so they
+  can answer the auth question themselves: with JWT on, `/auth/me` answers `401`
+  from its own handler and `/auth/login` serves the page that says the dashboard
+  needs the proxy. Neither discloses broker state beyond that.
 
 `/metrics/prometheus` being public matters more than it looks. Its per-queue series
 carry a `queue` label and no tenant label, and the parked-long-poll gauge is

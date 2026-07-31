@@ -52,6 +52,24 @@ This is the pattern the route exists for. The consumer acks the message it just 
 pushes its result in the same transaction, so there is no window in which the output exists
 without the input being consumed, or the input is consumed without the output existing.
 
+<pre class="mermaid">{`
+flowchart LR
+  IN["input partition<br/>message in-42"] --> W["consumer"]
+  W --> TX
+
+  subgraph TX["one PostgreSQL transaction"]
+    direction TB
+    A["ack in-42<br/>moves the input cursor"]
+    P["push orders.shipped<br/>the next stage input"]
+  end
+
+  TX -->|"commit"| OUT["orders.shipped / eu<br/>durable"]
+  TX -->|"any raise"| RB["nothing written<br/>in-42 redelivers"]
+`}</pre>
+
+The boundary is drawn around both operations at once, which is the only thing that makes the
+handoff safe: there is no ordering of two separate calls that gives you the same property.
+
 Chain that across stages and no hop can lose work or emit an orphan: a stage's output exists
 exactly when its input was consumed, because the commit that records the consumption is the
 commit that records the production. A failed attempt rolls back both halves, so the input

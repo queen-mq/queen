@@ -3,6 +3,7 @@
 namespace Queen\Builders;
 
 use Queen\Http\HttpClient;
+use Queen\Support\Uuid;
 
 class TransactionBuilder
 {
@@ -78,13 +79,22 @@ class TransactionBuilder
             'items' => array_map(function (array $item) use ($queueName, $partition) {
                 $payloadValue = $item['data'] ?? $item['payload'] ?? $item;
 
+                // Same contract as QueueBuilder::push: the caller's transactionId
+                // is what makes a retried transaction idempotent inside the dedup
+                // window, so it has to reach the wire. Absent, mint one here
+                // rather than leaving the broker to do it.
                 $result = [
                     'queue' => $queueName,
                     'payload' => $payloadValue,
+                    'transactionId' => $item['transactionId'] ?? Uuid::v7(),
                 ];
 
                 if ($partition !== null) {
                     $result['partition'] = $partition;
+                }
+
+                if (isset($item['traceId'])) {
+                    $result['traceId'] = $item['traceId'];
                 }
 
                 return $result;

@@ -23,6 +23,25 @@ The data itself is not stored per message either. Messages are packed into **seg
 with zstd, covering an inclusive offset range `[base_offset, end_offset]`. A partition's
 segments have disjoint ranges, allocated in ascending order.
 
+<pre class="mermaid">{`
+flowchart TB
+  P["log_partitions<br/>last_offset 11, log_start 4"]
+  S1["log_segments base 4, end 6<br/>blob: 3 frames, zstd"]
+  S2["log_segments base 7, end 11<br/>blob: 5 frames, zstd"]
+  T1["log_txns base 4, end 6<br/>hashes: 48 bytes"]
+  T2["log_txns base 7, end 11<br/>hashes: 80 bytes"]
+  C["log_consumers, group billing<br/>committed 6"]
+  P --> S1
+  P --> S2
+  P --> C
+  S1 -.-> T1
+  S2 -.-> T2
+`}</pre>
+
+Offsets 0 to 3 are gone, deleted by retention, which is why `log_start` sits at 4 rather than 0.
+Segment lengths differ because nothing chose them, and each dashed sidecar row mirrors the
+range of the one segment it hangs off.
+
 ## The five tables
 
 All five are created by `041_log_schema.sql`, applied at every boot. `queen.log_dlq` is a
@@ -185,6 +204,23 @@ body:
   [u16 psub_len | u8[psub_len] producer_sub]   present only when flag 2 is set
   u8[...] payload             the JSON bytes as the client sent them
 ```
+
+<pre class="mermaid">{`
+flowchart LR
+  S["log_segments row<br/>base_offset 7"] --> F0["frame 0<br/>offset 7"]
+  S --> F1["frame 1<br/>offset 8"]
+  S --> F2["frame 2<br/>offset 9"]
+  H["log_txns.hashes"] --> H0["bytes 0 to 15"]
+  H --> H1["bytes 16 to 31"]
+  H --> H2["bytes 32 to 47"]
+  H0 -.-> F0
+  H1 -.-> F1
+  H2 -.-> F2
+`}</pre>
+
+Position is the entire addressing scheme, and it is why an ack that arrives carrying only a
+`transactionId` can be turned into a number: find the matching 16-byte slot, and its index is
+the message.
 
 Reading offset `O` from a segment based at `B` means decompressing the blob and skipping to
 frame `O - B`. That is why a pop returns whole segment rows plus slicing bounds and does the

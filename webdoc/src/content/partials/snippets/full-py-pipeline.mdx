@@ -1,0 +1,210 @@
+---
+params: []
+description: "Verified snippet extracted from examples/full/py/03_pipeline_transaction.py."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/full/py/03_pipeline_transaction.py by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```python title="examples/full/py/03_pipeline_transaction.py"
+"""Queen in Python: a transactional handoff between two queues.
+
+Stage one reads from "orders" and, in a single transaction, acknowledges the
+order it read and pushes the invoice it derived from it. Either both land or
+neither does, so the pipeline cannot lose an order or invoice one twice. Stage
+two reads "invoices" and checks that all of them are there, exactly once.
+
+The last section shows the failure path: a message acknowledged as failed is
+redelivered rather than lost.
+
+Run it with the client source on the path:
+
+    cd /path/to/queen
+    PYTHONPATH=clients/client-py QUEEN_URL=http://localhost:6699 \
+        python3 examples/full/py/03_pipeline_transaction.py
+
+Exits 0 when every check passes, 1 on the first failure.
+"""
+
+import asyncio
+import os
+import sys
+import uuid
+
+from queen import Queen
+
+BROKER_URL = os.environ.get("QUEEN_URL", "http://localhost:6699")
+
+# A fresh pair of queue names per run keeps this run independent of every
+# previous one.
+RUN_ID = uuid.uuid4().hex[:8]
+ORDERS = f"ex-py-pipeline-orders-{RUN_ID}"
+INVOICES = f"ex-py-pipeline-invoices-{RUN_ID}"
+
+# One group per stage. Each stage has its own cursor over its own queue.
+BILLING = "billing"  # stage one, reading orders
+LEDGER = "ledger"  # stage two, reading invoices
+
+ORDER_BATCH = [
+    {"orderId": "A-1", "customer": "acme", "amount": 120},
+    {"orderId": "A-2", "customer": "acme", "amount": 40},
+    {"orderId": "B-1", "customer": "globex", "amount": 250},
+    {"orderId": "C-1", "customer": "initech", "amount": 999},
+]
+
+VAT = 0.22
+
+
+def check(condition, description):
+    """Assert one claim and say so out loud. A failed check exits non-zero."""
+    if not condition:
+        print(f"FAIL  {description}")
+        sys.exit(1)
+    print(f"ok    {description}")
+
+
+async def main():
+    async with Queen(BROKER_URL) as client:
+        print(f"broker {BROKER_URL}")
+        print(f"queues {ORDERS} -> {INVOICES}\n")
+
+        for name in (ORDERS, INVOICES):
+            await (
+                client.queue(name)
+                .config({"lease_time": 60, "retry_limit": 3, "dedup_window_seconds": 300})
+                .create()
+            )
+        print(f"      created {ORDERS} and {INVOICES}\n")
+
+        pushed = await client.queue(ORDERS).push([{"data": o} for o in ORDER_BATCH])
+        check(
+            all(r["status"] == "queued" for r in pushed),
+            f"{len(ORDER_BATCH)} orders are on {ORDERS}",
+        )
+
+        # ------------------------------------------------------------------
+        # Stage one: read an order, derive an invoice, commit both together.
+        # ------------------------------------------------------------------
+        # pop() claims messages without committing anything. Nothing is settled
+        # until the ack, which is why the ack can travel with the push in one
+        # transaction: the broker applies both inside one PostgreSQL transaction
+        # or neither of them.
+        handled = 0
+        while handled < len(ORDER_BATCH):
+            batch = await (
+                client.queue(ORDERS).group(BILLING).batch(2).wait(True).timeout_millis(3000).pop()
+            )
+            if not batch:
+                break
+
+            transaction = client.transaction()
+            for message in batch:
+                order = message["data"]
+                invoice = {
+                    "invoiceFor": order["orderId"],
+                    "customer": order["customer"],
+                    "total": round(order["amount"] * (1 + VAT), 2),
+                }
+                transaction = transaction.queue(INVOICES).push([{"data": invoice}])
+                print(f"      order {order['orderId']} -> invoice {invoice['total']}")
+
+            # The acks carry each message's leaseId, so a commit whose lease has
+            # already expired (another consumer took over) fails instead of
+            # writing invoices for work someone else is redoing.
+            transaction = transaction.ack(batch, "completed", {"consumer_group": BILLING})
+
+            result = await transaction.commit()
+            check(
+                result.get("success") is True,
+                f"committed {len(batch)} acks and {len(batch)} pushes as one transaction",
+            )
+            handled += len(batch)
+
+        check(handled == len(ORDER_BATCH), f"stage one handled all {len(ORDER_BATCH)} orders")
+
+        drained = await (
+            client.queue(ORDERS).group(BILLING).batch(10).wait(True).timeout_millis(2000).pop()
+        )
+        check(drained == [], f"{ORDERS} is drained for group {BILLING}")
+
+        # ------------------------------------------------------------------
+        # Stage two: the derived messages are all there, exactly once.
+        # ------------------------------------------------------------------
+        invoices = []
+
+        async def handle(message):
+            invoices.append(message["data"])
+            print(f"      invoice for {message['data']['invoiceFor']} read by {LEDGER}")
+
+        await (
+            client.queue(INVOICES)
+            .group(LEDGER)
+            .batch(1)
+            .limit(len(ORDER_BATCH))
+            .idle_millis(5000)
+            .timeout_millis(2000)
+            .consume(handle)
+        )
+
+        billed = sorted(i["invoiceFor"] for i in invoices)
+        expected = sorted(o["orderId"] for o in ORDER_BATCH)
+        check(len(invoices) == len(ORDER_BATCH), f"{len(invoices)} invoices, expected {len(ORDER_BATCH)}")
+        check(len(set(billed)) == len(billed), "no order was invoiced twice")
+        check(billed == expected, "every order produced its invoice")
+
+        totals = {i["invoiceFor"]: i["total"] for i in invoices}
+        check(
+            all(totals[o["orderId"]] == round(o["amount"] * (1 + VAT), 2) for o in ORDER_BATCH),
+            "every invoice carries the total derived from its order",
+        )
+
+        # ------------------------------------------------------------------
+        # The failure path: a failed ack is a redelivery, not a loss.
+        # ------------------------------------------------------------------
+        print()
+        late = {"orderId": "D-1", "customer": "hooli", "amount": 500}
+        await client.queue(ORDERS).push({"data": late})
+
+        first_try = await (
+            client.queue(ORDERS).group(BILLING).batch(1).wait(True).timeout_millis(3000).pop()
+        )
+        check(len(first_try) == 1, f"picked up order {late['orderId']}")
+
+        # status False means failed. Nothing downstream was written, so the ack
+        # says so: the broker releases the lease and rewinds this group's cursor
+        # to the failed message instead of moving past it. After retry_limit
+        # failures the message goes to the dead letter queue rather than looping.
+        nacked = await client.ack(
+            first_try[0], False, {"group": BILLING, "error": "invoice service refused the call"}
+        )
+        check(nacked.get("success") is True, "acknowledged the order as failed")
+        print(f"      failed: {first_try[0]['transactionId']}")
+
+        redelivered = await (
+            client.queue(ORDERS).group(BILLING).batch(1).wait(True).timeout_millis(5000).pop()
+        )
+        check(len(redelivered) == 1, "the failed order was redelivered rather than dropped")
+        check(
+            redelivered[0]["transactionId"] == first_try[0]["transactionId"],
+            "and it is the very same message, not a copy",
+        )
+
+        settled = await client.ack(redelivered[0], True, {"group": BILLING})
+        check(settled.get("success") is True, "the retry succeeded and was acknowledged")
+
+        gone = await (
+            client.queue(ORDERS).group(BILLING).batch(10).wait(True).timeout_millis(2000).pop()
+        )
+        check(gone == [], "once acknowledged as completed it is not redelivered again")
+
+        for name in (ORDERS, INVOICES):
+            deleted = await client.queue(name).delete()
+            check(deleted.get("deleted") is True, f"queue {name} deleted")
+
+        print("\nPASS 03_pipeline_transaction")
+
+
+asyncio.run(main())
+```

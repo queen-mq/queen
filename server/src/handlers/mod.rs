@@ -119,6 +119,12 @@ pub struct AppState {
     // or foreign pid re-checks every time, so an attacker cannot grow the map,
     // and legitimate acks (pids from a real pop) are always positive.
     pub ownership_ok: Mutex<HashSet<String>>,
+    // Broker-direct dashboard identity surface (handlers/standalone.rs):
+    // whether JWT auth is on decides what /auth/me and /auth/login answer;
+    // `server_id` (QUEEN_SERVER_ID → HOSTNAME → random) becomes the synthetic
+    // cluster's cell_slug so the SPA's cell-level pages can name this broker.
+    pub auth_enabled: bool,
+    pub server_id: String,
 }
 
 const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
@@ -419,6 +425,7 @@ mod status;
 mod consumer_groups;
 mod maintenance;
 mod streams;
+mod standalone;
 mod static_files;
 mod analytics;
 
@@ -430,6 +437,7 @@ pub use status::*;
 pub use consumer_groups::*;
 pub use maintenance::*;
 pub use streams::*;
+pub use standalone::*;
 pub use static_files::*;
 pub use analytics::*;
 

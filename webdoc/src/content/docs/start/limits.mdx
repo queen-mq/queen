@@ -201,8 +201,11 @@ handler finishes loses the message.
   server-initiated push and no persistent subscription stream.
 - **Stream-processing state accumulates.** Nothing purges `queen_streams.queries`
   or `queen_streams.state`, and both are `GRANT`ed to `PUBLIC`.
-- **The bundled dashboard needs the proxy.** It boots by calling `GET /auth/me`,
-  which the broker does not serve.
+- **The bundled dashboard and JWT auth do not combine broker-direct.** With auth
+  off the broker serves a fully working dashboard as an anonymous operator; with
+  `JWT_ENABLED=true` it serves an explanation page instead, because the app
+  sends no bearer token and the broker holds no sessions. A dashboard with
+  logins and roles is `queen_proxy`'s.
 - **The broker needs a session it keeps.** Schema apply and the retention leader
   election both use session-level advisory locks, so a transaction-pooling proxy
   in front of PostgreSQL breaks them.

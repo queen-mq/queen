@@ -52,6 +52,15 @@ const SOURCES = [
     suite: "C++ client suite",
     command: "test/run.sh --suite cpp",
   },
+  // The complete programs behind the Full examples section. These are whole
+  // files rather than regions: each one is marked from its first line to its
+  // last, so what a reader copies is exactly what runs.
+  {
+    dir: "examples/full",
+    lang: "js",
+    suite: "Full examples",
+    command: "examples/full/run.sh",
+  },
 ];
 
 const EXT_LANG = {

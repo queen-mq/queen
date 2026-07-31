@@ -54,10 +54,15 @@ fn serve(path: &str) -> Option<Response> {
 /// does not exist used to come back 200 text/html — which every JSON client
 /// (and the webapp's axios) reads as SUCCESS. A phantom endpoint must fail
 /// loudly, not look like it worked.
+///
+/// /auth/* gets the same treatment: the SPA's identity bootstrap fetches
+/// /auth/me and parses JSON, so an /auth path this broker does not implement
+/// (the real ones are registered routes — handlers/standalone.rs) answering
+/// with the SPA document is the same phantom-endpoint lie.
 pub async fn handle_static(method: axum::http::Method, uri: Uri) -> Response {
     let path = uri.path();
     let readable = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
-    if path.starts_with("/api/") || path == "/api" || !readable {
+    if path.starts_with("/api/") || path == "/api" || path.starts_with("/auth/") || path == "/auth" || !readable {
         return json(
             StatusCode::NOT_FOUND,
             "{\"error\":\"Not Found\",\"code\":\"no_such_route\"}".to_string(),

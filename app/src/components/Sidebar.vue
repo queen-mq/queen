@@ -15,7 +15,7 @@
       <!-- Brand -->
       <div class="brand">
         <div class="brand-mark">
-          <img src="/queen-badge-open.svg" alt="" />
+          <img src="/queen-logo-transparent.png" alt="" />
           <span class="brand-health" :class="healthDot" :title="healthTitle" />
         </div>
         <div v-if="!props.collapsed" class="brand-text">
@@ -24,8 +24,9 @@
       </div>
 
       <!-- Acting tenant / cluster. Present on every route because every number
-           on every route belongs to it. -->
-      <ClusterSelector :collapsed="props.collapsed" />
+           on every route belongs to it. Standalone (broker-direct) has exactly
+           one synthetic cluster and nothing to switch to — no selector. -->
+      <ClusterSelector v-if="!standalone" :collapsed="props.collapsed" />
 
       <!-- Navigation, derived from route meta filtered by what identity
            grants. An entry the user cannot use is never in the DOM. -->
@@ -57,7 +58,9 @@
 
       <!-- Footer -->
       <div class="sidebar-foot">
-        <div v-if="!props.collapsed" class="env-pill">
+        <!-- Session pill. Standalone has no session: no email to show and a
+             sign-out that could only reload the page — so neither renders. -->
+        <div v-if="!props.collapsed && !standalone" class="env-pill">
           <span class="user-email" :title="email || 'signed in'">{{ email || 'signed in' }}</span>
           <button @click="logout" class="env-refresh" title="Sign out">
             <svg style="width:14px; height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75"/></svg>
@@ -93,7 +96,7 @@ defineEmits(['toggle-collapse'])
 
 const route = useRoute()
 const router = useRouter()
-const { email, can, epoch, logout } = useIdentity()
+const { email, can, epoch, logout, standalone } = useIdentity()
 const mobileOpen = ref(false)
 
 const closeMobile = () => { if (window.innerWidth < 1024) mobileOpen.value = false }

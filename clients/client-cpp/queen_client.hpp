@@ -1118,10 +1118,26 @@ private:
                     payload = item;
                 }
                 
-                push_items.push_back({
+                // Same contract as QueueBuilder::push: the caller's transactionId
+                // is what makes a retried transaction idempotent inside the dedup
+                // window, so it has to reach the wire. Absent, mint one here
+                // rather than leaving the broker to do it.
+                json formatted = {
                     {"queue", queue_name_},
-                    {"payload", payload}
-                });
+                    {"payload", payload},
+                    {"transactionId", item.contains("transactionId")
+                        ? item["transactionId"].get<std::string>()
+                        : util::generate_uuid_v7()}
+                };
+
+                if (item.contains("traceId") && item["traceId"].is_string()) {
+                    std::string trace_id = item["traceId"].get<std::string>();
+                    if (util::is_valid_uuid(trace_id)) {
+                        formatted["traceId"] = trace_id;
+                    }
+                }
+
+                push_items.push_back(formatted);
             }
             
             parent_->operations_.push_back({

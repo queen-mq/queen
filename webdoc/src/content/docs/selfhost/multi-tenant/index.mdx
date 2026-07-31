@@ -41,14 +41,18 @@ is a separate namespace on the broker and a separate quota bundle.
 
 ## Cluster to cell
 
-```text
-tenant "acme"
-├── cluster "acme-prod"    → cell "eu1-shared-a"
-└── cluster "acme-staging" → cell "eu1-shared-a"
+<pre class="mermaid">{`
+flowchart LR
+  T1["tenant acme"] --> C1["cluster acme-prod"]
+  T1 --> C2["cluster acme-staging"]
+  T2["tenant globex"] --> C3["cluster globex"]
+  C1 --> S1["cell eu1-shared-a<br/>one proxy, one broker, one PostgreSQL"]
+  C2 --> S1
+  C3 --> S2["cell eu1-ded-7<br/>one proxy, one broker, one PostgreSQL<br/>dedicated: nothing else on it"]
+`}</pre>
 
-tenant "globex"
-└── cluster "globex"       → cell "eu1-ded-7"   (dedicated: nothing else on it)
-```
+Each cell is a whole stack in its own right, which is what makes the arrows go
+one way only: a cluster names a single cell and never spans two.
 
 The relationship is **N:1 on shared cells and 1:1 on dedicated ones**. Plans carry a
 `cell_class` of `shared` or `dedicated` and cells carry the same field, but the
