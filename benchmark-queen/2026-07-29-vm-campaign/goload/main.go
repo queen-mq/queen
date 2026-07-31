@@ -481,6 +481,8 @@ func runOpenLoopMode(args []string) {
 	manualAck := fs.Bool("manual-ack", false, "consumers LEASE (pop AutoAck=false) and immediately ack the whole received batch as completed — measures TRUE production consume cost (lease + explicit full-batch offset commit) instead of server-side autoAck. On ack failure: count ackErr, NO retry (lease expires -> redeliver).")
 	ackAsync := fs.Bool("ack-async", false, "with -manual-ack: dispatch each batch's ackFullBatch on a goroutine and immediately pop the NEXT partition, instead of acking synchronously in the consumer loop. Models a real async-ack consumer that doesn't hold a partition's lease blocked on its own ack round-trip. No effect without -manual-ack.")
 	ackInflight := fs.Int("ack-inflight", 256, "with -ack-async: cap on concurrently in-flight async acks (a global buffered-channel semaphore). When full the consumer BLOCKS until a slot frees — an ack is NEVER shed; blocking is the honest backpressure. Only used with -ack-async.")
+	authToken := fs.String("token", "", "Bearer token (tenant API key). Set it to aim the run at queen_proxy instead of the broker; empty = straight to the broker, the historical shape")
+	hostHeader := fs.String("host-header", "", "Host header the proxy routes on (cluster slug). Only meaningful together with -token")
 	_ = fs.String("mode", "openloop", "run mode: max | app | openloop")
 	_ = fs.Parse(args)
 
@@ -529,12 +531,21 @@ func runOpenLoopMode(args []string) {
 	// attempt. A failed push is counted (pushErr) and dropped — the pacer will
 	// offer more on the next tick anyway, and retrying would double-offer and
 	// corrupt the offered-rate accounting (and hold an in-flight slot longer).
-	q, err := queen.New(queen.ClientConfig{
+	olCfg := queen.ClientConfig{
 		URL:                 *url,
 		TimeoutMillis:       *timeoutMs,
 		MaxIdleConnsPerHost: *idleConns,
 		RetryAttempts:       -1,
-	})
+	}
+	// With -token the same open-loop shape is offered THROUGH queen_proxy, so a
+	// soak with the proxy in the path can be diffed against the direct one.
+	if *authToken != "" {
+		olCfg.BearerToken = *authToken
+		if *hostHeader != "" {
+			olCfg.Headers = map[string]string{"Host": *hostHeader}
+		}
+	}
+	q, err := queen.New(olCfg)
 	if err != nil {
 		fmt.Printf("client init failed: %v\n", err)
 		os.Exit(1)

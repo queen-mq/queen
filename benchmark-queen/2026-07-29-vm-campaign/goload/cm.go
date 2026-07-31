@@ -1138,6 +1138,8 @@ func runCMMode(args []string) {
 	interTargeted := fs.Bool("intermediate-targeted", true, "intermediate stages (cm-db / cm-cal) also use TARGETED pops with static partition ownership (measured: allocator-update churn on log_partitions bloats the wildcard candidate scan to ~35ms at high single-push rates)")
 	sweepFloorMs := fs.Int("sweep-floor-ms", 250, "with -final-targeted: minimum wall time per full partition sweep (bounds empty-pop rate at low load)")
 	verifyOnly := fs.Bool("verify-only", false, "skip the run: verify existing logs in -logdir and exit")
+	authToken := fs.String("token", "", "Bearer token (tenant API key). Set it to aim the run at queen_proxy instead of the broker; empty = straight to the broker, the historical shape")
+	hostHeader := fs.String("host-header", "", "Host header the proxy routes on (cluster slug). Only meaningful together with -token")
 	_ = fs.String("mode", "cm", "run mode")
 	_ = fs.Parse(args)
 
@@ -1202,12 +1204,22 @@ func runCMMode(args []string) {
 	fmt.Printf("  queues: dedupWindow=%ds completedRetention=%ds leaseTime=%ds | logdir=%s\n",
 		*dedupWindow, *completedRet, *leaseTime, *logDir)
 
-	q, err := queen.New(queen.ClientConfig{
+	cmCfg := queen.ClientConfig{
 		URL:                 *url,
 		TimeoutMillis:       *timeoutMs,
 		MaxIdleConnsPerHost: *idleConns,
 		RetryAttempts:       3, // idempotent via dedupWindow; keeps scheduled seqs from being lost on transient errors
-	})
+	}
+	// Same workload, optionally one hop further away: with -token the run is
+	// aimed at queen_proxy instead of the broker, so the channel-manager number
+	// with the proxy in the path is comparable with the one without it.
+	if *authToken != "" {
+		cmCfg.BearerToken = *authToken
+		if *hostHeader != "" {
+			cmCfg.Headers = map[string]string{"Host": *hostHeader}
+		}
+	}
+	q, err := queen.New(cmCfg)
 	if err != nil {
 		fmt.Printf("client init failed: %v\n", err)
 		os.Exit(1)

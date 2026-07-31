@@ -1,0 +1,16 @@
+     5.87%  goload   goload             [.] runtime.findObject
+     5.69%  goload   goload             [.] encoding/json.checkValid
+     4.91%  goload   goload             [.] encoding/json.stateInString
+     4.90%  goload   goload             [.] runtime.scanobject
+     3.77%  goload   goload             [.] runtime.greyobject
+     3.21%  goload   goload             [.] encoding/json.unquoteBytes
+     2.34%  goload   goload             [.] encoding/json.appendString[go.shape.string]
+     2.27%  goload   goload             [.] encoding/json.(*decodeState).rescanLiteral
+     2.18%  goload   goload             [.] runtime.gcmarknewobject
+     1.90%  goload   goload             [.] runtime.memmove
+     1.84%  goload   goload             [.] runtime.gcDrain
+     1.77%  goload   goload             [.] runtime.mallocgcSmallScanNoHeader
+     1.63%  goload   goload             [.] encoding/json.(*decodeState).skip
+     1.37%  goload   goload             [.] runtime.(*spanSet).pop
+     1.33%  goload   goload             [.] runtime.memclrNoHeapPointers
+     1.26%  goload   goload             [.] runtime.markroot
