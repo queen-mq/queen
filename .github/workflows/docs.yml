@@ -64,11 +64,20 @@ jobs:
 
       # The benchmark figures are rendered from the archived artifacts by
       # scripts/charts.py, so the drift check needs matplotlib present.
+      #
+      # The version is pinned EXACTLY, not to 3.10.*, because gen-charts.mjs
+      # --check re-renders the figures and compares them to the committed SVGs
+      # byte for byte. Patch releases change that output: 3.10.* resolved to
+      # 3.10.9 on the runner against SVGs rendered with 3.10.6, and every run
+      # failed with "DRIFT: webdoc/public/charts is behind the benchmark
+      # artifacts" while `pnpm gen:check` passed locally. Bumping this pin means
+      # running `pnpm --dir webdoc gen` and committing the re-rendered figures
+      # in the same commit.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install matplotlib
-        run: pip install "matplotlib==3.10.*"
+        run: pip install "matplotlib==3.10.6"
 
       # Fails when a generated table or snippet is behind the Rust/SQL/test
       # source it is derived from, and when one of the mirrored Rust
