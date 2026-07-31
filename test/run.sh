@@ -208,9 +208,11 @@ tally() {  # logfile -> comparable pass tally, or "" if the suite prints none
   t="$(grep -aoE 'Overall Results: [0-9]+/[0-9]+ tests passed' "$f" 2>/dev/null \
        | sed -e 's/Overall Results: //' -e 's/ tests passed//' | paste -sd, -)"
   [ -n "$t" ] && { echo "$t"; return; }
-  # pytest: "=== 140 passed, 1 failed, 91 errors in 12.34s ==="
+  # pytest: "=== 140 passed, 1 failed, 91 errors in 12.34s ===". The broad
+  # character class also swallows the "in 313" duration tail ("in" is lowercase
+  # letters), which made parity flap when one lane merely ran slower — chop it.
   t="$(grep -aoE '[0-9]+ passed[0-9a-z, ]*' "$f" 2>/dev/null | tail -1 \
-       | sed -e 's/ *$//')"
+       | sed -e 's/ in [0-9]*$//' -e 's/ *$//')"
   [ -n "$t" ] && { echo "$t"; return; }
   echo ""
 }

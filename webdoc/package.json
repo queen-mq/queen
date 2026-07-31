@@ -20,6 +20,7 @@
     "check:prose": "node scripts/check-prose.mjs"
   },
   "dependencies": {
+    "@cloudflare/nimbus-docs": "0.8.2",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@iconify-json/ph": "^1.2.0",
@@ -28,7 +29,7 @@
     "astro-og-canvas": "^0.13.0",
     "canvaskit-wasm": "^0.41.1",
     "clsx": "^2.1.1",
-    "@cloudflare/nimbus-docs": "0.8.2",
+    "mermaid": "^11.16.0",
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {

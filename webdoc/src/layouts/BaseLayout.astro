@@ -2,6 +2,7 @@
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import "../styles/globals.css";
+import "../styles/mermaid.css";
 import "../styles/prose.css";
 import { config } from "virtual:nimbus/config";
 import { getCollectionLlmsUrl, getVersionStatus } from "@cloudflare/nimbus-docs";
@@ -114,5 +115,8 @@ const llmsUrl = Astro.site
       codeCopy();
       headingAnchors();
     </script>
-  </body>
+    <script>
+    import "../scripts/mermaid";
+  </script>
+</body>
 </html>

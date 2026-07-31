@@ -1,0 +1,12 @@
+{
+  "name": "queen-examples-full-js",
+  "private": true,
+  "type": "module",
+  "description": "Complete, self-verifying Queen MQ examples for the documentation.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "queen-mq": "file:../../../clients/client-js"
+  }
+}
