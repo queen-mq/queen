@@ -1,25 +1,16 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
 use deadpool_postgres::Pool;
-use serde::Deserialize;
-use serde_json::value::RawValue;
 
 use crate::db;
-use crate::frames::{
-    pack_frames, unpack_frames, uuid_bytes_to_string, uuid_string_to_bytes, zstd_compress,
-    zstd_decompress, FrameIn,
-};
-use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
+use crate::fusion::{json_escape_into, Fusion};
 use crate::metrics::Metrics;
-use crate::util::uuidv7_bytes;
 use crate::vegas::Vegas;
 
 pub struct AppState {
@@ -462,10 +453,6 @@ pub(crate) fn normalize_ack_status(s: Option<&str>) -> &'static str {
         Some("dlq") => "dlq",
         Some(_) => "failed",
     }
-}
-
-pub(crate) fn text_plain(status: StatusCode, body: String) -> Response {
-    (status, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
 // Collect the given query keys into a JSON filter object, keeping only

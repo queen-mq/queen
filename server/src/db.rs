@@ -147,44 +147,12 @@ pub fn resolve_query_timeout<T>(
     }
 }
 
-// Lowercase hex of a 16-byte txn hash — the token format queen.log_ack_by_hash_v1
-// returns in noopHashes/staleHashes (PG encode(..,'hex') is lowercase).
-fn hex16(b: &[u8; 16]) -> String {
-    let mut s = String::with_capacity(32);
-    for x in b {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{:02x}", x);
-    }
-    s
-}
-
 // ------------------------------------------------------------------------ ack
 // NEW (log engine): positional ack — advance the (queue, partition, group)
 // cursor to the absolute offset `upto` via queen.log_ack_v1 (005_log_ack). `ok=false`
 // releases the lease without advancing (full redelivery). Returns the SP JSON
 // as text: {"ok":bool,"off":i64,"acked":i64,...} or {"ok":false,"error":..}.
 #[allow(clippy::too_many_arguments)]
-pub async fn ack_position(
-    client: &deadpool_postgres::Client,
-    queue: &str,
-    partition: &str,
-    group: &str,
-    worker: &str,
-    upto: i64,
-    ok: bool,
-    count: i32,
-) -> Result<String, tokio_postgres::Error> {
-    let stmt = client
-        .prepare_cached(
-            "SELECT (queen.log_ack_v1($1, $2, $3, $4, $5::bigint, $6::bool, $7::int))::text",
-        )
-        .await?;
-    let row = client
-        .query_one(&stmt, &[&queue, &partition, &group, &worker, &upto, &ok, &count])
-        .await?;
-    Ok(row.get(0))
-}
-
 // ACK REGISTRY fast path (server/src/ack_registry.rs): partition-id-addressed
 // positional ack via queen.log_ack_at_v1 (005_log_ack) — the pid-keyed twin of
 // log_ack_v1. The registry HIT already proved (worker matches, whole batch
@@ -266,77 +234,6 @@ pub async fn ack_by_hash(
         .query_one(&stmt, &[&partition_id, &group, &worker, &hashes, &statuses])
         .await?;
     Ok(row.get(0))
-}
-
-// Ack a set of (transactionId -> status) for ONE (partition, consumer_group,
-// worker). COMPATIBILITY wrapper kept with its pre-log signature: the log SQL is
-// hash-addressed (SQL never sees txn strings, §3), so this parses `acks_json`
-// ([{"txn":..,"status":..}] — legacy [{"txn":..,"ok":bool}] accepted), computes
-// the 16B xxh3_128 hashes broker-side, calls queen.log_ack_by_hash_v1, and maps
-// the returned noopHashes/staleHashes back to noopTxns/staleTxns for the caller.
-// The dlq-handoff position is mirrored into the legacy "seq" key ("frameIdx":0)
-// alongside the contract's "off". Prefer ack_by_hash on new code paths.
-pub async fn ack_by_txn(
-    client: &deadpool_postgres::Client,
-    partition_id: &str,
-    group: &str,
-    worker: &str,
-    acks_json: &str,
-) -> Result<String, tokio_postgres::Error> {
-    let items: Vec<serde_json::Value> =
-        serde_json::from_str(acks_json).unwrap_or_default();
-    let mut hashes: Vec<Vec<u8>> = Vec::with_capacity(items.len());
-    let mut statuses: Vec<String> = Vec::with_capacity(items.len());
-    let mut by_hex: std::collections::HashMap<String, String> =
-        std::collections::HashMap::with_capacity(items.len());
-    for it in &items {
-        let txn = it.get("txn").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let status = match it.get("status").and_then(|x| x.as_str()) {
-            Some(s) => s.to_string(),
-            // Legacy boolean form: ok -> completed, !ok -> failed.
-            None => match it.get("ok").and_then(|x| x.as_bool()) {
-                Some(true) | None => "completed".to_string(),
-                Some(false) => "failed".to_string(),
-            },
-        };
-        let h = crate::util::txn_hash128(&txn);
-        by_hex.insert(hex16(&h), txn);
-        hashes.push(h.to_vec());
-        statuses.push(status);
-    }
-
-    let raw = ack_by_hash(client, partition_id, group, worker, &hashes, &statuses).await?;
-
-    // Post-process: hex hash lists -> txn lists; legacy position keys. On any
-    // parse hiccup return the SP text untouched (the caller degrades gracefully).
-    let mut v: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return Ok(raw),
-    };
-    if let Some(obj) = v.as_object_mut() {
-        for (hkey, tkey) in [("noopHashes", "noopTxns"), ("staleHashes", "staleTxns")] {
-            let mapped: Vec<serde_json::Value> = obj
-                .get(hkey)
-                .and_then(|x| x.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|h| h.as_str())
-                        .filter_map(|h| by_hex.get(&h.to_ascii_lowercase()))
-                        .map(|t| serde_json::Value::String(t.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !mapped.is_empty() {
-                obj.insert(tkey.to_string(), serde_json::Value::Array(mapped));
-            }
-        }
-        // Legacy (seq, frameIdx) mirror of the scalar offset for pre-log callers.
-        if let Some(off) = obj.get("off").and_then(|x| x.as_i64()) {
-            obj.insert("seq".to_string(), serde_json::Value::from(off));
-            obj.insert("frameIdx".to_string(), serde_json::Value::from(0));
-        }
-    }
-    Ok(v.to_string())
 }
 
 // Dead-letter the poison HEAD frame of a leased batch via queen.log_dlq_head_v1
@@ -1561,36 +1458,6 @@ pub async fn cleanup_system_metrics(
 // (partition, group) cursor accordingly on first contact (existing cursors are
 // never re-seeded).
 #[allow(clippy::too_many_arguments)]
-pub async fn pop_wildcard(
-    client: &deadpool_postgres::Client,
-    queue: &str,
-    group: &str,
-    budget: i32,
-    lease_seconds: i32,
-    worker: &str,
-    auto_ack: bool,
-    max_partitions: i32,
-    sub_mode: &str,
-    sub_from: &str,
-    // Track B (§5): $10 = tenant, scopes the wildcard candidate scan + per-queue
-    // resolution (default tenant when the feature is off).
-    tenant: &str,
-) -> Result<String, tokio_postgres::Error> {
-    let stmt = client
-        .prepare_cached(
-            "SELECT (queen.log_pop_wildcard_wire_v1($1, $2, $3::int, $4::int, $5, $6::bool, $7::int, $8, $9, $10::text::uuid))::text",
-        )
-        .await?;
-    let row = client
-        .query_one(
-            &stmt,
-            &[&queue, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &tenant],
-        )
-        .await?;
-    Ok(row.get(0))
-}
-
 // Binary wildcard pop: same claim algorithm, but blobs come back as a NATIVE
 // bytea[] aligned with the meta's segment traversal order — no base64 encode
 // on PG, no whitespace-strip + decode on the broker (see log_pop_wildcard_bin_v1).
