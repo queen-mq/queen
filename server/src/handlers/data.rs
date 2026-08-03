@@ -935,6 +935,16 @@ async fn serve_pop_hotlist(
 ) -> Response {
     let lease_id: &str = if auto_ack { "" } else { worker };
     let mut backoff_count: u32 = 0;
+    // Request-flow trace: the per-request uuidv7 `worker` is the correlation
+    // key — grep w=<prefix> and sort by t= to reconstruct one pop's full life.
+    let t_rq = Instant::now();
+    // uuidv7 is time-ordered: the LEADING hex is the timestamp and collides
+    // across concurrent requests — the trailing bits are the random part.
+    let wtag: &str = if worker.len() >= 8 { &worker[worker.len() - 8..] } else { worker };
+    if st.hotlist.traced(qkey) {
+        eprintln!("[hlt] rqin q={} g={} w={} batch={} mp={} wait={} t={}",
+            queue, group, wtag, batch, max_parts, wait, crate::hotlist::trace_now_ms());
+    }
     loop {
         // ── TASK M (minimum pop wait). The ceiling on a small cell is
         // COMMIT-bound, ~4 tiny PG commits per DELIVERED message, because a pop
@@ -1012,11 +1022,14 @@ async fn serve_pop_hotlist(
                 .saturating_duration_since(Instant::now())
                 .min(interval);
             let _parked = st.metrics.parked.enter(tenant, queue);
-            if st.notifier.wait_queue(qkey, waitd).await {
-                if st.hotlist.traced(qkey) {
-                    eprintln!("[hlt] woken q={} g={} t={}", queue, group,
-                        crate::hotlist::trace_now_ms());
-                }
+            let t_park = Instant::now();
+            let woke = st.notifier.wait_queue(qkey, waitd).await;
+            if st.hotlist.traced(qkey) {
+                eprintln!("[hlt] park q={} g={} w={} ms={} woke={} bo={} t={}", queue, group,
+                    wtag, t_park.elapsed().as_millis(), woke, backoff_count,
+                    crate::hotlist::trace_now_ms());
+            }
+            if woke {
                 backoff_count = 0;
             }
             continue;
@@ -1046,6 +1059,11 @@ async fn serve_pop_hotlist(
             st.metrics
                 .ack_success
                 .fetch_add(count as u64, Ordering::Relaxed);
+        }
+        if st.hotlist.traced(qkey) {
+            eprintln!("[hlt] rqout q={} g={} w={} n={} ms={} t={}",
+                queue, group, wtag, count, t_rq.elapsed().as_millis(),
+                crate::hotlist::trace_now_ms());
         }
         return json(
             if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK },
@@ -1208,8 +1226,113 @@ async fn hotlist_pop_attempt(
     let need_reseed = st.hotlist.reseed_due(qkey, group, now_ms, st.hotlist_reseed_ms);
     let need_cfg = !st.hotlist.cfg_fresh(qkey, now_ms, HOTLIST_CFG_TTL_MS);
     if !need_reseed && !need_cfg && !st.hotlist.has_ready(qkey, group, now_ms) {
+        if st.hotlist.traced(qkey) {
+            eprintln!("[hlt] quiet q={} g={} w={} t={}", queue, group,
+                &worker[worker.len().saturating_sub(8)..], crate::hotlist::trace_now_ms());
+        }
         let (b, c, m) = empty();
         return (b, c, m, Duration::ZERO);
+    }
+
+    // ── POP FUSION (server/src/pop_fusion.rs). Steady-path serves only: the
+    // side quests that need a private connection (deferral-config refresh,
+    // reseed floor) stay on the direct path below, which they reach unchanged
+    // because this branch requires them idle. take_batch is pure in-memory, so
+    // the fused route touches neither the Vegas permit nor the pool — the
+    // flush task takes ONE permit + ONE connection for the whole fused
+    // transaction.
+    if st.pop_fusion.enabled() && !need_cfg && !need_reseed {
+        // Checkout width = the SQL's serve cap, 1:1. The old 2x over-fetch dated
+    // from the random-candidate-scan era, when half a claim's candidates were
+    // routinely stolen or empty. With the hot-list ring the candidates are
+    // near-perfect (measured 2026-08-03: leased 0.0%, empty 1.0%) — and the
+    // over-fetch systematically returned the surplus HALF of every claim with
+    // no verdict (requeue 49% of all candidates), sending perfectly good
+    // partitions to the BACK of the ready ring for a full extra lap (~1s at
+    // the sparse shape's service rate). One line, half the latency.
+    let k = (max_parts.max(1) as usize).clamp(2, 64);
+        let want = batch.max(1) as u32;
+        let cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
+        if st.hotlist.traced(qkey) {
+            eprintln!("[hlt] take q={} g={} w={} got={} est={} fused=1 t={}", queue, group,
+                &worker[worker.len().saturating_sub(8)..], cands.len(),
+                st.hotlist.ready_est(qkey, group, now_ms), crate::hotlist::trace_now_ms());
+        }
+        if cands.is_empty() {
+            // The quiet gate said ready, but a concurrent serve drained the
+            // ring first — same outcome as the direct path's empty take.
+            let (b, c, m) = empty();
+            return (b, c, m, Duration::ZERO);
+        }
+        let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
+        let skip_window = st.hotlist.skip_window(qkey);
+        let lease_ms = lease_seconds.max(1) as i64 * 1000;
+        // Same cancellation-safety contract as the direct path: if this future
+        // is dropped while parked on the oneshot, the guard requeues the
+        // checked-out candidates. The flush may still commit the leases — the
+        // next serve then sees them live ('leased' verdict) and they expire
+        // into redelivery, the same at-least-once window the direct path has
+        // between SQL completion and render.
+        let mut guard = InflightGuard {
+            hl: st.hotlist.clone(),
+            qkey: qkey.to_string(),
+            group: group.to_string(),
+            cands,
+            now_ms,
+            auto_ack,
+            lease_ms,
+            armed: true,
+        };
+        let t_claim = Instant::now();
+        let verdict = st
+            .pop_fusion
+            .claim(
+                queue.to_string(),
+                group.to_string(),
+                names,
+                batch,
+                lease_seconds,
+                worker.to_string(),
+                auto_ack,
+                max_parts,
+                sub_mode.to_string(),
+                sub_from.to_string(),
+                skip_window,
+                tenant.to_string(),
+            )
+            .await;
+        guard.armed = false;
+        let cands = std::mem::take(&mut guard.cands);
+        if st.hotlist.traced(qkey) {
+            eprintln!("[hlt] fusedwait q={} g={} w={} ms={} t={}", queue, group,
+                &worker[worker.len().saturating_sub(8)..], t_claim.elapsed().as_millis(),
+                crate::hotlist::trace_now_ms());
+        }
+        match verdict {
+            crate::pop_fusion::PopVerdict::Served { meta, blobs, states, rtt } => {
+                return finish_pop_serve(
+                    st, qkey, queue, group, cands, meta, blobs, states, now_ms, auto_ack,
+                    lease_ms, lease_seconds, lease_id, rtt,
+                );
+            }
+            crate::pop_fusion::PopVerdict::FlushErr => {
+                // Byte-identical to the direct path's DB-error handling:
+                // requeue everything, return empty; nothing strands.
+                let back: Vec<crate::hotlist::CheckinResult> = cands
+                    .iter()
+                    .map(|c| crate::hotlist::CheckinResult {
+                        name: c.name.clone(),
+                        epoch: c.epoch,
+                        verdict: crate::hotlist::Verdict::Requeue,
+                        drained: false,
+                    })
+                    .collect();
+                st.hotlist
+                    .checkin(qkey, group, back, now_ms, auto_ack, lease_ms);
+                let (b, c, m) = empty();
+                return (b, c, m, Duration::ZERO);
+            }
+        }
     }
 
     // Real DB work ahead: NOW take the serving permit + a pooled connection. The
@@ -1250,9 +1373,26 @@ async fn hotlist_pop_attempt(
     // the serve's whole SQL leg and capped a 100-partition T1 ring at ~6
     // concurrent serves (measured: 806 serves/s x 863 msg avg = the entire ~700k
     // pop ceiling; July's pre-hotlist SQL claim held ONE partition per pop).
+    // Checkout width, ceiling 64 — and the ceiling is LOAD-BEARING for a
+    // deeper reason than the serial SQL leg it was written for. 2026-08-02,
+    // after log_pop_list_v1 went batched (~6 statements per pop regardless of
+    // candidate count), the ceiling was experimentally raised to 512 to
+    // amortize the per-pop WAL commit over wide claims. Measured on the sparse
+    // CM shape (1000 partitions x 1 msg/s, 8-core cell): WORSE by 4-13x —
+    // p50 21.8s at k=512/batch 512, 5.9s at k=128/batch 128, vs ~1.5s at the
+    // default k=20. The INFLIGHT hold is the CLIENT's whole cycle (work +
+    // derived push + ack), so wide checkouts strip the ready ring for hundreds
+    // of ms regardless of how cheap the SQL leg is, and the ring starves.
+    // Wide-claim WAL amortization would need a server-side pipelined serve
+    // (checkin before the client cycle), not a wider client-held checkout.
     let k = ((max_parts.max(1) as usize) * 2).clamp(2, 64);
     let want = batch.max(1) as u32;
     let mut cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
+    if tr {
+        eprintln!("[hlt] take q={} g={} got={} est={} fused=0 t={}", queue, group,
+            cands.len(), st.hotlist.ready_est(qkey, group, now_ms),
+            crate::hotlist::trace_now_ms());
+    }
     if cands.is_empty() && need_reseed {
         hotlist_reseed_scan(&st.hotlist, &client, qkey, group, now_ms).await;
         cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
@@ -1328,6 +1468,35 @@ async fn hotlist_pop_attempt(
             }
         };
 
+    finish_pop_serve(
+        st, qkey, queue, group, cands, meta_txt, blobs, states_txt, now_ms, auto_ack,
+        lease_ms, lease_seconds, lease_id, rtt,
+    )
+}
+
+// The post-SQL half of a hot-list serve: map tri-state verdicts to the checked
+// out candidates, check them back into the ring, and render the response. ONE
+// body shared by the direct path and the pop-fusion path (pop_fusion.rs) — the
+// fused route must never drift from the direct one, so it cannot have its own
+// copy of this logic.
+#[allow(clippy::too_many_arguments)]
+fn finish_pop_serve(
+    st: &Arc<AppState>,
+    qkey: &str,
+    queue: &str,
+    group: &str,
+    cands: Vec<crate::hotlist::Candidate>,
+    meta_txt: String,
+    blobs: Vec<Vec<u8>>,
+    states_txt: String,
+    now_ms: i64,
+    auto_ack: bool,
+    lease_ms: i64,
+    lease_seconds: i32,
+    lease_id: &str,
+    rtt: Duration,
+) -> (String, usize, PopMeta, Duration) {
+    let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption);
     // Map the tri-state verdicts back to the candidates we sent (§7).
     // Parse the served partitions FIRST: the checkin needs per-partition
     // batch_end (last served offset) to pair with the claim-time lastOff.
@@ -1394,6 +1563,20 @@ async fn hotlist_pop_attempt(
             }
         })
         .collect();
+    if st.hotlist.traced(qkey) {
+        let (mut took, mut leased, mut emp, mut req) = (0u32, 0u32, 0u32, 0u32);
+        for r in &results {
+            match r.verdict {
+                crate::hotlist::Verdict::Took => took += 1,
+                crate::hotlist::Verdict::Leased(_) => leased += 1,
+                crate::hotlist::Verdict::Empty => emp += 1,
+                crate::hotlist::Verdict::Requeue => req += 1,
+            }
+        }
+        eprintln!("[hlt] tri q={} g={} w={} took={} leased={} empty={} req={} t={}",
+            queue, group, &lease_id[lease_id.len().saturating_sub(8)..], took, leased, emp, req,
+            crate::hotlist::trace_now_ms());
+    }
     st.hotlist
         .checkin(qkey, group, results, now_ms, auto_ack, lease_ms);
 

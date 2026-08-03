@@ -1,0 +1,47 @@
+# pgmq under test: Postgres + the pgmq extension, nothing else.
+#
+# FAIRNESS NOTE (SPEC.md §5.1): pgmq gets the WHOLE broker-VM budget for
+# Postgres, because pgmq has no broker process. In the Queen run the same budget
+# is shared by Postgres AND the Queen broker. That handicaps Queen deliberately
+# and must be stated in every report that uses these numbers.
+#
+#   CM_CPUS / CM_MEM must be identical across every compose file in this
+#   directory. Override both together or neither.
+#
+#   docker compose -f docker-compose.pgmq.yml up -d
+services:
+  pgmq:
+    # The pgmq PROJECT image, not tembo's: measured 2026-08-02, quay.io/tembo
+    # ships pgmq 1.5.1, which has no grouped read at all (only read /
+    # read_with_poll) and therefore cannot express per-property ordering. Pin
+    # the image that actually has the FIFO features or the run is meaningless.
+    image: ${PGMQ_IMAGE:-ghcr.io/pgmq/pg17-pgmq:latest}
+    container_name: cmbench-pgmq
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "${PGMQ_PORT:-5432}:5432"
+    volumes:
+      - ./postgres.conf:/etc/postgresql/postgresql.conf:ro
+      - ./init-pgmq.sql:/docker-entrypoint-initdb.d/01-pgmq.sql:ro
+      - pgmq-data:/var/lib/postgresql/data
+    shm_size: ${CM_SHM:-1g}
+    deploy:
+      resources:
+        limits:
+          cpus: "${CM_CPUS:-8}"
+          memory: ${CM_MEM:-16g}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgmq-data:

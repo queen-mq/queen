@@ -28,6 +28,10 @@ pub struct AppState {
     // (QUEEN_ACK_FUSION unset) ⇒ enabled() is false and the ack handler never
     // enqueues — the synchronous log_ack_at_v1 fast path is byte-identical.
     pub ack_fusion: Arc<crate::ack_fusion::AckFusion>,
+    // POP FUSION (server/src/pop_fusion.rs): claim-leg coalescing; the serve
+    // path routes through it only when enabled() and the steady-path
+    // preconditions hold (fresh cfg, no reseed due).
+    pub pop_fusion: Arc<crate::pop_fusion::PopFusion>,
     pub push_vegas: Arc<Vegas>,
     pub pop_vegas: Arc<Vegas>,
     pub metrics: Arc<Metrics>,

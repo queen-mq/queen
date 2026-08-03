@@ -848,6 +848,13 @@ impl HotList {
             return;
         }
         let _ = now_ms;
+        if self.traced(qkey) {
+            let (_, q) = crate::handlers::split_tenant_queue(qkey);
+            eprintln!("[hlt] promote q={} g={} idx={} st={} cov={} bc={} dr={} t={}",
+                q, group, idx, sub.state[local as usize], covered,
+                sub.batch_count[local as usize], sub.drained[local as usize],
+                trace_now_ms());
+        }
         match sub.state[local as usize] {
             WHEEL => {
                 // Spec §2 clear-su-ack: a COVERED ack (whole leased batch completed)

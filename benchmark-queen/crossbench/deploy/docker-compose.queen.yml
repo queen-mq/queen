@@ -1,0 +1,112 @@
+# QueenMQ under test: the PUBLISHED broker image plus its Postgres.
+#
+# Uses ghcr.io/queen-mq/queen:latest rather than a locally-built image on
+# purpose. A comparison where the home team runs a bespoke build off a working
+# tree and everyone else runs a release artefact is not a comparison — and the
+# published tag is also what a reader could reproduce. Pin the digest in the run
+# log so the result names the exact artefact (SPEC.md §5.6).
+#
+# FAIRNESS NOTE (SPEC.md §5.1): here the broker-VM budget is shared by the Queen
+# broker AND Postgres, while pgmq gets the whole budget for Postgres alone and
+# Kafka gets it all for itself. That handicaps Queen deliberately, and it stays.
+#
+# What does NOT stay is a rigid split of that budget between the two containers.
+# An earlier revision capped the broker at 2 CPUs and Postgres at 6, guessing
+# from July's ~19:7 ratio. Measured 2026-08-02, that split throttled almost
+# nothing (56 periods in 17 965, 0.3%), so it was not the cause of the latency it
+# was suspected of — but it is still the wrong offer: every other system gets
+# ONE limit covering the whole VM and can spend it however it likes, while a
+# fixed 2+6 leaves the broker unable to borrow idle Postgres cores at a burst.
+# So neither container is capped here: the pair shares the VM, which is the same
+# deal the single-container systems get.
+#
+#   docker compose -f docker-compose.queen.yml up -d
+services:
+  queen-pg:
+    image: ${QUEEN_PG_IMAGE:-postgres:17}
+    container_name: cmbench-queen-pg
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-postgres}
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      # BYTE-IDENTICAL to the pgmq run. This is the single thing that makes
+      # Queen and pgmq comparable; never tune it for one side only.
+      - ./postgres.conf:/etc/postgresql/postgresql.conf:ro
+      - queen-pg-data:/var/lib/postgresql/data
+    shm_size: ${CM_SHM:-1g}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  queen:
+    image: ${QUEEN_IMAGE:-ghcr.io/queen-mq/queen:latest}
+    container_name: cmbench-queen
+    depends_on:
+      queen-pg:
+        condition: service_healthy
+    environment:
+      PG_HOST: queen-pg
+      PG_PORT: "5432"
+      PG_USER: postgres
+      PG_PASSWORD: ${PG_PASSWORD:-postgres}
+      PG_DATABASE: postgres
+      # The broker creates its own schema on boot.
+      QUEEN_LOG_LEVEL: ${QUEEN_LOG_LEVEL:-info}
+      # Pop fusion (server/src/pop_fusion.rs): default off; the A/B toggles it
+      # on the SAME image so nothing else varies.
+      QUEEN_POP_FUSION: ${QUEEN_POP_FUSION:-0}
+      # Chain trace (bounded volume): set to a queue-name prefix to get [hlt]
+      # woken/attempt/sqldone/served lines on stderr for that queue only.
+      QUEEN_HOTLIST_TRACE: ${QUEEN_HOTLIST_TRACE:-}
+      QUEEN_POP_FUSION_SHARDS: ${QUEEN_POP_FUSION_SHARDS:-4}
+      QUEEN_POP_FUSION_CONCURRENCY: ${QUEEN_POP_FUSION_CONCURRENCY:-1}
+      QUEEN_POP_FUSION_MAX_JOBS: ${QUEEN_POP_FUSION_MAX_JOBS:-16}
+      METRICS_FLUSH_MS: ${METRICS_FLUSH_MS:-60000}
+
+      # Adaptive-concurrency (Vegas) windows on the DB lanes.
+      #
+      # These are NOT a default we are quietly improving: the published image
+      # ships init=16 min=4 max=64, and at this workload the window COLLAPSED to
+      # 5 (observed vegas_pop=5 in the broker's own rates block). A window of 5
+      # caps the whole broker at ~1000 pops/s regardless of how many consumers
+      # the client runs, because the permit is acquired BEFORE the DB op
+      # (server/src/vegas.rs:104) and the queue in front of that gate is invisible
+      # to the p50_push_ms / p99_pop_ms the broker reports. That is exactly the
+      # signature we measured: single-digit-ms operations, ~900 ms end-to-end,
+      # and a p50 that would not move for any client-side knob.
+      #
+      # QueenMQ's own July 2026 tuning for this workload used PINIT=512/PMAX=2048.
+      # Running the campaign on init=16/max=64 measures a broker throttled ~30x
+      # below what its operators would ever deploy.
+      QUEEN_SEG_PUSH_INIT: ${QUEEN_SEG_PUSH_INIT:-512}
+      QUEEN_SEG_PUSH_MIN: ${QUEEN_SEG_PUSH_MIN:-64}
+      QUEEN_SEG_PUSH_MAX: ${QUEEN_SEG_PUSH_MAX:-2048}
+      QUEEN_SEG_POP_INIT: ${QUEEN_SEG_POP_INIT:-512}
+      QUEEN_SEG_POP_MIN: ${QUEEN_SEG_POP_MIN:-64}
+      QUEEN_SEG_POP_MAX: ${QUEEN_SEG_POP_MAX:-2048}
+
+      # Long-poll re-check cadence. The parked-pop path is a polling loop
+      # (server/src/handlers/mod.rs:348): initial interval, doubling after
+      # POP_WAIT_BACKOFF_THRESHOLD empty rounds, capped at the max. Left at the
+      # image defaults here so the Vegas change can be measured in isolation;
+      # override explicitly if the experiment calls for it.
+      POP_WAIT_INITIAL_INTERVAL_MS: ${POP_WAIT_INITIAL_INTERVAL_MS:-100}
+      POP_WAIT_BACKOFF_THRESHOLD: ${POP_WAIT_BACKOFF_THRESHOLD:-3}
+      POP_WAIT_MAX_INTERVAL_MS: ${POP_WAIT_MAX_INTERVAL_MS:-1000}
+    ports:
+      - "${QUEEN_PORT:-6632}:6632"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6632/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  queen-pg-data:

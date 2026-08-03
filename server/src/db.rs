@@ -89,7 +89,7 @@ fn log_cancel_once(what: &'static str, msg: &str) {
 /// tokio timeout abandoned. Spawned detached (cancellation is inherently racy and
 /// must never block the request path); `cancel_query` opens its OWN connection, so
 /// it does not touch the poisoned pooled connection. Logging is throttled per class.
-fn spawn_cancel(cancel: CancelToken, what: &'static str) {
+pub(crate) fn spawn_cancel(cancel: CancelToken, what: &'static str) {
     let tls = cancel_tls();
     log_cancel_once(what, &format!("stmt-timeout ({what}): issuing server-side query cancellation"));
     tokio::spawn(async move {
@@ -359,6 +359,42 @@ pub async fn pop_list(
         )
         .await?;
     let row = client
+        .query_one(
+            &stmt,
+            &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,
+              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1), row.get(2)))
+}
+
+// pop_list inside a caller-owned TRANSACTION — the pop-fusion flush path
+// (server/src/pop_fusion.rs): N of these share one transaction / one commit.
+// Same statement text as pop_list, so the prepared-statement cache is shared
+// with the direct path and the SQL contract is provably identical.
+#[allow(clippy::too_many_arguments)]
+pub async fn pop_list_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    queue: &str,
+    group: &str,
+    partitions: &[String],
+    budget: i32,
+    lease_seconds: i32,
+    worker: &str,
+    auto_ack: bool,
+    max_partitions: i32,
+    sub_mode: &str,
+    sub_from: &str,
+    skip_window: bool,
+    tenant: &str,
+) -> Result<(String, Vec<Vec<u8>>, String), tokio_postgres::Error> {
+    let stmt = tx
+        .prepare_cached(
+            "SELECT (t.meta)::text, t.blobs, (t.states)::text \
+             FROM queen.log_pop_list_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::text::uuid) t",
+        )
+        .await?;
+    let row = tx
         .query_one(
             &stmt,
             &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,

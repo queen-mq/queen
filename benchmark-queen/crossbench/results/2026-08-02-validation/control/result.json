@@ -1,0 +1,179 @@
+{
+  "system": "mem",
+  "started_unix": 1785664705,
+  "elapsed_sec": 60.000535103,
+  "rate_events_per_sec": 5000,
+  "properties": 1000,
+  "durability": "default",
+  "dedup_window_sec": 0,
+  "invariants": {
+    "deliveries_per_sec": 30000,
+    "ordered_lanes": 813,
+    "publishes_per_sec_copied": 30000,
+    "publishes_per_sec_native": 10000
+  },
+  "provisioned": {
+    "connections": 0,
+    "consumer_members": 0,
+    "ordered_lanes": 4000,
+    "physical_queues": 4,
+    "publishes_per_ingress_event": 2,
+    "semantics_built_in_app": null
+  },
+  "flow": {
+    "ack_err": 0,
+    "acked": 1662018,
+    "delivered": 1662018,
+    "derived": 277003,
+    "offered": 275005,
+    "processed": 1662018,
+    "published": 277003,
+    "push_err": 0,
+    "push_retry": 0,
+    "shed": 0,
+    "slow_decodes": 0
+  },
+  "latency_ms": {
+    "flow_a_p50": 3234.2505169259143,
+    "flow_a_p95": 5439.339331430949,
+    "flow_a_p99": 5931.641601515722,
+    "flow_b_p50": 2493.9480796421863,
+    "flow_b_p95": 4194.304,
+    "flow_b_p99": 4573.920945148821
+  },
+  "correctness": {
+    "dups": 0,
+    "gaps": 0,
+    "inflight_at_cutoff": 12,
+    "order_violations": 0,
+    "pass": true
+  },
+  "broker_stats": {
+    "mem_acked": 1662018,
+    "mem_delivered": 1662018,
+    "mem_nacked": 0,
+    "mem_published": 554006
+  },
+  "streams": [
+    {
+      "stream": "cm-avail_cm-db",
+      "msgs": 138503,
+      "unique": 138503,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 0,
+      "pass": true
+    },
+    {
+      "stream": "cm-prices_cm-cal",
+      "msgs": 138500,
+      "unique": 138500,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 2,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-1",
+      "msgs": 138503,
+      "unique": 138503,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 0,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-2",
+      "msgs": 138503,
+      "unique": 138503,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 0,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-3",
+      "msgs": 138503,
+      "unique": 138503,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 0,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-4",
+      "msgs": 138503,
+      "unique": 138503,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 0,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-5",
+      "msgs": 138503,
+      "unique": 138503,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 0,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-prices_otap-1",
+      "msgs": 138500,
+      "unique": 138500,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 2,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-prices_otap-2",
+      "msgs": 138500,
+      "unique": 138500,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 2,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-prices_otap-3",
+      "msgs": 138500,
+      "unique": 138500,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 2,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-prices_otap-4",
+      "msgs": 138500,
+      "unique": 138500,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 2,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-prices_otap-5",
+      "msgs": 138500,
+      "unique": 138500,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 2,
+      "pass": true
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 mod ack_fusion;
+mod pop_fusion;
 mod ack_registry;
 mod auth;
 mod config;
@@ -259,6 +260,20 @@ async fn main() {
         cfg.ack_fusion_hold_ms,
         cfg.ack_fusion_enabled,
     );
+    // POP FUSION (server/src/pop_fusion.rs): the third fusion leg the seg port
+    // dropped — N pop claims, one transaction, one commit. Vegas admission is
+    // taken per FLUSH inside the module. Default OFF (QUEEN_POP_FUSION).
+    let pop_fusion = pop_fusion::PopFusion::new(
+        cfg.pop_fusion_shards,
+        pool.clone(),
+        cfg.stmt_timeout,
+        pop_vegas.clone(),
+        metrics.clone(),
+        cfg.pop_fusion_hold_ms,
+        cfg.pop_fusion_max_jobs,
+        cfg.pop_fusion_max_inflight,
+        cfg.pop_fusion_enabled,
+    );
     if cfg.ack_fusion_enabled {
         tracing::info!(
             target: "boot",
@@ -295,6 +310,7 @@ async fn main() {
         fusion,
         ack_registry,
         ack_fusion,
+        pop_fusion,
         push_vegas: push_vegas.clone(),
         pop_vegas: pop_vegas.clone(),
         metrics: metrics.clone(),

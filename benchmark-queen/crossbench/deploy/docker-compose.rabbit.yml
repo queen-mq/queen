@@ -1,0 +1,58 @@
+# RabbitMQ under test.
+#
+# SCALE WARNING. This topology needs 12 x lanes queues, each with its own
+# ordered consumer. At one property per lane that is 12 000 queues and 12 000
+# consumer channels on one node. Classic queues might survive it; quorum queues
+# will not, because each quorum queue is its own Raft group.
+#
+# So Rabbit is normally run with FEWER lanes (cmbench -lanes 100) and the
+# resulting head-of-line blocking between properties sharing a lane is reported
+# as its cost, not hidden. Both queue types are run where they fit:
+#   -rabbit-queue-type classic   higher ceiling, weaker durability story
+#   -rabbit-queue-type quorum    Raft-replicated, the tier comparable with fsync
+#
+#   docker compose -f docker-compose.rabbit.yml up -d
+services:
+  # NO named volume here, on purpose.
+  #
+  # The image declares /var/lib/rabbitmq as a VOLUME, so Docker always creates an
+  # anonymous volume for it. Mounting a named volume anywhere inside that path
+  # (even one level down at mnesia/) changes how the parent is seeded and leaves
+  # .erlang.cookie unreadable by the uid the entrypoint drops to, so the broker
+  # dies on boot with "Error when reading /var/lib/rabbitmq/.erlang.cookie:
+  # eacces". Measured repeatedly on 2026-08-02; a plain `docker run` of the same
+  # image boots clean.
+  #
+  # The image's own anonymous volume lives under /var/lib/docker/volumes on the
+  # same block device, so the disk numbers are unaffected. Each `up` starts from a
+  # clean state, which is what the campaign wants anyway.
+  rabbit:
+    image: ${RABBIT_IMAGE:-rabbitmq:4-management}
+    container_name: cmbench-rabbit
+    hostname: cmbench-rabbit
+    ports:
+      - "${RABBIT_PORT:-5672}:5672"
+      - "${RABBIT_MGMT_PORT:-15672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-guest}
+      # Thousands of queues and channels need the file-descriptor and memory
+      # headroom raised, or the run dies on a limit we imposed rather than on
+      # RabbitMQ's own ceiling.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+P 4194304 +Q 4194304"
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    deploy:
+      resources:
+        limits:
+          cpus: "${CM_CPUS:-8}"
+          memory: ${CM_MEM:-16g}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20

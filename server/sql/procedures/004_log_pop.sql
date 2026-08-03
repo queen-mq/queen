@@ -1299,8 +1299,8 @@ $$;
 -- The broker's in-memory hot-list (server/src/hotlist.rs) hands this the K
 -- candidate partition NAMES it pulled from the (queue, group) ring, INSTEAD of
 -- the SQL candidate scan (log_partitions ⋈ log_consumers, ORDER BY random()).
--- The claim core is the wildcard pop's, verbatim: the loop over candidates
--- calls queen.log_pop_v1 (INVARIANT) per candidate. What is NEW is a TRI-STATE
+-- The claim core is BATCHED (see the IMPLEMENTATION block below); first-contact
+-- candidates still route through queen.log_pop_v1. What is NEW is a TRI-STATE
 -- verdict per candidate so the broker maintains the ring with NO second probe
 -- (§7 — the lease_expires_at is already on the consumer row the claim read):
 --
@@ -1338,6 +1338,67 @@ $$;
 -- Track B (§5): p_tenant scopes the queue resolution + the per-candidate pops.
 -- Current-signature DROP = boot-idempotency half of DROP+CREATE (see
 -- log_pop_v1's header).
+-- ----------------------------------------------------------------------------
+-- IMPLEMENTATION (2026-08-02 rewrite — the contract above is UNCHANGED: same
+-- signature, same meta/blobs/states wire shape, same tri-state semantics).
+--
+-- The previous body FOREACHed the candidates calling queen.log_pop_v1 once per
+-- partition: ~6 statement executions per partition (queue re-join, seeding
+-- probe, claim, head probe, forward scan, lease UPDATE) plus a per-partition
+-- jsonb_agg. Measured on the sparse-partition shape (1000 partitions, ~1 msg
+-- each, pg_stat_statements track=all): 3.42 ms/pop of which ~0.17 ms is data
+-- work — the rest per-partition statement overhead, paid INSIDE the pop
+-- admission permit and the pop's WAL-committing transaction. That pinned the
+-- broker at ~1.2k pops/s with the box idle. This body does the same work in
+-- ~6 statements TOTAL, independent of the candidate count:
+--
+--   1. queue resolve ONCE (the knobs are per-queue; the old shape re-read them
+--      once per partition);
+--   2. ONE batched claim: FOR UPDATE OF c SKIP LOCKED over every requested
+--      consumer row. The deadlock lesson holds — no INSERT here, and SKIP
+--      LOCKED never waits, so claim order cannot form lock cycles;
+--   3. ONE no-lock probe of what the claim did not take (missing rows /
+--      foreign leases), feeding the tri-state verdicts byte-identically;
+--   4. ONE batched segment-METADATA read (head probe + forward scan per
+--      claimed partition, LATERAL over the segments PK). The blob column is
+--      deliberately NOT selected — nothing detoasts here. delayed_processing
+--      is applied in the walk: created_at is monotone in base_offset, so
+--      deferred rows are a contiguous suffix and cutting in plpgsql is
+--      equivalent to the old per-row SQL filter;
+--   5. ONE batched lease (or auto-ack) UPDATE for the partitions actually
+--      served — attempt tracking verbatim — RETURNING each partition's CURRENT
+--      last_offset: a post-claim read, preserving the drained/lastOff compose
+--      argument of the old per-partition re-read;
+--   6. ONE blob fetch for exactly the chosen (partition, base) pairs, ordered
+--      by selection ordinality = emission order, so the out-of-band blobs stay
+--      positionally aligned with meta by construction.
+--
+-- Budget allocation still walks candidates in INPUT order with the same
+-- running remainder and the same EXIT (budget / partition cap): which
+-- partitions are served under a tight budget is unchanged, and a
+-- budget-exhausted tail still gets NO state entry (checkin maps absent →
+-- re-append, as before).
+--
+-- FIRST CONTACT (no consumer row) takes the old path: one queen.log_pop_v1
+-- call for that partition — subscription seeding and the advisory-guarded row
+-- creation (the 2026-07-23 mass-creation livelock fix) live THERE, not
+-- duplicated here. Steady state never pays it.
+--
+-- ACCEPTED divergences from the FOREACH body (reviewed 2026-08-02):
+--   * the batched claim locks every claimable requested row up-front, so rows
+--     past a budget-exhaustion EXIT sit locked (no lease written) until
+--     commit. Serve candidates come from take_batch, which hands DISJOINT sets
+--     to concurrent pops, so the serve path never contends; a racing wildcard
+--     pop sees SKIP LOCKED → its own short-horizon 'leased' verdict, the same
+--     outcome any transient claim overlap already produced.
+--   * with window_buffer active and p_skip_window unset, the quiet-partition
+--     skip is decided AFTER the claim (the old body returned before claiming):
+--     same verdict, one transiently-locked row wider.
+--   * the states array is grouped by verdict phase rather than strict input
+--     order; the broker builds a name-keyed map (data.rs checkin), so order
+--     was never part of the contract. meta.partitions and the blob array keep
+--     exact serve order — those ARE positional.
+-- ----------------------------------------------------------------------------
 DROP FUNCTION IF EXISTS queen.log_pop_list_v1(TEXT, TEXT, TEXT[], INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, BOOLEAN, UUID);
 CREATE FUNCTION queen.log_pop_list_v1(
     p_queue TEXT,
@@ -1356,112 +1417,390 @@ CREATE FUNCTION queen.log_pop_list_v1(
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    -- Deduped candidates, first occurrence kept (filled in BEGIN). The old
+    -- FOREACH was inherently duplicate-safe: the second claim of a name saw
+    -- the fresh lease this transaction had just written and skipped. The
+    -- cached-metadata walk below would double-serve instead, so duplicates
+    -- are dropped up front (the hot-list ring cannot emit them anyway; a
+    -- dropped duplicate simply gets no verdict → the broker re-appends).
+    v_parts TEXT[];
+    v_n INTEGER := 0;
     v_qid UUID;
-    v_name TEXT;
+    v_delayed INTEGER := 0;
+    v_win_buf INTEGER := 0;
+    v_deadline TIMESTAMPTZ;
+    v_now TIMESTAMPTZ := clock_timestamp();
     v_remaining INTEGER := GREATEST(p_budget, 1);
     v_max_parts INTEGER := CASE WHEN p_max_partitions IS NULL OR p_max_partitions <= 0
                                 THEN 2147483647 ELSE p_max_partitions END;
     v_claimed INTEGER := 0;
-    v_out JSONB := '[]'::jsonb;
-    v_states JSONB := '[]'::jsonb;
+
+    -- 1:1 with p_partitions positions (ordinality-indexed writes; no searches).
+    a_claimed BOOLEAN[];
+    a_probed  BOOLEAN[];
+    a_rowmiss BOOLEAN[];
+    a_pid     UUID[];
+    a_lastoff BIGINT[];
+    a_comm    BIGINT[];
+    a_lworker TEXT[];
+    a_lexp    TIMESTAMPTZ[];
+    a_newest  TIMESTAMPTZ[];
+
+    -- segment metadata blocks, grouped by input ordinal; consumed by a moving
+    -- pointer in the walk (both sides are in input order → O(total) pointer).
+    m_ord  INTEGER[]     := '{}';
+    m_base BIGINT[]      := '{}';
+    m_end  BIGINT[]      := '{}';
+    m_cre  TIMESTAMPTZ[] := '{}';
+    m_len  INTEGER := 0;
+    m_i    INTEGER := 1;
+
+    -- served entries, in serve order. kind 'f' = fast (batched claim),
+    -- 'w' = slow (first-contact via log_pop_v1, already leased in there).
+    e_kind  TEXT[]    := '{}';
+    e_ord   INTEGER[] := '{}';
+    e_segj  JSONB[]   := '{}';
+    e_pid   UUID[]    := '{}';
+    -- fast entries: slice bounds into the batched blob fetch + lease inputs
+    e_bfrom INTEGER[] := '{}';
+    e_bcnt  INTEGER[] := '{}';
+    e_start BIGINT[]  := '{}';
+    e_last  BIGINT[]  := '{}';
+    e_take  INTEGER[] := '{}';
+    -- slow entries: blobs captured inline + lastOff read inline (old shape)
+    e_sfrom INTEGER[] := '{}';
+    e_scnt  INTEGER[] := '{}';
+    e_lastoff BIGINT[] := '{}';   -- slow: filled inline; fast: from RETURNING
+
+    slow_blobs BYTEA[] := '{}'::bytea[];
+
+    -- flat blob selection for the fast path, in emission order
+    sel_pid  UUID[]   := '{}';
+    sel_base BIGINT[] := '{}';
+    v_fast_blobs BYTEA[] := '{}'::bytea[];
+
+    -- zero-taken claimed partitions: seal + fresh re-check batch
+    z_ord     INTEGER[] := '{}';
+    z_seal    BOOLEAN[] := '{}';
+    z_pending BOOLEAN[] := '{}';
+
+    v_out       JSONB := '[]'::jsonb;
+    v_states    JSONB := '[]'::jsonb;
+    v_all_blobs BYTEA[] := '{}'::bytea[];
+
+    rec RECORD;
+    i INTEGER;
+    v_ord INTEGER;
+    v_name TEXT;
+    v_wanted BIGINT;
+    v_pbudget INTEGER;
+    v_taken INTEGER;
+    v_take INTEGER;
+    v_avail BIGINT;
+    v_start BIGINT;
+    v_last BIGINT;
+    v_segj JSONB;
+    v_has_rows BOOLEAN;
+    v_bfrom INTEGER;
     v_segments JSONB;
     v_part_blobs BYTEA[];
-    v_all_blobs BYTEA[] := '{}'::bytea[];
-    v_taken INTEGER;
-    v_now TIMESTAMPTZ := clock_timestamp();
-    v_pid UUID;
-    v_last_off BIGINT;
-    v_lease TIMESTAMPTZ;
-    v_pending BOOLEAN;
+    v_sp_taken INTEGER;
+    v_pid2 UUID;
+    v_lo2 BIGINT;
+    v_flworker TEXT;
+    v_flexp TIMESTAMPTZ;
+    v_fpend BOOLEAN;
 BEGIN
-    -- queue identity is the queen.queues id (log_queues is gone); no
-    -- provisioning here — the broker routes to this path only AFTER the
-    -- wildcard/reseed path carried the registration.
-    SELECT id INTO v_qid FROM queen.queues WHERE name = p_queue AND tenant_id = p_tenant;
-    IF v_qid IS NULL THEN
+    SELECT array_agg(name ORDER BY ord)
+    INTO v_parts
+    FROM (SELECT DISTINCT ON (name) name, ord
+          FROM unnest(p_partitions) WITH ORDINALITY AS t(name, ord)
+          ORDER BY name, ord) d;
+    v_n := COALESCE(array_length(v_parts, 1), 0);
+    a_claimed := array_fill(FALSE, ARRAY[GREATEST(v_n, 1)]);
+    a_probed  := array_fill(FALSE, ARRAY[GREATEST(v_n, 1)]);
+    a_rowmiss := array_fill(FALSE, ARRAY[GREATEST(v_n, 1)]);
+    a_pid     := array_fill(NULL::uuid, ARRAY[GREATEST(v_n, 1)]);
+    a_lastoff := array_fill(NULL::bigint, ARRAY[GREATEST(v_n, 1)]);
+    a_comm    := array_fill(NULL::bigint, ARRAY[GREATEST(v_n, 1)]);
+    a_lworker := array_fill(NULL::text, ARRAY[GREATEST(v_n, 1)]);
+    a_lexp    := array_fill(NULL::timestamptz, ARRAY[GREATEST(v_n, 1)]);
+    a_newest  := array_fill(NULL::timestamptz, ARRAY[GREATEST(v_n, 1)]);
+    IF v_n = 0 THEN
         meta := jsonb_build_object('partitions', '[]'::jsonb);
-        blobs := '{}'::bytea[];
-        states := '[]'::jsonb;
-        RETURN NEXT;
-        RETURN;
+        blobs := '{}'::bytea[]; states := '[]'::jsonb;
+        RETURN NEXT; RETURN;
     END IF;
 
-    FOREACH v_name IN ARRAY COALESCE(p_partitions, ARRAY[]::text[]) LOOP
-        -- budget spent OR partition cap reached: leave the rest for the ring
+    -- Queue identity + visibility knobs, ONCE for the whole candidate list.
+    SELECT q.id, COALESCE(q.delayed_processing, 0), COALESCE(q.window_buffer, 0)
+    INTO v_qid, v_delayed, v_win_buf
+    FROM queen.queues q
+    WHERE q.name = p_queue AND q.tenant_id = p_tenant;
+    IF v_qid IS NULL THEN
+        meta := jsonb_build_object('partitions', '[]'::jsonb);
+        blobs := '{}'::bytea[]; states := '[]'::jsonb;
+        RETURN NEXT; RETURN;
+    END IF;
+    IF v_delayed > 0 THEN
+        v_deadline := v_now - make_interval(secs => v_delayed);
+    END IF;
+
+    -- ------------------------------------------------------------------
+    -- PASS 1 — batched claim. INNER joins only (FOR UPDATE forbids the
+    -- nullable side of an outer join); anything missing falls to the probe.
+    -- ------------------------------------------------------------------
+    FOR rec IN
+        SELECT req.ord, p.id AS pid, p.last_offset, c.committed
+        FROM unnest(v_parts) WITH ORDINALITY AS req(name, ord)
+        JOIN queen.log_partitions p
+          ON p.queue_id = v_qid AND p.name = req.name
+        JOIN queen.log_consumers c
+          ON c.partition_id = p.id AND c.consumer_group = p_group
+        WHERE (c.worker_id IS NULL OR c.lease_expires_at IS NULL
+               OR c.lease_expires_at < v_now)
+        ORDER BY req.ord
+        FOR UPDATE OF c SKIP LOCKED
+    LOOP
+        a_claimed[rec.ord] := TRUE;
+        a_pid[rec.ord]     := rec.pid;
+        a_lastoff[rec.ord] := rec.last_offset;
+        a_comm[rec.ord]    := rec.committed;
+    END LOOP;
+
+    -- ------------------------------------------------------------------
+    -- PASS 1b — no-lock probe of everything the claim did not take: missing
+    -- consumer row (first contact → slow path), foreign lease, or lock-skip.
+    -- Partition-row-missing candidates match nothing here and stay unprobed.
+    -- ------------------------------------------------------------------
+    FOR rec IN
+        SELECT req.ord, p.id AS pid, p.last_offset,
+               (c.partition_id IS NULL) AS rowmiss,
+               c.committed, c.worker_id, c.lease_expires_at
+        FROM unnest(v_parts) WITH ORDINALITY AS req(name, ord)
+        JOIN queen.log_partitions p
+          ON p.queue_id = v_qid AND p.name = req.name
+        LEFT JOIN queen.log_consumers c
+          ON c.partition_id = p.id AND c.consumer_group = p_group
+        WHERE NOT a_claimed[req.ord]
+        ORDER BY req.ord
+    LOOP
+        a_probed[rec.ord]  := TRUE;
+        a_pid[rec.ord]     := rec.pid;
+        a_lastoff[rec.ord] := rec.last_offset;
+        a_comm[rec.ord]    := rec.committed;
+        a_rowmiss[rec.ord] := rec.rowmiss;
+        a_lworker[rec.ord] := rec.worker_id;
+        a_lexp[rec.ord]    := rec.lease_expires_at;
+    END LOOP;
+
+    -- ------------------------------------------------------------------
+    -- PASS 2 — segment METADATA for the claimed set: head probe (greatest
+    -- base <= wanted, one backward PK step) + forward scan. No blob column.
+    -- No deadline filter (walk applies it; deferred rows are a monotone
+    -- suffix). Forward LIMIT = full budget: a segment holds >= 1 frame, so
+    -- more rows can never be needed.
+    -- ------------------------------------------------------------------
+    FOR rec IN
+        SELECT req.ord, s.base_offset, s.end_offset, s.created_at
+        FROM unnest(v_parts) WITH ORDINALITY AS req(name, ord)
+        CROSS JOIN LATERAL (
+            (SELECT s1.base_offset, s1.end_offset, s1.created_at
+             FROM queen.log_segments s1
+             WHERE s1.partition_id = a_pid[req.ord]
+               AND s1.base_offset <= a_comm[req.ord] + 1
+             ORDER BY s1.base_offset DESC LIMIT 1)
+            UNION ALL
+            (SELECT s2.base_offset, s2.end_offset, s2.created_at
+             FROM queen.log_segments s2
+             WHERE s2.partition_id = a_pid[req.ord]
+               AND s2.base_offset > a_comm[req.ord] + 1
+             ORDER BY s2.base_offset LIMIT v_remaining)
+        ) s
+        WHERE a_claimed[req.ord]
+        ORDER BY req.ord, s.base_offset
+    LOOP
+        m_ord := m_ord || rec.ord;
+        m_base := m_base || rec.base_offset;
+        m_end := m_end || rec.end_offset;
+        m_cre := m_cre || rec.created_at;
+    END LOOP;
+    m_len := COALESCE(array_length(m_ord, 1), 0);
+
+    -- window_buffer newest-segment probe, only when the check is live.
+    IF v_win_buf > 0 AND NOT p_skip_window THEN
+        FOR rec IN
+            SELECT req.ord, s.created_at
+            FROM unnest(v_parts) WITH ORDINALITY AS req(name, ord)
+            CROSS JOIN LATERAL (
+                SELECT s3.created_at FROM queen.log_segments s3
+                WHERE s3.partition_id = a_pid[req.ord]
+                ORDER BY s3.base_offset DESC LIMIT 1
+            ) s
+            WHERE a_claimed[req.ord]
+            ORDER BY req.ord
+        LOOP
+            a_newest[rec.ord] := rec.created_at;
+        END LOOP;
+    END IF;
+
+    -- ------------------------------------------------------------------
+    -- THE WALK — input order, running budget, same EXIT as the FOREACH body.
+    -- Pure in-memory except the (rare) first-contact slow path.
+    -- ------------------------------------------------------------------
+    FOR v_ord IN 1..v_n LOOP
         EXIT WHEN v_remaining <= 0 OR v_claimed >= v_max_parts;
+        v_name := v_parts[v_ord];
 
-        -- Same row shape / keys as log_pop_wildcard_bin_v1 (blobs out-of-band,
-        -- meta carries seq/startOff/take/createdAt); ORDER BY r_base keeps meta
-        -- and blobs position-aligned. p_skip_window forwarded (§6).
-        SELECT COALESCE(jsonb_agg(jsonb_build_object(
-                   'seq', r_base,
-                   'startOff', r_start_idx,
-                   'take', r_take,
-                   'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
-               ) ORDER BY r_base), '[]'::jsonb),
-               COALESCE(SUM(r_take), 0),
-               COALESCE(array_agg(r_blob ORDER BY r_base), '{}'::bytea[])
-        INTO v_segments, v_taken, v_part_blobs
-        FROM queen.log_pop_v1(p_queue, v_name, p_group,
-                              v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from, p_skip_window, p_tenant);
-
-        IF v_taken > 0 THEN
-            -- lastOff: the partition's allocator watermark AT (or just after) the
-            -- claim. The broker compares it with the served batch_end to learn
-            -- whether the claim EXHAUSTED the visible backlog ('drained'): the
-            -- clear-su-ack (§2) may clear only a drained entry — batch_count==0
-            -- alone proved wrong (2026-07-24: a 1000-msg backlog consumed in
-            -- 100-msg batches has no in-lease marks, yet 900 remain; clearing
-            -- stalled every next batch on the 30s reseed floor). A push that
-            -- commits AFTER this read makes lastOff stale-low, but that push's
-            -- own mark bumps batch_count, so the compose of the two signals
-            -- stays safe in both directions.
-            SELECT p.id, p.last_offset INTO v_pid, v_last_off FROM queen.log_partitions p
-              WHERE p.queue_id = v_qid AND p.name = v_name;
-            v_out := v_out || jsonb_build_object(
-                'partition', v_name, 'partitionId', v_pid, 'segments', v_segments);
-            v_all_blobs := v_all_blobs || v_part_blobs;
-            v_remaining := v_remaining - v_taken;
-            v_claimed := v_claimed + 1;
-            v_states := v_states || jsonb_build_object('p', v_name, 's', 'took',
-                'lastOff', v_last_off);
-        ELSE
-            -- 0 frames: distinguish a live FOREIGN lease from genuinely empty.
-            -- One indexed point lookup on the consumer row the claim already
-            -- read (worker <> this pop's fresh uuid ⇒ never a self false-positive).
-            SELECT c.lease_expires_at INTO v_lease
-            FROM queen.log_consumers c
-            JOIN queen.log_partitions p ON p.id = c.partition_id
-            WHERE p.queue_id = v_qid AND p.name = v_name
-              AND c.consumer_group = p_group
-              AND c.worker_id IS NOT NULL
-              AND c.worker_id <> p_worker
-              AND c.lease_expires_at IS NOT NULL
-              AND c.lease_expires_at > v_now
-            LIMIT 1;
-            IF FOUND THEN
+        IF a_claimed[v_ord] THEN
+            -- window_buffer quiet-skip (claim-then-skip; header note): the old
+            -- outcome for a fresh-write partition was taken=0 with segments
+            -- present → pending → short-horizon 'leased'.
+            IF v_win_buf > 0 AND NOT p_skip_window
+               AND a_newest[v_ord] IS NOT NULL
+               AND a_newest[v_ord] > v_now - make_interval(secs => v_win_buf) THEN
                 v_states := v_states || jsonb_build_object(
                     'p', v_name, 's', 'leased',
-                    'until', to_char(v_lease, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                    'until', to_char(v_now + interval '250 milliseconds',
+                                     'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                WHILE m_i <= m_len AND m_ord[m_i] = v_ord LOOP
+                    m_i := m_i + 1;   -- skip this partition's metadata block
+                END LOOP;
+                CONTINUE;
+            END IF;
+
+            v_wanted := a_comm[v_ord] + 1;
+            v_pbudget := v_remaining;
+            v_taken := 0; v_start := NULL; v_last := NULL;
+            v_segj := '[]'::jsonb;
+            v_has_rows := FALSE;
+            v_bfrom := COALESCE(array_length(sel_pid, 1), 0) + 1;
+
+            WHILE m_i <= m_len AND m_ord[m_i] = v_ord LOOP
+                v_has_rows := TRUE;
+                IF v_taken < v_pbudget
+                   AND (v_deadline IS NULL OR m_cre[m_i] <= v_deadline) THEN
+                    IF m_base[m_i] <= v_wanted THEN
+                        -- head row: counts only if it still covers `wanted`
+                        IF m_end[m_i] >= v_wanted THEN
+                            v_avail := m_end[m_i] - v_wanted + 1;
+                            v_take := LEAST(v_avail, v_pbudget - v_taken)::int;
+                            v_segj := v_segj || jsonb_build_object(
+                                'seq', m_base[m_i],
+                                'startOff', (v_wanted - m_base[m_i])::int,
+                                'take', v_take,
+                                'createdAt', to_char(m_cre[m_i], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                            sel_pid := sel_pid || a_pid[v_ord];
+                            sel_base := sel_base || m_base[m_i];
+                            v_taken := v_taken + v_take;
+                            v_start := v_wanted;
+                            v_last := v_wanted + v_take - 1;
+                        END IF;
+                    ELSE
+                        -- forward row: starts at frame 0
+                        v_avail := m_end[m_i] - m_base[m_i] + 1;
+                        v_take := LEAST(v_avail, v_pbudget - v_taken)::int;
+                        v_segj := v_segj || jsonb_build_object(
+                            'seq', m_base[m_i],
+                            'startOff', 0,
+                            'take', v_take,
+                            'createdAt', to_char(m_cre[m_i], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                        sel_pid := sel_pid || a_pid[v_ord];
+                        sel_base := sel_base || m_base[m_i];
+                        v_taken := v_taken + v_take;
+                        IF v_start IS NULL THEN
+                            v_start := m_base[m_i];  -- retention gap: batch starts here
+                        END IF;
+                        v_last := m_base[m_i] + v_take - 1;
+                    END IF;
+                END IF;
+                m_i := m_i + 1;
+            END LOOP;
+
+            IF v_taken > 0 THEN
+                e_kind := array_append(e_kind, 'f');
+                e_ord  := e_ord || v_ord;
+                e_pid  := e_pid || a_pid[v_ord];
+                e_segj := e_segj || v_segj;
+                e_bfrom := e_bfrom || v_bfrom;
+                e_bcnt := e_bcnt || (COALESCE(array_length(sel_pid, 1), 0) - v_bfrom + 1);
+                e_start := e_start || v_start;
+                e_last := e_last || v_last;
+                e_take := e_take || v_taken;
+                e_sfrom := e_sfrom || 0;  -- unused for fast
+                e_scnt := e_scnt || 0;
+                e_lastoff := e_lastoff || NULL::bigint;  -- from RETURNING below
+                v_remaining := v_remaining - v_taken;
+                v_claimed := v_claimed + 1;
             ELSE
-                -- 0 frames, no visible foreign lease. If this snapshot still
-                -- shows pending backlog, the claim was lock-skipped by a
-                -- concurrent pop transaction (SKIP LOCKED at the consumer-row
-                -- claim, or the advisory creation guard) — with autoAck the
-                -- winner holds no visible lease, so the snapshot is the ONLY
-                -- discriminator. 'empty' here would let the broker CAS-clear a
-                -- backlogged ring entry (every push that predates the group
-                -- ring leaves epoch untouched, so the CAS passes) and strand
-                -- the partition until the reseed floor (~30s) — the bench-smoke
-                -- "25 short" tail stall. Report a short-horizon 'leased'
-                -- instead: the broker wheels a bounded re-probe (<=1s cap).
-                SELECT (p.last_offset > COALESCE(c.committed, -1)) INTO v_pending
+                -- claimed, nothing visible: seal decision + tri-state deferred
+                -- to the batched fresh re-check (parity with the old body's
+                -- post-serve re-check statement and its snapshot ordering).
+                z_ord := z_ord || v_ord;
+                z_seal := z_seal || (NOT v_has_rows AND a_lastoff[v_ord] > a_comm[v_ord]);
+                z_pending := z_pending || FALSE;  -- placeholder
+            END IF;
+
+        ELSIF a_probed[v_ord] AND a_rowmiss[v_ord] THEN
+            -- ----------------------------------------------------------
+            -- SLOW PATH — first contact: the old per-partition serve,
+            -- verbatim. log_pop_v1 owns seeding + advisory-guarded creation.
+            -- ----------------------------------------------------------
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                       'seq', r_base,
+                       'startOff', r_start_idx,
+                       'take', r_take,
+                       'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+                   ) ORDER BY r_base), '[]'::jsonb),
+                   COALESCE(SUM(r_take), 0),
+                   COALESCE(array_agg(r_blob ORDER BY r_base), '{}'::bytea[])
+            INTO v_segments, v_sp_taken, v_part_blobs
+            FROM queen.log_pop_v1(p_queue, v_name, p_group,
+                                  v_remaining, p_lease_seconds, p_worker, p_auto_ack,
+                                  p_sub_mode, p_sub_from, p_skip_window, p_tenant);
+
+            IF v_sp_taken > 0 THEN
+                SELECT p.id, p.last_offset INTO v_pid2, v_lo2
+                FROM queen.log_partitions p
+                WHERE p.queue_id = v_qid AND p.name = v_name;
+                e_kind := array_append(e_kind, 'w');
+                e_ord  := e_ord || v_ord;
+                e_pid  := e_pid || v_pid2;
+                e_segj := e_segj || v_segments;
+                e_bfrom := e_bfrom || 0;  -- unused for slow
+                e_bcnt := e_bcnt || 0;
+                e_start := e_start || NULL::bigint;
+                e_last := e_last || NULL::bigint;
+                e_take := e_take || v_sp_taken;
+                e_sfrom := e_sfrom || (COALESCE(array_length(slow_blobs, 1), 0) + 1);
+                e_scnt := e_scnt || COALESCE(array_length(v_part_blobs, 1), 0);
+                e_lastoff := e_lastoff || v_lo2;
+                slow_blobs := slow_blobs || v_part_blobs;
+                v_remaining := v_remaining - v_sp_taken;
+                v_claimed := v_claimed + 1;
+            ELSE
+                -- Zero-serve on first contact: decide from a FRESH snapshot,
+                -- exactly as the old body did — its re-check ran as a NEW
+                -- statement and therefore saw log_pop_v1's OWN writes (the
+                -- consumer row it may have just created and seeded, or its
+                -- cursor seal). The pass-1b probe data is stale here by
+                -- construction: judging from it reported 'leased' for a
+                -- freshly-seeded caught-up partition where the old body said
+                -- 'empty' (safe direction, but a parity break — found by the
+                -- 2026-08-02 adversarial review).
+                SELECT c.worker_id, c.lease_expires_at,
+                       (p.last_offset > COALESCE(c.committed, -1))
+                INTO v_flworker, v_flexp, v_fpend
                 FROM queen.log_partitions p
                 LEFT JOIN queen.log_consumers c
                   ON c.partition_id = p.id AND c.consumer_group = p_group
                 WHERE p.queue_id = v_qid AND p.name = v_name;
-                IF COALESCE(v_pending, FALSE) THEN
+                IF v_flworker IS NOT NULL AND v_flworker <> p_worker
+                   AND v_flexp IS NOT NULL AND v_flexp > v_now THEN
+                    v_states := v_states || jsonb_build_object(
+                        'p', v_name, 's', 'leased',
+                        'until', to_char(v_flexp, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                ELSIF COALESCE(v_fpend, FALSE) THEN
                     v_states := v_states || jsonb_build_object(
                         'p', v_name, 's', 'leased',
                         'until', to_char(v_now + interval '250 milliseconds',
@@ -1469,6 +1808,145 @@ BEGIN
                 ELSE
                     v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
                 END IF;
+            END IF;
+
+        ELSIF a_probed[v_ord] THEN
+            -- row exists, claim skipped it: live foreign lease, or locked by a
+            -- concurrent pop. Same verdicts as the old body.
+            IF a_lworker[v_ord] IS NOT NULL AND a_lworker[v_ord] <> p_worker
+               AND a_lexp[v_ord] IS NOT NULL AND a_lexp[v_ord] > v_now THEN
+                v_states := v_states || jsonb_build_object(
+                    'p', v_name, 's', 'leased',
+                    'until', to_char(a_lexp[v_ord], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+            ELSIF a_lastoff[v_ord] > COALESCE(a_comm[v_ord], -1) THEN
+                v_states := v_states || jsonb_build_object(
+                    'p', v_name, 's', 'leased',
+                    'until', to_char(v_now + interval '250 milliseconds',
+                                     'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+            ELSE
+                v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
+            END IF;
+
+        ELSE
+            -- partition row itself missing: the old body's per-partition pop
+            -- returned nothing and its pending re-check found no row → empty.
+            v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
+        END IF;
+    END LOOP;
+
+    -- ------------------------------------------------------------------
+    -- WRITES — one statement per kind, only for what was actually used
+    -- (batched-lease design point, 2026-08-02).
+    -- ------------------------------------------------------------------
+    IF COALESCE(array_length(z_ord, 1), 0) > 0 THEN
+        -- Cursor seal (empty-partition starvation fix, 2026-07-30): only when
+        -- the partition holds NO segments at all, sealed to the resolve-time
+        -- last_offset snapshot — monotone offsets keep a racing push above
+        -- the seal, exactly as before.
+        UPDATE queen.log_consumers c SET committed = u.seal_off
+        FROM (SELECT a_pid[zz.z] AS pid, a_lastoff[zz.z] AS seal_off
+              FROM unnest(z_ord) WITH ORDINALITY AS zz(z, zi)
+              WHERE z_seal[zi]) u
+        WHERE c.partition_id = u.pid AND c.consumer_group = p_group;
+
+        -- Fresh pending re-check (new snapshot: sees our own seal), batched.
+        FOR rec IN
+            SELECT zz.zi, (p.last_offset > COALESCE(c.committed, -1)) AS pending
+            FROM unnest(z_ord) WITH ORDINALITY AS zz(z, zi)
+            JOIN queen.log_partitions p ON p.id = a_pid[zz.z]
+            LEFT JOIN queen.log_consumers c
+              ON c.partition_id = p.id AND c.consumer_group = p_group
+        LOOP
+            z_pending[rec.zi] := COALESCE(rec.pending, FALSE);
+        END LOOP;
+
+        FOR i IN 1..array_length(z_ord, 1) LOOP
+            IF z_pending[i] THEN
+                v_states := v_states || jsonb_build_object(
+                    'p', v_parts[z_ord[i]], 's', 'leased',
+                    'until', to_char(v_now + interval '250 milliseconds',
+                                     'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+            ELSE
+                v_states := v_states || jsonb_build_object(
+                    'p', v_parts[z_ord[i]], 's', 'empty');
+            END IF;
+        END LOOP;
+    END IF;
+
+    -- Batched lease / auto-ack for the FAST-path served partitions (slow-path
+    -- ones were already written inside log_pop_v1).
+    IF EXISTS (SELECT 1 FROM unnest(e_kind) k WHERE k = 'f') THEN
+        IF p_auto_ack THEN
+            -- auto-ack: commit the delivery in-transaction; no lease; attempt
+            -- state untouched (auto-ack never redelivers).
+            FOR rec IN
+                UPDATE queen.log_consumers c SET
+                    committed = u.last_off,
+                    worker_id = NULL, lease_expires_at = NULL, lease_acquired_at = NULL,
+                    batch_end = NULL,
+                    total_consumed = c.total_consumed + u.take
+                FROM (SELECT ei, e_pid[ei] AS pid, e_last[ei] AS last_off, e_take[ei] AS take
+                      FROM generate_series(1, array_length(e_kind, 1)) ei
+                      WHERE e_kind[ei] = 'f') u
+                JOIN queen.log_partitions p ON p.id = u.pid
+                WHERE c.partition_id = u.pid AND c.consumer_group = p_group
+                RETURNING u.ei, p.last_offset
+            LOOP
+                e_lastoff[rec.ei] := rec.last_offset;
+            END LOOP;
+        ELSE
+            -- Lease the batches (committed, last]. Attempt tracking verbatim:
+            -- same start offset as the previous non-auto-ack delivery =
+            -- redelivery → attempt_count++; anywhere else = fresh → 1.
+            FOR rec IN
+                UPDATE queen.log_consumers c SET
+                    worker_id = p_worker,
+                    lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
+                    lease_acquired_at = v_now,
+                    batch_end = u.last_off,
+                    attempt_count = CASE WHEN c.attempt_offset IS NOT DISTINCT FROM u.start_off
+                                         THEN c.attempt_count + 1 ELSE 1 END,
+                    attempt_offset = u.start_off
+                FROM (SELECT ei, e_pid[ei] AS pid, e_start[ei] AS start_off, e_last[ei] AS last_off
+                      FROM generate_series(1, array_length(e_kind, 1)) ei
+                      WHERE e_kind[ei] = 'f') u
+                JOIN queen.log_partitions p ON p.id = u.pid
+                WHERE c.partition_id = u.pid AND c.consumer_group = p_group
+                RETURNING u.ei, p.last_offset
+            LOOP
+                e_lastoff[rec.ei] := rec.last_offset;
+            END LOOP;
+        END IF;
+
+        -- ONE blob fetch, in selection (= emission) order.
+        SELECT COALESCE(array_agg(s.blob ORDER BY u.ord), '{}'::bytea[])
+        INTO v_fast_blobs
+        FROM unnest(sel_pid, sel_base) WITH ORDINALITY AS u(pid, base, ord)
+        JOIN queen.log_segments s
+          ON s.partition_id = u.pid AND s.base_offset = u.base;
+    END IF;
+
+    -- ------------------------------------------------------------------
+    -- ASSEMBLY — served entries in serve order; per-entry blob splice keeps
+    -- the flat array positionally aligned with meta.
+    -- ------------------------------------------------------------------
+    FOR i IN 1..COALESCE(array_length(e_kind, 1), 0) LOOP
+        v_out := v_out || jsonb_build_object(
+            'partition', v_parts[e_ord[i]],
+            'partitionId', e_pid[i],
+            'segments', e_segj[i]);
+        v_states := v_states || jsonb_build_object(
+            'p', v_parts[e_ord[i]], 's', 'took',
+            'lastOff', e_lastoff[i]);
+        IF e_kind[i] = 'f' THEN
+            IF e_bcnt[i] > 0 THEN
+                v_all_blobs := v_all_blobs
+                    || v_fast_blobs[e_bfrom[i] : e_bfrom[i] + e_bcnt[i] - 1];
+            END IF;
+        ELSE
+            IF e_scnt[i] > 0 THEN
+                v_all_blobs := v_all_blobs
+                    || slow_blobs[e_sfrom[i] : e_sfrom[i] + e_scnt[i] - 1];
             END IF;
         END IF;
     END LOOP;

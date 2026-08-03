@@ -291,6 +291,11 @@ pub struct Config {
     pub ack_fusion_enabled: bool,
     pub ack_fusion_shards: usize,
     pub ack_fusion_hold_ms: u64,
+    pub pop_fusion_enabled: bool,
+    pub pop_fusion_shards: usize,
+    pub pop_fusion_hold_ms: u64,
+    pub pop_fusion_max_jobs: usize,
+    pub pop_fusion_max_inflight: u32,
     // Retention/metrics background-job knobs (RUSTFIX item 20 — C++ JobsConfig,
     // config.hpp:286-329). `retention_batch_size` bounds each metrics-purge DELETE;
     // `metrics_retention_days` is the worker/system-metrics purge window (default
@@ -673,6 +678,14 @@ pub fn load() -> Config {
         ack_fusion_shards: env_int("QUEEN_ACK_FUSION_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))
             .max(1) as usize,
         ack_fusion_hold_ms: env_int("QUEEN_ACK_FUSION_HOLD_MS", 3).max(1) as u64,
+        // POP FUSION (server/src/pop_fusion.rs): N pop claim legs share one
+        // transaction/commit. Default OFF for the A/B; the win is the sparse-
+        // partition regime where pop commits dominate the WAL (2026-08-02).
+        pop_fusion_enabled: env_bool("QUEEN_POP_FUSION", false),
+        pop_fusion_shards: env_int("QUEEN_POP_FUSION_SHARDS", 4).max(1) as usize,
+        pop_fusion_hold_ms: env_int("QUEEN_POP_FUSION_HOLD_MS", 3).max(1) as u64,
+        pop_fusion_max_jobs: env_int("QUEEN_POP_FUSION_MAX_JOBS", 16).max(1) as usize,
+        pop_fusion_max_inflight: env_int("QUEEN_POP_FUSION_CONCURRENCY", 1).max(1) as u32,
         retention_batch_size: env_int("RETENTION_BATCH_SIZE", 1000).max(1) as usize,
         retention_parallelism: env_int("RETENTION_PARALLELISM", 1).max(1) as usize,
         metrics_retention_days: env_int("METRICS_RETENTION_DAYS", 90).max(1) as i32,
