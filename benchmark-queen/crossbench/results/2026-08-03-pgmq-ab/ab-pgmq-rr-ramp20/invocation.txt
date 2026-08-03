@@ -1,0 +1,1 @@
+./cmbench -system pgmq -pgmq-dsn postgres://postgres:postgres@10.114.0.2:5432/postgres -rate 2000 -properties 1000 -duration 180 -ramp 20 -drain 90 -pgmq-read-fn read_grouped_rr -logdir results/ab-pgmq-rr-ramp20

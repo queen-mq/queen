@@ -723,6 +723,26 @@ impl HotList {
                         sub.revisit_at[local as usize] = 0;
                         sub.ready_push_tail(local);
                         woke = true;
+                    } else if cfg.window == 0
+                        && cfg.delayed == 0
+                        && sub.revisit_at[local as usize] <= now_ms + pad_ms()
+                    {
+                        // Plain queue: every WHEEL entry is a lease park shaped
+                        // core+PAD (own post-serve backstop `now+lease+PAD`, or a
+                        // foreign `until+PAD`, both capped MAX_LEASE_REVISIT_MS).
+                        // revisit_at ≤ now+PAD ⟺ the lease core has passed and only
+                        // the safety pad remains — and this mark PROVES data is
+                        // pending, so promote instead of sitting out the pad.
+                        // NEVER promote inside the core: a claim there re-finds the
+                        // live lease (`leased` verdict → re-park churn), which is
+                        // the race the park exists to avoid. Idempotent by
+                        // construction (state flips to READY; later marks take the
+                        // READY arm), so no reschedule and no wheel-heap spam.
+                        // Canaries for the herd risk: `leased`/`empty` verdict
+                        // rates and pop_empty_pct must not rise.
+                        sub.revisit_at[local as usize] = 0;
+                        sub.ready_push_tail(local);
+                        woke = true;
                     }
                 }
                 READY => { /* already claimable */ }

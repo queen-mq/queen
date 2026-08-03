@@ -1,0 +1,195 @@
+{
+  "system": "pgmq",
+  "started_unix": 1785751295,
+  "elapsed_sec": 180.000623612,
+  "rate_events_per_sec": 2000,
+  "properties": 1000,
+  "durability": "default",
+  "dedup_window_sec": 0,
+  "invariants": {
+    "deliveries_per_sec": 12000,
+    "ordered_lanes": 325,
+    "publishes_per_sec_copied": 12000,
+    "publishes_per_sec_native": 4000
+  },
+  "provisioned": {
+    "connections": 98,
+    "consumer_members": 96,
+    "ordered_lanes": 12000,
+    "physical_queues": 12,
+    "publishes_per_ingress_event": 6,
+    "semantics_built_in_app": [
+      "fan-out materialised: no consumer groups, so every derived message is INSERTed once PER GROUP",
+      "ack is a DELETE and the read is an UPDATE: 3 row versions per delivered message vs 1 INSERT",
+      "no depth batching: a grouped read returns at most ONE message per property, so a property's backlog cannot be drained in one round trip",
+      "no broker-side dedup: a dedup window would need an external store",
+      "consumption is polling, not push: empty reads cost a query"
+    ]
+  },
+  "flow": {
+    "ack_err": 0,
+    "acked": 1811826,
+    "delivered": 1811826,
+    "derived": 301971,
+    "offered": 300000,
+    "processed": 1811826,
+    "published": 301934,
+    "push_err": 65,
+    "push_retry": 0,
+    "shed": 0,
+    "slow_decodes": 1811826
+  },
+  "latency_ms": {
+    "flow_a_p50": 571.7401181436027,
+    "flow_a_p95": 1143.4802362872053,
+    "flow_a_p99": 1617.1252584629572,
+    "flow_b_p50": 679.9174164288686,
+    "flow_b_p95": 1246.9740398210931,
+    "flow_b_p99": 1617.1252584629572
+  },
+  "correctness": {
+    "dups": 0,
+    "gaps": 0,
+    "inflight_at_cutoff": 174,
+    "order_violations": 23,
+    "pass": false
+  },
+  "broker_stats": {
+    "pgmq_deletes": 1811826,
+    "pgmq_empty_reads": 187268,
+    "pgmq_lanes": 1000,
+    "pgmq_logical_publishes": 603905,
+    "pgmq_physical_inserts": 1811789,
+    "pgmq_pool_acquired": 0,
+    "pgmq_pool_total_conns": 98,
+    "pgmq_props_per_lane": 1,
+    "pgmq_queues": 12,
+    "pgmq_read_fn": "read_grouped_rr",
+    "pgmq_readers": 96,
+    "pgmq_reads": 326993,
+    "pgmq_rows_read": 1811826,
+    "pgmq_visibility_timeout": 60
+  },
+  "streams": [
+    {
+      "stream": "cm-avail_cm-db",
+      "msgs": 150971,
+      "unique": 150971,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 29,
+      "pass": true
+    },
+    {
+      "stream": "cm-prices_cm-cal",
+      "msgs": 151000,
+      "unique": 151000,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 8,
+      "inflight_at_cutoff": 0,
+      "pass": false
+    },
+    {
+      "stream": "cm-ota-sync_ota-1",
+      "msgs": 150971,
+      "unique": 150971,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 29,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-2",
+      "msgs": 150971,
+      "unique": 150971,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 29,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-3",
+      "msgs": 150971,
+      "unique": 150971,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 29,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-sync_ota-4",
+      "msgs": 150971,
+      "unique": 150971,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 1,
+      "inflight_at_cutoff": 29,
+      "pass": false
+    },
+    {
+      "stream": "cm-ota-sync_ota-5",
+      "msgs": 150971,
+      "unique": 150971,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 0,
+      "inflight_at_cutoff": 29,
+      "pass": true
+    },
+    {
+      "stream": "cm-ota-prices_otap-1",
+      "msgs": 151000,
+      "unique": 151000,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 2,
+      "inflight_at_cutoff": 0,
+      "pass": false
+    },
+    {
+      "stream": "cm-ota-prices_otap-2",
+      "msgs": 151000,
+      "unique": 151000,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 1,
+      "inflight_at_cutoff": 0,
+      "pass": false
+    },
+    {
+      "stream": "cm-ota-prices_otap-3",
+      "msgs": 151000,
+      "unique": 151000,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 1,
+      "inflight_at_cutoff": 0,
+      "pass": false
+    },
+    {
+      "stream": "cm-ota-prices_otap-4",
+      "msgs": 151000,
+      "unique": 151000,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 2,
+      "inflight_at_cutoff": 0,
+      "pass": false
+    },
+    {
+      "stream": "cm-ota-prices_otap-5",
+      "msgs": 151000,
+      "unique": 151000,
+      "dups": 0,
+      "gaps": 0,
+      "order_violations": 8,
+      "inflight_at_cutoff": 0,
+      "pass": false
+    }
+  ]
+}

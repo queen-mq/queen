@@ -1,0 +1,1 @@
+./cmbench -system kafka -kafka-seeds 10.114.0.2:9092 -rate 2000 -properties 1000 -duration 180 -ramp 10 -drain 90 -lanes 1000

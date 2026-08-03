@@ -1,0 +1,1 @@
+./cmbench -system pgmq -pgmq-dsn postgres://postgres:postgres@10.114.0.2:5432/postgres -rate 3000 -properties 1000 -duration 300 -ramp 20 -drain 60 -pgmq-read-fn read_grouped_head

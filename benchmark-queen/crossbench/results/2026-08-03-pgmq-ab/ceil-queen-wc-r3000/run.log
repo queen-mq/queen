@@ -1,0 +1,404 @@
+=== CM-BENCH  system=queen  R=3000 ev/s  P=1000  duration=300s ===
+invariants: 18000 deliveries/s, 488 ordered lanes, publishes/s native=6000 copied=18000
+started 12 stages, lane budget 737 (headroom 1.50x)
+warmup: 1000 properties x 2 flows in 3.441s, pipeline drained=true (12000/12000)
+t=   1  off=    76 pub=    76 der=    73 del=    435 proc=    413 ack=    447  lag=      28  shed=0 pushErr=0 ackErr=0  e2eA p50=2287 p99=3527  e2eB p50=2287 p99=3527
+t=   2  off=   226 pub=   224 der=   221 del=   1317 proc=   1285 ack=   1280  lag=      72  shed=0 pushErr=0 ackErr=0  e2eA p50=2097 p99=3527  e2eB p50=2097 p99=3527
+t=   3  off=   374 pub=   374 der=   367 del=   2158 proc=   2134 ack=   2136  lag=     147  shed=0 pushErr=0 ackErr=0  e2eA p50=1923 p99=3527  e2eB p50=1923 p99=3527
+t=   4  off=   525 pub=   524 der=   506 del=   3028 proc=   3019 ack=   2977  lag=     182  shed=0 pushErr=0 ackErr=0  e2eA p50=1483 p99=3527  e2eB p50=1483 p99=3527
+t=   5  off=   675 pub=   674 der=   664 del=   3932 proc=   3900 ack=   3801  lag=     276  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3527  e2eB p50=882 p99=3527
+t=   6  off=   825 pub=   823 der=   802 del=   4828 proc=   4775 ack=   4601  lag=     334  shed=0 pushErr=0 ackErr=0  e2eA p50=156 p99=3527  e2eB p50=143 p99=3527
+t=   7  off=   975 pub=   969 der=   946 del=   5574 proc=   5603 ack=   5229  lag=     430  shed=0 pushErr=0 ackErr=0  e2eA p50=170 p99=3527  e2eB p50=156 p99=3527
+t=   8  off=  1126 pub=  1124 der=  1130 del=   6831 proc=   6762 ack=   6920  lag=     442  shed=0 pushErr=0 ackErr=0  e2eA p50=156 p99=3527  e2eB p50=156 p99=3527
+t=   9  off=  1273 pub=  1271 der=  1264 del=   7522 proc=   7465 ack=   7146  lag=     568  shed=0 pushErr=0 ackErr=0  e2eA p50=156 p99=3527  e2eB p50=156 p99=3527
+t=  10  off=  1426 pub=  1414 der=  1379 del=   8358 proc=   8270 ack=   8064  lag=     607  shed=0 pushErr=0 ackErr=0  e2eA p50=156 p99=3527  e2eB p50=156 p99=3527
+t=  11  off=  1575 pub=  1573 der=  1552 del=   9163 proc=   9229 ack=   8861  lag=     711  shed=0 pushErr=0 ackErr=0  e2eA p50=170 p99=3527  e2eB p50=156 p99=3527
+t=  12  off=  1725 pub=  1720 der=  1683 del=   9799 proc=   9832 ack=   9605  lag=    1014  shed=0 pushErr=0 ackErr=0  e2eA p50=170 p99=3527  e2eB p50=170 p99=3527
+t=  13  off=  1875 pub=  1870 der=  1857 del=  11104 proc=  11085 ack=  10094  lag=    1084  shed=0 pushErr=0 ackErr=0  e2eA p50=185 p99=3527  e2eB p50=170 p99=3527
+t=  14  off=  2023 pub=  2027 der=  1872 del=  11469 proc=  11234 ack=  11421  lag=    1237  shed=0 pushErr=0 ackErr=0  e2eA p50=185 p99=3527  e2eB p50=185 p99=3527
+t=  15  off=  2176 pub=  2068 der=  2073 del=  12191 proc=  12441 ack=  11839  lag=    1229  shed=0 pushErr=0 ackErr=0  e2eA p50=202 p99=3234  e2eB p50=202 p99=3527
+t=  16  off=  2326 pub=  2333 der=  2227 del=  13004 proc=  12733 ack=  12034  lag=    1964  shed=0 pushErr=0 ackErr=0  e2eA p50=202 p99=3234  e2eB p50=202 p99=3527
+t=  17  off=  2476 pub=  2238 der=  2023 del=  12154 proc=  12316 ack=  11863  lag=    2001  shed=0 pushErr=0 ackErr=0  e2eA p50=220 p99=3234  e2eB p50=220 p99=3527
+t=  18  off=  2625 pub=  2640 der=  2106 del=  12709 proc=  12554 ack=  12392  lag=    2617  shed=0 pushErr=0 ackErr=0  e2eA p50=240 p99=3234  e2eB p50=240 p99=3527
+t=  19  off=  2775 pub=  2564 der=  2223 del=  13408 proc=  13189 ack=  13259  lag=    3107  shed=0 pushErr=0 ackErr=0  e2eA p50=262 p99=3234  e2eB p50=240 p99=3527
+t=  20  off=  2924 pub=  2945 der=  2667 del=  15849 proc=  15850 ack=  14002  lag=    3537  shed=0 pushErr=0 ackErr=0  e2eA p50=262 p99=3234  e2eB p50=262 p99=3527
+t=  21  off=  3002 pub=  2777 der=  2715 del=  17468 proc=  17604 ack=  17154  lag=    2285  shed=0 pushErr=0 ackErr=0  e2eA p50=312 p99=3234  e2eB p50=312 p99=3234
+t=  22  off=  2997 pub=  2911 der=  2857 del=  15730 proc=  15239 ack=  17508  lag=    4242  shed=0 pushErr=0 ackErr=0  e2eA p50=340 p99=3234  e2eB p50=340 p99=3234
+t=  23  off=  3000 pub=  3016 der=  3032 del=  18889 proc=  19296 ack=  18309  lag=    3122  shed=0 pushErr=0 ackErr=0  e2eA p50=371 p99=3234  e2eB p50=404 p99=3234
+t=  24  off=  3003 pub=  2899 der=  2915 del=  17518 proc=  17337 ack=  16422  lag=    3259  shed=0 pushErr=0 ackErr=0  e2eA p50=441 p99=2966  e2eB p50=441 p99=2966
+t=  25  off=  2997 pub=  2966 der=  3129 del=  18381 proc=  18229 ack=  18283  lag=    3641  shed=0 pushErr=0 ackErr=0  e2eA p50=481 p99=2966  e2eB p50=481 p99=2966
+t=  26  off=  3001 pub=  2777 der=  2780 del=  16808 proc=  16943 ack=  17785  lag=    3375  shed=0 pushErr=0 ackErr=0  e2eA p50=572 p99=2966  e2eB p50=524 p99=2966
+t=  27  off=  3002 pub=  2997 der=  2658 del=  15124 proc=  15336 ack=  14337  lag=    4326  shed=0 pushErr=0 ackErr=0  e2eA p50=572 p99=2966  e2eB p50=572 p99=2966
+t=  28  off=  3000 pub=  3356 der=  3050 del=  17256 proc=  16308 ack=  15702  lag=    6624  shed=0 pushErr=0 ackErr=0  e2eA p50=623 p99=2966  e2eB p50=623 p99=2966
+t=  29  off=  3000 pub=  3132 der=  3374 del=  20887 proc=  21497 ack=  21288  lag=    5129  shed=0 pushErr=0 ackErr=0  e2eA p50=680 p99=2966  e2eB p50=680 p99=2966
+t=  30  off=  2998 pub=  3184 der=  3320 del=  19640 proc=  19666 ack=  19081  lag=    5247  shed=0 pushErr=0 ackErr=0  e2eA p50=741 p99=2966  e2eB p50=741 p99=2966
+t=  31  off=  2998 pub=  2869 der=  2924 del=  18446 proc=  18743 ack=  20796  lag=    3993  shed=0 pushErr=0 ackErr=0  e2eA p50=741 p99=2966  e2eB p50=741 p99=2966
+t=  32  off=  3000 pub=  2855 der=  2951 del=  17297 proc=  17235 ack=  17634  lag=    4368  shed=0 pushErr=0 ackErr=0  e2eA p50=741 p99=2966  e2eB p50=741 p99=2966
+t=  33  off=  3003 pub=  3104 der=  2975 del=  18756 proc=  18468 ack=  17872  lag=    3879  shed=0 pushErr=0 ackErr=0  e2eA p50=741 p99=2966  e2eB p50=809 p99=2966
+t=  34  off=  3001 pub=  3036 der=  3113 del=  17566 proc=  17846 ack=  18853  lag=    4634  shed=0 pushErr=0 ackErr=0  e2eA p50=809 p99=2966  e2eB p50=809 p99=2966
+t=  35  off=  2998 pub=  2723 der=  2818 del=  17363 proc=  17191 ack=  17297  lag=    4256  shed=0 pushErr=0 ackErr=0  e2eA p50=809 p99=2966  e2eB p50=809 p99=2966
+t=  36  off=  3001 pub=  3050 der=  2931 del=  17906 proc=  17750 ack=  16164  lag=    4211  shed=0 pushErr=0 ackErr=0  e2eA p50=809 p99=2966  e2eB p50=809 p99=2966
+t=  37  off=  2999 pub=  2735 der=  2850 del=  15884 proc=  16493 ack=  16193  lag=    4703  shed=0 pushErr=0 ackErr=0  e2eA p50=809 p99=2966  e2eB p50=809 p99=2966
+t=  38  off=  3002 pub=  3365 der=  2908 del=  18307 proc=  17922 ack=  17793  lag=    4686  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2966
+t=  39  off=  2998 pub=  3031 der=  3531 del=  20880 proc=  21114 ack=  20406  lag=    4258  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  40  off=  2999 pub=  3270 der=  3251 del=  18652 proc=  18022 ack=  18303  lag=    5761  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  41  off=  3001 pub=  3051 der=  2932 del=  19164 proc=  19166 ack=  20429  lag=    4306  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  42  off=  3002 pub=  3086 der=  2961 del=  18894 proc=  18772 ack=  18264  lag=    3425  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  43  off=  2999 pub=  2962 der=  3300 del=  17877 proc=  18033 ack=  17674  lag=    4854  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  44  off=  2997 pub=  2932 der=  2938 del=  18840 proc=  18918 ack=  18769  lag=    3558  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  45  off=  3002 pub=  2790 der=  2888 del=  16607 proc=  16892 ack=  18505  lag=    3896  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  46  off=  2996 pub=  2709 der=  2735 del=  16849 proc=  16938 ack=  16915  lag=    3342  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  47  off=  3006 pub=  2462 der=  2417 del=  14505 proc=  15120 ack=  14234  lag=    2769  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  48  off=  2996 pub=  3121 der=  2479 del=  15554 proc=  14847 ack=  16388  lag=    3438  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  49  off=  3002 pub=  3182 der=  3121 del=  18854 proc=  18732 ack=  17581  lag=    3493  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=882 p99=2720
+t=  50  off=  3000 pub=  2929 der=  3228 del=  18965 proc=  18815 ack=  20144  lag=    3747  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=962 p99=2720
+t=  51  off=  3002 pub=  2972 der=  3200 del=  17694 proc=  18275 ack=  16476  lag=    4444  shed=0 pushErr=0 ackErr=0  e2eA p50=882 p99=2966  e2eB p50=962 p99=2720
+t=  52  off=  2998 pub=  2898 der=  3093 del=  19445 proc=  19220 ack=  18347  lag=    3587  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=2966  e2eB p50=962 p99=2720
+t=  53  off=  3002 pub=  2928 der=  2729 del=  16482 proc=  16541 ack=  17545  lag=    3619  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=2966  e2eB p50=962 p99=2720
+t=  54  off=  2998 pub=  3080 der=  3022 del=  17889 proc=  17806 ack=  17567  lag=    4003  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2720
+t=  55  off=  3000 pub=  3052 der=  3046 del=  18534 proc=  18349 ack=  17732  lag=    3936  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2720
+t=  56  off=  2999 pub=  2925 der=  2827 del=  17812 proc=  18035 ack=  19767  lag=    2961  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2720
+t=  57  off=  3002 pub=  2764 der=  2568 del=  15369 proc=  15981 ack=  16320  lag=    2584  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2720
+t=  58  off=  2998 pub=  2902 der=  3063 del=  17722 proc=  16263 ack=  13666  lag=    4538  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2720
+t=  59  off=  3005 pub=  3160 der=  2973 del=  18124 proc=  18445 ack=  20586  lag=    4118  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2966
+t=  60  off=  2996 pub=  3038 der=  3151 del=  19699 proc=  19999 ack=  18995  lag=    2912  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2966
+t=  61  off=  3002 pub=  3039 der=  3163 del=  17755 proc=  17663 ack=  17734  lag=    4103  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2966
+t=  62  off=  2998 pub=  2826 der=  3034 del=  18134 proc=  18468 ack=  18400  lag=    3631  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2966
+t=  63  off=  2998 pub=  2793 der=  2897 del=  16929 proc=  16572 ack=  16456  lag=    4337  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2966
+t=  64  off=  3006 pub=  2534 der=  2578 del=  16999 proc=  17695 ack=  18775  lag=    2066  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=962 p99=2966
+t=  65  off=  2996 pub=  2610 der=  2408 del=  14364 proc=  14257 ack=  15718  lag=    2459  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3234  e2eB p50=1049 p99=3234
+t=  66  off=  2998 pub=  2628 der=  2875 del=  16505 proc=  16076 ack=  15233  lag=    3386  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3527  e2eB p50=1049 p99=3234
+t=  67  off=  3001 pub=  2316 der=  2455 del=  15061 proc=  15281 ack=  14322  lag=    2696  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3527  e2eB p50=1049 p99=3234
+t=  68  off=  3000 pub=  2402 der=  2450 del=  14362 proc=  14348 ack=  13310  lag=    3000  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=3527  e2eB p50=1049 p99=3527
+t=  69  off=  3001 pub=  2894 der=  2354 del=  14568 proc=  14281 ack=  15374  lag=    3383  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=3527  e2eB p50=1049 p99=3527
+t=  70  off=  3002 pub=  2900 der=  3123 del=  18457 proc=  18707 ack=  17078  lag=    3191  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=3527  e2eB p50=1049 p99=3527
+t=  71  off=  2997 pub=  3007 der=  2864 del=  17433 proc=  17425 ack=  18660  lag=    3093  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=3846  e2eB p50=1049 p99=3527
+t=  72  off=  3001 pub=  3217 der=  2872 del=  15960 proc=  16292 ack=  16513  lag=    4378  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=3846  e2eB p50=1049 p99=3846
+t=  73  off=  3002 pub=  3489 der=  3372 del=  20627 proc=  19943 ack=  19946  lag=    4784  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4194  e2eB p50=1049 p99=3846
+t=  74  off=  3000 pub=  2932 der=  3519 del=  21297 proc=  21529 ack=  19722  lag=    3782  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4194  e2eB p50=1049 p99=4194
+t=  75  off=  2997 pub=  2987 der=  3005 del=  18528 proc=  18499 ack=  18993  lag=    3295  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4194  e2eB p50=1143 p99=4194
+t=  76  off=  3002 pub=  3104 der=  2985 del=  16958 proc=  17322 ack=  18481  lag=    4002  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4194  e2eB p50=1143 p99=4194
+t=  77  off=  2998 pub=  2645 der=  2660 del=  15999 proc=  15688 ack=  14714  lag=    4259  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4194  e2eB p50=1143 p99=4194
+t=  78  off=  3001 pub=  3029 der=  2768 del=  17558 proc=  17817 ack=  17934  lag=    3311  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4574  e2eB p50=1143 p99=4194
+t=  79  off=  3000 pub=  3037 der=  3006 del=  18462 proc=  18668 ack=  18918  lag=    2710  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4574  e2eB p50=1143 p99=4194
+t=  80  off=  2997 pub=  3375 der=  3307 del=  18911 proc=  18225 ack=  18901  lag=    4395  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4574  e2eB p50=1143 p99=4574
+t=  81  off=  3004 pub=  3227 der=  3046 del=  19596 proc=  19568 ack=  19328  lag=    3284  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4988  e2eB p50=1143 p99=4574
+t=  82  off=  2997 pub=  3187 der=  3469 del=  20078 proc=  20218 ack=  19978  lag=    3598  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4988  e2eB p50=1143 p99=4574
+t=  83  off=  3003 pub=  3029 der=  3307 del=  18837 proc=  19259 ack=  18995  lag=    3903  shed=0 pushErr=0 ackErr=0  e2eA p50=1049 p99=4988  e2eB p50=1143 p99=4574
+t=  84  off=  2999 pub=  3185 der=  3063 del=  18812 proc=  18501 ack=  18245  lag=    3902  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5439  e2eB p50=1143 p99=4988
+t=  85  off=  3002 pub=  3167 der=  3150 del=  18789 proc=  18634 ack=  18924  lag=    4185  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5439  e2eB p50=1143 p99=4988
+t=  86  off=  2999 pub=  2933 der=  3098 del=  18696 proc=  18646 ack=  18212  lag=    3962  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5439  e2eB p50=1143 p99=4988
+t=  87  off=  2999 pub=  2507 der=  2585 del=  16176 proc=  16800 ack=  16691  lag=    2594  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5439  e2eB p50=1143 p99=4988
+t=  88  off=  3000 pub=  3187 der=  2632 del=  14571 proc=  13742 ack=  14130  lag=    5199  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5439  e2eB p50=1143 p99=4988
+t=  89  off=  2997 pub=  3125 der=  2920 del=  19152 proc=  19247 ack=  21717  lag=    3677  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5932  e2eB p50=1143 p99=5439
+t=  90  off=  3004 pub=  2979 der=  3646 del=  21012 proc=  21065 ack=  18431  lag=    3821  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5932  e2eB p50=1143 p99=5439
+t=  91  off=  2997 pub=  3121 der=  2957 del=  17702 proc=  17722 ack=  18598  lag=    4005  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5932  e2eB p50=1143 p99=5932
+t=  92  off=  3002 pub=  3048 der=  3098 del=  18447 proc=  18714 ack=  18874  lag=    3829  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5932  e2eB p50=1143 p99=5932
+t=  93  off=  3000 pub=  2983 der=  2849 del=  17684 proc=  17786 ack=  18619  lag=    3271  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5932  e2eB p50=1143 p99=6469
+t=  94  off=  2999 pub=  2679 der=  3116 del=  18126 proc=  18097 ack=  17656  lag=    3433  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5932  e2eB p50=1143 p99=6469
+t=  95  off=  3003 pub=  2961 der=  2577 del=  16202 proc=  16515 ack=  16389  lag=    2764  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=5932  e2eB p50=1143 p99=6469
+t=  96  off=  2999 pub=  2816 der=  2876 del=  16577 proc=  15974 ack=  16276  lag=    3986  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=6469  e2eB p50=1143 p99=6469
+t=  97  off=  2999 pub=  2324 der=  2474 del=  14817 proc=  15166 ack=  17172  lag=    3514  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=6469  e2eB p50=1143 p99=6469
+t=  98  off=  3000 pub=  2896 der=  2806 del=  16404 proc=  16258 ack=  13483  lag=    4182  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=6469  e2eB p50=1143 p99=6469
+t=  99  off=  3000 pub=  3147 der=  2924 del=  18537 proc=  18665 ack=  19564  lag=    3284  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=6469  e2eB p50=1143 p99=7054
+t= 100  off=  3000 pub=  2893 der=  3062 del=  18448 proc=  18233 ack=  17133  lag=    3254  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=6469  e2eB p50=1143 p99=7054
+t= 101  off=  3002 pub=  3242 der=  3129 del=  18505 proc=  18946 ack=  17008  lag=    3195  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7054  e2eB p50=1143 p99=7054
+t= 102  off=  3002 pub=  3229 der=  3216 del=  18738 proc=  17908 ack=  20682  lag=    4596  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7054  e2eB p50=1247 p99=7054
+t= 103  off=  2998 pub=  2979 der=  3193 del=  19695 proc=  20307 ack=  17515  lag=    3233  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7054  e2eB p50=1247 p99=7054
+t= 104  off=  2998 pub=  3006 der=  2914 del=  17889 proc=  17933 ack=  18755  lag=    2876  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7054  e2eB p50=1247 p99=7054
+t= 105  off=  3002 pub=  2967 der=  2936 del=  16924 proc=  16870 ack=  18325  lag=    3653  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7054  e2eB p50=1247 p99=7054
+t= 106  off=  2998 pub=  3011 der=  3216 del=  19854 proc=  19650 ack=  17606  lag=    3094  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7054
+t= 107  off=  3000 pub=  2739 der=  2633 del=  15474 proc=  16039 ack=  17333  lag=    2959  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7054
+t= 108  off=  3000 pub=  3016 der=  2628 del=  16413 proc=  15873 ack=  15916  lag=    3242  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 109  off=  3000 pub=  3046 der=  3287 del=  19214 proc=  19320 ack=  19375  lag=    3403  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 110  off=  3000 pub=  3136 der=  3119 del=  17962 proc=  17558 ack=  18038  lag=    4576  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 111  off=  2998 pub=  3021 der=  3164 del=  19484 proc=  20003 ack=  18739  lag=    3414  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 112  off=  3001 pub=  3082 der=  3246 del=  18720 proc=  18594 ack=  18288  lag=    4132  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 113  off=  3003 pub=  2991 der=  2846 del=  17344 proc=  17409 ack=  19425  lag=    3944  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 114  off=  2998 pub=  3020 der=  2899 del=  17806 proc=  17818 ack=  18304  lag=    3641  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 115  off=  3000 pub=  3252 der=  3111 del=  18269 proc=  17794 ack=  16945  lag=    4654  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=7692
+t= 116  off=  2998 pub=  3160 der=  3272 del=  20501 proc=  20863 ack=  19018  lag=    3311  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=7692  e2eB p50=1247 p99=8389
+t= 117  off=  3004 pub=  2629 der=  2708 del=  16581 proc=  16578 ack=  17309  lag=    2902  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 118  off=  2998 pub=  2817 der=  2818 del=  15510 proc=  15574 ack=  16311  lag=    4235  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 119  off=  3002 pub=  3086 der=  3197 del=  18695 proc=  18642 ack=  18789  lag=    4664  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 120  off=  2996 pub=  2822 der=  2709 del=  17958 proc=  18220 ack=  17611  lag=    2811  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 121  off=  3003 pub=  3204 der=  3115 del=  18331 proc=  17769 ack=  17172  lag=    3821  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 122  off=  2997 pub=  3072 der=  3215 del=  19388 proc=  19760 ack=  19558  lag=    3208  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 123  off=  3002 pub=  3000 der=  2938 del=  17777 proc=  17667 ack=  19509  lag=    3231  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 124  off=  3001 pub=  2834 der=  2945 del=  16934 proc=  16929 ack=  17724  lag=    3861  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 125  off=  2999 pub=  2693 der=  2827 del=  16832 proc=  17263 ack=  16755  lag=    3426  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 126  off=  3000 pub=  2848 der=  2541 del=  16574 proc=  16623 ack=  16404  lag=    2356  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 127  off=  3002 pub=  2254 der=  2684 del=  14963 proc=  14795 ack=  15146  lag=    3235  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 128  off=  2998 pub=  2969 der=  2130 del=  14004 proc=  13922 ack=  16425  lag=    2932  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 129  off=  3000 pub=  3286 der=  3278 del=  18707 proc=  18474 ack=  15221  lag=    4134  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 130  off=  2999 pub=  3152 der=  3651 del=  21607 proc=  21465 ack=  19629  lag=    4076  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=8389
+t= 131  off=  2999 pub=  2998 der=  3153 del=  18529 proc=  18527 ack=  19723  lag=    4312  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=9148
+t= 132  off=  3002 pub=  3319 der=  3028 del=  18680 proc=  18721 ack=  18725  lag=    4050  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=9148
+t= 133  off=  3000 pub=  2907 der=  3159 del=  19009 proc=  18902 ack=  19255  lag=    3850  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=9148
+t= 134  off=  3000 pub=  3059 der=  3006 del=  17435 proc=  17262 ack=  17728  lag=    4677  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=8389  e2eB p50=1247 p99=9148
+t= 135  off=  3000 pub=  3143 der=  3020 del=  18433 proc=  19084 ack=  20021  lag=    3836  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 136  off=  3001 pub=  2890 der=  3041 del=  18224 proc=  17958 ack=  16366  lag=    3973  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 137  off=  3000 pub=  2584 der=  2641 del=  16548 proc=  16739 ack=  16696  lag=    3023  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 138  off=  2999 pub=  3268 der=  2545 del=  15855 proc=  15529 ack=  16899  lag=    3487  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 139  off=  3002 pub=  3110 der=  3533 del=  20561 proc=  20209 ack=  17126  lag=    4053  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 140  off=  2998 pub=  2969 der=  3170 del=  19060 proc=  19421 ack=  21495  lag=    3451  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 141  off=  3003 pub=  2963 der=  2966 del=  17973 proc=  17908 ack=  17871  lag=    3336  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 142  off=  2997 pub=  2966 der=  2896 del=  17117 proc=  17366 ack=  19323  lag=    3416  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 143  off=  3000 pub=  3119 der=  2925 del=  18344 proc=  18258 ack=  16461  lag=    2902  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 144  off=  3000 pub=  3095 der=  3379 del=  19684 proc=  19620 ack=  17727  lag=    3272  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 145  off=  2992 pub=  2761 der=  3035 del=  17626 proc=  17743 ack=  18631  lag=    3465  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 146  off=  3006 pub=  2927 der=  2668 del=  16701 proc=  16777 ack=  16862  lag=    2955  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 147  off=  3002 pub=  2601 der=  2515 del=  14901 proc=  14908 ack=  17442  lag=    3223  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 148  off=  3000 pub=  2743 der=  2554 del=  14943 proc=  14687 ack=  13851  lag=    4049  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 149  off=  3000 pub=  2941 der=  3021 del=  18778 proc=  18942 ack=  18061  lag=    3153  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 150  off=  3000 pub=  2500 der=  2932 del=  17481 proc=  17819 ack=  18172  lag=    2494  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9148  e2eB p50=1247 p99=9148
+t= 151  off=  2998 pub=  2583 der=  2659 del=  15838 proc=  15488 ack=  15452  lag=    2884  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9976  e2eB p50=1247 p99=9148
+t= 152  off=  3004 pub=  2877 der=  2583 del=  15304 proc=  15472 ack=  16463  lag=    3204  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9976  e2eB p50=1247 p99=9148
+t= 153  off=  2998 pub=  2686 der=  2808 del=  17446 proc=  17702 ack=  16725  lag=    2228  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9976  e2eB p50=1247 p99=9148
+t= 154  off=  3000 pub=  2917 der=  2867 del=  16315 proc=  15922 ack=  16525  lag=    3558  shed=0 pushErr=0 ackErr=0  e2eA p50=1143 p99=9976  e2eB p50=1247 p99=9976
+t= 155  off=  3004 pub=  2539 der=  2698 del=  16359 proc=  16435 ack=  16523  lag=    3152  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1247 p99=9976
+t= 156  off=  2997 pub=  2895 der=  2541 del=  16053 proc=  16134 ack=  16510  lag=    2618  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1247 p99=9976
+t= 157  off=  2999 pub=  2679 der=  2220 del=  13299 proc=  13300 ack=  15310  lag=    3097  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1247 p99=9976
+t= 158  off=  2998 pub=  2946 der=  3298 del=  18013 proc=  17324 ack=  15491  lag=    5209  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1247 p99=9976
+t= 159  off=  3003 pub=  3411 der=  3251 del=  20218 proc=  20623 ack=  19616  lag=    4252  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1247 p99=9976
+t= 160  off=  2999 pub=  3221 der=  3632 del=  21938 proc=  21777 ack=  18371  lag=    3856  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1247 p99=9976
+t= 161  off=  3000 pub=  3148 der=  2721 del=  17454 proc=  17726 ack=  21495  lag=    2883  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1247 p99=9976
+t= 162  off=  2998 pub=  3305 der=  3628 del=  19735 proc=  19797 ack=  16595  lag=    4531  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1360 p99=9976
+t= 163  off=  3002 pub=  2878 der=  3101 del=  19460 proc=  19740 ack=  21492  lag=    3174  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=9976  e2eB p50=1360 p99=9976
+t= 164  off=  3000 pub=  2678 der=  2937 del=  17651 proc=  17290 ack=  17357  lag=    3247  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=9976
+t= 165  off=  2998 pub=  3093 der=  2813 del=  16535 proc=  16720 ack=  16670  lag=    3685  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=9976
+t= 166  off=  3002 pub=  3022 der=  2938 del=  17628 proc=  17269 ack=  17268  lag=    4128  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=9976
+t= 167  off=  3000 pub=  2536 der=  2739 del=  16629 proc=  17025 ack=  17078  lag=    3334  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=9976
+t= 168  off=  3000 pub=  3120 der=  2426 del=  15285 proc=  14767 ack=  16229  lag=    3817  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=9976
+t= 169  off=  3001 pub=  2991 der=  3191 del=  18661 proc=  18843 ack=  18569  lag=    3920  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=9976
+t= 170  off=  2999 pub=  3194 der=  3234 del=  19690 proc=  19841 ack=  18275  lag=    3443  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=10879
+t= 171  off=  2999 pub=  3021 der=  3042 del=  17968 proc=  18561 ack=  19650  lag=    3113  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=10879
+t= 172  off=  3001 pub=  3209 der=  3389 del=  19720 proc=  18965 ack=  17696  lag=    4302  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=10879
+t= 173  off=  3000 pub=  3075 der=  2843 del=  17891 proc=  18484 ack=  19184  lag=    3108  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=10879
+t= 174  off=  3002 pub=  2872 der=  3113 del=  18742 proc=  18448 ack=  17862  lag=    3097  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=10879
+t= 175  off=  3000 pub=  3103 der=  2910 del=  17795 proc=  17708 ack=  18678  lag=    3042  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=10879  e2eB p50=1360 p99=10879
+t= 176  off=  3000 pub=  3045 der=  2911 del=  18089 proc=  18046 ack=  18188  lag=    2596  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=10879
+t= 177  off=  2998 pub=  2729 der=  2946 del=  15503 proc=  15707 ack=  16727  lag=    4348  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=10879
+t= 178  off=  3000 pub=  2923 der=  2658 del=  16147 proc=  15848 ack=  14065  lag=    4713  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=10879
+t= 179  off=  2998 pub=  2933 der=  3192 del=  19472 proc=  19310 ack=  18037  lag=    4296  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=10879
+t= 180  off=  3002 pub=  3173 der=  3177 del=  19238 proc=  19377 ack=  20772  lag=    3977  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=11863
+t= 181  off=  3000 pub=  3063 der=  2953 del=  17598 proc=  17721 ack=  18375  lag=    4084  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=11863
+t= 182  off=  3003 pub=  3290 der=  2984 del=  18470 proc=  18278 ack=  18870  lag=    4016  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=11863
+t= 183  off=  2997 pub=  3079 der=  3416 del=  19854 proc=  20037 ack=  18350  lag=    4138  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=11863
+t= 184  off=  3000 pub=  2849 der=  3082 del=  18974 proc=  18659 ack=  19729  lag=    3738  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=11863
+t= 185  off=  3000 pub=  2897 der=  2880 del=  17544 proc=  17837 ack=  17928  lag=    3198  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=11863  e2eB p50=1360 p99=11863
+t= 186  off=  2998 pub=  2737 der=  2789 del=  16540 proc=  16659 ack=  17426  lag=    3221  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=11863
+t= 187  off=  3004 pub=  2352 der=  2213 del=  13750 proc=  14270 ack=  16088  lag=    2368  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=11863
+t= 188  off=  2996 pub=  2589 der=  2706 del=  15951 proc=  15414 ack=  12805  lag=    3073  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 189  off=  3002 pub=  3020 der=  2883 del=  16531 proc=  16458 ack=  18279  lag=    4050  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 190  off=  2999 pub=  3057 der=  3025 del=  18987 proc=  19173 ack=  17222  lag=    3059  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 191  off=  3001 pub=  2977 der=  3190 del=  18236 proc=  18424 ack=  18058  lag=    3562  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 192  off=  2998 pub=  3236 der=  2879 del=  17638 proc=  17208 ack=  18326  lag=    3985  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 193  off=  3002 pub=  3010 der=  3334 del=  19396 proc=  19144 ack=  18326  lag=    4521  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 194  off=  2998 pub=  3072 der=  3015 del=  19248 proc=  19701 ack=  18048  lag=    2967  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 195  off=  3003 pub=  3287 der=  2893 del=  17193 proc=  17235 ack=  17832  lag=    3484  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 196  off=  3001 pub=  2900 der=  3312 del=  20034 proc=  19735 ack=  20457  lag=    3209  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 197  off=  2996 pub=  2757 der=  2650 del=  15136 proc=  15443 ack=  15659  lag=    3773  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 198  off=  3002 pub=  2586 der=  2796 del=  16329 proc=  16308 ack=  15106  lag=    4031  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=12937  e2eB p50=1360 p99=12937
+t= 199  off=  2998 pub=  3255 der=  3087 del=  18604 proc=  18437 ack=  19324  lag=    4284  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=12937
+t= 200  off=  3000 pub=  2985 der=  3014 del=  18345 proc=  18155 ack=  18795  lag=    4184  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 201  off=  3000 pub=  3172 der=  3081 del=  18927 proc=  19128 ack=  19324  lag=    3633  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 202  off=  3002 pub=  3080 der=  3214 del=  18921 proc=  19102 ack=  17218  lag=    3681  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 203  off=  3000 pub=  3012 der=  2887 del=  17608 proc=  17336 ack=  18861  lag=    3792  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 204  off=  3000 pub=  2887 der=  3122 del=  18930 proc=  18730 ack=  18023  lag=    3559  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 205  off=  3000 pub=  3111 der=  2579 del=  15934 proc=  16688 ack=  18099  lag=    2877  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 206  off=  3000 pub=  3316 der=  3360 del=  19087 proc=  18884 ack=  18008  lag=    4109  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 207  off=  3000 pub=  2636 der=  2844 del=  17944 proc=  18229 ack=  17593  lag=    2736  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 208  off=  3000 pub=  3008 der=  2635 del=  15303 proc=  14576 ack=  15648  lag=    4343  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 209  off=  3000 pub=  2917 der=  3540 del=  21042 proc=  21068 ack=  18750  lag=    3892  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 210  off=  2999 pub=  3215 der=  3017 del=  17437 proc=  17838 ack=  19830  lag=    4354  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 211  off=  3001 pub=  3165 der=  3330 del=  20155 proc=  19734 ack=  18599  lag=    4435  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 212  off=  2998 pub=  3124 der=  2981 del=  17901 proc=  18217 ack=  19597  lag=    4247  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 213  off=  3003 pub=  3060 der=  3152 del=  19466 proc=  19087 ack=  18898  lag=    3980  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 214  off=  2999 pub=  2914 der=  2650 del=  16899 proc=  16980 ack=  18742  lag=    3164  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 215  off=  3000 pub=  2868 der=  3143 del=  18328 proc=  18397 ack=  16637  lag=    3350  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 216  off=  3000 pub=  2840 der=  2869 del=  17300 proc=  17588 ack=  18264  lag=    2947  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 217  off=  3000 pub=  2403 der=  2256 del=  13835 proc=  14067 ack=  16208  lag=    2563  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 218  off=  3002 pub=  2353 der=  2586 del=  15324 proc=  14960 ack=  12286  lag=    2886  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 219  off=  3002 pub=  2771 der=  2607 del=  15593 proc=  15434 ack=  16709  lag=    3258  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=14108  e2eB p50=1360 p99=14108
+t= 220  off=  2996 pub=  2857 der=  3135 del=  18087 proc=  18118 ack=  15551  lag=    3672  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 221  off=  3000 pub=  3191 der=  2664 del=  16341 proc=  16080 ack=  18186  lag=    4103  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 222  off=  3002 pub=  3116 der=  3095 del=  19223 proc=  19836 ack=  17802  lag=    2858  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 223  off=  3000 pub=  3101 der=  3298 del=  19384 proc=  18929 ack=  19038  lag=    3520  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 224  off=  2998 pub=  2749 der=  3077 del=  17972 proc=  18417 ack=  18299  lag=    3237  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 225  off=  3002 pub=  3032 der=  2639 del=  16909 proc=  16376 ack=  17514  lag=    3088  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 226  off=  2998 pub=  3008 der=  2841 del=  16191 proc=  16450 ack=  20082  lag=    3851  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 227  off=  2998 pub=  2594 der=  2961 del=  17478 proc=  17658 ack=  13059  lag=    3592  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 228  off=  3002 pub=  2748 der=  2727 del=  16534 proc=  16271 ack=  17553  lag=    3704  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 229  off=  3002 pub=  2971 der=  2942 del=  17779 proc=  17605 ack=  16857  lag=    3780  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 230  off=  2994 pub=  3195 der=  3111 del=  18328 proc=  18137 ack=  17388  lag=    4393  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 231  off=  3003 pub=  2891 der=  3005 del=  18357 proc=  18795 ack=  19502  lag=    3514  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=14108
+t= 232  off=  3001 pub=  2855 der=  2920 del=  17968 proc=  17965 ack=  17828  lag=    3004  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=15385
+t= 233  off=  3002 pub=  3109 der=  3001 del=  17255 proc=  17203 ack=  16822  lag=    3915  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=15385
+t= 234  off=  2998 pub=  2823 der=  2925 del=  17770 proc=  17824 ack=  18869  lag=    3539  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=15385  e2eB p50=1360 p99=15385
+t= 235  off=  3002 pub=  2838 der=  2681 del=  16879 proc=  17352 ack=  18215  lag=    2430  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 236  off=  2998 pub=  3043 der=  2978 del=  17139 proc=  16708 ack=  15737  lag=    3655  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 237  off=  3002 pub=  2738 der=  2700 del=  17020 proc=  17172 ack=  15920  lag=    2721  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 238  off=  2999 pub=  2690 der=  2704 del=  15550 proc=  15272 ack=  15726  lag=    3659  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 239  off=  2999 pub=  2855 der=  3067 del=  18201 proc=  18398 ack=  17594  lag=    3451  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 240  off=  3000 pub=  2910 der=  2915 del=  17271 proc=  17338 ack=  19438  lag=    3598  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 241  off=  3000 pub=  3214 der=  2688 del=  18023 proc=  17260 ack=  16796  lag=    2992  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 242  off=  3002 pub=  3103 der=  3385 del=  18571 proc=  19122 ack=  18382  lag=    3898  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 243  off=  2998 pub=  3024 der=  3088 del=  19059 proc=  18888 ack=  19763  lag=    3474  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 244  off=  3000 pub=  3111 der=  2979 del=  17519 proc=  17767 ack=  17877  lag=    3713  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 245  off=  3002 pub=  2866 der=  2972 del=  18012 proc=  18221 ack=  18367  lag=    3218  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 246  off=  3000 pub=  2939 der=  2930 del=  17508 proc=  17121 ack=  18063  lag=    3686  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 247  off=  2998 pub=  2530 der=  2759 del=  16879 proc=  17452 ack=  15290  lag=    2559  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 248  off=  3002 pub=  2488 der=  2335 del=  13280 proc=  12756 ack=  16684  lag=    3966  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 249  off=  3000 pub=  3012 der=  2955 del=  18125 proc=  18193 ack=  16030  lag=    3560  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 250  off=  2998 pub=  2929 der=  2754 del=  17656 proc=  17479 ack=  16312  lag=    2780  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 251  off=  3000 pub=  3049 der=  3147 del=  17551 proc=  17443 ack=  17525  lag=    4121  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=15385
+t= 252  off=  3000 pub=  3546 der=  3331 del=  19110 proc=  19162 ack=  18063  lag=    5160  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1360 p99=16777
+t= 253  off=  2999 pub=  3112 der=  3521 del=  21936 proc=  22029 ack=  21840  lag=    3848  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1483 p99=16777
+t= 254  off=  3001 pub=  3161 der=  2956 del=  17938 proc=  17952 ack=  20191  lag=    3837  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1483 p99=16777
+t= 255  off=  3001 pub=  2966 der=  3121 del=  18851 proc=  19083 ack=  17379  lag=    3325  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1483 p99=16777
+t= 256  off=  2999 pub=  2846 der=  2878 del=  16657 proc=  16359 ack=  18295  lag=    4202  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1483 p99=16777
+t= 257  off=  3002 pub=  2665 der=  2656 del=  16260 proc=  16503 ack=  15048  lag=    3644  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=16777  e2eB p50=1483 p99=16777
+t= 258  off=  3001 pub=  2664 der=  2556 del=  15810 proc=  15689 ack=  15837  lag=    3399  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 259  off=  2997 pub=  3093 der=  3157 del=  17915 proc=  17711 ack=  18398  lag=    4566  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 260  off=  3002 pub=  3039 der=  2830 del=  18100 proc=  18334 ack=  17952  lag=    3421  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 261  off=  2998 pub=  3182 der=  3101 del=  18232 proc=  18063 ack=  18121  lag=    4045  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 262  off=  2998 pub=  2991 der=  3205 del=  19211 proc=  19390 ack=  17602  lag=    3671  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 263  off=  3002 pub=  2982 der=  3056 del=  18135 proc=  18085 ack=  20031  lag=    3848  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 264  off=  3001 pub=  3140 der=  3166 del=  19259 proc=  19589 ack=  17611  lag=    3229  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 265  off=  2999 pub=  2868 der=  2968 del=  18038 proc=  17582 ack=  18329  lag=    3355  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 266  off=  3000 pub=  3120 der=  2843 del=  16326 proc=  16591 ack=  18540  lag=    4099  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 267  off=  3000 pub=  2374 der=  2761 del=  16057 proc=  16184 ack=  16373  lag=    4094  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=16777
+t= 268  off=  2999 pub=  2970 der=  2641 del=  16333 proc=  16161 ack=  13809  lag=    4108  shed=0 pushErr=0 ackErr=0  e2eA p50=1247 p99=18296  e2eB p50=1483 p99=18296
+t= 269  off=  2999 pub=  3159 der=  2571 del=  17013 proc=  17127 ack=  18900  lag=    2995  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=18296  e2eB p50=1483 p99=18296
+t= 270  off=  3002 pub=  3208 der=  3723 del=  21378 proc=  20961 ack=  18055  lag=    3857  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=18296  e2eB p50=1483 p99=18296
+t= 271  off=  3000 pub=  2967 der=  2902 del=  17996 proc=  18411 ack=  21853  lag=    2923  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=18296  e2eB p50=1483 p99=18296
+t= 272  off=  3000 pub=  3321 der=  3439 del=  19737 proc=  19010 ack=  16063  lag=    4429  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=18296  e2eB p50=1483 p99=18296
+t= 273  off=  3002 pub=  2961 der=  3271 del=  19793 proc=  20569 ack=  21365  lag=    3176  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 274  off=  2998 pub=  3055 der=  2849 del=  17532 proc=  17324 ack=  17990  lag=    3152  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 275  off=  3000 pub=  3135 der=  3086 del=  17579 proc=  17676 ack=  17631  lag=    4041  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 276  off=  3001 pub=  3012 der=  2935 del=  18267 proc=  18291 ack=  20045  lag=    3437  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 277  off=  2997 pub=  2372 der=  2523 del=  15959 proc=  16299 ack=  16536  lag=    2125  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 278  off=  3002 pub=  2263 der=  2302 del=  13146 proc=  13127 ack=  13148  lag=    2771  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 279  off=  3004 pub=  2777 der=  2833 del=  16699 proc=  16246 ack=  16200  lag=    3467  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 280  off=  2996 pub=  3033 der=  2630 del=  15538 proc=  15539 ack=  17056  lag=    4111  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 281  off=  3000 pub=  2883 der=  3310 del=  20056 proc=  19976 ack=  16560  lag=    3568  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 282  off=  3002 pub=  3111 der=  3057 del=  17593 proc=  17851 ack=  17226  lag=    4113  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 283  off=  2998 pub=  3373 der=  2855 del=  17954 proc=  17812 ack=  17976  lag=    3949  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 284  off=  3000 pub=  3328 der=  3600 del=  21150 proc=  20738 ack=  20728  lag=    4539  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 285  off=  3000 pub=  2966 der=  2966 del=  17852 proc=  18043 ack=  20512  lag=    4292  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 286  off=  3000 pub=  3101 der=  3390 del=  20303 proc=  20515 ack=  17697  lag=    3828  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 287  off=  3004 pub=  2805 der=  2499 del=  16023 proc=  16075 ack=  16815  lag=    3053  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=19952  e2eB p50=1483 p99=18296
+t= 288  off=  2997 pub=  2668 der=  2842 del=  16429 proc=  16497 ack=  15326  lag=    3434  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 289  off=  2998 pub=  3225 der=  2976 del=  17939 proc=  17542 ack=  18802  lag=    3997  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 290  off=  3001 pub=  3092 der=  3280 del=  19498 proc=  19808 ack=  18735  lag=    3681  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 291  off=  3000 pub=  3176 der=  3074 del=  18977 proc=  18744 ack=  19114  lag=    3483  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 292  off=  3001 pub=  3198 der=  3133 del=  18727 proc=  18919 ack=  19033  lag=    3427  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 293  off=  2997 pub=  3103 der=  3073 del=  18801 proc=  19018 ack=  19068  lag=    2877  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 294  off=  3002 pub=  3167 der=  3114 del=  18504 proc=  17948 ack=  18783  lag=    3666  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 295  off=  3000 pub=  2960 der=  3105 del=  17849 proc=  18266 ack=  19655  lag=    3885  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 296  off=  3000 pub=  2937 der=  3214 del=  18956 proc=  18569 ack=  17583  lag=    4323  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 297  off=  3000 pub=  2777 der=  2706 del=  16656 proc=  17216 ack=  15034  lag=    3414  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 298  off=  3002 pub=  2645 der=  2642 del=  15084 proc=  14870 ack=  16768  lag=    4399  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 299  off=  2998 pub=  3185 der=  3073 del=  18468 proc=  18369 ack=  16843  lag=    4580  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+t= 300  off=  3000 pub=  3278 der=  3088 del=  18680 proc=  18879 ack=  19626  lag=    4419  shed=0 pushErr=0 ackErr=0  e2eA p50=1360 p99=21757  e2eB p50=1483 p99=19952
+draining up to 60s...
+
+=== VERIFIER (dir=results/ceil-queen-wc-r3000, ackErr=0, baseSeq=0) ===
+stage(topic_group)                   msgs     unique     dups     gaps    viols   inflight  verdict
+cm-avail_cm-db                     429897     429897        0        0        0       6104  PASS
+cm-prices_cm-cal                   430446     430446        0        0        0       5554  PASS
+cm-ota-sync_ota-1                  429897     429897        0        0        0       6104  PASS
+cm-ota-sync_ota-2                  429897     429897        0        0        0       6104  PASS
+cm-ota-sync_ota-3                  429897     429897        0        0        0       6104  PASS
+cm-ota-sync_ota-4                  429897     429897        0        0        0       6104  PASS
+cm-ota-sync_ota-5                  429897     429897        0        0        0       6104  PASS
+cm-ota-prices_otap-1               430446     430446        0        0        0       5554  PASS
+cm-ota-prices_otap-2               430446     430446        0        0        0       5554  PASS
+cm-ota-prices_otap-3               430446     430446        0        0        0       5554  PASS
+cm-ota-prices_otap-4               430446     430446        0        0        0       5554  PASS
+cm-ota-prices_otap-5               430446     430446        0        0        0       5554  PASS
+TOTAL                             5162058    5162058        0        0        0      69948
+VERDICT: PASS  (0 gaps below frontier, 0 order-violations, 0 dups, 69948 in-flight at cutoff)
+
+=== SUMMARY  system=queen  R=3000  P=1000  elapsed=5m0s ===
+
+-- workload demand (broker-independent) --
+  deliveries/s required      18000
+  ordered lanes required     488
+
+-- what actually flowed --
+  offered              870001  (2900/s)
+  published            860222  (2867/s)
+  derived              860343  (2868/s)
+  delivered           5162058  (17207/s)
+  processed           5162058  (17207/s)
+  shed                      0
+  pushErr                 121   pushRetry 0
+  acked               5162058   ackErr 0
+  broker-reported redeliveries 0
+
+-- end-to-end latency (CO-corrected, terminal stages) --
+  flow A  p50 1359.8 ms   p95 12937.0 ms   p99 21757.4 ms
+  flow B  p50 1482.9 ms   p95 11863.3 ms   p99 19951.6 ms
+
+-- cost to serve: what this system needed --
+  ordered lanes provisioned  4000
+  physical queues/topics     4
+  consumer members           96
+  connections                1
+  publishes / ingress event  2.0
+  semantics built in the app:
+      - consumption mode: WILDCARD pops, up to 40 partitions per pop
+      - lanes assigned dynamically by the broker: no application-side ownership map, no advance knowledge of key cardinality
+      - cost of that flexibility is the server-side candidate scan, which is charged to Queen here and not hidden behind the targeted mode
+
+-- adapter counters --
+  queen_ack_errors           0
+  queen_acked                5162058
+  queen_batched_pushes       593105
+  queen_dedup_window         0
+  queen_empty_pops           96
+  queen_lanes_per_queue      1000
+  queen_lease_seconds        60
+  queen_messages_popped      5162058
+  queen_messages_pushed      1720565
+  queen_mode                 wildcard
+  queen_pop_workers          96
+  queen_pops                 242318
+  queen_props_per_lane       1
+  queen_redelivered          0
+
+-- per-stage entry age (ms from producer schedule; decomposes e2e) --
+  stage                                p50       p95       p99
+  cm-avail/cm-db                    1048.6   12937.0   21757.4
+  cm-prices/cm-cal                  1247.0   11863.3   19951.6
+  cm-ota-sync/ota-1                 1247.0   12937.0   21757.4
+  cm-ota-sync/ota-2                 1247.0   12937.0   21757.4
+  cm-ota-sync/ota-3                 1247.0   12937.0   21757.4
+  cm-ota-sync/ota-4                 1247.0   12937.0   21757.4
+  cm-ota-sync/ota-5                 1247.0   12937.0   21757.4
+  cm-ota-prices/otap-1              1482.9   11863.3   19951.6
+  cm-ota-prices/otap-2              1359.8   11863.3   19951.6
+  cm-ota-prices/otap-3              1482.9   11863.3   19951.6
+  cm-ota-prices/otap-4              1482.9   11863.3   19951.6
+  cm-ota-prices/otap-5              1482.9   11863.3   19951.6
+
+-- worker cycle phases, p50/p95 ms (popRTT + barrier + push + ackDisp ~= cycle) --
+  stage                                   popRTT         barrier            push         ackDisp
+  cm-avail/cm-db                   71.5 /  131.1   46.3 /  131.1   21.2 /  155.9    0.0 /    0.0
+  cm-prices/cm-cal                 77.9 /  142.9   46.3 /  131.1   23.2 /  155.9    0.0 /    0.0
+  cm-ota-sync/ota-1                65.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-2                65.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-3                65.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-4                65.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-5                65.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-1             71.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-2             71.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-3             71.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-4             71.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-5             71.5 /  131.1   32.8 /   65.5    0.0 /    0.0    0.0 /    0.0
+
+-- correctness --
+  gaps 0   order violations 0   dups 0   in-flight at cutoff 69948
+  VERDICT: PASS
