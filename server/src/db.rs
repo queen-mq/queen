@@ -172,6 +172,7 @@ pub async fn ack_at(
     ok: bool,
     count: i32,
 ) -> Result<String, tokio_postgres::Error> {
+    let t0 = std::time::Instant::now();
     let stmt = client
         .prepare_cached(
             "SELECT (queen.log_ack_at_v1($1::text::uuid, $2, $3, $4::bigint, $5::bool, $6::int))::text",
@@ -180,6 +181,7 @@ pub async fn ack_at(
     let row = client
         .query_one(&stmt, &[&partition_id, &group, &worker, &upto, &ok, &count])
         .await?;
+    crate::admission::note_commit(crate::admission::Lane::Ack, t0.elapsed());
     Ok(row.get(0))
 }
 
@@ -225,6 +227,7 @@ pub async fn ack_by_hash(
     hashes: &[Vec<u8>],
     statuses: &[String],
 ) -> Result<String, tokio_postgres::Error> {
+    let t0 = std::time::Instant::now();
     let stmt = client
         .prepare_cached(
             "SELECT (queen.log_ack_by_hash_v1($1::text::uuid, $2, $3, $4::bytea[], $5::text[]))::text",
@@ -233,6 +236,7 @@ pub async fn ack_by_hash(
     let row = client
         .query_one(&stmt, &[&partition_id, &group, &worker, &hashes, &statuses])
         .await?;
+    crate::admission::note_commit(crate::admission::Lane::Ack, t0.elapsed());
     Ok(row.get(0))
 }
 
@@ -258,6 +262,7 @@ pub async fn seg_dlq_head(
     payload_json: &str,
     error: &str,
 ) -> Result<String, tokio_postgres::Error> {
+    let t0 = std::time::Instant::now();
     let stmt = client
         .prepare_cached(
             "SELECT (queen.log_dlq_head_v1($1::text::uuid, $2, $3, $4::bigint, \
@@ -279,6 +284,7 @@ pub async fn seg_dlq_head(
             ],
         )
         .await?;
+    crate::admission::note_commit(crate::admission::Lane::Ack, t0.elapsed());
     Ok(row.get(0))
 }
 
@@ -517,7 +523,9 @@ pub async fn renew_lease(
     let stmt = client
         .prepare_cached("SELECT (queen.log_renew_lease_v1($1, $2::int))::text")
         .await?;
+    let t0 = std::time::Instant::now();
     let row = client.query_one(&stmt, &[&worker, &seconds]).await?;
+    crate::admission::note_commit(crate::admission::Lane::Ack, t0.elapsed());
     Ok(row.get(0))
 }
 
@@ -536,7 +544,9 @@ pub async fn transaction(
     let stmt = client
         .prepare_cached("SELECT (queen.log_transaction_wire_v1($1::text::jsonb))::text")
         .await?;
+    let t0 = std::time::Instant::now();
     let row = client.query_one(&stmt, &[&payload]).await?;
+    crate::admission::note_commit(crate::admission::Lane::Push, t0.elapsed());
     Ok(row.get(0))
 }
 
@@ -1803,7 +1813,9 @@ pub async fn streams_cycle(
     let stmt = client
         .prepare_cached("SELECT (queen.log_streams_cycle_v1($1::text::jsonb))::text")
         .await?;
+    let t0 = std::time::Instant::now();
     let row = client.query_one(&stmt, &[&requests_json]).await?;
+    crate::admission::note_commit(crate::admission::Lane::Push, t0.elapsed());
     Ok(row.get(0))
 }
 

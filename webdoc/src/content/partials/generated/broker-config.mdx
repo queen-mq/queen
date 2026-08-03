@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 85 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 94 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 ### Server
 
@@ -80,6 +80,11 @@ The broker is configured entirely through environment variables: 85 of them, lis
 | `POP_WAIT_BACKOFF_THRESHOLD` | integer | `3` |  |
 | `POP_WAIT_INITIAL_INTERVAL_MS` | integer | `100` |  |
 | `POP_WAIT_MAX_INTERVAL_MS` | integer | `1000` |  |
+| `QUEEN_POP_FUSION` | boolean | `false` |  |
+| `QUEEN_POP_FUSION_CONCURRENCY` | integer | `1` |  |
+| `QUEEN_POP_FUSION_HOLD_MS` | integer | `3` |  |
+| `QUEEN_POP_FUSION_MAX_JOBS` | integer | `16` |  |
+| `QUEEN_POP_FUSION_SHARDS` | integer | `4` |  |
 
 ### Storage engine
 
@@ -100,19 +105,6 @@ The broker is configured entirely through environment variables: 85 of them, lis
 | `QUEEN_V2_FUSION_HOLD_MS` | integer | `15` |  |
 | `QUEEN_V2_FUSION_SHARDS` | integer | `8` |  |
 | `QUEEN_V2_ZSTD_LEVEL` | integer | `3` |  |
-
-### Flow control
-
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `QUEEN_SEG_POP_INIT` | integer | `16` |  |
-| `QUEEN_SEG_POP_MAX` | integer | `64` |  |
-| `QUEEN_SEG_POP_MIN` | integer | `4` |  |
-| `QUEEN_SEG_PUSH_INIT` | integer | `16` |  |
-| `QUEEN_SEG_PUSH_MAX` | integer | `64` |  |
-| `QUEEN_SEG_PUSH_MIN` | integer | `4` |  |
-| `QUEEN_VEGAS_ALPHA` | number | `3.0` |  |
-| `QUEEN_VEGAS_BETA` | number | `6.0` |  |
 
 ### Background jobs
 
@@ -151,6 +143,23 @@ The broker is configured entirely through environment variables: 85 of them, lis
 | `QUEEN_LOG_RATES_MS` | integer | `10000` |  |
 | `QUEEN_LOG_TOPN_QUEUES` | integer | `10` |  |
 | `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` |  |
+
+### Other
+
+| Variable | Type | Default | Also read as |
+| --- | --- | --- | --- |
+| `QUEEN_ADMISSION_INIT` | integer | `16` |  |
+| `QUEEN_ADMISSION_MAX` | integer | `128` |  |
+| `QUEEN_ADMISSION_MIN` | integer | `8` |  |
+| `QUEEN_ADMISSION_NOSYNC_BUDGET` | integer | `64` |  |
+| `QUEEN_ADMISSION_POOL_RESERVE` | integer | `16` |  |
+| `QUEEN_ADMISSION_SHARE_ACK` | number | `0.30` |  |
+| `QUEEN_ADMISSION_SHARE_MAINT` | number | `0.05` |  |
+| `QUEEN_ADMISSION_SHARE_POP` | number | `0.40` |  |
+| `QUEEN_ADMISSION_SHARE_PUSH` | number | `0.25` |  |
+| `QUEEN_ADMISSION_TICK_MS` | integer | `500` |  |
+| `QUEEN_ADMISSION_TRACE` | boolean | `false` |  |
+| `QUEEN_ADMISSION_TRAIN_GAP_US` | integer | `300` |  |
 
 ### Experiment-only
 

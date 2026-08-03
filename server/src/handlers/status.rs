@@ -23,7 +23,6 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::uuidv7_bytes;
-use crate::vegas::Vegas;
 
 pub async fn handle_status() -> Response {
     json(StatusCode::OK, "{\"status\":\"ok\",\"engine\":\"segments-rust\"}".to_string())
@@ -273,13 +272,23 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
 // always emitted even if the DB read fails.
 pub async fn handle_prometheus(State(st): State<Arc<AppState>>) -> Response {
     let mut body = st.metrics.prometheus();
-    body.push_str("# HELP queen_seg_push_vegas_limit Adaptive push concurrency limit\n# TYPE queen_seg_push_vegas_limit gauge\n");
-    body.push_str("# HELP queen_seg_pop_vegas_limit Adaptive pop concurrency limit\n# TYPE queen_seg_pop_vegas_limit gauge\n");
-    body.push_str(&format!(
-        "queen_seg_push_vegas_limit {}\nqueen_seg_pop_vegas_limit {}\n",
-        st.push_vegas.limit(),
-        st.pop_vegas.limit()
-    ));
+    let adm = st.admission.snapshot();
+    body.push_str("# HELP queen_admission_budget Write-transaction admission budget\n# TYPE queen_admission_budget gauge\n");
+    body.push_str(&format!("queen_admission_budget {}\n", adm.budget));
+    body.push_str("# HELP queen_admission_inflight Admitted write transactions per lane\n# TYPE queen_admission_inflight gauge\n");
+    body.push_str("# HELP queen_admission_waiting Waiters per lane\n# TYPE queen_admission_waiting gauge\n");
+    for (i, lane) in ["push", "pop", "ack", "maint"].iter().enumerate() {
+        body.push_str(&format!(
+            "queen_admission_inflight{{lane=\"{}\"}} {}\nqueen_admission_waiting{{lane=\"{}\"}} {}\n",
+            lane, adm.inflight[i], lane, adm.waiting[i]
+        ));
+    }
+    body.push_str("# HELP queen_admission_trains_per_s Commit trains per second (flush cycles)\n# TYPE queen_admission_trains_per_s gauge\n");
+    body.push_str(&format!("queen_admission_trains_per_s {:.2}\n", adm.trains_per_s));
+    body.push_str("# HELP queen_admission_txn_per_train Mean transactions per commit train\n# TYPE queen_admission_txn_per_train gauge\n");
+    body.push_str(&format!("queen_admission_txn_per_train {:.2}\n", adm.txn_per_train_avg));
+    body.push_str("# HELP queen_admission_cycle_ms Median flush-cycle duration\n# TYPE queen_admission_cycle_ms gauge\n");
+    body.push_str(&format!("queen_admission_cycle_ms {:.3}\n", adm.cycle_ms.unwrap_or(0.0)));
 
     // RUSTFIX item 24: restore the DB pool gauges (prometheus.cpp:157-174), the
     // maintenance-mode gauge (prometheus.cpp:253-266), and the file-buffer gauges

@@ -23,7 +23,6 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::{txn_hash128, uuidv7_bytes};
-use crate::vegas::Vegas;
 
 // Unwrap the streaming SP's [{idx, result}] array to the single inner result
 // object. Falls back to the raw parsed value if the shape is unexpected.
@@ -344,6 +343,9 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
     });
     let requests = serde_json::Value::Array(vec![element]).to_string();
 
+    // Push-lane admission BEFORE the pool checkout (ordering contract,
+    // admission.rs): the streams cycle commits sink-push WAL.
+    let _slot = crate::admission::lane_slot(crate::admission::Lane::Push).await;
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),

@@ -1,0 +1,224 @@
+=== CM-BENCH  system=queen  R=2000 ev/s  P=1000  duration=120s ===
+invariants: 12000 deliveries/s, 325 ordered lanes, publishes/s native=4000 copied=12000
+started 12 stages, lane budget 488 (headroom 1.50x)
+warmup: 1000 properties x 2 flows in 2.529s, pipeline drained=true (12000/12000)
+t=   1  off=   101 pub=   100 der=    97 del=    580 proc=    547 ack=    547  lag=      38  shed=0 pushErr=0 ackErr=0  e2eA p50=1923 p99=2494  e2eB p50=1923 p99=2494
+t=   2  off=   300 pub=   297 der=   291 del=   1716 proc=   1680 ack=   1650  lag=     110  shed=0 pushErr=0 ackErr=0  e2eA p50=1763 p99=2494  e2eB p50=1763 p99=2494
+t=   3  off=   501 pub=   498 der=   485 del=   2868 proc=   2848 ack=   2846  lag=     185  shed=0 pushErr=0 ackErr=0  e2eA p50=1483 p99=2494  e2eB p50=1483 p99=2494
+t=   4  off=   699 pub=   701 der=   685 del=   4099 proc=   4012 ack=   3916  lag=     299  shed=0 pushErr=0 ackErr=0  e2eA p50=962 p99=2494  e2eB p50=1049 p99=2494
+t=   5  off=   900 pub=   900 der=   879 del=   5195 proc=   5205 ack=   5119  lag=     389  shed=0 pushErr=0 ackErr=0  e2eA p50=156 p99=2494  e2eB p50=143 p99=2494
+t=   6  off=  1101 pub=  1078 der=  1038 del=   6234 proc=   6229 ack=   5870  lag=     428  shed=0 pushErr=0 ackErr=0  e2eA p50=143 p99=2494  e2eB p50=143 p99=2494
+t=   7  off=  1300 pub=  1298 der=  1199 del=   7196 proc=   7115 ack=   6848  lag=     606  shed=0 pushErr=0 ackErr=0  e2eA p50=156 p99=2494  e2eB p50=156 p99=2494
+t=   8  off=  1499 pub=  1479 der=  1407 del=   8400 proc=   8285 ack=   8085  lag=     835  shed=0 pushErr=0 ackErr=0  e2eA p50=170 p99=2494  e2eB p50=170 p99=2494
+t=   9  off=  1702 pub=  1726 der=  1629 del=   9544 proc=   9673 ack=   9279  lag=    1033  shed=0 pushErr=0 ackErr=0  e2eA p50=202 p99=2494  e2eB p50=202 p99=2494
+t=  10  off=  1899 pub=  1897 der=  1853 del=  10788 proc=  10409 ack=  10484  lag=    1786  shed=0 pushErr=0 ackErr=0  e2eA p50=220 p99=2494  e2eB p50=220 p99=2494
+t=  11  off=  2001 pub=  2015 der=  1974 del=  11613 proc=  11745 ack=  11083  lag=    1926  shed=0 pushErr=0 ackErr=0  e2eA p50=240 p99=2494  e2eB p50=240 p99=2494
+t=  12  off=  1999 pub=  2007 der=  1864 del=  10558 proc=  10576 ack=   9993  lag=    2677  shed=0 pushErr=0 ackErr=0  e2eA p50=262 p99=2494  e2eB p50=262 p99=2494
+t=  13  off=  2000 pub=  1996 der=  2129 del=  13054 proc=  12480 ack=  13849  lag=    2838  shed=0 pushErr=0 ackErr=0  e2eA p50=286 p99=2494  e2eB p50=312 p99=2494
+t=  14  off=  2000 pub=  2005 der=  2066 del=  12283 proc=  12888 ack=  11926  lag=    2285  shed=0 pushErr=0 ackErr=0  e2eA p50=312 p99=2494  e2eB p50=312 p99=2494
+t=  15  off=  2000 pub=  1993 der=  1954 del=  11766 proc=  11692 ack=  12643  lag=    2356  shed=0 pushErr=0 ackErr=0  e2eA p50=340 p99=2494  e2eB p50=340 p99=2494
+t=  16  off=  1999 pub=  1987 der=  2025 del=  12374 proc=  12285 ack=  12699  lag=    2183  shed=0 pushErr=0 ackErr=0  e2eA p50=340 p99=2494  e2eB p50=340 p99=2494
+t=  17  off=  2000 pub=  1984 der=  1731 del=  10547 proc=  10284 ack=  10290  lag=    2538  shed=0 pushErr=0 ackErr=0  e2eA p50=371 p99=2494  e2eB p50=371 p99=2494
+t=  18  off=  2001 pub=  2028 der=  2223 del=  13055 proc=  13276 ack=  12999  lag=    2405  shed=0 pushErr=0 ackErr=0  e2eA p50=371 p99=2494  e2eB p50=371 p99=2494
+t=  19  off=  2000 pub=  2002 der=  2032 del=  12169 proc=  12270 ack=  12046  lag=    2297  shed=0 pushErr=0 ackErr=0  e2eA p50=371 p99=2494  e2eB p50=371 p99=2494
+t=  20  off=  2000 pub=  1998 der=  2018 del=  12078 proc=  12145 ack=  12626  lag=    2240  shed=0 pushErr=0 ackErr=0  e2eA p50=371 p99=2494  e2eB p50=371 p99=2494
+t=  21  off=  2000 pub=  1901 der=  1919 del=  12392 proc=  12235 ack=  12586  lag=    1501  shed=0 pushErr=0 ackErr=0  e2eA p50=371 p99=2494  e2eB p50=371 p99=2494
+t=  22  off=  1999 pub=  2105 der=  1828 del=  10603 proc=  10858 ack=  10494  lag=    1888  shed=0 pushErr=0 ackErr=0  e2eA p50=371 p99=2287  e2eB p50=404 p99=2494
+t=  23  off=  2002 pub=  1886 der=  2127 del=  12932 proc=  12809 ack=  12998  lag=    1600  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  24  off=  2001 pub=  1925 der=  1904 del=  11954 proc=  12262 ack=  12223  lag=     783  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  25  off=  1999 pub=  2187 der=  2210 del=  12625 proc=  12130 ack=  12185  lag=    1890  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  26  off=  1998 pub=  1995 der=  2057 del=  11833 proc=  12214 ack=  11718  lag=    1956  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  27  off=  2000 pub=  2004 der=  1962 del=  11925 proc=  11468 ack=  11916  lag=    2302  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  28  off=  2001 pub=  2000 der=  1976 del=  11986 proc=  12060 ack=  11116  lag=    2122  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  29  off=  1999 pub=  1998 der=  2111 del=  11578 proc=  11640 ack=  12152  lag=    3035  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  30  off=  2000 pub=  2005 der=  1901 del=  12389 proc=  12351 ack=  12798  lag=    2194  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2287  e2eB p50=404 p99=2287
+t=  31  off=  2002 pub=  1997 der=  2005 del=  11564 proc=  11858 ack=  11821  lag=    2358  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2287
+t=  32  off=  2000 pub=  2000 der=  1799 del=  11198 proc=  11294 ack=  11485  lag=    2059  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2287
+t=  33  off=  2000 pub=  1994 der=  1997 del=  12258 proc=  11912 ack=  11826  lag=    2126  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2287
+t=  34  off=  1998 pub=  2000 der=  2223 del=  13097 proc=  13335 ack=  13158  lag=    1906  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  35  off=  2001 pub=  2005 der=  2019 del=  11825 proc=  11828 ack=  11774  lag=    2178  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  36  off=  2000 pub=  1994 der=  1965 del=  12128 proc=  11896 ack=  11881  lag=    2101  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  37  off=  1999 pub=  2006 der=  1997 del=  11575 proc=  11691 ack=  11569  lag=    2401  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  38  off=  2001 pub=  1999 der=  1967 del=  12031 proc=  12107 ack=  12315  lag=    2128  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  39  off=  2000 pub=  1991 der=  2083 del=  12079 proc=  12293 ack=  12245  lag=    2241  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  40  off=  2001 pub=  2002 der=  1979 del=  12223 proc=  11831 ack=  11635  lag=    2307  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  41  off=  1999 pub=  2005 der=  1980 del=  11846 proc=  12088 ack=  12344  lag=    2124  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=2097  e2eB p50=404 p99=2097
+t=  42  off=  2001 pub=  1994 der=  1857 del=  10707 proc=  10895 ack=  10902  lag=    2508  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=2097
+t=  43  off=  1997 pub=  2008 der=  2135 del=  13187 proc=  12797 ack=  12681  lag=    2394  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=2097
+t=  44  off=  2003 pub=  2003 der=  2033 del=  12046 proc=  12076 ack=  12138  lag=    2486  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=2097
+t=  45  off=  1999 pub=  1998 der=  1981 del=  12037 proc=  12201 ack=  12242  lag=    2188  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=2097
+t=  46  off=  2001 pub=  2003 der=  1991 del=  12166 proc=  11984 ack=  12096  lag=    2162  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=2097
+t=  47  off=  2000 pub=  1990 der=  1954 del=  11413 proc=  11614 ack=  11619  lag=    2308  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=2097
+t=  48  off=  1999 pub=  1992 der=  2089 del=  12700 proc=  12642 ack=  12415  lag=    2103  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  49  off=  2000 pub=  2015 der=  1994 del=  12026 proc=  11826 ack=  11757  lag=    2262  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  50  off=  1999 pub=  1988 der=  2012 del=  12223 proc=  12195 ack=  12177  lag=    2115  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  51  off=  2001 pub=  2017 der=  1984 del=  11343 proc=  11689 ack=  11907  lag=    2363  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  52  off=  2001 pub=  1995 der=  1900 del=  11529 proc=  11356 ack=  11311  lag=    2502  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  53  off=  1999 pub=  2001 der=  2055 del=  12272 proc=  12258 ack=  12352  lag=    2520  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  54  off=  2000 pub=  1996 der=  1969 del=  12168 proc=  12052 ack=  11884  lag=    2309  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  55  off=  2000 pub=  1972 der=  2036 del=  12637 proc=  12798 ack=  13075  lag=    1663  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  56  off=  2000 pub=  2030 der=  2067 del=  11661 proc=  11603 ack=  11240  lag=    2425  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  57  off=  2000 pub=  1999 der=  1991 del=  11820 proc=  11843 ack=  11543  lag=    2536  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1923  e2eB p50=404 p99=1923
+t=  58  off=  2000 pub=  2002 der=  1841 del=  11392 proc=  11251 ack=  11779  lag=    2492  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1763  e2eB p50=404 p99=1923
+t=  59  off=  1999 pub=  2001 der=  2014 del=  12366 proc=  12371 ack=  12247  lag=    2192  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1763  e2eB p50=404 p99=1923
+t=  60  off=  2002 pub=  2000 der=  2240 del=  12410 proc=  12260 ack=  11863  lag=    3132  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1763  e2eB p50=404 p99=1763
+t=  61  off=  1999 pub=  2003 der=  1942 del=  11950 proc=  12164 ack=  12472  lag=    2681  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1763  e2eB p50=404 p99=1763
+t=  62  off=  2001 pub=  1987 der=  1832 del=  10870 proc=  11051 ack=  10747  lag=    2777  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1763  e2eB p50=404 p99=1763
+t=  63  off=  1998 pub=  2004 der=  2096 del=  12735 proc=  12344 ack=  12727  lag=    2917  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1763  e2eB p50=404 p99=1763
+t=  64  off=  2000 pub=  2002 der=  2019 del=  12415 proc=  12620 ack=  12649  lag=    2394  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1763  e2eB p50=404 p99=1763
+t=  65  off=  2000 pub=  2005 der=  1904 del=  11748 proc=  11691 ack=  11807  lag=    2228  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1617  e2eB p50=404 p99=1617
+t=  66  off=  2001 pub=  1998 der=  2053 del=  11868 proc=  11991 ack=  11936  lag=    2500  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1617  e2eB p50=404 p99=1617
+t=  67  off=  2001 pub=  2003 der=  1992 del=  12373 proc=  11951 ack=  11825  lag=    2512  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1617  e2eB p50=404 p99=1617
+t=  68  off=  1998 pub=  1971 der=  2021 del=  11562 proc=  12095 ack=  11971  lag=    2493  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1617  e2eB p50=404 p99=1617
+t=  69  off=  2001 pub=  2027 der=  2029 del=  12287 proc=  12203 ack=  12162  lag=    2462  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1617  e2eB p50=404 p99=1617
+t=  70  off=  2001 pub=  2002 der=  1946 del=  12026 proc=  11952 ack=  12362  lag=    2242  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1617
+t=  71  off=  1999 pub=  1996 der=  1981 del=  11882 proc=  11901 ack=  11442  lag=    2242  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1617
+t=  72  off=  2001 pub=  1999 der=  1962 del=  11087 proc=  11243 ack=  11594  lag=    2808  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1617
+t=  73  off=  1999 pub=  1997 der=  2094 del=  12551 proc=  12389 ack=  12028  lag=    2886  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1483
+t=  74  off=  2000 pub=  2005 der=  1951 del=  11981 proc=  12073 ack=  12197  lag=    2573  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1483
+t=  75  off=  2001 pub=  2001 der=  2016 del=  12443 proc=  12422 ack=  12585  lag=    2232  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1483
+t=  76  off=  1999 pub=  2004 der=  1968 del=  11983 proc=  11773 ack=  12079  lag=    2303  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1483
+t=  77  off=  2001 pub=  1988 der=  2056 del=  12645 proc=  12628 ack=  12240  lag=    1943  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1483  e2eB p50=404 p99=1483
+t=  78  off=  1999 pub=  2012 der=  1983 del=  11281 proc=  11429 ack=  11578  lag=    2441  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1360  e2eB p50=404 p99=1483
+t=  79  off=  2000 pub=  1984 der=  2024 del=  11973 proc=  11985 ack=  11927  lag=    2560  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1360  e2eB p50=404 p99=1360
+t=  80  off=  1999 pub=  2009 der=  2001 del=  12035 proc=  12162 ack=  12345  lag=    2412  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1360  e2eB p50=404 p99=1360
+t=  81  off=  2001 pub=  2006 der=  1954 del=  12079 proc=  11907 ack=  11560  lag=    2281  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1360  e2eB p50=404 p99=1360
+t=  82  off=  1999 pub=  1980 der=  1918 del=  11432 proc=  11684 ack=  11871  lag=    2167  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1247  e2eB p50=404 p99=1360
+t=  83  off=  2002 pub=  2008 der=  2050 del=  12504 proc=  11999 ack=  12174  lag=    2426  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1247  e2eB p50=404 p99=1360
+t=  84  off=  1999 pub=  2012 der=  2086 del=  12455 proc=  12522 ack=  12554  lag=    2346  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1247  e2eB p50=404 p99=1247
+t=  85  off=  1999 pub=  1998 der=  1977 del=  11696 proc=  11919 ack=  11721  lag=    2310  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1247  e2eB p50=404 p99=1247
+t=  86  off=  2002 pub=  1984 der=  2029 del=  12472 proc=  12192 ack=  12149  lag=    2247  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1247  e2eB p50=404 p99=1247
+t=  87  off=  1998 pub=  2017 der=  1960 del=  11462 proc=  11674 ack=  11822  lag=    2390  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1247  e2eB p50=404 p99=1247
+t=  88  off=  2000 pub=  1998 der=  2055 del=  11830 proc=  11979 ack=  11862  lag=    2684  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1143  e2eB p50=404 p99=1143
+t=  89  off=  2002 pub=  2002 der=  1893 del=  11976 proc=  11939 ack=  11643  lag=    2212  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1143  e2eB p50=404 p99=1143
+t=  90  off=  2000 pub=  1996 der=  2195 del=  12985 proc=  13046 ack=  12791  lag=    2137  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1143  e2eB p50=404 p99=1143
+t=  91  off=  2003 pub=  1999 der=  1905 del=  11745 proc=  11731 ack=  12127  lag=    1930  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1143  e2eB p50=404 p99=1143
+t=  92  off=  1997 pub=  2002 der=  1959 del=  10647 proc=  10734 ack=  10838  lag=    2993  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1143  e2eB p50=404 p99=1143
+t=  93  off=  1998 pub=  1995 der=  1983 del=  12524 proc=  12250 ack=  12162  lag=    2653  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1143  e2eB p50=404 p99=1143
+t=  94  off=  2000 pub=  2004 der=  2046 del=  12174 proc=  12133 ack=  12154  lag=    2754  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t=  95  off=  2000 pub=  1997 der=  1996 del=  12162 proc=  12289 ack=  12504  lag=    2442  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t=  96  off=  2002 pub=  2004 der=  1992 del=  11691 proc=  11774 ack=  11795  lag=    2632  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t=  97  off=  1998 pub=  2001 der=  1959 del=  12029 proc=  11818 ack=  11669  lag=    2610  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t=  98  off=  2001 pub=  1999 der=  2002 del=  12081 proc=  12071 ack=  12340  lag=    2548  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t=  99  off=  1999 pub=  1994 der=  2013 del=  12391 proc=  12378 ack=  12124  lag=    2229  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t= 100  off=  2000 pub=  2004 der=  2020 del=  11860 proc=  11972 ack=  11960  lag=    2361  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t= 101  off=  2002 pub=  2005 der=  2006 del=  11975 proc=  11880 ack=  11813  lag=    2516  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t= 102  off=  1998 pub=  1995 der=  1800 del=  10776 proc=  10943 ack=  10961  lag=    2568  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=1049  e2eB p50=404 p99=1049
+t= 103  off=  2000 pub=  1997 der=  2176 del=  12960 proc=  12841 ack=  12282  lag=    2604  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=404 p99=1049
+t= 104  off=  2001 pub=  2007 der=  1969 del=  11938 proc=  11936 ack=  12703  lag=    2520  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 105  off=  1999 pub=  2000 der=  2093 del=  12247 proc=  12338 ack=  12191  lag=    2647  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 106  off=  2000 pub=  1998 der=  1967 del=  11851 proc=  11922 ack=  12206  lag=    2558  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 107  off=  2001 pub=  1999 der=  1988 del=  11495 proc=  11467 ack=  11383  lag=    3030  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 108  off=  2001 pub=  2008 der=  1958 del=  12577 proc=  12499 ack=  12417  lag=    2329  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 109  off=  1998 pub=  1998 der=  2019 del=  11672 proc=  11821 ack=  11938  lag=    2601  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 110  off=  2002 pub=  1999 der=  1987 del=  12315 proc=  12142 ack=  12027  lag=    2393  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 111  off=  1999 pub=  1999 der=  2025 del=  11740 proc=  11913 ack=  11720  lag=    2604  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 112  off=  1998 pub=  1982 der=  1936 del=  11459 proc=  11591 ack=  11471  lag=    2675  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 113  off=  2002 pub=  2014 der=  2046 del=  12197 proc=  11953 ack=  12102  lag=    2966  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 114  off=  2001 pub=  2002 der=  2060 del=  12505 proc=  12462 ack=  12624  lag=    2806  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 115  off=  1999 pub=  2005 der=  1929 del=  12122 proc=  11930 ack=  11895  lag=    2526  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 116  off=  1999 pub=  1999 der=  2061 del=  11941 proc=  12362 ack=  12172  lag=    2468  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 117  off=  2001 pub=  1996 der=  1946 del=  11874 proc=  11537 ack=  11798  lag=    2657  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 118  off=  1999 pub=  1996 der=  1969 del=  11705 proc=  11674 ack=  11760  lag=    2824  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=962  e2eB p50=441 p99=962
+t= 119  off=  2001 pub=  2001 der=  2111 del=  13142 proc=  13152 ack=  12370  lag=    2228  shed=0 pushErr=0 ackErr=0  e2eA p50=404 p99=882  e2eB p50=441 p99=962
+draining up to 60s...
+
+=== VERIFIER (dir=results/diag-2k-200, ackErr=0, baseSeq=0) ===
+stage(topic_group)                   msgs     unique     dups     gaps    viols   inflight  verdict
+cm-avail_cm-db                     116001     116001        0        0        0          0  PASS
+cm-prices_cm-cal                   116000     116000        0        0        0          0  PASS
+cm-ota-sync_ota-1                  116001     116001        0        0        0          0  PASS
+cm-ota-sync_ota-2                  116001     116001        0        0        0          0  PASS
+cm-ota-sync_ota-3                  116001     116001        0        0        0          0  PASS
+cm-ota-sync_ota-4                  116001     116001        0        0        0          0  PASS
+cm-ota-sync_ota-5                  116001     116001        0        0        0          0  PASS
+cm-ota-prices_otap-1               116000     116000        0        0        0          0  PASS
+cm-ota-prices_otap-2               116000     116000        0        0        0          0  PASS
+cm-ota-prices_otap-3               116000     116000        0        0        0          0  PASS
+cm-ota-prices_otap-4               116000     116000        0        0        0          0  PASS
+cm-ota-prices_otap-5               116000     116000        0        0        0          0  PASS
+TOTAL                             1392006    1392006        0        0        0          0
+VERDICT: PASS  (0 gaps below frontier, 0 order-violations, 0 dups, 0 in-flight at cutoff)
+
+=== SUMMARY  system=queen  R=2000  P=1000  elapsed=2m0s ===
+
+-- workload demand (broker-independent) --
+  deliveries/s required      12000
+  ordered lanes required     325
+
+-- what actually flowed --
+  offered              230001  (1917/s)
+  published            231991  (1933/s)
+  derived              232001  (1933/s)
+  delivered           1392006  (11600/s)
+  processed           1392006  (11600/s)
+  shed                      0
+  pushErr                  10   pushRetry 0
+  acked               1392006   ackErr 0
+  broker-reported redeliveries 0
+
+-- end-to-end latency (CO-corrected, terminal stages) --
+  flow A  p50 404.3 ms   p95 679.9 ms   p99 961.5 ms
+  flow B  p50 440.9 ms   p95 679.9 ms   p99 961.5 ms
+
+-- cost to serve: what this system needed --
+  ordered lanes provisioned  800
+  physical queues/topics     4
+  consumer members           96
+  connections                1
+  publishes / ingress event  2.0
+  semantics built in the app:
+      - consumption mode: WILDCARD pops, up to 40 partitions per pop
+      - lanes assigned dynamically by the broker: no application-side ownership map, no advance knowledge of key cardinality
+      - cost of that flexibility is the server-side candidate scan, which is charged to Queen here and not hidden behind the targeted mode
+      - properties share lanes: 1000 properties into 200 partitions (~5.0 per lane) => head-of-line blocking between properties
+
+-- adapter counters --
+  queen_ack_errors           0
+  queen_acked                1392006
+  queen_batched_pushes       124133
+  queen_dedup_window         0
+  queen_empty_pops           190
+  queen_lanes_per_queue      200
+  queen_lease_seconds        60
+  queen_messages_popped      1392006
+  queen_messages_pushed      463992
+  queen_mode                 wildcard
+  queen_pop_workers          96
+  queen_pops                 69885
+  queen_props_per_lane       5
+  queen_redelivered          0
+
+-- per-stage entry age (ms from producer schedule; decomposes e2e) --
+  stage                                p50       p95       p99
+  cm-avail/cm-db                     170.0     340.0     571.7
+  cm-prices/cm-cal                   170.0     370.7     571.7
+  cm-ota-sync/ota-1                  370.7     623.5     881.7
+  cm-ota-sync/ota-2                  370.7     623.5     881.7
+  cm-ota-sync/ota-3                  370.7     623.5     881.7
+  cm-ota-sync/ota-4                  370.7     623.5     881.7
+  cm-ota-sync/ota-5                  370.7     623.5     881.7
+  cm-ota-prices/otap-1               370.7     623.5     881.7
+  cm-ota-prices/otap-2               370.7     623.5     881.7
+  cm-ota-prices/otap-3               370.7     623.5     881.7
+  cm-ota-prices/otap-4               370.7     623.5     881.7
+  cm-ota-prices/otap-5               370.7     623.5     881.7
+
+-- worker cycle phases, p50/p95 ms (popRTT + barrier + push + ackDisp ~= cycle) --
+  stage                                   popRTT         barrier            push         ackDisp
+  cm-avail/cm-db                  131.1 /  240.4   30.0 /   71.5    5.8 /   27.6    0.0 /    0.0
+  cm-prices/cm-cal                131.1 /  240.4   30.0 /   71.5    6.3 /   27.6    0.0 /    0.0
+  cm-ota-sync/ota-1               131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-2               131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-3               131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-4               131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-sync/ota-5               131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-1            131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-2            131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-3            131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-4            131.1 /  240.4   32.8 /   85.0    0.0 /    0.0    0.0 /    0.0
+  cm-ota-prices/otap-5            131.1 /  240.4   32.8 /   92.7    0.0 /    0.0    0.0 /    0.0
+
+-- correctness --
+  gaps 0   order violations 0   dups 0   in-flight at cutoff 0
+  VERDICT: PASS

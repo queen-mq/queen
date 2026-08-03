@@ -23,7 +23,6 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::{txn_hash128, uuidv7_bytes};
-use crate::vegas::Vegas;
 
 // -------------------------------------------------- GET /api/v1/messages/:pid/:txn
 // Per-message access (plan "Per-message access" decision): resolve (partitionId,

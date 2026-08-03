@@ -23,7 +23,6 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::uuidv7_bytes;
-use crate::vegas::Vegas;
 
 // GET /api/v1/consumer-groups — every group across both engines. Returns the
 // get_consumer_groups_v4 JSON array verbatim (the Admin client reads it as-is).

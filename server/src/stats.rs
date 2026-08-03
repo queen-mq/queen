@@ -89,12 +89,19 @@ enum Outcome {
 async fn run_cycle(
     pool: &Pool,
 ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
+    // Maintenance-lane admission: the stats refresh commits WAL on the same
+    // device as everything else — it rides the shared budget, low priority.
+    let mut slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
+    let t0 = std::time::Instant::now();
     let client = pool.get().await?;
     client.batch_execute("BEGIN").await?;
     let res = cycle_body(&client).await;
     match &res {
         Ok(_) => {
             let _ = client.batch_execute("COMMIT").await;
+            if let Some(sl) = slot.as_mut() {
+                sl.commit_done(t0.elapsed());
+            }
         }
         Err(_) => {
             let _ = client.batch_execute("ROLLBACK").await;

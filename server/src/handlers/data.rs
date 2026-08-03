@@ -23,7 +23,7 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::{uuidv7_bytes, FnvHashMap};
-use crate::vegas::Vegas;
+use crate::admission::Lane;
 
 // ------------------------------------------------------------------ push
 #[derive(Deserialize)]
@@ -595,15 +595,15 @@ pub async fn handle_pop(
         // ── discovery-latency fix (2026-07-24): the legacy long-poll re-checks the
         // queue every backoff interval, so at N parked consumers the rate of EMPTY
         // re-polls is O(#parked consumers) = O(#queues). Acquiring the SHARED
-        // pop_vegas serving permit on every such empty re-poll let that O(#queues)
+        // pop admission slot on every such empty re-poll let that O(#queues)
         // storm saturate the limiter (Vegas shrinks it under RTT pressure) — so a
         // freshly-woken REAL delivery pop queued behind thousands of empty re-polls
         // on acquire(), a priority inversion whose wait grew LINEARLY with the queue
-        // count. Gate the vegas-limited wildcard scan behind the cheap indexed
+        // count. Gate the admission-limited wildcard scan behind the cheap indexed
         // has_pending SUPERSET (no permit taken): `false` means there is definitively
         // nothing to deliver → skip the scan and park; a "maybe pending" queue takes
         // the permit and scans. The probe borrows a pooled connection (uncontended —
-        // pool.get measured ~0µs) and never touches pop_vegas, so the quiet re-poll
+        // pool.get measured ~0µs) and never touches the admission budget, so the quiet re-poll
         // storm can no longer starve real deliveries.
         let pending = match st.pool.get().await {
             Ok(c) => db::has_pending(&c, &queue, &group, tenant.as_str()).await.unwrap_or(true),
@@ -611,12 +611,12 @@ pub async fn handle_pop(
         };
 
         let (txt, blobs, rtt): (String, Vec<Vec<u8>>, Duration) = if pending {
-            let permit = st.pop_vegas.acquire().await;
+            let mut slot = st.admission.acquire(Lane::Pop).await;
             let client = match st.pool.get().await {
                 Ok(c) => c,
                 Err(_) => {
                     st.metrics.record_db_error();
-                    drop(permit);
+                    drop(slot);
                     return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
                 }
             };
@@ -634,8 +634,8 @@ pub async fn handle_pop(
             )
             .await;
             let rtt = t0.elapsed();
-            st.pop_vegas.record(rtt);
-            drop(permit);
+            if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+            drop(slot);
             // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
             // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE
             // any parking below — a parked pop must never pin a PG connection.
@@ -771,12 +771,12 @@ async fn try_targeted_serve(
         if remaining <= 0 {
             break;
         }
-        let permit = st.pop_vegas.acquire().await;
+        let mut slot = st.admission.acquire(Lane::Pop).await;
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
                 st.metrics.record_db_error();
-                drop(permit);
+                drop(slot);
                 break;
             }
         };
@@ -791,9 +791,9 @@ async fn try_targeted_serve(
         )
         .await;
         let rtt = t0.elapsed();
-        st.pop_vegas.record(rtt);
+        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
         total_rtt += rtt;
-        drop(permit);
+        drop(slot);
         // This is a targeted (hint-driven) pop — count it whether or not it found
         // data; an empty result still cost ~1ms vs the wildcard's ~10ms.
         st.metrics.pop_targeted.fetch_add(1, Ordering::Relaxed);
@@ -954,7 +954,7 @@ async fn serve_pop_hotlist(
         //
         // WHERE the wait lives is the whole design. It is HERE — in Rust, before
         // hotlist_pop_attempt — and never inside the SQL, because a wait inside
-        // log_pop_list_v1 (pg_sleep) would hold a pooled PG connection, a pop_vegas
+        // log_pop_list_v1 (pg_sleep) would hold a pooled PG connection, a pop admission slot
         // serving permit and (once claimed) row locks for the entire window: it
         // would trade a commit for a connection, and on a 2-core cell with a Vegas
         // limit in the tens that is strictly worse than the disease. Waiting here
@@ -1149,12 +1149,12 @@ async fn hotlist_pop_attempt(
     // subsequent pop takes the ring path. group_seeded is a cache hit (zero DB,
     // zero pool.get) once seeded, so steady state is pure ring.
     if !st.group_seeded(queue, group, tenant).await {
-        let permit = st.pop_vegas.acquire().await;
+        let mut slot = st.admission.acquire(Lane::Pop).await;
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
                 st.metrics.record_db_error();
-                drop(permit);
+                drop(slot);
                 let (b, c, m) = empty();
                 return (b, c, m, Duration::ZERO);
             }
@@ -1170,8 +1170,8 @@ async fn hotlist_pop_attempt(
         )
         .await;
         let rtt = t0.elapsed();
-        st.pop_vegas.record(rtt);
-        drop(permit);
+        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+        drop(slot);
         let (txt, blobs) = match db::resolve_query_timeout(res, client, cancel_token, "pop_wildcard", &st.metrics)
         {
             Some(t) => t,
@@ -1210,10 +1210,10 @@ async fn hotlist_pop_attempt(
     st.hotlist.ensure_group(qkey, group);
 
     // ── discovery-latency fix (2026-07-24): resolve the in-memory ring BEFORE
-    // taking the pop_vegas serving permit / a pooled connection. A parked consumer
+    // taking the pop admission slot / a pooled connection. A parked consumer
     // whose queue is quiet re-polls every backoff interval, so the rate of EMPTY
     // re-polls is O(#parked consumers) = O(#queues). The old order acquired the
-    // SHARED pop_vegas limiter on every such empty re-poll, and that O(#queues)
+    // SHARED admission budget on every such empty re-poll, and that O(#queues)
     // storm saturated the limiter (Vegas shrinks it under RTT pressure) — so a
     // freshly-woken REAL delivery pop queued behind thousands of empty re-polls on
     // acquire(), a priority inversion whose wait grew LINEARLY with the queue count
@@ -1222,7 +1222,7 @@ async fn hotlist_pop_attempt(
     // DB: a candidate to serve (a push marked the ring), a due keyset reseed (§8
     // floor), or a stale deferral-config refresh (§6) — each gated by a cheap
     // in-memory predicate here. The quiet re-poll short-circuits WITHOUT ever
-    // touching pop_vegas / the pool.
+    // touching the admission budget / the pool.
     let need_reseed = st.hotlist.reseed_due(qkey, group, now_ms, st.hotlist_reseed_ms);
     let need_cfg = !st.hotlist.cfg_fresh(qkey, now_ms, HOTLIST_CFG_TTL_MS);
     if !need_reseed && !need_cfg && !st.hotlist.has_ready(qkey, group, now_ms) {
@@ -1341,20 +1341,20 @@ async fn hotlist_pop_attempt(
     // O(#queues) quiet re-poll storm.
     let tr = st.hotlist.traced(qkey);
     let t_start = if tr { crate::hotlist::trace_now_ms() } else { 0 };
-    let permit = st.pop_vegas.acquire().await;
-    let t_vegas = if tr { crate::hotlist::trace_now_ms() } else { 0 };
+    let mut slot = st.admission.acquire(Lane::Pop).await;
+    let t_adm = if tr { crate::hotlist::trace_now_ms() } else { 0 };
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => {
             st.metrics.record_db_error();
-            drop(permit);
+            drop(slot);
             let (b, c, m) = empty();
             return (b, c, m, Duration::ZERO);
         }
     };
     if tr {
-        eprintln!("[hlt] attempt q={} start={} vegas_wait={} pool_wait={}",
-            queue, t_start, t_vegas - t_start, crate::hotlist::trace_now_ms() - t_vegas);
+        eprintln!("[hlt] attempt q={} start={} adm_wait={} pool_wait={}",
+            queue, t_start, t_adm - t_start, crate::hotlist::trace_now_ms() - t_adm);
     }
 
     // Lazy deferral-config refresh (§6), TTL-throttled.
@@ -1399,7 +1399,7 @@ async fn hotlist_pop_attempt(
     }
     if cands.is_empty() {
         drop(client);
-        drop(permit);
+        drop(slot);
         let (b, c, m) = empty();
         return (b, c, m, Duration::ZERO);
     }
@@ -1439,8 +1439,8 @@ async fn hotlist_pop_attempt(
     if tr {
         eprintln!("[hlt] sqldone q={} cands={} sql_ms={}", queue, names.len(), rtt.as_millis());
     }
-    st.pop_vegas.record(rtt);
-    drop(permit);
+    if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+    drop(slot);
     // The await returned (not dropped) — take ownership of the candidates back and
     // disarm the guard; every path below runs an explicit checkin.
     guard.armed = false;
@@ -1661,12 +1661,12 @@ pub async fn handle_pop_partition(
 
     let mut backoff_count: u32 = 0;
     loop {
-        let permit = st.pop_vegas.acquire().await;
+        let mut slot = st.admission.acquire(Lane::Pop).await;
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
                 st.metrics.record_db_error();
-                drop(permit);
+                drop(slot);
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
             }
         };
@@ -1684,8 +1684,8 @@ pub async fn handle_pop_partition(
         )
         .await;
         let rtt = t0.elapsed();
-        st.pop_vegas.record(rtt);
-        drop(permit);
+        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+        drop(slot);
         // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
         // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
         // parking below — a parked pop must never pin a PG connection.
@@ -1812,12 +1812,12 @@ pub async fn handle_pop_discover(
 
     let mut backoff_count: u32 = 0;
     loop {
-        let permit = st.pop_vegas.acquire().await;
+        let mut slot = st.admission.acquire(Lane::Pop).await;
         let client = match st.pool.get().await {
             Ok(c) => c,
             Err(_) => {
                 st.metrics.record_db_error();
-                drop(permit);
+                drop(slot);
                 return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
             }
         };
@@ -1835,8 +1835,8 @@ pub async fn handle_pop_discover(
         )
         .await;
         let rtt = t0.elapsed();
-        st.pop_vegas.record(rtt);
-        drop(permit);
+        if matches!(res, Ok(Ok(_))) { slot.commit_done(rtt); }
+        drop(slot);
         // Spec §10 (parked long-poll): resolve_query_timeout releases the pooled
         // connection (drop on success/db-error, DETACH+cancel on timeout) BEFORE any
         // parking below — a parked pop must never pin a PG connection.
@@ -2393,7 +2393,14 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
     // deadlock the flush task (which needs its own connection from the same pool)
     // once more acks park than the pool is deep.
     let mut client: Option<deadpool_postgres::Client> = None;
+    // Ack-lane admission, taken BEFORE the pool checkout (the reverse order
+    // deadlocks against the slot-then-pool paths; see admission.rs). Scoped
+    // exactly like `client`: with fusion OFF it spans the loop, with fusion ON
+    // it is taken per-iteration next to the lazy client and dropped with it —
+    // never held across a fusion commit-wait.
+    let mut _ack_slot: Option<crate::admission::Slot> = None;
     if !fusion_on {
+        _ack_slot = crate::admission::lane_slot(crate::admission::Lane::Ack).await;
         match st.pool.get().await {
             Ok(c) => client = Some(c),
             Err(_) => {
@@ -2580,6 +2587,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
         // the next group's fusion wait never pins it. With fusion OFF the shared
         // client is already held.
         if fusion_on && client.is_none() {
+            _ack_slot = crate::admission::lane_slot(crate::admission::Lane::Ack).await;
             match st.pool.get().await {
                 Ok(c) => client = Some(c),
                 Err(_) => {
@@ -2771,6 +2779,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
         // None; with fusion OFF the shared client is kept for the whole loop.
         if fusion_on {
             client = None;
+            _ack_slot = None;
         }
     }
 
@@ -2967,6 +2976,9 @@ pub async fn handle_lease_extend(
             .unwrap_or(60)
     };
 
+    // Ack-lane admission BEFORE the pool checkout (ordering contract,
+    // admission.rs). Held for the single renew statement.
+    let _slot = crate::admission::lane_slot(crate::admission::Lane::Ack).await;
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
@@ -3316,6 +3328,9 @@ pub async fn handle_transaction(
             only.cloned()
         }
     };
+    // Push-lane admission BEFORE the pool checkout (ordering contract,
+    // admission.rs): the wire transaction commits push WAL.
+    let _slot = crate::admission::lane_slot(crate::admission::Lane::Push).await;
     // Acquire the DB client up front: ack worker resolution and the bogus-ack
     // pre-check below both need it, and it is reused for the SP call.
     let client = match st.pool.get().await {

@@ -60,6 +60,8 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
         let d = delta(&last, &now);
         last = now;
 
+        // Maintenance-lane admission for the metrics write batch.
+        let _slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
         let client = match pool.get().await {
             Ok(c) => c,
             Err(e) => {

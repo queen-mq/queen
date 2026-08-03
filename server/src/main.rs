@@ -29,7 +29,7 @@ mod stats;
 mod syscollect;
 mod tenant;
 mod util;
-mod vegas;
+mod admission;
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -88,20 +88,30 @@ async fn main() {
         obs::fatal(format!("schema apply failed: {e}"));
     }
 
-    let push_vegas = vegas::Vegas::new(
-        cfg.push_init,
-        cfg.push_min,
-        cfg.push_max,
-        cfg.vegas_alpha,
-        cfg.vegas_beta,
-    );
-    let pop_vegas = vegas::Vegas::new(
-        cfg.pop_init,
-        cfg.pop_min,
-        cfg.pop_max,
-        cfg.vegas_alpha,
-        cfg.vegas_beta,
-    );
+    // ONE admission arbiter for the whole commit path (admission.rs): every
+    // write transaction — push bundles, pop claims, acks, maintenance — takes
+    // a lane slot from the same budget, sensed via passive commit trains.
+    let admission = admission::Admission::new(admission::AdmissionCfg {
+        init: cfg.admission_init,
+        min: cfg.admission_min,
+        max: cfg.admission_max,
+        pool_reserve: cfg.admission_pool_reserve,
+        pool_size: cfg.pool_size as u64,
+        train_gap: std::time::Duration::from_micros(cfg.admission_train_gap_us),
+        tick: std::time::Duration::from_millis(cfg.admission_tick_ms),
+        share: [
+            cfg.admission_share_push,
+            cfg.admission_share_pop,
+            cfg.admission_share_ack,
+            cfg.admission_share_maint,
+        ],
+        nosync_budget: cfg.admission_nosync_budget,
+        trace: cfg.admission_trace,
+    });
+    // The long-tail writers (db.rs ack/renew/wire/streams wrappers, the
+    // maintenance loops, the spool drain) reach the arbiter through the
+    // process-global handle.
+    admission::set_global(admission.clone());
 
     let metrics = Arc::new(metrics::Metrics::new());
 
@@ -192,7 +202,7 @@ async fn main() {
     let fusion = fusion::Fusion::new(
         cfg.fusion_shards,
         pool.clone(),
-        push_vegas.clone(),
+        admission.clone(),
         metrics.clone(),
         cfg.zstd_level,
         cfg.fusion_frames,
@@ -267,7 +277,7 @@ async fn main() {
         cfg.pop_fusion_shards,
         pool.clone(),
         cfg.stmt_timeout,
-        pop_vegas.clone(),
+        admission.clone(),
         metrics.clone(),
         cfg.pop_fusion_hold_ms,
         cfg.pop_fusion_max_jobs,
@@ -311,8 +321,7 @@ async fn main() {
         ack_registry,
         ack_fusion,
         pop_fusion,
-        push_vegas: push_vegas.clone(),
-        pop_vegas: pop_vegas.clone(),
+        admission: admission.clone(),
         metrics: metrics.clone(),
         stmt_timeout: cfg.stmt_timeout,
         pop_default_timeout_ms: cfg.pop_default_timeout_ms,
@@ -349,8 +358,7 @@ async fn main() {
         hotlist: state.hotlist.clone(),
         dedup: state.fusion.dedup_cache(),
         dedup_cap_mb: cfg.dedup_cache_mb,
-        push_vegas: state.push_vegas.clone(),
-        pop_vegas: state.pop_vegas.clone(),
+        admission: state.admission.clone(),
         interval_ms: cfg.log_rates_ms,
         top_n: cfg.log_top_n_queues,
     });

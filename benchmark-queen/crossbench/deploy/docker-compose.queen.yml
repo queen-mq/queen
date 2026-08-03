@@ -70,27 +70,14 @@ services:
       QUEEN_POP_FUSION_MAX_JOBS: ${QUEEN_POP_FUSION_MAX_JOBS:-16}
       METRICS_FLUSH_MS: ${METRICS_FLUSH_MS:-60000}
 
-      # Adaptive-concurrency (Vegas) windows on the DB lanes.
-      #
-      # These are NOT a default we are quietly improving: the published image
-      # ships init=16 min=4 max=64, and at this workload the window COLLAPSED to
-      # 5 (observed vegas_pop=5 in the broker's own rates block). A window of 5
-      # caps the whole broker at ~1000 pops/s regardless of how many consumers
-      # the client runs, because the permit is acquired BEFORE the DB op
-      # (server/src/vegas.rs:104) and the queue in front of that gate is invisible
-      # to the p50_push_ms / p99_pop_ms the broker reports. That is exactly the
-      # signature we measured: single-digit-ms operations, ~900 ms end-to-end,
-      # and a p50 that would not move for any client-side knob.
-      #
-      # QueenMQ's own July 2026 tuning for this workload used PINIT=512/PMAX=2048.
-      # Running the campaign on init=16/max=64 measures a broker throttled ~30x
-      # below what its operators would ever deploy.
-      QUEEN_SEG_PUSH_INIT: ${QUEEN_SEG_PUSH_INIT:-512}
-      QUEEN_SEG_PUSH_MIN: ${QUEEN_SEG_PUSH_MIN:-64}
-      QUEEN_SEG_PUSH_MAX: ${QUEEN_SEG_PUSH_MAX:-2048}
-      QUEEN_SEG_POP_INIT: ${QUEEN_SEG_POP_INIT:-512}
-      QUEEN_SEG_POP_MIN: ${QUEEN_SEG_POP_MIN:-64}
-      QUEEN_SEG_POP_MAX: ${QUEEN_SEG_POP_MAX:-2048}
+      # Admission arbiter (server/src/admission.rs, replaced the Vegas lanes
+      # 2026-08-03). The budget is sensed from passive commit trains and needs
+      # no workload tuning; QUEEN_ADMISSION_* exists for bounds/trace only.
+      # The old QUEEN_SEG_{PUSH,POP}_{INIT,MIN,MAX} / QUEEN_VEGAS_* knobs are
+      # dead (the broker warns at boot if they are set). The whole history of
+      # why per-op-RTT windows could not work at this workload is in
+      # results/2026-08-03-pgmq-ab/RESULTS.md.
+      QUEEN_ADMISSION_TRACE: ${QUEEN_ADMISSION_TRACE:-0}
 
       # Long-poll re-check cadence. The parked-pop path is a polling loop
       # (server/src/handlers/mod.rs:348): initial interval, doubling after

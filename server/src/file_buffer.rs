@@ -656,6 +656,10 @@ impl FileBufferManager {
             blobs.push(blob);
         }
 
+        // Maintenance-lane admission: spool replay is push WAL, but it is
+        // recovery traffic — it must never outrank live lanes.
+        let mut slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
+        let t0 = std::time::Instant::now();
         // Pool acquisition failure = DB unreachable = transient.
         let client = pool
             .get()
@@ -664,6 +668,9 @@ impl FileBufferManager {
         db::log_push_multi(&client, &queues, &partitions, &counts, &hashes, &verified, &blobs, &tenants)
             .await
             .map_err(|e| classify_push_error(&e))?;
+        if let Some(sl) = slot.as_mut() {
+            sl.commit_done(t0.elapsed());
+        }
         Ok(())
     }
 }

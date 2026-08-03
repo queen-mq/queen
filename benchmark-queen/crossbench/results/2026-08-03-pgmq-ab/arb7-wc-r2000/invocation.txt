@@ -1,0 +1,1 @@
+queen:arbiter7 (eff-memory cap decay) | wc r2000

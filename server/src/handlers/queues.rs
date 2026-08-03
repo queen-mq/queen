@@ -23,7 +23,6 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::uuidv7_bytes;
-use crate::vegas::Vegas;
 
 // ------------------------------------------------------------------ configure
 // POST /api/v1/configure — create/update a queue. The JS/Go builders send

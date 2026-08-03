@@ -32,7 +32,6 @@ use crate::dedup::DedupCache;
 use crate::file_buffer::FileBufferManager;
 use crate::hotlist::HotList;
 use crate::metrics::Metrics;
-use crate::vegas::Vegas;
 use std::sync::Arc;
 
 /// Install the process-wide `tracing` subscriber. Call ONCE, first thing in
@@ -206,8 +205,7 @@ pub struct ReporterHandles {
     pub hotlist: Arc<HotList>,
     pub dedup: Arc<DedupCache>,
     pub dedup_cap_mb: usize,
-    pub push_vegas: Arc<Vegas>,
-    pub pop_vegas: Arc<Vegas>,
+    pub admission: Arc<crate::admission::Admission>,
     pub interval_ms: u64,
     pub top_n: usize,
 }
@@ -222,6 +220,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
         // Track the spool's DB-health so we can emit the enter/leave-buffered-mode
         // transition (the single most important durability signal) on-change.
         let mut prev_healthy = h.file_buffer.db_healthy();
+        let (mut prev_visits, mut prev_cands, _, _) = h.hotlist.lap.snapshot();
         static POOL_SAT: Sampler = Sampler::new(10_000);
         let mut last = Instant::now();
         loop {
@@ -284,6 +283,12 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 prev_healthy = healthy;
             }
 
+            let adm = h.admission.snapshot();
+            let (lap_visits, lap_cands, age_p50, age_p95) = h.hotlist.lap.snapshot();
+            let d_visits = lap_visits.saturating_sub(prev_visits);
+            let d_cands = lap_cands.saturating_sub(prev_cands);
+            prev_visits = lap_visits;
+            prev_cands = lap_cands;
             tracing::info!(
                 target: "rates",
                 scope = "global",
@@ -300,8 +305,19 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 parked = parked,
                 pool = format!("{}/{}", st.size, st.max_size),
                 pool_waiting = st.waiting,
-                vegas_push = h.push_vegas.limit(),
-                vegas_pop = h.pop_vegas.limit(),
+                adm_budget = adm.budget,
+                adm_mode = adm.mode_str(),
+                adm_lanes = %adm.lanes_str(),
+                trains_s = format!("{:.1}", adm.trains_per_s),
+                txn_train = format!("{:.1}", adm.txn_per_train_avg),
+                txn_train_p95 = adm.txn_per_train_p95,
+                cycle_ms = format!("{:.2}", adm.cycle_ms.unwrap_or(0.0)),
+                oldest_wait_ms = format!("{:.1}", adm.oldest_wait_ms.unwrap_or(0.0)),
+                adm_last = adm.last_change,
+                visits_s = format!("{:.0}", d_visits as f64 / secs),
+                cands_visit = format!("{:.1}", d_cands as f64 / (d_visits.max(1)) as f64),
+                ready_age_p50 = format!("{:.0}", age_p50),
+                ready_age_p95 = format!("{:.0}", age_p95),
                 buffered = buffered,
                 "broker rates"
             );
@@ -377,6 +393,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 spool_healthy = h.file_buffer.db_healthy(),
                 pool = format!("{}/{}", st.size, st.max_size),
                 pool_waiting = st.waiting,
+                adm_commits = adm.completions,
                 rss_gb = format!("{:.2}", rss_gb),
                 "broker sizes"
             );

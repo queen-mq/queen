@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 use deadpool_postgres::Pool;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::sync::OwnedSemaphorePermit;
 use tokio_postgres::NoTls;
 
 use crate::dedup::{DedupCache, PushCheck};
@@ -14,7 +13,7 @@ use crate::frames::{
     pack_frames, unpack_frames_ref, uuid_bytes_to_string, zstd_compress, zstd_decompress, FrameIn,
 };
 use crate::metrics::Metrics;
-use crate::vegas::Vegas;
+use crate::admission::{Admission, Lane};
 
 // ---------------------------------------------------------------------------
 // Cross-partition BUNDLING observability (Trap 3b). Every dispatch commits ONE
@@ -256,7 +255,7 @@ const SEGMENT_AT_SQL: &str =
 
 struct FlushCtx {
     pool: Pool,
-    vegas: Arc<Vegas>,
+    admission: Arc<Admission>,
     metrics: Arc<Metrics>,
     zstd_level: i32,
     stmt_timeout: Duration,
@@ -286,7 +285,7 @@ impl Fusion {
     pub fn new(
         shards: usize,
         pool: Pool,
-        vegas: Arc<Vegas>,
+        admission: Arc<Admission>,
         metrics: Arc<Metrics>,
         zstd_level: i32,
         fusion_frames: usize,
@@ -369,7 +368,7 @@ impl Fusion {
             senders.push(tx);
             let ctx = Arc::new(FlushCtx {
                 pool: pool.clone(),
-                vegas: vegas.clone(),
+                admission: admission.clone(),
                 metrics: metrics.clone(),
                 zstd_level,
                 stmt_timeout,
@@ -400,7 +399,7 @@ impl Fusion {
 // in-flight set) is single-task-local and needs no locking.
 //
 // Fire-on-idle (Trap 1): on arrival, if the push lane is uncontended (under the
-// fan-out cap and a push Vegas permit is immediately free) the ready partition
+// fan-out cap and a push admission slot is immediately free) the ready partition
 // flushes IMMEDIATELY — no hold timer — as a bundle of 1, so a single/low-rate
 // push commits in ~one DB RTT, not ~hold ms.
 //
@@ -431,7 +430,7 @@ async fn shard_loop(
 ) {
     let mut groups: FnvHashMap<String, FusionGroup> = FnvHashMap::default();
     let mut inflight: FnvHashSet<String> = FnvHashSet::default();
-    // Concurrently in-flight bundles for THIS shard (each holds one push Vegas
+    // Concurrently in-flight bundles for THIS shard (each holds one push admission slot
     // permit and commits one multi-segment transaction). The fan-out fairness cap
     // (`max_inflight`) now bounds concurrent bundles, not partitions — a single
     // bundle may already touch up to `bundle_max` partitions.
@@ -498,7 +497,7 @@ async fn shard_loop(
             }
             _ = tick.tick() => {
                 // Liveness backstop: retry held groups whose dispatch depends on a
-                // permit freed on another shard (the push Vegas lane is shared),
+                // slot freed on another shard (the push admission budget is shared),
                 // which no local arrival/completion would have woken us for.
                 sweep_bundles(&mut groups, &mut inflight, &mut inflight_bundles,
                     max_inflight, bundle_max, floor, &ctx, &done_tx);
@@ -580,7 +579,7 @@ where
 
 // Form and dispatch ONE bundle now. Returns true if a bundle was fired. Gates, in
 // order: (1) the per-shard concurrent-bundle fan-out cap; (2) at least one ready,
-// not-in-flight partition exists; (3) a push Vegas permit must be immediately
+// not-in-flight partition exists; (3) a push admission slot must be immediately
 // available — its absence means the lane is contended, so we hold and accumulate
 // (Trap 1 fallback). The chosen partitions are exactly `take_front_disjoint`: up
 // to `bundle_max` ready groups whose partitions are not already in flight (hence
@@ -621,9 +620,11 @@ fn try_dispatch_bundle(
     if chosen.is_empty() {
         return false;
     }
-    // One permit for the whole bundle: one DB op / one commit for all N segments.
-    let permit = match ctx.vegas.try_acquire() {
-        Some(p) => p,
+    // One admission slot for the whole bundle: one DB op / one commit for all
+    // N segments. Non-blocking — fire-on-idle needs a synchronous probe; when
+    // the budget is full the shard holds and the groups keep fattening.
+    let slot = match ctx.admission.try_acquire(Lane::Push) {
+        Some(s) => s,
         None => return false,
     };
     let mut bundle: Vec<FusionGroup> = Vec::with_capacity(chosen.len());
@@ -633,7 +634,7 @@ fn try_dispatch_bundle(
         bundle.push(g);
     }
     *inflight_bundles += 1;
-    spawn_bundle_flush(ctx.clone(), chosen, bundle, permit, done.clone());
+    spawn_bundle_flush(ctx.clone(), chosen, bundle, slot, done.clone());
     true
 }
 
@@ -1030,7 +1031,7 @@ async fn resolve_dup_mids(
 }
 
 // Flush ONE bundle of N disjoint partitions as a single committed transaction.
-// The push Vegas permit (acquired by the shard loop so availability can gate
+// The push admission slot (acquired by the shard loop so availability can gate
 // fire-on-idle) is held until the DB op returns. On completion the bundle's
 // partition keys are sent back so the shard releases each in-flight slot and
 // dispatches each partition's accumulated next segment — the signal is sent AFTER
@@ -1040,7 +1041,7 @@ fn spawn_bundle_flush(
     ctx: Arc<FlushCtx>,
     keys: Vec<String>,
     bundle: Vec<FusionGroup>,
-    permit: OwnedSemaphorePermit,
+    mut slot: crate::admission::Slot,
     done: mpsc::UnboundedSender<Vec<String>>,
 ) {
     tokio::spawn(async move {
@@ -1298,10 +1299,14 @@ fn spawn_bundle_flush(
             }
         }
         let rtt = t0.elapsed();
-        // Release the push permit BEFORE signalling completion so the shard sees
-        // the permit free when it re-dispatches these partitions' next segments.
-        drop(permit);
-        ctx.vegas.record(rtt);
+        // Feed the train sensor only when something actually committed (a pool
+        // failure or an all-error flush produced no flush ack to cluster), then
+        // release the slot BEFORE signalling completion so the shard sees it
+        // free when it re-dispatches these partitions' next segments.
+        if gs.iter().any(|g| g.db_ok) {
+            slot.commit_done(rtt);
+        }
+        drop(slot);
         // Per-segment metrics (one record per partition preserves the existing
         // "avg frames per segment" prometheus semantics); the bundle counter below
         // captures the commits-vs-segments coalescing gain.

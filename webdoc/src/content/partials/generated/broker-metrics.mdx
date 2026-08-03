@@ -10,7 +10,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/handlers/status.rs
 */}
 
-`GET /metrics/prometheus` exposes **50 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
+`GET /metrics/prometheus` exposes **54 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
 
 ### Process (this broker instance)
 
@@ -72,13 +72,17 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_pop_fill_wait_total` | counter | Pops that held an under-full batch back (minPopWaitTime) |
 | `queen_pop_targeted_total` | counter | Hinted targeted single-partition pops issued |
 | `queen_pop_wildcard_total` | counter | Wildcard candidate-scan pops issued |
-| `queen_seg_pop_vegas_limit` | gauge | Adaptive pop concurrency limit |
-| `queen_seg_push_vegas_limit` | gauge | Adaptive push concurrency limit |
 
 ### Other
 
 | Family | Type | Help |
 | --- | --- | --- |
+| `queen_admission_budget` | gauge | Write-transaction admission budget |
+| `queen_admission_cycle_ms` | gauge | Median flush-cycle duration |
+| `queen_admission_inflight` | gauge | Admitted write transactions per lane |
+| `queen_admission_trains_per_s` | gauge | Commit trains per second (flush cycles) |
+| `queen_admission_txn_per_train` | gauge | Mean transactions per commit train |
+| `queen_admission_waiting` | gauge | Waiters per lane |
 | `queen_db_pool_active` | gauge | Active pooled connections |
 | `queen_db_pool_idle` | gauge | Idle pooled connections |
 | `queen_db_pool_size` | gauge | Configured DB pool size |

@@ -42,7 +42,7 @@
 //     into redelivery — the same at-least-once window the direct path already
 //     has between SQL completion and render, widened by ≤ one flush RTT.
 //
-// VEGAS. The admission permit is taken once per FLUSH, not once per pop: the
+// ADMISSION. The slot is taken once per FLUSH, not once per pop: the
 // limiter's RTT signal becomes the fused transaction — the thing that actually
 // queues on PG — instead of N copies of the same WAL wait.
 //
@@ -58,13 +58,36 @@ use deadpool_postgres::Pool;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::db;
-use crate::vegas::Vegas;
+use crate::admission::{Admission, Lane};
 
 // Coalescing observability: COMMITS counts fused transactions, JOBS the pop
 // claims inside them. jobs/commit is the fusion gain, cross-checkable against
 // pg_stat_statements (log_pop_list_v1.calls ≈ JOBS; commits ≈ COMMITS).
 static POP_COMMITS: AtomicU64 = AtomicU64::new(0);
 static POP_JOBS: AtomicU64 = AtomicU64::new(0);
+
+// Rolling commit-wait ring for the fused claim transactions: the exec/commit
+// split the admission law cannot see from slot age alone. Read in the
+// periodic coalesce summary.
+static COMMIT_WAIT: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+
+fn record_commit_wait(d: std::time::Duration) {
+    if let Ok(mut v) = COMMIT_WAIT.lock() {
+        if v.len() >= 4096 {
+            let overflow = v.len() - 4095;
+            v.drain(0..overflow);
+        }
+        v.push(d.as_secs_f64() * 1e3);
+    }
+}
+
+fn commit_wait_p(v: &mut Vec<f64>, p: usize) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[(v.len() * p / 100).min(v.len() - 1)]
+}
 
 fn record_flush(jobs: usize) {
     let commits = POP_COMMITS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -76,6 +99,14 @@ fn record_flush(jobs: usize) {
             commits,
             jobs = total,
             jobs_per_commit = format!("{:.2}", total as f64 / commits as f64),
+            commit_p50_ms = format!("{:.2}", {
+                let mut v = COMMIT_WAIT.lock().map(|g| g.clone()).unwrap_or_default();
+                commit_wait_p(&mut v, 50)
+            }),
+            commit_p95_ms = format!("{:.2}", {
+                let mut v = COMMIT_WAIT.lock().map(|g| g.clone()).unwrap_or_default();
+                commit_wait_p(&mut v, 95)
+            }),
             "coalesce summary"
         );
     }
@@ -118,7 +149,7 @@ pub struct PopJob {
 struct FlushCtx {
     pool: Pool,
     stmt_timeout: Duration,
-    vegas: Arc<Vegas>,
+    admission: Arc<Admission>,
     metrics: Arc<crate::metrics::Metrics>,
     max_jobs: usize,
     max_inflight: u32,
@@ -138,7 +169,7 @@ impl PopFusion {
         shards: usize,
         pool: Pool,
         stmt_timeout: Duration,
-        vegas: Arc<Vegas>,
+        admission: Arc<Admission>,
         metrics: Arc<crate::metrics::Metrics>,
         hold_ms: u64,
         max_jobs: usize,
@@ -156,7 +187,7 @@ impl PopFusion {
                 let ctx = Arc::new(FlushCtx {
                     pool: pool.clone(),
                     stmt_timeout,
-                    vegas: vegas.clone(),
+                    admission: admission.clone(),
                     metrics: metrics.clone(),
                     max_jobs,
                     max_inflight: max_inflight.max(1),
@@ -281,15 +312,16 @@ fn spawn_flush(ctx: Arc<FlushCtx>, jobs: Vec<PopJob>, done: mpsc::UnboundedSende
     tokio::spawn(async move {
         let n = jobs.len();
 
-        // Admission: one permit per fused transaction (see module header).
-        let permit = ctx.vegas.acquire().await;
+        // Admission: one slot per fused transaction (see module header).
+        let mut slot = ctx.admission.acquire(Lane::Pop).await;
 
         // The rtt clock starts AFTER admission + pool checkout — parity with
         // the direct path, whose recorded rtt is the SQL wall only. Clocking
-        // from before acquire() feeds the permit queue back into the Vegas
-        // window as congestion, and the loop self-sustains: measured
-        // 2026-08-03 at 2k/1000 sparse lanes, vegas_pop sat pinned at 6
-        // (init 16) and ~70 of the 80 ms fused wait was that feedback.
+        // from before acquire() would feed the admission queue back into the
+        // measured wait as if it were commit cost. (The Vegas-era limiter had
+        // exactly that loop: measured 2026-08-03 at 2k/1000 sparse lanes,
+        // vegas_pop sat pinned at 6 and ~70 of the 80 ms fused wait was the
+        // feedback. The train sensor only ever sees post-admission SQL wall.)
         let mut sql_rtt = Duration::ZERO;
         let outcome: Result<Vec<(String, Vec<Vec<u8>>, String)>, ()> = async {
             let mut client = ctx.pool.get().await.map_err(|_| ())?;
@@ -318,14 +350,18 @@ fn spawn_flush(ctx: Arc<FlushCtx>, jobs: Vec<PopJob>, done: mpsc::UnboundedSende
                     .await?;
                     results.push(r);
                 }
+                let t_commit = Instant::now();
                 tx.commit().await?;
-                Ok::<_, tokio_postgres::Error>(results)
+                Ok::<_, tokio_postgres::Error>((results, t_commit.elapsed()))
             };
 
             let res = tokio::time::timeout(ctx.stmt_timeout, work).await;
             sql_rtt = t0.elapsed();
             match res {
-                Ok(Ok(results)) => Ok(results),
+                Ok(Ok((results, commit_wait))) => {
+                    record_commit_wait(commit_wait);
+                    Ok(results)
+                }
                 Ok(Err(_)) => {
                     // Statement/commit error: the tx is aborted (or the commit
                     // failed), nothing durable happened. Connection is usable.
@@ -346,14 +382,15 @@ fn spawn_flush(ctx: Arc<FlushCtx>, jobs: Vec<PopJob>, done: mpsc::UnboundedSende
         }
         .await;
 
-        // A zero sql_rtt means the pool checkout failed before any SQL ran —
-        // nothing to teach the limiter (the direct path doesn't record pool
-        // failures either).
+        // Feed the train sensor only on a real commit: a pool failure ran no
+        // SQL, an error/timeout aborted the transaction — neither produced a
+        // flush ack worth clustering. The slot release itself is RAII: no arm
+        // can leak in-flight accounting.
         let rtt = sql_rtt;
-        if !rtt.is_zero() {
-            ctx.vegas.record(rtt);
+        if outcome.is_ok() && !rtt.is_zero() {
+            slot.commit_done(rtt);
         }
-        drop(permit);
+        drop(slot);
 
         match outcome {
             Ok(results) => {

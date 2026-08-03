@@ -228,15 +228,24 @@ pub struct Config {
     pub pg_ssl_reject_unauthorized: bool,
     pub stmt_timeout: Duration,
     pub zstd_level: i32,
-    // Vegas per-lane: initial / min / max / alpha / beta.
-    pub push_init: u64,
-    pub push_min: u64,
-    pub push_max: u64,
-    pub pop_init: u64,
-    pub pop_min: u64,
-    pub pop_max: u64,
-    pub vegas_alpha: f64,
-    pub vegas_beta: f64,
+    // Admission arbiter (admission.rs): one budget of concurrent write
+    // transactions for the whole commit path, sensed via passive commit-train
+    // detection. init/min/max bound the budget; pool_reserve keeps connections
+    // out of it for unmetered writes and reads.
+    pub admission_init: u64,
+    pub admission_min: u64,
+    pub admission_max: u64,
+    pub admission_pool_reserve: u64,
+    pub admission_train_gap_us: u64,
+    pub admission_tick_ms: u64,
+    // Guaranteed minimum lane shares of the budget (wake order under
+    // exhaustion is fixed: ack > pop > push > maint).
+    pub admission_share_push: f64,
+    pub admission_share_pop: f64,
+    pub admission_share_ack: f64,
+    pub admission_share_maint: f64,
+    pub admission_nosync_budget: u64,
+    pub admission_trace: bool,
     // pop long-poll (RUSTFIX item 19). Default idle wait 30s (DEFAULT_TIMEOUT); the
     // re-query interval backs off exponentially instead of a fixed poll.
     pub pop_default_timeout_ms: u64,
@@ -564,12 +573,33 @@ pub fn log_effective(cfg: &Config) {
         pop_wait_backoff_threshold = cfg.pop_wait_backoff_threshold,
         pop_wait_backoff_multiplier = cfg.pop_wait_backoff_multiplier,
         pop_wait_max_ms = cfg.pop_wait_max_interval_ms,
-        push_vegas = %format!("{}/{}/{}", cfg.push_min, cfg.push_init, cfg.push_max),
-        pop_vegas = %format!("{}/{}/{}", cfg.pop_min, cfg.pop_init, cfg.pop_max),
-        vegas_alpha = cfg.vegas_alpha,
-        vegas_beta = cfg.vegas_beta,
+        admission = %format!(
+            "{}/{}/{}", cfg.admission_min, cfg.admission_init, cfg.admission_max),
+        admission_pool_reserve = cfg.admission_pool_reserve,
+        admission_train_gap_us = cfg.admission_train_gap_us,
+        admission_tick_ms = cfg.admission_tick_ms,
+        admission_shares = %format!(
+            "push={} pop={} ack={} maint={}",
+            cfg.admission_share_push, cfg.admission_share_pop,
+            cfg.admission_share_ack, cfg.admission_share_maint),
+        admission_nosync_budget = cfg.admission_nosync_budget,
         "config: flow"
     );
+    // The Vegas-era knobs are gone with the limiter itself; anyone still
+    // setting them (deploy files, helm) must hear about it at boot rather
+    // than tune a ghost.
+    for dead in [
+        "QUEEN_SEG_PUSH_INIT", "QUEEN_SEG_PUSH_MIN", "QUEEN_SEG_PUSH_MAX",
+        "QUEEN_SEG_POP_INIT", "QUEEN_SEG_POP_MIN", "QUEEN_SEG_POP_MAX",
+        "QUEEN_VEGAS_ALPHA", "QUEEN_VEGAS_BETA",
+    ] {
+        if std::env::var(dead).is_ok() {
+            tracing::warn!(target: "boot",
+                var = dead,
+                "deprecated knob is set but no longer read: admission is \
+                 governed by QUEEN_ADMISSION_* (see admission.rs)");
+        }
+    }
     tracing::info!(
         target: "boot",
         retention_interval_ms = cfg.retention_interval_ms,
@@ -641,14 +671,18 @@ pub fn load() -> Config {
         pg_ssl_reject_unauthorized: env_bool("PG_SSL_REJECT_UNAUTHORIZED", true),
         stmt_timeout: Duration::from_millis(env_int("QUEEN_STMT_TIMEOUT_MS", 30000) as u64),
         zstd_level: env_int("QUEEN_V2_ZSTD_LEVEL", 3) as i32,
-        push_init: env_int("QUEEN_SEG_PUSH_INIT", 16) as u64,
-        push_min: env_int("QUEEN_SEG_PUSH_MIN", 4) as u64,
-        push_max: env_int("QUEEN_SEG_PUSH_MAX", 64) as u64,
-        pop_init: env_int("QUEEN_SEG_POP_INIT", 16) as u64,
-        pop_min: env_int("QUEEN_SEG_POP_MIN", 4) as u64,
-        pop_max: env_int("QUEEN_SEG_POP_MAX", 64) as u64,
-        vegas_alpha: env_f64("QUEEN_VEGAS_ALPHA", 3.0),
-        vegas_beta: env_f64("QUEEN_VEGAS_BETA", 6.0),
+        admission_init: env_int("QUEEN_ADMISSION_INIT", 16).max(1) as u64,
+        admission_min: env_int("QUEEN_ADMISSION_MIN", 8).max(1) as u64,
+        admission_max: env_int("QUEEN_ADMISSION_MAX", 128).max(1) as u64,
+        admission_pool_reserve: env_int("QUEEN_ADMISSION_POOL_RESERVE", 16).max(0) as u64,
+        admission_train_gap_us: env_int("QUEEN_ADMISSION_TRAIN_GAP_US", 300).max(50) as u64,
+        admission_tick_ms: env_int("QUEEN_ADMISSION_TICK_MS", 500).max(100) as u64,
+        admission_share_push: env_f64("QUEEN_ADMISSION_SHARE_PUSH", 0.25),
+        admission_share_pop: env_f64("QUEEN_ADMISSION_SHARE_POP", 0.40),
+        admission_share_ack: env_f64("QUEEN_ADMISSION_SHARE_ACK", 0.30),
+        admission_share_maint: env_f64("QUEEN_ADMISSION_SHARE_MAINT", 0.05),
+        admission_nosync_budget: env_int("QUEEN_ADMISSION_NOSYNC_BUDGET", 64).max(1) as u64,
+        admission_trace: env_bool("QUEEN_ADMISSION_TRACE", false),
         // RUSTFIX item 19: honor DEFAULT_TIMEOUT (C++ name) first, then
         // POP_DEFAULT_TIMEOUT_MS, then 30000 — not the old 2000.
         pop_default_timeout_ms: env_int("DEFAULT_TIMEOUT", env_int("POP_DEFAULT_TIMEOUT_MS", 30000))

@@ -234,6 +234,11 @@ async fn run_cycle(
     knobs: Knobs,
     sweep_partitions: bool,
 ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
+    // Maintenance-lane admission for the whole stepped cycle: one slot, held
+    // across the SP steps (bounded by the cycle itself). The individual step
+    // commits do not feed the train sensor — a held slot without commit_done
+    // contributes accounting, never fake samples.
+    let _slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
     let client = pool.get().await?;
     let got: bool = client
         .query_one("SELECT pg_try_advisory_lock($1)", &[&CLEANUP_LOCK_ID])

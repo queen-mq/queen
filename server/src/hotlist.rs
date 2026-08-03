@@ -257,6 +257,12 @@ struct SubRing {
     revisit_at: Vec<i64>,
     batch_count: Vec<u32>,
     drained: Vec<bool>,
+    // Epoch-ms stamp of the entry's LAST transition into the ready list: the
+    // difference now - ready_since at claim time is the READY-AGE — how long a
+    // servable lane waited for a pop to visit it. This is the lap of the ring
+    // measured directly, the latency variable every admission law so far has
+    // been blind to (instrumented 2026-08-03).
+    ready_since: Vec<i64>,
     ready_head: u32, // shard-local pos, NIL if empty
     ready_tail: u32,
     // (revisit_at snapshot, local pos). Stale entries (state changed or
@@ -272,6 +278,7 @@ impl SubRing {
             prev: Vec::new(),
             epoch: Vec::new(),
             drained: Vec::new(),
+            ready_since: Vec::new(),
             state: Vec::new(),
             revisit_at: Vec::new(),
             batch_count: Vec::new(),
@@ -293,10 +300,12 @@ impl SubRing {
             self.revisit_at.resize(need, 0);
             self.batch_count.resize(need, 0);
             self.drained.resize(need, false);
+            self.ready_since.resize(need, 0);
         }
     }
 
     fn ready_push_tail(&mut self, l: u32) {
+        self.ready_since[l as usize] = crate::util::now_epoch_ms();
         self.next[l as usize] = NIL;
         self.prev[l as usize] = self.ready_tail;
         if self.ready_tail == NIL {
@@ -443,7 +452,61 @@ impl QueueState {
 
 // ------------------------------------------------------------------ HotList
 
+/// Rolling ready-age / visit statistics for the whole hot list (all rings).
+/// Ring buffer + counters, same pattern as metrics::OpMetrics.
+pub struct LapStats {
+    visits: std::sync::atomic::AtomicU64,
+    cands: std::sync::atomic::AtomicU64,
+    ages: std::sync::Mutex<Vec<f64>>,
+    head: std::sync::atomic::AtomicU64,
+}
+
+const LAP_CAP: usize = 4096;
+
+impl LapStats {
+    fn new() -> Self {
+        LapStats {
+            visits: std::sync::atomic::AtomicU64::new(0),
+            cands: std::sync::atomic::AtomicU64::new(0),
+            ages: std::sync::Mutex::new(vec![-1.0; LAP_CAP]),
+            head: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+    fn record_age(&self, ms: f64) {
+        let h = (self.head.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize) % LAP_CAP;
+        if let Ok(mut a) = self.ages.lock() {
+            a[h] = ms.max(0.0);
+        }
+    }
+    fn note_visit(&self, n: usize) {
+        self.visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.cands.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// (visits, candidates, ready-age p50 ms, p95 ms) — counters cumulative,
+    /// ages over the rolling window.
+    pub fn snapshot(&self) -> (u64, u64, f64, f64) {
+        let mut v = { self.ages.lock().unwrap().clone() };
+        v.retain(|&x| x >= 0.0);
+        let (p50, p95) = if v.is_empty() {
+            (0.0, 0.0)
+        } else {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (
+                v[v.len() / 2],
+                v[(v.len() * 95 / 100).min(v.len() - 1)],
+            )
+        };
+        (
+            self.visits.load(std::sync::atomic::Ordering::Relaxed),
+            self.cands.load(std::sync::atomic::Ordering::Relaxed),
+            p50,
+            p95,
+        )
+    }
+}
+
 pub struct HotList {
+    pub lap: LapStats,
     enabled: bool,
     shards: usize,
     // windowBuffer early-promotion threshold (§6): batch_count >= this ⇒ promote
@@ -501,6 +564,7 @@ impl HotList {
         tenancy: bool,
     ) -> Arc<HotList> {
         Arc::new(HotList {
+            lap: LapStats::new(),
             enabled,
             shards: shards.max(1),
             window_batch: window_batch.max(1),
@@ -994,6 +1058,8 @@ impl HotList {
             match sub.ready_pop_head() {
                 Some(local) => {
                     empty_streak = 0;
+                    self.lap
+                        .record_age((now_ms - sub.ready_since[local as usize]) as f64);
                     sub.state[local as usize] = INFLIGHT;
                     // drained is a claim-scoped fact: reset here so only THIS
                     // claim's Took checkin can re-assert it. Without the reset a
@@ -1022,6 +1088,9 @@ impl HotList {
             }
         }
         *ring.take_cursor.lock().unwrap() = cursor;
+        if !out.is_empty() {
+            self.lap.note_visit(out.len());
+        }
         out
     }
 

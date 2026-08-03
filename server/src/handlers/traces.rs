@@ -23,7 +23,6 @@ use crate::frames::{
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
 use crate::util::uuidv7_bytes;
-use crate::vegas::Vegas;
 
 // ------------------------------------------------------------ POST /api/v1/traces
 // Engine-agnostic (queen.message_traces). Mirrors the C++ traces route: require

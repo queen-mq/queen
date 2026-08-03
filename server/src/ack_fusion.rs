@@ -315,6 +315,11 @@ fn dispatch(
 fn spawn_flush(ctx: Arc<FlushCtx>, rows: Vec<Folded>, done: mpsc::UnboundedSender<()>) {
     tokio::spawn(async move {
         let n = rows.len();
+        // One admission slot per fused ack transaction — the ack lane's only
+        // committer when fusion is ON (flag-off acks are metered inside the
+        // db.rs wrappers). Taken here, in the flush task, never in the enqueue
+        // path: an HTTP ack parked on this flush must not hold budget.
+        let mut slot = crate::admission::lane_slot(crate::admission::Lane::Ack).await;
         let t0 = Instant::now();
 
         // Index-aligned typed arrays (the SP realigns its result to input order).
@@ -343,7 +348,12 @@ fn spawn_flush(ctx: Arc<FlushCtx>, rows: Vec<Folded>, done: mpsc::UnboundedSende
                 )
                 .await
                 {
-                    Ok(Ok(txt)) => parse_multi(&txt, n),
+                    Ok(Ok(txt)) => {
+                        if let Some(sl) = slot.as_mut() {
+                            sl.commit_done(t0.elapsed());
+                        }
+                        parse_multi(&txt, n)
+                    }
                     Ok(Err(e)) => {
                         static ACK_MULTI_ERR: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
                         if let Some(suppressed) = ACK_MULTI_ERR.tick_now() {

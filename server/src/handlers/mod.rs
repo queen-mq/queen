@@ -11,7 +11,7 @@ use deadpool_postgres::Pool;
 use crate::db;
 use crate::fusion::{json_escape_into, Fusion};
 use crate::metrics::Metrics;
-use crate::vegas::Vegas;
+use crate::admission::Admission;
 
 pub struct AppState {
     pub pool: Pool,
@@ -32,8 +32,7 @@ pub struct AppState {
     // path routes through it only when enabled() and the steady-path
     // preconditions hold (fresh cfg, no reseed due).
     pub pop_fusion: Arc<crate::pop_fusion::PopFusion>,
-    pub push_vegas: Arc<Vegas>,
-    pub pop_vegas: Arc<Vegas>,
+    pub admission: Arc<Admission>,
     pub metrics: Arc<Metrics>,
     pub stmt_timeout: Duration,
     pub pop_default_timeout_ms: u64,
