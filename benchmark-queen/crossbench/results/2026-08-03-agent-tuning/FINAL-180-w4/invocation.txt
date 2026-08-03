@@ -1,0 +1,1 @@
+./cmbench -system queen -queen-url http://10.114.0.2:6632 -queen-pop-mode wildcard -queen-pop-partitions 40 -queen-pop-workers 4 -rate 2000 -properties 1000 -lanes 1000 -duration 180 -ramp 10 -drain 90 -logdir results/FINAL-180-w4  # queen:arbiter9 POP_FUSION=0 QUEEN_ADMISSION_MIN=96 QUEEN_ADMISSION_INIT=96 (all other admission defaults), pp40, 4 workers/stage = 48
