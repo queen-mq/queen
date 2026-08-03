@@ -482,6 +482,10 @@ impl LapStats {
         self.visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.cands.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
     }
+    pub fn visits(&self) -> u64 {
+        self.visits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// (visits, candidates, ready-age p50 ms, p95 ms) — counters cumulative,
     /// ages over the rolling window.
     pub fn snapshot(&self) -> (u64, u64, f64, f64) {
@@ -1430,6 +1434,40 @@ impl HotList {
     /// Observability (§10 / VM plan): per (tenant, queue, group) ring sizes. The
     /// composite key is split here so the log/metrics surface shows a readable queue
     /// name attributed to the right tenant.
+    /// (oldest ready-entry age ms, total ready entries) across every ring.
+    /// The ready lists are FIFO per shard, so each shard's HEAD is its oldest
+    /// entry: the global oldest is the max over heads — O(rings x shards) and
+    /// free of the survivorship bias of age-at-visit sampling (a lane never
+    /// visited never samples; the head always counts). This is the pop-lane
+    /// controller's objective signal (v5) and the direct answer to "quanto e'
+    /// vecchia la entry piu' vecchia".
+    pub fn ready_probe(&self) -> (f64, u64) {
+        let now = crate::util::now_epoch_ms();
+        let queues: Vec<Arc<QueueState>> = {
+            self.queues.lock().unwrap().values().cloned().collect()
+        };
+        let mut oldest_ms = 0.0f64;
+        let mut depth = 0u64;
+        for s in queues {
+            let groups: Vec<Arc<GroupRing>> = {
+                s.groups.lock().unwrap().values().cloned().collect()
+            };
+            for ring in groups {
+                for sub in ring.subs.iter() {
+                    let sg = sub.lock().unwrap();
+                    depth += sg.len_ready as u64;
+                    if sg.ready_head != NIL {
+                        let age = (now - sg.ready_since[sg.ready_head as usize]) as f64;
+                        if age > oldest_ms {
+                            oldest_ms = age;
+                        }
+                    }
+                }
+            }
+        }
+        (oldest_ms.max(0.0), depth)
+    }
+
     pub fn ring_sizes(&self) -> Vec<RingSize> {
         let queues: Vec<(String, Arc<QueueState>)> = {
             self.queues

@@ -182,15 +182,42 @@ const LANE_PROBE_ACCEPT_GAIN: f64 = 1.05;
 /// re-probing the same wall every tick is how ratchets happen.
 const LANE_PROBE_BACKOFF_TICKS: u8 = 6;
 
-/// Downward pressure the probe ratchet lacks: a BUSY lane earning under
-/// DECAY_EFF_FRAC of its own rolling best compl/slot is in the contention
-/// regime and steps its cap down by DECAY_STEP_FRAC (min 1). Best decays by
-/// EFF_BEST_DECAY per tick (~70 s half-life at 500 ms): old glories fade, so
-/// a genuine regime change re-baselines within a couple of minutes.
-const LANE_DECAY_EFF_FRAC: f64 = 0.6;
-const LANE_DECAY_STEP_FRAC: f64 = 0.05;
-const LANE_DECAY_BACKOFF_TICKS: u8 = 2;
-const LANE_EFF_BEST_DECAY: f64 = 0.995;
+// ---- Pop-lane verdict v5 (ready-age with Little disambiguation) ----
+//
+// The pop lane's objective is the measured wait of the ready ring, NOT a
+// throughput proxy: ready_age ~= ring_depth / visit_rate (Little), so judging
+// the quotient alone credits/blames the ARRIVAL process (the baseRTT mistake,
+// third edition). The verdict therefore reads all three terms and attributes:
+//   age improved                         -> keep the probe
+//   age worse, depth grew >= LOAD_FRAC
+//     and visits held                    -> load, not us: hold (no blame)
+//   anything else (visits fell, or
+//     ambiguous)                         -> REVERT — inside a struggling
+//                                           system the default is to take
+//                                           capacity out, never to keep it.
+// B stays on oldest-slot-age, a DIFFERENT variable, on purpose: the day both
+// controllers chase the same age, the coupled-loops disease is rebuilt with a
+// new name.
+
+/// Age counts as improved when it drops to <= this fraction of the pre-probe
+/// value, or sits under the floor (noise/healthy: shape 500/1000 measured
+/// oldest ~2-5 ms when the ring is visited continuously).
+const POP_AGE_KEEP_FRAC: f64 = 0.9;
+const POP_AGE_FLOOR_MS: f64 = 10.0;
+
+/// Depth growth that attributes an age rise to load rather than to the probe.
+const POP_DEPTH_LOAD_FRAC: f64 = 1.2;
+
+/// Visits/s must hold at least this fraction for the load attribution — if the
+/// visit rate fell while we widened the cap, the age rise is ours.
+const POP_VISITS_HOLD_FRAC: f64 = 0.95;
+
+/// Unused-cap decay for every lane (replaces the efficiency-best decay, whose
+/// optimum was DEGENERATE: completions-per-slot is maximised by giant claims
+/// at minimal concurrency — measured 2026-08-03, pop cap pinned at 2 with
+/// 14-20 admission waiters). A cap trailing real usage carries no such reward:
+/// it only shrinks capacity nobody is using.
+const LANE_IDLE_DECAY_SLACK: f64 = 2.0;
 
 /// Minimum completions in a tick for any lane judgement (probe verdict, press,
 /// decay): below this the efficiency estimate is noise.
@@ -378,7 +405,6 @@ struct Core {
     done_count: [u64; LANES],
     busy_ns: [u128; LANES],
     busy_touched: Instant,
-    lane_e_before: [f64; LANES],
     lane_t_before: [f64; LANES],
     lane_probe: [bool; LANES],
     lane_raise: [f64; LANES],
@@ -386,7 +412,10 @@ struct Core {
     // memory): the downward pressure the probe ratchet lacks. A lane running
     // far below its own best efficiency while busy is in the contention
     // regime and walks its cap down until efficiency recovers.
-    lane_eff_best: [f64; LANES],
+    // Latest externally fed pop signal (hotlist ready ring) + tick-start copy.
+    pop_sig: LaneSignal,
+    pop_sig_before: LaneSignal,
+    pop_visits_prev: u64,
     lane_backoff: [u8; LANES],
     last_adapt: Instant,
     trains: TrainStats,
@@ -472,11 +501,12 @@ impl Admission {
                 done_count: [0; LANES],
                 busy_ns: [0; LANES],
                 busy_touched: Instant::now(),
-                lane_e_before: [0.0; LANES],
                 lane_t_before: [0.0; LANES],
                 lane_probe: [false; LANES],
                 lane_raise: [0.0; LANES],
-                lane_eff_best: [0.0; LANES],
+                pop_sig: LaneSignal::default(),
+                pop_sig_before: LaneSignal::default(),
+                pop_visits_prev: 0,
                 lane_backoff: [0; LANES],
                 last_adapt: Instant::now(),
                 trains: TrainStats::default(),
@@ -624,7 +654,10 @@ impl Admission {
             return;
         }
         c.last_adapt = now;
-        let b = c.budget;
+        // Pop objective signal for this tick (fed externally, see LaneSignal).
+        let sig = c.pop_sig;
+        let vrate_now = sig.visits.saturating_sub(c.pop_visits_prev) as f64 / dt;
+        c.pop_visits_prev = sig.visits;
         for l in 0..LANES {
             let busy = std::mem::take(&mut c.busy_ns[l]) as f64 / 1e9;
             let done = std::mem::take(&mut c.done_count[l]) as f64;
@@ -637,62 +670,74 @@ impl Admission {
             // below its share (sparse-lane regime), and pinning the cap at the
             // share would force the contention this controller exists to avoid.
             let gmin = LANE_MIN_CAP;
-            let _ = b;
-            if done >= LANE_JUDGE_MIN_DONE && avg_if >= LANE_PRESS_SLACK {
-                c.lane_eff_best[l] = (c.lane_eff_best[l] * LANE_EFF_BEST_DECAY).max(eff);
-            }
             if c.lane_backoff[l] > 0 {
                 c.lane_backoff[l] -= 1;
             } else {
                 if c.lane_probe[l] {
-                    // Judge the probe on MARGINAL THROUGHPUT alone: keep the
-                    // raise only if the lane's completion rate strictly grew
-                    // (>=5%, above tick noise at thousands of samples). An
-                    // efficiency-tolerance arm was tried first and is wrong:
-                    // while a backlog drains, extra slots always buy a little
-                    // throughput at halved per-slot efficiency, so the lane
-                    // ratchets into the contention regime (measured arbiter5:
-                    // pop cap crept to 16, p99_pop 64 ms). Under this criterion
-                    // a demand-bound lane's marginal gain is zero by
-                    // construction once service meets arrival, so the cap
-                    // settles at the smallest value that serves the demand.
-                    let ok = t_rate >= c.lane_t_before[l] * LANE_PROBE_ACCEPT_GAIN;
-                    if !ok {
+                    // Judge last tick's raise. Pop judges on its OBJECTIVE (the
+                    // ready ring's oldest wait) with Little disambiguation; the
+                    // other lanes have no ring and judge on marginal
+                    // throughput (kept iff completion rate strictly grew — an
+                    // efficiency arm was tried and is degenerate, see the
+                    // constants block).
+                    let (keep, reason) = if l == Lane::Pop as usize {
+                        let before = c.pop_sig_before;
+                        if sig.oldest_ms <= POP_AGE_FLOOR_MS
+                            || sig.oldest_ms <= before.oldest_ms * POP_AGE_KEEP_FRAC
+                        {
+                            (true, "age-improved")
+                        } else if (sig.depth as f64)
+                            >= (before.depth.max(1) as f64) * POP_DEPTH_LOAD_FRAC
+                            && vrate_now >= c.lane_t_before[l] * POP_VISITS_HOLD_FRAC
+                        {
+                            // Depth grew and the visit rate held: the age rise
+                            // belongs to the arrival process, not to the probe.
+                            (true, "load-attributed")
+                        } else {
+                            // Visits fell or the picture is ambiguous: inside a
+                            // struggling system the default is to take capacity
+                            // out, never to keep it.
+                            (false, "age-worse")
+                        }
+                    } else {
+                        (
+                            t_rate >= c.lane_t_before[l] * LANE_PROBE_ACCEPT_GAIN,
+                            "throughput",
+                        )
+                    };
+                    if !keep {
                         c.cap[l] -= c.lane_raise[l];
                         c.lane_backoff[l] = LANE_PROBE_BACKOFF_TICKS;
                         if self.cfg.trace {
                             tracing::info!(target: "admission",
                                 lane = Lane::ALL[l].name(),
                                 cap = c.cap[l] as u64,
+                                reason,
+                                oldest_ms = format!("{:.0}", sig.oldest_ms),
+                                depth = sig.depth,
+                                visits_s = format!("{:.0}", vrate_now),
                                 t_rate = format!("{:.0}", t_rate),
                                 eff = format!("{:.1}", eff),
                                 "lane probe reverted");
                         }
+                    } else if self.cfg.trace && l == Lane::Pop as usize {
+                        tracing::info!(target: "admission",
+                            lane = "pop", cap = c.cap[l] as u64, reason,
+                            oldest_ms = format!("{:.0}", sig.oldest_ms),
+                            depth = sig.depth,
+                            "lane probe kept");
                     }
                     c.lane_probe[l] = false;
                 }
-                // Efficiency-memory decay: a busy lane earning well under its
-                // own best completions-per-slot is contending (pop on sparse
-                // lanes ratchets to cap 16 at ~60% best eff without this) —
-                // walk the cap down and let the probes re-earn it if returns
-                // ever turn positive again.
+                // Unused-cap decay (every lane): capacity nobody uses trails
+                // back toward usage. Carries no degenerate reward — it never
+                // fires on a lane that is actually pressing its cap.
                 if c.lane_backoff[l] == 0
-                    && !c.lane_probe[l]
-                    && done >= LANE_JUDGE_MIN_DONE
-                    && avg_if + LANE_PRESS_SLACK >= c.cap[l]
-                    && c.lane_eff_best[l] > 0.0
-                    && eff < c.lane_eff_best[l] * LANE_DECAY_EFF_FRAC
+                    && !sat
+                    && avg_if + LANE_IDLE_DECAY_SLACK < c.cap[l]
+                    && c.cap[l] > gmin
                 {
-                    c.cap[l] = (c.cap[l] - (c.cap[l] * LANE_DECAY_STEP_FRAC).max(1.0)).max(gmin);
-                    c.lane_backoff[l] = LANE_DECAY_BACKOFF_TICKS;
-                    if self.cfg.trace {
-                        tracing::info!(target: "admission",
-                            lane = Lane::ALL[l].name(),
-                            cap = c.cap[l] as u64,
-                            eff = format!("{:.1}", eff),
-                            eff_best = format!("{:.1}", c.lane_eff_best[l]),
-                            "lane cap decayed (efficiency far below best)");
-                    }
+                    c.cap[l] -= 1.0;
                 }
                 // Press detection: saturated this tick with real usage and a
                 // sample base worth judging. Never re-probe in the same tick
@@ -702,8 +747,15 @@ impl Admission {
                     && avg_if + LANE_PRESS_SLACK >= c.cap[l]
                     && done >= LANE_JUDGE_MIN_DONE
                 {
-                    c.lane_t_before[l] = t_rate;
-                    c.lane_e_before[l] = eff;
+                    // Snapshot the pre-probe picture the verdict will compare
+                    // against: pop keeps its objective signal, every lane keeps
+                    // its rate (pop reuses lane_t_before for the visit rate).
+                    if l == Lane::Pop as usize {
+                        c.pop_sig_before = sig;
+                        c.lane_t_before[l] = vrate_now;
+                    } else {
+                        c.lane_t_before[l] = t_rate;
+                    }
                     let step = (c.cap[l] * LANE_PROBE_STEP_FRAC).max(1.0);
                     c.lane_raise[l] = step;
                     c.cap[l] += step;
@@ -807,6 +859,12 @@ impl Admission {
         }
     }
 
+    /// Feed the pop-lane objective signal (see LaneSignal). Cheap: one lock.
+    pub fn feed_pop_signal(&self, sig: LaneSignal) {
+        let mut c = self.core.lock().unwrap();
+        c.pop_sig = sig;
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let c = self.core.lock().unwrap();
         let (tpt_avg, tpt_p95) = c.trains.txn_per_train();
@@ -840,6 +898,19 @@ impl Admission {
             completions: c.trains.completions,
         }
     }
+}
+
+/// External latency signal for a lane whose objective lives outside the
+/// arbiter (the pop lane's ready ring). Fed by a sampler task; the arbiter
+/// stays ignorant of WHERE the numbers come from.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LaneSignal {
+    /// Age of the oldest servable-but-unvisited entry (ms).
+    pub oldest_ms: f64,
+    /// Servable entries standing in the ring.
+    pub depth: u64,
+    /// Cumulative visit count (take_batch calls that claimed >= 1).
+    pub visits: u64,
 }
 
 /// Process-global arbiter handle for the long-tail write wrappers (db.rs ack /
@@ -1069,7 +1140,7 @@ mod tests {
         cf.max = 64;
         cf.pool_size = 128;
         let adm = Admission::new(cf);
-        let pop = Lane::Pop as usize;
+        let pop = Lane::Push as usize;
         // Tick 1: pop lane pressing its cap of 8 with healthy efficiency.
         {
             let mut c = adm.core.lock().unwrap();
@@ -1099,6 +1170,61 @@ mod tests {
             "negative-returns probe must revert ({probed} -> {reverted})"
         );
         assert!(adm.core.lock().unwrap().lane_backoff[pop] > 0, "backoff armed");
+    }
+
+    /// Drive one adapt tick with a fabricated pop state: probe pending, cap
+    /// raised by 1 from 8, chosen signal now vs before. Returns the cap after.
+    async fn pop_verdict_case(sig_before: LaneSignal, sig_now: LaneSignal, vrate_before: f64) -> f64 {
+        let mut cf = cfg();
+        cf.init = 32;
+        cf.max = 64;
+        cf.pool_size = 128;
+        let adm = Admission::new(cf);
+        let pop = Lane::Pop as usize;
+        {
+            let mut c = adm.core.lock().unwrap();
+            c.cap[pop] = 9.0; // 8 + the probe step of 1
+            c.lane_probe[pop] = true;
+            c.lane_raise[pop] = 1.0;
+            c.lane_t_before[pop] = vrate_before;
+            c.pop_sig_before = sig_before;
+            c.pop_sig = sig_now;
+            // visits delta over dt=1s -> vrate_now = sig_now.visits
+            c.pop_visits_prev = 0;
+            c.last_adapt = Instant::now() - Duration::from_secs(1);
+            c.busy_touched = Instant::now();
+            c.busy_ns[pop] = 9 * 1_000_000_000u128;
+            c.done_count[pop] = 100;
+        }
+        adm.adapt();
+        let cap = adm.core.lock().unwrap().cap[pop];
+        cap
+    }
+
+    #[tokio::test]
+    async fn pop_probe_kept_when_age_improves() {
+        let before = LaneSignal { oldest_ms: 200.0, depth: 500, visits: 0 };
+        let now = LaneSignal { oldest_ms: 100.0, depth: 500, visits: 400 };
+        let cap = pop_verdict_case(before, now, 400.0).await;
+        assert!((cap - 9.0).abs() < 0.01, "age improved must keep ({cap})");
+    }
+
+    #[tokio::test]
+    async fn pop_probe_held_when_load_grew() {
+        // Age worse BUT depth grew >20% and visits held: the arrivals did it.
+        let before = LaneSignal { oldest_ms: 100.0, depth: 500, visits: 0 };
+        let now = LaneSignal { oldest_ms: 180.0, depth: 700, visits: 400 };
+        let cap = pop_verdict_case(before, now, 400.0).await;
+        assert!((cap - 9.0).abs() < 0.01, "load-attributed must hold ({cap})");
+    }
+
+    #[tokio::test]
+    async fn pop_probe_reverts_when_visits_fell() {
+        // Age worse, depth flat, visit rate dropped: the probe did it.
+        let before = LaneSignal { oldest_ms: 100.0, depth: 500, visits: 0 };
+        let now = LaneSignal { oldest_ms: 180.0, depth: 510, visits: 300 };
+        let cap = pop_verdict_case(before, now, 400.0).await;
+        assert!((cap - 8.0).abs() < 0.01, "ambiguous/worse must revert ({cap})");
     }
 
     #[tokio::test]

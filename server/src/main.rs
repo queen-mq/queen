@@ -350,6 +350,28 @@ async fn main() {
     // LOGGING_PLAN.md Phase 1: periodic `rates` + `sizes` aggregate blocks —
     // throughput/latency/hit-rate/cache-sizes in the log (sampled ~1 line/10s),
     // alongside Prometheus. Sourced from already-collected process state.
+    // Pop-lane objective sampler: reads the hotlist ready ring (oldest wait,
+    // depth, visit counter) every adapter tick and feeds it to the admission
+    // arbiter — the arbiter stays ignorant of where the numbers come from.
+    {
+        let adm = state.admission.clone();
+        let hl = state.hotlist.clone();
+        let tick = std::time::Duration::from_millis(cfg.admission_tick_ms);
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(tick);
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                iv.tick().await;
+                let (oldest_ms, depth) = hl.ready_probe();
+                adm.feed_pop_signal(admission::LaneSignal {
+                    oldest_ms,
+                    depth,
+                    visits: hl.lap.visits(),
+                });
+            }
+        });
+    }
+
     obs::spawn_reporter(obs::ReporterHandles {
         metrics: state.metrics.clone(),
         pool: state.pool.clone(),

@@ -285,6 +285,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
 
             let adm = h.admission.snapshot();
             let (lap_visits, lap_cands, age_p50, age_p95) = h.hotlist.lap.snapshot();
+            let (ring_oldest, ring_depth) = h.hotlist.ready_probe();
             let d_visits = lap_visits.saturating_sub(prev_visits);
             let d_cands = lap_cands.saturating_sub(prev_cands);
             prev_visits = lap_visits;
@@ -318,6 +319,8 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 cands_visit = format!("{:.1}", d_cands as f64 / (d_visits.max(1)) as f64),
                 ready_age_p50 = format!("{:.0}", age_p50),
                 ready_age_p95 = format!("{:.0}", age_p95),
+                ring_oldest_ms = format!("{:.0}", ring_oldest),
+                ring_depth = ring_depth,
                 buffered = buffered,
                 "broker rates"
             );
