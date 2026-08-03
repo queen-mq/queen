@@ -88,7 +88,8 @@ pub enum PopVerdict {
         meta: String,
         blobs: Vec<Vec<u8>>,
         states: String,
-        /// Whole-flush RTT (shared by every fused job) — the pop metrics'
+        /// The fused transaction's SQL wall (shared by every fused job),
+        /// clocked AFTER admission + pool checkout — the pop metrics'
         /// per-request rtt, same meaning as the direct path's.
         rtt: Duration,
     },
@@ -279,14 +280,21 @@ fn dispatch(
 fn spawn_flush(ctx: Arc<FlushCtx>, jobs: Vec<PopJob>, done: mpsc::UnboundedSender<()>) {
     tokio::spawn(async move {
         let n = jobs.len();
-        let t0 = Instant::now();
 
         // Admission: one permit per fused transaction (see module header).
         let permit = ctx.vegas.acquire().await;
 
+        // The rtt clock starts AFTER admission + pool checkout — parity with
+        // the direct path, whose recorded rtt is the SQL wall only. Clocking
+        // from before acquire() feeds the permit queue back into the Vegas
+        // window as congestion, and the loop self-sustains: measured
+        // 2026-08-03 at 2k/1000 sparse lanes, vegas_pop sat pinned at 6
+        // (init 16) and ~70 of the 80 ms fused wait was that feedback.
+        let mut sql_rtt = Duration::ZERO;
         let outcome: Result<Vec<(String, Vec<Vec<u8>>, String)>, ()> = async {
             let mut client = ctx.pool.get().await.map_err(|_| ())?;
             let cancel = client.cancel_token();
+            let t0 = Instant::now();
 
             let work = async {
                 let tx = client.transaction().await?;
@@ -314,7 +322,9 @@ fn spawn_flush(ctx: Arc<FlushCtx>, jobs: Vec<PopJob>, done: mpsc::UnboundedSende
                 Ok::<_, tokio_postgres::Error>(results)
             };
 
-            match tokio::time::timeout(ctx.stmt_timeout, work).await {
+            let res = tokio::time::timeout(ctx.stmt_timeout, work).await;
+            sql_rtt = t0.elapsed();
+            match res {
                 Ok(Ok(results)) => Ok(results),
                 Ok(Err(_)) => {
                     // Statement/commit error: the tx is aborted (or the commit
@@ -336,8 +346,13 @@ fn spawn_flush(ctx: Arc<FlushCtx>, jobs: Vec<PopJob>, done: mpsc::UnboundedSende
         }
         .await;
 
-        let rtt = t0.elapsed();
-        ctx.vegas.record(rtt);
+        // A zero sql_rtt means the pool checkout failed before any SQL ran —
+        // nothing to teach the limiter (the direct path doesn't record pool
+        // failures either).
+        let rtt = sql_rtt;
+        if !rtt.is_zero() {
+            ctx.vegas.record(rtt);
+        }
         drop(permit);
 
         match outcome {

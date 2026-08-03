@@ -69,7 +69,33 @@ const NIL: u32 = u32::MAX;
 
 // §6: scheduling padding on every PG-derived deadline (the broker clock only
 // schedules the retry; PG remains the visibility authority).
-const PAD_MS: i64 = 300;
+// Wheel-park padding: absorbs PG<->broker clock skew + commit visibility lag.
+// 300 is the distributed-era calibration; on a single-host cell skew is ~0 and
+// QUEEN_HOTLIST_pad_ms() can drop it (2026-08-03 timer review).
+// Safety-floor telemetry (2026-08-03 timer review): how often the class-B
+// timers actually fire. Sampled summary ~1 line / 10s via obs::Sampler.
+pub static FLOOR_LEASED_PARKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static FLOOR_PROMOTE_CLEAR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static FLOOR_PROMOTE_REQUEUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn floor_summary() {
+    static S: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+    if S.tick_now().is_some() {
+        use std::sync::atomic::Ordering::Relaxed;
+        tracing::info!(target: "hotlist",
+            leased_parks = FLOOR_LEASED_PARKS.load(Relaxed),
+            promote_clear = FLOOR_PROMOTE_CLEAR.load(Relaxed),
+            promote_requeue = FLOOR_PROMOTE_REQUEUE.load(Relaxed),
+            "floor timers");
+    }
+}
+
+fn pad_ms() -> i64 {
+    static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_HOTLIST_PAD_MS").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(300)
+    })
+}
 // Cap on how long a leased entry is parked in the wheel before it is re-probed.
 // The lease-expiry deadline is only an OPTIMISATION to avoid probing a genuinely
 // held partition on every delivery — but a lease is routinely released EARLY by
@@ -668,7 +694,7 @@ impl HotList {
                     if cfg.delayed > 0 {
                         // §6: delayed ⇒ wheel at commit_ts + D (broker now ≈ PG
                         // commit; SQL enforces the exact cut, wheel only schedules).
-                        let at = now_ms + cfg.delayed as i64 * 1000 + PAD_MS;
+                        let at = now_ms + cfg.delayed as i64 * 1000 + pad_ms();
                         sub.wheel_schedule(local, at);
                     } else if cfg.window > 0 {
                         // §6: windowBuffer ⇒ hold until first_mark + W, unless the
@@ -873,12 +899,15 @@ impl HotList {
                 {
                     sub.revisit_at[local as usize] = 0;
                     sub.state[local as usize] = IDLE; // stale heap entry skips lazily
+                    FLOOR_PROMOTE_CLEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     sub.revisit_at[local as usize] = 0;
                     sub.ready_push_tail(local);
                     drop(sub);
                     self.wake(qkey);
+                    FLOOR_PROMOTE_REQUEUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
+                floor_summary();
             }
             INFLIGHT => {
                 // ack during an in-flight pop of the same partition: bump epoch so
@@ -1123,7 +1152,7 @@ impl HotList {
                     // Bounded (MAX_LEASE_REVISIT_MS): our own ack normally promotes
                     // this before the deadline, but if that promote is lost to the
                     // race the cap re-probes within ~1s instead of at lease expiry.
-                    let park = (now_ms + lease_ms.max(1) + PAD_MS)
+                    let park = (now_ms + lease_ms.max(1) + pad_ms())
                         .min(now_ms + MAX_LEASE_REVISIT_MS);
                     sub.wheel_schedule(local, park);
                 }
@@ -1161,8 +1190,10 @@ impl HotList {
                     // between the pop and this checkin); parking at the full expiry
                     // strands the partition until then. The cap re-probes within
                     // ~1s so a stale lease is rediscovered promptly.
-                    let park = (until_ms + PAD_MS).min(now_ms + MAX_LEASE_REVISIT_MS);
+                    let park = (until_ms + pad_ms()).min(now_ms + MAX_LEASE_REVISIT_MS);
                     sub.wheel_schedule(local, park);
+                    FLOOR_LEASED_PARKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    floor_summary();
                 }
                 Verdict::Empty => {
                     // Epoch-CAS (§4): clear only if no mark raced.
@@ -1249,7 +1280,7 @@ impl HotList {
         match s {
             IDLE | INFLIGHT => {
                 if cfg.delayed > 0 {
-                    sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + PAD_MS);
+                    sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + pad_ms());
                 } else {
                     sub.ready_push_tail(local);
                 }
