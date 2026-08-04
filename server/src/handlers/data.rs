@@ -3774,3 +3774,339 @@ mod tests {
         );
     }
 }
+
+/// Conformance between this module's wire handling and the `queen-protocol`
+/// crate, which is what the Rust client serializes against.
+///
+/// The broker cannot simply *use* the crate's types: `PushItem<'a>` borrows out
+/// of the request body and the responses are rendered by hand into a pre-sized
+/// `String`, both deliberate throughput choices. So the two representations are
+/// locked together here instead — every test below sends a value through one
+/// side and asserts the other side agrees. A renamed field, a changed default
+/// or a dropped key fails here rather than in somebody's consumer loop.
+#[cfg(test)]
+mod protocol_conformance {
+    use super::*;
+    use queen_protocol as qp;
+
+    // ------------------------------------------------------------- push in
+
+    #[test]
+    fn client_push_body_parses_into_the_brokers_zero_copy_struct() {
+        let req = qp::PushRequest::new(vec![
+            qp::PushItem::new("orders", serde_json::json!({"n": 1})),
+            qp::PushItem::new("orders", serde_json::json!(null))
+                .partition("eu")
+                .transaction_id("txn-7"),
+        ]);
+        let body = serde_json::to_vec(&req).unwrap();
+
+        let parsed: PushBody = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.items.len(), 2);
+
+        assert_eq!(parsed.items[0].queue, "orders");
+        assert_eq!(parsed.items[0].partition, None);
+        assert_eq!(parsed.items[0].transaction_id, None);
+        assert_eq!(parsed.items[0].payload.get(), r#"{"n":1}"#);
+
+        assert_eq!(parsed.items[1].partition, Some("eu"));
+        assert_eq!(parsed.items[1].transaction_id, Some("txn-7"));
+        assert_eq!(parsed.items[1].payload.get(), "null");
+    }
+
+    /// Locks the asymmetry documented on [`qp::PushItem`]: the push path has
+    /// nowhere to store a trace id, so the client type does not offer one. If
+    /// `PushItem<'a>` ever grows the field, this test fails and the client type
+    /// gets it too — deliberately, rather than by accident.
+    #[test]
+    fn push_path_still_has_no_trace_id_field() {
+        // A body carrying traceId parses fine (serde ignores unknown keys) and
+        // nothing anywhere captures the value.
+        let body = br#"{"items":[{"queue":"q","payload":1,"traceId":"6f1a3d0e-0000-7000-8000-000000000000"}]}"#;
+        let parsed: PushBody = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed.items.len(), 1);
+
+        // The crate's own serialization never emits the key in the first place.
+        let ours = serde_json::to_string(&qp::PushItem::new("q", serde_json::json!(1))).unwrap();
+        assert!(!ours.contains("traceId"), "{ours}");
+
+        // Whereas the transaction path does carry it — the contrast is the point.
+        let txn = serde_json::to_string(
+            &qp::TxnPushItem::new("q", serde_json::json!(1))
+                .trace_id("6f1a3d0e-0000-7000-8000-000000000000"),
+        )
+        .unwrap();
+        assert!(txn.contains("traceId"), "{txn}");
+    }
+
+    // ------------------------------------------------------------ push out
+
+    #[test]
+    fn rendered_push_results_parse_into_the_client_type() {
+        let results = vec![
+            ItemResult {
+                message_id: "0190aaaa-0000-7000-8000-000000000001".into(),
+                txn: "txn-1".into(),
+                queue: "orders".into(),
+                status: "queued",
+                dup_of: None,
+            },
+            ItemResult {
+                message_id: "0190aaaa-0000-7000-8000-000000000002".into(),
+                // Exercise the escaper: a quote and a backslash in the txn must
+                // survive the hand-rolled renderer intact.
+                txn: r#"weird"txn\2"#.into(),
+                queue: "orders".into(),
+                status: "duplicate",
+                dup_of: None,
+            },
+        ];
+
+        let rendered = render_push_results(&results);
+        let parsed: Vec<qp::PushResult> = serde_json::from_str(&rendered).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].index, 0);
+        assert_eq!(parsed[0].message_id, results[0].message_id);
+        assert_eq!(parsed[0].transaction_id, "txn-1");
+        assert_eq!(parsed[0].queue_name, "orders");
+        assert_eq!(parsed[0].status, qp::PushStatus::Queued);
+
+        assert_eq!(parsed[1].index, 1);
+        assert_eq!(parsed[1].transaction_id, r#"weird"txn\2"#);
+        assert_eq!(parsed[1].status, qp::PushStatus::Duplicate);
+    }
+
+    /// Every status the broker can stamp must be a variant the client can
+    /// parse. An unmapped one would fail deserialization on a real response.
+    #[test]
+    fn every_status_the_broker_stamps_is_known_to_the_client() {
+        for status in ["queued", "duplicate", "error", "buffered", "failed"] {
+            let rendered = render_push_results(&[ItemResult {
+                message_id: "m".into(),
+                txn: "t".into(),
+                queue: "q".into(),
+                status,
+                dup_of: None,
+            }]);
+            let parsed: Vec<qp::PushResult> = serde_json::from_str(&rendered)
+                .unwrap_or_else(|e| panic!("client cannot parse status {status:?}: {e}"));
+            // ...and round-trips back to the same spelling, so the client never
+            // reports a status the broker did not stamp.
+            assert_eq!(
+                serde_json::to_value(parsed[0].status).unwrap(),
+                serde_json::Value::String(status.to_string())
+            );
+        }
+    }
+
+    // -------------------------------------------------------------- ack in
+
+    #[test]
+    fn client_ack_batch_parses_into_the_brokers_struct() {
+        let req = qp::AckBatchRequest {
+            acknowledgments: vec![
+                qp::AckBatchItem {
+                    transaction_id: "t1".into(),
+                    partition_id: "p1".into(),
+                    status: qp::AckStatus::Completed,
+                    lease_id: Some("L1".into()),
+                    error: None,
+                },
+                qp::AckBatchItem {
+                    transaction_id: "t2".into(),
+                    partition_id: "p1".into(),
+                    status: qp::AckStatus::Dlq,
+                    lease_id: Some("L1".into()),
+                    error: Some("poison".into()),
+                },
+            ],
+            consumer_group: Some("workers".into()),
+        };
+        let body = serde_json::to_vec(&req).unwrap();
+
+        let parsed: AckBatch = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.consumer_group.as_deref(), Some("workers"));
+        assert_eq!(parsed.acknowledgments.len(), 2);
+        assert_eq!(parsed.acknowledgments[0].transaction_id.as_deref(), Some("t1"));
+        assert_eq!(parsed.acknowledgments[0].partition_id.as_deref(), Some("p1"));
+        assert_eq!(parsed.acknowledgments[1].error.as_deref(), Some("poison"));
+
+        // And the statuses survive normalization to the same four outcomes.
+        assert_eq!(
+            normalize_ack_status(parsed.acknowledgments[0].status.as_deref()),
+            "completed"
+        );
+        assert_eq!(
+            normalize_ack_status(parsed.acknowledgments[1].status.as_deref()),
+            "dlq"
+        );
+    }
+
+    #[test]
+    fn client_single_ack_parses_into_the_brokers_struct() {
+        let req = qp::AckRequest {
+            transaction_id: "t1".into(),
+            partition_id: "p1".into(),
+            status: qp::AckStatus::Failed,
+            consumer_group: Some("g".into()),
+            lease_id: Some("L1".into()),
+            error: Some("boom".into()),
+        };
+        let parsed: AckSingle = serde_json::from_slice(&serde_json::to_vec(&req).unwrap()).unwrap();
+        assert_eq!(parsed.transaction_id.as_deref(), Some("t1"));
+        assert_eq!(parsed.partition_id.as_deref(), Some("p1"));
+        assert_eq!(parsed.consumer_group.as_deref(), Some("g"));
+        assert_eq!(parsed.lease_id.as_deref(), Some("L1"));
+        assert_eq!(normalize_ack_status(parsed.status.as_deref()), "failed");
+    }
+
+    /// The client predicts what the broker will do with a status string —
+    /// including the aliases and the "unknown means nack" fallback. If the
+    /// broker's table changes, the client's copy has to change with it.
+    #[test]
+    fn ack_status_tables_agree_exactly() {
+        let cases = [
+            None,
+            Some("completed"),
+            Some("success"),
+            Some("acked"),
+            Some("ok"),
+            Some("retry"),
+            Some("dlq"),
+            Some("failed"),
+            // Unrecognized, empty and wrong-case all fall through to `failed`.
+            Some(""),
+            Some("COMPLETED"),
+            Some("Completed"),
+            Some("nonsense"),
+        ];
+        for case in cases {
+            assert_eq!(
+                qp::AckStatus::parse(case).as_str(),
+                normalize_ack_status(case),
+                "disagreement on {case:?}"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------- ack out
+
+    #[test]
+    fn rendered_ack_results_parse_into_the_client_type() {
+        let acks = vec![
+            Ack {
+                txn: "t1".into(),
+                partition_id: "p1".into(),
+                worker: "w".into(),
+                status: "completed",
+                error: None,
+            },
+            Ack {
+                txn: r#"esc"aped"#.into(),
+                partition_id: "p1".into(),
+                worker: "w".into(),
+                status: "dlq",
+                error: Some("poison".into()),
+            },
+        ];
+        let rendered = render_ack_results(
+            &acks,
+            &[true, false],
+            &[None, Some("Invalid or expired lease".to_string())],
+            &[true, false],
+            &[false, true],
+            &[false, false],
+        );
+
+        let parsed: Vec<qp::AckResult> = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed.len(), 2);
+
+        assert_eq!(parsed[0].index, 0);
+        assert_eq!(parsed[0].transaction_id, "t1");
+        assert!(parsed[0].success);
+        assert!(parsed[0].error.is_none());
+        assert!(parsed[0].lease_released);
+        assert!(!parsed[0].dlq);
+        assert!(!parsed[0].noop);
+
+        assert_eq!(parsed[1].transaction_id, r#"esc"aped"#);
+        assert!(!parsed[1].success);
+        assert_eq!(parsed[1].error.as_deref(), Some("Invalid or expired lease"));
+        assert!(parsed[1].dlq);
+    }
+
+    // ---------------------------------------------------------------- pop
+
+    /// The client builds its query string from `PopParams::to_pairs`; axum
+    /// parses it back into the broker's `PopParams`. Both halves are exercised
+    /// here so a renamed key (`timeout` vs `timeoutMillis` is the classic one)
+    /// cannot pass silently.
+    #[test]
+    fn client_pop_params_deserialize_into_the_brokers_params() {
+        let ours = qp::PopParams {
+            batch: Some(25),
+            partitions: Some(4),
+            auto_ack: Some(true),
+            wait: Some(true),
+            timeout_millis: Some(15_000),
+            lease_seconds: Some(90),
+            consumer_group: Some("workers".into()),
+            subscription_mode: Some(qp::SubscriptionMode::New),
+            subscription_from: Some("now".into()),
+            namespace: None,
+            task: None,
+        };
+
+        let qs = ours
+            .to_pairs()
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let uri: axum::http::Uri = format!("http://x/api/v1/pop/queue/q?{qs}").parse().unwrap();
+        let axum::extract::Query(theirs) =
+            axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
+
+        assert_eq!(theirs.batch, Some(25));
+        assert_eq!(theirs.partitions, Some(4));
+        assert_eq!(theirs.auto_ack, Some(true));
+        assert_eq!(theirs.wait, Some(true));
+        assert_eq!(theirs.timeout, Some(15_000));
+        assert_eq!(theirs.lease_seconds, Some(90));
+        assert_eq!(theirs.consumer_group.as_deref(), Some("workers"));
+        assert_eq!(theirs.subscription_mode.as_deref(), Some("new"));
+        assert_eq!(theirs.subscription_from.as_deref(), Some("now"));
+    }
+
+    /// A minimal client (everything defaulted) must still produce a query the
+    /// broker accepts — and must not accidentally send `autoAck=false`, which
+    /// the broker would read as opt-in-shaped.
+    #[test]
+    fn defaulted_pop_params_produce_an_empty_query() {
+        let ours = qp::PopParams {
+            auto_ack: Some(false),
+            partitions: Some(1),
+            ..Default::default()
+        };
+        assert!(ours.to_pairs().is_empty());
+
+        let uri: axum::http::Uri = "http://x/api/v1/pop/queue/q".parse().unwrap();
+        let axum::extract::Query(theirs) =
+            axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
+        assert_eq!(theirs.batch, None);
+        assert_eq!(theirs.auto_ack, None);
+    }
+
+    /// The literal bytes the pop-maintenance branch returns must not read as a
+    /// failure on the client: there is no `success` key, so the client's
+    /// default has to be `true`.
+    #[test]
+    fn pop_maintenance_body_is_not_a_failure_on_the_client() {
+        let body = "{\"messages\":[],\"paused\":true}";
+        let parsed: qp::PopResponse = serde_json::from_str(body).unwrap();
+        assert!(parsed.success, "paused must not read as failure");
+        assert!(parsed.is_paused());
+        assert!(parsed.is_empty());
+    }
+}

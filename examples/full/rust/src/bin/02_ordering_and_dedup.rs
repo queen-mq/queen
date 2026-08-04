@@ -1,0 +1,207 @@
+// docs:start(full-rust-ordering-dedup)
+//
+// Queen MQ by example, 2 of 3: ordering and deduplication.
+//
+// Part one: one partition per customer. Messages for different customers are
+// pushed interleaved, but each customer's messages come back in the order they
+// were pushed, because a partition is the unit of ordering.
+//
+// Part two: pushing the same transactionId twice. The broker answers `duplicate`
+// for the second push and stores nothing new.
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6699 cargo run --bin ordering-and-dedup
+//
+// The program checks its own outcome and exits non-zero if any check fails.
+
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use queen_mq::{Config, PushItem, PushStatus, Queen, QueueOptions};
+use serde_json::json;
+
+const GROUP: &str = "ex-rust-ordering";
+
+struct Checks(usize);
+
+impl Checks {
+    fn assert(&mut self, condition: bool, description: &str) -> Result<(), String> {
+        if !condition {
+            return Err(description.to_string());
+        }
+        self.0 += 1;
+        println!("  ok: {description}");
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    match run().await {
+        Ok(checks) => println!("\nPASS: {checks} checks"),
+        Err(e) => {
+            eprintln!("\nFAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run() -> Result<usize, String> {
+    let url = std::env::var("QUEEN_URL").unwrap_or_else(|_| "http://localhost:6699".into());
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let queue = format!("ex-rust-ordering-dedup-{run_id}");
+
+    let mut checks = Checks(0);
+    println!("broker {url}");
+
+    let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
+    queen
+        .queue(&queue)
+        .configure(QueueOptions {
+            lease_time: Some(30),
+            // The window inside which a repeated transaction id is a duplicate.
+            dedup_window_seconds: Some(3600),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("queue {queue} created");
+
+    // ---------------------------------------------------------------- part one
+
+    println!("\npushing interleaved, one partition per customer");
+    let customers = ["acme", "globex", "initech"];
+    let mut expected: HashMap<&str, Vec<String>> = HashMap::new();
+
+    // Pushed round-robin across customers, so the queue as a whole is
+    // interleaved. Ordering is promised per partition, not across the queue.
+    for seq in 1..=4 {
+        for customer in customers {
+            let event = format!("{customer}-{seq}");
+            queen
+                .queue(&queue)
+                .partition(customer)
+                .push(json!({ "event": event, "customer": customer, "seq": seq }))
+                .await
+                .map_err(|e| e.to_string())?;
+            expected.entry(customer).or_default().push(event);
+        }
+    }
+    println!("  pushed {} messages across {} partitions", 4 * customers.len(), customers.len());
+
+    println!("\nconsuming");
+    // partitions(8) claims several lanes per poll. Each lane is still served in
+    // order; what interleaves is which lane is served when.
+    let mut arrived: HashMap<String, Vec<String>> = HashMap::new();
+    let mut total = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while total < 4 * customers.len() && std::time::Instant::now() < deadline {
+        let msgs = queen
+            .queue(&queue)
+            .group(GROUP)
+            .batch(50)
+            .partitions(8)
+            .wait(false)
+            .pop()
+            .await
+            .map_err(|e| e.to_string())?;
+        if msgs.is_empty() {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            continue;
+        }
+        for m in &msgs {
+            arrived
+                .entry(m.partition.clone())
+                .or_default()
+                .push(m.data["event"].as_str().unwrap_or_default().to_string());
+            total += 1;
+        }
+        queen.ack_all(&msgs).await.map_err(|e| e.to_string())?;
+    }
+
+    println!("\nchecking order");
+    checks.assert(
+        total == 4 * customers.len(),
+        &format!("consumed all {} messages", 4 * customers.len()),
+    )?;
+    for customer in customers {
+        let want = expected.get(customer).cloned().unwrap_or_default();
+        let got = arrived.get(customer).cloned().unwrap_or_default();
+        checks.assert(
+            got == want,
+            &format!("partition {customer} kept its order: {}", got.join(", ")),
+        )?;
+    }
+
+    // ---------------------------------------------------------------- part two
+
+    println!("\npushing the same transactionId twice");
+    let invoice_id = format!("invoice-{run_id}");
+    let item = PushItem::new(&queue, json!({ "invoice": invoice_id, "amount": 42.0 }))
+        .partition("billing")
+        .transaction_id(&invoice_id);
+
+    let first = queen
+        .queue(&queue)
+        .push_items(vec![item.clone()])
+        .await
+        .map_err(|e| e.to_string())?;
+    let second = queen
+        .queue(&queue)
+        .push_items(vec![item])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    println!("  first  -> {:?}", first[0].status);
+    println!("  second -> {:?}", second[0].status);
+
+    checks.assert(first[0].status == PushStatus::Queued, "the first push was queued")?;
+    checks.assert(
+        second[0].status == PushStatus::Duplicate,
+        "the second push was answered as duplicate",
+    )?;
+    // The duplicate echoes the ORIGINAL message id. That is what makes a retry
+    // after a timeout safe: the caller learns the id of the message that exists,
+    // not of one it just created.
+    checks.assert(
+        second[0].message_id == first[0].message_id,
+        "the duplicate echoes the original message id",
+    )?;
+
+    println!("\nchecking the partition holds one message");
+    let mut stored = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while stored.is_empty() && std::time::Instant::now() < deadline {
+        stored = queen
+            .queue(&queue)
+            .partition("billing")
+            .group("ex-rust-billing")
+            .batch(10)
+            .wait(false)
+            .pop()
+            .await
+            .map_err(|e| e.to_string())?;
+        if stored.is_empty() {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+    }
+    checks.assert(
+        stored.len() == 1,
+        "the partition holds exactly one message, not two",
+    )?;
+    checks.assert(
+        stored[0].transaction_id == invoice_id,
+        "that message is the one that was pushed first",
+    )?;
+    let ack = queen.ack(&stored[0]).await.map_err(|e| e.to_string())?;
+    checks.assert(ack.success, "the surviving message acknowledges cleanly")?;
+
+    queen.queue(&queue).delete().await.map_err(|e| e.to_string())?;
+    queen.close().await.map_err(|e| e.to_string())?;
+
+    Ok(checks.0)
+}
+// docs:end

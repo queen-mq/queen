@@ -1,0 +1,18 @@
+# Sidecar ignore (buildx honors <dockerfile>.dockerignore) — keeps the repo-root
+# build context light. This runner COPYs only crates/ and clients/client-rust.
+.git
+.claude
+server
+proxy
+app
+webdoc
+benchmark-queen
+examples
+assets
+helm
+helm_queen
+**/target
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.log

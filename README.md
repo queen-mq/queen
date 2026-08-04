@@ -4,12 +4,16 @@
 
 # Queen MQ
 
-**One ordered queue, from two messages a second to six hundred thousand.**
+**The queue that doesn't fall apart at the other end of your workload.**
 
 Every entity gets its own FIFO lane, created on first push, so a slow consumer on one never
-stalls another. The same broker holds thousands of near-idle lanes and a sustained 600,000
-messages a second, with consumer groups, replay, deduplication and a dead-letter queue at
-both ends. One stateless binary on the PostgreSQL you already run. No cluster, no JVM.
+stalls another. One broker held **400,000 ordered partitions**, and sustains **600,000
+messages a second** with leases, explicit acks, deduplication and retention all on:
+**50+ billion messages across 24 hours with zero errors**. Consumer groups, replay and a
+dead-letter queue at both ends. One stateless binary on the PostgreSQL you already run. No
+cluster, no JVM.
+
+[Every number above, with the conditions that make it true →](https://queenmq.com/benchmarks/comparison)
 
 <div align="center">
 
@@ -21,6 +25,7 @@ both ends. One stateless binary on the PostgreSQL you already run. No cluster, n
 [![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
+[![Rust client](https://img.shields.io/badge/rust%20client-1.75%2B-000000.svg)](clients/client-rust)
 [![PHP](https://img.shields.io/badge/php-8.3%2B-777BB4.svg)](https://www.php.net/)
 
 📚 **[Documentation](https://queenmq.com/)** · 🚀 **[Quickstart](https://queenmq.com/start/quickstart)** · 📊 **[Benchmarks](https://queenmq.com/benchmarks)** · 🛠 **[Develop](#developing-on-queen)**
@@ -62,7 +67,7 @@ whatever your PostgreSQL already does.
 - **Transactional handoff.** Acking one message and pushing the next stage's happens in a single PostgreSQL transaction.
 - **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent inside a configurable window, enforced in the database rather than a cache.
 - **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
-- **Five client SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an HTTP request is a first-class client.
+- **Six client SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an HTTP request is a first-class client.
 
 > *Why "Queen"? Because years ago, when I first read "queue", I read it as "queen" in my mind. The name stuck.*
 
@@ -187,12 +192,18 @@ More: **[Contributing](CONTRIBUTING.md)** · **[Developer guide](DEVELOPING.md)*
 | JavaScript / TypeScript | `queen-mq` (npm) | [clients/client-js](clients/client-js) |
 | Python | `queen-mq` (PyPI) | [clients/client-py](clients/client-py) |
 | Go | `github.com/smartpricing/queen/clients/client-go` | [clients/client-go](clients/client-go) |
+| Rust | `queen-mq` (crates.io) | [clients/client-rust](clients/client-rust) |
 | PHP / Laravel | `smartpricing/queen-mq` (Packagist) | [clients/client-laravel](clients/client-laravel) |
 | C++ | single header | [clients/client-cpp](clients/client-cpp) |
 | CLI | `queenctl` | [clients/client-cli](clients/client-cli) |
 
 All of them speak the same HTTP API, which is documented in full and published as
 [OpenAPI 3.1](https://queenmq.com/reference/openapi) generated from the router itself.
+
+The Rust client is the one exception to "an SDK re-describes the wire by hand": it and the
+broker both depend on [`crates/queen-protocol`](crates/queen-protocol), and the broker's own
+tests round-trip its request parsers and rendered responses through those types. A renamed
+field fails a test instead of reaching a client.
 
 ## Repository layout
 
@@ -201,11 +212,12 @@ All of them speak the same HTTP API, which is documented in full and published a
 | `server/` | The broker. Rust, crate `queen-seg-rust`, binary `queen-seg`. Schema and stored procedures in `server/sql/`, embedded at compile time. |
 | `proxy/` | Multi-tenant gateway: API keys, quotas, rate limits, metering, console. Its own PostgreSQL. |
 | `app/` | The Vue dashboard, compiled into the broker binary. |
-| `clients/` | The five SDKs and the `queenctl` CLI. |
+| `clients/` | The six SDKs and the `queenctl` CLI. |
+| `crates/` | Crates shared between the broker and a client. Today: `queen-protocol`, the wire types. |
 | `webdoc/` | This project's documentation site (Astro). Large parts of it are generated from the source in `server/` and `proxy/`. |
 | `test/` | The Docker test harness: every client suite against a freshly built broker. |
 | `benchmark-queen/` | Benchmark sessions with their raw artifacts. Every number on the website comes from here. |
-| `examples/`, `streams/` | JavaScript examples. |
+| `examples/`, `streams/` | Complete runnable examples: `examples/full/` in JavaScript, Python, Go and Rust, with a runner that asserts each one's outcome. |
 
 ## Documentation
 

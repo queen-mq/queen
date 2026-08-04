@@ -3,7 +3,7 @@ title: PHP client
 description: "Complete surface of the PHP client: constructor options with defaults, every builder method, the Admin methods that reach a route that exists, the rdkafka-style consumer, and the Laravel integration."
 type: reference
 sidebar:
-  order: 25
+  order: 26
   label: PHP
 sourceOfTruth:
   - clients/client-laravel/composer.json
@@ -177,7 +177,7 @@ Each item may carry `data`, `payload`, or be the payload itself. The client mint
 `transactionId` via `Queen\Support\Uuid::v7()` when the item has none.
 
 <Aside type="caution">
-Unlike the JavaScript and Python clients, PHP forwards `traceId` **without validating** that it is
+Unlike the JavaScript and Python clients, PHP sends `traceId` **without validating** that it is
 a UUID. A malformed value is sent as-is and rejected by the broker.
 </Aside>
 

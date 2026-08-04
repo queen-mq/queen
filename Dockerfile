@@ -40,6 +40,12 @@ FROM rust:1-bookworm AS server-builder
 
 WORKDIR /usr/build/server
 
+# Layer 0: the shared wire-type crate. server/Cargo.toml takes queen-protocol as
+# a DEV dependency (the conformance tests only — the release binary never links
+# it), but cargo resolves the entire dependency graph, dev dependencies
+# included, before it compiles anything. So the path has to exist even here.
+COPY crates /usr/build/crates
+
 # Layer 1: manifests + build script + version file (build.rs embeds
 # server.json's version into the binary via env!("QUEEN_VERSION")).
 COPY server/Cargo.toml server/Cargo.lock server/server.json server/build.rs ./

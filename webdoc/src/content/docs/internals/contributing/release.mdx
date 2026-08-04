@@ -24,7 +24,7 @@ sourceOfTruth:
   - developer/14-release.md
 ---
 
-A release touches the broker image, five client SDKs and the CLI, across five package registries
+A release touches the broker image, six client SDKs and the CLI, across seven package registries
 plus GitHub Releases. Two of those channels are published by CI on a trigger; the rest are
 published by a person running a command. Knowing which is which is the point of this page.
 
@@ -47,6 +47,8 @@ Everything else carries its own version, or none at all.
 | Python client | `clients/client-py/pyproject.toml` |
 | PHP/Laravel client | nowhere: `composer.json` has no `version` field; Packagist reads the git tag |
 | Go client | nowhere: the git tag *is* the version |
+| Rust client | `clients/client-rust/Cargo.toml` |
+| `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on the client's dependency on it |
 | `queenctl` | nowhere: the tag is the version, injected at build time with `-ldflags` |
 | C++ client | nowhere: header-only, taken at whatever tag you check out |
 | Dashboard (`app/`) | `app/package.json`, private, never published separately |
@@ -54,13 +56,14 @@ Everything else carries its own version, or none at all.
 ## The versioning rule
 
 **The broker and the SDKs are version-aligned at 1.0.0.** One `MAJOR.MINOR.PATCH` for the
-broker image, npm, PyPI, Packagist, the Go module tag and the CLI tag, so a client version tells
-you which broker it was released against without a compatibility matrix.
+broker image, npm, PyPI, crates.io, Packagist, the Go module tag and the CLI tag, so a client
+version tells you which broker it was released against without a compatibility matrix.
 
 <Aside type="note">
 The numbers in the tree are now aligned on 1.0.0. The broker (`server/server.json`), the proxy
 (`proxy/Cargo.toml`) and the dashboard (`app/package.json`) carry the prerelease `1.0.0-beta.1`;
-the JavaScript and Python clients carry `1.0.0`. The Go module, the CLI and the Packagist
+the JavaScript and Python clients carry `1.0.0`, and so do the Rust client and
+`queen-protocol`. The Go module, the CLI and the Packagist
 package take their version from git tags, so they are aligned by tagging at release time and
 not by editing a file. `README.md` points at `ghcr.io/queen-mq/queen:latest`, but its prose
 still carries 0.16-era numbers.
@@ -121,9 +124,20 @@ Four channels have no workflow. Each needs a command run by a maintainer.
 | PyPI | `queen-mq` | `clients/client-py/publish.sh`, which builds the wheel and sdist and uploads with twine |
 | Go modules | `github.com/smartpricing/queen/clients/client-go` | push a `clients/client-go/vX.Y.Z` tag; the module proxy picks it up |
 | Packagist | `smartpricing/queen-mq` | push a `vX.Y.Z` tag; a webhook makes Packagist pull it |
+| crates.io | `queen-protocol`, then `queen-mq` | `cargo publish` from `crates/queen-protocol`, **then** from `clients/client-rust` |
 
 The C++ client needs nothing published: consumers take `clients/client-cpp/queen_client.hpp` at
 the tag.
+
+<Aside type="caution">
+The two crates.io publishes are ordered, not interchangeable. `queen-mq` depends on
+`queen-protocol` by path *and* by version; cargo rewrites the path away when it packages, so
+the client cannot be published until the version it names is already on the registry. Publish
+`queen-protocol` first, wait for the index to update, then publish `queen-mq`. Running
+`cargo package --allow-dirty --no-verify` in `clients/client-rust` before the first publish
+reports `no matching package named queen-protocol found`, which is this ordering and not a
+misconfiguration.
+</Aside>
 
 Two tag shapes are load-bearing and easy to get wrong. Both nested Go modules need the
 directory-prefixed form (`clients/client-go/v1.0.0` and `clients/client-cli/v1.0.0`) because
@@ -134,7 +148,8 @@ shapes, alongside the plain `vX.Y.Z` broker tags.
 ## Order
 
 The broker tag and image go first, because every SDK is released *against* a broker; then npm,
-because most downstream consumers wait on it; then PyPI; then the Go module tag; then the plain
+because most downstream consumers wait on it; then PyPI; then the two crates, protocol before
+client; then the Go module tag; then the plain
 `vX.Y.Z` tag that Packagist and the C++ header hang off; then the CLI tag, which triggers its own
 workflow.
 

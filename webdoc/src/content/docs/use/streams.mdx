@@ -23,6 +23,10 @@ There is no separate stream-processing service to deploy. A stream is a process 
 
 ## The shape of a query
 
+<Tabs>
+
+<TabItem label="JavaScript">
+
 ```js
 // Illustrative, not extracted from a test.
 import { Queen, Stream } from 'queen-mq'
@@ -37,18 +41,49 @@ await Stream.from(queen.queue('orders'))
   .run({ queryId: 'orders.per_minute', url: 'http://localhost:6632' })
 ```
 
-The chain is immutable (every combinator returns a new stream) and it is finalised by `run`, which registers the query and starts the runtime loop. The same builder exists in three languages with the same operator set:
+</TabItem>
 
-| Stage | JavaScript | Python | Go |
-| --- | --- | --- | --- |
-| Stateless | `map`, `filter`, `flatMap` | `map`, `filter`, `flat_map` | `Map`, `Filter`, `FlatMap` |
-| Keying | `keyBy` | `key_by` | `KeyBy` |
-| Windows | `windowTumbling`, `windowSliding`, `windowSession`, `windowCron` | `window_tumbling`, `window_sliding`, `window_session`, `window_cron` | `WindowTumbling`, `WindowSliding`, `WindowSession`, `WindowCron` |
-| Folding | `reduce`, `aggregate` | `reduce`, `aggregate` | `Reduce`, `Aggregate` |
-| Flow control | `gate` | `gate` | `Gate` |
-| Terminal | `to`, `foreach` | `to`, `foreach` | `To`, `Foreach` |
+<TabItem label="Rust">
+
+```rust
+// Illustrative, not extracted from a test.
+use queen_mq::{Config, Queen};
+use queen_mq::streams::{RunOptions, Stream};
+
+let queen = Queen::connect(Config::new("http://localhost:6632"))?;
+
+let handle = Stream::from(queen.queue("orders"))
+    .filter(|r| r.number("amount").unwrap_or(0.0) > 0.0)
+    .window_tumbling(60)
+    .aggregate_count("count")
+    .aggregate_sum("sum", |r| r.number("amount"))
+    .to(queen.queue("orders.per_minute"))
+    .run(&queen, RunOptions::new("orders.per_minute"))
+    .await?;
+```
+
+</TabItem>
+
+</Tabs>
+
+The chain is immutable (every combinator returns a new stream) and it is finalised by `run`, which registers the query and starts the runtime loop. The same builder exists in four languages with the same operator set:
+
+| Stage | JavaScript | Python | Go | Rust |
+| --- | --- | --- | --- | --- |
+| Stateless | `map`, `filter`, `flatMap` | `map`, `filter`, `flat_map` | `Map`, `Filter`, `FlatMap` | `map`, `filter`, `flat_map` |
+| Keying | `keyBy` | `key_by` | `KeyBy` | `key_by` |
+| Windows | `windowTumbling`, `windowSliding`, `windowSession`, `windowCron` | `window_tumbling`, `window_sliding`, `window_session`, `window_cron` | `WindowTumbling`, `WindowSliding`, `WindowSession`, `WindowCron` | `window_tumbling`, `window_sliding`, `window_session`, `window_cron` |
+| Folding | `reduce`, `aggregate` | `reduce`, `aggregate` | `Reduce`, `Aggregate` | `reduce`, `aggregate_count`, `aggregate_sum`, `aggregate_min`, `aggregate_max`, `aggregate_avg` |
+| Flow control | `gate` | `gate` | `Gate` | `gate` |
+| Terminal | `to`, `foreach` | `to`, `foreach` | `To`, `Foreach` | `to`, `to_partitioned`, `foreach` |
 
 A sink (`to` or `foreach`) must be the last operator in the chain; the builder rejects a chain where it is not.
+
+Rust names each aggregate field with its own call rather than passing a map of extractors, because the extractors have different signatures once they are typed. `aggregate_count("count").aggregate_sum("total", |r| r.number("amount"))` builds the same single aggregate the other SDKs express as one object, and fingerprints identically.
+
+<Aside type="note">
+The `config_hash` is computed the same way in all four SDKs: `sha256` over a JSON array of each operator's kind and structural configuration, with the keys in insertion order and user closures deliberately excluded. That is what lets the same query be redeployed in a different language without tripping the mismatch guard. The Rust implementation pins this with test vectors captured from the JavaScript one.
+</Aside>
 
 ## The three endpoints behind it
 

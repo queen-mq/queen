@@ -3,7 +3,7 @@ title: C++ client
 description: "Complete surface of the single-header C++ client: build requirements, ClientConfig with defaults, every builder method, and the behaviours that differ from the other clients."
 type: reference
 sidebar:
-  order: 26
+  order: 27
   label: C++
 sourceOfTruth:
   - clients/client-cpp/queen_client.hpp
@@ -189,7 +189,7 @@ option list is in [Reference](/reference).
 | `push(const std::vector<json>& payload)` | Returns `json`. Throws with no queue name. |
 
 Each item may carry `data`, `payload`, or be the payload itself. The client mints a UUIDv7
-`transactionId` when the item has none, and forwards `traceId` only when it is a valid UUID.
+`transactionId` when the item has none, and sends `traceId` only when it is a valid UUID. The broker's push path stores no trace id, so the value is dropped and the message pops back with `traceId: null`; it is honoured only on the transaction path.
 A direct push returns the broker's per-item array; a buffered push returns
 `{"buffered": true, "count": n}` without sending.
 

@@ -1,0 +1,289 @@
+// docs:start(full-rust-pipeline)
+//
+// Queen MQ by example, 3 of 3: the transactional handoff.
+//
+// A pipeline stage consumes from "orders" and, in a SINGLE transaction, both
+// acknowledges the input and pushes the derived message to "invoices". Either
+// both happen or neither does, so no crash can leave a stage that consumed an
+// order without emitting its invoice.
+//
+// The last section shows the other half of the contract: a message acknowledged
+// as failed is redelivered, not lost.
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6699 cargo run --bin pipeline-transaction
+//
+// The program checks its own outcome and exits non-zero if any check fails.
+
+use std::collections::HashSet;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use queen_mq::{Config, Queen, QueueOptions};
+use serde_json::json;
+
+const STAGE_ONE_GROUP: &str = "ex-rust-invoicing";
+const STAGE_TWO_GROUP: &str = "ex-rust-ledger";
+
+struct Checks(usize);
+
+impl Checks {
+    fn assert(&mut self, condition: bool, description: &str) -> Result<(), String> {
+        if !condition {
+            return Err(description.to_string());
+        }
+        self.0 += 1;
+        println!("  ok: {description}");
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    match run().await {
+        Ok(checks) => println!("\nPASS: {checks} checks"),
+        Err(e) => {
+            eprintln!("\nFAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run() -> Result<usize, String> {
+    let url = std::env::var("QUEEN_URL").unwrap_or_else(|_| "http://localhost:6699".into());
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let orders_q = format!("ex-rust-orders-{run_id}");
+    let invoices_q = format!("ex-rust-invoices-{run_id}");
+
+    let orders = vec![
+        json!({ "orderId": "A-1", "customer": "acme",    "total": 120.5 }),
+        json!({ "orderId": "B-1", "customer": "globex",  "total": 88.75 }),
+        json!({ "orderId": "C-1", "customer": "initech", "total": 310.0 }),
+    ];
+
+    let mut checks = Checks(0);
+    println!("broker {url}");
+
+    let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
+    for name in [&orders_q, &invoices_q] {
+        queen
+            .queue(name)
+            .configure(QueueOptions {
+                // Short enough that the redelivery at the end of this program
+                // happens while it is still running.
+                lease_time: Some(5),
+                retry_limit: Some(3),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    println!("queues {orders_q} and {invoices_q} created");
+
+    println!("\npushing orders");
+    for order in &orders {
+        queen
+            .queue(&orders_q)
+            .partition(order["customer"].as_str().unwrap())
+            .push(order.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    println!("  pushed {} orders", orders.len());
+
+    // ------------------------------------------------------------- stage one
+
+    println!("\nstage one: order -> invoice, atomically");
+    let mut handled = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    while handled < orders.len() && std::time::Instant::now() < deadline {
+        let msgs = queen
+            .queue(&orders_q)
+            .group(STAGE_ONE_GROUP)
+            .batch(10)
+            .partitions(8)
+            .wait(false)
+            .pop()
+            .await
+            .map_err(|e| e.to_string())?;
+        if msgs.is_empty() {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            continue;
+        }
+
+        for msg in &msgs {
+            let order_id = msg.data["orderId"].as_str().unwrap_or_default().to_string();
+            let total = msg.data["total"].as_f64().unwrap_or(0.0);
+            let customer = msg.data["customer"].as_str().unwrap_or("unknown").to_string();
+
+            // One transaction: the ack that consumes the order and the push that
+            // emits the invoice. The broker commits both or neither, so there is
+            // no window in which the order is gone and the invoice does not
+            // exist. Acking through the builder also carries the message's lease
+            // into requiredLeases, so a lease that expired while this handler ran
+            // rolls the whole thing back instead of emitting an invoice for an
+            // order somebody else has re-claimed.
+            queen
+                .transaction()
+                .ack(msg)
+                .push_to(
+                    invoices_q.clone(),
+                    customer.clone(),
+                    json!({
+                        "invoiceFor": order_id,
+                        "customer": customer,
+                        "amountDue": (total * 100.0).round() / 100.0,
+                    }),
+                )
+                .map_err(|e| e.to_string())?
+                .commit()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("  {order_id} -> invoice");
+            handled += 1;
+        }
+    }
+
+    checks.assert(
+        handled == orders.len(),
+        &format!("stage one handled all {} orders", orders.len()),
+    )?;
+
+    let remaining = queen
+        .queue(&orders_q)
+        .group(STAGE_ONE_GROUP)
+        .batch(10)
+        .partitions(8)
+        .wait(false)
+        .pop()
+        .await
+        .map_err(|e| e.to_string())?;
+    checks.assert(remaining.is_empty(), "no order is left unacknowledged")?;
+
+    // ------------------------------------------------------------- stage two
+
+    println!("\nstage two: reading the invoices");
+    let mut invoices = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    while invoices.len() < orders.len() && std::time::Instant::now() < deadline {
+        let msgs = queen
+            .queue(&invoices_q)
+            .group(STAGE_TWO_GROUP)
+            .batch(10)
+            .partitions(8)
+            .wait(false)
+            .pop()
+            .await
+            .map_err(|e| e.to_string())?;
+        if msgs.is_empty() {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            continue;
+        }
+        for m in &msgs {
+            println!(
+                "  invoice for {} ({})",
+                m.data["invoiceFor"], m.data["amountDue"]
+            );
+            invoices.push(m.data.clone());
+        }
+        queen.ack_all(&msgs).await.map_err(|e| e.to_string())?;
+    }
+
+    checks.assert(
+        invoices.len() == orders.len(),
+        &format!("every order produced one invoice ({})", orders.len()),
+    )?;
+    let invoiced: Vec<&str> = invoices
+        .iter()
+        .filter_map(|i| i["invoiceFor"].as_str())
+        .collect();
+    let unique: HashSet<&&str> = invoiced.iter().collect();
+    checks.assert(unique.len() == invoiced.len(), "no invoice was produced twice")?;
+    checks.assert(
+        orders
+            .iter()
+            .all(|o| invoiced.contains(&o["orderId"].as_str().unwrap())),
+        "every order is represented exactly once",
+    )?;
+
+    // ------------------------------------------------- a failed ack redelivers
+
+    println!("\nthe other half: a failed acknowledgement redelivers");
+    let late = json!({ "orderId": "D-1", "customer": "hooli", "total": 9.99 });
+    let pushed = queen
+        .queue(&orders_q)
+        .partition("hooli")
+        .push(late.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let late_txn = pushed[0].transaction_id.clone();
+
+    let mut first_try = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while first_try.is_empty() && std::time::Instant::now() < deadline {
+        first_try = queen
+            .queue(&orders_q)
+            .partition("hooli")
+            .group(STAGE_ONE_GROUP)
+            .batch(10)
+            .wait(false)
+            .pop()
+            .await
+            .map_err(|e| e.to_string())?;
+        if first_try.is_empty() {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+    }
+    checks.assert(first_try.len() == 1, "the new order was delivered once")?;
+    checks.assert(
+        first_try[0].transaction_id == late_txn,
+        "it is the order that was just pushed",
+    )?;
+
+    // A negative acknowledgement clamps this group's cursor at the failed
+    // message and releases the lease, so the message comes back rather than
+    // being skipped.
+    let nack = queen
+        .nack(&first_try[0], "the downstream ledger was unreachable")
+        .await
+        .map_err(|e| e.to_string())?;
+    checks.assert(nack.success, "the broker accepted the failed acknowledgement")?;
+
+    let mut second_try = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    while second_try.is_empty() && std::time::Instant::now() < deadline {
+        second_try = queen
+            .queue(&orders_q)
+            .partition("hooli")
+            .group(STAGE_ONE_GROUP)
+            .batch(10)
+            .wait(false)
+            .pop()
+            .await
+            .map_err(|e| e.to_string())?;
+        if second_try.is_empty() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    checks.assert(second_try.len() == 1, "the failed order came back")?;
+    checks.assert(
+        second_try[0].transaction_id == late_txn,
+        "it is the same message, redelivered rather than lost",
+    )?;
+    checks.assert(
+        second_try[0].data["orderId"] == late["orderId"],
+        "with its payload intact",
+    )?;
+    queen.ack(&second_try[0]).await.map_err(|e| e.to_string())?;
+
+    for name in [&orders_q, &invoices_q] {
+        queen.queue(name).delete().await.map_err(|e| e.to_string())?;
+    }
+    queen.close().await.map_err(|e| e.to_string())?;
+
+    Ok(checks.0)
+}
+// docs:end

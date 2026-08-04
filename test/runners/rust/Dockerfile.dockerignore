@@ -1,0 +1,20 @@
+# Sidecar ignore (buildx honors <dockerfile>.dockerignore) — keeps the repo-root
+# build context light. This runner COPYs only crates/ and server/; the denylist
+# below is what stops `docker build .` from tarring the 3.6 GB server/target.
+.git
+.claude
+server/target
+**/target
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.log
+benchmark-queen
+webdoc
+app
+proxy
+clients
+examples
+assets
+helm
+helm_queen

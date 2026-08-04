@@ -217,8 +217,12 @@ even though it is not in the defaults object. Two things follow:
 | `push(payload)` | n/a | Returns a `PushBuilder`. `payload` is one item or an array. |
 
 Each item may be `{ data }`, `{ payload }`, or a bare object used as the payload itself. The
-client mints a UUIDv7 `transactionId` when the item does not carry one, and forwards `traceId`
+client mints a UUIDv7 `transactionId` when the item does not carry one, and sends `traceId`
 only when it is a valid UUID. The wire field is always `payload`; `data` is a client-side alias.
+
+The broker's push path stores no trace id, so it is dropped and the message pops back
+with `traceId: null`. Push inside a transaction when a trace id has to survive. See
+[Pick your SDK](/use/clients#verified-gaps).
 
 <Render file="snippets/js-push" />
 

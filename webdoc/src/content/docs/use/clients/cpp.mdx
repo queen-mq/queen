@@ -4,7 +4,7 @@ description: "Build and use the single-header C++ client: what it implements, wh
 type: how-to
 tier: use
 sidebar:
-  order: 17
+  order: 18
 sourceOfTruth:
   - clients/client-cpp/queen_client.hpp
   - clients/client-cpp/Makefile
@@ -136,7 +136,7 @@ auto res = client.queue("orders")
 ```
 
 `push()` takes a `std::vector<json>`. The body is `data`, or `payload`, or the item itself; a
-missing `transactionId` is minted as a UUIDv7 and a `traceId` is forwarded only if it is a
+missing `transactionId` is minted as a UUIDv7 and a `traceId` is sent only if it is a
 valid UUID. The response is the broker's per-item array with `status` set to `queued`,
 `duplicate`, `buffered` or `failed`.
 

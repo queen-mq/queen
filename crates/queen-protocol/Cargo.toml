@@ -1,0 +1,16 @@
+[package]
+name = "queen-protocol"
+version = "1.0.0"
+edition = "2021"
+description = "Canonical wire types for the Queen MQ HTTP API, shared by the broker and the Rust client."
+license = "Apache-2.0"
+repository = "https://github.com/queen-mq/queen"
+
+[dependencies]
+# `raw_value` mirrors the broker's own serde_json feature set: a payload can be
+# carried as an un-reparsed RawValue on paths that only splice it through.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }

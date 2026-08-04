@@ -4,7 +4,7 @@ description: "Base URL, auth header, the exact push/pop/ack request and response
 type: how-to
 tier: use
 sidebar:
-  order: 18
+  order: 19
   label: Plain HTTP
 sourceOfTruth:
   - server/src/handlers/data.rs
@@ -366,7 +366,7 @@ pushes unless their `transactionId`s are deterministic and still inside the dedu
 
 ## Writing your own client
 
-The behaviours the five SDKs implement, in the order they matter:
+The behaviours the six SDKs implement, in the order they matter:
 
 1. **Send `Authorization: Bearer` and nothing else.** No API-key header, no query-string token.
 2. **Treat `204` as "no messages" and never parse its body.**

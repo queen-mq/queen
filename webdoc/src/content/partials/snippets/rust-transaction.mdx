@@ -1,0 +1,20 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-rust/tests/admin.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-rust/tests/admin.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="clients/client-rust/tests/admin.rs"
+let resp = q
+    .transaction()
+    .ack(&msgs[0])
+    .push(dst.clone(), serde_json::json!({ "stage": 2 }))
+    .unwrap()
+    .commit()
+    .await
+    .unwrap();
+```

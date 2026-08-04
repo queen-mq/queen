@@ -4,8 +4,9 @@
 # runs each (suite x topology) as an isolated docker-compose project in parallel
 # and prints a pass/fail matrix.
 #
-#   suites:  js go py cli cpp   -> run on `single`, `ha` and `tenanted` stacks
-#            rust               -> 50 in-process unit tests, no stack (`unit`)
+#   suites:  js go py cli cpp rust-client
+#                               -> run on `single`, `ha` and `tenanted` stacks
+#            rust               -> in-process broker unit tests, no stack (`unit`)
 #            mesh               -> HA mesh assertion, `ha` stack only
 #            tenancy            -> two-tenant isolation, `ha-tenanted` stack only
 #
@@ -37,8 +38,8 @@
 # Env: QUEEN_TEST_MAX_PARALLEL overrides -j.
 set -uo pipefail
 
-ALL_SUITES="js go py cli cpp rust mesh tenancy"
-CLIENT_SUITES="js go py cli cpp"
+ALL_SUITES="js go py cli cpp rust-client rust mesh tenancy"
+CLIENT_SUITES="js go py cli cpp rust-client"
 
 SUITES="$ALL_SUITES"
 TOPOS="single ha tenanted"
@@ -91,8 +92,11 @@ tenancy_for() { case "$1" in tenanted|ha-tenanted) echo true;; *) echo false;; e
 
 # --- build images -----------------------------------------------------------
 build_runner() {
+  # Every runner builds from the repo root; the heavy trees are denylisted per
+  # runner by a sidecar test/runners/<suite>/Dockerfile.dockerignore. (`rust`
+  # used to build from server/, but the shared crates/queen-protocol has to be
+  # in its context now — see test/runners/rust/Dockerfile.)
   suite="$1"; df="test/runners/$suite/Dockerfile"; ctx="."
-  [ "$suite" = "rust" ] && { df="test/runners/rust/Dockerfile"; ctx="server"; }
   echo ">> build queen-test-runner-$suite"
   ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f "$df" -t "queen-test-runner-$suite" "$ctx" ) \
     || { echo "!! build failed: $suite (see above)"; return 1; }
@@ -174,7 +178,7 @@ wait
 # --- matrix report ----------------------------------------------------------
 echo
 echo "========================= Queen test matrix ========================="
-printf "%-8s %-11s %-11s %-11s %-13s %-8s\n" \
+printf "%-12s %-11s %-11s %-11s %-13s %-8s\n" \
   "suite" "single" "ha" "tenanted" "ha-tenanted" "unit"
 overall=0
 cell() {  # suite topo width
@@ -183,9 +187,11 @@ cell() {  # suite topo width
   c="$(cat "$f")"; d="$(cat "$LOGDIR/$1-$2.dur" 2>/dev/null || echo '?')"
   if [ "$c" = 0 ]; then printf "%-${w}s" "PASS ${d}s"; else printf "%-${w}s" "FAIL:$c"; overall=1; fi
 }
-for s in js go py cli cpp rust mesh tenancy; do
+# Driven by ALL_SUITES rather than a second hardcoded list: a suite added above
+# and forgotten here would run, be gated on, and never appear in the report.
+for s in $ALL_SUITES; do
   want_suite "$s" || continue
-  printf "%-8s " "$s"
+  printf "%-12s " "$s"
   cell "$s" single 11; cell "$s" ha 11; cell "$s" tenanted 11
   cell "$s" ha-tenanted 13; cell "$s" unit 8
   printf "\n"
@@ -211,6 +217,14 @@ tally() {  # logfile -> comparable pass tally, or "" if the suite prints none
   # pytest: "=== 140 passed, 1 failed, 91 errors in 12.34s ===". The broad
   # character class also swallows the "in 313" duration tail ("in" is lowercase
   # letters), which made parity flap when one lane merely ran slower — chop it.
+  # cargo: one "test result: ok. 24 passed; 0 failed; ..." per test binary.
+  # Join them in order — counts only, no durations, so it cannot flap. This
+  # MUST come before the pytest pattern below: that one also matches the
+  # "24 passed" inside a cargo line (it stops at the ';', which is outside its
+  # character class), and would report only the last binary's tally.
+  t="$(grep -aoE 'test result: [a-zA-Z]+\. [0-9]+ passed; [0-9]+ failed' "$f" 2>/dev/null \
+       | sed 's/test result: //' | paste -sd, -)"
+  [ -n "$t" ] && { echo "$t"; return; }
   t="$(grep -aoE '[0-9]+ passed[0-9a-z, ]*' "$f" 2>/dev/null | tail -1 \
        | sed -e 's/ in [0-9]*$//' -e 's/ *$//')"
   [ -n "$t" ] && { echo "$t"; return; }

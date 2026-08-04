@@ -9,8 +9,8 @@
 #   examples/full/run.sh                          # against http://localhost:6632
 #   QUEEN_URL=http://localhost:6699 examples/full/run.sh
 #
-# Needs: node 22+, python 3.9+ with httpx, go 1.24+. The clients are taken from
-# this repository, not from the registries.
+# Needs: node 22+, python 3.9+ with httpx, go 1.24+, rust 1.75+. The clients are
+# taken from this repository, not from the registries.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,6 +70,15 @@ echo
 echo "Go"
 for f in produce-consume ordering-and-dedup pipeline-transaction; do
   run "$f" env -C "$HERE/go" GOWORK=off go run "./$f"
+done
+
+# The Rust examples take the client by path, so cargo builds it from this tree.
+# Compile once up front: otherwise the first `run` would time its own build.
+echo
+echo "Rust"
+(cd "$HERE/rust" && cargo build --quiet) || exit 1
+for f in produce-consume ordering-and-dedup pipeline-transaction; do
+  run "$f" env -C "$HERE/rust" cargo run --quiet --bin "$f"
 done
 
 echo

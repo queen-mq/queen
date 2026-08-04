@@ -123,6 +123,48 @@ rather than returning empty immediately:
 <Render file="snippets/js-pop" />
 
 </TabItem>
+<TabItem label="Rust">
+
+Add the client:
+
+```toml
+[dependencies]
+queen-mq = "1.0.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+```
+
+Point it at the broker:
+
+```rust
+use queen_mq::{Config, Queen};
+
+let queen = Queen::connect(Config::new("http://localhost:6632"))?;
+```
+
+Push a message. The payload is anything that implements `serde::Serialize`, and it
+must be JSON. The blocks below are extracted verbatim from the files the Rust suite
+executes, which is why the queue names look like test fixtures; substitute your own:
+
+<Render file="snippets/rust-push" />
+
+The result is one entry per item, and `status` is `Queued` when the message was
+stored. Now consume it. `consume()` polls, hands each message to your closure, and
+acknowledges it when the closure returns `Ok`; `limit(...)` makes it stop after that
+many messages instead of running forever:
+
+<Render file="snippets/rust-consume" />
+
+If you want the raw pop instead of the managed consumer loop, `pop()` returns the
+messages and leaves acknowledgement to you:
+
+<Render file="snippets/rust-pop" />
+
+Unlike the JavaScript and Python clients, a failed `pop()` here returns an error
+rather than an empty list, so an outage cannot look like an idle queue.
+
+</TabItem>
+
 <TabItem label="curl">
 
 Push one message. `items` is an array; `queue` and `payload` are required, and

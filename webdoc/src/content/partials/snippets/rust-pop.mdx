@@ -1,0 +1,21 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-rust/tests/core.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-rust/tests/core.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="clients/client-rust/tests/core.rs"
+msgs = q
+    .queue(&queue)
+    .group("g-multi")
+    .batch(10)
+    .partitions(3)
+    .wait(false)
+    .pop()
+    .await
+    .unwrap();
+```

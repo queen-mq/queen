@@ -1,0 +1,15 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-rust/tests/core.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-rust/tests/core.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="clients/client-rust/tests/core.rs"
+let txn = format!("{queue}-fixed-txn");
+let item = queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 }))
+    .transaction_id(txn.clone());
+```

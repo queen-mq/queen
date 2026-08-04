@@ -106,7 +106,7 @@ multi-tenant proxy either 421s or lands your traffic on another tenant's cluster
 
 `push()` takes one item or an array. Each item's body is `data`, or `payload`, or, if
 neither key is present, the item itself. A `transactionId` you do not set is minted as a
-UUIDv7 client-side. A `traceId` is forwarded only if it is a valid UUID.
+UUIDv7 client-side. A `traceId` is put on the wire only if it is a valid UUID, but The broker's push path stores no trace id, so the value is dropped and the message pops back with `traceId: null`; it is honoured only on the transaction path.
 
 The call returns a thenable builder, so `await` executes it. The resolved value is the
 broker's array, one entry per item in request order:

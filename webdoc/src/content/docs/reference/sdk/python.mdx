@@ -197,8 +197,12 @@ full option list is in [Reference](/reference).
 | `push(payload)` | none | Returns a `PushBuilder`; `payload` is one dict or a list of dicts. Raises `ValueError` with no queue name. |
 
 Each item may carry `data`, `payload`, or be used as the payload itself. The client mints a
-UUIDv7 `transactionId` when the item does not supply one, and forwards `traceId` only when it is
+UUIDv7 `transactionId` when the item does not supply one, and sends `traceId` only when it is
 a valid UUID.
+
+The broker's push path stores no trace id, so it is dropped and the message pops back
+with `traceId: null`. Push inside a transaction when a trace id has to survive. See
+[Pick your SDK](/use/clients#verified-gaps).
 
 <Render file="snippets/py-push" />
 

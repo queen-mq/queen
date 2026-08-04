@@ -1,0 +1,48 @@
+[package]
+name = "queen-mq"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rust client for Queen MQ — one ordered lane per entity, on the PostgreSQL you already run."
+license = "Apache-2.0"
+repository = "https://github.com/queen-mq/queen"
+keywords = ["queue", "message-queue", "postgresql", "mq"]
+categories = ["asynchronous", "database"]
+
+[dependencies]
+queen-protocol = { path = "../../crates/queen-protocol", version = "1.0.0" }
+
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# rustls with the `ring` provider, matching the broker's TLS choice: no OpenSSL
+# on the host and no cmake in the build (aws-lc-rs would want both). `charset`
+# and `http2` are the only other defaults worth keeping for an API client.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "http2",
+    "charset",
+] }
+
+# Jitter for the retry backoffs and the random half of uuidv7.
+rand = "0.8"
+
+# The streams config_hash is sha256 over the chain's shape, and it has to match
+# the other SDKs byte for byte. Same crate and version the broker uses.
+sha2 = "0.10"
+
+# Same logging facade as the broker, so an application already wired to
+# `tracing` sees client events without extra setup.
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = []
+# Register SIGINT/SIGTERM handlers that flush buffers before exit. Off by
+# default: a library has no business installing process-wide signal handlers
+# unless the application asks for it. (The JS client defaults this ON, which is
+# the right call for a script and the wrong one for a service.)
+signals = ["tokio/signal"]

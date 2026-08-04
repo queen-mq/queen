@@ -52,6 +52,12 @@ const SOURCES = [
     suite: "C++ client suite",
     command: "test/run.sh --suite cpp",
   },
+  {
+    dir: "clients/client-rust/tests",
+    lang: "rust",
+    suite: "Rust client suite",
+    command: "test/run.sh --suite rust-client",
+  },
   // The complete programs behind the Full examples section. These are whole
   // files rather than regions: each one is marked from its first line to its
   // last, so what a reader copies is exactly what runs.
@@ -72,6 +78,7 @@ const EXT_LANG = {
   ".cpp": "cpp",
   ".hpp": "cpp",
   ".php": "php",
+  ".rs": "rust",
   ".sh": "bash",
 };
 

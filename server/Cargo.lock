@@ -996,6 +996,7 @@ dependencies = [
  "hmac 0.12.1",
  "jsonwebtoken",
  "libc",
+ "queen-protocol",
  "rand 0.8.7",
  "rust-embed",
  "rustls",
@@ -1011,6 +1012,14 @@ dependencies = [
  "webpki-roots",
  "xxhash-rust",
  "zstd",
+]
+
+[[package]]
+name = "queen-protocol"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

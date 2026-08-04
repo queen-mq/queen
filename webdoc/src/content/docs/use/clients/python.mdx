@@ -144,8 +144,12 @@ to a proxy) and `structured_logs` do not exist. Everything else in `CLIENT_DEFAU
 <Render file="snippets/py-push" />
 
 `push()` takes one dict or a list of dicts. The body is `data`, or `payload`, or the dict
-itself. A missing `transactionId` is minted as a UUIDv7 client-side; a `traceId` is forwarded
+itself. A missing `transactionId` is minted as a UUIDv7 client-side; a `traceId` is sent
 only if it is a valid UUID.
+
+The broker's push path stores no trace id, so it is dropped and the message pops back
+with `traceId: null`. Push inside a transaction when a trace id has to survive. See
+[Pick your SDK](/use/clients#verified-gaps).
 
 The returned `PushBuilder` is awaitable and resolves to the broker's per-item array:
 

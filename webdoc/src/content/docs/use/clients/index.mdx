@@ -1,6 +1,6 @@
 ---
 title: Pick your SDK
-description: "What each Queen client actually implements: five SDKs, the plain HTTP API, and the gaps verified in their source."
+description: "What each Queen client actually implements: six SDKs, the plain HTTP API, and the gaps verified in their source."
 type: overview
 tier: use
 sidebar:
@@ -12,11 +12,12 @@ sourceOfTruth:
   - clients/client-go/queen.go
   - clients/client-laravel/src/Queen.php
   - clients/client-cpp/queen_client.hpp
+  - clients/client-rust/src/lib.rs
   - server/src/main.rs
 ---
 
 Every SDK speaks the same HTTP API, so the choice is about ergonomics and completeness, not
-about capability. All five wrap the same six calls (push, pop, ack, transaction, lease
+about capability. All six wrap the same six calls (push, pop, ack, transaction, lease
 renewal, DLQ query) behind a fluent builder with the same method names transliterated into
 each language's conventions. The differences are in what got finished: the admin surface,
 client-side buffering, lease renewal inside the consume loop, and how each one behaves when
@@ -27,30 +28,38 @@ routes and one header. See [Using Queen over HTTP](/use/clients/http).
 
 ## The matrix
 
-| | JavaScript | Python | Go | PHP / Laravel | C++ | HTTP |
-| --- | --- | --- | --- | --- | --- | --- |
-| Install | npm `queen-mq` | PyPI `queen-mq` | `go get github.com/smartpricing/queen/clients/client-go` | Composer `smartpricing/queen-mq` | vendor `queen_client.hpp` | n/a |
-| Runtime floor | Node 22 | Python 3.9 | Go 1.24 | PHP 8.3 | C++17 | any |
-| Style | async/await | async/await (httpx) | `context.Context` + explicit `Execute` | synchronous, explicit `execute()` | synchronous, blocking | your own |
-| push / pop / ack | yes | yes | yes | yes | yes | yes |
-| Transactions | yes | yes | yes | yes | yes | yes |
-| Consume loop with workers | yes | yes | yes | yes | yes | write it |
-| Multi-partition pop | yes | yes | yes | yes | yes | `?partitions=N` |
-| Client-side buffering | yes | yes | yes | yes | yes | batch the body yourself |
-| Admin / observability calls | yes | yes | yes | yes | **none** | yes |
-| DLQ query | yes | yes | yes | yes | yes | `GET /api/v1/dlq` |
-| Streaming SDK in the same package | yes | yes | yes | no | no | `/streams/v1/*` |
-| Lease renewal during consume | yes | yes | yes | yes | **not implemented** | your own timer |
-| `429` backoff with `Retry-After` | yes | yes | yes | yes | yes | your own |
-| `403` treated as terminal | yes | yes | yes | yes | yes | your own |
-| Signal handling on by default | yes | yes (no opt-out) | no | consumer only | partial, unsafe | n/a |
-| Load-balancing strategies | round-robin, session, affinity | round-robin, session, affinity | round-robin, session, affinity | round-robin, session, affinity | round-robin, session | n/a |
+| | JavaScript | Python | Go | Rust | PHP / Laravel | C++ | HTTP |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Install | npm `queen-mq` | PyPI `queen-mq` | `go get github.com/smartpricing/queen/clients/client-go` | crates.io `queen-mq` | Composer `smartpricing/queen-mq` | vendor `queen_client.hpp` | n/a |
+| Runtime floor | Node 22 | Python 3.9 | Go 1.24 | Rust 1.75 | PHP 8.3 | C++17 | any |
+| Style | async/await | async/await (httpx) | `context.Context` + explicit `Execute` | async on tokio, `await` executes | synchronous, explicit `execute()` | synchronous, blocking | your own |
+| push / pop / ack | yes | yes | yes | yes | yes | yes | yes |
+| Transactions | yes | yes | yes | yes | yes | yes | yes |
+| Consume loop with workers | yes | yes | yes | yes | yes | yes | write it |
+| Multi-partition pop | yes | yes | yes | yes | yes | yes | `?partitions=N` |
+| Client-side buffering | yes | yes | yes | yes | yes | yes | batch the body yourself |
+| Admin / observability calls | yes | yes | yes | yes | yes | **none** | yes |
+| DLQ query | yes | yes | yes | yes | yes | yes | `GET /api/v1/dlq` |
+| Streaming SDK in the same package | yes | yes | yes | yes | no | no | `/streams/v1/*` |
+| Lease renewal during consume | yes | yes | yes | yes | yes | **not implemented** | your own timer |
+| `429` backoff with `Retry-After` | yes | yes | yes | yes | yes | yes | your own |
+| `403` treated as terminal | yes | yes | yes | yes | yes | yes | your own |
+| Signal handling on by default | yes | yes (no opt-out) | no | no (opt-in feature) | consumer only | partial, unsafe | n/a |
+| Load-balancing strategies | round-robin, session, affinity | round-robin, session, affinity | round-robin, session, affinity | round-robin, session, affinity | round-robin, session, affinity | round-robin, session | n/a |
+| Wire types shared with the broker | no | no | no | **yes** | no | no | n/a |
 
 The runtime floors are read from `package.json` (`engines.node`), the PEP 585 annotations in
-`clients/client-py/queen/` (see [Python](/use/clients/python)), `go.mod`, `composer.json`
-(`php: ^8.3`) and the `-std=c++17` in the C++ `Makefile`.
+`clients/client-py/queen/` (see [Python](/use/clients/python)), `go.mod`, the `rust-version`
+in `clients/client-rust/Cargo.toml`, `composer.json` (`php: ^8.3`) and the `-std=c++17` in the
+C++ `Makefile`.
 
-## Same grammar, five spellings
+The last row is the one structural difference. The Rust client and the broker both depend on
+`crates/queen-protocol`, and the broker's own test suite round-trips its request parsers and
+its rendered responses through those types. A renamed field fails a test rather than reaching
+a client. Every other SDK re-describes the wire by hand, which is where most of the gaps below
+came from.
+
+## Same grammar, six spellings
 
 Every SDK builds a request the same way: name the queue, narrow it, then act.
 
@@ -80,6 +89,14 @@ _, err := client.Queue("orders").Partition("acct-42").Push(payload).Execute(ctx)
 
 </TabItem>
 
+<TabItem label="Rust">
+
+```rust
+queen.queue("orders").partition("acct-42").push(json!({ "id": 1 })).await?;
+```
+
+</TabItem>
+
 <TabItem label="PHP">
 
 ```php
@@ -98,16 +115,18 @@ client.queue("orders").partition("acct-42").push({{{"data", {{"id", 1}}}}});
 
 </Tabs>
 
-Two rules hold in all of them. `data` (or `payload`) is unwrapped as the message body; an
-item with neither key is sent as the body itself. And a `transactionId` you do not supply is
-minted client-side as a UUIDv7, which means it is unique per call and therefore
-non-idempotent. Supply your own if you want the dedup window to protect a retry.
+Two rules hold in all of them, with one exception. `data` (or `payload`) is unwrapped as the
+message body; an item with neither key is sent as the body itself. Rust is the exception:
+`push` takes the body directly, because there is no untyped item object to unwrap. And a
+`transactionId` you do not supply is minted client-side as a UUIDv7 everywhere, which means it
+is unique per call and therefore non-idempotent. Supply your own if you want the dedup window
+to protect a retry.
 
 ## Where the SDKs diverge
 
 These are behaviours you cannot infer from one SDK by reading another.
 
-**`pop()` long-polls everywhere except Go.** JavaScript, Python, PHP and C++ all initialise
+**`pop()` long-polls everywhere except Go.** (Rust long-polls too.) JavaScript, Python, PHP and C++ all initialise
 the builder's wait flag from their *consume* defaults, which is `true`, so a bare `pop()`
 issues a 30-second long poll. Go's `Pop()` leaves the flag unset and falls back to
 `PopDefaults.Wait`, which is `false`, so it returns immediately with whatever is available.
@@ -116,21 +135,28 @@ relying on the default.
 
 **A failed pop is silent in three SDKs.** JavaScript, Python and C++ catch every exception
 inside `pop()`, including an exhausted `429` budget and a terminal `403`, and return an
-empty list. An empty result therefore does not mean an empty queue. PHP's `pop()` and
-Go's `Pop()` propagate the error instead. If you need to distinguish, use the consume loop,
-which logs the status code and treats `403` as fatal.
+empty list. An empty result therefore does not mean an empty queue. PHP's `pop()`, Go's
+`Pop()` and Rust's `pop()` propagate the error instead. If you need to distinguish, use the
+consume loop, which logs the status code and treats `403` as fatal.
+
+**Only Rust reads the consumer group off the message.** Everywhere else the group is a separate
+argument to `ack()`, so forgetting it acks the wrong cursor silently. A Rust `Message` carries
+the group that claimed it and the ack uses that, which also means a batch ack spanning two
+groups is refused client-side rather than half-applied.
 
 **The handler signature is not the same everywhere.** JavaScript and PHP pass the array of
 popped messages unless you call `.each()`. Python passes a *single* message when `batch` is 1
 and one message came back, and the list otherwise. Go picks the shape from the method:
 `Consume` takes one message, `ConsumeBatch` takes a slice. C++ always hands the handler a
-`json` value: the array, or one message under `.each()`. Details are on each SDK's page.
+`json` value: the array, or one message under `.each()`. Rust picks the shape from the method,
+like Go: `consume` takes one message, `consume_batch` takes the batch. Details are on each
+SDK's page.
 
-**Only three consumers abandon a batch after a negative ack.** Because an ack is an offset
+**Only four consumers abandon a batch after a negative ack.** Because an ack is an offset
 commit, a nack clamps the group's cursor at the failed message, so every later message in that
-popped batch is coming back. Under `.each()` the JavaScript, Python and Go consumers stop and
-drop the rest of the batch; the PHP and C++ consumers keep going and ack messages that will be
-redelivered anyway, producing duplicate work and rejected acks. Make those handlers
+popped batch is coming back. Under `.each()` the JavaScript, Python, Go and Rust consumers stop
+and drop the rest of the batch; the PHP and C++ consumers keep going and ack messages that will
+be redelivered anyway, producing duplicate work and rejected acks. Make those handlers
 idempotent, or fail the whole batch.
 
 **Client-side buffering suppresses the server's verdict.** With a buffer configured, `push`
@@ -138,23 +164,40 @@ returns a local acknowledgement immediately and the messages flush later on a co
 trigger. You never see the per-item `queued` / `duplicate` status for a buffered push, and the
 buffer lives in process memory: a crash between the call and the flush loses the messages.
 Every SDK's `close()` flushes first, so run it. The JavaScript, Python and PHP consumers hook
-signals to do that for you, and Go and C++ leave it to you.
+signals to do that for you; Go, Rust and C++ leave it to you. Rust can do it behind the
+`signals` cargo feature, which still installs nothing on its own: it gives you a future that
+resolves on the signal, so the flush sits where you want it in your shutdown sequence.
+
+**`limit` under concurrency counts per worker, except in Rust.** JavaScript, Python and Go
+track the limit inside each worker, so `concurrency(4).limit(10)` processes up to forty
+messages. Rust shares one counter across workers and stops at ten.
 
 ## Verified gaps
 
 Every item below was checked against the current source and the broker's router. They are
 listed here so a green call does not mislead you.
 
-- **`renew()` never reports the new expiry.** The broker's `POST /api/v1/lease/:leaseId/extend`
-  returns `{"renewed":N,"expiresAt":"..."}` (`server/sql/procedures/005_log_ack.sql`), while
-  every SDK reads `newExpiresAt` or `lease_expires_at`. The renewal itself happens; the
-  expiry field you get back is `null` (JavaScript, Python, PHP), the zero time (Go) or
-  `null` (C++). Schedule the next renewal from your own clock, not from the response.
+- **`renew()` does report the new expiry, under three names.** This used to be a gap: the
+  stored procedure returns `{"renewed":N,"expiresAt":"..."}` while the SDKs read `newExpiresAt`
+  or `lease_expires_at`. The broker now writes the same value under all three keys
+  (`server/src/handlers/data.rs`, the `for key in ["newExpiresAt", "expiresAt",
+  "lease_expires_at"]` loop), so whichever one your SDK looks for is populated. Renewal is
+  still best-effort and always answers HTTP 200, so check `success` rather than the status
+  code.
 - **Two admin methods target routes the broker does not register.** `clearQueue()` (`DELETE
   /api/v1/queues/:queue/clear`) and `moveMessageToDLQ()` (`POST
   /api/v1/messages/:partitionId/:transactionId/dlq`) exist in the JavaScript, Python, Go and
   PHP admin surfaces, but neither path appears in `server/src/main.rs`. They return a 404.
-  `retryMessage()` and `deleteMessage()` are real.
+  `retryMessage()` and `deleteMessage()` are real. The Rust client does not expose either one,
+  for that reason. Note also that `retryMessage()` is a dead-letter *replay*: it re-pushes the
+  DLQ snapshot and drops the DLQ row, and errors on a message that is not in the DLQ.
+- **`traceId` on a plain push is discarded.** The JavaScript, Python and Go clients forward a
+  `traceId` with `POST /api/v1/push`, and their pages say so, but the broker's push path has
+  nowhere to put it: `PushItem` in `server/src/handlers/data.rs` declares no such field, and
+  neither the staged frame nor `fusion::OwnedFrame` carries one. Serde drops the unknown key
+  and the message pops back with `"traceId": null`. It is honoured on the transaction path,
+  where `txn_add_push` reads it, so push inside a transaction when a trace id has to survive.
+  The Rust client omits the field on plain pushes rather than offering one that does nothing.
 - **C++ has no admin surface at all.** `queen_client.hpp` defines no `Admin` class: no
   overview, queue listing, status, analytics, traces-by-name, maintenance mode or consumer
   group calls. Only the message plane, transactions and the DLQ query are reachable.
@@ -172,22 +215,24 @@ listed here so a green call does not mislead you.
   without flushing buffers and the `SIGTERM` handler only prints. Call `close()` from your
   own handler.
 - **The DLQ builders send filters the broker ignores.** `GET /api/v1/dlq` reads only `queue`,
-  `consumerGroup`, `limit` and `offset` (`server/src/handlers/messages.rs`). Every SDK also
-  sends `partition`, `from` and `to`, which are dropped. The response has no `total` either
+  `consumerGroup`, `limit` and `offset` (`server/src/handlers/messages.rs`). Every SDK except
+  Rust also sends `partition`, `from` and `to`, which are dropped; the Rust builder exposes only
+  the four that work. The response has no `total` either
   (it carries `messages` plus a `pagination` object), so the `total` field the SDKs expose is
   always zero or undefined.
 
 ## Authentication and rate limits
 
-All five SDKs authenticate with one header, `Authorization: Bearer <token>`. There is no
+All six SDKs authenticate with one header, `Authorization: Bearer <token>`. There is no
 API-key header and no query-string token. Set it as `bearerToken` (JavaScript, PHP),
-`bearer_token` (Python), `BearerToken` (Go) or `ClientConfig::bearer_token` (C++). The broker
+`bearer_token` (Python), `BearerToken` (Go), `Config::bearer_token` (Rust) or
+`ClientConfig::bearer_token` (C++). The broker
 also accepts a bare token with no `Bearer ` prefix, but the SDKs always send the prefix. In C++
 the token only takes effect through the vector-of-URLs constructor; the single-URL constructor
 ignores `ClientConfig` entirely.
 
 The `429` and `403` handling exists because of the multi-tenant proxy, not the broker. All
-five implement the same policy: a `429` is retried in place against the same backend with
+six implement the same policy: a `429` is retried in place against the same backend with
 exponential backoff (base 500 ms, cap 30 s, ±20 % jitter) and `Retry-After` wins when the
 server sends one. An ordinary request gets ten attempts; a long-poll pop retries
 unboundedly, because its outer loop is already an indefinite wait. Setting the maximum
@@ -224,6 +269,11 @@ broker's major version; the wire contract shown throughout these pages is the 1.
     href="/use/clients/go"
     title="Go"
     description="context.Context throughout, explicit Execute, and a Pop() that does not long-poll by default."
+  />
+  <LinkCard
+    href="/use/clients/rust"
+    title="Rust"
+    description="crates.io queen-mq: async on tokio, wire types shared with the broker, and the full streams DSL."
   />
   <LinkCard
     href="/use/clients/php-laravel"

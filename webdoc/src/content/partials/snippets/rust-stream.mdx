@@ -1,0 +1,27 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-rust/tests/streams.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-rust/tests/streams.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="clients/client-rust/tests/streams.rs"
+let handle = Stream::from(q.queue(&src))
+    .window_tumbling(2)
+    .idle_flush_ms(500)
+    .aggregate_count("count")
+    .aggregate_sum("sum", |r| r.number("amount"))
+    .to(q.queue(&sink))
+    .run(
+        &q,
+        RunOptions::new(unique("st-tumbling-q"))
+            .reset(true)
+            .batch_size(50)
+            .max_wait(Duration::from_millis(300)),
+    )
+    .await
+    .unwrap();
+```
