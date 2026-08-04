@@ -18,7 +18,7 @@ PostgreSQL you already run. No cluster, no JVM.
 
 <div align="center">
 
-<img src="assets/queen-partitions.svg" alt="Producers push to one queue split into ordered partitions, one per agent session. Two consumer groups each receive every message. One slow session stalls only its own partition." width="780" />
+<img src="assets/queen-features.svg" alt="A queue split into one ordered lane per session, one of them stalled behind a slow consumer and holding up nobody, and that same lane magnified to single messages: four complete behind the committed cursor, three leased, three waiting, one arriving from a push. Three panels show consumer groups replaying from a segment edge, a lease resolving to a retry or to the dead-letter table, and window state, output and the acknowledgement of the source committing together. Underneath, three identical broker processes with nothing between them, over one PostgreSQL boundary holding the partition, segment, consumer and dead-letter tables." width="880" />
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-2021-000000.svg)](https://www.rust-lang.org/)
@@ -26,7 +26,7 @@ PostgreSQL you already run. No cluster, no JVM.
 [![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
-[![Rust client](https://img.shields.io/badge/rust%20client-1.75%2B-000000.svg)](clients/client-rust)
+[![Rust client](https://img.shields.io/badge/rust%20client-1.86%2B-000000.svg)](clients/client-rust)
 [![PHP](https://img.shields.io/badge/php-8.3%2B-777BB4.svg)](https://www.php.net/)
 
 📚 **[Documentation](https://queenmq.com/)** · 🚀 **[Quickstart](https://queenmq.com/start/quickstart)** · 📊 **[Benchmarks](https://queenmq.com/benchmarks)** · 🛠 **[Develop](#developing-on-queen)**
@@ -194,7 +194,7 @@ More: **[Contributing](CONTRIBUTING.md)** · **[Developer guide](DEVELOPING.md)*
 | JavaScript / TypeScript | `queen-mq` (npm) | [clients/client-js](clients/client-js) |
 | Python | `queen-mq` (PyPI) | [clients/client-py](clients/client-py) |
 | Go | `github.com/smartpricing/queen/clients/client-go` | [clients/client-go](clients/client-go) |
-| Rust | in this tree, not yet on crates.io | [clients/client-rust](clients/client-rust) |
+| Rust | `queen-mq` (crates.io) | [clients/client-rust](clients/client-rust) |
 | PHP / Laravel | in this tree, not yet on Packagist | [clients/client-laravel](clients/client-laravel) |
 | C++ | single header | [clients/client-cpp](clients/client-cpp) |
 | CLI | `queenctl` | [clients/client-cli](clients/client-cli) |
