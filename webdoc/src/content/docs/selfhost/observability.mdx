@@ -106,7 +106,8 @@ request. Rates are deltas over the elapsed window, not lifetime averages.
 | `parked` | long-poll pops currently parked, summed over queues |
 | `pool` | connections the pool has created, over its configured maximum |
 | `pool_waiting` | requests queueing for a connection. Non-zero is backpressure |
-| `vegas_push`, `vegas_pop` | the adaptive concurrency limits in force |
+| `adm_budget`, `adm_mode` | the admission budget in force, and whether the train sensor is live (`normal`) or degraded (`nosync`) |
+| `adm_lanes` | per lane `inflight/cap w<waiters>`. Waiters with an idle pool means admission is the constraint |
 | `buffered` | `true` while pushes are being spooled to disk instead of PostgreSQL |
 
 Immediately after the global line, up to `QUEEN_LOG_TOPN_QUEUES` (default 10)

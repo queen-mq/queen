@@ -118,8 +118,8 @@ answer, but the arithmetic is yours to do.
 Parked consumers are cheap. A long-poll pop releases its pooled connection
 *before* parking, so waiting consumers cost memory and a wake-up, not a
 connection. Concurrent in-flight statements are the scarce resource, and the
-adaptive concurrency limiters (visible as `vegas_push` and `vegas_pop` in the
-`rates` block) are what keep them bounded.
+admission arbiter (visible as `adm_budget` and `adm_lanes` in the `rates` block)
+is what keeps them bounded.
 
 Broker memory is dominated by two explicitly budgeted caches:
 `QUEEN_DEDUP_CACHE_MB` (default 512) and `QUEEN_ACK_REGISTRY_MB` (default 64).

@@ -54,7 +54,7 @@ because they all read the same row. Summing them across instances multiplies
 your traffic by the number of brokers. Aggregate them with `max`, never `sum`.
 
 The in-process families beyond `queen_process_*` (pool gauges, spool gauges,
-the maintenance flag, the Vegas limits, the fusion batch families, parked
+the maintenance flag, the admission families, the fusion batch families, parked
 long-polls) are also per-instance and also reset on restart.
 
 ## How a scrape is assembled
@@ -62,8 +62,11 @@ long-polls) are also per-instance and also reset on restart.
 The response is built in one pass and in a fixed order:
 
 1. In-process gauges and counters, always emitted.
-2. `queen_seg_push_vegas_limit` and `queen_seg_pop_vegas_limit`, the adaptive
-   concurrency limits.
+2. The admission families: `queen_admission_budget`,
+   `queen_admission_inflight{lane}`, `queen_admission_waiting{lane}`,
+   `queen_admission_trains_per_s`, `queen_admission_txn_per_train` and
+   `queen_admission_cycle_ms`. These replaced `queen_seg_push_vegas_limit` and
+   `queen_seg_pop_vegas_limit` in 1.0.0-beta.2, which no longer exist.
 3. Pool gauges (`queen_db_pool_size`, `_idle`, `_active`), the push
    maintenance-mode flag, and the disk spool gauges.
 4. One call to the database aggregator, whose JSON becomes the `queen_cluster_*`

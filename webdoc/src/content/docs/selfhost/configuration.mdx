@@ -181,10 +181,17 @@ explicitly that they are not part of the product contract:
 `QUEEN_V2_FUSION_SHARDS`, `QUEEN_V2_FUSION_FRAMES`, `QUEEN_V2_FUSION_HOLD_MS`,
 `QUEEN_V2_FUSION_MAX_INFLIGHT`, `QUEEN_V2_BUNDLE_MAX`, `QUEEN_V2_BUNDLE_LOG`,
 `QUEEN_V2_FUSION_MIN_FRAMES`, `QUEEN_V2_FUSION_MIN_WAIT_MS`,
-`QUEEN_V2_ZSTD_LEVEL`, and the Vegas bounds
-`QUEEN_SEG_{PUSH,POP}_{MIN,INIT,MAX}` with `QUEEN_VEGAS_ALPHA` /
-`QUEEN_VEGAS_BETA`. Setting them is supported; treating a value you found in a
-blog post as a tuning recommendation is not.
+`QUEEN_V2_ZSTD_LEVEL`, and the admission bounds `QUEEN_ADMISSION_MIN` /
+`QUEEN_ADMISSION_INIT` / `QUEEN_ADMISSION_MAX` with the per-lane shares
+`QUEEN_ADMISSION_SHARE_{PUSH,POP,ACK,MAINT}`. Setting them is supported;
+treating a value you found in a blog post as a tuning recommendation is not.
+
+**Removed in 1.0.0-beta.2.** `QUEEN_SEG_{PUSH,POP}_{INIT,MIN,MAX}`,
+`QUEEN_VEGAS_ALPHA` and `QUEEN_VEGAS_BETA` configured the two Vegas limiters
+that the single admission arbiter replaced. They are no longer read. The broker
+logs a warning at boot if it finds any of them set, so a deployment that still
+carries them is told rather than left tuning a control loop that is not there.
+See [flow control](/internals/flow-control).
 
 **Read but inert.** `RETENTION_PARALLELISM` is parsed and printed in the boot
 `config: jobs` line, but the log engine's maintenance cycle has no work for it:

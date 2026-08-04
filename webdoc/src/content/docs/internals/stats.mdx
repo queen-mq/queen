@@ -191,8 +191,8 @@ messages are being delivered.
 - **`queen_process_*`**: what *this* broker instance did since it started. Reset on restart.
 - **`queen_cluster_*`**: lifetime totals read back out of PostgreSQL, so every instance reports the
   same value.
-- **Gauges** are live in-process readings: the two Vegas limits, pool active/idle/size, spool pending
-  and failed, fusion items per batch, the pop fill-wait counters.
+- **Gauges** are live in-process readings: the admission budget and per-lane inflight/waiting, pool
+  active/idle/size, spool pending and failed, fusion items per batch, the pop fill-wait counters.
 
 The full list is generated from the source; see the [Prometheus reference](/reference).
 

@@ -208,9 +208,8 @@ disk for replay) or `failed` (not stored anywhere).
 | `500` | no PostgreSQL connection available (`{"error":"pool"}`), a pop that failed at the transport level, a failed lease renewal, or a stored-procedure error that is not a not-found |
 | `503` | `/health` only, when the database round-trip fails |
 
-The broker never returns **429**: it has no per-client rate limiter. Its internal push and pop
-concurrency limits are adaptive (Vegas) and make a request *wait* for a permit rather than
-rejecting it. Rate limiting and 429 responses come from the multi-tenant gateway, not from the
+The broker never returns **429**: it has no per-client rate limiter. Its internal admission arbiter
+is adaptive and makes a request *wait* for a slot rather than rejecting it. Rate limiting and 429 responses come from the multi-tenant gateway, not from the
 broker.
 
 ## Retrying safely

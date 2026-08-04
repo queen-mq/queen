@@ -3,6 +3,97 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.0.0-beta.2
+
+**One admission arbiter replaces the two Vegas limiters.** Concurrency against PostgreSQL
+was governed by a pair of TCP-Vegas-style controllers, one per lane, each inferring
+queueing from per-operation round-trip time. On a WAL-bound commit path most of the excess
+over the observed minimum is the group-commit flush wait: intrinsic cost that admission
+cannot remove. The estimator counted that floor as congestion and backed off from it, and
+because its grow and shrink thresholds were absolute the dead band widened as the limit
+fell, making low limits an attractor. The broker left cores idle while the connection pool
+reported no waiters at all, and nothing exported the controller's inputs, so the
+disagreement was invisible.
+
+`server/src/admission.rs` replaces it with a single arbiter for every write transaction:
+
+- **The sensor is passive.** Group commit clusters write completions in time, so grouping
+  the broker's own commit completions measures the flush pipeline with no PostgreSQL-side
+  telemetry. Train size is amortisation measured rather than assumed; train cadence is the
+  flush rate; the gap between train starts is the flush cycle.
+- **One budget, four lanes.** Push, Pop, Ack and Maint share a work-conserving budget.
+  Guarantees act on the wake order when the budget is exhausted, acks first because they
+  unblock lanes. The budget never rises above `DB_POOL_SIZE` minus a reserve, so admitted
+  work cannot starve on the pool.
+- **Slots are RAII.** Dropping a slot releases it. The previous limiter leaked its
+  in-flight counter at eight call sites that took a permit and returned early, until its
+  own anti-ramp guard was permanently disabled.
+- **A degraded mode is detected, not guessed.** With `synchronous_commit = off` commit
+  waits collapse and the trains carry no signal; the arbiter pins a static budget and says
+  so in telemetry (`adm_mode`).
+
+**The pop claim path is set-based.** `queen.log_pop_list_v1` used to call `log_pop_v1` once
+per candidate partition, about six statement executions each, inside the admission permit
+and the committing transaction. It now does the same work in roughly six statements total,
+independent of the candidate count. Measured on the sparse-partition shape, the per-pop
+cost was 3.42 ms of which 0.17 ms was data work.
+
+**New defaults.** `QUEEN_V2_FUSION_HOLD_MS` is 3, down from 15: the hold is paid twice per
+flow, on ingress and on the derived republish. `QUEEN_ADMISSION_MIN` and
+`QUEEN_ADMISSION_INIT` now derive from the pool, two thirds of
+`DB_POOL_SIZE - QUEEN_ADMISSION_POOL_RESERVE`, which is 96 on the defaults. They are
+derived rather than fixed so a small deployment cannot admit more concurrent transactions
+than it has connections for. On the 2000 ev/s / 1000-lane shape, raising the floor alone
+took p50 from 1143 ms to 240 ms.
+
+**Validated by a soak.** 600,000 msg/s for 3 h 10 m with full production semantics (leases,
+explicit async acks, 60 s dedup window, retention active): **6.82 billion messages, zero
+push, pop and ack errors, flat lag**, p50 120 ms and p99 297 ms, with the median steady
+inside ±8% across the run.
+
+**Known weakness, stated because this is a beta.** The shrink signal is the age of the
+oldest admitted slot, which conflates statement execution with commit wait: a transaction
+doing genuine heavy work looks like one waiting behind a queue. On workloads whose write
+transactions routinely run long the budget hunts rather than settles. This is documented in
+`admission.rs` and on [flow control](https://queenmq.com/internals/flow-control), and the
+replacement signal is named there.
+
+### Breaking
+
+- **Prometheus metric names changed.** `queen_seg_push_vegas_limit` and
+  `queen_seg_pop_vegas_limit` no longer exist. The replacements are
+  `queen_admission_budget`, `queen_admission_inflight{lane}`,
+  `queen_admission_waiting{lane}`, `queen_admission_trains_per_s`,
+  `queen_admission_txn_per_train` and `queen_admission_cycle_ms`. **Dashboards and alerts
+  referencing the old names need updating.**
+- **The `rates` log line changed shape.** `vegas_push` and `vegas_pop` are replaced by
+  `adm_budget`, `adm_mode` and `adm_lanes`.
+- **Vegas-era variables are no longer read.** `QUEEN_SEG_{PUSH,POP}_{INIT,MIN,MAX}`,
+  `QUEEN_VEGAS_ALPHA` and `QUEEN_VEGAS_BETA` are accepted by the environment and ignored;
+  the broker logs a warning at boot for each one it finds set, rather than letting a
+  deployment tune a control loop that is not there. The Helm chart no longer sets the eight
+  libqueen-era `QUEEN_{PUSH,ACK,POP}_MAX_CONCURRENT` / `QUEEN_VEGAS_*` /
+  `QUEEN_PUSH_*_BATCH` variables, none of which the Rust broker ever read.
+
+## 1.0.0-beta.1
+
+First beta of the 1.0 line: the Rust broker on the segment storage engine described under
+[1.0.0](#100) below, plus the tenancy surface built on top of it.
+
+- **Multi-tenancy and the gateway.** Native tenant scoping in the broker behind
+  `QUEEN_TENANCY_HEADER` (off by default), and `queen-proxy`, a separate Apache-2.0 gateway
+  carrying API keys, plans, quotas, rate limiting, metering and a console.
+- **One webapp behind the proxy.** Auth, roles, tenant selector and the operator surface in
+  a single application, re-keyed onto the documentation site's palette.
+- **The migration tool is gone.** It shelled out its PostgreSQL connection parameters,
+  which was a remote-code-execution path; the fix landed first and the tool was then
+  removed rather than kept.
+- **Tenancy correctness and cost.** Each tenant gets its own discovery wake gate, so one
+  tenant's pushes stop waking every other tenant's parked consumers. Confirmed
+  partition-to-tenant ownership is cached, dropping a round trip per ack.
+- **Hot-list lease revisit is bounded**, which removes a stall that could hold a single
+  partition indefinitely.
+
 ## 1.0.0
 
 **A Rust broker on a new storage engine.** The 0.x line was a C++ implementation

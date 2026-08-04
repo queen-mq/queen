@@ -663,18 +663,37 @@ pub fn load() -> Config {
     // still falls through to PG_DB rather than resolving to "" under item 6.
     pg.dbname = Some(resolve_db_name());
 
+    // --- admission floor (campaign 2026-08-03/04) --------------------------
+    // The AIMD budget hunts in a band (measured 20-27) that sits BELOW what the
+    // workload needs, because it shrinks on `oldest_age > 20ms` while healthy
+    // pop work routinely takes 37-64 ms. Left at the old floor of 8 the anchor
+    // shape ran at 1143 ms p50 with 12 510 messages permanently in flight and
+    // 76 of 160 pool connections idle; raising the floor alone took it to
+    // 240 ms. The floor is therefore a real default, not a tuning knob.
+    //
+    // DERIVED from the pool rather than hardcoded: admission.rs `ceiling()` is
+    // `max.min(pool_size - reserve).max(min)`, so a fixed floor larger than the
+    // pool would admit more concurrent transactions than there are connections
+    // — exactly what the module's own contract forbids. Two thirds of the
+    // usable pool yields 96 on the default (160 - 16), which is the value the
+    // sweep settled on, and stays safe on a small deployment.
+    let pool_size = env_int("DB_POOL_SIZE", 160) as usize;
+    let admission_pool_reserve = env_int("QUEEN_ADMISSION_POOL_RESERVE", 16).max(0) as u64;
+    let admission_floor =
+        ((pool_size as u64).saturating_sub(admission_pool_reserve) * 2 / 3).max(8) as i64;
+
     Config {
         port: env_str("PORT", "6632"),
         pg,
-        pool_size: env_int("DB_POOL_SIZE", 160) as usize,
+        pool_size,
         pg_use_ssl: env_bool("PG_USE_SSL", false),
         pg_ssl_reject_unauthorized: env_bool("PG_SSL_REJECT_UNAUTHORIZED", true),
         stmt_timeout: Duration::from_millis(env_int("QUEEN_STMT_TIMEOUT_MS", 30000) as u64),
         zstd_level: env_int("QUEEN_V2_ZSTD_LEVEL", 3) as i32,
-        admission_init: env_int("QUEEN_ADMISSION_INIT", 16).max(1) as u64,
-        admission_min: env_int("QUEEN_ADMISSION_MIN", 8).max(1) as u64,
+        admission_init: env_int("QUEEN_ADMISSION_INIT", admission_floor).max(1) as u64,
+        admission_min: env_int("QUEEN_ADMISSION_MIN", admission_floor).max(1) as u64,
         admission_max: env_int("QUEEN_ADMISSION_MAX", 128).max(1) as u64,
-        admission_pool_reserve: env_int("QUEEN_ADMISSION_POOL_RESERVE", 16).max(0) as u64,
+        admission_pool_reserve,
         admission_train_gap_us: env_int("QUEEN_ADMISSION_TRAIN_GAP_US", 300).max(50) as u64,
         admission_tick_ms: env_int("QUEEN_ADMISSION_TICK_MS", 500).max(100) as u64,
         admission_share_push: env_f64("QUEEN_ADMISSION_SHARE_PUSH", 0.25),
@@ -693,7 +712,15 @@ pub fn load() -> Config {
         pop_wait_max_interval_ms: env_int("POP_WAIT_MAX_INTERVAL_MS", 1000).max(1) as u64,
         fusion_shards: env_int("QUEEN_V2_FUSION_SHARDS", 8).max(1) as usize,
         fusion_frames: env_int("QUEEN_V2_FUSION_FRAMES", 500).max(1) as usize,
-        fusion_hold_ms: env_int("QUEEN_V2_FUSION_HOLD_MS", 15).max(1) as u64,
+        // 15 -> 3 (campaign 2026-08-03/04). The hold is paid TWICE per flow —
+        // once on ingress, once on the derived republish — so at 15 ms it was
+        // ~30 of the ~95 ms of broker-side latency on the anchor shape. Cutting
+        // it took 170 -> 142.9 ms p50 there. NOTE the sign flips with regime:
+        // measured at 96 workers with the ring backed up, hold=2 was WORSE
+        // (340 ms), because thinner batches cost more WAL contention than the
+        // hold costs latency. It only pays once the ring drains. 3 is the
+        // measured plateau (2 and 3 tie on p50, 3 has the better p99).
+        fusion_hold_ms: env_int("QUEEN_V2_FUSION_HOLD_MS", 3).max(1) as u64,
         // Segments/log-engine sweep cadence (docs 17-18): retention runs as
         // frequent, incremental, bounded steps (advisory-locked, p_max_rows per
         // call) instead of the old C++ 5-minute monolith — a 5s default keeps

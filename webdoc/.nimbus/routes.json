@@ -6,6 +6,7 @@
     "/404",
     "/benchmarks",
     "/benchmarks/archive",
+    "/benchmarks/comparison",
     "/benchmarks/multitenant-cell",
     "/benchmarks/ordered-pipeline",
     "/benchmarks/peak",

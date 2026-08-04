@@ -38,9 +38,9 @@ An HTTP request crosses the same five layers regardless of what it does.
    authenticated `sub`; tenant resolution reads `x-queen-tenant` when
    `QUEEN_TENANCY_HEADER=1`, otherwise stamps the fixed default tenant. Both run before any
    handler and both are transparent when disabled.
-3. **A concurrency permit.** Push and pop each pass through their own adaptive limiter, a
-   Vegas-style controller that sizes itself from observed PostgreSQL round-trip times. See
-   [Flow control](/internals/flow-control).
+3. **An admission slot.** Every write transaction passes through one process-wide arbiter that
+   sizes itself from PostgreSQL's commit-flush pipeline, with four lanes (push, pop, ack, maint)
+   sharing the budget. See [Flow control](/internals/flow-control).
 4. **A pooled connection.** One `deadpool-postgres` pool, `DB_POOL_SIZE` connections
    (default 160), shared by handlers and background jobs. Hot statements go through
    `prepare_cached`, so a steady-state call re-uses a prepared statement on that connection.

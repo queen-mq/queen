@@ -90,7 +90,7 @@ pending data, and asks SQL only about those. The full mechanism is on
 it is deliberate:
 
 1. **A cheap in-memory check first.** If no reseed is due, the deferral config is fresh, and the
-   ring has nothing ready, the pop returns empty **without taking a Vegas permit or a pooled
+   ring has nothing ready, the pop returns empty **without taking an admission slot or a pooled
    connection**. This ordering exists because a quiet re-poll rate is proportional to the number
    of parked consumers: acquiring the shared serving limiter on every empty re-poll let that storm
    saturate the limiter, so a freshly woken real delivery queued behind thousands of empty polls.

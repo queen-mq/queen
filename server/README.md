@@ -130,7 +130,12 @@ The fusion / concurrency engine self-tunes; these are override knobs, not part o
 the product contract: `QUEEN_V2_FUSION_FRAMES` (500), `QUEEN_V2_FUSION_HOLD_MS`
 (15), `QUEEN_V2_FUSION_SHARDS` (8), `QUEEN_V2_FUSION_MAX_INFLIGHT`,
 `QUEEN_V2_ZSTD_LEVEL` (3), `QUEEN_V2_BUNDLE_MAX` / `QUEEN_V2_BUNDLE_LOG`, and the
-Vegas bounds `QUEEN_SEG_{PUSH,POP}_{MIN,INIT,MAX}` (4 / 16 / 64).
+admission bounds `QUEEN_ADMISSION_{MIN,INIT,MAX}` (min and init derive from
+`DB_POOL_SIZE`; max 128) with the per-lane shares
+`QUEEN_ADMISSION_SHARE_{PUSH,POP,ACK,MAINT}`.
+
+The Vegas-era `QUEEN_SEG_{PUSH,POP}_{INIT,MIN,MAX}` and `QUEEN_VEGAS_{ALPHA,BETA}`
+were removed in 1.0.0-beta.2; the broker warns at boot if it finds them set.
 
 ## HTTP surface
 
@@ -182,7 +187,7 @@ server/
     ├── db.rs         # SP call wrappers (tokio-postgres)
     ├── handlers/     # HTTP handlers, split by route domain
     ├── fusion.rs     # cross-request fusion + bundling
-    ├── vegas.rs      # adaptive concurrency limiter
+    ├── admission.rs  # single write-transaction admission arbiter
     ├── frames.rs     # zstd frame codec
     ├── auth.rs       # JWT validation + per-route access levels
     ├── udp.rs        # inter-instance UDP sync

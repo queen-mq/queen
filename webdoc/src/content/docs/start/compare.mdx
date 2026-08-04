@@ -1,6 +1,6 @@
 ---
 title: Compared to Kafka, RabbitMQ, SQS and pgmq
-description: "Architectural differences only: how each system gets per-entity ordering, and what that costs. No performance comparisons."
+description: "How each system gets per-entity ordering, what that costs in structure and in measured latency, and which features come with each bet."
 type: concept
 tier: use
 sidebar:
@@ -15,17 +15,15 @@ sourceOfTruth:
   - server/sql/procedures/005_log_ack.sql
 ---
 
-This page compares designs, not speeds. There are no throughput or latency
-comparisons here, and that is a deliberate omission: every such number in Queen's
-older documentation was measured against a C++ broker that no longer exists, on a
-storage engine that no longer exists. Republishing them would be inventing data.
-Queen's own measurements, with the configuration that produced each one, are in
-[Benchmarks](/benchmarks).
+This page compares designs first and speeds second. The systems below make
+genuinely different bets, and one question separates them more sharply than any
+other: **how do you get strict ordering per entity, when there are many entities,
+the set changes constantly, and one slow entity must not delay the others?**
 
-What is worth comparing is structure, because the systems below make genuinely
-different bets. One question separates them more sharply than any other: **how do
-you get strict ordering per entity, when there are many entities, the set changes
-constantly, and one slow entity must not delay the others?**
+There are measured numbers further down, from a run of all four on one machine
+with matched resources. Read the framing that comes with them: **the point is not
+to crown a winner, because the cost curves cross.** Each system wins a shape and
+loses another, and the useful output is knowing which shape you have.
 
 Queen's answer, for reference: a partition is a row in a PostgreSQL table,
 created by the first push that names it, and ordering inside it comes from taking
@@ -165,6 +163,97 @@ is no broker process: clients connect to PostgreSQL and call SQL functions.
   hop that pgmq does not have, and one more thing that can be misconfigured.
   pgmq's answer (no broker) is genuinely simpler when your consumers are all
   happy speaking SQL.
+
+## What the measurements say
+
+All four on one machine, 32 vCPU and 62 GB, with the same resource limits, the
+same PostgreSQL durability tier for the two that use PostgreSQL, and the same
+twelve-stage ordered pipeline. Full conditions, per-cell CPU, memory and disk,
+and the caveats are in [Cross-broker comparison](/benchmarks/comparison).
+
+Benchmarks are worth what they are worth. Each of these systems would go faster
+run by someone who runs it daily, and we are not those people for three of the
+four. We tuned what we could, archived every configuration, and would rather be
+corrected with a pointer to a specific run than be right by omission.
+
+**Sparse, 1 000 ordered lanes at 2 messages per lane per second.** Everyone
+served the full rate.
+
+| | p50 | cores | RAM | physical queues |
+| --- | ---: | ---: | ---: | ---: |
+| pgmq | **55 ms** | 6.5 | 2.2 GB | 12 |
+| Queen | 72 ms | 7.4 | **1.8 GB** | **4** |
+| RabbitMQ | 93 ms | 7.0 | 2.6 GB | **12 000** |
+| Kafka | 143 ms | **2.2** | 11.6 GB | 4 |
+
+**Dense, the same 1 000 lanes at 12 messages per lane per second.** Two systems
+kept up.
+
+| | p50 | % of rate served | shed |
+| --- | ---: | ---: | ---: |
+| Queen | **680 ms** (median of 8 runs, range 340 to 3 234) | **96%** | **0** |
+| Kafka | 2 287 ms | 89% | 0 |
+| pgmq | 11 863 ms | 63% | 104 780 |
+| RabbitMQ | 19 952 ms | 27% | 363 942 |
+
+The reversal between those two tables is the whole story. pgmq's grouped read
+scans the queue table on every call, so its cost tracks standing rows rather than
+lane count: unbeatable when the queue is short, and self-reinforcing collapse when
+it is not. Queen amortises over the partition visit, so more messages per lane
+make it cheaper per message. RabbitMQ needs a queue per key and 12 000 live
+queues is where that stops working.
+
+<Aside type="caution">
+Queen's dense figure is a **median of eight repetitions, not a best run**: the
+same cell and build produced 340 to 3 234 ms. That dispersion is a defect we are
+chasing, it appears only on dense shapes, and we publish the median because
+publishing the 340 would be cherry picking. The other three systems' dense
+figures are single runs and their dispersion is unknown.
+</Aside>
+
+**Cardinality.** pgmq is flat: 12 000 and 240 000 ordered lanes give identical
+percentiles, because its group is a value in a header rather than an object. Kafka
+refuses topic creation somewhere between 2 000 and 5 000 partitions per topic on
+default settings, and its p95 has already reached 23 727 ms at 8 000 partitions.
+Queen at 80 000 ordered lanes runs a p95 of 2 494 ms.
+
+**Sustained throughput.** Queen holds 600 000 msg/s for three hours with leases,
+explicit acks, deduplication and retention all active: 6.82 billion messages, zero
+errors. pgmq's ordered-consume path tops out between 20 000 and 40 000 msg/s on the
+same machine, with deduplication and retention absent because it has neither.
+
+## What comes with each bet
+
+Ordering is the axis this page is organised around, but it is not the only thing
+you are choosing. Support here means "in the product, without assembling it":
+
+| | Queen | Kafka | RabbitMQ | SQS | pgmq |
+| --- | :--: | :--: | :--: | :--: | :--: |
+| Ordering per entity at high cardinality | ✅ | ⚠️ hash-modded | ⚠️ queue per key | ⚠️ per group id | ⚠️ queue per key |
+| Lanes created on demand | ✅ | ❌ fixed count | ❌ declared | ❌ | ❌ |
+| Consumer groups over one stored copy | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Replay / seek to offset or timestamp | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Deduplication on your own key | ✅ per queue | ⚠️ producer-session | ❌ plugin | ⚠️ FIFO, fixed window | ❌ |
+| Dead-letter queue with a retry budget | ✅ | ❌ app-level | ✅ | ✅ redrive | ❌ |
+| Per-group lag as data you can query | ✅ | ⚠️ via tooling | ❌ | ❌ | ❌ |
+| Ack and push in one transaction | ✅ | ❌ | ❌ | ❌ | ✅ same database |
+| Disk spool when the store is unreachable | ✅ | n/a | n/a | n/a | ❌ |
+| Content-based routing | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Broker replicates itself | ❌ PostgreSQL's job | ✅ | ✅ | ✅ managed | ❌ |
+| No server to operate | ❌ | ❌ | ❌ | ✅ | ⚠️ no broker, still a database |
+| Runs without extensions on managed PostgreSQL | ✅ | n/a | n/a | n/a | ❌ needs the extension |
+
+Two rows deserve reading twice, because they are the ones that disqualify Queen.
+**Queen does not replicate itself**: durability and failover are PostgreSQL's, so
+one PostgreSQL is one failure domain. And **there is no routing**: no exchanges,
+no topic patterns, no header matching. If either is a requirement, the comparison
+ends there regardless of any latency figure above.
+
+The spool row is narrower than it looks: when PostgreSQL is unreachable, pushes
+append to rotating on-disk files and replay oldest-first when it recovers, with
+the original `transactionId` preserved so deduplication makes the replay
+idempotent. It keeps a write outage from becoming data loss. It is not a substitute
+for replication.
 
 ## Choosing something else
 

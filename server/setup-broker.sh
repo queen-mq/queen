@@ -41,10 +41,13 @@ docker run -d --name "$rn" --network "$NET" --ulimit nofile=65535:65535 -p "$RPO
   -e QUEEN_V2_FUSION_SHARDS="${FSHARDS:-16}" -e QUEEN_V2_FUSION_FRAMES="${FFRAMES:-500}" \
   -e QUEEN_V2_FUSION_HOLD_MS="${FHOLD:-30}" -e QUEEN_V2_FUSION_MAX_INFLIGHT="${MAXINFLIGHT:-64}" \
   -e QUEEN_V2_BUNDLE_MAX="${BUNDLEMAX:-32}" \
-  -e QUEEN_SEG_PUSH_INIT="${PINIT:-64}" -e QUEEN_SEG_PUSH_MIN="${PMIN:-16}" -e QUEEN_SEG_PUSH_MAX="${PMAX:-256}" \
-  -e QUEEN_SEG_POP_INIT="${OINIT:-64}" -e QUEEN_SEG_POP_MIN="${OMIN:-16}" -e QUEEN_SEG_POP_MAX="${OMAX:-256}" \
-  -e QUEEN_VEGAS_ALPHA="${VA:-6}" -e QUEEN_VEGAS_BETA="${VB:-12}" \
   "$RIMG" >/dev/null
+# NB: the QUEEN_SEG_{PUSH,POP}_{INIT,MIN,MAX} and QUEEN_VEGAS_{ALPHA,BETA} knobs
+# that used to be set here died with the Vegas limiter. Concurrency is now the
+# single admission arbiter (server/src/admission.rs); its floor and initial
+# budget derive from DB_POOL_SIZE, so there is nothing to set. Override
+# QUEEN_ADMISSION_* only with a measurement in hand — the broker warns at boot
+# if any of the dead knobs are still present in the environment.
 for i in $(seq 1 90); do curl -sf "http://localhost:$RPORT/status" >/dev/null 2>&1 && break; sleep 1; done
 docker logs "$rn" 2>&1 | tail -3
 
