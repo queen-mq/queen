@@ -1,0 +1,2 @@
+host=bench-02
+cores=32 ram_gb=62

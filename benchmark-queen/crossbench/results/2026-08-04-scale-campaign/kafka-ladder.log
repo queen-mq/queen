@@ -1,0 +1,28 @@
+[04:11:31] --- KLAD-2000: lanes=2000 => 8000 partizioni ---
+up: cmbench-kafka 
+KLAD-2000    p50=   155.9 p95=  23726.6 p99=  28215.8 del/s= 36500 part=8000    viol=0
+samples=11 active=8
+cpu_cores_mean=2.88 p95=3.78
+cmbench-kafka_rss_mb_max=1290
+[04:14:51] --- KLAD-5000: lanes=5000 => 20000 partizioni ---
+up: cmbench-kafka 
+KLAD-5000: NESSUN RISULTATO
+cmbench: run failed: setup: create topic cm-ota-sync: POLICY_VIOLATION: Request parameters do not satisfy the configured policy.
+samples=11 active=2
+cpu_cores_mean=1.43 p95=1.02
+cmbench-kafka_rss_mb_max=474
+[04:15:45] --- KLAD-10000: lanes=10000 => 40000 partizioni ---
+up: cmbench-kafka 
+KLAD-10000: NESSUN RISULTATO
+cmbench: run failed: setup: create topic cm-avail: POLICY_VIOLATION: Request parameters do not satisfy the configured policy.
+samples=11 active=2
+cpu_cores_mean=1.54 p95=1.34
+cmbench-kafka_rss_mb_max=460
+[04:16:31] --- KLAD-20000: lanes=20000 => 80000 partizioni ---
+up: cmbench-kafka 
+KLAD-20000: NESSUN RISULTATO
+cmbench: run failed: setup: create topic cm-prices: POLICY_VIOLATION: Request parameters do not satisfy the configured policy.
+samples=11 active=2
+cpu_cores_mean=1.45 p95=1.20
+cmbench-kafka_rss_mb_max=460
+[04:17:16] === SCALA KAFKA COMPLETA ===

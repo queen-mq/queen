@@ -1,0 +1,1 @@
+./cmbench -system queen -queen-url http://10.114.0.2:6632 -queen-pop-mode wildcard -queen-pop-partitions 40 -queen-pop-workers 8 -rate 10000 -properties 5000 -lanes 5000 -duration 60 -ramp 5 -drain 30 -logdir results/HO-s5000-T 

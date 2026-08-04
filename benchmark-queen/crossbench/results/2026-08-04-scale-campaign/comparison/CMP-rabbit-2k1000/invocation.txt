@@ -1,0 +1,1 @@
+./cmbench -system rabbit -rabbit-url amqp://guest:guest@10.114.0.2:5672/ -rate 2000 -properties 1000 -lanes 1000 -duration 60 -ramp 5 -drain 30 -logdir results/CMP-rabbit-2k1000  # 32c parity

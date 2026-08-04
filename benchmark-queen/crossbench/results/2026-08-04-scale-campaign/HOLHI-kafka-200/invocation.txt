@@ -1,0 +1,1 @@
+./cmbench -system kafka -kafka-seeds 10.114.0.2:9092 -rate 6000 -properties 20000 -lanes 200 -duration 120 -ramp 10 -drain 60 -logdir results/HOLHI-kafka-200  # P=20000 lanes=200

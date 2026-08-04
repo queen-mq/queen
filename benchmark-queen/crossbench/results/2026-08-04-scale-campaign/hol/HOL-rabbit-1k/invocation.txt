@@ -1,0 +1,1 @@
+./cmbench -system rabbit -rabbit-url amqp://guest:guest@10.114.0.2:5672/ -rate 6000 -properties 20000 -lanes 1000 -duration 120 -ramp 10 -drain 60 -logdir results/HOL-rabbit-1k  # HOL P=20000 lanes=1000

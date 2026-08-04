@@ -1,0 +1,241 @@
+[21:09:26] === BLOCCO 1 — HOL: ogni sistema alla cardinalita che sa esprimere ===
+[21:09:26] P=20000 property, rate=6000 ev/s (36k consegne/s), 120s
+[21:10:09] --- Queen, partizioni dinamiche (una per property) ---
+HOL-queen-dynamic  p50=   101.1 p95=   2493.9 p99=  15384.8 del/s= 36498 shed=0       lanes=80000   viol=0
+   lag finale: lag=    1684
+samples=146 active=146
+cpu_cores_mean=14.62 p95=18.64
+cmbench-queen_rss_mb_max=495
+cmbench-queen-pg_rss_mb_max=6769
+[21:13:23] --- Queen, vincolata a 1000 lane (controllo) ---
+HOL-queen-1k       p50=   110.2 p95=   1923.1 p99=   7054.0 del/s= 36499 shed=0       lanes=4000    viol=0
+   lag finale: lag=    2594
+samples=135 active=126
+cpu_cores_mean=14.73 p95=16.25
+cmbench-queen_rss_mb_max=278
+cmbench-queen-pg_rss_mb_max=4957
+[21:16:20] --- pgmq, cardinalita piena (gruppi = colonna) ---
+HOL-pgmq-full      p50=    71.5 p95=    881.7 p99=   5439.3 del/s= 36500 shed=0       lanes=240000  viol=0
+   lag finale: lag=    1342
+samples=131 active=128
+cpu_cores_mean=15.26 p95=17.53
+cmbench-pgmq_rss_mb_max=7219
+disk_read_mbps_mean=0.0
+[21:19:11] --- pgmq, 1000 lane ---
+HOL-pgmq-1k        p50=    71.5 p95=    881.7 p99=   5439.3 del/s= 36500 shed=0       lanes=12000   viol=0
+   lag finale: lag=    1504
+samples=131 active=128
+cpu_cores_mean=15.04 p95=17.14
+cmbench-pgmq_rss_mb_max=6826
+disk_read_mbps_mean=0.0
+[21:22:01] --- Kafka, 1000 lane (4000 partizioni) ---
+HOL-kafka-1k       p50=   155.9 p95=  14107.9 p99=  18295.7 del/s= 36499 shed=0       lanes=4000    viol=0
+   lag finale: lag=    2482
+samples=150 active=141
+cpu_cores_mean=3.17 p95=5.31
+cmbench-kafka_rss_mb_max=12998
+disk_read_mbps_mean=0.0
+[21:25:14] --- Rabbit, 1000 lane (12 000 code) ---
+HOL-rabbit-1k      p50= 23726.6 p95=  43514.7 p99=  43514.7 del/s= 20697 shed=184684  lanes=12000   viol=0
+   lag finale: lag=     838
+samples=166 active=163
+cpu_cores_mean=12.01 p95=17.47
+cmbench-rabbit_rss_mb_max=3578
+disk_read_mbps_mean=0.0
+[21:28:08] === BLOCCO 1 COMPLETO ===
+[21:28:08] === BLOCCO 1b — esprimibilita: Kafka alla cardinalita piena, e HOL ad alta rho ===
+[21:28:09] --- KAFKA-20k (lanes=20000) ---
+up: cmbench-kafka 
+KAFKA-20k: NESSUN RISULTATO — il sistema non ha potuto esprimere questa cardinalita
+invariants: 36000 deliveries/s, 975 ordered lanes, publishes/s native=12000 copied=36000
+cmbench: run failed: setup: create topic cm-avail: POLICY_VIOLATION: Request parameters do not satisfy the configured policy.
+samples=8 active=2
+cpu_cores_mean=1.39 p95=1.01
+cmbench-kafka_rss_mb_max=473
+disk_read_mbps_mean=0.0
+[21:28:56] --- KAFKA-1k-ctl (lanes=1000) ---
+up: cmbench-kafka 
+KAFKA-1k-ctl         p50=   155.9 p95=  12937.0 p99=  16777.2 del/s= 36500 shed=0       lanes=4000    viol=0
+  gaps 0   order violations 0   dups 0   in-flight at cutoff 18
+  VERDICT: PASS
+samples=149 active=140
+cpu_cores_mean=3.24 p95=5.03
+cmbench-kafka_rss_mb_max=12928
+disk_read_mbps_mean=0.0
+[21:32:05] --- HOLHI-kafka-200 (lanes=200) ---
+up: cmbench-kafka 
+HOLHI-kafka-200      p50=   142.9 p95=   4987.9 p99=   8388.6 del/s= 36500 shed=0       lanes=800     viol=0
+  gaps 0   order violations 0   dups 0   in-flight at cutoff 6
+  VERDICT: PASS
+samples=137 active=128
+cpu_cores_mean=2.70 p95=4.66
+cmbench-kafka_rss_mb_max=11925
+disk_read_mbps_mean=0.0
+[21:35:07] --- HOLHI-queen-200 (lanes=200) ---
+up: cmbench-queen cmbench-queen-pg 
+[21:38:04] === BLOCCO 1b — scala di cardinalita Kafka: dove si rompe davvero ===
+[21:38:07] --- KLAD-2000 (lanes=2000) ---
+HOLHI-queen-200      p50=   131.1 p95=   3527.0 p99=   8388.6 del/s= 36499 shed=0       lanes=800     viol=0
+  gaps 0   order violations 0   dups 0   in-flight at cutoff 96
+  VERDICT: PASS
+up: cmbench-kafka 
+KLAD-2000            p50=   155.9 p95=  23726.6 p99=  28215.8 del/s= 36500 shed=0       lanes=8000    viol=0
+VERDICT: PASS  (0 gaps below frontier, 0 order-violations, 0 dups, 12 in-flight at cutoff)
+samples=156 active=151
+cpu_cores_mean=3.72 p95=6.17
+cmbench-kafka_rss_mb_max=14270
+[21:41:24] --- KLAD-5000 (lanes=5000) ---
+up: cmbench-kafka 
+KLAD-5000: NESSUN RISULTATO
+cmbench: run failed: setup: create topic cm-avail: POLICY_VIOLATION: Request parameters do not satisfy the configured policy.
+samples=10 active=2
+cpu_cores_mean=1.38 p95=0.92
+cmbench-kafka_rss_mb_max=478
+[21:42:18] --- KLAD-10000 (lanes=10000) ---
+up: cmbench-kafka 
+KLAD-10000: NESSUN RISULTATO
+cmbench: run failed: setup: create topic cm-avail: POLICY_VIOLATION: Request parameters do not satisfy the configured policy.
+samples=10 active=2
+cpu_cores_mean=1.41 p95=0.85
+cmbench-kafka_rss_mb_max=482
+[21:43:04] --- KLAD-20000 (lanes=20000) ---
+up: cmbench-kafka 
+KLAD-20000: NESSUN RISULTATO
+cmbench: run failed: setup: create topic cm-avail: POLICY_VIOLATION: Request parameters do not satisfy the configured policy.
+samples=10 active=2
+cpu_cores_mean=1.41 p95=0.98
+cmbench-kafka_rss_mb_max=476
+[21:43:48] === BLOCCO 1c — HOL ad alta rho (200 lane = 100 property/lane, rho~2.7) ===
+[21:43:49] --- HOLHI-kafka-200 (lanes=200) ---
+up: cmbench-kafka 
+HOLHI-kafka-200      p50=   142.9 p95=   4987.9 p99=   8388.6 del/s= 36500 shed=0       lanes=800     viol=0
+samples=10 active=7
+cpu_cores_mean=4.63 p95=6.44
+cmbench-kafka_rss_mb_max=1654
+[21:46:42] --- HOLHI-queen-200 (lanes=200) ---
+up: cmbench-queen cmbench-queen-pg 
+HOLHI-queen-200      p50=   131.1 p95=   3527.0 p99=   8388.6 del/s= 36499 shed=0       lanes=800     viol=0
+samples=10 active=9
+cpu_cores_mean=7.63 p95=12.00
+cmbench-queen_rss_mb_max=153
+[21:49:41] --- HOLHI-queen-dyn (lanes=0) ---
+up: cmbench-queen cmbench-queen-pg 
+HOLHI-queen-dyn      p50=   101.1 p95=   3846.2 p99=  19951.6 del/s= 36498 shed=0       lanes=80000   viol=0
+VERDICT: PASS  (0 gaps below frontier, 0 order-violations, 0 dups, 204 in-flight at cutoff)
+samples=148 active=147
+cpu_cores_mean=14.77 p95=18.93
+cmbench-queen_rss_mb_max=454
+[21:53:00] --- HOLHI-pgmq-200 (lanes=200) ---
+up: cmbench-pgmq 
+HOLHI-pgmq-200       p50=    85.0 p95=    961.5 p99=   5931.6 del/s= 36500 shed=0       lanes=2400    viol=0
+VERDICT: PASS  (0 gaps below frontier, 0 order-violations, 0 dups, 12 in-flight at cutoff)
+samples=132 active=129
+cpu_cores_mean=15.49 p95=17.62
+cmbench-pgmq_rss_mb_max=6913
+[21:55:52] === BLOCCO 2 — griglia della legge, assi decorrelati ===
+[21:55:53] --- LAW-B-p500-r6000 (d=12.0) ---
+LAW-B-p500-r6000 p50=   110.2 p95=    340.0 del/s=  34596 shed=0       viol=0
+samples=67 active=61
+cpu_cores_mean=15.32 p95=17.51
+cmbench-queen_rss_mb_max=268
+[21:57:47] --- LAW-B-p1000-r6000 (d=6.0) ---
+LAW-B-p1000-r6000 p50=    85.0 p95=    881.7 del/s=  34698 shed=0       viol=0
+samples=67 active=63
+cpu_cores_mean=14.56 p95=17.35
+cmbench-queen_rss_mb_max=291
+[21:59:40] --- LAW-B-p2000-r6000 (d=3.0) ---
+LAW-B-p2000-r6000 p50=    92.7 p95=    142.9 del/s=  34897 shed=0       viol=0
+samples=73 active=71
+cpu_cores_mean=13.25 p95=17.22
+cmbench-queen_rss_mb_max=286
+[22:01:39] --- LAW-B-p1000-r3000 (d=3.0) ---
+LAW-B-p1000-r3000 p50=    71.5 p95=    185.4 del/s=  17449 shed=0       viol=0
+samples=68 active=63
+cpu_cores_mean=10.89 p95=12.64
+cmbench-queen_rss_mb_max=248
+[22:03:32] --- LAW-B-p1000-r12000 (d=12.0) ---
+LAW-B-p1000-r12000 p50=   679.9 p95=   4194.3 del/s=  69142 shed=0       viol=0
+samples=73 active=66
+cpu_cores_mean=12.16 p95=18.66
+cmbench-queen_rss_mb_max=319
+[22:05:31] --- LAW-B-p2000-r12000 (d=6.0) ---
+LAW-B-p2000-r12000 p50=  1048.6 p95=   2719.7 del/s=  69400 shed=0       viol=0
+samples=73 active=71
+cpu_cores_mean=10.98 p95=13.91
+cmbench-queen_rss_mb_max=270
+[22:07:31] --- LAW-A-p500-r6000 (d=12.0) ---
+LAW-A-p500-r6000 p50=   101.1 p95=    404.3 del/s=  34598 shed=0       viol=0
+samples=67 active=61
+cpu_cores_mean=13.39 p95=15.39
+cmbench-queen_rss_mb_max=250
+[22:09:24] --- LAW-A-p1000-r6000 (d=6.0) ---
+LAW-A-p1000-r6000 p50=   101.1 p95=   2493.9 del/s=  34700 shed=0       viol=0
+samples=67 active=63
+cpu_cores_mean=12.22 p95=14.85
+cmbench-queen_rss_mb_max=266
+[22:11:17] --- LAW-A-p2000-r6000 (d=3.0) ---
+LAW-A-p2000-r6000 p50=    92.7 p95=    480.8 del/s=  34899 shed=0       viol=0
+samples=73 active=71
+cpu_cores_mean=11.99 p95=15.67
+cmbench-queen_rss_mb_max=271
+[22:13:16] --- LAW-A-p1000-r3000 (d=3.0) ---
+LAW-A-p1000-r3000 p50=    77.9 p95=    480.8 del/s=  17449 shed=0       viol=0
+samples=68 active=63
+cpu_cores_mean=9.11 p95=10.37
+cmbench-queen_rss_mb_max=245
+[22:15:09] --- LAW-A-p1000-r12000 (d=12.0) ---
+LAW-A-p1000-r12000 p50=   340.0 p95=   3846.2 del/s=  69195 shed=0       viol=0
+samples=73 active=67
+cpu_cores_mean=12.66 p95=17.43
+cmbench-queen_rss_mb_max=288
+[22:17:08] --- LAW-A-p2000-r12000 (d=6.0) ---
+LAW-A-p2000-r12000 p50=   480.8 p95=   1617.1 del/s=  69397 shed=0       viol=0
+samples=73 active=71
+cpu_cores_mean=13.30 p95=17.65
+cmbench-queen_rss_mb_max=293
+[22:19:06] === BLOCCO 3 — tenant ===
+[22:19:48] --- tenant SMALL: 10 x 10 code, 240s ---
+[22:20:30] === RIPETIBILITA: stessa cella P=1000 r=12000, 4x per set, env verificato ===
+[22:24:34] --- REP-A-1 | env reale: QUEEN_POP_FUSION=0 QUEEN_V2_FUSION_HOLD_MS=3  workers=4
+[22:22:49] push=     61/s pop=     61/s ack=     61/s empty=      0/s | e2e p50=   8.03 p99=   39.17 ms | pushRTT p50=  2.35 p99=  32.64 ms | lag=2 | errs push=0 pop=0 ack=0 gor=334
+[22:23:19] push=     64/s pop=     64/s ack=     64/s empty=      0/s | e2e p50=   9.41 p99=   39.68 ms | pushRTT p50=  3.02 p99=  33.02 ms | lag=0 | errs push=0 pop=0 ack=0 gor=334
+[22:23:49] push=     67/s pop=     67/s ack=     67/s empty=      0/s | e2e p50=   8.77 p99=   39.68 ms | pushRTT p50=  2.70 p99=  33.02 ms | lag=2 | errs push=0 pop=0 ack=0 gor=334
+
+[final] pushed=14394 popped=14390 acked=14390 empty=11 | tail: 4 msgs across 4 queues | errs push=0 pop=0 ack=0
+REP-A-1 p50=   679.9 p95=   2493.9 del/s=  69181 viol=0
+[22:26:32] --- REP-B-1 | env reale: QUEEN_POP_FUSION=1 QUEEN_V2_FUSION_HOLD_MS=15  workers=8
+REP-B-1 p50=   623.5 p95=   3846.2 del/s=  69134 viol=0
+[22:28:25] --- REP-A-2 | env reale: QUEEN_POP_FUSION=0 QUEEN_V2_FUSION_HOLD_MS=3  workers=4
+REP-A-2 p50=  1048.6 p95=   2719.7 del/s=  69200 viol=0
+[22:30:17] --- REP-B-2 | env reale: QUEEN_POP_FUSION=1 QUEEN_V2_FUSION_HOLD_MS=15  workers=8
+REP-B-2 p50=   440.9 p95=   3234.3 del/s=  69186 viol=0
+[22:32:15] --- REP-A-3 | env reale: QUEEN_POP_FUSION=0 QUEEN_V2_FUSION_HOLD_MS=3  workers=4
+REP-A-3 p50=   741.5 p95=   2493.9 del/s=  69196 viol=0
+[22:34:13] --- REP-B-3 | env reale: QUEEN_POP_FUSION=1 QUEEN_V2_FUSION_HOLD_MS=15  workers=8
+REP-B-3 p50=  2965.8 p95=   5439.3 del/s=  68025 viol=0
+[22:36:06] --- REP-A-4 | env reale: QUEEN_POP_FUSION=0 QUEEN_V2_FUSION_HOLD_MS=3  workers=4
+REP-A-4 p50=   340.0 p95=   2097.2 del/s=  69148 viol=0
+[22:37:59] --- REP-B-4 | env reale: QUEEN_POP_FUSION=1 QUEEN_V2_FUSION_HOLD_MS=15  workers=8
+REP-B-4 p50=  3234.3 p95=   5439.3 del/s=  66943 viol=0
+[22:39:08] === FINE RIPETIBILITA ===
+[22:39:08] === BLOCCO 3 — tenant ===
+[22:39:50] --- tenant SMALL: 10 x 10 code, 240s ---
+[22:42:22] push=     61/s pop=     61/s ack=     61/s empty=      0/s | e2e p50=  11.33 p99=   39.17 ms | pushRTT p50=  5.22 p99=  31.87 ms | lag=0 | errs push=0 pop=0 ack=0 gor=334
+[22:42:52] push=     57/s pop=     57/s ack=     57/s empty=      0/s | e2e p50=  11.20 p99=   40.19 ms | pushRTT p50=  5.02 p99=  32.13 ms | lag=1 | errs push=0 pop=0 ack=0 gor=334
+[22:43:22] push=     48/s pop=     49/s ack=     49/s empty=      0/s | e2e p50=   9.28 p99=   38.14 ms | pushRTT p50=  3.82 p99=  31.36 ms | lag=0 | errs push=0 pop=0 ack=0 gor=334
+
+[final] pushed=14390 popped=14390 acked=14390 empty=6 | tail: 0 msgs across 0 queues | errs push=0 pop=0 ack=0
+[22:45:23] --- tenant BIG: 1000 x 10 code, 600s ---
+[22:54:25] push=   6175/s pop=   6162/s ack=   6161/s empty=      3/s | e2e p50=  95.74 p99=  238.59 ms | pushRTT p50= 18.05 p99=  74.24 ms | lag=498 | errs push=0 pop=0 ack=0 gor=32892
+[22:54:55] push=   6091/s pop=   6104/s ack=   6105/s empty=      4/s | e2e p50=  91.65 p99=  226.30 ms | pushRTT p50= 18.30 p99=  75.26 ms | lag=101 | errs push=0 pop=0 ack=0 gor=32904
+[22:55:25] push=   5916/s pop=   5916/s ack=   5916/s empty=      5/s | e2e p50=  82.43 p99=  203.78 ms | pushRTT p50= 18.05 p99=  73.22 ms | lag=108 | errs push=0 pop=0 ack=0 gor=32904
+
+[final] pushed=3609328 popped=3609214 acked=3609200 empty=2517 | tail: 118 msgs across 118 queues | errs push=0 pop=0 ack=0
+[22:56:54] === BLOCCO 4a — calibrazione loader ===
+[23:00:08] achieved max calibrazione: 76497900 msg/s
+[23:00:08] rate soak: 600000 msg/s
+[23:00:08] === BLOCCO 4b — soak 3h10m ===
+[23:03:25] offered=   600047/s achieved=   599627/s shed=        0/s inflight=   500 | p50=  43.78 p99=  144.38 p999=  183.30 ms | push=71967400 pop=56253900 lag=15713500 | errs push=0 pop=0 empty=2946986 gor=5323 | ack=   411013/s ackErr=0 ackAvg=39.05ms
+[23:03:55] offered=   599920/s achieved=   600350/s shed=        0/s inflight=   372 | p50=  70.14 p99=  181.25 p999=  232.45 ms | push=89977900 pop=68116500 lag=21861400 | errs push=0 pop=0 empty=3507872 gor=5246 | ack=   395047/s ackErr=0 ackAvg=40.07ms
+[23:04:25] offered=   600090/s achieved=   600027/s shed=        0/s inflight=   391 | p50=  50.43 p99=  162.82 p999=  205.82 ms | push=107978700 pop=80251700 lag=27727000 | errs push=0 pop=0 empty=3858675 gor=4117 | ack=   404500/s ackErr=0 ackAvg=39.43ms
+[23:04:55] === SOAK AVVIATO ===
