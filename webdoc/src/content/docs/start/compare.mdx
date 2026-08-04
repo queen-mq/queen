@@ -257,7 +257,13 @@ for replication.
 
 ## Choosing something else
 
-Each of these systems is the right answer to a question Queen answers badly.
+Each of these systems is the right answer to a question Queen answers badly, and
+at any single point on the map a specialist may well beat it. What none of them
+does is span the map: pgmq owns sparse and wide and stops at roughly a twentieth
+of Queen's sustained rate; Kafka owns throughput and cost per message and cannot
+express the cardinality; RabbitMQ needs a live object per lane. Queen's claim is
+not that it wins a point. It is that you do not have to know which point you are
+on before you choose, and you do not have to migrate when the workload moves.
 
 | Choose | When |
 | --- | --- |
@@ -265,7 +271,7 @@ Each of these systems is the right answer to a question Queen answers badly.
 | **RabbitMQ** | You need real routing (exchanges, topic patterns, header matching) or protocol breadth beyond HTTP; ordering per queue is enough and you do not need replay |
 | **Amazon SQS** | You want no server and no database to operate at all; your fan-out is built from a topic plus several queues; your ordering domains fit FIFO's quotas; you never need to re-read history |
 | **pgmq** | You want PostgreSQL-backed queuing with no broker process; your consumers can all speak SQL; a work queue with visibility timeouts is enough, without consumer groups or replay; you can install extensions |
-| **Queen** | You need strict FIFO per entity at high and unpredictable cardinality, where one slow entity must not block others; consumer groups with replay over the same stored messages; ack-and-push in one PostgreSQL transaction; one binary and no cluster, next to a PostgreSQL you already run |
+| **Queen** | You need **all three at once**: strict FIFO per entity at cardinality you do not control, throughput that does not cap out when the same lanes get busy, and consumer groups with replay, deduplication and dead-lettering over one stored copy. Each system above gives you two of those; the third is where it stops. Also: ack-and-push in one PostgreSQL transaction, one binary and no cluster, next to a PostgreSQL you already run |
 
 Before committing either way, read [Limits and non-goals](/start/limits). It is
 the honest inverse of this page, and it will disqualify Queen faster than any

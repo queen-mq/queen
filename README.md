@@ -4,7 +4,12 @@
 
 # Queen MQ
 
-**Ordered FIFO partitions and consumer groups, on the PostgreSQL you already run. One stateless binary, no cluster, no JVM.**
+**One ordered queue, from two messages a second to six hundred thousand.**
+
+Every entity gets its own FIFO lane, created on first push, so a slow consumer on one never
+stalls another. The same broker holds thousands of near-idle lanes and a sustained 600,000
+messages a second, with consumer groups, replay, deduplication and a dead-letter queue at
+both ends. One stateless binary on the PostgreSQL you already run. No cluster, no JVM.
 
 <div align="center">
 

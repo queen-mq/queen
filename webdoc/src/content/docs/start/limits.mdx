@@ -231,6 +231,17 @@ handler finishes loses the message.
 | Opaque binary or very large payloads | Payloads are JSON, inside a request-body cap |
 | A broker you can expose directly to untrusted clients | No TLS listener, no CORS, authentication off by default, and a mesh port that must be firewalled |
 | A Rust, Java or .NET SDK today | Only five language SDKs exist; everything else is plain HTTP |
+| Nothing but per-key ordering at very high cardinality, at a modest rate | pgmq does that with no per-lane state at all, and we measured it beating Queen on every percentile at three times the cardinality. Queen's per-lane cursor is what buys consumer groups, replay, per-group lag and a retry budget; if you need none of those, you are paying for them |
+
+The second-to-last row is the one worth dwelling on, because it is the newest and
+the least comfortable. Measured side by side on one machine, pgmq is faster than
+Queen on sparse lanes and flat in cardinality where Queen's tail grows. What it
+cannot do is hold the rate: its ordered-consume path tops out between 20 000 and
+40 000 messages per second and collapses above that, against 600 000 sustained
+for Queen, and it has no consumer groups, no replay, no deduplication and no
+dead-letter queue. Choose by which of those two failures you can absorb, not by
+the headline. The full tables are in
+[Cross-broker comparison](/benchmarks/comparison).
 
 If none of those is disqualifying, the design reasoning behind the trade-offs is
 in [Why Queen exists](/start/why), the architectural comparison is in

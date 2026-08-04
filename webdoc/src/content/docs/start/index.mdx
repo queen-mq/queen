@@ -16,6 +16,14 @@ is a strictly ordered lane that a consumer group drains independently. Ten thous
 partitions cost ten thousand index rows, not ten thousand log files or ten thousand
 processes, and a consumer stuck on one lane never blocks another.
 
+The point of that design is **range**. The same broker holds a workload of thousands of
+lanes each seeing a message every second or two, and a workload of 600 000 messages a
+second, without changing its architecture and without you choosing which of the two you
+were building for. Systems that specialise in one end tend to fall off the other: measured
+side by side, the closest PostgreSQL-based alternative is faster than Queen on sparse lanes
+and stops serving the offered rate at roughly a twentieth of Queen's sustained throughput.
+[See the numbers, with their conditions](/benchmarks/comparison).
+
 Everything else follows from that choice. The broker is one stateless Rust binary that
 holds no cluster membership and no partition assignments, so you scale it by starting
 another copy against the same database. Clients speak plain HTTP and hold no coordination

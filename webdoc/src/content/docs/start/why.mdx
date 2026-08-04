@@ -33,22 +33,48 @@ tool call must not delay anybody else's.
 
 That is a head-of-line blocking problem with an awkward cardinality. The set of
 live sessions is large, it changes constantly, and you do not know the next
-session id before it appears. The two standard answers both make you pay for
+session id before it appears. Two of the three standard answers make you pay for
 entity count in a resource you have to provision in advance:
 
 - **One physical shard per entity.** Kafka gives you ordered partitions, but a
   fixed number of them: entities are hashed onto the shards you allocated, so
   two sessions that collide on the same partition block each other, and you
-  cannot create a partition per session on demand.
+  cannot create a partition per session on demand. Measured on our own rig, its
+  broker refuses topic creation somewhere between 2 000 and 5 000 partitions per
+  topic on default settings, and its p95 has already grown to 23.7 seconds at
+  8 000 partitions.
 - **One process or queue per entity.** RabbitMQ preserves order within a queue,
   so per-entity ordering means a queue per entity, and every one of those is a
-  live server-side object with its own memory and bookkeeping.
+  live server-side object with its own memory and bookkeeping. At 1 000 ordered
+  lanes that is 12 000 queues and 12 000 consumers.
 
-Queen's answer is that a partition should be a *logical* lane, not a physical
-one: a row, created the first time you push to it, carrying little more than a
-name and an offset counter. Ordering becomes a property of a row lock instead of
-a property of a file or a process. Everything below follows from that, including
-the parts that hurt.
+**The third answer does not make you pay for cardinality at all, and it is worth
+being straight about it.** pgmq keeps the ordering key as a value inside each
+message's JSONB header, so a lane is not an object: adding one costs nothing and
+its cost curve is flat. We measured it at 240 000 ordered lanes with the same
+latency it has at 12 000, and better percentiles than Queen at three times the
+cardinality. If cardinality alone is your problem, that design wins.
+
+What it gives up is everything that requires remembering who has read what. Its
+grouped read rewrites the message row itself, so there is no cursor per consumer
+group: no replay, no second group over the same stored messages, no per-group
+lag, and no natural place to keep a retry budget. And because the read has to
+scan the queue table to find each group's head, its cost tracks standing rows
+rather than lane count: when arrival outruns service the table grows, every read
+re-scans the backlog, and service falls further. We measured that ceiling at
+20 000 to 40 000 messages per second on ordered consumption, with a collapse
+above it rather than a slope.
+
+Queen's answer is a third position: a partition is a *logical* lane, but it keeps
+per-lane state. A row, created the first time you push to it, carrying little
+more than a name and an offset counter, plus one cursor per (partition, consumer
+group). Ordering becomes a property of a row lock instead of a property of a file
+or a process, and the cursor is what buys back replay, groups, lag and
+dead-lettering.
+
+That per-lane state is a real cost. It is why Queen's tail grows with lane count
+where pgmq's does not, and it is the honest price of the features on top of it.
+Everything below follows from that trade, including the parts that hurt.
 
 ## 1. Unlimited dynamic FIFO partitions
 
