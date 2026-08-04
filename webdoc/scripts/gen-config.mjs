@@ -170,6 +170,22 @@ const EXTRA_VARS = [
     // Applied in main.rs as a DefaultBodyLimit layer; config.rs only echoes it
     // into the boot log.
   },
+  {
+    name: "QUEEN_ADMISSION_INIT",
+    type: "integer",
+    def: "96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)",
+    aliases: [],
+    // config.rs :: admission_floor — derived from the pool rather than a
+    // literal, so the parser reads back the binding name. Stated here as the
+    // value the defaults actually produce (160 - 16, two thirds).
+  },
+  {
+    name: "QUEEN_ADMISSION_MIN",
+    type: "integer",
+    def: "96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)",
+    aliases: [],
+    // Same derived floor as QUEEN_ADMISSION_INIT.
+  },
 ];
 
 /** Still parsed and logged at boot, but wired to nothing. */

@@ -102,7 +102,7 @@ The broker is configured entirely through environment variables: 94 of them, lis
 | `QUEEN_HOTLIST_RESEED_MS` | integer | `30000` |  |
 | `QUEEN_HOTLIST_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |
 | `QUEEN_HOTLIST_WINDOW_BATCH` | integer | `100` |  |
-| `QUEEN_V2_FUSION_HOLD_MS` | integer | `15` |  |
+| `QUEEN_V2_FUSION_HOLD_MS` | integer | `3` |  |
 | `QUEEN_V2_FUSION_SHARDS` | integer | `8` |  |
 | `QUEEN_V2_ZSTD_LEVEL` | integer | `3` |  |
 
@@ -148,9 +148,9 @@ The broker is configured entirely through environment variables: 94 of them, lis
 
 | Variable | Type | Default | Also read as |
 | --- | --- | --- | --- |
-| `QUEEN_ADMISSION_INIT` | integer | `16` |  |
+| `QUEEN_ADMISSION_INIT` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |
 | `QUEEN_ADMISSION_MAX` | integer | `128` |  |
-| `QUEEN_ADMISSION_MIN` | integer | `8` |  |
+| `QUEEN_ADMISSION_MIN` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |
 | `QUEEN_ADMISSION_NOSYNC_BUDGET` | integer | `64` |  |
 | `QUEEN_ADMISSION_POOL_RESERVE` | integer | `16` |  |
 | `QUEEN_ADMISSION_SHARE_ACK` | number | `0.30` |  |
