@@ -81,7 +81,7 @@ traffic can only arrive at the one proxy that fronts its cell. Therefore:
 - **Usage is aggregated locally** and flushed per minute, rather than counted twice
   and reconciled.
 
-The cost of that design is honest and worth stating: the counters are process-local,
+The cost of that design is that the counters are process-local,
 so a proxy restart resets them. Token buckets start full, and the in-memory
 push-block flags are empty until the pumps that own them run again: the storage flag
 within about ten seconds of the next successful reconcile, the monthly-quota flag on
@@ -193,7 +193,7 @@ The order is load-bearing, and it is the order in the gateway:
   <LinkCard
     href="/selfhost/multi-tenant/tenants"
     title="Tenants, clusters and cells"
-    description="The data model and the SQL functions that provision it, including what is not implemented."
+    description="The data model and the SQL functions that provision it, including the ones only a psql session can call."
   />
   <LinkCard
     href="/selfhost/multi-tenant/auth"

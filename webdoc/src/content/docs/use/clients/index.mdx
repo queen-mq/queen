@@ -1,6 +1,6 @@
 ---
 title: Pick your SDK
-description: "What each Queen client actually implements: six SDKs, the plain HTTP API, and the gaps verified in their source."
+description: "What each Queen client implements: six SDKs, the plain HTTP API, and the per-SDK behaviour verified in their source."
 type: overview
 tier: use
 sidebar:
@@ -19,12 +19,15 @@ sourceOfTruth:
 Every SDK speaks the same HTTP API, so the choice is about ergonomics and completeness, not
 about capability. All six wrap the same six calls (push, pop, ack, transaction, lease
 renewal, DLQ query) behind a fluent builder with the same method names transliterated into
-each language's conventions. The differences are in what got finished: the admin surface,
+each language's conventions. The differences are in coverage: the admin surface,
 client-side buffering, lease renewal inside the consume loop, and how each one behaves when
 a proxy answers `429` or `403`.
 
 If your language is not here, the HTTP API is the SDK. The whole message plane is eight
-routes and one header. See [Using Queen over HTTP](/use/clients/http).
+routes and one header. See the [HTTP quickstart](/use/clients/http).
+
+The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+[Versions and compatibility](/reference/compatibility) states what that covers.
 
 ## The matrix
 
@@ -38,10 +41,10 @@ routes and one header. See [Using Queen over HTTP](/use/clients/http).
 | Consume loop with workers | yes | yes | yes | yes | yes | yes | write it |
 | Multi-partition pop | yes | yes | yes | yes | yes | yes | `?partitions=N` |
 | Client-side buffering | yes | yes | yes | yes | yes | yes | batch the body yourself |
-| Admin / observability calls | yes | yes | yes | yes | yes | **none** | yes |
+| Admin / observability calls | yes | yes | yes | yes | yes | none | yes |
 | DLQ query | yes | yes | yes | yes | yes | yes | `GET /api/v1/dlq` |
 | Streaming SDK in the same package | yes | yes | yes | yes | no | no | `/streams/v1/*` |
-| Lease renewal during consume | yes | yes | yes | yes | yes | **not implemented** | your own timer |
+| Lease renewal during consume | yes | yes | yes | yes | yes | not implemented | your own timer |
 | `429` backoff with `Retry-After` | yes | yes | yes | yes | yes | yes | your own |
 | `403` treated as terminal | yes | yes | yes | yes | yes | yes | your own |
 | Signal handling on by default | yes | yes (no opt-out) | no | no (opt-in feature) | consumer only | partial, unsafe | n/a |
@@ -49,15 +52,14 @@ routes and one header. See [Using Queen over HTTP](/use/clients/http).
 | Wire types shared with the broker | no | no | no | **yes** | no | no | n/a |
 
 The runtime floors are read from `package.json` (`engines.node`), the PEP 585 annotations in
-`clients/client-py/queen/` (see [Python](/use/clients/python)), `go.mod`, the `rust-version`
+`clients/client-py/queen/` (see the [Python quickstart](/use/clients/python)), `go.mod`, the `rust-version`
 in `clients/client-rust/Cargo.toml`, `composer.json` (`php: ^8.3`) and the `-std=c++17` in the
 C++ `Makefile`.
 
 The last row is the one structural difference. The Rust client and the broker both depend on
 `crates/queen-protocol`, and the broker's own test suite round-trips its request parsers and
 its rendered responses through those types. A renamed field fails a test rather than reaching
-a client. Every other SDK re-describes the wire by hand, which is where most of the gaps below
-came from.
+a client. Every other SDK re-describes the wire by hand.
 
 ## Same grammar, six spellings
 
@@ -124,7 +126,7 @@ to protect a retry.
 
 ## Where the SDKs diverge
 
-These are behaviours you cannot infer from one SDK by reading another.
+These are per-SDK behaviours to check when you move between languages.
 
 **`pop()` long-polls everywhere except Go.** (Rust long-polls too.) JavaScript, Python, PHP and C++ all initialise
 the builder's wait flag from their *consume* defaults, which is `true`, so a bare `pop()`
@@ -172,35 +174,33 @@ resolves on the signal, so the flush sits where you want it in your shutdown seq
 track the limit inside each worker, so `concurrency(4).limit(10)` processes up to forty
 messages. Rust shares one counter across workers and stops at ten.
 
-## Verified gaps
+## Verified against the source
 
-Every item below was checked against the current source and the broker's router. They are
-listed here so a green call does not mislead you.
+Every item below was checked against the current source and the broker's router.
 
-- **`renew()` does report the new expiry, under three names.** This used to be a gap: the
-  stored procedure returns `{"renewed":N,"expiresAt":"..."}` while the SDKs read `newExpiresAt`
-  or `lease_expires_at`. The broker now writes the same value under all three keys
+- **`renew()` reports the new expiry under three names.** The stored procedure returns
+  `{"renewed":N,"expiresAt":"..."}`, and the broker writes the same value under all three keys
   (`server/src/handlers/data.rs`, the `for key in ["newExpiresAt", "expiresAt",
   "lease_expires_at"]` loop), so whichever one your SDK looks for is populated. Renewal is
-  still best-effort and always answers HTTP 200, so check `success` rather than the status
+  best-effort and always answers HTTP 200, so check `success` rather than the status
   code.
-- **Two admin methods target routes the broker does not register.** `clearQueue()` (`DELETE
-  /api/v1/queues/:queue/clear`) and `moveMessageToDLQ()` (`POST
+- **The admin message operations are `retryMessage()` and `deleteMessage()`.** `clearQueue()`
+  (`DELETE /api/v1/queues/:queue/clear`) and `moveMessageToDLQ()` (`POST
   /api/v1/messages/:partitionId/:transactionId/dlq`) exist in the JavaScript, Python, Go and
-  PHP admin surfaces, but neither path appears in `server/src/main.rs`. They return a 404.
-  `retryMessage()` and `deleteMessage()` are real. The Rust client does not expose either one,
-  for that reason. Note also that `retryMessage()` is a dead-letter *replay*: it re-pushes the
-  DLQ snapshot and drops the DLQ row, and errors on a message that is not in the DLQ.
-- **`traceId` on a plain push is discarded.** The JavaScript, Python and Go clients forward a
-  `traceId` with `POST /api/v1/push`, and their pages say so, but the broker's push path has
-  nowhere to put it: `PushItem` in `server/src/handlers/data.rs` declares no such field, and
-  neither the staged frame nor `fusion::OwnedFrame` carries one. Serde drops the unknown key
-  and the message pops back with `"traceId": null`. It is honoured on the transaction path,
-  where `txn_add_push` reads it, so push inside a transaction when a trace id has to survive.
-  The Rust client omits the field on plain pushes rather than offering one that does nothing.
-- **C++ has no admin surface at all.** `queen_client.hpp` defines no `Admin` class: no
-  overview, queue listing, status, analytics, traces-by-name, maintenance mode or consumer
-  group calls. Only the message plane, transactions and the DLQ query are reachable.
+  PHP admin surfaces, but neither path appears in `server/src/main.rs`, so they return a 404.
+  The Rust client exposes neither one, for that reason. Note also that `retryMessage()` is a
+  dead-letter *replay*: it re-pushes the DLQ snapshot and drops the DLQ row, and errors on a
+  message that is not in the DLQ.
+- **`traceId` travels on the transaction path.** `txn_add_push` reads it, so push inside a
+  transaction when a trace id has to survive. On a plain push it is discarded: the JavaScript,
+  Python and Go clients forward a `traceId` with `POST /api/v1/push`, and their pages document
+  it, but the broker's push path has nowhere to put it. `PushItem` in
+  `server/src/handlers/data.rs` declares no such field, and neither the staged frame nor
+  `fusion::OwnedFrame` carries one, so serde drops the unknown key and the message pops back
+  with `"traceId": null`. The Rust client omits the field on plain pushes.
+- **The C++ client covers the message plane, transactions and the DLQ query.**
+  `queen_client.hpp` defines no `Admin` class, so overview, queue listing, status, analytics,
+  traces-by-name, maintenance mode and consumer group calls are not reachable from it.
 - **C++ accepts `renew_lease(true, ms)` and does nothing with it.** The value is carried into
   `ConsumeOptions`, and the consume worker's renewal site is a `// TODO`. Long-running C++
   handlers must call `client.renew(messages)` on their own timer or lose the lease.
@@ -217,9 +217,9 @@ listed here so a green call does not mislead you.
 - **The DLQ builders send filters the broker ignores.** `GET /api/v1/dlq` reads only `queue`,
   `consumerGroup`, `limit` and `offset` (`server/src/handlers/messages.rs`). Every SDK except
   Rust also sends `partition`, `from` and `to`, which are dropped; the Rust builder exposes only
-  the four that work. The response has no `total` either
-  (it carries `messages` plus a `pagination` object), so the `total` field the SDKs expose is
-  always zero or undefined.
+  the four that work. The `total` the response carries is the size of the page, not of the
+  result set: the handler sets it to the length of the array it just returned, so it can never
+  exceed `limit`. Page with `offset` until you get a short page.
 
 ## Authentication and rate limits
 
@@ -251,43 +251,45 @@ for a consumer. See [Reference](/reference) for the level of every route.
 
 At the 1.0.0 release the client SDKs are version-aligned with the broker. Pin the SDK to the
 broker's major version; the wire contract shown throughout these pages is the 1.0.0 one.
+Which client version works with which broker, and what is explicitly not part of the
+contract, is set out in [versions and compatibility](/reference/compatibility).
 
 ## The pages
 
 <CardGrid>
   <LinkCard
     href="/use/clients/javascript"
-    title="JavaScript"
+    title="JavaScript quickstart"
     description="npm queen-mq, the reference implementation: buffering, load balancing, injectable logger, host-routed proxies."
   />
   <LinkCard
     href="/use/clients/python"
-    title="Python"
+    title="Python quickstart"
     description="PyPI queen-mq: async/await on httpx, and the four places it differs from JavaScript."
   />
   <LinkCard
     href="/use/clients/go"
-    title="Go"
+    title="Go quickstart"
     description="context.Context throughout, explicit Execute, and a Pop() that does not long-poll by default."
   />
   <LinkCard
     href="/use/clients/rust"
-    title="Rust"
+    title="Rust quickstart"
     description="crates.io queen-mq: async on tokio, wire types shared with the broker, and the full streams DSL."
   />
   <LinkCard
     href="/use/clients/php-laravel"
-    title="PHP and Laravel"
+    title="PHP and Laravel quickstart"
     description="The plain PHP SDK, the service provider, and the artisan queen:consume command."
   />
   <LinkCard
     href="/use/clients/cpp"
-    title="C++"
-    description="One header, three vendored dependencies whose include paths no longer resolve, and how to build it anyway."
+    title="C++ quickstart"
+    description="One header, three vendored dependencies you put in place yourself, and the build recipe."
   />
   <LinkCard
     href="/use/clients/http"
-    title="Plain HTTP"
+    title="HTTP quickstart"
     description="Base URL, auth header, the push/pop/ack shapes, the bodiless 204, and a complete curl walkthrough."
   />
 </CardGrid>

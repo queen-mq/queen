@@ -23,7 +23,9 @@ jobs:
       - name: Build queen:test
         uses: docker/build-push-action@v6
         with:
-          context: ./server
+          # Repo root, not ./server: the broker depends on the shared
+          # queen-protocol crate by relative path, so it has to be in context.
+          context: .
           file: ./server/Dockerfile
           tags: queen:test
           outputs: type=docker,dest=/tmp/queen-test.tar
@@ -43,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [js, go, py, cli, cpp, mesh]
+        suite: [js, go, py, cli, cpp, rust-client, mesh]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -64,3 +66,57 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: cargo test
         run: cargo test --manifest-path server/Cargo.toml --locked
+
+  # The Rust SDK and the wire-contract crate. There is no cargo workspace at the
+  # repo root, and a path dependency's `#[cfg(test)]` modules are never compiled
+  # — so the broker's `cargo test` above reaches neither of these. Each manifest
+  # has to be named explicitly or its tests do not run anywhere.
+  #
+  # No broker here: this cell is the unit tests, the fake-broker wire tests and
+  # the skip branch of the integration harness. The live-broker run is the
+  # `rust-client` cell of the matrix above.
+  rust-client-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+      - name: queen-protocol tests
+        run: cargo test --manifest-path crates/queen-protocol/Cargo.toml --locked
+      - name: client tests
+        run: cargo test --manifest-path clients/client-rust/Cargo.toml --locked
+      # `signals` is off by default, so nothing else in the repo ever compiles
+      # `shutdown_on_signal`.
+      - name: client tests (all features)
+        run: cargo test --manifest-path clients/client-rust/Cargo.toml --locked --all-features
+      - name: rustfmt
+        run: |
+          cargo fmt --manifest-path crates/queen-protocol/Cargo.toml --check
+          cargo fmt --manifest-path clients/client-rust/Cargo.toml --check
+      - name: clippy
+        run: |
+          cargo clippy --manifest-path crates/queen-protocol/Cargo.toml --locked \
+            --all-targets -- -D warnings
+          cargo clippy --manifest-path clients/client-rust/Cargo.toml --locked \
+            --all-targets --all-features -- -D warnings
+
+  # `rust-version` in the client's Cargo.toml is a promise to anyone on an older
+  # toolchain. Every other job runs current stable, so without this the promise
+  # is never checked — which is how it came to say 1.75 while the crate had not
+  # built on anything below 1.86 for a long time. Keep the number here and in
+  # Cargo.toml in step.
+  rust-client-msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.86"
+      - name: cargo check on the declared MSRV
+        run: |
+          cargo check --manifest-path crates/queen-protocol/Cargo.toml --locked --all-targets
+          cargo check --manifest-path clients/client-rust/Cargo.toml --locked \
+            --all-targets --all-features

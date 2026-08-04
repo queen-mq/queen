@@ -95,7 +95,12 @@ describe('HttpClient — 429 retry policy', () => {
   it('falls back to exponential backoff when Retry-After is absent, and the gap grows', async () => {
     const plan = repeat(rateLimited(), 2)
     await withPlanServer(plan, { status: 200, body: { ok: true } }, async (url, hits) => {
-      const client = new HttpClient({ baseUrl: url, retry429: { baseMs: 20, capMs: 2000 } })
+      // baseMs has to be well above the event loop's scheduling noise. At 20ms
+      // a loaded runner added ~27ms to BOTH gaps, which collapses their ratio
+      // towards 1 (observed: 47ms then 54ms) and failed a test about growth
+      // that was working perfectly. The delay is additive, so the fix is a base
+      // big enough to dominate it, not a looser threshold.
+      const client = new HttpClient({ baseUrl: url, retry429: { baseMs: 100, capMs: 2000 } })
       try {
         const result = await client.get('/x')
         assert.deepEqual(result, { ok: true })

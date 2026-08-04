@@ -1,6 +1,6 @@
 ---
 title: Testing
-description: "One command builds the broker and every runner image, then runs each suite against each topology as an isolated Compose project and prints a matrix, plus what is green today and one defect in the harness itself."
+description: "One command builds the broker and every runner image, runs each suite against each topology as an isolated Compose project, and prints a matrix. Plus what is green today."
 type: how-to
 tier: internals
 sidebar:
@@ -17,6 +17,7 @@ sourceOfTruth:
   - test/runners/py/entrypoint.sh
   - test/runners/cli/entrypoint.sh
   - test/runners/cpp/entrypoint.sh
+  - test/runners/rust-client/entrypoint.sh
   - .github/workflows/tests.yml
 verifiedBy:
   - test/run.sh
@@ -53,6 +54,7 @@ and `--no-build` reuses everything.
 | `py` | the whole `pytest` tree under `clients/client-py/tests`, streams included | `single`, `ha`, `tenanted` |
 | `cli` | the `queenctl` end-to-end suite, which needs the Go workspace and `QUEEN_E2E=1` | `single`, `ha`, `tenanted` |
 | `cpp` | `test_retry429` (self-contained, no broker) then `test_client` against the broker | `single`, `ha`, `tenanted` |
+| `rust-client` | `cargo test` in `clients/client-rust`: the lib unit tests, then each integration binary in turn. `QUEEN_TEST_URL` is what turns the integration tests on; without it they skip | `single`, `ha`, `tenanted` |
 | `rust` | the broker's in-process unit tests, `cargo test`, no stack and no PostgreSQL | `unit` |
 | `mesh` | asserts the two brokers of an HA pair see each other with zero handshake failures | `ha` |
 | `tenancy` | two-tenant isolation over the HA pair with the trusted tenant header | `ha-tenanted` |

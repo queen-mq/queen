@@ -30,7 +30,7 @@ step entirely.
 The apply **only creates**. There are no teardown files, no migration blocks and no upgrade
 `ALTER`s: a deployment starts from an empty database, and `schema.sql`'s `CREATE TABLE`s declare
 the final shape directly. Pointing this build at a database written by an earlier schema is
-unsupported (fresh database, full stop). See [Retired objects](/internals/legacy) for the history.
+unsupported: a new version means a fresh database. See [Retired objects](/internals/legacy) for the history.
 
 The engine needs `CREATE SCHEMA` and **no extensions**, with one floor worth naming: the
 `cgm_identity_uk` index below uses `NULLS NOT DISTINCT`, which needs **PostgreSQL 15 or newer**.
@@ -90,7 +90,7 @@ A queue row is created by the first push (`003_log_push` provisioning), by `/con
 and by a **wildcard pop or subscription registration on a queue that does not exist yet**
 (`004_log_pop`). That last one is a deliberate widening: the pop writes a durable queue-scoped
 `consumer_groups_metadata` row, whose FK needs the queue row, and subscribe-before-first-push is
-legitimate, so the FK must not turn an early subscriber into an error. The honest flip side: a
+legitimate, so the FK must not turn an early subscriber into an error. The flip side: a
 consumer typo now creates a queue row, where it previously left only an orphan watermark.
 
 Queue deletion is **one call**: `queen.delete_queue_v1` (`013_analytics`) resolves the id, deletes

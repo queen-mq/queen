@@ -1,10 +1,11 @@
 ---
-title: Go
+title: Go quickstart
 description: "Install the Go client, construct it, and use the fluent API, including the Pop() that does not long-poll by default."
 type: how-to
 tier: use
 sidebar:
   order: 15
+  label: Go
 sourceOfTruth:
   - clients/client-go/queen.go
   - clients/client-go/queue_builder.go
@@ -28,6 +29,9 @@ verifiedBy:
 The Go client takes a `context.Context` on every network call and separates building from
 executing: a builder chain is inert until you call `Execute(ctx)`, `Pop(ctx)` or `Get(ctx)`.
 It requires Go 1.24 and depends only on `github.com/google/uuid` and `github.com/jackc/pgx/v5`.
+
+The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+[Versions and compatibility](/reference/compatibility) states what that covers.
 
 ```bash
 go get github.com/smartpricing/queen/clients/client-go
@@ -346,12 +350,13 @@ from `queen.log_dlq`, unlike a pop.
 
 <Aside type="note">
 Three things about this call. `Get` swallows errors and returns an empty response with a
-`nil` error, so check `len(dlq.Messages)` rather than trusting the error. `dlq.Total` is
-always `0`: the broker answers `{"messages":[…],"pagination":{"limit":…,"offset":…}}` with no
-`total` field. And `.From()`, `.To()` and the partition are sent as query parameters that the
+`nil` error, so check `len(dlq.Messages)` rather than trusting the error. `dlq.Total` is the
+size of the page, not of the result set: the handler sets it to the length of the array it just
+returned, so it can never exceed `Limit` and it does not tell you how much is left. And
+`.From()`, `.To()` and the partition are sent as query parameters that the
 broker's DLQ handler does not read (it collects only `queue`, `consumerGroup`, `limit` and
-`offset`), so they are silently ignored. Page with `Limit`/`Offset` and filter the rest
-client-side.
+`offset`), so they are silently ignored. Page with `Limit`/`Offset` until you get a short page,
+and filter the rest client-side.
 </Aside>
 
 The broker does have a replay route that re-pushes a dead letter and drops its DLQ row, but

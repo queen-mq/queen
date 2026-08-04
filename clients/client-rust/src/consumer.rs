@@ -366,7 +366,12 @@ impl WorkerCtx {
         }
         match outcome {
             Ok(()) => {
-                if let Err(e) = self.builder.inner.ack_one(msg, AckStatus::Completed, None).await {
+                if let Err(e) = self
+                    .builder
+                    .inner
+                    .ack_one(msg, AckStatus::Completed, None)
+                    .await
+                {
                     tracing::error!(transaction_id = %msg.transaction_id, error = %e, "ack failed");
                 }
                 self.shared.acked.fetch_add(1, Ordering::Relaxed);
@@ -415,7 +420,64 @@ impl WorkerCtx {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use super::*;
+    use crate::config::Config;
+    use crate::Queen;
+
+    /// A builder pointed at a port that refuses, giving up after one attempt.
+    /// The tests below either never reach the network or expect the call that
+    /// does to fail immediately.
+    fn builder() -> QueueBuilder {
+        Queen::connect(Config::new("http://127.0.0.1:1").retry_attempts(1))
+            .expect("one http:// URL is a valid configuration")
+            .queue("orders")
+    }
+
+    fn shared() -> Arc<Shared> {
+        Arc::new(Shared {
+            processed: AtomicU64::new(0),
+            acked: AtomicU64::new(0),
+            nacked: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+            reason: std::sync::Mutex::new(StopReason::Ended),
+        })
+    }
+
+    fn ctx(builder: QueueBuilder, shared: &Arc<Shared>, cancel: Option<Cancel>) -> WorkerCtx {
+        WorkerCtx {
+            builder,
+            shared: Arc::clone(shared),
+            cancel,
+        }
+    }
+
+    fn message(transaction_id: &str) -> Message {
+        Message {
+            id: format!("m-{transaction_id}"),
+            transaction_id: transaction_id.to_string(),
+            trace_id: None,
+            data: serde_json::json!({ "n": 1 }),
+            producer_sub: None,
+            created_at: "2026-08-04T10:00:00Z".into(),
+            partition_id: "p1".into(),
+            partition: "Default".into(),
+            lease_id: "L1".into(),
+            consumer_group: "workers".into(),
+        }
+    }
+
+    /// Consume with a handler that does nothing, for the paths that stop before
+    /// a message is ever delivered.
+    async fn consume_noop(b: &QueueBuilder) -> Result<ConsumeSummary> {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            b.consume(|_| async { Ok::<(), Infallible>(()) }),
+        )
+        .await
+        .expect("consume never returned: a stop condition was not checked before polling")
+    }
 
     #[tokio::test]
     async fn cancel_is_observable_from_a_clone() {
@@ -453,5 +515,219 @@ mod tests {
         stop_with(&shared, StopReason::Limit);
         stop_with(&shared, StopReason::Idle);
         assert_eq!(*shared.reason.lock().unwrap(), StopReason::Limit);
+    }
+
+    #[tokio::test]
+    async fn cancelling_twice_is_harmless_and_shows_up_in_debug() {
+        let c = Cancel::new();
+        assert!(!c.is_cancelled());
+        assert!(format!("{c:?}").contains("false"), "{c:?}");
+
+        c.cancel();
+        // A second cancel must not panic on the notifier or unset the flag:
+        // shutdown paths routinely fire this from more than one place.
+        c.cancel();
+        assert!(c.is_cancelled());
+        assert!(format!("{c:?}").contains("true"), "{c:?}");
+
+        tokio::time::timeout(Duration::from_millis(500), c.cancelled())
+            .await
+            .expect("cancelled() must resolve at once when the flag is already set");
+    }
+
+    // These three stop conditions are checked at the top of the worker loop,
+    // before the first poll. That is what makes them observable at all here:
+    // the broker is unreachable, so a consumer that polled first would spend the
+    // test backing off instead of returning.
+    #[tokio::test]
+    async fn a_cancelled_consumer_stops_before_it_polls() {
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let summary = consume_noop(&builder().concurrency(4).cancel(cancel))
+            .await
+            .expect("a consumer that was asked to stop did not fail, it stopped");
+        assert_eq!(summary.stopped_by, StopReason::Cancelled);
+        assert_eq!(summary.processed, 0, "nothing was ever delivered");
+    }
+
+    #[tokio::test]
+    async fn a_limit_already_reached_stops_before_the_first_poll() {
+        let summary = consume_noop(&builder().limit(0))
+            .await
+            .expect("limit(0) is a no-op consumer, not an error");
+        assert_eq!(summary.stopped_by, StopReason::Limit);
+        assert_eq!(summary.processed, 0);
+    }
+
+    #[tokio::test]
+    async fn an_already_elapsed_idle_timeout_stops_before_the_first_poll() {
+        let summary = consume_noop(&builder().idle(Duration::ZERO))
+            .await
+            .expect("an idle consumer stops, it does not fail");
+        assert_eq!(summary.stopped_by, StopReason::Idle);
+    }
+
+    #[tokio::test]
+    async fn consuming_without_addressing_is_refused_before_any_worker_starts() {
+        let queen = Queen::connect(Config::new("http://127.0.0.1:1"))
+            .expect("one http:// URL is a valid configuration");
+        let err = queen
+            .queue_opt(None)
+            .consume(|_| async { Ok::<(), Infallible>(()) })
+            .await
+            .expect_err("a consumer with nothing to poll must say so");
+        assert!(err.to_string().contains("queue"), "{err}");
+
+        let err = queen
+            .queue_opt(None)
+            .consume_batch(|_| async { Ok::<(), Infallible>(()) })
+            .await
+            .expect_err("consume_batch has the same requirement");
+        assert!(err.to_string().contains("queue"), "{err}");
+    }
+
+    // `limit` counts across all workers, not per worker — a promise the crate
+    // docs make explicitly. A per-worker counter would let `concurrency(4)`
+    // with `limit(10)` process forty messages.
+    #[test]
+    fn the_limit_is_shared_by_every_worker() {
+        let shared = shared();
+        let a = ctx(builder().limit(10), &shared, None);
+        let b = ctx(builder().limit(10), &shared, None);
+
+        for _ in 0..9 {
+            a.bump_processed();
+        }
+        assert!(
+            !b.limit_reached(),
+            "9 of 10 processed, yet a worker already considers the limit reached"
+        );
+
+        b.bump_processed();
+        assert!(
+            a.limit_reached(),
+            "the tenth message was counted by the other worker; both workers must stop"
+        );
+        assert_eq!(shared.processed.load(Ordering::SeqCst), 10);
+    }
+
+    // A batch is counted whole, so `consume_batch` can overshoot the limit —
+    // but it must never *undershoot* it and keep polling forever.
+    #[test]
+    fn a_batch_counts_every_message_and_may_overshoot_the_limit() {
+        let shared = shared();
+        let c = ctx(builder().limit(5), &shared, None);
+        c.bump_processed_by(7);
+        assert_eq!(shared.processed.load(Ordering::SeqCst), 7);
+        assert!(
+            c.limit_reached(),
+            "an overshooting batch still ends the run"
+        );
+    }
+
+    #[test]
+    fn a_worker_stops_on_either_the_shared_flag_or_its_cancel_token() {
+        let shared = shared();
+        let cancel = Cancel::new();
+        let cancellable = ctx(builder(), &shared, Some(cancel.clone()));
+        let plain = ctx(builder(), &shared, None);
+        assert!(!cancellable.should_stop());
+        assert!(!plain.should_stop());
+
+        // The token is checked between messages too, not only between polls:
+        // otherwise a cancel during a long batch would be ignored until the
+        // whole claim had been processed.
+        cancel.cancel();
+        assert!(cancellable.should_stop());
+        assert!(
+            !plain.should_stop(),
+            "one consumer's token must not stop a worker that was never given it"
+        );
+
+        stop_with(&shared, StopReason::Limit);
+        assert!(
+            plain.should_stop(),
+            "one worker hitting the limit must stop the others mid-batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_ack_mode_reports_the_outcome_without_settling_anything() {
+        let shared = shared();
+        let c = ctx(builder().auto_ack(false), &shared, None);
+        let msg = message("t1");
+
+        assert!(c.settle(&msg, Ok::<(), Infallible>(())).await);
+        assert!(!c.settle(&msg, Err("boom")).await);
+        c.settle_batch(&[msg], Ok::<(), Infallible>(())).await;
+
+        assert_eq!(
+            (
+                shared.acked.load(Ordering::Relaxed),
+                shared.nacked.load(Ordering::Relaxed)
+            ),
+            (0, 0),
+            "auto_ack(false) hands settling to the caller, so the summary must not claim acks the \
+             client never sent"
+        );
+    }
+
+    // The summary counts what the consumer *decided*, not what the broker
+    // confirmed: a failed ack is logged and the loop carries on. Pinned so that
+    // reading `acked` as "committed" stays a documented mistake rather than an
+    // accident, and so that a handler that succeeded is never reported as
+    // nacked just because its ack did not land.
+    #[tokio::test]
+    async fn an_ack_that_never_reached_the_broker_is_still_counted() {
+        let shared = shared();
+        let c = ctx(builder(), &shared, None);
+        let msg = message("t1");
+
+        assert!(
+            c.settle(&msg, Ok::<(), Infallible>(())).await,
+            "the handler succeeded; a failed ack must not turn that into a nack"
+        );
+        assert_eq!(shared.acked.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.nacked.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn a_handler_error_nacks_and_tells_the_loop_to_abandon_the_batch() {
+        let shared = shared();
+        let c = ctx(builder(), &shared, None);
+
+        assert!(
+            !c.settle(&message("t1"), Err("boom")).await,
+            "settle must return false so the loop drops the rest of the claim: everything after a \
+             nack is redelivered anyway"
+        );
+        assert_eq!(shared.nacked.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.acked.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn a_batch_settles_once_and_counts_every_message_in_it() {
+        let shared = shared();
+        let c = ctx(builder(), &shared, None);
+        let msgs = vec![message("t1"), message("t2"), message("t3")];
+
+        c.settle_batch(&msgs, Ok::<(), Infallible>(())).await;
+        assert_eq!(
+            shared.acked.load(Ordering::Relaxed),
+            3,
+            "one ack per message"
+        );
+
+        c.settle_batch(&msgs, Err("boom")).await;
+        assert_eq!(
+            shared.nacked.load(Ordering::Relaxed),
+            3,
+            "one handler error nacks the whole batch, not just the message that failed"
+        );
+
+        // An empty batch is not a settle: a pop that returned nothing would
+        // otherwise ack a claim that does not exist.
+        c.settle_batch(&[], Ok::<(), Infallible>(())).await;
+        assert_eq!(shared.acked.load(Ordering::Relaxed), 3);
     }
 }

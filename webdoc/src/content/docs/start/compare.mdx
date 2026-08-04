@@ -20,6 +20,9 @@ genuinely different bets, and one question separates them more sharply than any
 other: **how do you get strict ordering per entity, when there are many entities,
 the set changes constantly, and one slow entity must not delay the others?**
 
+If you are evaluating alternatives to Kafka, to RabbitMQ, or to running pgmq at
+scale, this page is the comparison.
+
 There are measured numbers further down, from a run of all four on one machine
 with matched resources. Read the framing that comes with them: **the point is not
 to crown a winner, because the cost curves cross.** Each system wins a shape and
@@ -62,7 +65,7 @@ quorum, and a JVM.
   PostgreSQL well and a limitation if you wanted the message broker to be
   independently replicated. One PostgreSQL is one failure domain.
 - **Ecosystem.** Kafka has connectors, stream-processing frameworks and a very
-  large operational literature. Queen has five language SDKs, an operator CLI and
+  large operational literature. Queen has six language SDKs, an operator CLI and
   an HTTP API.
 
 ## RabbitMQ
@@ -83,12 +86,12 @@ server-side objects with their own state on the broker.
 - **No replay.** A message that has been consumed and acknowledged is gone.
   Queen's consumption state is a cursor, so a second consumer group can read the
   same history from the start, and a group can be moved back to a timestamp.
-- **Routing is RabbitMQ's real strength, and Queen has none of it.** There are no
-  exchanges, no bindings, no topic patterns and no header matching. The producer
-  names the queue and the partition. The nearest thing is consumer-*side*
-  selection: queue names carry a dotted `namespace.task` convention, and
-  `GET /api/v1/pop?namespace=…&task=…` pops across every queue that matches. If
-  you need content-based routing, Queen will not give it to you.
+- **Routing is RabbitMQ's real strength.** In Queen the producer names the queue
+  and the partition: there are no exchanges, no bindings, no topic patterns and
+  no header matching. The nearest thing is consumer-*side* selection: queue names
+  carry a dotted `namespace.task` convention, and
+  `GET /api/v1/pop?namespace=…&task=…` pops across every queue that matches.
+  Content-based routing stays on RabbitMQ's side.
 - **Where Queen borrowed from RabbitMQ.** Leases with expiry, explicit
   `completed` / `failed` / `retry` / `dlq` outcomes, a retry budget and a real
   dead-letter table are all recognisably from this side of the family, with one
@@ -110,8 +113,8 @@ with per-queue throughput quotas that standard queues do not have.
 **Where it diverges from Queen.**
 
 - **There is no server, and that is the whole point.** Nothing to run, nothing to
-  size, nothing to back up. Queen cannot match that: it is a binary plus a
-  PostgreSQL you operate. If the appeal is "no infrastructure", stop here.
+  size, nothing to back up. Queen is a binary plus a PostgreSQL you operate, so
+  "no infrastructure" is SQS's answer rather than Queen's.
 - **No consumer groups.** Fan-out is a topology you assemble (a topic in front of
   several queues), and each subscriber gets its own copy stored separately. In
   Queen fan-out is a second `consumerGroup` string on the pop, reading the same
@@ -171,10 +174,10 @@ same PostgreSQL durability tier for the two that use PostgreSQL, and the same
 twelve-stage ordered pipeline. Full conditions, per-cell CPU, memory and disk,
 and the caveats are in [Cross-broker comparison](/benchmarks/comparison).
 
-Benchmarks are worth what they are worth. Each of these systems would go faster
-run by someone who runs it daily, and we are not those people for three of the
-four. We tuned what we could, archived every configuration, and would rather be
-corrected with a pointer to a specific run than be right by omission.
+Each of these systems would go faster run by someone who operates it daily, and
+for three of the four that is not us. We tuned each one as far as we could,
+archived every configuration, and welcome a correction that points at a specific
+run.
 
 **Sparse, 1 000 ordered lanes at 2 messages per lane per second.** Everyone
 served the full rate.
@@ -205,10 +208,10 @@ queues is where that stops working.
 
 <Aside type="caution">
 Queen's dense figure is a **median of eight repetitions, not a best run**: the
-same cell and build produced 340 to 3 234 ms. That dispersion is a defect we are
-chasing, it appears only on dense shapes, and we publish the median because
-publishing the 340 would be cherry picking. The other three systems' dense
-figures are single runs and their dispersion is unknown.
+same cell and build produced 340 to 3 234 ms. That dispersion is a known defect,
+it appears only on dense shapes, and the published figure is the median rather
+than the 340. The other three systems' dense figures are single runs and their
+dispersion is unknown.
 </Aside>
 
 **Cardinality.** pgmq is flat: 12 000 and 240 000 ordered lanes give identical
@@ -237,17 +240,18 @@ you are choosing. Support here means "in the product, without assembling it":
 | Dead-letter queue with a retry budget | ✅ | ❌ app-level | ✅ | ✅ redrive | ❌ |
 | Per-group lag as data you can query | ✅ | ⚠️ via tooling | ❌ | ❌ | ❌ |
 | Ack and push in one transaction | ✅ | ❌ | ❌ | ❌ | ✅ same database |
+| Windowed aggregation with the state in the same commit | ✅ | ⚠️ separate runtime | ❌ | ❌ | ❌ |
 | Disk spool when the store is unreachable | ✅ | n/a | n/a | n/a | ❌ |
 | Content-based routing | ❌ | ❌ | ✅ | ❌ | ❌ |
 | Broker replicates itself | ❌ PostgreSQL's job | ✅ | ✅ | ✅ managed | ❌ |
 | No server to operate | ❌ | ❌ | ❌ | ✅ | ⚠️ no broker, still a database |
 | Runs without extensions on managed PostgreSQL | ✅ | n/a | n/a | n/a | ❌ needs the extension |
 
-Two rows deserve reading twice, because they are the ones that disqualify Queen.
-**Queen does not replicate itself**: durability and failover are PostgreSQL's, so
-one PostgreSQL is one failure domain. And **there is no routing**: no exchanges,
-no topic patterns, no header matching. If either is a requirement, the comparison
-ends there regardless of any latency figure above.
+Two rows deserve reading twice, because either one settles the question on its
+own. **Replication is PostgreSQL's**: durability and failover come from the
+database, so one PostgreSQL is one failure domain. And **routing is out of
+scope**: no exchanges, no topic patterns, no header matching. If either is a
+requirement, it decides the choice regardless of any latency figure above.
 
 The spool row is narrower than it looks: when PostgreSQL is unreachable, pushes
 append to rotating on-disk files and replay oldest-first when it recovers, with
@@ -255,10 +259,20 @@ the original `transactionId` preserved so deduplication makes the replay
 idempotent. It keeps a write outage from becoming data loss. It is not a substitute
 for replication.
 
+The aggregation row is worth a sentence of its own. Tumbling, sliding, session
+and cron windows run as an operator chain in your process, and the broker commits the window
+state, the messages the chain emits and the acknowledgement of the source in a
+single transaction. That is exactly-once windowed aggregation with no changelog
+topic and no state store to size and operate, and it falls out of the storage
+choice rather than being bolted on: the state and the queue are already in the
+same database. Kafka reaches the same guarantee through Kafka Streams or Flink,
+which is a second runtime with its own state backend. The full surface is in
+[streams and windowing](/use/streams).
+
 ## Choosing something else
 
-Each of these systems is the right answer to a question Queen answers badly, and
-at any single point on the map a specialist may well beat it. What none of them
+Each of these systems is the right answer to a question of its own, and at any
+single point on the map a specialist may well beat Queen. What none of them
 does is span the map: pgmq owns sparse and wide and stops at roughly a twentieth
 of Queen's sustained rate; Kafka owns throughput and cost per message and cannot
 express the cardinality; RabbitMQ needs a live object per lane. Queen's claim is
@@ -273,6 +287,6 @@ on before you choose, and you do not have to migrate when the workload moves.
 | **pgmq** | You want PostgreSQL-backed queuing with no broker process; your consumers can all speak SQL; a work queue with visibility timeouts is enough, without consumer groups or replay; you can install extensions |
 | **Queen** | You need **all three at once**: strict FIFO per entity at cardinality you do not control, throughput that does not cap out when the same lanes get busy, and consumer groups with replay, deduplication and dead-lettering over one stored copy. Each system above gives you two of those; the third is where it stops. Also: ack-and-push in one PostgreSQL transaction, one binary and no cluster, next to a PostgreSQL you already run |
 
-Before committing either way, read [Limits and non-goals](/start/limits). It is
-the honest inverse of this page, and it will disqualify Queen faster than any
-comparison table.
+Before committing either way, read [Limits and non-goals](/start/limits). It sets
+out the boundaries of the model directly, which is the fastest way to find a
+requirement Queen does not meet.

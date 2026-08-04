@@ -1,10 +1,11 @@
 ---
-title: Python
-description: "Install queen-mq, construct the async client, and use the fluent grammar, plus the four places it behaves differently from JavaScript."
+title: Python quickstart
+description: "Install queen-mq for Python, construct the async client, and use the fluent grammar, plus the four places it behaves differently from JavaScript."
 type: how-to
 tier: use
 sidebar:
   order: 14
+  label: Python
 sourceOfTruth:
   - clients/client-py/queen/client.py
   - clients/client-py/queen/builders/queue_builder.py
@@ -28,6 +29,9 @@ The Python client is async throughout, built on `httpx`. Every network call is a
 the builders are synchronous until the terminal operation, which is awaited. The public
 surface mirrors JavaScript with `snake_case` names, and the four real behavioural differences
 are called out below.
+
+The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+[Versions and compatibility](/reference/compatibility) states what that covers.
 
 ```bash
 pip install queen-mq
@@ -149,7 +153,7 @@ only if it is a valid UUID.
 
 The broker's push path stores no trace id, so it is dropped and the message pops back
 with `traceId: null`. Push inside a transaction when a trace id has to survive. See
-[Pick your SDK](/use/clients#verified-gaps).
+[Pick your SDK](/use/clients#verified-against-the-source).
 
 The returned `PushBuilder` is awaitable and resolves to the broker's per-item array:
 
@@ -348,11 +352,12 @@ row carries `queue`, `partition`, `consumerGroup`, `errorMessage`, `retryCount`,
 `createdAt` and `failedAt`.
 
 <Aside type="note">
-`total` never comes back: the broker answers
-`{"messages":[…],"pagination":{"limit":…,"offset":…}}` with no `total` field. `.from_()`,
-`.to()` and the builder's partition are sent as query parameters the broker's DLQ handler does
-not read (it collects only `queue`, `consumerGroup`, `limit` and `offset`), so they are
-silently ignored. Page with `limit`/`offset` and filter the rest yourself.
+`total` is the size of the page, not of the result set. The handler sets it to the length of
+the array it just returned, so it can never exceed `limit` and it does not tell you how much
+is left. `.from_()`, `.to()` and the builder's partition are sent as query parameters the
+broker's DLQ handler does not read (it collects only `queue`, `consumerGroup`, `limit` and
+`offset`), so they are silently ignored. Page with `limit`/`offset` until you get a short page,
+and filter the rest yourself.
 </Aside>
 
 To reprocess one dead letter, `admin.retry_message(partition_id, transaction_id)` calls the

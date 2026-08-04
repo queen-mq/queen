@@ -7,9 +7,9 @@ mod common;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use queen_mq::{BufferOptions, PushStatus, QueueOptions, StopReason, SubscriptionMode};
+use queen_mq::{BufferOptions, PushStatus, Queen, QueueOptions, StopReason, SubscriptionMode};
 
 use common::*;
 
@@ -72,11 +72,15 @@ async fn a_repeated_transaction_id_is_a_duplicate_not_a_second_message() {
 
     // docs:start(rust-push-dedup)
     let txn = format!("{queue}-fixed-txn");
-    let item = queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 }))
-        .transaction_id(txn.clone());
+    let item =
+        queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 })).transaction_id(txn.clone());
     // docs:end
 
-    let first = q.queue(&queue).push_items(vec![item.clone()]).await.unwrap();
+    let first = q
+        .queue(&queue)
+        .push_items(vec![item.clone()])
+        .await
+        .unwrap();
     assert_eq!(first[0].status, PushStatus::Queued);
 
     let second = q.queue(&queue).push_items(vec![item]).await.unwrap();
@@ -176,6 +180,416 @@ async fn a_size_threshold_flushes_without_being_asked() {
 
     let msgs = pop_retry(&q, &queue, None, 10, 30).await;
     assert_eq!(msgs.len(), 5, "the size threshold did not trigger a flush");
+
+    drop_queue(&q, &queue).await;
+}
+
+/// Wait for the client-side push buffers to empty.
+///
+/// A time-triggered flush runs on a task the manager spawns, so there is no
+/// future to await: the buffer count going to zero is the only observable.
+async fn wait_for_buffer_drain(q: &Queen, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if q.buffer_stats().total_buffered_messages == 0 {
+            return true;
+        }
+        sleep_ms(50).await;
+    }
+    false
+}
+
+// Every `BufferOptions` in this repository is built with `time: 60s`, so the
+// timer half of the buffer had never actually fired — while the public default
+// is one second, which is what every caller who takes the default gets. A timer
+// that never armed, or that armed once and never again, would look exactly like
+// a working buffer to the size-threshold tests above.
+#[tokio::test]
+async fn a_time_threshold_flushes_the_buffer_and_then_re_arms() {
+    let q = broker!();
+    let queue = unique("push-timeflush");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    // A count threshold far above what this test pushes, so only the timer can
+    // possibly send anything.
+    let b = q.queue(&queue).buffer(BufferOptions {
+        message_count: 1_000,
+        time: Duration::from_millis(400),
+    });
+
+    b.push(serde_json::json!({ "n": 1 }))
+        .await
+        .expect("buffered push failed");
+    assert_eq!(
+        q.buffer_stats().total_buffered_messages,
+        1,
+        "the first push should still be waiting, not on the wire"
+    );
+
+    assert!(
+        wait_for_buffer_drain(&q, Duration::from_secs(10)).await,
+        "the time threshold never fired: {} message(s) still buffered",
+        q.buffer_stats().total_buffered_messages
+    );
+
+    let first = pop_retry(&q, &queue, Some("g-timeflush"), 10, 30).await;
+    assert_eq!(
+        first.len(),
+        1,
+        "the timed flush emptied the buffer locally \
+         but sent nothing to the broker"
+    );
+    q.ack_all(&first).await.expect("ack failed");
+
+    // The second push is the point of the test: the manager clears `timer_armed`
+    // when a timer fires, so a buffer that has flushed once has to arm a fresh
+    // timer. If it does not, every message after the first flush waits forever.
+    b.push(serde_json::json!({ "n": 2 }))
+        .await
+        .expect("buffered push failed");
+    assert!(
+        wait_for_buffer_drain(&q, Duration::from_secs(10)).await,
+        "the buffer timer did not re-arm after firing once"
+    );
+
+    let second = pop_retry(&q, &queue, Some("g-timeflush"), 10, 30).await;
+    assert_eq!(second.len(), 1, "the re-armed timer sent nothing");
+    assert_eq!(second[0].data["n"], 2);
+
+    drop_queue(&q, &queue).await;
+}
+
+// `flush_buffer()` has no call site anywhere in the crate. It is the targeted
+// counterpart of `flush_all_buffers`, and the way it can go wrong is by
+// flushing too much: buffers are keyed by (queue, partition), so an address
+// built from the queue alone would ship another lane's messages early.
+#[tokio::test]
+async fn flush_buffer_sends_only_the_partition_it_was_asked_for() {
+    let q = broker!();
+    let queue = unique("push-flush-one");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    let opts = BufferOptions {
+        message_count: 1_000,
+        time: Duration::from_secs(60),
+    };
+    let eu = q.queue(&queue).partition("eu").buffer(opts);
+    let us = q.queue(&queue).partition("us").buffer(opts);
+    eu.push(serde_json::json!({ "lane": "eu" }))
+        .await
+        .expect("buffered push failed");
+    us.push(serde_json::json!({ "lane": "us" }))
+        .await
+        .expect("buffered push failed");
+    assert_eq!(
+        q.buffer_stats().active_buffers,
+        2,
+        "two partitions of one queue must buffer separately"
+    );
+
+    let flushed = eu.flush_buffer().await.expect("flush_buffer failed");
+    assert_eq!(
+        flushed.len(),
+        1,
+        "flush_buffer returned {} results for one buffered message",
+        flushed.len()
+    );
+    assert_eq!(flushed[0].status, PushStatus::Queued);
+
+    let stats = q.buffer_stats();
+    assert_eq!(
+        stats.total_buffered_messages, 1,
+        "flush_buffer drained the other partition as well"
+    );
+    assert_eq!(stats.active_buffers, 1);
+
+    let mut eu_msgs = Vec::new();
+    for _ in 0..30 {
+        eu_msgs = q
+            .queue(&queue)
+            .partition("eu")
+            .batch(10)
+            .wait(false)
+            .pop()
+            .await
+            .expect("pop failed");
+        if !eu_msgs.is_empty() {
+            break;
+        }
+        sleep_ms(150).await;
+    }
+    assert_eq!(eu_msgs.len(), 1, "the flushed lane delivered nothing");
+    assert_eq!(eu_msgs[0].data["lane"], "eu");
+
+    let us_msgs = q
+        .queue(&queue)
+        .partition("us")
+        .batch(10)
+        .wait(false)
+        .pop()
+        .await
+        .expect("pop failed");
+    assert!(
+        us_msgs.is_empty(),
+        "the lane nobody flushed reached the broker anyway: {} message(s)",
+        us_msgs.len()
+    );
+
+    // Do not leave a buffer (and its 60-second timer) armed behind this test.
+    let _ = us.flush_buffer().await;
+    drop_queue(&q, &queue).await;
+}
+
+// `close()` has no call site either, and it is the documented way to not lose
+// buffered messages at shutdown. A close that emptied the buffer without
+// awaiting the send would look identical from the stats and drop everything.
+#[tokio::test]
+async fn close_flushes_whatever_the_buffers_still_hold() {
+    let q = broker!();
+    let queue = unique("push-close");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    // Neither threshold can fire on its own within this test.
+    let b = q.queue(&queue).buffer(BufferOptions {
+        message_count: 1_000,
+        time: Duration::from_secs(60),
+    });
+    for n in 0..3 {
+        b.push(serde_json::json!({ "n": n }))
+            .await
+            .expect("buffered push failed");
+    }
+    assert_eq!(q.buffer_stats().total_buffered_messages, 3);
+
+    q.close().await.expect("close failed");
+    assert_eq!(
+        q.buffer_stats().total_buffered_messages,
+        0,
+        "close() returned with messages still buffered"
+    );
+
+    let msgs = pop_retry(&q, &queue, Some("g-close"), 10, 30).await;
+    assert_eq!(
+        msgs.len(),
+        3,
+        "close() emptied the buffer without sending it: {} of 3 arrived",
+        msgs.len()
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// One request carrying the same key three times is the *intra-batch* dedup
+// path, which is not the same code as "push it again later": winner and losers
+// are decided inside a single transaction. A batch that deduplicated only
+// against already-stored rows would enqueue all three.
+#[tokio::test]
+async fn duplicates_within_one_push_collapse_onto_the_first_item() {
+    let q = broker!();
+    let queue = unique("push-dedup-batch");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            dedup_window_seconds: Some(3600),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let txn = format!("{queue}-one-key");
+    let items: Vec<queen_mq::PushItem> = (0..3)
+        .map(|n| {
+            queen_mq::PushItem::new(&queue, serde_json::json!({ "n": n })).transaction_id(&txn)
+        })
+        .collect();
+
+    let res = q
+        .queue(&queue)
+        .push_items(items)
+        .await
+        .expect("push failed");
+    assert_eq!(res.len(), 3, "one result per item, losers included");
+
+    let winner = res
+        .iter()
+        .find(|r| r.status == PushStatus::Queued)
+        .expect("no item in the batch was queued");
+    let duplicates: Vec<_> = res
+        .iter()
+        .filter(|r| r.status == PushStatus::Duplicate)
+        .collect();
+    assert_eq!(
+        duplicates.len(),
+        2,
+        "three items sharing one key produced {} duplicate(s)",
+        duplicates.len()
+    );
+    for d in &duplicates {
+        assert_eq!(
+            d.message_id, winner.message_id,
+            "a duplicate must carry the winner's message id, or a producer cannot \
+             tell what its retry resolved to"
+        );
+    }
+
+    // A later request with the same key resolves to the same message, which is
+    // what proves the in-batch winner is the row the dedup window remembers.
+    let again = q
+        .queue(&queue)
+        .push_items(vec![
+            queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 9 })).transaction_id(&txn),
+            queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 10 })).transaction_id(&txn),
+        ])
+        .await
+        .expect("push failed");
+    assert!(
+        again.iter().all(|r| r.status == PushStatus::Duplicate),
+        "a key already stored must not enqueue again: {again:?}"
+    );
+    assert!(
+        again.iter().all(|r| r.message_id == winner.message_id),
+        "a late duplicate must resolve to the pre-existing message"
+    );
+
+    let msgs = pop_retry(&q, &queue, Some("g-dedup-batch"), 10, 30).await;
+    assert_eq!(
+        msgs.len(),
+        1,
+        "five pushes of one key left {} message(s) in the queue",
+        msgs.len()
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// The dedup contract under a race, which the sequential retry tests cannot
+// reach: eight requests carrying one key, none of them ordered against the
+// others. A winner decided anywhere other than the single row the key maps to
+// enqueues the message twice, and the loser gets an id nobody can look up.
+#[tokio::test]
+async fn racing_pushes_of_one_key_still_enqueue_exactly_once() {
+    let q = broker!();
+    let queue = unique("push-dedup-race");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            dedup_window_seconds: Some(3600),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let txn = format!("{queue}-contended-key");
+    let mut tasks = Vec::new();
+    for n in 0..8 {
+        let q = q.clone();
+        let queue = queue.clone();
+        let txn = txn.clone();
+        tasks.push(tokio::spawn(async move {
+            q.queue(&queue)
+                .push_items(vec![queen_mq::PushItem::new(
+                    &queue,
+                    serde_json::json!({ "n": n }),
+                )
+                .transaction_id(txn)])
+                .await
+        }));
+    }
+
+    let mut results = Vec::new();
+    for t in tasks {
+        let out = t
+            .await
+            .expect("a push task panicked")
+            .expect("a racing push failed");
+        results.extend(out);
+    }
+    assert_eq!(results.len(), 8, "one result per racing push");
+
+    let queued = results
+        .iter()
+        .filter(|r| r.status == PushStatus::Queued)
+        .count();
+    assert_eq!(
+        queued, 1,
+        "eight racing pushes of one key produced {queued} queued message(s)"
+    );
+
+    let ids: std::collections::HashSet<&str> =
+        results.iter().map(|r| r.message_id.as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        1,
+        "every racer must resolve to one message id, got {ids:?}"
+    );
+
+    let msgs = pop_retry(&q, &queue, Some("g-dedup-race"), 10, 30).await;
+    assert_eq!(
+        msgs.len(),
+        1,
+        "the queue ended up holding {} message(s)",
+        msgs.len()
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// `PushItem::partition` is never used anywhere in the crate, and it is the only
+// way to address two lanes in one request. It also documents a trap:
+// `push_items` reads the address from each ITEM, so the builder's
+// `.partition()` is an affinity and buffering key here, not a default the way
+// `push_many` treats it.
+#[tokio::test]
+async fn push_items_takes_each_items_own_partition() {
+    let q = broker!();
+    let queue = unique("push-item-lane");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    let res = q
+        .queue(&queue)
+        .partition("eu")
+        .push_items(vec![
+            queen_mq::PushItem::new(&queue, serde_json::json!({ "lane": "own" })).partition("us"),
+            queen_mq::PushItem::new(&queue, serde_json::json!({ "lane": "none" })),
+        ])
+        .await
+        .expect("push failed");
+    assert_eq!(res.len(), 2, "one result per item");
+    assert!(
+        res.iter().all(|r| r.status == PushStatus::Queued),
+        "both items should have been stored: {res:?}"
+    );
+
+    // A multi-lane drain, because a pop that names no partition may be served
+    // any single one of them.
+    let all = drain_until(&q, &queue, Duration::from_secs(30), |m| m.len() >= 2).await;
+    assert_eq!(all.len(), 2, "only {} of 2 messages arrived", all.len());
+
+    let own = all
+        .iter()
+        .find(|m| m.data["lane"] == "own")
+        .expect("the item addressed to 'us' never arrived");
+    assert_eq!(
+        own.partition, "us",
+        "PushItem::partition must win over the builder's partition"
+    );
+
+    let none = all
+        .iter()
+        .find(|m| m.data["lane"] == "none")
+        .expect("the item with no partition never arrived");
+    assert_eq!(
+        none.partition, "Default",
+        "an item with no partition falls back to Default; push_items does not \
+         inherit the builder's 'eu'"
+    );
+
+    assert!(
+        !all.iter().any(|m| m.partition == "eu"),
+        "nothing should have landed in the builder's partition"
+    );
 
     drop_queue(&q, &queue).await;
 }
@@ -361,10 +775,181 @@ async fn a_multi_partition_pop_drains_several_lanes_under_one_lease() {
         sleep_ms(150).await;
     }
 
-    assert!(msgs.len() >= 2, "multi-partition pop drained only {}", msgs.len());
+    assert!(
+        msgs.len() >= 2,
+        "multi-partition pop drained only {}",
+        msgs.len()
+    );
     let leases: std::collections::HashSet<&str> =
         msgs.iter().map(|m| m.lease_id.as_str()).collect();
     assert_eq!(leases.len(), 1, "one pop must yield exactly one lease id");
+
+    drop_queue(&q, &queue).await;
+}
+
+// `wait(true)` is the builder's default and what the README examples use, yet
+// no test in this suite had ever taken it: every one of them opts out with
+// `.wait(false)`. A long poll that is never woken, or woken only at its
+// deadline, reads as a slow broker rather than as a client that is not
+// long-polling at all.
+#[tokio::test]
+async fn a_blocking_pop_wakes_up_when_a_message_lands() {
+    let q = broker!();
+    let queue = unique("pop-longpoll");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    let producer = q.clone();
+    let target = queue.clone();
+    let writer = tokio::spawn(async move {
+        sleep_ms(1_500).await;
+        producer
+            .queue(&target)
+            .push(serde_json::json!({ "late": true }))
+            .await
+            .expect("the delayed push failed");
+    });
+
+    let started = Instant::now();
+    let msgs = q
+        .queue(&queue)
+        .group("g-longpoll")
+        .batch(10)
+        .wait(true)
+        .poll_timeout(Duration::from_secs(5))
+        .pop()
+        .await
+        .expect("a long poll must not error");
+    let waited = started.elapsed();
+
+    writer.await.expect("the producer task panicked");
+
+    assert_eq!(
+        msgs.len(),
+        1,
+        "the long poll returned {} message(s) after {waited:?}",
+        msgs.len()
+    );
+    assert_eq!(msgs[0].data["late"], true);
+    assert!(
+        waited < Duration::from_secs(5),
+        "the long poll only delivered at its deadline ({waited:?}); the push \
+         landed after 1.5s and should have woken it"
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// The other half of `wait(true)`: a queue that stays quiet. The client asks for
+// `poll_timeout + 5s` on the socket precisely so the broker's timer fires
+// first and this reads as an empty poll. Lose that slack and every long-polling
+// consumer starts reporting transport failures instead of an idle queue.
+#[tokio::test]
+async fn a_blocking_pop_on_a_quiet_queue_returns_empty_not_a_timeout() {
+    let q = broker!();
+    let queue = unique("pop-longpoll-quiet");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    let started = Instant::now();
+    let msgs = q
+        .queue(&queue)
+        .group("g-quiet")
+        .wait(true)
+        .poll_timeout(Duration::from_secs(2))
+        .pop()
+        .await
+        .expect("an exhausted long poll must be Ok(empty), never Err");
+    let waited = started.elapsed();
+
+    assert!(
+        msgs.is_empty(),
+        "a quiet queue served {} message(s)",
+        msgs.len()
+    );
+    assert!(
+        waited >= Duration::from_millis(1_500),
+        "the poll came back after {waited:?}: wait(true) did not hold the request \
+         for its timeout"
+    );
+    assert!(
+        waited < Duration::from_secs(6),
+        "the poll took {waited:?}, which is the client's own timeout \
+         (poll_timeout + 5s) firing rather than the broker's"
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// `batch` is a budget for the whole claim, not a per-lane allowance. Read the
+// other way round — ten *per partition* — a five-lane pop hands back fifty
+// messages, a silent fivefold overshoot of whatever the caller sized its
+// handler and its lease for.
+#[tokio::test]
+async fn batch_caps_the_whole_claim_not_each_partition() {
+    let q = broker!();
+    let queue = unique("pop-batch-cap");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    const LANES: usize = 5;
+    const PER_LANE: usize = 100;
+    for lane in 0..LANES {
+        q.queue(&queue)
+            .partition(format!("lane-{lane}"))
+            .push_many((0..PER_LANE).map(|n| serde_json::json!({ "lane": lane, "n": n })))
+            .await
+            .expect("push failed");
+    }
+
+    // The cap only means something once every lane is poppable: a pop racing the
+    // fusion window returns fewer for reasons that have nothing to do with
+    // `batch`. The warm-up runs on its own consumer group, so the groups below
+    // still see the whole backlog.
+    let want = LANES * PER_LANE;
+    let warm = drain_until(&q, &queue, Duration::from_secs(60), |m| m.len() >= want).await;
+    assert_eq!(
+        warm.len(),
+        want,
+        "setup: only {} of {want} messages became visible",
+        warm.len()
+    );
+
+    let capped = q
+        .queue(&queue)
+        .group("g-cap")
+        .batch(10)
+        .partitions(LANES as i32)
+        .wait(false)
+        .pop()
+        .await
+        .expect("pop failed");
+    assert_eq!(
+        capped.len(),
+        10,
+        "batch(10) with partitions({LANES}) returned {} messages; the batch caps \
+         the claim, not each lane",
+        capped.len()
+    );
+
+    // And without `partitions()` a claim is a single lane, however large the
+    // batch. This asserts the lane count rather than the message count: how much
+    // one checkout takes is the broker's business, how many lanes it locks is
+    // the contract.
+    let single = q
+        .queue(&queue)
+        .group("g-single-lane")
+        .batch(want as i32)
+        .wait(false)
+        .pop()
+        .await
+        .expect("pop failed");
+    assert!(!single.is_empty(), "a default pop claimed nothing");
+    let lanes: std::collections::HashSet<&str> =
+        single.iter().map(|m| m.partition.as_str()).collect();
+    assert_eq!(
+        lanes.len(),
+        1,
+        "a pop without partitions() drained {} lanes: {lanes:?}",
+        lanes.len()
+    );
 
     drop_queue(&q, &queue).await;
 }
@@ -670,6 +1255,306 @@ async fn two_consumer_groups_each_receive_every_message() {
 
     assert_eq!(a.len(), 3, "group-a did not see every message");
     assert_eq!(b.len(), 3, "group-b did not see every message");
+
+    drop_queue(&q, &queue).await;
+}
+
+// Every consume test above opts out of long polling, which left the loop's
+// `popped.is_empty() && builder.wait` branch — the default one — unexecuted.
+// That branch must neither sleep nor turn an empty poll into an error, and a
+// consumer that did either would still finish this test's work, just late or
+// not at all.
+#[tokio::test]
+async fn a_long_polling_consumer_stops_on_its_limit() {
+    let q = broker!();
+    let queue = unique("consume-longpoll");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    q.queue(&queue)
+        .push_many((0..4).map(|n| serde_json::json!({ "n": n })))
+        .await
+        .expect("push failed");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+
+    let summary = q
+        .queue(&queue)
+        .group("g-consume-longpoll")
+        .batch(4)
+        .limit(4)
+        .poll_timeout(Duration::from_secs(3))
+        .idle(Duration::from_secs(20))
+        .consume(move |msg| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock()
+                    .expect("handler sink poisoned")
+                    .push(msg.data["n"].as_i64().unwrap_or(-1));
+                Ok::<_, std::convert::Infallible>(())
+            }
+        })
+        .await
+        .expect("a long-polling consumer must not fail on an empty poll");
+
+    assert_eq!(summary.processed, 4);
+    assert_eq!(summary.acked, 4);
+    assert_eq!(
+        summary.stopped_by,
+        StopReason::Limit,
+        "a long-polling consumer that reached its limit stopped by {:?}",
+        summary.stopped_by
+    );
+
+    let mut got = seen.lock().expect("handler sink poisoned").clone();
+    got.sort();
+    assert_eq!(got, vec![0, 1, 2, 3], "the consumer saw {got:?}");
+
+    drop_queue(&q, &queue).await;
+}
+
+// The idle deadline is only re-checked between polls, so with long polling on
+// it competes with the poll window. A consumer that sat on the socket instead
+// of winding down would eventually stop for the wrong reason, or hang until
+// something arrived.
+#[tokio::test]
+async fn a_long_polling_consumer_goes_idle_on_a_quiet_queue() {
+    let q = broker!();
+    let queue = unique("consume-longpoll-idle");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    let started = Instant::now();
+    let summary = q
+        .queue(&queue)
+        .group("g-longpoll-idle")
+        .poll_timeout(Duration::from_secs(1))
+        .idle(Duration::from_secs(2))
+        .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) })
+        .await
+        .expect("an empty long poll must not fail the consumer");
+
+    assert_eq!(summary.processed, 0);
+    assert_eq!(
+        summary.stopped_by,
+        StopReason::Idle,
+        "a quiet long-polling consumer stopped by {:?}",
+        summary.stopped_by
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the consumer took {:?} to give up on an empty queue",
+        started.elapsed()
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// No consumer in the suite had ever claimed more than one partition, which left
+// the per-message settle against a *shared* lease untested: an ack that
+// released the whole claim on the first message would strand the rest of the
+// batch and have it redelivered.
+#[tokio::test]
+async fn a_consumer_can_settle_a_multi_partition_claim_message_by_message() {
+    let q = broker!();
+    let queue = unique("consume-multipart");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    const LANES: usize = 4;
+    const PER_LANE: usize = 5;
+    for lane in 0..LANES {
+        q.queue(&queue)
+            .partition(format!("lane-{lane}"))
+            .push_many((0..PER_LANE).map(|n| serde_json::json!({ "lane": lane, "n": n })))
+            .await
+            .expect("push failed");
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+
+    let want = (LANES * PER_LANE) as u64;
+    let summary = q
+        .queue(&queue)
+        .group("g-multipart")
+        .batch(20)
+        .partitions(LANES as i32)
+        .limit(want)
+        .wait(false)
+        .idle(Duration::from_secs(20))
+        .consume(move |msg| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock()
+                    .expect("handler sink poisoned")
+                    .push(msg.partition.clone());
+                Ok::<_, std::convert::Infallible>(())
+            }
+        })
+        .await
+        .expect("consume failed");
+
+    assert_eq!(summary.processed, want);
+    assert_eq!(
+        summary.acked, want,
+        "every message under a shared lease must be acked, not just the first"
+    );
+    assert_eq!(summary.nacked, 0);
+    assert_eq!(summary.stopped_by, StopReason::Limit);
+
+    let lanes: std::collections::HashSet<String> = seen
+        .lock()
+        .expect("handler sink poisoned")
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(
+        lanes.len(),
+        LANES,
+        "the consumer only reached {} of {LANES} lanes: {lanes:?}",
+        lanes.len()
+    );
+
+    // A settle that released the lease early would leave the tail of each claim
+    // to come back here.
+    let again = q
+        .queue(&queue)
+        .group("g-multipart")
+        .batch(50)
+        .partitions(LANES as i32)
+        .wait(false)
+        .pop()
+        .await
+        .expect("pop failed");
+    assert!(
+        again.is_empty(),
+        "{} message(s) came back after a fully acked multi-partition consume",
+        again.len()
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// The suite's only `consume_batch` test has a handler that always succeeds, so
+// `settle_batch`'s error arm — one nack covering the entire claim — had never
+// run. A batch that half-acked on failure would look fine in the summary and
+// lose the messages it silently committed.
+#[tokio::test]
+async fn a_failing_batch_handler_nacks_the_whole_claim() {
+    let q = broker!();
+    let queue = unique("consume-batch-fail");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            lease_time: Some(1),
+            // High enough that the redelivery check below cannot race the DLQ.
+            retry_limit: Some(20),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    q.queue(&queue)
+        .push_many((0..4).map(|n| serde_json::json!({ "n": n })))
+        .await
+        .expect("push failed");
+
+    let handled = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&handled);
+
+    let summary = q
+        .queue(&queue)
+        .group("g-batchfail")
+        .batch(4)
+        .limit(4)
+        .wait(false)
+        .idle(Duration::from_secs(5))
+        .consume_batch(move |msgs| {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(msgs.len() as u64, Ordering::SeqCst);
+                Err::<(), _>("batch handler exploded")
+            }
+        })
+        .await
+        .expect("consume_batch failed");
+
+    assert!(
+        handled.load(Ordering::SeqCst) > 0,
+        "the handler never ran, so nothing was settled either way"
+    );
+    assert_eq!(
+        summary.acked, 0,
+        "a failing batch handler must not ack anything"
+    );
+    assert_eq!(
+        summary.nacked, summary.processed,
+        "settle_batch must nack every message it handed to the handler"
+    );
+
+    let again = pop_retry(&q, &queue, Some("g-batchfail"), 10, 40).await;
+    assert!(!again.is_empty(), "a nacked batch was never redelivered");
+
+    drop_queue(&q, &queue).await;
+}
+
+// ----------------------------------------------------------------- acking
+
+// `nack_all` has no call site in the crate: the batch reject path was reachable
+// only through a `consume_batch` handler error. Rejecting a claim by hand is
+// what a manual consumer does, and it has to come back with one verdict per
+// message rather than a single collapsed result.
+#[tokio::test]
+async fn nack_all_rejects_a_whole_claim_and_hands_it_back() {
+    let q = broker!();
+    let queue = unique("nack-all");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            lease_time: Some(1),
+            retry_limit: Some(20),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    q.queue(&queue)
+        .push_many((0..4).map(|n| serde_json::json!({ "n": n })))
+        .await
+        .expect("push failed");
+
+    let msgs = pop_retry(&q, &queue, Some("g-nackall"), 10, 30).await;
+    assert!(!msgs.is_empty(), "setup: nothing became poppable");
+
+    let acks = q
+        .nack_all(&msgs, "the batch could not be processed")
+        .await
+        .expect("nack_all failed");
+    assert_eq!(
+        acks.len(),
+        msgs.len(),
+        "nack_all returned {} verdicts for {} messages",
+        acks.len(),
+        msgs.len()
+    );
+    assert!(
+        acks.iter().all(|a| a.success),
+        "the broker refused part of the batch nack: {acks:?}"
+    );
+    assert!(
+        acks.iter().all(|a| !a.dlq),
+        "a first rejection under a retry limit of 20 must not dead-letter"
+    );
+
+    // A nack clamps the group's cursor at the failure, so the claim comes back.
+    let again = pop_retry(&q, &queue, Some("g-nackall"), 10, 40).await;
+    assert!(
+        again.len() >= msgs.len(),
+        "a rejected claim of {} came back as {}",
+        msgs.len(),
+        again.len()
+    );
 
     drop_queue(&q, &queue).await;
 }

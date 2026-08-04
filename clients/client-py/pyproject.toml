@@ -12,7 +12,7 @@ authors = [
 ]
 license = {text = "Apache-2.0"}
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
@@ -28,7 +28,7 @@ keywords = [
     "message-queue", "queue", "broker", "message-queue-system", "fifo",
     "streaming", "stream-processing", "rate-limiter",
     "tumbling-window", "sliding-window", "session-window", "event-time",
-    "watermark", "exactly-once", "postgres",
+    "watermark", "exactly-once", "postgres", "postgresql",
 ]
 requires-python = ">=3.8"
 dependencies = [
@@ -47,8 +47,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/queen-mq/queen"
-Documentation = "https://github.com/queen-mq/queen"
+Homepage = "https://queenmq.com"
+Documentation = "https://queenmq.com/use/"
 Repository = "https://github.com/queen-mq/queen"
 Issues = "https://github.com/queen-mq/queen/issues"
 

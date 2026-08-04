@@ -1009,11 +1009,24 @@ async fn serve_pop_hotlist(
             }
         }
 
-        let (body, count, meta, rtt) = hotlist_pop_attempt(
+        let (body, count, meta, rtt) = match hotlist_pop_attempt(
             st, qkey, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
             worker, lease_id, tenant,
         )
-        .await;
+        .await
+        {
+            Ok(v) => v,
+            // Transport failure (no pooled connection, or a statement the broker
+            // cancelled). hotlist_pop_attempt has already run the full cleanup for
+            // that arm — admission slot dropped, db error counted, and any
+            // checked-out candidates checked back into the ring — so the only thing
+            // left here is to surface it. Return WITHOUT parking: a `wait=true` pop
+            // must not long-poll its way through a dead pool, which is precisely
+            // what the old empty-tuple return did (count==0 ⇒ park ⇒ eventually a
+            // bodiless 204, indistinguishable from an idle queue). Same shape and
+            // same point in the poll loop as the legacy scan path's 500s above.
+            Err(resp) => return resp,
+        };
 
         if count == 0 && wait && Instant::now() < deadline {
             backoff_count += 1;
@@ -1116,8 +1129,18 @@ impl Drop for InflightGuard {
 // One ring-serve attempt: (lazily) refresh the queue deferral config, take K
 // candidates from the (queue, group) ring, call queen.log_pop_list_v1 on them,
 // check the tri-state verdicts back into the ring (§4/§6/§7), and render. An
-// empty ring triggers a throttled keyset reseed (§8) before giving up. Returns
-// (body, count, meta, rtt); count==0 means the caller should park.
+// empty ring triggers a throttled keyset reseed (§8) before giving up.
+//
+// Ok((body, count, meta, rtt)); count==0 means the caller should park.
+// Err(response) is a TRANSPORT failure — no pooled connection, or a statement
+// the broker cancelled — and the caller must return it as-is WITHOUT parking,
+// exactly as the legacy scan path returns from inside its own poll loop. It is
+// an error channel and not "count == 0" because an empty tuple renders as a
+// bodiless 204 (handlers::json drops the body on 204, RFC 9110 §15.3.5), which
+// is the client-visible shape of an idle queue: a consumer cannot tell a dead
+// pool from "nothing for you" and simply long-polls the outage. Documented
+// contract: reference/http/pop.mdx (500 + {"error":"pool"} /
+// {"error":"pop failed"}) and internals/life-of-a-pop.mdx.
 #[allow(clippy::too_many_arguments)]
 async fn hotlist_pop_attempt(
     st: &Arc<AppState>,
@@ -1135,7 +1158,7 @@ async fn hotlist_pop_attempt(
     worker: &str,
     lease_id: &str,
     tenant: &str,
-) -> (String, usize, PopMeta, Duration) {
+) -> Result<(String, usize, PopMeta, Duration), Response> {
     let now_ms = crate::util::now_epoch_ms();
     let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption);
 
@@ -1156,7 +1179,7 @@ async fn hotlist_pop_attempt(
                 st.metrics.record_db_error();
                 drop(slot);
                 let (b, c, m) = empty();
-                return (b, c, m, Duration::ZERO);
+                return Ok((b, c, m, Duration::ZERO));
             }
         };
         let cancel_token = client.cancel_token();
@@ -1177,7 +1200,7 @@ async fn hotlist_pop_attempt(
             Some(t) => t,
             None => {
                 let (b, c, m) = empty();
-                return (b, c, m, rtt);
+                return Ok((b, c, m, rtt));
             }
         };
         // Learn ids for the ack bridge; the ring is populated by the next pop's
@@ -1190,10 +1213,10 @@ async fn hotlist_pop_attempt(
             let (body, count, meta) = render_pop_parts(
                 &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption,
             );
-            return (body, count, meta, rtt);
+            return Ok((body, count, meta, rtt));
         }
         let (b, c, m) = empty();
-        return (b, c, m, rtt);
+        return Ok((b, c, m, rtt));
     }
 
     // Register the (tenant, queue, group) ring so pushes' marks reach it even before
@@ -1231,7 +1254,7 @@ async fn hotlist_pop_attempt(
                 &worker[worker.len().saturating_sub(8)..], crate::hotlist::trace_now_ms());
         }
         let (b, c, m) = empty();
-        return (b, c, m, Duration::ZERO);
+        return Ok((b, c, m, Duration::ZERO));
     }
 
     // ── POP FUSION (server/src/pop_fusion.rs). Steady-path serves only: the
@@ -1262,7 +1285,7 @@ async fn hotlist_pop_attempt(
             // The quiet gate said ready, but a concurrent serve drained the
             // ring first — same outcome as the direct path's empty take.
             let (b, c, m) = empty();
-            return (b, c, m, Duration::ZERO);
+            return Ok((b, c, m, Duration::ZERO));
         }
         let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
         let skip_window = st.hotlist.skip_window(qkey);
@@ -1310,10 +1333,10 @@ async fn hotlist_pop_attempt(
         }
         match verdict {
             crate::pop_fusion::PopVerdict::Served { meta, blobs, states, rtt } => {
-                return finish_pop_serve(
+                return Ok(finish_pop_serve(
                     st, qkey, queue, group, cands, meta, blobs, states, now_ms, auto_ack,
                     lease_ms, lease_seconds, lease_id, rtt,
-                );
+                ));
             }
             crate::pop_fusion::PopVerdict::FlushErr => {
                 // Byte-identical to the direct path's DB-error handling:
@@ -1330,7 +1353,7 @@ async fn hotlist_pop_attempt(
                 st.hotlist
                     .checkin(qkey, group, back, now_ms, auto_ack, lease_ms);
                 let (b, c, m) = empty();
-                return (b, c, m, Duration::ZERO);
+                return Ok((b, c, m, Duration::ZERO));
             }
         }
     }
@@ -1348,8 +1371,14 @@ async fn hotlist_pop_attempt(
         Err(_) => {
             st.metrics.record_db_error();
             drop(slot);
-            let (b, c, m) = empty();
-            return (b, c, m, Duration::ZERO);
+            // Transport failure, not an empty queue: same 500 + body the legacy
+            // scan path returns from its own pool.get arm. No candidate was
+            // checked out yet (take_batch runs below), so there is nothing to
+            // check back in — only the admission slot, dropped above.
+            return Err(json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            ));
         }
     };
     if tr {
@@ -1401,7 +1430,7 @@ async fn hotlist_pop_attempt(
         drop(client);
         drop(slot);
         let (b, c, m) = empty();
-        return (b, c, m, Duration::ZERO);
+        return Ok((b, c, m, Duration::ZERO));
     }
 
     let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
@@ -1451,7 +1480,13 @@ async fn hotlist_pop_attempt(
             Some(t) => t,
             None => {
                 // DB error/timeout — the candidates were checked out (INFLIGHT).
-                // Re-append them all (Requeue) so nothing is stranded, then park.
+                // Re-append them all (Requeue) so nothing is stranded, and only
+                // THEN surface the failure. The check-in is unconditional and
+                // must stay ahead of every exit from this arm: the guard was
+                // disarmed above (the await returned rather than being dropped),
+                // so this call is the ONLY thing that puts the partitions back in
+                // the ring — a mark/promote/reseed on an INFLIGHT entry is a
+                // no-op, so an early return here would strand them permanently.
                 let back: Vec<crate::hotlist::CheckinResult> = cands
                     .iter()
                     .map(|c| crate::hotlist::CheckinResult {
@@ -1463,15 +1498,21 @@ async fn hotlist_pop_attempt(
                     .collect();
                 st.hotlist
                     .checkin(qkey, group, back, now_ms, auto_ack, lease_ms);
-                let (b, c, m) = empty();
-                return (b, c, m, rtt);
+                // resolve_query_timeout has already cancelled the statement
+                // server-side, quarantined the connection and counted the error;
+                // report it like the legacy scan path instead of parking on what
+                // looks like an empty queue.
+                return Err(json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{\"error\":\"pop failed\"}".to_string(),
+                ));
             }
         };
 
-    finish_pop_serve(
+    Ok(finish_pop_serve(
         st, qkey, queue, group, cands, meta_txt, blobs, states_txt, now_ms, auto_ack,
         lease_ms, lease_seconds, lease_id, rtt,
-    )
+    ))
 }
 
 // The post-SQL half of a hot-list serve: map tri-state verdicts to the checked

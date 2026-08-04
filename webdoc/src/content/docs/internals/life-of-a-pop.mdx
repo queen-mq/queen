@@ -108,7 +108,7 @@ That first SQL pop is also a **provisioning** call: a wildcard pop, like a subsc
 registration, on a queue that does not exist creates its `queen.queues` config row. It has to.
 The durable subscription marker carries a foreign key to the queue row, and a group may
 legitimately subscribe before the first push creates the queue, so without the upsert the FK would
-reject exactly those early subscribers. The honest flip side of that widening: a consumer typo now
+reject exactly those early subscribers. The flip side of that widening: a consumer typo now
 creates a queue row, where it previously left only an orphan watermark.
 </Aside>
 

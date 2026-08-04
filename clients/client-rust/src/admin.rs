@@ -30,13 +30,17 @@ impl Admin {
     }
 
     async fn get(&self, path: &str) -> Result<serde_json::Value> {
-        let out: Option<serde_json::Value> = self.inner.http.get_json(path, &Opts::default()).await?;
+        let out: Option<serde_json::Value> =
+            self.inner.http.get_json(path, &Opts::default()).await?;
         Ok(out.unwrap_or(serde_json::Value::Null))
     }
 
     async fn post<B: serde::Serialize>(&self, path: &str, body: &B) -> Result<serde_json::Value> {
-        let out: Option<serde_json::Value> =
-            self.inner.http.post_json(path, body, &Opts::default()).await?;
+        let out: Option<serde_json::Value> = self
+            .inner
+            .http
+            .post_json(path, body, &Opts::default())
+            .await?;
         Ok(out.unwrap_or(serde_json::Value::Null))
     }
 
@@ -60,8 +64,12 @@ impl Admin {
         self.get("/api/v1/resources/tasks").await
     }
 
-    pub async fn list_queues(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
-        self.get(&with_query("/api/v1/resources/queues", params)).await
+    pub async fn list_queues(
+        &self,
+        params: &[(&'static str, String)],
+    ) -> Result<serde_json::Value> {
+        self.get(&with_query("/api/v1/resources/queues", params))
+            .await
     }
 
     pub async fn queue(&self, name: &str) -> Result<serde_json::Value> {
@@ -69,6 +77,15 @@ impl Admin {
             .await
     }
 
+    /// # This broker does not route it
+    ///
+    /// `/api/v1/resources/partitions` is registered nowhere in the broker, so
+    /// every call answers 404 `no_such_route` — the same trap as the JS SDK's
+    /// `clearQueue` and `moveMessageToDlq`, which this client does not offer
+    /// for exactly that reason. It is kept, and pinned by
+    /// `the_partitions_resource_is_not_a_route_on_this_broker`, only because
+    /// removing a public method is a breaking change; use
+    /// [`Admin::queue`] for a single queue's partition counts.
     pub async fn partitions(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
         self.get(&with_query("/api/v1/resources/partitions", params))
             .await
@@ -82,11 +99,18 @@ impl Admin {
 
     // ----------------------------------------------------------- messages
 
-    pub async fn list_messages(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
+    pub async fn list_messages(
+        &self,
+        params: &[(&'static str, String)],
+    ) -> Result<serde_json::Value> {
         self.get(&with_query("/api/v1/messages", params)).await
     }
 
-    pub async fn message(&self, partition_id: &str, transaction_id: &str) -> Result<serde_json::Value> {
+    pub async fn message(
+        &self,
+        partition_id: &str,
+        transaction_id: &str,
+    ) -> Result<serde_json::Value> {
         self.get(&format!(
             "/api/v1/messages/{}/{}",
             urlencode(partition_id),
@@ -155,7 +179,10 @@ impl Admin {
         Ok(out.unwrap_or_default())
     }
 
-    pub async fn trace_names(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
+    pub async fn trace_names(
+        &self,
+        params: &[(&'static str, String)],
+    ) -> Result<serde_json::Value> {
         self.get(&with_query("/api/v1/traces/names", params)).await
     }
 
@@ -296,7 +323,10 @@ impl Admin {
         self.get(&with_query("/api/v1/status", params)).await
     }
 
-    pub async fn queue_stats(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
+    pub async fn queue_stats(
+        &self,
+        params: &[(&'static str, String)],
+    ) -> Result<serde_json::Value> {
         self.get(&with_query("/api/v1/status/queues", params)).await
     }
 
@@ -313,15 +343,22 @@ impl Admin {
     }
 
     pub async fn analytics(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
-        self.get(&with_query("/api/v1/status/analytics", params)).await
+        self.get(&with_query("/api/v1/status/analytics", params))
+            .await
     }
 
-    pub async fn system_metrics(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
+    pub async fn system_metrics(
+        &self,
+        params: &[(&'static str, String)],
+    ) -> Result<serde_json::Value> {
         self.get(&with_query("/api/v1/analytics/system-metrics", params))
             .await
     }
 
-    pub async fn worker_metrics(&self, params: &[(&'static str, String)]) -> Result<serde_json::Value> {
+    pub async fn worker_metrics(
+        &self,
+        params: &[(&'static str, String)],
+    ) -> Result<serde_json::Value> {
         self.get(&with_query("/api/v1/analytics/worker-metrics", params))
             .await
     }

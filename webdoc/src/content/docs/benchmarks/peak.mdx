@@ -1,6 +1,6 @@
 ---
 title: Throughput ceiling
-description: "One million messages per second per side for 600 seconds, with server-side auto-ack, deduplication off, and 500,600 offered messages never accepted. What a ceiling measurement is for, and why it is not a production expectation."
+description: "One million messages per second per side for 600 seconds, with server-side auto-ack, deduplication off, and 500,600 offered messages never accepted. A ceiling, not a production expectation."
 type: reference
 sidebar:
   order: 3
@@ -82,7 +82,7 @@ and the lag returned to near zero within about ten seconds.
 
 The whole-run p99 of 667 ms is therefore higher than the steady-state p99 of about 309 ms,
 because the whole-run histogram includes the ramp to a million per second and that one recovery.
-Both numbers are in the artifact; which one is honest depends on the question. For "what does
+Both numbers are in the artifact; which one applies depends on the question. For "what does
 this configuration deliver once it is running", use the steady-state band. For "what did the run
 as a whole look like", use the final line.
 
@@ -94,7 +94,8 @@ Four reasons, and each one is a property of the configuration rather than of the
 transaction that reads the messages. There is no lease and no acknowledgement, so a response lost
 in flight, or a consumer that crashes after receiving a batch, loses that batch permanently: the
 broker has already recorded it as consumed. That removes one HTTP round trip and one PostgreSQL
-transaction per batch from the measured path. Work that matters does not run this way.
+transaction per batch from the measured path. Work that must not be lost runs with leases and
+explicit acks instead, which is the configuration of [the 24-hour soak](/benchmarks/soak-24h).
 
 **Deduplication off removes a probe under the write serialiser.** With deduplication on, SQL
 takes the partition's row lock and probes the transaction-id sidecar within the window *before*
@@ -103,8 +104,8 @@ allocating offsets. That is what makes duplicate suppression exact, and it is no
 **0.086% of offered messages were never accepted.** 3,032 push requests failed and were dropped
 rather than retried: the open-loop producer runs with exactly one attempt, because retrying
 would double-offer and corrupt the offered-rate accounting. In a real producer those pushes
-would be retried and would arrive; here they are gone. A ceiling run is allowed to be lossy at
-the edge. A production configuration is not.
+would be retried and would arrive; here they are gone, which is a property of the loader's
+single-attempt setting rather than of the broker.
 
 **Nothing was verified per message.** The loader counted offered, accepted and popped. It did not
 number the messages and check the set on arrival.

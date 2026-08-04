@@ -13,11 +13,10 @@ sourceOfTruth:
 
 ## What this is, and what it is not
 
-Benchmarks are worth what they are worth. The honest position is that each of these systems
-would go faster in the hands of someone who runs it every day, and we are not those people
-for three of the four. We tuned each one as far as we could, we documented every knob we
-touched, and we archived the raw artifacts so a maintainer who disagrees can point at the
-exact run and tell us what we got wrong. That would be a good outcome.
+Each of these systems would go faster in the hands of someone who runs it every day, and for
+three of the four that is not us. So the method carries the weight: we tuned each one as far
+as we could, we documented every knob we touched, and we archived the raw artifacts, so a
+maintainer who reads a cell differently can point at the exact run and we will correct it.
 
 **The purpose is not to crown a winner.** It is to show the shapes: what each design is
 built for, where its cost curve bends, and what it stops being able to express. The clearest
@@ -103,16 +102,16 @@ All PASS on correctness. **Read this table with two caveats.**
 <Aside type="caution">
 **Queen's figure is a median of eight runs, not a best.** The same cell, same build, same
 configuration, produced 340, 441, 624, 680, 742, 1 049, 2 966 and 3 234 ms. That is 7x of
-dispersion and it is a defect we are chasing, not measurement noise: it appears only where
-the admission and lane controllers become binding, and not at all on sparse shapes, on the
-tenant scenarios or on the three-hour soak. Publishing the 340 would have been cherry
-picking. **Kafka, pgmq and RabbitMQ here are single runs and have not been repeated**, so
-their dispersion is unknown and could be comparable.
+dispersion, and it is a known defect under investigation rather than measurement noise: it
+appears only where the admission and lane controllers become binding, and not at all on sparse
+shapes, on the tenant scenarios or on the three-hour soak. The table publishes the median; all
+eight values are above. **Kafka, pgmq and RabbitMQ here are single runs and have not been
+repeated**, so their dispersion is unknown and could be comparable.
 </Aside>
 
 The ranking survives the caveat: even Queen's worst observed run beats pgmq and RabbitMQ,
 which do not merely go slower but stop serving the offered rate and shed messages. Against
-Kafka the honest statement is that Queen's median is about 3x better while its range
+Kafka the accurate statement is that Queen's median is about 3x better while its range
 overlaps Kafka's single observation.
 
 **Why the reversal.** pgmq's grouped read is `GROUP BY headers->>'x-pgmq-group'` over the
@@ -199,11 +198,12 @@ The mechanism is visible directly in the failing runs: 767 000 standing rows gav
 pop/s, 1.90 million gave 2 358, 3.06 million gave 1 250. Service rate falls roughly as the
 inverse of queue depth, which is what "one full table scan per read" predicts.
 
-**Queen's comparable figure** is the [three-hour soak](/benchmarks/soak-24h): 600 000 msg/s
-sustained with leases, explicit asynchronous acks, a 60-second deduplication window and
-retention active, 6.82 billion messages, zero push, pop or ack errors, flat lag, p50 120 ms.
-That is 15 to 30 times pgmq's ordered-consume ceiling, and Queen is doing more work per
-message: pgmq has neither deduplication nor retention as concepts.
+**Queen's comparable figure** is this campaign's own three-hour soak, recorded in
+`NIGHT-REPORT.md`: 600 000 msg/s sustained with leases, explicit asynchronous acks, a 60-second
+deduplication window and retention active, 6.82 billion messages, zero push, pop or ack errors,
+flat lag, p50 120 ms. That is 15 to 30 times pgmq's ordered-consume ceiling, and Queen is doing
+more work per message: pgmq has neither deduplication nor retention as concepts. The 24-hour run
+at the same semantics is [the soak](/benchmarks/soak-24h).
 
 ## What each shape is telling you
 
@@ -244,7 +244,7 @@ under `benchmark-queen/crossbench/results/2026-08-04-scale-campaign/`. The metho
 conditions are in `benchmark-queen/crossbench/SPEC.md`, and the harness itself is in
 `benchmark-queen/crossbench/`.
 
-Three known limits of this campaign, stated so nobody has to find them:
+Three known limits of this campaign:
 
 1. **Cells are 60 to 120 seconds.** Queen's instantaneous p50 drifts upward inside a run
    because completed-message retention outlives the run and nothing is pruned; pgmq, which

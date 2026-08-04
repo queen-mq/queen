@@ -9,9 +9,10 @@
 Every entity gets its own FIFO lane, created on first push, so a slow consumer on one never
 stalls another. One broker held **400,000 ordered partitions**, and sustains **600,000
 messages a second** with leases, explicit acks, deduplication and retention all on:
-**50+ billion messages across 24 hours with zero errors**. Consumer groups, replay and a
-dead-letter queue at both ends. One stateless binary on the PostgreSQL you already run. No
-cluster, no JVM.
+**50+ billion messages across 24 hours**.
+Consumer groups, replay and a dead-letter queue at both ends. Windowed aggregation that commits
+its state, its output and its acks in one transaction. One stateless binary on the
+PostgreSQL you already run. No cluster, no JVM.
 
 [Every number above, with the conditions that make it true →](https://queenmq.com/benchmarks/comparison)
 
@@ -21,7 +22,7 @@ cluster, no JVM.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-2021-000000.svg)](https://www.rust-lang.org/)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-14%2B-336791.svg)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/postgresql-15%2B-336791.svg)](https://www.postgresql.org/)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
@@ -65,6 +66,7 @@ whatever your PostgreSQL already does.
 - **Consumer groups with replay.** Each group keeps its own cursor per partition, and can be moved back to a timestamp or forward to the end.
 - **Acknowledgement as an offset commit.** No per-message delivery state to store, scan or clean up.
 - **Transactional handoff.** Acking one message and pushing the next stage's happens in a single PostgreSQL transaction.
+- **Windowed aggregation in the same transaction.** Tumbling, sliding, session and cron windows over a queue, with the window state, the emitted messages and the source acknowledgement committing together or not at all. No changelog topic, no state store, no second system.
 - **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent inside a configurable window, enforced in the database rather than a cache.
 - **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
 - **Six client SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an HTTP request is a first-class client.
@@ -170,7 +172,7 @@ a freshly built broker, on a single-node stack and on a two-broker mesh:
 test/run.sh
 ```
 
-### Three things that will bite you otherwise
+### Three things to know before you build
 
 - **The SQL lives inside the binary.** `server/sql/schema.sql` and everything under
   `server/sql/procedures/` is embedded with `include_str!` at compile time. Editing a `.sql`
@@ -192,8 +194,8 @@ More: **[Contributing](CONTRIBUTING.md)** · **[Developer guide](DEVELOPING.md)*
 | JavaScript / TypeScript | `queen-mq` (npm) | [clients/client-js](clients/client-js) |
 | Python | `queen-mq` (PyPI) | [clients/client-py](clients/client-py) |
 | Go | `github.com/smartpricing/queen/clients/client-go` | [clients/client-go](clients/client-go) |
-| Rust | `queen-mq` (crates.io) | [clients/client-rust](clients/client-rust) |
-| PHP / Laravel | `smartpricing/queen-mq` (Packagist) | [clients/client-laravel](clients/client-laravel) |
+| Rust | in this tree, not yet on crates.io | [clients/client-rust](clients/client-rust) |
+| PHP / Laravel | in this tree, not yet on Packagist | [clients/client-laravel](clients/client-laravel) |
 | C++ | single header | [clients/client-cpp](clients/client-cpp) |
 | CLI | `queenctl` | [clients/client-cli](clients/client-cli) |
 
@@ -226,7 +228,7 @@ the route table, the environment-variable reference, the Prometheus family list,
 route classes, the OpenAPI documents and the benchmark figures are all derived at build time,
 and CI fails when any of them falls behind the code.
 
-- [Start here](https://queenmq.com/start): what Queen is, why it exists, and an honest list of what it does not do
+- [Start here](https://queenmq.com/start): what Queen is, why it exists, and where its limits are
 - [Use Queen](https://queenmq.com/use): the model, the SDKs, worked examples
 - [Self-hosting](https://queenmq.com/selfhost): deployment, PostgreSQL, high availability, security, operations, multi-tenancy
 - [Internals](https://queenmq.com/internals): segments, offsets, the push and pop paths, the schema

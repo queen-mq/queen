@@ -37,12 +37,12 @@ enabling retention does nothing, and so does enabling retention with both window
 | `retentionSeconds` | Segments older than the window | No (deletes whether or not anyone consumed them) |
 | `completedRetentionSeconds` | Segments older than the window | Yes (never past the slowest group's cursor) |
 
-`retentionSeconds` is the honest "I do not care after N seconds" knob. Data leaves on age
+`retentionSeconds` is the plain "I do not care after N seconds" knob. Data leaves on age
 alone; a consumer that was down longer than the window comes back to a shorter log.
 
 `completedRetentionSeconds` is the safe one. Its boundary is capped at the *lowest* `committed`
 cursor across every consumer group on that partition, plus one. Three things follow from that
-cap, and all three surprise people:
+cap:
 
 - Unconsumed backlog is never deleted by this rule, however old it is.
 - A partition that no consumer group has ever popped has, by definition, nothing consumed, so
@@ -69,12 +69,12 @@ needed.
 
 ## maxWaitTimeSeconds deletes segments on age alone, in-flight leases included
 
-This is the sharpest edge in the retention surface, so it goes in the heading rather than a
-footnote.
+`maxWaitTimeSeconds` is an age-based shedding valve for data you are willing to lose, and the
+heading states its contract.
 
-`maxWaitTimeSeconds` deletes whole segments older than its cutoff **for every consumer group,
+It deletes whole segments older than its cutoff **for every consumer group,
 whether or not they have been consumed, and whether or not they are currently leased to a
-running worker**. The SQL that implements it calls this data loss by design. It also:
+running worker**. The SQL that implements it documents this as data loss by design. It also:
 
 - applies regardless of `retentionEnabled`, so a queue configured with only this option is still
   swept;

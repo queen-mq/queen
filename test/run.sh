@@ -107,7 +107,9 @@ for s in $SUITES; do want_suite "$s" && [ "$s" != "rust" ] && needs_broker=1; do
 
 if [ "$BUILD_BROKER" = 1 ] && [ "$needs_broker" = 1 ]; then
   echo ">> build queen:test (broker)"
-  ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f server/Dockerfile -t queen:test server ) \
+  # Context is the repo root, not server/: the broker takes queen-protocol by
+  # the relative path ../crates/queen-protocol, which has to be inside it.
+  ( cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build -q -f server/Dockerfile -t queen:test . ) \
     || { echo "!! broker image build failed"; exit 1; }
 fi
 

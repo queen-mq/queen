@@ -102,6 +102,20 @@ pub struct PopResponse {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// How many partitions this pop actually claimed.
+    ///
+    /// The renderer always emits it (`server/src/handlers/data.rs:2261`,
+    /// `out.push_str("],\"partitionsClaimed\":")`), including `0` on an empty
+    /// claim, and it is the only way to tell a `partitions=8` pop that found
+    /// one busy lane from one that found eight. Absent from the paused and
+    /// failure bodies, which never reach the renderer.
+    #[serde(
+        rename = "partitionsClaimed",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub partitions_claimed: Option<i32>,
 }
 
 fn default_true() -> bool {
@@ -224,6 +238,143 @@ impl PopParams {
 mod tests {
     use super::*;
 
+    /// A pop body byte for byte as `render_pop_parts` builds it.
+    ///
+    /// Transcribed from the renderer in `server/src/handlers/data.rs`: the
+    /// top-level keys and their order at :2077-2087, the per-message object at
+    /// :2185-2230, the trailing `partitionsClaimed` at :2261. Two partitions
+    /// were claimed, so the top-level identity describes `eu` while the third
+    /// message comes from `us` — that divergence is the whole reason the
+    /// per-message fields exist.
+    ///
+    /// This is the response every consumer receives on every successful pop and
+    /// it had no conformance test at all. A literal invented inside the test
+    /// would agree with whatever this struct happens to say, which is exactly
+    /// how `DlqMessage.error` spent its life reading a key the broker never
+    /// sends.
+    const POP_BODY_FROM_THE_RENDERER: &str = concat!(
+        r#"{"success":true,"queue":"orders","partition":"eu","#,
+        r#""partitionId":"0198f0aa-0000-7000-8000-0000000000e1","#,
+        r#""leaseId":"0198f0aa-0000-7000-8000-00000000a001","#,
+        r#""consumerGroup":"fulfilment","messages":["#,
+        r#"{"id":"0198f0aa-0000-7000-8000-000000000001","#,
+        r#""transactionId":"order-1","traceId":null,"data":{"total":19.99},"#,
+        r#""producerSub":null,"createdAt":"2026-08-04T09:15:00.123Z","#,
+        r#""partitionId":"0198f0aa-0000-7000-8000-0000000000e1","partition":"eu","#,
+        r#""leaseId":"0198f0aa-0000-7000-8000-00000000a001","consumerGroup":"fulfilment"},"#,
+        r#"{"id":"0198f0aa-0000-7000-8000-000000000002","#,
+        r#""transactionId":"order-2","traceId":null,"data":null,"#,
+        r#""producerSub":null,"createdAt":"2026-08-04T09:15:00.123Z","#,
+        r#""partitionId":"0198f0aa-0000-7000-8000-0000000000e1","partition":"eu","#,
+        r#""leaseId":"0198f0aa-0000-7000-8000-00000000a001","consumerGroup":"fulfilment"},"#,
+        r#"{"id":"0198f0aa-0000-7000-8000-000000000003","#,
+        r#""transactionId":"order-3","#,
+        r#""traceId":"0198f0aa-0000-7000-8000-0000000000c3","data":[1,2,3],"#,
+        r#""producerSub":"svc-checkout","createdAt":"2026-08-04T09:15:01.000Z","#,
+        r#""partitionId":"0198f0aa-0000-7000-8000-0000000000e2","partition":"us","#,
+        r#""leaseId":"0198f0aa-0000-7000-8000-00000000a001","consumerGroup":"fulfilment"}"#,
+        r#"],"partitionsClaimed":2}"#,
+    );
+
+    #[test]
+    fn a_rendered_pop_body_parses_with_every_field_populated() {
+        let got: PopResponse = serde_json::from_str(POP_BODY_FROM_THE_RENDERER)
+            .expect("the body the broker renders for every pop must deserialize");
+        assert!(got.success);
+        assert_eq!(got.queue, "orders");
+        assert_eq!(got.consumer_group, "fulfilment");
+        assert_eq!(got.messages.len(), 3, "one message per rendered frame");
+        assert_eq!(got.partitions_claimed, Some(2));
+
+        // The payload is spliced into the body verbatim, so every JSON shape a
+        // producer can push has to survive the round trip — object, null and
+        // array all appear in one real batch.
+        assert_eq!(got.messages[0].data, serde_json::json!({"total": 19.99}));
+        assert_eq!(
+            got.messages[1].data,
+            serde_json::Value::Null,
+            "an empty stored payload renders as `null`, not as an absent key"
+        );
+        assert_eq!(got.messages[2].data, serde_json::json!([1, 2, 3]));
+
+        assert_eq!(
+            got.messages[2].producer_sub.as_deref(),
+            Some("svc-checkout")
+        );
+        assert!(
+            got.messages[0].producer_sub.is_none(),
+            "an unauthenticated push renders `producerSub: null`"
+        );
+        assert!(got.messages.iter().all(|m| m.is_leased()));
+    }
+
+    #[test]
+    fn the_top_level_identity_describes_only_the_first_claimed_partition() {
+        // A `partitions=N` pop returns messages from several lanes but renders
+        // ONE top-level partition/partitionId, the first claimed. A consumer
+        // that acks with the top-level partitionId therefore acks the wrong
+        // lane for every message that came from another one; the per-message
+        // fields are the only safe source, and this pins that they differ.
+        let got: PopResponse = serde_json::from_str(POP_BODY_FROM_THE_RENDERER).unwrap();
+        assert_eq!(got.partition, "eu");
+        assert_eq!(got.partition_id, "0198f0aa-0000-7000-8000-0000000000e1");
+        assert_eq!(got.messages[2].partition, "us");
+        assert_ne!(
+            got.messages[2].partition_id, got.partition_id,
+            "the third message came from the second claimed lane, so its \
+             partitionId must not be the top-level one"
+        );
+        // The lease, unlike the partition, really is shared by every partition
+        // in one pop: one renewal covers the whole claim.
+        assert!(got
+            .messages
+            .iter()
+            .all(|m| m.lease_id == got.lease_id && !m.lease_id.is_empty()));
+    }
+
+    #[test]
+    fn an_empty_claim_renders_blank_identity_rather_than_null() {
+        // `render_pop_parts(&[], ...)` (data.rs:2058-2061) falls back to
+        // ("", "") for the first partition instead of omitting the keys, so an
+        // empty poll arrives as empty STRINGS with success:true. Parsing this
+        // as a failure — or choking on it — turns every quiet poll into an
+        // error.
+        let wire = concat!(
+            r#"{"success":true,"queue":"orders","partition":"","partitionId":"","#,
+            r#""leaseId":"0198f0aa-0000-7000-8000-00000000a001","#,
+            r#""consumerGroup":"fulfilment","messages":[],"partitionsClaimed":0}"#,
+        );
+        let got: PopResponse = serde_json::from_str(wire).expect("an empty poll must parse");
+        assert!(got.success, "an empty poll is not a failure");
+        assert!(got.is_empty());
+        assert!(!got.is_paused());
+        assert_eq!(got.partition, "");
+        assert_eq!(got.partitions_claimed, Some(0));
+    }
+
+    #[test]
+    fn a_pop_failure_omits_every_identity_key_and_still_reads_as_a_failure() {
+        // `pop_error_body` (data.rs:1982-1986) writes only three keys. Both
+        // defaults have to hold at once: the absent `queue`/`leaseId`/… must
+        // fill in, while the EXPLICIT success:false must beat `default_true` —
+        // if that default ever leaked over a present key, a failed pop would
+        // read as a successful empty one and the consumer would poll forever
+        // instead of surfacing the error.
+        let wire = r#"{"success":false,"error":"parse","messages":[]}"#;
+        let got: PopResponse = serde_json::from_str(wire).unwrap();
+        assert!(
+            !got.success,
+            "an explicit success:false must survive the default"
+        );
+        assert_eq!(got.error.as_deref(), Some("parse"));
+        assert_eq!(got.queue, "");
+        assert_eq!(got.lease_id, "");
+        assert_eq!(
+            got.partitions_claimed, None,
+            "the failure body never reaches the renderer, so it carries no count"
+        );
+    }
+
     #[test]
     fn parses_a_normal_claim() {
         let wire = r#"{"success":true,"queue":"orders","partition":"eu","partitionId":"p1","leaseId":"L1","consumerGroup":"g","messages":[
@@ -239,11 +390,65 @@ mod tests {
 
     #[test]
     fn parses_the_paused_204_shape() {
-        // No `success` key at all — the default must not read as a failure.
+        // The literal string the pop-maintenance branch writes, from
+        // `server/src/handlers/data.rs` — the same constant appears at :561
+        // (queue pop), :1683 and :1827 (the partition and discovery routes).
+        //
+        // It rides an HTTP 204, which is the interesting part: a transport that
+        // short-circuits "no content" to an empty body throws this away and
+        // maintenance silently reads as "the queue is quiet". The Rust client
+        // deliberately reads the 204's body (`src/http.rs:338-348`), so the
+        // signal does arrive here and `paused` is a live field, not a dead one.
+        // If that branch is ever simplified away, this shape stops reaching
+        // `is_paused()` and the only symptom is consumers spinning through a
+        // maintenance window.
         let got: PopResponse = serde_json::from_str(r#"{"messages":[],"paused":true}"#).unwrap();
-        assert!(got.success);
+        assert!(
+            got.success,
+            "there is no `success` key on the paused body, and the default must \
+             not turn maintenance into a failure"
+        );
         assert!(got.is_paused());
         assert!(got.is_empty());
+        assert_eq!(got.partitions_claimed, None);
+    }
+
+    #[test]
+    fn a_body_from_a_newer_broker_still_parses() {
+        // The renderer already sends one key this struct did not model
+        // (`partitionsClaimed`, data.rs:2261) and will send more. An unknown
+        // key must be dropped, never rejected: a client that fails to decode a
+        // pop cannot ack, so its leases lapse and every message is redelivered.
+        let wire = concat!(
+            r#"{"success":true,"queue":"q","partition":"p","partitionId":"p1","#,
+            r#""leaseId":"L1","consumerGroup":"g","partitionsClaimed":1,"#,
+            r#""someFutureField":{"nested":true},"messages":["#,
+            r#"{"id":"m1","transactionId":"t1","traceId":null,"data":1,"producerSub":null,"#,
+            r#""createdAt":"2026-08-04T10:00:00Z","partitionId":"p1","partition":"p","#,
+            r#""leaseId":"L1","consumerGroup":"g","deliveryAttempt":2}]}"#,
+        );
+        let got: PopResponse =
+            serde_json::from_str(wire).expect("an unmodelled key must not fail the decode");
+        assert_eq!(got.messages.len(), 1);
+        assert_eq!(got.partitions_claimed, Some(1));
+    }
+
+    #[test]
+    fn optional_message_fields_read_the_same_absent_or_null() {
+        // The renderer always writes `traceId`/`producerSub` as literal nulls
+        // (data.rs:2189-2219), but a fixture, a proxy or a hand-rolled producer
+        // may omit them. Both must land on `None` rather than one of them
+        // failing to decode.
+        let nulls = r#"{"id":"m1","transactionId":"t1","traceId":null,"data":{},"producerSub":null,"createdAt":"2026-08-04T10:00:00Z","partitionId":"p1","partition":"p","leaseId":"","consumerGroup":"g"}"#;
+        let absent = r#"{"id":"m1","transactionId":"t1","data":{},"createdAt":"2026-08-04T10:00:00Z","partitionId":"p1","partition":"p","leaseId":"","consumerGroup":"g"}"#;
+        let a: Message = serde_json::from_str(nulls).unwrap();
+        let b: Message = serde_json::from_str(absent).expect("absent optionals must default");
+        assert_eq!(a, b);
+        assert!(a.trace_id.is_none() && a.producer_sub.is_none());
+        assert!(
+            !a.is_leased(),
+            "an empty leaseId is the autoAck marker, so this must not read as leased"
+        );
     }
 
     #[test]

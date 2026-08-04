@@ -19,7 +19,8 @@ carry offsets. It carries `transactionId`, because that is the identifier a clie
 Turning one into the other is the work this page describes, along with the two accelerators that
 avoid doing it.
 
-The wire contract:
+The wire contract, documented field by field on
+[the ack reference page](/reference/http/ack/):
 
 ```text
 POST /api/v1/ack        {transactionId, partitionId, status, consumerGroup?, leaseId?}
@@ -113,11 +114,12 @@ All three are arrays of 32-character lowercase hex tokens. The broker maps them 
 
 The retry limit comes from `queen.queues.retry_limit` (default 3), and the DLQ is enabled when
 either `dead_letter_queue` or `dlq_after_max_retries` is true. Both default true, so an unconfigured
-queue dead-letters.
+queue dead-letters. The client-facing shape of that budget is
+[leases, retries and the DLQ](/use/concepts/leases-retries-dlq/).
 
 `batch_retry_count` is charged **only** by an explicit `failed`. A lease expiry never spends it. The
-redelivery counter `attempt_count` is separate telemetry, incremented by the pop path when a batch
-redelivers from the same start offset.
+redelivery counter `attempt_count` is separate telemetry, incremented by
+[the pop path](/internals/life-of-a-pop/) when a batch redelivers from the same start offset.
 
 ### Filing the DLQ row
 
@@ -145,7 +147,8 @@ Replay is a re-push, not a revival. `POST /api/v1/messages/:partitionId/:transac
 pushes the stored payload back into its queue under a fresh identity and then drops the DLQ
 row, so the replayed message lands at the tail of the partition and the offset the original
 occupied stays committed. `GET /api/v1/dlq` lists rows and
-`DELETE /api/v1/messages/:partitionId/:transactionId` removes one.
+`DELETE /api/v1/messages/:partitionId/:transactionId` removes one. All three are on
+[Messages and the dead-letter queue](/reference/http/messages-dlq/).
 </Aside>
 
 ## Accelerator one: the ack registry
@@ -210,7 +213,7 @@ through 200, including an earlier ack to 100), many independent advances can fus
 transaction with no loss of semantics. That is what collapses the ack commit rate so the push
 pipeline stops queueing behind a flood of tiny ack fsyncs.
 
-The mechanism mirrors push fusion:
+The mechanism mirrors [push fusion](/internals/life-of-a-push/):
 
 - **Sharded** by hash of the partition id (`QUEEN_ACK_FUSION_SHARDS`, default 8), so all acks for a
   given partition land in one shard and both same-key folding and per-partition commit order are
@@ -281,8 +284,9 @@ reintroduce exactly the work they exist to remove.
 
 ## Lease renewal
 
-`POST /api/v1/lease/:leaseId/extend` calls `queen.log_renew_lease_v1(worker, seconds)`, which renews
-**every live lease held by that worker** (a multi-partition pop shares one worker id). It uses
+[`POST /api/v1/lease/:leaseId/extend`](/reference/http/lease/) calls
+`queen.log_renew_lease_v1(worker, seconds)`, which renews **every live lease held by that worker**
+(a multi-partition pop shares one worker id). It uses
 `GREATEST`, so renewing can never shorten a lease, and reports the **minimum** expiry across the
 renewed rows, since the earliest deadline is what the caller needs in order to schedule the next
 renewal. It always answers `200`; renewal is best-effort.
@@ -297,8 +301,9 @@ never-existent one.
 
 ## Acks inside a transaction
 
-`POST /api/v1/transaction` bundles pushes and acks into one `queen.log_transaction_wire_v1` call, one
-PostgreSQL transaction, all or nothing. Its ack elements come in both forms: positional (`uptoOff`)
+[`POST /api/v1/transaction`](/reference/http/transaction/) bundles pushes and acks into one
+`queen.log_transaction_wire_v1` call, one PostgreSQL transaction, all or nothing. Its ack elements
+come in both forms: positional (`uptoOff`)
 when the pop was served by this process, and hash-resolved (an `acks` array of hex tokens) when it was
 not, for instance when another broker answered the pop, so there is no local registry entry.
 

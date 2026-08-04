@@ -1,10 +1,11 @@
 ---
-title: Idempotent producers
-description: "Deduplication is exact, per-partition and window-bounded: how to choose a deterministic transaction id, what a duplicate response looks like, and what happens once the window closes."
+title: Message deduplication and idempotent producers
+description: "Deduplication is exact, per-partition and window-bounded: how to choose a deterministic idempotency key, what a duplicate response looks like, and what happens once the window closes."
 type: example
 tier: use
 sidebar:
   order: 23
+  label: Deduplication
 sourceOfTruth:
   - server/sql/procedures/003_log_push.sql
   - server/sql/procedures/001_log_schema.sql
@@ -16,6 +17,11 @@ verifiedBy:
 ---
 
 A producer that retries after a timeout does not know whether the first attempt landed. Queen answers that with an exact, server-side duplicate check on the `transactionId`, enforced inside the same lock that allocates the message's offset, so a duplicate writes nothing at all rather than being written and later reconciled.
+
+This is the feature Kafka calls an idempotent producer and most other systems call message
+deduplication on an idempotency key. In Queen the key is the `transactionId` you supply, and
+the check runs in the broker against stored hashes rather than against a per-session sequence
+number, so it survives a producer restart and does not depend on the connection.
 
 It is on by default, with a one-hour window.
 
@@ -105,7 +111,7 @@ GREATEST(dedup_window_seconds, completedRetentionSeconds, 900)
 
 seconds, per partition, in bounded autocommitting steps. The floor of 900 seconds means the sidecar is always at least 15 minutes deep even on a queue with deduplication off, because the ack path needs it.
 
-The consequence for a producer is simple and needs to be stated plainly: **once the window has passed, a repeat of the same `transactionId` is accepted as a new message.** There is no error, no warning and no marker on the message. Deduplication is a bounded protection against retry storms and at-least-once delivery from upstream. It is not a permanent uniqueness constraint. If your invariant is "this order is only ever processed once, forever", that invariant belongs in your own datastore, keyed by your own id.
+The consequence for a producer: if your invariant is "this order is only ever processed once, forever", keep that invariant in your own datastore, keyed by your own id. Deduplication is a bounded protection against retry storms and at-least-once delivery from upstream, not a permanent uniqueness constraint. **Once the window has passed, a repeat of the same `transactionId` is accepted as a new message**, with no error, no warning and no marker on the message.
 
 The same window bound applies to acknowledgement: an ack whose transaction id has aged out of the sidecar is reported as `unresolvable` rather than silently succeeding. See [Errors, backpressure and retries](/use/errors).
 

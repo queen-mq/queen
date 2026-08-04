@@ -129,15 +129,15 @@ that partition re-delivers from offset 3.
    lose. Setting `autoAck=true` on a pop commits the cursor inside the pop transaction, which
    is at-most-once: a consumer that crashes after the response has already been marked done.
 
-## What the model does not have
+## Where the model draws its boundaries
 
 <Aside type="caution">
-These are design decisions, not gaps waiting for a flag.
+These are design decisions, not configuration options.
 </Aside>
 
-- **No global ordering.** If your correctness argument needs a total order over more than one
-  partition, Queen will not give it to you.
-- **No priority queueing of any kind.** A partition is drained from its cursor forward.
+- **No global ordering.** Total order is per partition, so a correctness argument spanning more
+  than one partition cannot rest on it.
+- **No priority queueing.** A partition is drained from its cursor forward.
 - **No per-message delivery state.** There is nothing to clean up, and nothing to inspect that
   would tell you "message 4 is in flight" independently of its neighbours.
 - **No client-side assignment or rebalancing.** Which is why a restart is cheap, and also why
@@ -164,6 +164,36 @@ These are design decisions, not gaps waiting for a flag.
     href="/use/concepts/consuming"
     title="Consuming"
     description="Groups, subscription modes, long-poll, and the leased-batch limit."
+  />
+  <LinkCard
+    href="/use/concepts/ack"
+    title="Acknowledgement is an offset commit"
+    description="One cursor per partition and group, the status values, and the mixed-outcome clamping rules."
+  />
+  <LinkCard
+    href="/use/concepts/leases-retries-dlq"
+    title="Leases, retries and the dead-letter queue"
+    description="What a lease claims, what expiry costs you, and what the DLQ can and cannot do."
+  />
+  <LinkCard
+    href="/use/concepts/transactions"
+    title="Transactions"
+    description="Ack the input and push the next stage in one PostgreSQL commit, or do neither."
+  />
+  <LinkCard
+    href="/use/concepts/replay"
+    title="Replay and subscription modes"
+    description="Where a group starts reading, and how to move its cursor backwards or forwards later."
+  />
+  <LinkCard
+    href="/use/concepts/retention"
+    title="Retention"
+    description="Opt-in, whole-segment and time-based: how long a message survives and how big your replay window is."
+  />
+  <LinkCard
+    href="/use/concepts/guarantees"
+    title="Delivery guarantees"
+    description="At-least-once by default, why consumption is not exactly-once, and where duplicates come from."
   />
   <LinkCard
     href="/reference"

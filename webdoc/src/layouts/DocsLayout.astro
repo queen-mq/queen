@@ -66,6 +66,41 @@ if (!effectiveSearchable || versionStatus?.isHidden) {
   }
 }
 
+// BreadcrumbList structured data for the trail <Breadcrumbs> renders below.
+// Without it a search result prints the raw URL path instead of the trail.
+// A crumb with no `href` is the one the component renders as a plain span
+// (the current page, and a hub that is itself the current page); those omit
+// `item`, which is what the schema asks for. Gated on the same `length > 1`
+// the component uses, so a page with no visible trail emits no markup.
+const breadcrumbLd =
+  Array.isArray(breadcrumbs) && breadcrumbs.length > 1
+    ? {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: breadcrumbs.map((crumb, i) => ({
+          "@type": "ListItem",
+          position: i + 1,
+          name: crumb.label,
+          ...(crumb.href && Astro.site
+            ? { item: new URL(crumb.href, Astro.site).href }
+            : {}),
+        })),
+      }
+    : null;
+
+// `head` entries are injected with `set:html`, so close off the one sequence
+// that could end the script element early.
+const headWithBreadcrumbs = breadcrumbLd
+  ? [
+      ...head,
+      {
+        tag: "script" as const,
+        attrs: { type: "application/ld+json" },
+        content: JSON.stringify(breadcrumbLd).replace(/</g, "\\u003c"),
+      },
+    ]
+  : head;
+
 const hasHeader = Astro.slots.has("header");
 const hasSidebar = Astro.slots.has("sidebar");
 const hasToc = Astro.slots.has("toc");
@@ -74,7 +109,7 @@ const hasContentFooter = Astro.slots.has("content-footer");
 const hasPagination = Astro.slots.has("pagination");
 ---
 
-<BaseLayout title={title} description={description} noindex={noindex || draft} markdownUrl={markdownUrl} socialImage={socialImage} lastUpdated={lastUpdated} head={head} collection={collection} entryId={entryId}>
+<BaseLayout title={title} description={description} noindex={noindex || draft} markdownUrl={markdownUrl} socialImage={socialImage} lastUpdated={lastUpdated} head={headWithBreadcrumbs} collection={collection} entryId={entryId}>
   <div class="flex flex-col min-h-screen">
     {hasHeader ? <slot name="header" /> : <Header collection={collection} entryId={entryId} showSidebar={showSidebar} />}
 

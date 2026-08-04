@@ -22,12 +22,48 @@ interface Props {
   source?: string;
 }
 
+import { readFileSync } from "node:fs";
+
 const { src, alt, caption, source } = Astro.props;
+
+/**
+ * Intrinsic size, read from the file at build time.
+ *
+ * An <img> with no width/height and `loading="lazy"` occupies zero height
+ * until its bytes land, so the prose under a figure jumps down as each chart
+ * arrives. The attributes give the browser an aspect ratio to reserve; the
+ * `width: 100%; height: auto` in globals.css still drives the rendered size.
+ *
+ * The viewBox is the source of truth rather than the width/height attributes,
+ * which matplotlib writes in points.
+ */
+function intrinsicSize(name: string): { width: number; height: number } | null {
+  const file = new URL(`../../public/charts/${name}.svg`, import.meta.url);
+  let svg: string;
+  try {
+    svg = readFileSync(file, "utf8").slice(0, 4096);
+  } catch {
+    // A missing figure is already a visible broken image and the markdown
+    // lint catches the reference; do not fail the build a second time here.
+    return null;
+  }
+  const viewBox = svg.match(/viewBox\s*=\s*"([^"]+)"/);
+  if (!viewBox) return null;
+  const parts = viewBox[1].trim().split(/[\s,]+/).map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
+  const [, , width, height] = parts;
+  if (width <= 0 || height <= 0) return null;
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+// Both surfaces are rendered from the same figure, so one measurement covers
+// the pair. Fall back to the dark file if the light one cannot be read.
+const size = intrinsicSize(`${src}-light`) ?? intrinsicSize(`${src}-dark`);
 ---
 
 <figure class="nb-chart">
-  <img class="nb-chart-light" src={`/charts/${src}-light.svg`} alt={alt} loading="lazy" decoding="async" />
-  <img class="nb-chart-dark" src={`/charts/${src}-dark.svg`} alt={alt} loading="lazy" decoding="async" />
+  <img class="nb-chart-light" src={`/charts/${src}-light.svg`} alt={alt} width={size?.width} height={size?.height} loading="lazy" decoding="async" />
+  <img class="nb-chart-dark" src={`/charts/${src}-dark.svg`} alt={alt} width={size?.width} height={size?.height} loading="lazy" decoding="async" />
   {
     (caption || source) && (
       <figcaption>

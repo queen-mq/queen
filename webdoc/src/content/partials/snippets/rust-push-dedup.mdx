@@ -10,6 +10,6 @@ description: "Verified snippet extracted from clients/client-rust/tests/core.rs.
 
 ```rust title="clients/client-rust/tests/core.rs"
 let txn = format!("{queue}-fixed-txn");
-let item = queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 }))
-    .transaction_id(txn.clone());
+let item =
+    queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 })).transaction_id(txn.clone());
 ```

@@ -151,13 +151,14 @@ What they legitimately imply:
   half a million messages. The lowest is a two-core shared cell with a rate
   limiter in front.
 
-What they do not imply, and you should not extrapolate:
+What they do not imply:
 
-- **Nothing here is a latency SLO.** These are throughput and correctness runs.
+- **These are throughput and correctness runs, not a latency SLO.**
   Percentile latency depends on your commit durability setting, your disk and your
   batch size.
-- **Nothing here was measured on your disk.** Commit rate is a storage property
-  first. A run on NVMe tells you very little about a network volume.
+- **Each figure carries the storage it was measured on.** Commit rate is a
+  storage property first, and a run on NVMe tells you very little about a
+  network volume.
 - **The high-throughput rows are not the safe configuration.** Deduplication off
   removes exactly-once storage on retry; `autoAck` removes redelivery. If your
   deployment needs either guarantee, size against the explicit-ack row.

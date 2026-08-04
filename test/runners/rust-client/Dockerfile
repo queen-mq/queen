@@ -21,7 +21,7 @@ WORKDIR /suite/clients/client-rust
 
 # Compile the test binaries at build time so a slow first cargo build does not
 # eat into the suite's wall clock (and cannot be mistaken for a hung broker).
-RUN cargo test --no-run
+RUN cargo test --locked --no-run
 
 COPY test/runners/common/wait-for-broker.sh /usr/local/bin/wait-for-broker
 COPY test/runners/rust-client/entrypoint.sh /entrypoint.sh

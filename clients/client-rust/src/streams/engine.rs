@@ -180,7 +180,10 @@ pub(crate) fn run_reduce(
             .get("windowStart")
             .and_then(|v| v.as_i64())
             .unwrap_or_else(|| super::ops::parse_iso_ms(&parts.window_key).unwrap_or(0));
-        let we = value.get("windowEnd").and_then(|v| v.as_i64()).unwrap_or(ws);
+        let we = value
+            .get("windowEnd")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(ws);
         accs.insert(
             state_key.clone(),
             Acc {
@@ -188,10 +191,7 @@ pub(crate) fn run_reduce(
                 window_start: ws,
                 window_end: we,
                 window_key: parts.window_key,
-                acc: value
-                    .get("acc")
-                    .cloned()
-                    .unwrap_or_else(|| value.clone()),
+                acc: value.get("acc").cloned().unwrap_or_else(|| value.clone()),
                 touched: false,
                 seeded: true,
             },
@@ -481,7 +481,10 @@ mod tests {
 
     #[test]
     fn sliding_fans_out_to_size_over_slide_windows() {
-        let w = Window::new(WindowKind::Sliding { size: 60, slide: 10 });
+        let w = Window::new(WindowKind::Sliding {
+            size: 60,
+            slide: 10,
+        });
         let envs = w.annotate(rec(1.0), "k".into(), 1_785_837_637_000);
         assert_eq!(envs.len(), 6, "60/10 windows should cover each event");
         // Every window must actually contain the timestamp.
@@ -491,14 +494,16 @@ mod tests {
             assert_eq!(e.window_end - e.window_start, 60_000);
         }
         // ...and they are distinct.
-        let starts: std::collections::HashSet<i64> =
-            envs.iter().map(|e| e.window_start).collect();
+        let starts: std::collections::HashSet<i64> = envs.iter().map(|e| e.window_start).collect();
         assert_eq!(starts.len(), 6);
     }
 
     #[test]
     fn sliding_with_slide_equal_to_size_is_tumbling() {
-        let w = Window::new(WindowKind::Sliding { size: 30, slide: 30 });
+        let w = Window::new(WindowKind::Sliding {
+            size: 30,
+            slide: 30,
+        });
         let envs = w.annotate(rec(1.0), "k".into(), 45_000);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].window_start, 30_000);
@@ -506,7 +511,9 @@ mod tests {
 
     #[test]
     fn cron_aligns_to_wall_clock_boundaries() {
-        let minute = Window::new(WindowKind::Cron { every: Every::Minute });
+        let minute = Window::new(WindowKind::Cron {
+            every: Every::Minute,
+        });
         let e = minute.annotate(rec(1.0), "k".into(), 1_785_837_637_123);
         assert_eq!(e[0].window_key, "2026-08-04T10:00:00.000Z");
 
@@ -591,7 +598,10 @@ mod tests {
 
         let out = run_reduce(&counter(), &envs, &state, Some(25_000), "tumb:10", 0);
         let keys: Vec<&str> = out.emits.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"quiet"), "the idle key never closed: {keys:?}");
+        assert!(
+            keys.contains(&"quiet"),
+            "the idle key never closed: {keys:?}"
+        );
     }
 
     #[test]
@@ -621,7 +631,14 @@ mod tests {
         for n in [1.0, 2.0, 3.0] {
             envs.extend(w.annotate(rec(n), "k".into(), 1_000));
         }
-        let out = run_reduce(&summer(), &envs, &BTreeMap::new(), Some(10_000), "tumb:10", 0);
+        let out = run_reduce(
+            &summer(),
+            &envs,
+            &BTreeMap::new(),
+            Some(10_000),
+            "tumb:10",
+            0,
+        );
         assert_eq!(out.emits.len(), 1);
         assert_eq!(out.emits[0].value["sum"], 6.0);
     }
@@ -633,7 +650,14 @@ mod tests {
         envs.extend(w.annotate(rec(10.0), "b".into(), 1_000));
         envs.extend(w.annotate(rec(1.0), "a".into(), 2_000));
 
-        let out = run_reduce(&summer(), &envs, &BTreeMap::new(), Some(10_000), "tumb:10", 0);
+        let out = run_reduce(
+            &summer(),
+            &envs,
+            &BTreeMap::new(),
+            Some(10_000),
+            "tumb:10",
+            0,
+        );
         assert_eq!(out.emits.len(), 2);
         let by_key: BTreeMap<&str, f64> = out
             .emits

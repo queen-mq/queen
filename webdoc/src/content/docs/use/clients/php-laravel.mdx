@@ -1,5 +1,5 @@
 ---
-title: PHP and Laravel
+title: PHP and Laravel quickstart
 description: "Install the PHP SDK with Composer, use the fluent builders, and wire the Laravel service provider, facade and queen:consume command."
 type: how-to
 tier: use
@@ -33,6 +33,9 @@ The PHP client is a plain PSR-4 library (`Queen\` mapped onto `src/`) with an op
 Laravel layer on top. It is synchronous: every builder chain ends in an explicit `execute()`,
 `pop()`, `get()` or `commit()`. It requires PHP 8.3 and depends on `guzzlehttp/guzzle` and
 `ramsey/uuid`.
+
+The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+[Versions and compatibility](/reference/compatibility) states what that covers.
 
 ```bash
 composer require smartpricing/queen-mq
@@ -255,10 +258,11 @@ $dlq = $client->queue('orders')->dlq('billing')->limit(50)->get();
 ```
 
 <Aside type="caution">
-Three verified gaps carry over to PHP. `admin()->clearQueue()` and
+Three verified behaviours carry over to PHP. `admin()->clearQueue()` and
 `admin()->moveMessageToDLQ()` call paths the broker does not register and return 404. The DLQ
 query's `from`, `to` and partition filters are sent but never read by the broker, which
-collects only `queue`, `consumerGroup`, `limit` and `offset`, and the response has no `total`.
+collects only `queue`, `consumerGroup`, `limit` and `offset`. The response's `total` is the
+size of the page rather than of the result set, so it cannot be used to page.
 And `renew()` always reports `newExpiresAt` as `null`, because the broker answers
 `{"renewed":N,"expiresAt":"…"}` under different key names. The renewal itself works.
 </Aside>

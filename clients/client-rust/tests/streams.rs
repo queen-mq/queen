@@ -11,16 +11,23 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use queen_mq::streams::{Every, LatePolicy, RunOptions, Stream};
-use queen_mq::QueueOptions;
+use queen_mq::{Cancel, QueueOptions, SubscriptionMode};
 
 use common::*;
 
 /// Push `n` messages one per `gap`, so events actually span several windows.
-async fn push_spread(queen: &queen_mq::Queen, queue: &str, partition: &str, n: usize, gap: Duration) {
+async fn push_spread(
+    queen: &queen_mq::Queen,
+    queue: &str,
+    partition: &str,
+    n: usize,
+    gap: Duration,
+) {
     for i in 0..n {
         queen
             .queue(queue)
@@ -44,7 +51,7 @@ async fn a_stream_registers_and_reports_its_query_id() {
 
     let handle = Stream::from(q.queue(&src))
         .map(|r| r.data.clone())
-        .to(q.queue(&unique("st-register-sink")))
+        .to(q.queue(unique("st-register-sink")))
         .run(&q, RunOptions::new(unique("st-register-q")).reset(true))
         .await
         .unwrap();
@@ -227,7 +234,11 @@ async fn a_tumbling_window_sums_and_closes_every_window() {
     .await;
     handle.stop().await.unwrap();
 
-    assert!(out.len() >= 2, "expected several windows, got {}", out.len());
+    assert!(
+        out.len() >= 2,
+        "expected several windows, got {}",
+        out.len()
+    );
     assert_eq!(sum_field(&out, "count"), 8.0, "every message counted once");
     assert_eq!(sum_field(&out, "sum"), 36.0, "1+2+...+8");
 
@@ -361,7 +372,10 @@ async fn every_aggregate_field_computes() {
     // avg is present and inside the range.
     for m in &out {
         let avg = m.data["avg"].as_f64().unwrap();
-        assert!((1.0..=9.0).contains(&avg), "avg {avg} outside the data range");
+        assert!(
+            (1.0..=9.0).contains(&avg),
+            "avg {avg} outside the data range"
+        );
     }
 
     drop_queue(&q, &src).await;
@@ -854,14 +868,16 @@ async fn foreach_runs_a_side_effect_with_window_context() {
     }
     handle.stop().await.unwrap();
 
-    let seen = seen.lock().unwrap();
-    assert!(!seen.is_empty(), "foreach never ran");
-    let (key, window_start) = &seen[0];
-    assert!(!key.is_empty(), "the emit context carried no key");
-    assert!(
-        window_start.is_some(),
-        "a windowed emit should carry its window start"
-    );
+    {
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "foreach never ran");
+        let (key, window_start) = &seen[0];
+        assert!(!key.is_empty(), "the emit context carried no key");
+        assert!(
+            window_start.is_some(),
+            "a windowed emit should carry its window start"
+        );
+    }
 
     drop_queue(&q, &src).await;
 }
@@ -1036,6 +1052,315 @@ async fn a_gate_that_denies_everything_commits_nothing() {
     assert!(out.is_empty(), "a fully denied batch still emitted");
     assert!(metrics.gate_denied > 0, "{metrics:?}");
     assert_eq!(metrics.gate_allowed, 0);
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+// ============================================================================
+// Gate behind a stateless stage
+// ============================================================================
+//
+// A pre-stage breaks the one-to-one correspondence between claimed messages and
+// records: `filter` leaves a message with no record at all, `flat_map` leaves it
+// with several. The gate's ack is an offset commit — `count` messages ending at
+// a transaction id — so every one of these tests is really asking the same
+// question: is the ack counted in messages, or in records?
+
+/// A source whose lease lapses in a couple of seconds, so a held or unsettled
+/// tail comes back while the test is still watching, and whose retry limit is
+/// high enough that a redelivery loop shows up as a duplicate emit instead of
+/// quietly draining into the DLQ.
+fn replayable_source() -> QueueOptions {
+    QueueOptions {
+        lease_time: Some(2),
+        retry_limit: Some(50),
+        ..Default::default()
+    }
+}
+
+/// The consumer group a stream claims under when `RunOptions` names none.
+fn stream_group(query_id: &str) -> String {
+    format!("streams.{query_id}")
+}
+
+#[tokio::test]
+async fn a_gate_behind_a_filter_settles_every_claimed_message() {
+    let q = broker!();
+    let src = unique("st-gate-filter");
+    let sink = unique("st-gate-filter-sink");
+    create_queue(&q, &src, replayable_source()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-gate-filter-q");
+
+    // Six claimed messages, two of which survive the filter, and a gate that
+    // allows everything: all six have to be settled. Acking the two *records*
+    // instead settles the first two messages, leaves four claimed for ever, and
+    // re-emits the two that did pass on every redelivery.
+    let handle = Stream::from(q.queue(&src))
+        .filter(|r| r.number("i").unwrap_or(0.0) >= 4.0)
+        .gate(|_, _| true)
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(&query)
+                .reset(true)
+                .batch_size(10)
+                .max_wait(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap();
+
+    for i in 0..6 {
+        q.queue(&src)
+            .partition("one")
+            .push(serde_json::json!({ "i": i }))
+            .await
+            .unwrap();
+    }
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| m.len() >= 2).await;
+    // Keep watching for longer than the lease: a misplaced ack shows up as the
+    // same records arriving a second time.
+    let extra = drain_until(&q, &sink, Duration::from_secs(6), |_| false).await;
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    let mut seen: Vec<i64> = out.iter().filter_map(|m| m.data["i"].as_i64()).collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![4, 5],
+        "the wrong records reached the sink: {seen:?}"
+    );
+    assert!(
+        extra.is_empty(),
+        "the batch was redelivered and re-emitted: {} extra sink messages",
+        extra.len()
+    );
+    assert_eq!(
+        metrics.gate_allowed, 6,
+        "the gate settles messages, not records — four were filtered out but all \
+         six were claimed: {metrics:?}"
+    );
+    assert_eq!(metrics.errors, 0, "{metrics:?}");
+
+    // Nothing is left claimable: the filtered-out messages were acked too.
+    let leftover = pop_retry(&q, &src, Some(&stream_group(&query)), 10, 10).await;
+    assert!(
+        leftover.is_empty(),
+        "{} messages were never settled",
+        leftover.len()
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn a_gate_behind_a_flat_map_acks_the_message_not_its_records() {
+    let q = broker!();
+    let src = unique("st-gate-fanout");
+    let sink = unique("st-gate-fanout-sink");
+    create_queue(&q, &src, replayable_source()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-gate-fanout-q");
+
+    // One claimed message, three records. Counting records indexes past the end
+    // of the claimed batch — a panic inside the spawned loop task, which
+    // `stop()` then reports as a clean shutdown while the sink stays empty.
+    let handle = Stream::from(q.queue(&src))
+        .flat_map(|r| {
+            r.field("items")
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|v| serde_json::json!({ "v": v }))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .gate(|_, _| true)
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(&query)
+                .reset(true)
+                .max_wait(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap();
+
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "items": [1, 2, 3] }))
+        .await
+        .unwrap();
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| m.len() >= 3).await;
+    let extra = drain_until(&q, &sink, Duration::from_secs(6), |_| false).await;
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    assert_eq!(out.len(), 3, "the expanded records never reached the sink");
+    assert_eq!(sum_field(&out, "v"), 6.0, "1 + 2 + 3");
+    assert!(
+        extra.is_empty(),
+        "the message was redelivered and expanded again: {} extra sink messages",
+        extra.len()
+    );
+    assert_eq!(
+        metrics.gate_allowed, 1,
+        "one message was settled, however many records it produced: {metrics:?}"
+    );
+    assert_eq!(metrics.errors, 0, "{metrics:?}");
+
+    let leftover = pop_retry(&q, &src, Some(&stream_group(&query)), 10, 10).await;
+    assert!(leftover.is_empty(), "the message was never settled");
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn a_gate_that_denies_half_an_expanded_message_commits_none_of_it() {
+    let q = broker!();
+    let src = unique("st-gate-partial");
+    let sink = unique("st-gate-partial-sink");
+    create_queue(&q, &src, replayable_source()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-gate-partial-q");
+
+    // The gate allows two of the message's three records. A redelivery replays
+    // the whole message, so committing the allowed prefix would duplicate those
+    // two records on every retry: a message is settled only when all of it is.
+    let handle = Stream::from(q.queue(&src))
+        .flat_map(|r| {
+            r.field("items")
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|v| serde_json::json!({ "v": v }))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .gate(|rec, _| rec.number("v").unwrap_or(0.0) < 3.0)
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(&query)
+                .reset(true)
+                .max_wait(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap();
+
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "items": [1, 2, 3] }))
+        .await
+        .unwrap();
+
+    // Long enough for the lease to lapse and the message to be replayed twice.
+    let out = drain_until(&q, &sink, Duration::from_secs(9), |_| false).await;
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    assert!(
+        out.is_empty(),
+        "{} records of a part-denied message were committed",
+        out.len()
+    );
+    assert_eq!(
+        metrics.gate_allowed, 0,
+        "no message was fully allowed: {metrics:?}"
+    );
+    assert!(metrics.gate_denied > 0, "{metrics:?}");
+
+    // Un-acked, so it is claimable again once the lease lapses.
+    let back = pop_retry(&q, &src, Some(&stream_group(&query)), 10, 30).await;
+    assert_eq!(
+        back.len(),
+        1,
+        "the part-denied message was settled instead of being held"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn a_gate_ack_counts_messages_even_when_a_filter_thinned_them() {
+    let q = broker!();
+    let src = unique("st-gate-prefix");
+    let sink = unique("st-gate-prefix-sink");
+    create_queue(&q, &src, replayable_source()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-gate-prefix-q");
+
+    // Five messages; the filter drops #1, the gate denies from #3 on. The
+    // allowed prefix is three MESSAGES (#0, the empty #1, #2) but only two
+    // RECORDS. Those two counts must not be confused: acking two would leave
+    // message #2 claimed after its record was already emitted, so the redelivery
+    // would emit it twice.
+    let handle = Stream::from(q.queue(&src))
+        .filter(|r| r.number("i").unwrap_or(0.0) != 1.0)
+        .gate(|rec, _| rec.number("i").unwrap_or(0.0) < 3.0)
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(&query)
+                .reset(true)
+                .batch_size(10)
+                .max_wait(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap();
+
+    for i in 0..5 {
+        q.queue(&src)
+            .partition("one")
+            .push(serde_json::json!({ "i": i }))
+            .await
+            .unwrap();
+    }
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| m.len() >= 2).await;
+    let extra = drain_until(&q, &sink, Duration::from_secs(6), |_| false).await;
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    let mut seen: Vec<i64> = out.iter().filter_map(|m| m.data["i"].as_i64()).collect();
+    seen.sort();
+    assert_eq!(seen, vec![0, 2], "the wrong prefix was emitted: {seen:?}");
+    assert!(
+        extra.is_empty(),
+        "an already-emitted message was redelivered: {} extra sink messages",
+        extra.len()
+    );
+    assert_eq!(
+        metrics.gate_allowed, 3,
+        "three messages were settled to emit two records: {metrics:?}"
+    );
+
+    // The tail comes back exactly where the ack stopped.
+    let back = pop_retry(&q, &src, Some(&stream_group(&query)), 10, 30).await;
+    assert!(
+        !back.is_empty(),
+        "the denied tail was settled instead of being held"
+    );
+    let first = back[0].data["i"].as_i64();
+    assert_eq!(
+        first,
+        Some(3),
+        "the ack settled the wrong prefix: the tail resumes at {first:?}, not at 3"
+    );
+    let replayed: Vec<i64> = back.iter().filter_map(|m| m.data["i"].as_i64()).collect();
+    assert!(
+        replayed.iter().all(|i| *i >= 3),
+        "an allowed message came back: {replayed:?}"
+    );
 
     drop_queue(&q, &src).await;
     drop_queue(&q, &sink).await;
@@ -1279,7 +1604,12 @@ async fn a_stream_over_many_partitions_keeps_every_message() {
     let out = drain_until(&q, &sink, Duration::from_secs(45), |m| m.len() >= want).await;
     handle.stop().await.unwrap();
 
-    assert_eq!(out.len(), want, "lost {} of {want} messages", want - out.len());
+    assert_eq!(
+        out.len(),
+        want,
+        "lost {} of {want} messages",
+        want - out.len()
+    );
     // Each lane's messages stay in order within their own lane.
     for lane in 0..LANES {
         let seq: Vec<i64> = out
@@ -1290,6 +1620,844 @@ async fn a_stream_over_many_partitions_keeps_every_message() {
         let mut sorted = seq.clone();
         sorted.sort();
         assert_eq!(seq, sorted, "lane {lane} arrived out of order: {seq:?}");
+    }
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+// ============================================================================
+// Event time: the watermark drives the sweep
+// ============================================================================
+
+#[tokio::test]
+async fn an_event_time_idle_flush_waits_for_the_watermark_not_the_wall_clock() {
+    let q = broker!();
+    let src = unique("st-etflush");
+    let sink = unique("st-etflush-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    // The other event-time tests all pass idle_flush_ms(0), so the watermark
+    // branch of the sweep never runs — and a sweep is on by default in
+    // production (5s for tumbling). These timestamps are in 1970, so a sweep
+    // that reached for the wall clock instead of the watermark would find every
+    // window ripe by half a century and close them immediately.
+    let handle = Stream::from(q.queue(&src))
+        .window_tumbling(10)
+        .event_time(|m| m.data.get("ts").and_then(|v| v.as_i64()))
+        .idle_flush_ms(300)
+        .aggregate_sum("sum", |r| r.number("v"))
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(unique("st-etflush-q"))
+                .reset(true)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    // Two events inside the window [0s, 10s), then silence. Event time has only
+    // reached 2s, so the window is not ripe and nothing may be emitted however
+    // many times the sweep ticks.
+    for (ts, v) in [(1_000i64, 1.0), (2_000, 2.0)] {
+        q.queue(&src)
+            .partition("one")
+            .push(serde_json::json!({ "ts": ts, "v": v }))
+            .await
+            .unwrap();
+    }
+
+    let premature = drain_until(&q, &sink, Duration::from_secs(5), |_| false).await;
+    let idle_metrics = handle.metrics();
+    // Without this the silence below would prove nothing: a runner that never
+    // cycled has no watermark to sweep against either.
+    assert!(
+        idle_metrics.cycles > 0,
+        "the two events were never consumed: {idle_metrics:?}"
+    );
+    assert!(
+        premature.is_empty(),
+        "the sweep closed a window the data had not reached yet: {} emits",
+        premature.len()
+    );
+    assert_eq!(
+        idle_metrics.flush_cycles, 0,
+        "a flush committed on a partition whose watermark had not moved: {idle_metrics:?}"
+    );
+
+    // Now move event time past the window end. Exactly one window closes: the
+    // one this event lands in stays open, because the watermark it just set
+    // sits at its start, not past its end.
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "ts": 60_000, "v": 100.0 }))
+        .await
+        .unwrap();
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| !m.is_empty()).await;
+    let tail = drain_until(&q, &sink, Duration::from_secs(4), |_| false).await;
+    handle.stop().await.unwrap();
+
+    assert_eq!(
+        out.len(),
+        1,
+        "expected one closed window, got {}",
+        out.len()
+    );
+    assert_eq!(
+        sum_field(&out, "sum"),
+        3.0,
+        "the closed window should total 1+2 and nothing else"
+    );
+    assert!(
+        tail.is_empty(),
+        "the window holding the newest event closed too: {} extra emits",
+        tail.len()
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn allowed_lateness_admits_a_straggler_inside_the_tolerance_and_drops_the_rest() {
+    let q = broker!();
+    let src = unique("st-lateness");
+    let sink = unique("st-lateness-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    // allowed_lateness holds the watermark back: it is max(event time) minus
+    // the tolerance, so an event that old is still on time. Nothing else
+    // exercises it, and the default of 0 makes the subtraction invisible.
+    let handle = Stream::from(q.queue(&src))
+        .window_tumbling(10)
+        .event_time(|m| m.data.get("ts").and_then(|v| v.as_i64()))
+        .allowed_lateness(30)
+        .idle_flush_ms(0)
+        .aggregate_sum("sum", |r| r.number("v"))
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(unique("st-lateness-q"))
+                .reset(true)
+                .max_wait(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap();
+
+    // Watermark after this cycle: 100s - 30s = 70s. It has to be established
+    // before the stragglers arrive, since a batch is judged against the
+    // watermark it started with.
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "ts": 100_000, "v": 1.0 }))
+        .await
+        .unwrap();
+    sleep_ms(2500).await;
+
+    // 75s: 25s late, inside the 30s tolerance, so it accumulates into [70s, 80s).
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "ts": 75_000, "v": 5.0 }))
+        .await
+        .unwrap();
+    // 60s: past the tolerance, so it is dropped rather than reopening anything.
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "ts": 60_000, "v": 999.0 }))
+        .await
+        .unwrap();
+    sleep_ms(2500).await;
+
+    // Push event time far enough ahead to close both windows.
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "ts": 200_000, "v": 0.0 }))
+        .await
+        .unwrap();
+
+    let out = drain_until(&q, &sink, Duration::from_secs(30), |m| {
+        sum_field(m, "sum") >= 6.0
+    })
+    .await;
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    assert_eq!(
+        sum_field(&out, "sum"),
+        6.0,
+        "expected 1 from the on-time window and 5 from the tolerated straggler, \
+         with the 999 dropped: {out:?}"
+    );
+    assert!(
+        out.iter().any(|m| m.data["sum"].as_f64() == Some(5.0)),
+        "the straggler inside the tolerance was dropped: {out:?}"
+    );
+    assert!(
+        metrics.late_events >= 1,
+        "the event past the tolerance was not counted as late: {metrics:?}"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+// ============================================================================
+// Windows without a reducer, post stages, sinks
+// ============================================================================
+
+#[tokio::test]
+async fn a_window_without_a_reducer_annotates_and_passes_records_straight_through() {
+    let q = broker!();
+    let src = unique("st-annotate");
+    let sink = unique("st-annotate-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    // `window_tumbling(..).to(..)` with no reducer is allowed by the chain
+    // rules but never exercised: it is the one branch that emits records
+    // without folding them. A minute-long window makes the point — nothing is
+    // buffered waiting for it to close, and no state row is written.
+    let handle = Stream::from(q.queue(&src))
+        .window_tumbling(60)
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(unique("st-annotate-q"))
+                .reset(true)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    for n in 1..=3 {
+        q.queue(&src)
+            .partition("one")
+            .push(serde_json::json!({ "n": n }))
+            .await
+            .unwrap();
+    }
+
+    let out = drain_until(&q, &sink, Duration::from_secs(20), |m| m.len() >= 3).await;
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    assert_eq!(
+        out.len(),
+        3,
+        "the records were held back waiting for a window that had no reducer to close"
+    );
+    assert_eq!(sum_field(&out, "n"), 6.0, "the payloads were reshaped");
+    assert_eq!(
+        metrics.state_ops, 0,
+        "an annotating window wrote state it will never read: {metrics:?}"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn a_post_reducer_filter_drops_whole_emits() {
+    let q = broker!();
+    let src = unique("st-postfilter");
+    let sink = unique("st-postfilter-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    // Only Map was covered on the post side. A filter there runs on the closed
+    // aggregate, so it suppresses an entire window's emit — the state row is
+    // still settled, it just never reaches the sink.
+    let handle = Stream::from(q.queue(&src))
+        .window_tumbling(1)
+        .idle_flush_ms(300)
+        .aggregate_sum("sum", |r| r.number("v"))
+        .filter(|r| r.number("sum").unwrap_or(0.0) >= 10.0)
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(unique("st-postfilter-q"))
+                .reset(true)
+                .max_partitions(4)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    // One message per lane, so each lane closes exactly one window.
+    for (lane, v) in [("loud", 10.0), ("quiet", 1.0)] {
+        q.queue(&src)
+            .partition(lane)
+            .push(serde_json::json!({ "v": v }))
+            .await
+            .unwrap();
+    }
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| !m.is_empty()).await;
+    let tail = drain_until(&q, &sink, Duration::from_secs(5), |_| false).await;
+    handle.stop().await.unwrap();
+
+    assert_eq!(out.len(), 1, "expected only the loud lane's window");
+    assert_eq!(sum_field(&out, "sum"), 10.0);
+    assert_eq!(out[0].partition.as_str(), "loud");
+    assert!(
+        tail.is_empty(),
+        "the quiet lane's emit reached the sink after all: {tail:?}"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn a_post_reducer_flat_map_fans_one_emit_into_several_sink_messages() {
+    let q = broker!();
+    let src = unique("st-postfanout");
+    let sink = unique("st-postfanout-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    // The FlatMap arm of the post stage has to carry the emit's key and window
+    // key onto every copy, or the sink loses the window each row came from.
+    let handle = Stream::from(q.queue(&src))
+        .window_tumbling(1)
+        .idle_flush_ms(300)
+        .aggregate_sum("sum", |r| r.number("v"))
+        .flat_map(|r| {
+            let half = r.number("sum").unwrap_or(0.0) / 2.0;
+            vec![
+                serde_json::json!({ "half": half, "side": "left" }),
+                serde_json::json!({ "half": half, "side": "right" }),
+            ]
+        })
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(unique("st-postfanout-q"))
+                .reset(true)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "v": 8.0 }))
+        .await
+        .unwrap();
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| m.len() >= 2).await;
+    handle.stop().await.unwrap();
+
+    assert_eq!(
+        out.len(),
+        2,
+        "one emit should have become two sink messages"
+    );
+    assert_eq!(sum_field(&out, "half"), 8.0, "the halves lost their total");
+    let mut sides: Vec<&str> = out.iter().filter_map(|m| m.data["side"].as_str()).collect();
+    sides.sort();
+    assert_eq!(
+        sides,
+        vec!["left", "right"],
+        "both copies carry the same side, so the fan-out duplicated one value"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn to_partitioned_routes_by_the_emitted_value_not_the_source_lane() {
+    let q = broker!();
+    let src = unique("st-topart");
+    let sink = unique("st-topart-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    // `to_partitioned` has no call site anywhere in the crate. Everything is
+    // pushed down one source lane, so a sink that reused the source partition
+    // would put every message in "mixed".
+    let handle = Stream::from(q.queue(&src))
+        .to_partitioned(q.queue(&sink), |v| {
+            v.get("tenant")
+                .and_then(|t| t.as_str())
+                .unwrap_or("none")
+                .to_string()
+        })
+        .run(
+            &q,
+            RunOptions::new(unique("st-topart-q"))
+                .reset(true)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    for tenant in ["acme", "acme", "globex", "globex"] {
+        q.queue(&src)
+            .partition("mixed")
+            .push(serde_json::json!({ "tenant": tenant }))
+            .await
+            .unwrap();
+    }
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| m.len() >= 4).await;
+    handle.stop().await.unwrap();
+
+    assert_eq!(out.len(), 4, "not every message was routed");
+    for m in &out {
+        let tenant = m.data["tenant"].as_str().unwrap_or("");
+        assert_eq!(
+            m.partition.as_str(),
+            tenant,
+            "a message for {tenant} landed in partition {}",
+            m.partition
+        );
+    }
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+// ============================================================================
+// Terminals that fail
+// ============================================================================
+
+#[tokio::test]
+async fn a_failing_foreach_aborts_the_cycle_before_the_ack() {
+    let q = broker!();
+    let src = unique("st-foreach-err");
+    create_queue(&q, &src, replayable_source()).await;
+    let query = unique("st-foreach-err-q");
+
+    // The effect runs before the commit, so a user error has to abort the whole
+    // cycle: the message stays claimed and comes back. The existing foreach test
+    // always returns Ok, which never touches this path — and a swallowed error
+    // would look identical from the outside except that the work is silently
+    // lost.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+
+    let handle = Stream::from(q.queue(&src))
+        .foreach(move |_value, _ctx| {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<(), String>("the effect failed".to_string())
+            }
+        })
+        .run(
+            &q,
+            RunOptions::new(&query)
+                .reset(true)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "n": 1 }))
+        .await
+        .unwrap();
+
+    // Two calls means the message was redelivered, which only happens if the
+    // first cycle committed nothing.
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    while calls.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+        sleep_ms(200).await;
+    }
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    assert!(
+        calls.load(Ordering::SeqCst) >= 2,
+        "the effect ran {} time(s): a failed effect was acked instead of retried",
+        calls.load(Ordering::SeqCst)
+    );
+    assert!(
+        metrics.errors > 0,
+        "a failing effect was not counted as a cycle error: {metrics:?}"
+    );
+    assert_eq!(metrics.push_items, 0, "{metrics:?}");
+
+    let back = pop_retry(&q, &src, Some(&stream_group(&query)), 10, 30).await;
+    assert!(
+        !back.is_empty(),
+        "the message was settled even though the effect never succeeded"
+    );
+
+    drop_queue(&q, &src).await;
+}
+
+// ============================================================================
+// RunOptions
+// ============================================================================
+
+#[tokio::test]
+async fn a_named_consumer_group_replaces_the_default_streams_group() {
+    let q = broker!();
+    let src = unique("st-cgroup");
+    let sink = unique("st-cgroup-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-cgroup-q");
+    let group = unique("st-cgroup-g");
+
+    let handle = Stream::from(q.queue(&src))
+        .map(|r| r.data.clone())
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(&query)
+                .reset(true)
+                .consumer_group(&group)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    for i in 0..3 {
+        q.queue(&src)
+            .partition("one")
+            .push(serde_json::json!({ "i": i }))
+            .await
+            .unwrap();
+    }
+
+    let out = drain_until(&q, &sink, Duration::from_secs(25), |m| m.len() >= 3).await;
+    handle.stop().await.unwrap();
+    assert_eq!(out.len(), 3, "the stream did not consume the source");
+
+    // The named group's cursor is past the batch...
+    let under_named = pop_retry(&q, &src, Some(&group), 10, 12).await;
+    assert!(
+        under_named.is_empty(),
+        "{} messages are still pending for the named group, so the stream acked \
+         under a different one",
+        under_named.len()
+    );
+    // ...while the default name never saw them, which is what makes the check
+    // above meaningful: the messages are still there, they are simply settled
+    // for the group the stream was told to use.
+    let under_default = pop_retry(&q, &src, Some(&stream_group(&query)), 10, 12).await;
+    assert_eq!(
+        under_default.len(),
+        3,
+        "the stream claimed under the default group after being given a name"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn a_stream_can_start_at_the_tail_instead_of_replaying_the_backlog() {
+    let q = broker!();
+    let src = unique("st-subseed");
+    let sink_new = unique("st-subseed-new");
+    let sink_now = unique("st-subseed-now");
+    for name in [&src, &sink_new, &sink_now] {
+        create_queue(&q, name, QueueOptions::default()).await;
+    }
+
+    // A backlog that predates both queries. Neither of these two RunOptions
+    // setters had a call site, and the default ("all") would replay all of it.
+    for i in 0..3 {
+        q.queue(&src)
+            .partition("one")
+            .push(serde_json::json!({ "era": "old", "i": i }))
+            .await
+            .unwrap();
+    }
+    sleep_ms(1500).await;
+
+    let first = Stream::from(q.queue(&src))
+        .map(|r| r.data.clone())
+        .to(q.queue(&sink_new))
+        .run(
+            &q,
+            RunOptions::new(unique("st-subseed-qa"))
+                .reset(true)
+                .subscription_mode(SubscriptionMode::New)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+    // The cursor is seeded the first time the group meets the partition, so the
+    // marker has to be pushed after that first poll.
+    sleep_ms(2000).await;
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "era": "new" }))
+        .await
+        .unwrap();
+
+    let out = drain_until(&q, &sink_new, Duration::from_secs(25), |m| {
+        m.iter().any(|x| x.data["era"] == "new")
+    })
+    .await;
+    first.stop().await.unwrap();
+
+    assert!(
+        out.iter().any(|m| m.data["era"] == "new"),
+        "the message pushed after the subscription never arrived: {out:?}"
+    );
+    assert!(
+        !out.iter().any(|m| m.data["era"] == "old"),
+        "subscription_mode(New) replayed the backlog: {out:?}"
+    );
+
+    // subscription_from("now") seeds the same way for a group that has never
+    // met the partition — and by now the backlog includes the "new" marker too.
+    let second = Stream::from(q.queue(&src))
+        .map(|r| r.data.clone())
+        .to(q.queue(&sink_now))
+        .run(
+            &q,
+            RunOptions::new(unique("st-subseed-qb"))
+                .reset(true)
+                .subscription_from("now")
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+    sleep_ms(2000).await;
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "era": "newest" }))
+        .await
+        .unwrap();
+
+    let out = drain_until(&q, &sink_now, Duration::from_secs(25), |m| {
+        m.iter().any(|x| x.data["era"] == "newest")
+    })
+    .await;
+    second.stop().await.unwrap();
+
+    assert!(
+        out.iter().any(|m| m.data["era"] == "newest"),
+        "the message pushed after the subscription never arrived: {out:?}"
+    );
+    assert!(
+        out.iter().all(|m| m.data["era"] == "newest"),
+        "subscription_from(\"now\") replayed what was already in the queue: {out:?}"
+    );
+
+    for name in [&src, &sink_new, &sink_now] {
+        drop_queue(&q, name).await;
+    }
+}
+
+#[tokio::test]
+async fn a_cancel_token_stops_the_runner_like_stop_does() {
+    let q = broker!();
+    let src = unique("st-cancel");
+    let sink = unique("st-cancel-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    // `RunOptions::cancel` is the shutdown path for a process that already has
+    // a token wired through it; nothing exercised it, so a runner that only
+    // ever looked at its own stop flag would pass every other test.
+    let cancel = Cancel::new();
+    let handle = Stream::from(q.queue(&src))
+        .map(|r| r.data.clone())
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(unique("st-cancel-q"))
+                .reset(true)
+                .cancel(cancel.clone())
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "when": "before" }))
+        .await
+        .unwrap();
+    let before = drain_until(&q, &sink, Duration::from_secs(25), |m| !m.is_empty()).await;
+    assert!(!before.is_empty(), "the stream never processed anything");
+
+    cancel.cancel();
+    // One poll is at most max_wait long, so the loop is out well inside this.
+    sleep_ms(1500).await;
+    q.queue(&src)
+        .partition("one")
+        .push(serde_json::json!({ "when": "after" }))
+        .await
+        .unwrap();
+
+    let after = drain_until(&q, &sink, Duration::from_secs(8), |_| false).await;
+    let metrics = handle.metrics();
+    // stop() on an already-cancelled runner still has to return cleanly.
+    handle.stop().await.unwrap();
+
+    assert!(
+        after.is_empty(),
+        "the runner kept consuming after its token was cancelled: {after:?}"
+    );
+    assert_eq!(
+        metrics.messages, 1,
+        "only the message pushed before the cancel should have been consumed: {metrics:?}"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+// ============================================================================
+// Scale-out and volume
+// ============================================================================
+
+#[tokio::test]
+async fn two_runners_under_one_query_id_share_the_cursor() {
+    let q = broker!();
+    let src = unique("st-scaleout");
+    let sink = unique("st-scaleout-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+    let query = unique("st-scaleout-q");
+
+    // This is how a stream scales: same query id, same consumer group, same
+    // state. Covered so far only as a sequential restart and as two *different*
+    // queries, neither of which would notice a runner that claimed its own
+    // cursor and processed every message twice.
+    let build = |queen: &queen_mq::Queen| {
+        Stream::from(queen.queue(&src))
+            .map(|r| r.data.clone())
+            .to(queen.queue(&sink))
+    };
+    let opts = || {
+        RunOptions::new(&query)
+            .max_partitions(4)
+            .batch_size(50)
+            .max_wait(Duration::from_millis(300))
+    };
+
+    let a = build(&q).run(&q, opts().reset(true)).await.unwrap();
+    let b = build(&q).run(&q, opts()).await.unwrap();
+    assert_eq!(
+        a.query_id(),
+        b.query_id(),
+        "one query id must register as one query"
+    );
+
+    const LANES: usize = 4;
+    const PER_LANE: usize = 10;
+    for lane in 0..LANES {
+        q.queue(&src)
+            .partition(format!("lane-{lane}"))
+            .push_many((0..PER_LANE).map(|i| serde_json::json!({ "n": lane * PER_LANE + i })))
+            .await
+            .unwrap();
+    }
+
+    let want = LANES * PER_LANE;
+    let out = drain_until(&q, &sink, Duration::from_secs(45), |m| m.len() >= want).await;
+    let combined = a.metrics().messages + b.metrics().messages;
+    a.stop().await.unwrap();
+    b.stop().await.unwrap();
+
+    let seen: std::collections::HashSet<i64> =
+        out.iter().filter_map(|m| m.data["n"].as_i64()).collect();
+    assert_eq!(
+        seen.len(),
+        want,
+        "expected {want} distinct messages, got {} across {} sink messages — \
+         a shared cursor means neither loss nor duplication",
+        seen.len(),
+        out.len()
+    );
+    assert_eq!(
+        combined, want as u64,
+        "the two runners consumed {combined} messages between them instead of {want}"
+    );
+
+    drop_queue(&q, &src).await;
+    drop_queue(&q, &sink).await;
+}
+
+#[tokio::test]
+async fn a_windowed_stream_totals_hundreds_of_messages_across_lanes_exactly() {
+    let q = broker!();
+    let src = unique("st-volume");
+    let sink = unique("st-volume-sink");
+    create_queue(&q, &src, QueueOptions::default()).await;
+    create_queue(&q, &sink, QueueOptions::default()).await;
+
+    const LANES: usize = 6;
+    const PER_LANE: usize = 50;
+
+    // The window tests with exact totals all run on a handful of messages, so a
+    // window that double-counts once per hundred cycles, or a flush that races
+    // the loop on a busy partition, would stay invisible. Here the arithmetic is
+    // only right if every message lands in exactly one window emit.
+    let handle = Stream::from(q.queue(&src))
+        .window_tumbling(1)
+        .idle_flush_ms(400)
+        .aggregate_count("count")
+        .aggregate_sum("sum", |r| r.number("amount"))
+        .to(q.queue(&sink))
+        .run(
+            &q,
+            RunOptions::new(unique("st-volume-q"))
+                .reset(true)
+                .max_partitions(8)
+                .batch_size(200)
+                .max_wait(Duration::from_millis(300)),
+        )
+        .await
+        .unwrap();
+
+    for lane in 0..LANES {
+        q.queue(&src)
+            .partition(format!("lane-{lane}"))
+            .push_many((1..=PER_LANE).map(|i| serde_json::json!({ "amount": i })))
+            .await
+            .unwrap();
+    }
+
+    let want_count = (LANES * PER_LANE) as f64;
+    // 1 + 2 + ... + PER_LANE, once per lane.
+    let want_sum = (PER_LANE * (PER_LANE + 1) / 2 * LANES) as f64;
+
+    let out = drain_until(&q, &sink, Duration::from_secs(60), |m| {
+        sum_field(m, "count") >= want_count
+    })
+    .await;
+    let metrics = handle.metrics();
+    handle.stop().await.unwrap();
+
+    assert_eq!(
+        sum_field(&out, "count"),
+        want_count,
+        "counted {} of {want_count} messages across {} window emits",
+        sum_field(&out, "count"),
+        out.len()
+    );
+    assert_eq!(
+        sum_field(&out, "sum"),
+        want_sum,
+        "the amounts do not add up: a window was folded twice or missed"
+    );
+    assert_eq!(
+        metrics.messages, want_count as u64,
+        "a batch was redelivered, so some messages were folded more than once: {metrics:?}"
+    );
+    for m in &out {
+        assert!(
+            m.partition.starts_with("lane-"),
+            "an emit landed in partition {}, losing its source lane",
+            m.partition
+        );
     }
 
     drop_queue(&q, &src).await;

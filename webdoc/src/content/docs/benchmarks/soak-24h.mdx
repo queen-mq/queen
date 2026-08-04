@@ -13,8 +13,8 @@ sourceOfTruth:
 ---
 
 **In 24 hours, one broker against one PostgreSQL moved 51,820,403,100 messages (about 600,000
-per second in each direction) with leased pops and explicit acknowledgement, zero restarts, and
-resident memory flat at roughly 6.3 GB.** The host was a 32 vCPU / 62 GiB machine and the broker
+per second in each direction) with leased pops, explicit acknowledgement, deduplication and
+retention all on, zero restarts, and resident memory flat at roughly 6.3 GB.** The host was a 32 vCPU / 62 GiB machine and the broker
 was commit `615efdc`. Artifacts are in `benchmark-queen/2026-07-25-soak24/`, and the loader's own
 stdout is `raw/soak24b.out`.
 
@@ -40,13 +40,15 @@ goload -mode openloop -> queue=segbench partitions=200 consumers=600 manualAck=t
 | Payload | 256 bytes | One size, one shape |
 | Partitions | 200 | Consumption parallelism per group is bounded by partition count |
 | Consumers | 600 closed-loop drainers | Consumers pull; consumer count changes the answer |
+| Deduplication | on, 60-second window | Every push probes the transaction-id sidecar under the partition lock before offsets are allocated. This is part of the measured path |
 | Retention | on, completed messages after 300 s | The reason the database plateaus instead of growing |
 | Duration | 86,400 s, reported every 10 s | 8,640 interval lines in the archived stdout |
 
 <Aside type="note">
-The archived stdout does not record the deduplication window for this run: the open-loop
-loader prints only the completed-retention setting it configured. The session note claims a
-60-second window. This page therefore makes no claim about deduplication either way.
+Deduplication was on for this run, with a 60-second window. The session note (`results.md`)
+records it as one of the four production semantics under test, alongside the leases, the
+explicit acks and retention. It is not in the loader's own header line because the open-loop
+loader prints only the completed-retention value it configured.
 </Aside>
 
 ## Result
@@ -131,9 +133,9 @@ Cumulative counters at checkpoints:
 | 24 h | 15,742 | 26 | 47,600 |
 
 82% of the failed pushes happened in the first four and a half hours. Errors did not stop after
-that, though: 13,500 acks failed between the nine- and twelve-hour marks. The session note's
-claim of "zero new errors in the last 14 hours" is not what the stdout shows; the last increment
-to any counter is at 21.3 hours.
+that, though: 13,500 acks failed between the nine- and twelve-hour marks. In the stdout the last
+increment to any counter is at 21.3 hours, which puts the quiet tail at about 2.7 hours rather
+than the 14 hours the session note reports.
 
 ## Latency was not flat, and the excursions have a cause
 
@@ -204,7 +206,7 @@ blips are a checkpoint tuning artifact, not a broker one.
 | `raw/soak-bench.csv` | 1 Hz sampler on the broker host: broker and PostgreSQL CPU and memory, commits, WAL, database size, wait events |
 | `raw/soak-loader.csv` | 1 Hz sampler on the loader host, including network throughput |
 | `raw/soak-watchdog.log` | Five-minute health lines with the restart counter |
-| `results.md` | The session note. Written in Italian, and see the two corrections above |
+| `results.md` | The session note. Written in Italian, and see the correction above |
 | `queen-soak24-report.png` | Six panels over the 24-hour axis |
 
 To run something of this shape yourself, see

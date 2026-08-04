@@ -34,7 +34,7 @@ the difference is not a footnote.
 
 | Run | Headline | The conditions that make it true |
 | --- | --- | --- |
-| [24-hour soak](/benchmarks/soak-24h) | 51,820,403,100 messages in 24 hours, about 600,000 msg/s per side, 0 restarts, broker resident memory flat at ~6.3 GB | **Explicit acks** (leased pops, `manualAck=true`, `ackAsync=true`), 200 partitions, 600 consumers, push batch 100, 256-byte payloads, 32 vCPU / 62 GiB, commit `615efdc` |
+| [24-hour soak](/benchmarks/soak-24h) | 51,820,403,100 messages in 24 hours, about 600,000 msg/s per side, 0 restarts, broker resident memory flat at ~6.3 GB | **Explicit acks** (leased pops, `manualAck=true`, `ackAsync=true`), **deduplication on** (60 s window), 200 partitions, 600 consumers, push batch 100, 256-byte payloads, 32 vCPU / 62 GiB, commit `615efdc` |
 | [Throughput ceiling](/benchmarks/peak) | 1,000,000 msg/s per side sustained for 600 s | **Server-side auto-ack** (`manualAck=false`) and **deduplication off**; 99.914% of offered messages accepted, ~500,600 never accepted |
 | [Ordered pipeline](/benchmarks/ordered-pipeline) | 88,503,408 messages verified across 4 stages and 1000 partitions with 0 duplicates, 0 gaps and 0 order violations | 25,000 events/s for 600 s, deduplication window 300 s, explicit bulk acks, per-stage verifier over per-property logs |
 | [Multi-tenant cell](/benchmarks/multitenant-cell) | A 2-core cell behind the proxy holding above 2400 msg/s with zero loss; 12 tenants for 1 hour with zero cross-tenant deliveries | **Deduplication off**, **429 retry disabled**, enforcement on, all tenants sharing one queue and one consumer group |
@@ -116,9 +116,10 @@ lower commit ceiling.
 
 ## What is deliberately absent
 
-- **No comparison with any other broker.** Every performance comparison this project ever
-  published was measured against the retired C++ implementation. Comparisons on this site are
-  architectural only.
+- **No pre-1.0 comparison figures.** Every performance comparison this project published before
+  1.0 was measured against the retired C++ implementation. The current cross-broker numbers,
+  measured on the shipping build with matched resources, are on
+  [Cross-broker comparison](/benchmarks/comparison).
 - **No storage-engine ratios.** The segment-engine spike figures circulating internally were
   measured against a storage engine that is no longer in the tree.
 - **No "2M msg/s combined" headline.** A 300-second run reached one million per side in both

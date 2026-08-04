@@ -10,11 +10,12 @@ sourceOfTruth:
   - README.md
 ---
 
-Queen MQ is a message queue that keeps its data in PostgreSQL. A queue is split into
-**partitions** (one per entity, created the first time you push to it), and each partition
-is a strictly ordered lane that a consumer group drains independently. Ten thousand
-partitions cost ten thousand index rows, not ten thousand log files or ten thousand
-processes, and a consumer stuck on one lane never blocks another.
+Queen MQ is a PostgreSQL message queue: it keeps all of its data in the database you
+already run. A queue is split into **partitions** (one per entity, created the first time
+you push to it), and each partition is a strictly ordered lane that a consumer group
+drains independently. Ten thousand partitions cost ten thousand index rows, not ten
+thousand log files or ten thousand processes, and a consumer stuck on one lane never
+blocks another.
 
 The point of that design is **range**. The same broker holds a workload of thousands of
 lanes each seeing a message every second or two, and a workload of 600 000 messages a
@@ -45,12 +46,12 @@ already does.
   <LinkCard
     href="/start/limits"
     title="Limits and non-goals"
-    description="What Queen does not do, what it deliberately refuses to do, and where the sharp edges are."
+    description="The boundaries of the model: ordering, parallelism, the single failure domain, and when to choose something else."
   />
   <LinkCard
     href="/start/compare"
     title="Compared to Kafka, RabbitMQ, SQS and pgmq"
-    description="Architectural differences, stated without performance claims we have not measured."
+    description="How each system gets per-entity ordering, what that costs in structure, and what the measured runs show."
   />
 </CardGrid>
 
@@ -79,7 +80,7 @@ The rest of the site is organised by what you are trying to do.
 - **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent
   within a configurable window, enforced inside the database rather than in a cache.
 - **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
-- **Five language SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an
+- **Six language SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an
   HTTP request is a first-class client.
 
 ## What this documentation promises

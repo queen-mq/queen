@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use queen_mq::{AckStatus, PushStatus, QueueOptions};
+use queen_mq::{
+    AckStatus, Config, Error, PushStatus, Queen, QueueOptions, Strategy, SubscriptionMode,
+};
 
 use common::*;
 
@@ -242,10 +244,14 @@ async fn the_dedup_window_can_be_switched_off() {
     .await;
 
     let txn = format!("{queue}-same");
-    let item = queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 }))
-        .transaction_id(txn.clone());
+    let item =
+        queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 })).transaction_id(txn.clone());
 
-    let a = q.queue(&queue).push_items(vec![item.clone()]).await.unwrap();
+    let a = q
+        .queue(&queue)
+        .push_items(vec![item.clone()])
+        .await
+        .unwrap();
     let b = q.queue(&queue).push_items(vec![item]).await.unwrap();
 
     assert_eq!(a[0].status, PushStatus::Queued);
@@ -256,6 +262,545 @@ async fn the_dedup_window_can_be_switched_off() {
         b[0].status,
         PushStatus::Queued,
         "dedupWindowSeconds=0 still deduplicated"
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+#[tokio::test]
+async fn the_four_options_nothing_else_ever_sends_reach_the_broker() {
+    let q = broker!();
+    let queue = unique("cov-writeonly-opts");
+
+    // `retryDelay`, `ttl`, `maxWaitTimeSeconds` and `minPopWaitTime` are the
+    // four QueueOptions fields no other test sets. None of them is loud when it
+    // goes missing: `configure_queue_v1` COALESCEs every key it does not
+    // recognise to that option's own default, so a renamed serde key produces a
+    // successful request, a configured queue, and an option that quietly does
+    // nothing. The echo is the only place that difference is visible.
+    let res = q
+        .queue(&queue)
+        .configure(QueueOptions {
+            retry_delay: Some(2500),
+            ttl: Some(4242),
+            max_wait_time_seconds: Some(7),
+            min_pop_wait_time: Some(250),
+            ..Default::default()
+        })
+        .await
+        .expect("configure was refused");
+
+    let options = res
+        .get("options")
+        .unwrap_or_else(|| panic!("the configure echo carries no options object: {res}"));
+    for (key, want) in [
+        ("retryDelay", 2500i64),
+        ("ttl", 4242),
+        ("maxWaitTimeSeconds", 7),
+        ("minPopWaitTime", 250),
+    ] {
+        assert_eq!(
+            options.get(key).and_then(|v| v.as_i64()),
+            Some(want),
+            "{key} never reached configure_queue_v1 — the broker echoed its own \
+             default, which is exactly what a renamed key looks like: {options}"
+        );
+    }
+
+    // And they are stored, not merely echoed: the queue-detail projection reads
+    // the columns back out. That projection IS the observable behaviour of
+    // retryDelay and ttl — the log engine enforces neither on the hot path, they
+    // only ever surface here and in the message-detail `queueConfig`.
+    let detail = q
+        .admin()
+        .queue_detail(&queue, &[])
+        .await
+        .expect("queue detail failed");
+    let config = &detail["queue"]["config"];
+    assert_eq!(
+        config["retryDelay"].as_i64(),
+        Some(2500),
+        "retryDelay was not persisted: {detail}"
+    );
+    assert_eq!(
+        config["ttl"].as_i64(),
+        Some(4242),
+        "ttl was not persisted: {detail}"
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+#[tokio::test]
+async fn the_broker_clamps_a_minimum_pop_wait_it_considers_absurd() {
+    let q = broker!();
+    let queue = unique("cov-minpopwait");
+
+    // The clamp is proof of delivery. `configure_queue_v1` stores
+    // LEAST(GREATEST(minPopWaitTime, 0), 60000), so 90s comes back as 60000 — a
+    // value the client never sent and cannot get by accident, whereas a dropped
+    // or misnamed key defaults to 0 and looks like a caller who asked for
+    // nothing.
+    let over = q
+        .queue(&queue)
+        .configure(QueueOptions {
+            min_pop_wait_time: Some(90_000),
+            ..Default::default()
+        })
+        .await
+        .expect("configure was refused");
+    assert_eq!(
+        over["options"]["minPopWaitTime"].as_i64(),
+        Some(60_000),
+        "an over-long pop wait was not clamped, which means it never arrived: {over}"
+    );
+
+    // Negative is not a faster way of saying zero, and the floor proves the same
+    // point from the other side.
+    let under = q
+        .queue(&queue)
+        .configure(QueueOptions {
+            min_pop_wait_time: Some(-5),
+            ..Default::default()
+        })
+        .await
+        .expect("configure was refused");
+    assert_eq!(
+        under["options"]["minPopWaitTime"].as_i64(),
+        Some(0),
+        "a negative pop wait was stored as-is: {under}"
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+// ============================================================================
+// Options that have to work together
+// ============================================================================
+
+#[tokio::test]
+async fn a_delayed_queue_with_a_window_buffer_still_delivers_everything() {
+    let q = broker!();
+    let queue = unique("cov-delayed-window");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            delayed_processing: Some(3),
+            window_buffer: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    q.queue(&queue)
+        .push_many((0..4).map(|n| serde_json::json!({ "n": n })))
+        .await
+        .unwrap();
+
+    // Two independent holds on the same messages, applied at different points
+    // of the pop: the window buffer refuses a partition whose newest segment is
+    // too young, the delayed deadline filters the segments themselves. Only the
+    // longer one may decide. Each option has its own test above and both would
+    // still pass if one cancelled the other here — a broker that dropped
+    // `delayedProcessing` once `windowBuffer` was set would serve these at ~1s.
+    sleep_ms(1200).await;
+    let early = q.queue(&queue).batch(10).wait(false).pop().await.unwrap();
+    assert!(
+        early.is_empty(),
+        "delayedProcessing=3 stopped applying once windowBuffer was set: {} message(s) at 1.2s",
+        early.len()
+    );
+
+    let later = pop_retry(&q, &queue, None, 10, 40).await;
+    assert_eq!(later.len(), 4, "the two holds together lost messages");
+
+    drop_queue(&q, &queue).await;
+}
+
+#[tokio::test]
+async fn dedup_still_catches_a_retried_push_on_an_encrypted_queue() {
+    let q = broker!();
+    let queue = unique("cov-encrypted-dedup");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            encryption_enabled: Some(true),
+            dedup_window_seconds: Some(3600),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The two features meet on the same push and must not touch each other:
+    // dedup resolves the transactionId's hash against the segment index while
+    // encryption rewrites the payload the frame carries. (With no encryption
+    // key configured the broker deliberately stores plaintext for a flagged
+    // queue, so both assertions hold either way — what must not happen is the
+    // retry landing twice.)
+    let txn = format!("{queue}-order-7");
+    let item = queen_mq::PushItem::new(&queue, serde_json::json!({ "secret": "hunter2", "n": 1 }))
+        .transaction_id(&txn);
+
+    let first = q
+        .queue(&queue)
+        .push_items(vec![item.clone()])
+        .await
+        .unwrap();
+    let second = q.queue(&queue).push_items(vec![item]).await.unwrap();
+    assert_eq!(first[0].status, PushStatus::Queued);
+    assert_eq!(
+        second[0].status,
+        PushStatus::Duplicate,
+        "the retry was enqueued a second time on an encrypted queue"
+    );
+    assert_eq!(
+        second[0].message_id, first[0].message_id,
+        "the duplicate verdict must point at the message that is already there"
+    );
+
+    let msgs = pop_retry(&q, &queue, None, 10, 25).await;
+    assert_eq!(
+        msgs.len(),
+        1,
+        "an encrypted queue deduplicated the push but \
+         delivered {} message(s)",
+        msgs.len()
+    );
+    assert_eq!(
+        msgs[0].data,
+        serde_json::json!({ "secret": "hunter2", "n": 1 }),
+        "the payload did not come back as it was pushed"
+    );
+    assert_eq!(msgs[0].transaction_id, txn);
+
+    drop_queue(&q, &queue).await;
+}
+
+#[tokio::test]
+async fn a_dead_lettered_message_carries_the_reason_its_nack_gave() {
+    let q = broker!();
+    let queue = unique("cov-dlq-reason");
+    create_queue(
+        &q,
+        &queue,
+        QueueOptions {
+            lease_time: Some(30),
+            retry_limit: Some(1),
+            dead_letter_queue: Some(true),
+            dlq_after_max_retries: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    q.queue(&queue)
+        .push(serde_json::json!({ "poison": true }))
+        .await
+        .unwrap();
+
+    const REASON: &str = "downstream 503 while charging the card";
+    for _ in 0..6 {
+        let msgs = pop_retry(&q, &queue, None, 1, 10).await;
+        if msgs.is_empty() {
+            break;
+        }
+        q.nack(&msgs[0], REASON).await.unwrap();
+        sleep_ms(150).await;
+    }
+
+    // Every other DLQ test in the suite counts rows. Counting is what let the
+    // reason go missing for good: `queen.get_dlq_messages_v1` projects it under
+    // `errorMessage`, the client read `error`, and the field was permanently
+    // None while the text sat unread in `rest` — a green suite and a DLQ page
+    // that says nothing about why anything is in it.
+    let dlq = q.queue(&queue).dlq(Some(50), None).await.unwrap();
+    assert_eq!(dlq.messages.len(), 1, "the message never dead-lettered");
+    let row = &dlq.messages[0];
+    assert_eq!(
+        row.error.as_deref(),
+        Some(REASON),
+        "the dead-letter reason did not survive the round trip: {row:?}"
+    );
+    assert_eq!(
+        row.queue.as_deref(),
+        Some(queue.as_str()),
+        "the DLQ row does not say which queue it came from: {row:?}"
+    );
+    assert!(
+        row.partition_id.is_some(),
+        "without a partitionId the row cannot be replayed: {row:?}"
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+#[tokio::test]
+async fn an_auto_ack_pop_commits_every_lane_it_claimed() {
+    let q = broker!();
+    let queue = unique("cov-autoack-multi");
+    create_queue(&q, &queue, short_lease(1)).await;
+
+    const LANES: usize = 4;
+    for lane in 0..LANES {
+        q.queue(&queue)
+            .partition(format!("lane-{lane}"))
+            .push(serde_json::json!({ "lane": lane }))
+            .await
+            .unwrap();
+    }
+
+    // Broker-side autoAck commits at delivery and takes no lease. Across
+    // several lanes it has to advance EVERY claimed partition's cursor, not
+    // just the one the response reports at the top level — and the single-lane
+    // test cannot tell those apart, because there the two are the same
+    // partition.
+    let mut seen: HashSet<u64> = HashSet::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while seen.len() < LANES && Instant::now() < deadline {
+        let msgs = q
+            .queue(&queue)
+            .group("g-autoack-multi")
+            .batch(10)
+            .partitions(8)
+            .wait(false)
+            .pop_auto_ack()
+            .await
+            .unwrap();
+        if msgs.is_empty() {
+            sleep_ms(120).await;
+            continue;
+        }
+        for m in &msgs {
+            assert!(
+                !m.is_leased(),
+                "autoAck took a lease on lane {}",
+                m.partition
+            );
+            let lane = m.data["lane"]
+                .as_u64()
+                .expect("every message carries its lane");
+            assert!(
+                seen.insert(lane),
+                "lane {lane} was delivered twice under autoAck"
+            );
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        LANES,
+        "an autoAck multi-partition pop lost lanes"
+    );
+
+    // The queue's lease is one second, so an uncommitted lane would come back
+    // here. Nothing does.
+    sleep_ms(2500).await;
+    let again = q
+        .queue(&queue)
+        .group("g-autoack-multi")
+        .batch(10)
+        .partitions(8)
+        .wait(false)
+        .pop()
+        .await
+        .unwrap();
+    assert!(
+        again.is_empty(),
+        "autoAck left {} message(s) uncommitted across lanes",
+        again.len()
+    );
+
+    drop_queue(&q, &queue).await;
+}
+
+#[tokio::test]
+async fn a_group_seeded_at_now_and_a_queue_mode_consumer_keep_separate_cursors() {
+    let q = broker!();
+    let queue = unique("cov-modes");
+    let group = format!("{queue}-late");
+    create_queue(&q, &queue, QueueOptions::default()).await;
+
+    q.queue(&queue)
+        .push_many((0..2).map(|n| serde_json::json!({ "n": n, "when": "before" })))
+        .await
+        .unwrap();
+
+    // Queue mode drains the backlog...
+    let backlog = pop_retry(&q, &queue, None, 10, 25).await;
+    assert_eq!(backlog.len(), 2, "setup: the backlog never became poppable");
+    q.ack_all(&backlog).await.unwrap();
+
+    // ...and a group registering afterwards at `now` inherits neither the
+    // backlog nor queue mode's progress: the seeding branch in the pop SP
+    // explicitly excludes __QUEUE_MODE__, so the two cursors are seeded and
+    // advanced independently. Each mode is covered alone elsewhere; what is
+    // untested is them sharing a queue, which is the shape a "replay one
+    // consumer without disturbing the workers" deployment actually has.
+    let skipped_backlog = q
+        .queue(&queue)
+        .group(&group)
+        .batch(10)
+        .wait(false)
+        .subscription_mode(SubscriptionMode::New)
+        .subscription_from("now")
+        .pop()
+        .await
+        .unwrap();
+    assert!(
+        skipped_backlog.is_empty(),
+        "a group seeded at now saw {} pre-existing message(s)",
+        skipped_backlog.len()
+    );
+
+    q.queue(&queue)
+        .push(serde_json::json!({ "n": 99, "when": "after" }))
+        .await
+        .unwrap();
+
+    // The message after the cut goes to BOTH. The group's cursor now exists, so
+    // the subscription hint is no longer in play — this reads the cursor the
+    // empty pop above created.
+    let for_group = pop_retry(&q, &queue, Some(&group), 10, 25).await;
+    assert_eq!(
+        for_group.len(),
+        1,
+        "the group should see exactly the message pushed after its cut; got {} — \
+         more than one means the empty pop never seeded its cursor at `now`",
+        for_group.len()
+    );
+    assert_eq!(for_group[0].data["when"], "after");
+    q.ack_all(&for_group).await.unwrap();
+
+    let for_queue_mode = pop_retry(&q, &queue, None, 10, 25).await;
+    assert_eq!(
+        for_queue_mode.len(),
+        1,
+        "queue mode lost the message to the consumer group's ack"
+    );
+    assert_eq!(for_queue_mode[0].data["n"], 99);
+
+    drop_queue(&q, &queue).await;
+}
+
+// ============================================================================
+// Client configuration, against a real broker
+// ============================================================================
+
+#[tokio::test]
+async fn every_backend_strategy_completes_a_round_trip() {
+    // `broker!()` is the suite's gate: it returns early when QUEEN_TEST_URL is
+    // missing and fails under QUEEN_TEST_STRICT, so reading the variable after
+    // it cannot become a silent skip.
+    let _gate = broker!();
+    let url = std::env::var("QUEEN_TEST_URL").expect("broker!() proved the URL is set");
+
+    // Outside the unit tests every client in this suite is built with the
+    // defaults, so `strategy`, `retry_attempts`, `failover(false)` and a valid
+    // extra header have never been near a broker. Each of them changes how a
+    // request is routed or given up on; a regression in any would surface first
+    // in somebody's production consumer.
+    for strategy in [Strategy::RoundRobin, Strategy::Session, Strategy::Affinity] {
+        let q = Queen::connect(
+            Config::new(url.clone())
+                .strategy(strategy)
+                .retry_attempts(1)
+                .failover(false)
+                .header("x-queen-client", "rust-coverage"),
+        )
+        .unwrap_or_else(|e| panic!("{strategy:?} is not a usable configuration: {e}"));
+
+        let queue = unique("cov-strategy");
+        create_queue(&q, &queue, QueueOptions::default()).await;
+        q.queue(&queue)
+            .push(serde_json::json!({ "strategy": format!("{strategy:?}") }))
+            .await
+            .unwrap_or_else(|e| panic!("{strategy:?} could not push: {e}"));
+
+        let msgs = pop_retry(&q, &queue, Some("g-strategy"), 10, 25).await;
+        assert_eq!(
+            msgs.len(),
+            1,
+            "{strategy:?} could not read back what it pushed"
+        );
+        assert_eq!(msgs[0].data["strategy"], format!("{strategy:?}"));
+        let acked = q.ack_all(&msgs).await.unwrap();
+        assert!(
+            acked.iter().all(|a| a.success),
+            "{strategy:?} pushed and popped but could not ack: {acked:?}"
+        );
+
+        drop_queue(&q, &queue).await;
+    }
+}
+
+#[tokio::test]
+async fn with_failover_off_a_request_stays_on_the_backend_it_picked() {
+    let _gate = broker!();
+    let url = std::env::var("QUEEN_TEST_URL").expect("broker!() proved the URL is set");
+
+    // Dead backend first, live one second, round-robin so the first pick is
+    // deterministic (index 0). With failover ON this is admin.rs's
+    // `an_unreachable_backend_fails_over_to_a_healthy_one` and the push
+    // succeeds; with it OFF the client must stay where it is, because that is
+    // the whole meaning of the flag. Nothing tested the off position, and the
+    // failure it hides is silent: a client that walks anyway looks healthier
+    // than it is.
+    let mut config = Config::urls(["http://127.0.0.1:1".to_string(), url])
+        .strategy(Strategy::RoundRobin)
+        .failover(false)
+        .retry_attempts(1);
+    // The dead backend must stay out for the rest of the test: at the default
+    // five seconds it would be readmitted mid-drain and a later poll would land
+    // on it, failing the test for the wrong reason.
+    config.health_retry_after = Duration::from_secs(120);
+    let q = Queen::connect(config).unwrap();
+
+    let queue = unique("cov-nofailover");
+    let err = q
+        .queue(&queue)
+        .push(serde_json::json!({ "n": 1 }))
+        .await
+        .expect_err("the first push goes to the dead backend and must fail");
+    assert!(
+        !matches!(err, Error::AllBackendsFailed { .. }),
+        "failover is off, so the client must not have walked the backend list: {err}"
+    );
+    assert!(
+        err.is_retryable(),
+        "a refused connection should read as retryable: {err}"
+    );
+
+    // The dead backend is marked down by that failure, so the next request
+    // picks the live one: failover off bounds a single request, it does not
+    // brick the client.
+    let res = q
+        .queue(&queue)
+        .push(serde_json::json!({ "n": 2 }))
+        .await
+        .expect("the live backend should have taken the second push");
+    assert_eq!(res.len(), 1);
+    let msgs = pop_retry(&q, &queue, None, 10, 25).await;
+    assert_eq!(msgs.len(), 1, "the push that succeeded never landed");
+    assert_eq!(msgs[0].data["n"], 2);
+
+    // And the walk is what produces AllBackendsFailed: same two-backend shape,
+    // failover on, nothing alive. Constructing the variant by hand (error.rs)
+    // proves its accessors, not that `send` ever builds one.
+    let doomed = Queen::connect(
+        Config::urls(["http://127.0.0.1:1", "http://127.0.0.1:2"])
+            .failover(true)
+            .retry_attempts(1),
+    )
+    .unwrap();
+    let err = doomed
+        .queue(&queue)
+        .push(serde_json::json!({ "n": 3 }))
+        .await
+        .expect_err("both backends are dead");
+    assert!(
+        matches!(err, Error::AllBackendsFailed { attempted: 2, .. }),
+        "a failed walk over two backends must report the walk: {err}"
     );
 
     drop_queue(&q, &queue).await;
@@ -480,22 +1025,24 @@ async fn a_partition_stays_ordered_under_concurrent_consumers() {
 
     assert_eq!(summary.processed, (LANES * PER_LANE) as u64);
 
-    let seen = seen.lock().unwrap();
-    for lane in 0..LANES as u64 {
-        let seq: Vec<u64> = seen
-            .iter()
-            .filter(|(l, _)| *l == lane)
-            .map(|(_, s)| *s)
-            .collect();
-        assert_eq!(
-            seq.len(),
-            PER_LANE,
-            "lane {lane} delivered {} of {PER_LANE}",
-            seq.len()
-        );
-        let mut sorted = seq.clone();
-        sorted.sort();
-        assert_eq!(seq, sorted, "lane {lane} arrived out of order: {seq:?}");
+    {
+        let seen = seen.lock().unwrap();
+        for lane in 0..LANES as u64 {
+            let seq: Vec<u64> = seen
+                .iter()
+                .filter(|(l, _)| *l == lane)
+                .map(|(_, s)| *s)
+                .collect();
+            assert_eq!(
+                seq.len(),
+                PER_LANE,
+                "lane {lane} delivered {} of {PER_LANE}",
+                seq.len()
+            );
+            let mut sorted = seq.clone();
+            sorted.sort();
+            assert_eq!(seq, sorted, "lane {lane} arrived out of order: {seq:?}");
+        }
     }
 
     drop_queue(&q, &queue).await;
@@ -533,14 +1080,16 @@ async fn concurrent_consumers_never_deliver_the_same_message_twice() {
         .await
         .unwrap();
 
-    let seen = seen.lock().unwrap();
-    let unique_seen: HashSet<u64> = seen.iter().copied().collect();
-    assert_eq!(
-        unique_seen.len(),
-        seen.len(),
-        "a message was delivered to two workers at once"
-    );
-    assert_eq!(unique_seen.len(), N, "lost messages");
+    {
+        let seen = seen.lock().unwrap();
+        let unique_seen: HashSet<u64> = seen.iter().copied().collect();
+        assert_eq!(
+            unique_seen.len(),
+            seen.len(),
+            "a message was delivered to two workers at once"
+        );
+        assert_eq!(unique_seen.len(), N, "lost messages");
+    }
 
     drop_queue(&q, &queue).await;
 }
@@ -728,7 +1277,12 @@ async fn a_group_can_be_moved_back_to_a_timestamp() {
     assert_eq!(first.len(), 3);
     q.ack_all(&first).await.unwrap();
 
-    // Back to before the first message.
+    // Back to before the first message. A timestamp seek is a supported
+    // request, not an optional one: `parse_seek` accepts exactly `toEnd=true`
+    // or a timestamp, and `queen.log_seek_one_v1` resolves the epoch to the
+    // first segment's `base_offset - 1`, so the whole partition becomes pending
+    // again. Tolerating a refusal here meant a client that stopped sending the
+    // `timestamp` key — or sent it under another name — passed green.
     let seek = q
         .admin()
         .seek_consumer_group(
@@ -739,15 +1293,29 @@ async fn a_group_can_be_moved_back_to_a_timestamp() {
                 position: None,
             },
         )
-        .await;
-    if seek.is_err() {
-        eprintln!("SKIP timestamp seek: broker refused ({seek:?})");
-        drop_queue(&q, &queue).await;
-        return;
-    }
+        .await
+        .expect("the broker refused a timestamp seek");
+
+    assert_eq!(
+        seek.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "the seek reported failure: {seek}"
+    );
+    assert!(
+        seek.get("partitionsUpdated")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 1,
+        "the seek moved no partition, so nothing can replay: {seek}"
+    );
 
     let replayed = pop_retry(&q, &queue, Some(&group), 10, 25).await;
-    assert!(!replayed.is_empty(), "seeking to the epoch replayed nothing");
+    assert_eq!(
+        replayed.len(),
+        3,
+        "seeking to the epoch must replay the whole partition; got {} of 3",
+        replayed.len()
+    );
 
     drop_queue(&q, &queue).await;
 }
@@ -776,7 +1344,13 @@ async fn namespaces_and_tasks_are_listed() {
     let mut found_ns = false;
     let mut found_task = false;
     for _ in 0..20 {
-        found_ns |= q.admin().namespaces().await.unwrap().to_string().contains(&ns);
+        found_ns |= q
+            .admin()
+            .namespaces()
+            .await
+            .unwrap()
+            .to_string()
+            .contains(&ns);
         found_task |= q.admin().tasks().await.unwrap().to_string().contains(&task);
         if found_ns && found_task {
             break;
@@ -875,7 +1449,10 @@ async fn a_renewed_lease_lets_a_slow_handler_finish() {
         .pop()
         .await
         .unwrap();
-    assert!(again.is_empty(), "the message was redelivered despite renewal");
+    assert!(
+        again.is_empty(),
+        "the message was redelivered despite renewal"
+    );
 
     drop_queue(&q, &queue).await;
 }
@@ -964,7 +1541,12 @@ async fn a_retried_push_inside_the_window_enqueues_once() {
     }
 
     let msgs = pop_retry(&q, &queue, None, 10, 25).await;
-    assert_eq!(msgs.len(), 1, "five retries produced {} messages", msgs.len());
+    assert_eq!(
+        msgs.len(),
+        1,
+        "five retries produced {} messages",
+        msgs.len()
+    );
     assert_eq!(msgs[0].transaction_id, txn);
 
     drop_queue(&q, &queue).await;
@@ -981,16 +1563,20 @@ async fn dedup_is_scoped_to_a_queue_and_partition() {
     let txn = "shared-transaction-id".to_string();
     let ra = q
         .queue(&a)
-        .push_items(vec![
-            queen_mq::PushItem::new(&a, serde_json::json!({ "q": "a" })).transaction_id(&txn)
-        ])
+        .push_items(vec![queen_mq::PushItem::new(
+            &a,
+            serde_json::json!({ "q": "a" }),
+        )
+        .transaction_id(&txn)])
         .await
         .unwrap();
     let rb = q
         .queue(&b)
-        .push_items(vec![
-            queen_mq::PushItem::new(&b, serde_json::json!({ "q": "b" })).transaction_id(&txn)
-        ])
+        .push_items(vec![queen_mq::PushItem::new(
+            &b,
+            serde_json::json!({ "q": "b" }),
+        )
+        .transaction_id(&txn)])
         .await
         .unwrap();
 
@@ -1103,27 +1689,42 @@ async fn a_transaction_with_a_stale_lease_rolls_back() {
     let msgs = pop_retry(&q, &src, Some("g-stale"), 1, 25).await;
     assert_eq!(msgs.len(), 1);
 
-    // Let the claim lapse, then try to hand off. requiredLeases is what turns
-    // this into a rollback rather than a push for work somebody else now owns.
+    // Let the claim lapse, then try to hand off. The rollback is the contract,
+    // and it has one direction only: the builder puts the popped leaseId on the
+    // ack operation (and in `requiredLeases`), the broker resolves that ack
+    // group's worker from it, and `queen.log_ack_by_hash_v1` rejects a worker
+    // whose `lease_expires_at` is in the past — "invalid or expired lease".
+    // `log_transaction_wire_v1` escalates that soft failure to a RAISE, so the
+    // pushes in the same call roll back with it. Accepting it would mean
+    // pushing stage two for a message somebody else can already claim, which is
+    // the exact failure the handoff exists to prevent — so "the broker took it"
+    // is a failure, not the other half of a two-world test.
     sleep_ms(2500).await;
-    let out = q
+    let err = q
         .transaction()
         .ack(&msgs[0])
         .push(sink.clone(), serde_json::json!({ "stage": 2 }))
         .unwrap()
         .commit()
-        .await;
+        .await
+        .expect_err("a transaction on a lapsed lease must be refused");
 
-    if out.is_ok() {
-        eprintln!("NOTE: the broker accepted a transaction on a lapsed lease");
-    } else {
-        sleep_ms(400).await;
-        let leaked = q.queue(&sink).batch(5).wait(false).pop().await.unwrap();
-        assert!(
-            leaked.is_empty(),
-            "the transaction failed but its push still landed"
-        );
-    }
+    let text = err.to_string();
+    assert!(
+        text.contains("rolled back"),
+        "the failure did not surface as a rollback: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("lease"),
+        "the rollback should name the lapsed lease as the cause: {text}"
+    );
+
+    sleep_ms(400).await;
+    let leaked = q.queue(&sink).batch(5).wait(false).pop().await.unwrap();
+    assert!(
+        leaked.is_empty(),
+        "the transaction was refused but its push still landed"
+    );
 
     drop_queue(&q, &src).await;
     drop_queue(&q, &sink).await;
@@ -1175,7 +1776,10 @@ async fn every_ack_status_is_accepted_and_does_what_it_says() {
             sleep_ms(150).await;
         }
         assert_eq!(msgs.len(), 1, "nothing on lane {lane}");
-        let res = q.ack_with(&msgs[0], status, Some("coverage".into())).await.unwrap();
+        let res = q
+            .ack_with(&msgs[0], status, Some("coverage".into()))
+            .await
+            .unwrap();
         assert!(res.success, "{status:?} was rejected: {:?}", res.error);
 
         // completed advances the cursor; retry and failed put it back.
@@ -1219,7 +1823,9 @@ async fn a_sustained_push_consume_cycle_stays_consistent() {
             for round in 0..ROUNDS {
                 q.queue(&queue)
                     .partition(format!("lane-{}", round % 4))
-                    .push_many((0..PER_ROUND).map(|i| serde_json::json!({ "round": round, "i": i })))
+                    .push_many(
+                        (0..PER_ROUND).map(|i| serde_json::json!({ "round": round, "i": i })),
+                    )
                     .await
                     .unwrap();
                 tokio::time::sleep(Duration::from_millis(50)).await;

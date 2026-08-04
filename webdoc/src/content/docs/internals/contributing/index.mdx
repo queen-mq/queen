@@ -56,9 +56,12 @@ project's is not. That is the main thing this page is for.
   - client-js/
   - client-py/
   - client-go/
+  - client-rust/
   - client-laravel/
   - client-cpp/
   - client-cli/
+- crates/
+  - queen-protocol/
 - test/
   - run.sh
   - compose/
@@ -80,7 +83,8 @@ project's is not. That is the main thing this page is for.
 | `proxy/` | The multi-tenant gateway, one per cell. Binary `queen-proxy`, its own PostgreSQL schema under `migrations/`. |
 | `proxy/console/` | The operator console SPA. Unlike the dashboard, its `dist/` **is** committed. |
 | `app/` | Vue 3 + Vite dashboard. Builds into `server/webapp/dist`. |
-| `clients/` | Five client SDKs: JavaScript (npm `queen-mq`), Python (PyPI `queen-mq`), Go, PHP/Laravel (Packagist `smartpricing/queen-mq`) and a header-only C++ client. Also `queenctl`, the operator CLI. |
+| `clients/` | Six client SDKs: JavaScript (npm `queen-mq`), Python (PyPI `queen-mq`), Go, Rust (crates.io `queen-mq`), PHP/Laravel (Packagist `smartpricing/queen-mq`) and a header-only C++ client. Also `queenctl`, the operator CLI. |
+| `crates/queen-protocol/` | The canonical wire types, shared by the Rust client and the broker. The broker takes it as a **dev**-dependency only: its hot-path parsers and hand-rendered responses stay as they are, and `handlers::data::protocol_conformance` round-trips this crate's types through them so a drifted field fails a test. |
 | `test/` | The Docker Compose test matrix. One entry point, `run.sh`. |
 | `webdoc/` | This site. |
 | `benchmark-queen/` | Archived benchmark sessions, their loaders and their raw output. |

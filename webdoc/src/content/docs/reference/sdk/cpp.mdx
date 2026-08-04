@@ -179,7 +179,7 @@ defaults, including `leaseTime: 300`, whereas a queue created implicitly by a fi
 60-second lease. `to_json()` emits a fixed key set, so options outside that struct cannot be set
 through `config()`; post to `/api/v1/configure` yourself when you need one. And remember
 **`/configure` is a full replace**: keys absent from the body reset to the broker's defaults. The
-option list is in [Reference](/reference).
+option list is in [Queue options](/reference/queue-options/).
 
 ### Producing
 
@@ -347,7 +347,7 @@ all on `204`), and throw `HttpError` on any status `>= 400`. `request_timeout_mi
 client default. Pass `RetryKind::Pop` for a long-poll request so a 429 backs off indefinitely
 instead of using the bounded budget.
 
-The complete route list is in [Reference](/reference).
+The complete route list is in the [route table](/reference/http/routes/).
 
 ## `HttpError`
 

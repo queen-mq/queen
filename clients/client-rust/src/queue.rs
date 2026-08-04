@@ -551,7 +551,10 @@ mod tests {
 
     #[test]
     fn pop_params_send_multi_partition_and_lease_override() {
-        let p = q("orders").partitions(8).lease_seconds(120).pop_params(true);
+        let p = q("orders")
+            .partitions(8)
+            .lease_seconds(120)
+            .pop_params(true);
         let pairs = p.to_pairs();
         assert!(pairs.contains(&("partitions", "8".to_string())));
         assert!(pairs.contains(&("leaseSeconds", "120".to_string())));
@@ -560,7 +563,10 @@ mod tests {
 
     #[test]
     fn encode_pairs_percent_encodes_values() {
-        let pairs = vec![("consumerGroup", "a group".to_string()), ("batch", "1".into())];
+        let pairs = vec![
+            ("consumerGroup", "a group".to_string()),
+            ("batch", "1".into()),
+        ];
         assert_eq!(encode_pairs(&pairs), "consumerGroup=a%20group&batch=1");
     }
 
@@ -576,5 +582,157 @@ mod tests {
     #[tokio::test]
     async fn pushing_nothing_is_a_no_op() {
         assert!(q("orders").push_items(vec![]).await.unwrap().is_empty());
+    }
+
+    // `wait` is sent even when false. The broker long-polls by default, so
+    // omitting the key would silently turn a non-blocking poll into a 30-second
+    // one — the exact opposite of what the caller asked for.
+    #[test]
+    fn a_non_blocking_pop_says_so_explicitly() {
+        let pairs = q("orders")
+            .wait(false)
+            .poll_timeout(Duration::from_millis(1500))
+            .pop_params(false)
+            .to_pairs();
+        assert!(
+            pairs.contains(&("wait", "false".to_string())),
+            "wait=false was dropped from the query: {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("timeout", "1500".to_string())),
+            "the poll timeout travels as `timeout`, in milliseconds: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn pop_params_carry_the_group_and_the_subscription_seed() {
+        let pairs = q("orders")
+            .group("workers")
+            .subscription_mode(SubscriptionMode::New)
+            .subscription_from("2026-08-04T10:00:00Z")
+            .pop_params(false)
+            .to_pairs();
+        assert!(
+            pairs.contains(&("consumerGroup", "workers".to_string())),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("subscriptionMode", "new".to_string())),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("subscriptionFrom", "2026-08-04T10:00:00Z".to_string())),
+            "{pairs:?}"
+        );
+    }
+
+    // A discovery pop has no queue in its path, so namespace and task are the
+    // only thing telling the broker what to serve. Dropping them from the query
+    // would turn the call into "any queue at all".
+    #[test]
+    fn a_discovery_pop_carries_its_addressing_in_the_query() {
+        let queen = Queen::connect(Config::new("http://127.0.0.1:1")).unwrap();
+        let b = queen.queue_opt(None).namespace("billing").task("invoice");
+        assert_eq!(b.pop_path().unwrap(), "/api/v1/pop");
+
+        let pairs = b.pop_params(false).to_pairs();
+        assert!(
+            pairs.contains(&("namespace", "billing".to_string())),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("task", "invoice".to_string())),
+            "{pairs:?}"
+        );
+    }
+
+    // Zero means "the smallest useful amount", not "none": batch=0 would let
+    // the broker apply its own default of 200, partitions=0 is not a claim at
+    // all, and concurrency=0 would spawn no workers and make consume return
+    // instantly having done nothing.
+    #[test]
+    fn zero_and_negative_knobs_clamp_to_one() {
+        let b = q("orders").batch(0).partitions(-5).concurrency(0);
+        assert_eq!(b.batch, 1);
+        assert_eq!(b.max_partitions, 1);
+        assert_eq!(b.concurrency, 1);
+
+        let pairs = b.pop_params(false).to_pairs();
+        assert!(pairs.contains(&("batch", "1".to_string())), "{pairs:?}");
+        assert!(
+            !pairs.iter().any(|(k, _)| *k == "partitions"),
+            "partitions=1 is the absence of the key, not partitions=1: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn the_affinity_key_covers_discovery_and_gives_up_when_there_is_nothing_to_pin() {
+        let queen = Queen::connect(Config::new("http://127.0.0.1:1")).unwrap();
+        assert_eq!(
+            queen
+                .queue_opt(None)
+                .namespace("billing")
+                .task("invoice")
+                .group("g")
+                .affinity_key()
+                .unwrap(),
+            "billing:invoice:g"
+        );
+        assert_eq!(
+            queen
+                .queue_opt(None)
+                .task("invoice")
+                .affinity_key()
+                .unwrap(),
+            "*:invoice:__QUEUE_MODE__"
+        );
+        // Nothing to hash on, so the request spreads rather than pinning to a
+        // backend chosen from a key that describes nothing.
+        assert!(queen.queue_opt(None).group("g").affinity_key().is_none());
+        assert_eq!(
+            q("orders").affinity_key().unwrap(),
+            "orders:*:__QUEUE_MODE__"
+        );
+    }
+
+    // A buffered push answers before the broker has seen anything, so its empty
+    // result means "accepted for batching" and not "nothing was pushed". Anyone
+    // treating `Ok(vec![])` as a failed push would be wrong exactly here.
+    #[tokio::test]
+    async fn a_buffered_push_is_accepted_without_a_verdict() {
+        let queen = Queen::connect(Config::new("http://127.0.0.1:1")).unwrap();
+        let opts = BufferOptions {
+            message_count: 100,
+            time: Duration::from_secs(60),
+        };
+        let out = queen
+            .queue("orders")
+            .partition("eu")
+            .buffer(opts)
+            .push_many([serde_json::json!(1), serde_json::json!(2)])
+            .await
+            .expect("a buffered push does not touch the network, so it cannot fail here");
+        assert!(
+            out.is_empty(),
+            "a buffered push has no per-item verdict yet"
+        );
+
+        let stats = queen.buffer_stats();
+        assert_eq!(stats.total_buffered_messages, 2);
+        assert_eq!(
+            stats.active_buffers, 1,
+            "one buffer per (queue, partition), not one per push"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_other_queue_scoped_operations_also_require_a_name() {
+        let b = Queen::connect(Config::new("http://127.0.0.1:1"))
+            .unwrap()
+            .queue_opt(None);
+        assert!(b.flush_buffer().await.is_err());
+        assert!(b.create().await.is_err());
+        assert!(b.configure(QueueOptions::default()).await.is_err());
+        assert!(b.name().is_none());
     }
 }

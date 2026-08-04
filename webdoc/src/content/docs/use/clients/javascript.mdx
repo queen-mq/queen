@@ -1,10 +1,11 @@
 ---
-title: JavaScript
-description: "Install queen-mq, construct a client, and use the fluent grammar end to end: push, pop, consume, transactions, buffering and shutdown."
+title: JavaScript quickstart
+description: "Install queen-mq for Node, construct a client, and use the fluent grammar end to end: push, pop, consume, transactions, buffering and shutdown."
 type: how-to
 tier: use
 sidebar:
   order: 13
+  label: JavaScript
 sourceOfTruth:
   - clients/client-js/client-v2/Queen.js
   - clients/client-js/client-v2/builders/QueueBuilder.js
@@ -27,6 +28,9 @@ verifiedBy:
 The JavaScript client is the reference implementation: every other SDK is a transliteration
 of it. It is ESM-only, requires Node 22 or newer (`engines.node: ">=22.0.0"`), and ships the
 broker client and the streaming SDK in one package.
+
+The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+[Versions and compatibility](/reference/compatibility) states what that covers.
 
 <PackageManagers pkg="queen-mq" />
 
@@ -334,11 +338,12 @@ carries `queue`, `partition`, `consumerGroup`, `errorMessage`, `retryCount`, `da
 `createdAt` and `failedAt`.
 
 <Aside type="note">
-`total` is always `undefined`: the broker answers
-`{"messages":[…],"pagination":{"limit":…,"offset":…}}` and has no `total` field. And
-`.from()`, `.to()` and the builder's partition are sent as query parameters the broker's DLQ
-handler never reads (it collects only `queue`, `consumerGroup`, `limit` and `offset`), so
-they are silently ignored. Page with `limit`/`offset` and filter the rest client-side.
+`total` is the size of the page, not of the result set. The handler sets it to the length of
+the array it just returned, so it can never exceed `limit` and it does not tell you how much
+is left. And `.from()`, `.to()` and the builder's partition are sent as query parameters the
+broker's DLQ handler never reads (it collects only `queue`, `consumerGroup`, `limit` and
+`offset`), so they are silently ignored. Page with `limit`/`offset` until you get a short page,
+and filter the rest client-side.
 </Aside>
 
 To reprocess one dead letter, `admin.retryMessage(partitionId, transactionId)` calls the

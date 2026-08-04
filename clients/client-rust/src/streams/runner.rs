@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 use queen_protocol::{
-    CycleAck, CycleRequest, CycleResponse, Message, RegisterRequest, RegisterResponse, SinkPushItem,
-    StateGetRequest, StateGetResponse, StateOp, SubscriptionMode,
+    CycleAck, CycleRequest, CycleResponse, Message, RegisterRequest, RegisterResponse,
+    SinkPushItem, StateGetRequest, StateGetResponse, StateOp, SubscriptionMode,
 };
 
 use super::engine::{self, Emit, Envelope};
@@ -441,7 +441,14 @@ impl Runner {
         let (state_ops, emits) = match (&self.stages.window, &self.stages.reducer) {
             (Some(window), Some(reducer)) => {
                 let loaded = self.load_state(&group.partition_id, None, None).await?;
-                self.windowed(window, reducer, records, &messages, &group.partition_id, &loaded)?
+                self.windowed(
+                    window,
+                    reducer,
+                    records,
+                    &messages,
+                    &group.partition_id,
+                    &loaded,
+                )?
             }
             (Some(window), None) => {
                 // A window with no reducer only annotates; every record passes
@@ -548,11 +555,11 @@ impl Runner {
                 max_event_time = max_event_time.max(ts);
                 // The stored watermark already has the lateness allowance
                 // subtracted, so this compares directly.
-                if watermark.is_some_and(|wm| ts < wm) {
-                    if window.on_late == super::ops::LatePolicy::Drop {
-                        dropped_late += 1;
-                        continue;
-                    }
+                if watermark.is_some_and(|wm| ts < wm)
+                    && window.on_late == super::ops::LatePolicy::Drop
+                {
+                    dropped_late += 1;
+                    continue;
                 }
             }
             envelopes.extend(window.annotate(rec, key, ts));
@@ -626,35 +633,77 @@ impl Runner {
         let mut touched: Vec<String> = Vec::new();
         let stream_time = now_ms();
 
+        // Gate one SOURCE MESSAGE at a time, not one record at a time.
+        //
+        // A pre-stage runs before the gate, and it can drop a message's record
+        // (`filter`) or turn one record into several (`flat_map`), so the
+        // number of records is not the number of messages. The ack is an offset
+        // commit — `count` messages ending at `transaction_id` — so it has to
+        // be counted in messages or it settles the wrong ones. Grouping is also
+        // what makes the partial commit safe: a message is settled only when
+        // every record it produced was allowed, so a redelivery replays the
+        // whole message and never half of it.
+        let Some(by_message) = group_by_source_message(records, messages) else {
+            // A record no longer traceable to a claimed message cannot be
+            // settled by an offset commit. Hold the batch rather than ack past
+            // it: the lease lapses and the whole thing comes back.
+            self.counters
+                .gate_denied
+                .fetch_add(messages.len() as u64, Ordering::Relaxed);
+            return Ok(());
+        };
+
         let mut allowed: Vec<(Record, String)> = Vec::new();
+        let mut settled = 0usize;
         let mut denied = false;
 
-        for (rec, key) in records {
-            engine::check_user_key(&key)?;
-            let entry = live
-                .entry(key.clone())
-                .or_insert_with(|| loaded.get(&key).cloned().unwrap_or(serde_json::json!({})));
+        'messages: for records_of_message in by_message {
+            let touched_mark = touched.len();
+            let mut rollback: Vec<(String, Option<Value>)> = Vec::new();
+            let mut batch: Vec<(Record, String)> = Vec::new();
 
-            let mut ctx = GateCtx {
-                state: entry,
-                stream_time_ms: stream_time,
-                partition_id: &group.partition_id,
-                partition: &group.partition,
-                key: &key,
-            };
-            if gate(&rec, &mut ctx) {
-                if !touched.contains(&key) {
-                    touched.push(key.clone());
+            for (rec, key) in records_of_message {
+                engine::check_user_key(&key)?;
+                if !rollback.iter().any(|(k, _)| *k == key) {
+                    rollback.push((key.clone(), live.get(&key).cloned()));
                 }
-                allowed.push((rec, key));
-            } else {
-                denied = true;
-                break;
+                let entry = live
+                    .entry(key.clone())
+                    .or_insert_with(|| loaded.get(&key).cloned().unwrap_or(serde_json::json!({})));
+
+                let mut ctx = GateCtx {
+                    state: entry,
+                    stream_time_ms: stream_time,
+                    partition_id: &group.partition_id,
+                    partition: &group.partition,
+                    key: &key,
+                };
+                if gate(&rec, &mut ctx) {
+                    if !touched.contains(&key) {
+                        touched.push(key.clone());
+                    }
+                    batch.push((rec, key));
+                } else {
+                    // Undo what this message did on its way to being denied:
+                    // `gate()` promises that a denied message did not happen,
+                    // so it must not have consumed a token.
+                    for (k, previous) in rollback.into_iter().rev() {
+                        match previous {
+                            Some(v) => live.insert(k, v),
+                            None => live.remove(&k),
+                        };
+                    }
+                    touched.truncate(touched_mark);
+                    denied = true;
+                    break 'messages;
+                }
             }
+
+            allowed.extend(batch);
+            settled += 1;
         }
 
-        let allowed_count = allowed.len();
-        if allowed_count == 0 {
+        if settled == 0 {
             // Commit nothing. The lease runs out on its own and the batch comes
             // back in the same order — which is the whole point of the gate:
             // back-pressure without a deferred queue and without reordering.
@@ -687,25 +736,25 @@ impl Runner {
             .terminal(&emits, &group.partition, &group.partition_id)
             .await?;
 
-        let last_allowed = &messages[allowed_count - 1];
+        let last_settled = &messages[settled - 1];
         let ack = CycleAck {
-            transaction_id: last_allowed.transaction_id.clone(),
-            lease_id: if last_allowed.lease_id.is_empty() {
+            transaction_id: last_settled.transaction_id.clone(),
+            lease_id: if last_settled.lease_id.is_empty() {
                 group.lease_id.clone()
             } else {
-                last_allowed.lease_id.clone()
+                last_settled.lease_id.clone()
             },
             status: "completed".into(),
-            count: allowed_count as i64,
+            count: settled as i64,
         };
 
         self.counters
             .gate_allowed
-            .fetch_add(allowed_count as u64, Ordering::Relaxed);
+            .fetch_add(settled as u64, Ordering::Relaxed);
         if denied {
             self.counters
                 .gate_denied
-                .fetch_add((messages.len() - allowed_count) as u64, Ordering::Relaxed);
+                .fetch_add((messages.len() - settled) as u64, Ordering::Relaxed);
         }
 
         // Holding the lease on a partial ack is what preserves FIFO: the tail
@@ -738,7 +787,10 @@ impl Runner {
             if self.is_stopped() {
                 break;
             }
-            if let Err(e) = self.flush_partition(window, &partition_id, &partition).await {
+            if let Err(e) = self
+                .flush_partition(window, &partition_id, &partition)
+                .await
+            {
                 self.counters.errors.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(partition_id, error = %e, "stream idle flush failed");
             }
@@ -788,7 +840,14 @@ impl Runner {
             }
             // Everything the broker returned is ripe by construction, so it all
             // closes.
-            engine::run_reduce(reducer, &[], &loaded, Some(clock), &window.tag(), window.grace_ms())
+            engine::run_reduce(
+                reducer,
+                &[],
+                &loaded,
+                Some(clock),
+                &window.tag(),
+                window.grace_ms(),
+            )
         };
 
         if outcome.emits.is_empty() {
@@ -1001,7 +1060,38 @@ pub(crate) fn emit_ctx(e: &Emit, partition: &str, partition_id: &str) -> EmitCtx
     }
 }
 
-fn apply_stateless(ops: &[Op], mut records: Vec<(Record, String)>) -> Result<Vec<(Record, String)>> {
+/// Bucket post-stage records back onto the messages they came from.
+///
+/// The gate settles messages, not records, and a pre-stage breaks the one-to-one
+/// correspondence between them: `filter` leaves a message with no records at
+/// all, `flat_map` leaves it with several. Returns one bucket per message, in
+/// claim order, or `None` if any record cannot be traced back — in which case
+/// the caller must settle nothing rather than guess.
+fn group_by_source_message(
+    records: Vec<(Record, String)>,
+    messages: &[Message],
+) -> Option<Vec<Vec<(Record, String)>>> {
+    let index_of: HashMap<&str, usize> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.transaction_id.as_str(), i))
+        .collect();
+    let mut buckets: Vec<Vec<(Record, String)>> = (0..messages.len()).map(|_| Vec::new()).collect();
+    for (rec, key) in records {
+        let origin = rec
+            .message
+            .as_ref()
+            .and_then(|m| index_of.get(m.transaction_id.as_str()))
+            .copied()?;
+        buckets[origin].push((rec, key));
+    }
+    Some(buckets)
+}
+
+fn apply_stateless(
+    ops: &[Op],
+    mut records: Vec<(Record, String)>,
+) -> Result<Vec<(Record, String)>> {
     for op in ops {
         let mut next = Vec::with_capacity(records.len());
         for (rec, key) in records {
@@ -1095,6 +1185,88 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------- gate: message buckets
+    //
+    // The gate acks by offset — `count` messages ending at a transaction id —
+    // so it has to know which message each record came from. Counting records
+    // instead acks the wrong message when a `filter` runs before the gate, and
+    // indexes past the end when a `flat_map` does.
+
+    fn records_of(messages: &[Message]) -> Vec<(Record, String)> {
+        messages
+            .iter()
+            .map(|m| (Record::from_message(m.clone()), m.partition_id.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn every_record_lands_on_the_message_it_came_from() {
+        let msgs = vec![
+            message("p1", "a", "1", "2026-08-04T10:00:00.000Z"),
+            message("p1", "a", "2", "2026-08-04T10:00:01.000Z"),
+        ];
+        let buckets = group_by_source_message(records_of(&msgs), &msgs).unwrap();
+        assert_eq!(buckets.len(), 2);
+        assert!(buckets.iter().all(|b| b.len() == 1));
+    }
+
+    #[test]
+    fn a_filtered_out_message_keeps_an_empty_bucket() {
+        // Three claimed messages, a pre-stage filter that keeps only the last.
+        // The bucket count must still be three, or the ack settles the wrong
+        // prefix: the gate would allow one record and ack message #1.
+        let msgs = vec![
+            message("p1", "a", "1", "2026-08-04T10:00:00.000Z"),
+            message("p1", "a", "2", "2026-08-04T10:00:01.000Z"),
+            message("p1", "a", "3", "2026-08-04T10:00:02.000Z"),
+        ];
+        let kept = vec![(
+            Record::from_message(msgs[2].clone()),
+            msgs[2].partition_id.clone(),
+        )];
+        let buckets = group_by_source_message(kept, &msgs).unwrap();
+        assert_eq!(buckets.len(), 3);
+        assert!(buckets[0].is_empty());
+        assert!(buckets[1].is_empty());
+        assert_eq!(buckets[2].len(), 1);
+    }
+
+    #[test]
+    fn an_expanded_message_keeps_all_its_records_in_one_bucket() {
+        // One message, three records out of a flat_map. Counting records would
+        // index `messages[2]` and panic inside the spawned loop task, which
+        // `stop()` then reports as a clean shutdown.
+        let msgs = vec![message("p1", "a", "1", "2026-08-04T10:00:00.000Z")];
+        let expanded: Vec<(Record, String)> = (0..3)
+            .map(|_| {
+                (
+                    Record::from_message(msgs[0].clone()),
+                    msgs[0].partition_id.clone(),
+                )
+            })
+            .collect();
+        let buckets = group_by_source_message(expanded, &msgs).unwrap();
+        assert_eq!(buckets.len(), 1, "one claimed message, one bucket");
+        assert_eq!(buckets[0].len(), 3);
+    }
+
+    #[test]
+    fn an_untraceable_record_settles_nothing() {
+        let msgs = vec![message("p1", "a", "1", "2026-08-04T10:00:00.000Z")];
+        let orphan = vec![(
+            Record {
+                data: serde_json::json!({}),
+                message: None,
+                ctx: None,
+            },
+            "p1".to_string(),
+        )];
+        assert!(
+            group_by_source_message(orphan, &msgs).is_none(),
+            "a record with no source message must hold the batch, not ack past it"
+        );
+    }
+
     #[test]
     fn grouping_keeps_partitions_apart_and_in_arrival_order() {
         let msgs = vec![
@@ -1121,7 +1293,9 @@ mod tests {
     #[test]
     fn stateless_ops_chain_in_order() {
         let ops = vec![
-            Op::Map(Arc::new(|r| serde_json::json!({ "n": r.number("n").unwrap_or(0.0) * 2.0 }))),
+            Op::Map(Arc::new(
+                |r| serde_json::json!({ "n": r.number("n").unwrap_or(0.0) * 2.0 }),
+            )),
             Op::Filter(Arc::new(|r| r.number("n").unwrap_or(0.0) > 2.0)),
         ];
         let records = vec![
@@ -1209,7 +1383,9 @@ mod tests {
             value: serde_json::json!({}),
         }];
         assert_eq!(
-            build_push_items(&sink, &emits, "eu")[0].partition.as_deref(),
+            build_push_items(&sink, &emits, "eu")[0]
+                .partition
+                .as_deref(),
             Some("all")
         );
     }

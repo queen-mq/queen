@@ -38,30 +38,32 @@ and each optional piece is off or inert until you configure it.
 | TLS | Not provided | The broker has no HTTPS listener. Terminate TLS in front of it. |
 | `queen_proxy` | Optional | A separate binary: multi-tenant gateway with its own PostgreSQL, API keys, quotas, rate limits and metering. |
 
-## What the broker deliberately does not do
+## The broker's boundaries
 
 Read this list before you put a broker anywhere a client can reach it.
 
-- **No TLS listener.** `rustls` is linked in, but only as a *client*: for
-  PostgreSQL connections and for fetching a JWKS document. Nothing in the broker
-  accepts an HTTPS connection. TLS termination is a reverse proxy's job, or
+- **TLS is terminated in front.** `rustls` is linked in, but only as a *client*:
+  for PostgreSQL connections and for fetching a JWKS document. Nothing in the
+  broker accepts an HTTPS connection. Termination is a reverse proxy's job, or
   `queen_proxy`'s.
-- **No CORS layer.** There is no `Access-Control-*` handling anywhere in the
-  request path, so a browser cannot call the broker cross-origin.
-- **No authentication by default.** With `JWT_ENABLED` unset, every route is
+- **Cross-origin browser calls are not served.** There is no `Access-Control-*`
+  handling anywhere in the request path, so a browser cannot call the broker
+  cross-origin.
+- **Authentication is opt-in.** With `JWT_ENABLED` unset, every route is
   served to every caller, including `/api/v1/system/*` (maintenance mode) and
   `/internal/*`, which are classified `Admin` when authentication *is* on. A
   broker on a routable address with default configuration is fully
   administrable by anyone who can reach it.
-- **No rate limiting and no quotas.** The broker has no 429 path at all. Request
-  admission control is `queen_proxy`'s job.
-- **No leader.** Every replica serves every route. Only background maintenance
-  is leader-gated, by PostgreSQL advisory locks, and the election is per cycle.
+- **Admission control is `queen_proxy`'s job.** The broker applies no rate
+  limiting and no quotas, and has no 429 path at all.
+- **Every replica serves every route.** There is no leader. Only background
+  maintenance is leader-gated, by PostgreSQL advisory locks, and the election is
+  per cycle.
 
-## The four things that surprise operators
+## Four behaviours to know before you deploy
 
 Each of these is explained in full on the page that owns it; they are collected
-here because they are the ones that get discovered the hard way.
+here because they shape an operational decision early.
 
 <Aside type="caution">
 `/health` performs a real database round-trip and answers **503** when
@@ -132,22 +134,28 @@ The pages above get a broker running and keep it running. The remaining pages in
 this section's sidebar go deeper on single subjects, and each one is worth
 reading before you rely on the behaviour it describes:
 
-- **Security**: trust boundaries, JWT algorithms and JWKS key discovery,
-  broker-to-PostgreSQL TLS, and at-rest payload encryption.
-- **Observability**: the log's periodic `rates` and `sizes` blocks, the metrics
-  endpoints, and why `/metrics/prometheus` is not a per-tenant surface.
-- **Probes and restarts**: health semantics, SIGTERM draining, and rolling
-  restarts.
-- **Durability**: surviving a PostgreSQL outage with the disk spool and
-  maintenance mode.
-- **Retention**: what the maintenance cycle deletes, and how disk grows if you
-  never turn retention on.
-- **Backup**: `pg_dump`, because the database is the whole state.
-- **Dashboard**: what the bundled SPA shows.
-- **Multi-tenant**: building your own multi-tenant service on `queen_proxy`, with
-  tenants, API keys, quotas, metering, isolation, and the broker's
-  `QUEEN_TENANCY_HEADER`.
+- [Security](/selfhost/security/): trust boundaries, JWT algorithms and JWKS key
+  discovery, broker-to-PostgreSQL TLS, and at-rest payload encryption.
+- [Observability](/selfhost/observability/): the log's periodic `rates` and
+  `sizes` blocks, the metrics endpoints, and why `/metrics/prometheus` is not a
+  per-tenant surface.
+- [Probes and restarts](/selfhost/probes-restarts/): health semantics, SIGTERM
+  draining, and rolling restarts.
+- [Durability](/selfhost/durability/): surviving a PostgreSQL outage with the
+  disk spool and maintenance mode.
+- [Retention](/selfhost/retention/): what the maintenance cycle deletes, and how
+  disk grows if you never turn retention on.
+- [Sizing](/selfhost/sizing/): capacity planning in commits rather than messages,
+  and why batch size is the lever that moves the result.
+- [Backup](/selfhost/backup/): `pg_dump`, because the database is the whole
+  state.
+- [Dashboard](/selfhost/dashboard/): what the bundled SPA shows.
+- [Multi-tenant](/selfhost/multi-tenant/): building your own multi-tenant service
+  on `queen_proxy`, with tenants, API keys, quotas, metering, isolation, and the
+  broker's `QUEEN_TENANCY_HEADER`.
 
-For what the broker actually exposes on the wire, and every environment variable
-with the default the code applies, see [Reference](/reference). For the
-measured runs behind any performance claim, see [Benchmarks](/benchmarks).
+For what the broker actually exposes on the wire, see the
+[route table](/reference/http/routes/); for every environment variable with the
+default the code applies, see the [configuration reference](/reference/config/).
+For the measured runs behind any performance claim, see
+[Benchmarks](/benchmarks).

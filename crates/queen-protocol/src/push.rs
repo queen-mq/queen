@@ -172,6 +172,17 @@ mod tests {
     }
 
     #[test]
+    fn a_push_result_from_a_newer_broker_still_parses() {
+        // A push that cannot be decoded is the worst case of all: the messages
+        // are already durable, and the caller has no id to deduplicate a retry
+        // with. An unknown key must never cost that.
+        let wire = r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"orders","status":"queued","partition":"eu"}]"#;
+        let got: Vec<PushResult> =
+            serde_json::from_str(wire).expect("an unmodelled key must not fail the decode");
+        assert_eq!(got[0].status, PushStatus::Queued);
+    }
+
+    #[test]
     fn every_push_status_parses() {
         for (s, want) in [
             ("queued", PushStatus::Queued),

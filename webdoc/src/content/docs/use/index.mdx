@@ -12,8 +12,8 @@ sourceOfTruth:
 
 This section is for the person writing code against Queen. The surface is small (push, pop,
 ack, and a transaction that bundles pushes and acks into one PostgreSQL commit), but the
-semantics are specific, and the two facts that surprise people most are consequences of the
-model rather than options you can turn off: **an acknowledgement is an offset commit**, and
+semantics are specific, and two of them follow from the model rather than being options you
+can turn off: **an acknowledgement is an offset commit**, and
 **a consumer group holds at most one leased batch per partition**.
 
 Read the concept chain in order. Everything after it (the SDK pages, the examples, the error
@@ -49,11 +49,11 @@ rest of it, then with the language-specific material.
 
 | Group | What it covers |
 | --- | --- |
-| Concepts, continued | Acknowledgement as an offset commit, leases and retries and the dead-letter queue, transactions, replay and repositioning a group, retention, and a summary of the guarantees |
-| Clients | One page per SDK (JavaScript, Python, Go, Rust, PHP/Laravel, C++), plus using Queen from any language over plain HTTP |
-| Examples | Producer and consumer, fan-out with consumer groups, a transactional multi-stage pipeline, idempotent deduplication, replay, and handling failures through the DLQ |
-| Errors | HTTP status codes, `429` backpressure through the proxy, and what a client should retry |
-| Streams | Windowed aggregation over a queue |
+| [Concepts, continued](/use/concepts/ack) | [Acknowledgement as an offset commit](/use/concepts/ack), [leases and retries and the dead-letter queue](/use/concepts/leases-retries-dlq), [transactions](/use/concepts/transactions), [replay and repositioning a group](/use/concepts/replay), [retention](/use/concepts/retention), and a summary of the [delivery guarantees](/use/concepts/guarantees) |
+| [Clients](/use/clients) | One page per SDK ([JavaScript](/use/clients/javascript), [Python](/use/clients/python), [Go](/use/clients/go), [Rust](/use/clients/rust), [PHP/Laravel](/use/clients/php-laravel), [C++](/use/clients/cpp)), plus [using Queen from any language over plain HTTP](/use/clients/http) |
+| [Examples](/use/examples) | [Producer and consumer](/use/examples/producer-consumer), [fan-out with consumer groups](/use/examples/fanout), a [transactional multi-stage pipeline](/use/examples/pipeline), [message deduplication](/use/examples/dedup), [replay](/use/examples/replay), and [handling failures through the DLQ](/use/examples/dlq) |
+| [Errors](/use/errors) | HTTP status codes, `429` backpressure through the proxy, and what a client should retry |
+| [Streams](/use/streams) | Windowed aggregation over a queue, with tumbling, sliding, session and cron windows |
 
 ## Before you write code
 
@@ -64,8 +64,9 @@ Four things are worth knowing before the first request.
   access level each route requires, is in the [reference](/reference).
 - **Clients hold no coordination state.** The broker hands out no partition assignments and
   runs no rebalancing protocol, so a worker that restarts does not stall its peers.
-- **The broker has no TLS listener and no CORS layer.** Terminate TLS at the proxy or at a
-  reverse proxy in front of it. See [self-hosting](/selfhost).
+- **TLS terminates in front of the broker.** The broker has no TLS listener and no CORS layer,
+  so terminate TLS at the proxy or at a reverse proxy in front of it. See
+  [self-hosting](/selfhost).
 - **`POST /api/v1/configure` is a full replace.** Any option you omit is reset to its default,
   including `dedupWindowSeconds`, which goes back to 3600. Send the whole configuration every
   time.

@@ -1,10 +1,11 @@
 ---
-title: C++
-description: "Build and use the single-header C++ client: what it implements, what it does not, and how to satisfy the three vendored headers whose paths no longer resolve."
+title: C++ quickstart
+description: "Build and use the single-header C++ client: what it covers, what it leaves to you, and how to satisfy its three vendored headers."
 type: how-to
 tier: use
 sidebar:
   order: 18
+  label: C++
 sourceOfTruth:
   - clients/client-cpp/queen_client.hpp
   - clients/client-cpp/Makefile
@@ -20,17 +21,20 @@ verifiedBy:
 
 `clients/client-cpp/queen_client.hpp` is a single header, about 2,150 lines, that implements
 the message plane, transactions, the DLQ query, client-side buffering, round-robin and session
-load balancing, and a thread-pool consumer. It needs C++17 and three third-party headers. It
-is the least complete of the SDKs: there is **no admin surface at all**, and lease renewal
-inside the consume loop is unimplemented.
+load balancing, and a thread-pool consumer. It needs C++17 and three third-party headers.
+Admin calls and lease renewal inside the consume loop are not part of it; the full scope list
+is below.
+
+The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+[Versions and compatibility](/reference/compatibility) states what that covers.
 
 ## Building it
 
 The header opens with `#include <json.hpp>`, `#include <httplib.h>` and
 `#include "../server/include/threadpool.hpp"`, and the `Makefile` adds
 `-I../server/vendor -I../server/include`. Relative to `clients/client-cpp/`, those resolve to
-`clients/server/vendor/` and `clients/server/include/`, **directories that do not exist in
-the repository**. Two of the three headers are third-party and gitignored; the third,
+`clients/server/vendor/` and `clients/server/include/`, directories the repository does not
+carry and step 1 below creates. Two of the three headers are third-party and gitignored; the third,
 `threadpool.hpp` (the MIT-licensed `astp::ThreadPool`), was recovered from git history and is
 vendored at `test/vendor/cpp/threadpool.hpp`.
 
@@ -116,7 +120,7 @@ QueenClient client({"https://cell.example"}, config);
 | `timeout_millis` | `30000` | Per-request timeout; a long-poll pop adds 5 s of slack. |
 | `retry_attempts` | `3` | **Total** tries for `5xx` and network failures. |
 | `retry_delay_millis` | `1000` | First retry delay; doubles per attempt. |
-| `load_balancing_strategy` | `"round-robin"` | Only `"round-robin"` and `"session"` exist here: **there is no affinity strategy**, unlike the other four SDKs. |
+| `load_balancing_strategy` | `"round-robin"` | `"round-robin"` and `"session"` here; the other four SDKs also offer affinity. |
 | `enable_failover` | `true` | Try the next backend on `5xx` / network error. |
 | `bearer_token` | `""` | Sent as `Authorization: Bearer <token>`. |
 | `retry_429` | zeroed | `{max_attempts, base_millis, cap_millis}`; zero means the kind-based default. Note the field names are `base_millis` / `cap_millis`, not `baseMs` / `capMs`. |
@@ -252,12 +256,14 @@ json dlq = client.queue("orders").dlq("billing").limit(50).get();
 <Aside type="note">
 The DLQ builder's `from()`, `to()` and partition are sent as query parameters the broker's DLQ
 handler does not read (it collects only `queue`, `consumerGroup`, `limit` and `offset`), so
-they are silently ignored, and the response carries no `total` at all. Page with `limit()` and
-`offset()` and filter client-side. This client has no admin surface, so the broker's
-dead-letter replay route is reachable only by calling it over HTTP yourself.
+they are silently ignored. The response does carry `total`, but it is the size of the page and
+not of the result set: the handler sets it to the length of the array it just returned. Page
+with `limit()` and `offset()` until you get a short page, and filter client-side. This client
+has no admin surface, so the broker's dead-letter replay route is reachable only by calling it
+over HTTP yourself.
 </Aside>
 
-## What is missing
+## Outside its scope
 
 - **No admin or observability surface.** `queen_client.hpp` defines no `Admin` class. Resource
   listings, queue and partition stats, `/api/v1/status`, analytics, traces-by-name, consumer

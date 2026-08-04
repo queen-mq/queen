@@ -1,6 +1,6 @@
 ---
 title: Streams and windowing
-description: "A windowing and aggregation runtime that runs in your process and commits state, output and the source acknowledgement in one PostgreSQL transaction through three broker endpoints."
+description: "Tumbling, sliding, session and cron windows over a queue, with exactly-once aggregation: the Kafka Streams shape without a changelog topic or a state store to operate."
 type: concept
 tier: use
 sidebar:
@@ -188,7 +188,7 @@ Two tables in their own schema, `queen_streams`, created and applied at boot lik
 
 Two facts to plan around.
 
-**Nothing purges stream state.** Retention operates on segments and never touches `queen_streams.state`. A query with unbounded key cardinality (a session window keyed on something that never repeats, a sliding window over high-cardinality keys) grows that table until you intervene. Closing a window deletes its own row, so bounded-cardinality queries reach a steady state; unbounded ones do not. Dropping the query (which cascades) or a `reset: true` re-registration are the ways to reclaim it.
+**Stream state is reclaimed explicitly.** Dropping the query (which cascades) or a `reset: true` re-registration are the ways to reclaim it; retention operates on segments and never touches `queen_streams.state`. A query with unbounded key cardinality (a session window keyed on something that never repeats, a sliding window over high-cardinality keys) grows that table until you intervene. Closing a window deletes its own row, so bounded-cardinality queries reach a steady state; unbounded ones do not.
 
 **The schema is granted to `PUBLIC`.** `queen_streams.queries` and `queen_streams.state` carry `SELECT`, `INSERT`, `UPDATE` and `DELETE` grants to `PUBLIC`, so any role that can connect to the database can read and modify stream state. Treat database access as equivalent to stream access.
 

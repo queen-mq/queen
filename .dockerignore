@@ -15,6 +15,13 @@
 app/dist
 server/webapp/dist
 proxy/console/dist
+# ...except the committed one, which server/Dockerfile copies verbatim: the
+# slim test image has no frontend stage to regenerate it from.
+!server/webapp/dist
+
+# Python virtualenvs — 280 MB of client-py/.venv would otherwise be uploaded to
+# the daemon on every build, and no Dockerfile copies it.
+**/.venv
 
 # Legacy / non-Rust build artifacts
 server/build/

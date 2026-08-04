@@ -20,9 +20,9 @@ each left behind, and when the leftovers were removed.
 
 One fact frames everything below: **deployments are always-virgin**. A database is born from
 `schema.sql` plus the 23 procedure files, all of which only *create*. Nothing is dropped, migrated
-or folded at boot, because there is never anything pre-existing to drop. There is no upgrade path;
-pointing this build at a database written by an earlier schema is unsupported (fresh database, full
-stop). Every removal described here therefore happened in the *source tree*, not in your database.
+or folded at boot, because there is never anything pre-existing to drop. Pointing this build at a
+database written by an earlier schema is unsupported: a new version means a fresh database.
+Every removal described here therefore happened in the *source tree*, not in your database.
 
 ## The story, in five stages
 
@@ -152,5 +152,5 @@ survive as practical guidance:
 
 - **When reading the database, start from the `log_*` tables.** They are the only place the engine
   keeps data; everything else is shared infrastructure (configuration, stats, metrics, traces).
-- **Never point this build at a database created by an older build.** There is no upgrade path and
-  no boot-time cleanup any more; the supported move is a fresh database.
+- **Never point this build at a database created by an older build.** The supported move is a
+  fresh database; there is no boot-time cleanup any more.

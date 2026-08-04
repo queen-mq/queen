@@ -205,7 +205,7 @@ even though it is not in the defaults object. Two things follow:
 
 - **`/configure` is a full replace.** Keys absent from the body reset to the broker's own
   defaults, not to whatever the queue had before. Send the complete intended configuration every
-  time. The full option list lives in [Reference](/reference).
+  time. The full option list lives in [Queue options](/reference/queue-options/).
 - Calling `create()` without `config()` sends `QUEUE_DEFAULTS` as-is, which means
   `leaseTime: 300`, whereas a queue created implicitly by a first push gets a 60-second lease.
 
@@ -243,7 +243,8 @@ builder resolves without re-sending.
 | `onDuplicate(cb)` | `cb(duplicateItems, error)` |
 
 Awaiting a non-buffered push resolves to the broker's per-item array. The four possible item
-statuses are described in [Reference](/reference). With no `onError` callback registered, at
+statuses are described on the [push route page](/reference/http/push/). With no `onError` callback
+registered, at
 least one `failed` item makes the await throw; with one registered, it does not throw. Awaiting a
 buffered push resolves to `{ buffered: true, count }` immediately. The messages have not been
 sent yet.

@@ -3,6 +3,34 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Two fixes in the Rust SDK, both found by putting its test suite under audit.**
+
+- **A dead-lettered message's reason was never readable.** `DlqMessage.error` deserialized
+  the key `error`, while `queen.get_dlq_messages_v1` projects the stored reason as
+  `errorMessage`. The field was therefore always `None` and the reason sat unnoticed in the
+  struct's `flatten`ed `rest`. It now reads the wire key, and accepts the plain one as an
+  alias. The test that was meant to cover this asserted only that the DLQ had one row.
+- **A `gate` after a stateless operator acked the wrong messages.** The gate settles by
+  offset commit — *n* messages ending at a transaction id — but counted the records the
+  gate had allowed. A `filter` before the gate leaves fewer records than messages, so the
+  commit landed short and the remainder was consumed but never acked, redelivered on lease
+  expiry, filtered out again: a partition that never drains. A `flat_map` leaves more
+  records than messages, and the count indexed past the end, panicking inside the spawned
+  loop task while `stop()` still reported a clean shutdown. Records are now grouped back
+  onto their source message, and a message is settled only when every record it produced
+  was allowed. State mutations from a denied message are rolled back, which is what
+  `Stream::gate` already documented.
+
+`TxnAckOperation` gained the `error` field the broker reads as the dead-letter reason, so a
+transactional failure can explain itself; `TransactionBuilder::nack` and `ack_with_reason`
+expose it.
+
+The SDK's tests also now run in CI, which they did not before: `rust-client` is in the
+suite matrix, and a native job runs the client's and `queen-protocol`'s unit tests, clippy,
+rustfmt and the declared MSRV.
+
 ## 1.0.0-beta.2
 
 **One admission arbiter replaces the two Vegas limiters.** Concurrency against PostgreSQL

@@ -260,7 +260,9 @@ impl HttpClient {
         let max_attempts = match opts.retry_kind {
             // A long-poll pop keeps waiting through a throttle unless the
             // application explicitly bounded it.
-            Some(RetryKind::Pop) => policy.max_attempts.filter(|_| policy_was_customized(policy)),
+            Some(RetryKind::Pop) => policy
+                .max_attempts
+                .filter(|_| policy_was_customized(policy)),
             _ => policy.max_attempts.or(Some(10)),
         };
 
@@ -319,12 +321,18 @@ impl HttpClient {
         let url = self.request_url(backend, path);
         let timeout = opts.timeout.unwrap_or(self.config.timeout);
 
-        let mut req = self.client_for(backend).request(method, &url).timeout(timeout);
+        let mut req = self
+            .client_for(backend)
+            .request(method, &url)
+            .timeout(timeout);
         if let Some(b) = body {
             req = req.body(b);
         }
 
-        let resp = req.send().await.map_err(|e| map_reqwest_error(e, timeout))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, timeout))?;
         let status = resp.status();
 
         if status == reqwest::StatusCode::NO_CONTENT {
@@ -356,8 +364,9 @@ impl HttpClient {
             let parsed: Option<ErrorBody> = serde_json::from_slice(&bytes).ok();
             let (message, code) = match parsed {
                 Some(b) => (
-                    b.error
-                        .unwrap_or_else(|| status.canonical_reason().unwrap_or("error").to_string()),
+                    b.error.unwrap_or_else(|| {
+                        status.canonical_reason().unwrap_or("error").to_string()
+                    }),
                     b.code,
                 ),
                 None => (
@@ -374,7 +383,10 @@ impl HttpClient {
             });
         }
 
-        let bytes = resp.bytes().await.map_err(|e| Error::Network(e.to_string()))?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
         Ok(if bytes.is_empty() {
             None
         } else {
@@ -384,7 +396,11 @@ impl HttpClient {
 
     // ---------------------------------------------------------- typed helpers
 
-    pub async fn get_json<T: DeserializeOwned>(&self, path: &str, opts: &Opts) -> Result<Option<T>> {
+    pub async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        opts: &Opts,
+    ) -> Result<Option<T>> {
         let body = self.send(reqwest::Method::GET, path, None, opts).await?;
         decode(body)
     }
@@ -581,10 +597,7 @@ mod tests {
             .host_header("acme.local:6711")
             .unwrap();
         let c = client(cfg);
-        assert_eq!(
-            c.request_url(0, "/health"),
-            "http://acme.local:6711/health"
-        );
+        assert_eq!(c.request_url(0, "/health"), "http://acme.local:6711/health");
     }
 
     #[test]

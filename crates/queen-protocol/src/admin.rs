@@ -234,7 +234,20 @@ pub struct DlqMessage {
     #[serde(default)]
     pub data: serde_json::Value,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Why the message was dead-lettered.
+    ///
+    /// The wire key is `errorMessage`: `queen.get_dlq_messages_v1` projects the
+    /// stored `error` column under that name, and the handler passes the SP's
+    /// text straight through. Reading `error` instead — as this did — left the
+    /// field permanently `None` while the reason sat unnoticed in `rest`. The
+    /// alias keeps the plain key working for anything that renders a DLQ row
+    /// from a different source.
+    #[serde(
+        rename = "errorMessage",
+        alias = "error",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub error: Option<String>,
 
     #[serde(flatten)]
@@ -382,7 +395,11 @@ pub struct TraceRequest {
 
     /// Free-form labels used to look the trace back up. `None` for an
     /// unlabelled event.
-    #[serde(rename = "traceNames", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "traceNames",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub trace_names: Option<Vec<String>>,
 
     /// `info`, `error`, `step`, … — free-form; SDKs default to `info`.
@@ -485,6 +502,142 @@ impl MaintenanceResponse {
 mod tests {
     use super::*;
 
+    /// A DLQ row exactly as `queen.get_dlq_messages_v1` projects it.
+    ///
+    /// Copied key for key from the `jsonb_build_object` in
+    /// `server/sql/procedures/010_log_admin.sql`. Deserializing a literal the
+    /// crate itself invented would have passed while the field was reading the
+    /// wrong key, which is how the reason went missing unnoticed.
+    const DLQ_ROW_FROM_THE_SP: &str = r#"{
+        "id": "0198f0aa-0000-7000-8000-000000000001",
+        "transactionId": "0198f0aa-0000-7000-8000-000000000002",
+        "partitionId": "0198f0aa-0000-7000-8000-000000000003",
+        "queue": "orders",
+        "partition": "customer-42",
+        "consumerGroup": "fulfilment",
+        "errorMessage": "handler returned an error: downstream 503",
+        "retryCount": 3,
+        "data": { "total": 19.99 },
+        "producerSub": null,
+        "createdAt": "2026-08-04T09:15:00.123Z",
+        "failedAt": "2026-08-04T09:15:00.123Z"
+    }"#;
+
+    #[test]
+    fn a_dlq_row_exposes_the_reason_the_broker_stored() {
+        let row: DlqMessage = serde_json::from_str(DLQ_ROW_FROM_THE_SP).unwrap();
+        assert_eq!(
+            row.error.as_deref(),
+            Some("handler returned an error: downstream 503"),
+            "the dead-letter reason did not reach the typed field; it is probably \
+             sitting in `rest` under a key this struct does not read: {:?}",
+            row.rest
+        );
+        assert_eq!(row.queue.as_deref(), Some("orders"));
+        assert_eq!(row.partition.as_deref(), Some("customer-42"));
+        assert_eq!(row.data["total"], serde_json::json!(19.99));
+        // Everything the struct does not name stays reachable rather than being
+        // dropped on the floor.
+        assert_eq!(row.rest.get("retryCount"), Some(&serde_json::json!(3)));
+        assert_eq!(
+            row.rest.get("consumerGroup"),
+            Some(&serde_json::json!("fulfilment"))
+        );
+        assert!(
+            !row.rest.contains_key("errorMessage"),
+            "the reason was captured twice: once typed and once in `rest`"
+        );
+    }
+
+    #[test]
+    fn a_dlq_row_still_reads_a_plain_error_key() {
+        // The alias exists so a row rendered from somewhere other than the SP
+        // — a fixture, a proxy, an older broker — still resolves.
+        let row: DlqMessage = serde_json::from_str(r#"{"data":{},"error":"plain key"}"#).unwrap();
+        assert_eq!(row.error.as_deref(), Some("plain key"));
+    }
+
+    #[test]
+    fn a_dlq_row_round_trips_through_the_wire_key() {
+        let row: DlqMessage = serde_json::from_str(DLQ_ROW_FROM_THE_SP).unwrap();
+        let s = serde_json::to_string(&row).unwrap();
+        assert!(
+            s.contains(r#""errorMessage":"#),
+            "re-serializing must emit the key the broker sends, not the field name: {s}"
+        );
+        assert_eq!(serde_json::from_str::<DlqMessage>(&s).unwrap(), row);
+    }
+
+    #[test]
+    fn the_dlq_envelope_parses_with_the_pagination_block_it_carries() {
+        // `queen.get_dlq_messages_v1` wraps the rows in {messages, pagination}
+        // (`server/sql/procedures/010_log_admin.sql:627-634`) and the handler
+        // then injects `total` from `messages.len()`
+        // (`server/src/handlers/messages.rs:570-573`). `pagination` is a real
+        // key this struct does not model, so the unknown-field path is
+        // exercised by the live wire and not only by hypothetical future
+        // fields — and `total` really is the page length, which is why it can
+        // never be used to drive pagination.
+        let wire = format!(
+            r#"{{"messages":[{DLQ_ROW_FROM_THE_SP}],"pagination":{{"limit":100,"offset":0}},"total":1}}"#
+        );
+        let got: DlqResponse =
+            serde_json::from_str(&wire).expect("the DLQ envelope must deserialize");
+        assert_eq!(got.total, 1);
+        assert_eq!(got.messages.len(), 1);
+        assert_eq!(
+            got.messages[0].error.as_deref(),
+            Some("handler returned an error: downstream 503"),
+            "the reason has to survive the envelope too, not just a bare row"
+        );
+        assert!(got.error.is_none());
+    }
+
+    #[test]
+    fn an_empty_dlq_reads_as_empty_rather_than_missing() {
+        // The SP COALESCEs the aggregate to '[]' (010:628), so an empty DLQ is
+        // an empty array with total 0 — never an absent `messages` key. Both
+        // still have to land on the same value, because a client that reads a
+        // missing array as an error reports a broken DLQ for a healthy queue.
+        let full: DlqResponse = serde_json::from_str(
+            r#"{"messages":[],"pagination":{"limit":100,"offset":0},"total":0}"#,
+        )
+        .unwrap();
+        let bare: DlqResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(full, bare);
+        assert!(full.messages.is_empty() && full.total == 0);
+    }
+
+    #[test]
+    fn a_dlq_row_tolerates_the_nulls_the_sql_projects() {
+        // `producerSub` is a literal NULL in the projection (010:651) and the
+        // remaining identity columns are nullable joins. Every one of them has
+        // to read as absent rather than failing the row, or a single
+        // unresolvable partition name takes the whole page down.
+        let row: DlqMessage = serde_json::from_str(
+            r#"{"id":null,"transactionId":null,"partitionId":null,"queue":null,"partition":null,"data":null,"errorMessage":null,"producerSub":null}"#,
+        )
+        .expect("a fully null row must still decode");
+        assert!(row.id.is_none() && row.queue.is_none() && row.error.is_none());
+        assert_eq!(row.data, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_dlq_row_from_a_newer_broker_keeps_what_it_does_not_model() {
+        // Unknown keys land in `rest` rather than being dropped, which is what
+        // made the missing `errorMessage` recoverable at all: the reason was
+        // sitting there the whole time.
+        let row: DlqMessage = serde_json::from_str(
+            r#"{"data":{},"errorMessage":"boom","dlqReason":"budget-exhausted","attempt":4}"#,
+        )
+        .unwrap();
+        assert_eq!(row.error.as_deref(), Some("boom"));
+        assert_eq!(
+            row.rest.get("dlqReason"),
+            Some(&serde_json::json!("budget-exhausted"))
+        );
+    }
+
     #[test]
     fn empty_options_serialize_to_an_empty_object() {
         let req = ConfigureRequest::new("orders");
@@ -517,7 +670,9 @@ mod tests {
     #[test]
     fn an_empty_queue_name_is_valid() {
         let req = ConfigureRequest::new("");
-        assert!(serde_json::to_string(&req).unwrap().contains(r#""queue":"""#));
+        assert!(serde_json::to_string(&req)
+            .unwrap()
+            .contains(r#""queue":"""#));
     }
 
     #[test]

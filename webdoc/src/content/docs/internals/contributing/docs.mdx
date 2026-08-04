@@ -1,6 +1,6 @@
 ---
 title: The documentation site
-description: "How this site is built: the content tree, the strict frontmatter contract, the seven generators that derive fact tables, OpenAPI documents and benchmark figures from the source, and the drift guards that fail the build when a mirrored classifier changes."
+description: "How this site is built: the content tree, the strict frontmatter contract, the seven generators that derive fact tables from the source, and the drift guards that fail the build."
 type: how-to
 tier: internals
 sidebar:
@@ -294,7 +294,8 @@ a `docs:start` inside an already-open region. Common leading indentation is stri
 snippet extracted from inside a test function reads as top-level code. An index partial lists
 the whole inventory.
 
-The scanned directories are the JavaScript, Python, Go and C++ client test trees.
+The scanned directories are the JavaScript, Python, Go, C++ and Rust client test trees, plus
+`examples/full` for the whole programs behind [Full examples](/full-examples).
 
 ## The drift guards
 
@@ -346,9 +347,11 @@ modules, and the JavaScript, Python and Go client test directories, not only on 
 `webdoc/**`.
 
 <Aside type="note">
-`gen-snippets.mjs` also scans `clients/client-cpp`, which the workflow's path filter does not
-include. No C++ file carries a marker today, so nothing is currently missed. But a snippet
-added there would not be drift-checked until the filter is extended.
+`gen-snippets.mjs` also scans `clients/client-cpp`, `clients/client-rust/tests` and
+`examples/full`, none of which the workflow's path filter includes. No C++ file carries a marker
+today, but the Rust tests carry six and `examples/full` carries twelve, so editing a marked
+region in either publishes a changed snippet without the drift check ever running. Until the
+filter is extended, a change there has to be caught by `pnpm --dir webdoc gen --check` locally.
 </Aside>
 
 The workflow builds and gates; it does not deploy. Deployment is Cloudflare Pages against

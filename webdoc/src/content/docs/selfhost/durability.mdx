@@ -17,8 +17,8 @@ sourceOfTruth:
 
 When PostgreSQL is unreachable, a push does not have to fail. The broker appends
 it to an on-disk spool, reports it to the client as `buffered`, and replays it
-once the database comes back. The mechanism is small, and its limits are as
-important as its guarantees.
+once the database comes back. The mechanism is small; this page covers what it
+guarantees and where its coverage ends.
 
 ## What the spool is
 
@@ -39,10 +39,11 @@ not silently drop every buffered push. In production, set `FILE_BUFFER_DIR`
 explicitly and confirm it in the `config: file_buffer` boot line.
 
 <Aside type="caution">
-There is **no per-event fsync**. Records are plain buffered appends under a
-mutex. A process crash or a host power loss can therefore lose the tail of the
-active file. The reader is built for that case (it stops at the first incomplete
-record instead of failing the file), but "stops cleanly" is not "loses nothing".
+Records are plain buffered appends under a mutex, with **no per-event fsync**.
+A process crash or a host power loss can therefore lose the tail of the
+active file. The reader is built for that case: it stops at the first incomplete
+record instead of failing the file, so the cost is the truncated tail rather
+than the whole file.
 The spool trades a small crash window for not blocking the push path on disk.
 </Aside>
 
@@ -87,9 +88,9 @@ per-item `status` field is the contract.
 
 The second is deliberate: maintenance mode, below.
 
-Two things are **not** covered. `POST /api/v1/transaction` has no spool path at
+The spool covers pushes. `POST /api/v1/transaction` has no spool path at
 all: a transaction is all-or-nothing against PostgreSQL, and during an outage it
-fails. And nothing on the consume side is buffered: pops and acks against an
+fails. The consume side is not buffered either: pops and acks against an
 unreachable database return errors, which is safe, because an unacked lease
 redelivers.
 
@@ -158,9 +159,9 @@ never be stored must not be allowed to freeze the queue behind it.
 
 The quarantine directory is invisible to the drain (every listing filters on the
 `.buf` and `.tmp` extensions and does not recurse), so a quarantined file stays
-put until someone looks at it. **Nothing else looks at it.** Treat a non-empty
-`failed/` directory as an alert: those messages were accepted and will never be
-stored.
+put until someone looks at it. Treat a non-empty
+`failed/` directory as an alert: nothing else picks those files up, and those
+messages were accepted and will never be stored.
 
 ## Startup recovery
 
@@ -203,25 +204,25 @@ why `queen_maintenance_mode_enabled` is worth an alert.
 ## The limits
 
 The spool is node-local, unreplicated, and unencrypted beyond what the queue
-already asked for. Read those three properties as one sentence: **losing the node
-loses its spool.**
+already asked for. Read those three properties as one sentence: losing the node
+loses its spool.
 
-- No other instance can drain another instance's directory. There is no transfer
+- A spool is drained by the instance that wrote it: there is no transfer
   and no cross-node visibility. Behind a load balancer, buffered messages are
   scattered across whichever instances accepted them.
-- An ephemeral container filesystem makes the whole mechanism decorative. Give
-  `FILE_BUFFER_DIR` storage that outlives the container, and keep the pod on the
-  node that holds it.
+- Give `FILE_BUFFER_DIR` storage that outlives the container, and keep the pod
+  on the node that holds it. On an ephemeral container filesystem the spool goes
+  with the container, so nothing is left to replay.
 - For a queue with `encryptionEnabled`, the spooled payload is the same
   AES-256-GCM envelope that would have been stored, and the flag is persisted so
   the replayed frame is still marked encrypted. For every other queue the payload
   sits on disk as plaintext JSON. If a malformed `QUEEN_ENCRYPTION_KEY` disabled
   encryption at boot (which is a warning, not a boot failure), then the spool
   holds plaintext for flagged queues too.
-- The spool bounds nothing. There is no size cap and no maximum age. During a
+- Monitor free space on that volume alongside `queen_file_buffer_pending`. The
+  spool has no size cap and no maximum age: during a
   long outage it grows until the filesystem fills, at which point spool writes
-  fail and pushes are reported `failed`. Monitor free space on that volume
-  alongside `queen_file_buffer_pending`.
+  fail and pushes are reported `failed`.
 
 ## Related pages
 

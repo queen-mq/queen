@@ -1,6 +1,6 @@
 ---
 title: Retention internals
-description: "The retention loop as bounded autocommitting steps with no wrapping transaction, one partition lock per step, an advisory lock that elects a leader, the eviction watermarks, and the empty-partition cleanup phase."
+description: "The retention loop as bounded autocommitting steps: no wrapping transaction, one partition lock per step, an advisory lock to elect a leader, the eviction watermarks, and empty-partition cleanup."
 type: concept
 tier: internals
 sidebar:
@@ -187,8 +187,9 @@ It delegates to `log_retention_step_v1` with rule 2 disabled and the history typ
 
 Whole segments older than the cutoff are dropped regardless of whether anyone consumed them, **for every
 group, in-flight leases included**. A cursor left below the new `log_start` resumes at the next existing
-offset, because the pop scan tolerates gaps. The SQL header calls this data loss by design, and it is
-accurate: the option's purpose is to bound how long data may sit, not to preserve it.
+offset, because [the pop scan](/internals/life-of-a-pop/) tolerates gaps. The SQL header calls this
+data loss by design, and it is accurate: the option's purpose is to bound how long data may sit, not
+to preserve it.
 
 It also applies **regardless of `retentionEnabled`**. A queue configured with only
 `maxWaitTimeSeconds` is still swept. If you set it expecting a warning, an alert, or a move to the
@@ -305,7 +306,7 @@ one global total order everywhere rather than an argument for why a second one i
 
 - **`queen.log_dlq`.** Nothing in the retention cycle purges it. Dead-lettered rows accumulate until
   something deletes them, and the only delete route is
-  `DELETE /api/v1/messages/:partitionId/:transactionId`.
+  [`DELETE /api/v1/messages/:partitionId/:transactionId`](/reference/http/messages-dlq/).
 - **Partitions that still hold something.** Phase 4 deletes only empty ones, and only after
   `PARTITION_CLEANUP_DAYS` of silence: a partition with segments, dead-letter rows, streams state or a
   live lease is never touched by it.
@@ -331,7 +332,9 @@ produce twelve error lines a minute.
 
 Retention is **opt-in**: `retentionEnabled` plus a positive window. With `retentionEnabled` false, or
 both windows zero, phase 1 skips the partition entirely and data is kept forever. The sidecar purge still
-runs (it has to) and `maxWaitTimeSeconds` still evicts if set.
+runs (it has to) and `maxWaitTimeSeconds` still evicts if set. Every one of those keys, with the
+value the code applies when you omit it, is on [Queue options](/reference/queue-options/), and the
+operator's view of the same cycle is [Retention](/selfhost/retention/).
 
 Remember that `/configure` is a full replace: omitting `retentionEnabled` resets it to its default.
 

@@ -42,7 +42,7 @@ await client
   })
 ```
 
-Two consequences of ack-as-cursor-commit are worth restating here, because they surprise people in exactly this situation:
+Two consequences of ack-as-cursor-commit are worth restating here, because they decide what happens next in exactly this situation:
 
 - **A failure signal is never skipped by a later success in the same call.** If one ack call marks offset 5 `failed` and offset 9 `completed`, the cursor clamps below 5. Offsets 6 to 9 redeliver. The JavaScript consume loop knows this and abandons the rest of the batch after a nack rather than pretending the later acks took effect.
 - **`retry` is the budget-free option.** It releases the lease and leaves the counter alone, which is what you want for "not my turn yet": a dependency that is briefly down, a rate limit you are respecting. Use `failed` for "this message is wrong".

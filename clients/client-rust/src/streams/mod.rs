@@ -89,12 +89,18 @@ pub(crate) struct Stages {
 impl std::fmt::Debug for Stages {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stages")
-            .field("pre", &self.pre.iter().map(|o| o.kind()).collect::<Vec<_>>())
+            .field(
+                "pre",
+                &self.pre.iter().map(|o| o.kind()).collect::<Vec<_>>(),
+            )
             .field("key_by", &self.key_by.is_some())
             .field("window", &self.window)
             .field("reducer", &self.reducer)
             .field("gate", &self.gate.is_some())
-            .field("post", &self.post.iter().map(|o| o.kind()).collect::<Vec<_>>())
+            .field(
+                "post",
+                &self.post.iter().map(|o| o.kind()).collect::<Vec<_>>(),
+            )
             .field(
                 "terminal",
                 &match &self.terminal {
@@ -475,7 +481,9 @@ impl Stream {
 
                 Op::Reduce(r) => {
                     if stages.reducer.is_some() {
-                        return Err(Error::Invalid("only one reduce/aggregate per stream".into()));
+                        return Err(Error::Invalid(
+                            "only one reduce/aggregate per stream".into(),
+                        ));
                     }
                     if stages.window.is_none() {
                         return Err(Error::Invalid(
@@ -565,7 +573,11 @@ mod tests {
             .filter(|_| true)
             .compile()
             .unwrap();
-        assert_eq!(stages.pre.len(), 1, "the map before the window is a pre stage");
+        assert_eq!(
+            stages.pre.len(),
+            1,
+            "the map before the window is a pre stage"
+        );
         assert_eq!(stages.post.len(), 2, "the two after the reducer are post");
     }
 
@@ -576,7 +588,10 @@ mod tests {
             .map(|r| r.data.clone())
             .compile()
             .unwrap_err();
-        assert!(err.to_string().contains("must be the last operator"), "{err}");
+        assert!(
+            err.to_string().contains("must be the last operator"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -640,7 +655,11 @@ mod tests {
             .key_by(|_| "b".into())
             .compile()
             .is_err());
-        assert!(stream().gate(|_, _| true).gate(|_, _| true).compile().is_err());
+        assert!(stream()
+            .gate(|_, _| true)
+            .gate(|_, _| true)
+            .compile()
+            .is_err());
         assert!(stream()
             .window_tumbling(60)
             .aggregate_count("a")
@@ -742,8 +761,14 @@ mod tests {
 
     #[test]
     fn changing_a_window_changes_the_hash() {
-        let a = stream().window_tumbling(60).aggregate_count("c").config_hash();
-        let b = stream().window_tumbling(30).aggregate_count("c").config_hash();
+        let a = stream()
+            .window_tumbling(60)
+            .aggregate_count("c")
+            .config_hash();
+        let b = stream()
+            .window_tumbling(30)
+            .aggregate_count("c")
+            .config_hash();
         assert_ne!(a, b);
 
         // ...and so does turning on event time, which changes how state is

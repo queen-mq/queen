@@ -182,7 +182,7 @@ broker being unreachable except through the thing that sets it:
 
 ## What isolation does not mean
 
-Honest limits, so nothing here is over-read:
+Four things sit outside the guarantee, so nothing here is over-read:
 
 - **Not resource isolation.** Tenants on a shared cell share one broker process and one
   PostgreSQL. The quotas bound each tenant's demand; they do not partition CPU, memory

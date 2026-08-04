@@ -60,9 +60,14 @@ broker image, npm, PyPI, crates.io, Packagist, the Go module tag and the CLI tag
 version tells you which broker it was released against without a compatibility matrix.
 
 <Aside type="note">
-The numbers in the tree are now aligned on 1.0.0. The broker (`server/server.json`), the proxy
-(`proxy/Cargo.toml`) and the dashboard (`app/package.json`) carry the prerelease `1.0.0-beta.1`;
-the JavaScript and Python clients carry `1.0.0`, and so do the Rust client and
+The tree is on 1.0.0, but the prereleases no longer move together. The broker carries
+`1.0.0-beta.2` (`server/server.json`, mirrored in `server/Cargo.toml`). The proxy
+(`proxy/Cargo.toml`), the dashboard (`app/package.json`) and the operator console
+(`proxy/console/package.json`) are still on `1.0.0-beta.1`, because beta.2 was a broker-only
+release and nothing outside `server/` was rebuilt for it. So a `queen-proxy` image and a
+`queen` image from the same day can legitimately report different prerelease numbers, and only
+the `MAJOR.MINOR.PATCH` in front of the suffix is the alignment the rule above promises.
+The JavaScript and Python clients carry `1.0.0`, and so do the Rust client and
 `queen-protocol`. The Go module, the CLI and the Packagist
 package take their version from git tags, so they are aligned by tagging at release time and
 not by editing a file. `README.md` points at `ghcr.io/queen-mq/queen:latest`, but its prose
@@ -183,11 +188,11 @@ no longer holds.
 
 | It says | Actually |
 | --- | --- |
-| the version is `0.14.1.beta.1` in `server/server.json` | it is `1.0.0-beta.1`, shipping as `1.0.0` |
+| the version is `0.14.1.beta.1` in `server/server.json` | it is `1.0.0-beta.2`, shipping as `1.0.0` |
 | the release covers "the C++ broker binary, libqueen, and five client SDKs" | there is no C++ broker and no `lib/`. The image carries the Rust broker, the dashboard and `queenctl` |
 | the pre-release checklist runs `cd lib && make test-contention` | that directory does not exist. The gate is `test/run.sh`. See [Testing](/internals/contributing/testing) |
 | user-facing docs live in `docs/*.html`, and a version bump has to edit `docs/index.html` and `docs/quickstart.html` | that site is retired. Documentation is `webdoc/`, and it is built and gated by its own workflow |
-| the version lives "in nine places" including those HTML files | the live places are `server/server.json`, `proxy/Cargo.toml`, `app/package.json`, `clients/client-js/package.json`, `clients/client-py/pyproject.toml`, `README.md`, and the image tag shown in these docs |
+| the version lives "in nine places" including those HTML files | the live places are `server/server.json`, `server/Cargo.toml`, `proxy/Cargo.toml`, `app/package.json`, `proxy/console/package.json`, `clients/client-js/package.json`, `clients/client-py/pyproject.toml`, `clients/client-rust/Cargo.toml`, `crates/queen-protocol/Cargo.toml`, `README.md`, and the image tag shown in these docs |
 | a rolled-back procedure can be re-applied from `lib/schema/procedures/` | procedures live in `server/sql/procedures/` and are embedded in the binary, so the binary and the procedures roll together: you cannot roll one back independently |
 | `helm/`, `helm_queen/` and `proxy/helm/` are release artifacts to update | those directories are gitignored and untracked. Nothing in CI reads them and they are not shipped |
 | the schema is "always additive between versions", so a rollback is always safe | true within 1.x, false across the 0.16-to-1.0 boundary. See the warning above |

@@ -275,5 +275,6 @@ Three queue options change what a pop is allowed to see. All three default to of
 
 Acking is the other half of consuming, and it is where the model is least like other brokers:
 an ack is an offset commit, so acking one message finishes everything before it in that
-partition for that group. The acknowledgement page in this section covers the status values, the
-mixed-outcome clamping rules, and the reports you get for acks that land below the cursor.
+partition for that group. [Acknowledgement is an offset commit](/use/concepts/ack) covers the
+status values, the mixed-outcome clamping rules, and the reports you get for acks that land
+below the cursor.

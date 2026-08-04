@@ -162,7 +162,11 @@ mod tests {
     #[test]
     fn status_aliases_match_the_broker_table() {
         for alias in ["completed", "success", "acked", "ok"] {
-            assert_eq!(AckStatus::parse(Some(alias)), AckStatus::Completed, "{alias}");
+            assert_eq!(
+                AckStatus::parse(Some(alias)),
+                AckStatus::Completed,
+                "{alias}"
+            );
         }
         assert_eq!(AckStatus::parse(None), AckStatus::Completed);
         assert_eq!(AckStatus::parse(Some("retry")), AckStatus::Retry);
@@ -224,6 +228,30 @@ mod tests {
         assert!(got[0].success);
         assert!(got[0].lease_released);
         assert_eq!(serde_json::to_string(&got).unwrap(), wire);
+    }
+
+    #[test]
+    fn an_ack_result_from_a_newer_broker_still_parses() {
+        // The renderer (`server/src/handlers/data.rs:2938-2952`) always writes
+        // all seven keys, so the only drift to guard against is a new one being
+        // added. Failing the decode here would leave the caller unable to tell
+        // a committed ack from a rejected one, which on a nack means silently
+        // losing the retry.
+        let wire = r#"[{"index":0,"transactionId":"t1","success":true,"error":null,"leaseReleased":true,"dlq":false,"noop":false,"offset":4211}]"#;
+        let got: Vec<AckResult> =
+            serde_json::from_str(wire).expect("an unmodelled key must not fail the decode");
+        assert!(got[0].success);
+    }
+
+    #[test]
+    fn a_noop_ack_is_not_a_failure() {
+        // A duplicate ack after a redelivery comes back success:true with
+        // noop:true. Treating `noop` as an error would make every redelivered
+        // message look like a failed handoff.
+        let wire = r#"{"index":0,"transactionId":"t1","success":true,"error":null,"leaseReleased":false,"dlq":false,"noop":true}"#;
+        let got: AckResult = serde_json::from_str(wire).unwrap();
+        assert!(got.success && got.noop);
+        assert!(got.error.is_none());
     }
 
     #[test]

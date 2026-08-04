@@ -1,6 +1,6 @@
 ---
 title: Multi-tenant cell
-description: "A two-core cell (PostgreSQL, broker and proxy in one CPU cap) holding above 2400 msg/s with zero loss, and a one-hour twelve-tenant soak with zero cross-tenant delivery, disclosed with every error the sampler recorded."
+description: "A two-core cell (PostgreSQL, broker and proxy in one CPU cap) holding above 2400 msg/s with zero loss, and a one-hour twelve-tenant soak with zero cross-tenant delivery."
 type: reference
 sidebar:
   order: 5
@@ -68,11 +68,11 @@ grows from 25 ms to 741 ms across the same range. Loss stays zero and nothing st
 honest backpressure: the failure mode past the knee is bounded latency growth, not loss.
 
 <Aside type="caution">
-This ladder is the weakest artifact in this section. The repository keeps the session's results
-table and the scripts that produced it (`b2-freetier.sh`, `runpt.sh`, `vm-cell.sh`), but each
-point's own JSON run record was written to `/root/campaign/` on the bench VM and is not in the
-tree. The configuration, the shape and the per-point results are recorded; the raw stdout is
-not.
+This ladder is archived less completely than the other runs in this section. The repository
+keeps the session's results table and the scripts that produced it (`b2-freetier.sh`,
+`runpt.sh`, `vm-cell.sh`); each point's own JSON run record was written to `/root/campaign/` on
+the bench VM and is not in the tree. The configuration, the shape and the per-point results are
+recorded; the raw stdout is not.
 </Aside>
 
 For context on the size of the change: the same free-tier shape measured in July, broker-only with
@@ -133,7 +133,7 @@ between 251,564 and 251,575 messages accepted, received between 251,567 and 251,
 **0 missing** with between 3 and 8 duplicates, about 0.002%, which is ordinary at-least-once
 redelivery. Noisy-neighbour containment is what that row means.
 
-### The aggregate verdict is FAIL, and here is why
+### Where the aggregate verdict comes from
 
 The loader's own checker reports `verdict: FAIL` for the run: 25,157 missing and 49,374 duplicates
 across 2,400,397 deliveries. Decomposed by tenant:
@@ -152,9 +152,9 @@ arrived as missing. Its duplicates come from the same place: when a rate-limited
 *acks* are refused, the lease expires and the span is redelivered, correctly.
 
 So the broker and the proxy behaved as specified, and the checker does not model
-enforcement-induced backlog or enforcement-induced redelivery. That is the honest reading, and it
-is why the publishable claim from this run is the isolation result and the nine-tenant zero-loss
-result rather than a delivery ratio.
+enforcement-induced backlog or enforcement-induced redelivery. That is the reading the artifact
+supports, and it is why the publishable claim from this run is the isolation result and the
+nine-tenant zero-loss result rather than a delivery ratio.
 
 The quota-blocked tenant is the clean case, and worth stating separately: every message the quota
 *admitted* was delivered, with zero missing.
@@ -209,10 +209,9 @@ was 2,399,280 against the loader's 2,400,397 delivered, the difference being the
 one interval before the loader did. Read requests carry zero messages, correctly.
 
 <Aside type="note">
-The session note states that metered push messages equal metered delivery messages. They do not:
-2,376,180 against 2,399,280. The accurate statement is the one above: each metered counter
-matches the loader's corresponding counter. Push and delivery differ from each other by the
-redelivery volume, which is the next section.
+The accurate statement is the one above: each metered counter matches the loader's corresponding
+counter. The two metered totals differ from each other, 2,376,180 against 2,399,280, by the
+redelivery volume, which is the next section; the session note records them as equal.
 </Aside>
 
 ### The push-to-delivery gap

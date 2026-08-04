@@ -66,14 +66,14 @@ What you get:
 
 What you do not get:
 
-- **No proof of identity.** Any endpoint that completes a TLS handshake is accepted
+- **Proof of identity.** Any endpoint that completes a TLS handshake is accepted
   as your database.
-- **No protection against an active man in the middle.** An attacker who can
+- **Protection against an active man in the middle.** An attacker who can
   redirect the broker's TCP connection (a poisoned DNS answer, a hijacked service
   record, an ARP-level redirect, a compromised sidecar) terminates TLS with its own
   self-signed certificate, and the broker connects happily. It then holds the
   database password from the startup message and every message the broker writes.
-- **No detection of a certificate swap.** There is nothing to compare against, so a
+- **Detection of a certificate swap.** With nothing to compare against, a
   substituted certificate produces no error and no log line.
 
 In other words, encrypt-only defends against someone reading the wire and not
@@ -128,4 +128,5 @@ runtime. The broker does not silently fall back to plaintext.
   others, including the mesh port and the plaintext HTTP listener.
 - [Payload encryption at rest](/selfhost/security/encryption): the only mechanism
   that protects payloads once they are inside the database.
-- The full variable list, with defaults, is in the [reference](/reference).
+- The full variable list, with defaults, is in the
+  [configuration reference](/reference/config/).

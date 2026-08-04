@@ -78,7 +78,7 @@ A failed transaction answers **HTTP 200** with `{"transactionId": "...", "succes
 
 The commit is atomic. The response is not. If the connection drops after PostgreSQL commits but before you read the reply, a retry pushes the message again, unless the `transactionId` is deterministic and still inside the deduplication window, in which case the retry aborts as a duplicate (point 1 above) and you know the original landed.
 
-The practical shape for a stage that must not double-publish is: derive the output `transactionId` deterministically from the input message id, and treat a `QDUP` failure on retry as "already done" rather than as an error. See [Idempotent producers](/use/examples/dedup) for how to choose that id and how long the window protects you.
+The practical shape for a stage that must not double-publish is: derive the output `transactionId` deterministically from the input message id, and treat a `QDUP` failure on retry as "already done" rather than as an error. See [message deduplication](/use/examples/dedup) for how to choose that id and how long the window protects you.
 
 ### Concurrent transactions do not deadlock each other
 

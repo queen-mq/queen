@@ -45,15 +45,39 @@ impl TransactionBuilder {
     }
 
     /// Ack a message with an explicit outcome.
-    pub fn ack_with(mut self, message: &Message, status: AckStatus) -> Self {
-        self.operations
-            .push(TxnOperation::Ack(TxnAckOperation {
-                transaction_id: message.transaction_id.clone(),
-                partition_id: message.partition_id.clone(),
-                status,
-                consumer_group: non_empty(&message.consumer_group),
-                lease_id: non_empty(&message.lease_id),
-            }));
+    pub fn ack_with(self, message: &Message, status: AckStatus) -> Self {
+        self.ack_op(message, status, None)
+    }
+
+    /// Fail a message with a reason, inside the transaction.
+    ///
+    /// The reason reaches the DLQ row the same way [`crate::Queen::nack`]'s
+    /// does — the broker reads `error` off the ack operation. Without it a
+    /// transactional failure dead-letters with an empty reason.
+    pub fn nack(self, message: &Message, reason: impl Into<String>) -> Self {
+        self.ack_op(message, AckStatus::Failed, Some(reason.into()))
+    }
+
+    /// Ack with both an explicit outcome and a reason, for `Dlq` as well as
+    /// `Failed`.
+    pub fn ack_with_reason(
+        self,
+        message: &Message,
+        status: AckStatus,
+        reason: impl Into<String>,
+    ) -> Self {
+        self.ack_op(message, status, Some(reason.into()))
+    }
+
+    fn ack_op(mut self, message: &Message, status: AckStatus, error: Option<String>) -> Self {
+        self.operations.push(TxnOperation::Ack(TxnAckOperation {
+            transaction_id: message.transaction_id.clone(),
+            partition_id: message.partition_id.clone(),
+            status,
+            consumer_group: non_empty(&message.consumer_group),
+            lease_id: non_empty(&message.lease_id),
+            error,
+        }));
         if !message.lease_id.is_empty() {
             self.leases.push(message.lease_id.clone());
         }
@@ -118,7 +142,9 @@ impl TransactionBuilder {
             {
                 items.push(item);
             }
-            _ => self.operations.push(TxnOperation::Push { items: vec![item] }),
+            _ => self
+                .operations
+                .push(TxnOperation::Push { items: vec![item] }),
         }
         Ok(self)
     }
@@ -150,7 +176,8 @@ impl TransactionBuilder {
             .http
             .post_json("/api/v1/transaction", &req, &Opts::default())
             .await?;
-        let resp = resp.ok_or_else(|| Error::Decode("transaction returned an empty body".into()))?;
+        let resp =
+            resp.ok_or_else(|| Error::Decode("transaction returned an empty body".into()))?;
 
         if !resp.success {
             return Err(Error::Invalid(format!(
@@ -214,7 +241,9 @@ mod tests {
 
     #[test]
     fn queue_mode_group_is_carried_through() {
-        let t = queen().transaction().ack(&msg("t1", "L1", "__QUEUE_MODE__"));
+        let t = queen()
+            .transaction()
+            .ack(&msg("t1", "L1", "__QUEUE_MODE__"));
         match &t.operations[0] {
             // Echoing the broker's own default is equivalent to omitting it,
             // and safer than relying on the caller to remember the group.
@@ -258,7 +287,10 @@ mod tests {
         let e = queen()
             .transaction()
             .push_item(TxnPushItem::new("q", serde_json::json!(1)).trace_id("not-a-uuid"));
-        assert!(e.is_err(), "a silently-dropped traceId is worse than an error");
+        assert!(
+            e.is_err(),
+            "a silently-dropped traceId is worse than an error"
+        );
     }
 
     #[test]

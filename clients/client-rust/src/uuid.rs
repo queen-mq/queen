@@ -109,6 +109,18 @@ pub fn is_valid_uuid(s: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    /// The generator's timestamp and counter are process-global atomics, so a
+    /// test that asserts *ordering* cannot run while another test is minting ids
+    /// from other threads: the interleaving genuinely produces an id lower than
+    /// the one before it (see `concurrent_generation_never_repeats_an_id`).
+    /// Cargo runs tests in parallel within one process, so the two take turns.
+    static GENERATOR: Mutex<()> = Mutex::new(());
+
+    fn exclusive_generator() -> std::sync::MutexGuard<'static, ()> {
+        GENERATOR.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn is_canonically_formatted_and_versioned() {
@@ -123,9 +135,14 @@ mod tests {
 
     #[test]
     fn a_tight_loop_produces_distinct_ordered_ids() {
+        let _generator = exclusive_generator();
         let ids: Vec<String> = (0..5_000).map(|_| uuidv7()).collect();
         let unique: HashSet<&String> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "uuidv7 collided within one process");
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "uuidv7 collided within one process"
+        );
 
         // The intra-millisecond counter is what keeps these sorted; without it
         // ids minted in the same millisecond would order randomly.
@@ -145,6 +162,81 @@ mod tests {
         assert!(!is_valid_uuid("0190aaaa-0000-7000-8000-00000000000z"));
         // one char short
         assert!(!is_valid_uuid("0190aaaa-0000-7000-8000-00000000001"));
+    }
+
+    // The first six bytes are a big-endian millisecond timestamp: that, and
+    // nothing else, is what makes these ids land in index order. A byte-order
+    // slip would still produce a well-formed UUID and still pass every other
+    // test in this file, while scattering every insert across the index.
+    #[test]
+    fn the_raw_bytes_carry_the_version_the_variant_and_a_real_timestamp() {
+        let b = uuidv7_bytes();
+        assert_eq!(b[6] & 0xf0, 0x70, "version nibble is not 7: {b:?}");
+        assert_eq!(b[8] & 0xc0, 0x80, "not the RFC 4122 variant: {b:?}");
+
+        let ms = u64::from_be_bytes([0, 0, b[0], b[1], b[2], b[3], b[4], b[5]]);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock is after 1970")
+            .as_millis() as u64;
+        assert!(
+            now.abs_diff(ms) < 5_000,
+            "timestamp prefix reads as {ms}ms, but now is {now}ms — the 48-bit big-endian layout \
+             is what keeps these ids sorted"
+        );
+    }
+
+    // The id is the transaction id, and the transaction id is the broker's
+    // dedup key: two threads minting the same one inside the dedup window means
+    // one of two distinct messages is dropped as a duplicate and never
+    // delivered. Global *ordering* across threads is deliberately not asserted
+    // — the timestamp and the counter are separate atomics, so an interleaving
+    // can hand out a lower id after a higher one, and pinning that would be a
+    // flaky test of a property this client does not promise.
+    #[test]
+    fn concurrent_generation_never_repeats_an_id() {
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 2_000;
+
+        let _generator = exclusive_generator();
+
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| std::thread::spawn(|| (0..PER_THREAD).map(|_| uuidv7()).collect::<Vec<_>>()))
+            .collect();
+
+        let mut all = Vec::with_capacity(THREADS * PER_THREAD);
+        for w in workers {
+            all.extend(w.join().expect("a generator thread panicked"));
+        }
+
+        let unique: HashSet<&String> = all.iter().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "{} of {} ids collided across threads",
+            all.len() - unique.len(),
+            all.len()
+        );
+        assert!(
+            all.iter()
+                .all(|s| is_valid_uuid(s) && s.as_bytes()[14] == b'7'),
+            "the race left a malformed id behind"
+        );
+    }
+
+    #[test]
+    fn the_validator_accepts_every_form_the_broker_parses() {
+        // Uppercase hex is a valid UUID; rejecting it would refuse a perfectly
+        // good trace id.
+        assert!(is_valid_uuid("0190AAAA-0000-7000-8000-00000000000F"));
+        assert!(is_valid_uuid("00000000-0000-0000-0000-000000000000"));
+        // ...and the decorated forms are not valid, so they are refused here
+        // rather than dropped silently by the broker.
+        assert!(!is_valid_uuid("{0190aaaa-0000-7000-8000-000000000001}"));
+        assert!(!is_valid_uuid(
+            "urn:uuid:0190aaaa-0000-7000-8000-000000000001"
+        ));
+        assert!(!is_valid_uuid("0190aaaa00007000800000000000000f"));
     }
 
     #[test]

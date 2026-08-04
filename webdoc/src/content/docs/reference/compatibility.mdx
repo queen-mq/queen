@@ -78,14 +78,14 @@ version table, and nothing to run by hand, because there is nothing to migrate.
 Restarting the same version re-applies the same definitions as a no-op, and a
 rolling restart of identical binaries is safe.
 
-What the apply does **not** do is bring an existing database forward. A
-`CREATE TABLE IF NOT EXISTS` against a table that already exists in an older
-shape leaves the older shape in place, so pointing a newer build at a database
-created by a different build is unsupported: stand up a fresh database and cut
-over. The same applies to a **downgrade**: an older broker would re-apply its
-own older definitions over a schema it does not understand. Roll back by
-restoring a dump into a fresh database, not by restarting an older image against
-the current one.
+The apply brings an empty database to this version's shape; it does not bring an
+existing one forward. A `CREATE TABLE IF NOT EXISTS` against a table that
+already exists in an older shape leaves the older shape in place, so pointing a
+newer build at a database created by a different build is unsupported: stand up
+a fresh database and cut over. A **downgrade** works the same way: an older
+broker would re-apply its own older definitions over a schema it does not
+understand. Roll back by restoring a dump into a fresh database, not by
+restarting an older image against the current one.
 
 One rolling-restart detail survives from the file mechanics: a definition whose
 return type changed between builds cannot be a `CREATE OR REPLACE`, so a few are
@@ -111,26 +111,26 @@ matrix runs against PostgreSQL 16.
 ## Coming from the retired 0.16 broker
 
 The 0.16 broker was a different implementation: C++, and a different storage
-engine. Replacing it with 1.0.0 is **not a data migration**, and there is no tool
-that makes it one.
+engine. Replacing it with 1.0.0 is a cutover rather than a data migration, and
+the cutover runs at the application level.
 
-**There is no importer.** The `migrate` subcommand still exists so the CLI entry
-compiles, and all it does is log
+**The move carries no data.** The `migrate` subcommand reports as much: all it
+does is log
 `migration is not supported on the log engine` and exit 1. It never opens a
-database connection. There are no migration HTTP endpoints either.
+database connection, and there are no migration HTTP endpoints either.
 
-**The boot apply does not touch old objects.** It only creates: nothing is
-dropped, altered or folded at boot, whatever the database already holds. That is
-not a compatibility promise, it is the always-virgin model: 1.0.0 expects an
+**The boot apply only creates.** Nothing is dropped, altered or folded at boot,
+whatever the database already holds. Read that as the always-virgin model rather
+than a compatibility promise: 1.0.0 expects an
 empty database, and against one carrying an earlier broker's tables it would
-simply create its own objects alongside data it will never read or reconcile.
+create its own objects alongside data it will never read or reconcile.
 
 <Aside type="danger">
 Pointing 1.0.0 at a database that carries any earlier broker's schema (the 0.16
 engine's tables, or any pre-release build of this one) is **unsupported**. The
-boot will not drop the old data, but nothing reads it, nothing migrates it, and
+boot will not drop the old data, but 1.0.0 neither reads nor migrates it, and
 same-named tables left in an older shape make the broker's behaviour undefined.
-Give 1.0.0 a fresh database, full stop, and keep a `pg_dump` of the old one as
+Give 1.0.0 a fresh database, and keep a `pg_dump` of the old one as
 the record.
 </Aside>
 
@@ -138,8 +138,8 @@ The practical upgrade is therefore a cutover, not an in-place migration: stand u
 1.0.0 against a clean database, move producers over, let the old consumers drain
 the old broker, and keep a dump of the old database as the record.
 
-Backup and restore are plain `pg_dump` and `pg_restore`. The broker offers no
-backup endpoint.
+Backup and restore are plain `pg_dump` and `pg_restore`, run against the
+broker's database like any other PostgreSQL workload.
 
 ## Mixed versions in a mesh
 

@@ -47,11 +47,11 @@ that exists in the tree.
 | `2026-04-26/` | The largest of the old campaigns: 18 short benchmarks across four axes (partition count, batch size, queue count, consumer group count), plus a version comparison between `0.14.0.alpha.3` and `0.12.19`, plus two four-stage pipeline reports (one ordered at 1000 partitions, one throughput-tuned at 10). Includes its own `HOW-TO-RUN.md` |
 | `2026-06-04/` | A throughput campaign with sustained-soak findings and a metrics and observability remediation plan |
 | `2026-06-06-engine-scaling/` | An investigation into whether one libqueen push and ack engine was enough, or whether the libuv event loop saturated before PostgreSQL did. The question is meaningless in 1.0: there is no libqueen and no event-loop engine count |
-| `2026-06-07/` | A 24-hour soak on the C++ 0.16 "new architecture", with a comparison against the April results. **This is the session behind the figures the repository `README.md` still displays, and behind the 0.16 soak pages of the retired documentation site** |
+| `2026-06-07/` | A 24-hour soak on the C++ 0.16 "new architecture", with a comparison against the April results. **This is the session behind the figures the repository `README.md` carried before 1.0, and behind the 0.16 soak pages of the retired documentation site** |
 | `simd-vs-0155/` | A comparison of SIMD JSON parsing against release 0.15.5, a C++ hot-path change |
 | `json-uuid-profile/` | JSON and UUID handling profiles on the C++ broker |
 | `fusion-hysteresis/` | A sweep harness for the C++ fusion and hysteresis behaviour, with a Node pacer |
-| `pgmq/` | A comparison against another PostgreSQL-backed queue, measured on the C++ broker. **Not quotable in any form**: this site makes no performance comparison against any other system, precisely because every such comparison this project published was measured on the retired implementation |
+| `pgmq/` | A comparison against another PostgreSQL-backed queue, measured on the C++ broker. **Not quotable in any form**, for the same reason as everything else in this table. The site's current cross-broker figures are on [Cross-broker comparison](/benchmarks/comparison), measured on the shipping build |
 | `test-perf/` | A scenario-based harness that started `./server/bin/queen-server` with `NUM_WORKERS` and `SIDECAR_POOL_SIZE` under CPU and memory caps. The binary and both variables are gone |
 
 ## Measured on the retired segments storage engine
@@ -90,16 +90,21 @@ for reasons that have nothing to do with the implementation.
 
 If you are chasing a figure, these are the places it probably came from:
 
-- **`README.md` in the repository root.** Still shows a 0.16-era soak chart and 0.16-era
-  throughput figures, and still points at the retired documentation site's 0.16 benchmark pages.
-  Those come from `2026-06-07/` and are C++ numbers.
-- **`benchmark-queen/README.md`.** A pre-1.0 index. It summarises only the April sessions and
-  states a throughput envelope and pipeline results from them.
-- **The retired documentation site under `docs/`.** Its benchmark pages
-  (`benchmarks.html`, `benchmarks-2026-04.html`, `benchmarks-0.16-soak.html`,
+- **`README.md` in the repository root, as it stood before 1.0.** Up to `7d4f966^` it embedded
+  a 0.16-era soak chart (`benchmark-queen/2026-06-07/soak-24h-overview.png`), quoted 0.16-era
+  throughput figures, and linked the retired documentation site's 0.16 benchmark pages. Those
+  come from `2026-06-07/` and are C++ numbers. The README in the tree today leads with the 1.0
+  figures and links to [Cross-broker comparison](/benchmarks/comparison), so a 0.16 number
+  attributed to it was read out of git history or out of a copy taken before the rewrite.
+- **`benchmark-queen/README.md`.** A pre-1.0 index, still in the tree. It summarises only the
+  April sessions and states a throughput envelope and pipeline results from them.
+- **The retired documentation site, formerly under `docs/`.** It was removed from the tree in
+  `7d4f966` (2026-07-30) and replaced by this site; browse `7d4f966^` to read it. Its benchmark
+  pages (`benchmarks.html`, `benchmarks-2026-04.html`, `benchmarks-0.16-soak.html`,
   `benchmarks-0.16-matrix.html` and `benchmarks-0.16-lag.html`) are all pre-1.0.
-- **Anything phrased as a comparison with another broker.** All of it was measured on the C++
-  implementation.
+- **Anything phrased as a comparison with another broker and published before 1.0.** All of it
+  was measured on the C++ implementation. The 1.0 comparison is
+  [Cross-broker comparison](/benchmarks/comparison).
 
 ## What replaced them
 

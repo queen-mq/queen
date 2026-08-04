@@ -1,6 +1,6 @@
 ---
 title: Kubernetes
-description: "A complete reference manifest written for this broker: the real image and command, the mesh port as TCP, peers for replicas, a Secret for the mesh secret, and probes that are not coupled to the database."
+description: "A complete reference manifest written for this broker: the real image and command, the mesh port as TCP, a Secret for the mesh secret, and probes that are not coupled to the database."
 type: how-to
 tier: operate
 sidebar:
@@ -17,12 +17,12 @@ sourceOfTruth:
   - test/compose/docker-compose.ha.yml
 ---
 
-There is **no official Helm chart** for Queen today. What follows is a complete
-reference manifest you can apply as-is, written against this broker's actual
-behaviour rather than adapted from a generic message-queue template. Every
-non-obvious field is explained below the YAML, and the two fields most commonly
-got wrong (the liveness probe and the mesh port) are explained at length,
-because getting either wrong produces failures that look like something else.
+What follows is a complete reference manifest you can apply as-is, written
+against this broker's actual behaviour rather than adapted from a generic
+message-queue template; there is no official Helm chart for Queen today. Every
+non-obvious field is explained below the YAML, and two of them (the liveness
+probe and the mesh port) are explained at length, because a wrong value in
+either produces failures that look like something else.
 
 Assumptions: PostgreSQL already exists and is reachable at `queen-pg` in the same
 namespace, and you have a namespace called `queen`.
@@ -305,7 +305,7 @@ serve a push or a pop, and should be pulled out of the Service.
 
 It makes it a destructive *liveness* signal. Wire `/health` to `livenessProbe`
 and a PostgreSQL blip becomes a restart of every broker in the cluster,
-simultaneously. That is worse than doing nothing, for three reasons:
+simultaneously, which costs more than leaving them running, for three reasons:
 
 1. **It destroys the mechanism built for exactly this failure.** While PostgreSQL
    is unreachable, pushes are appended to the on-disk spool and replayed when it

@@ -2,7 +2,23 @@
     "name": "smartpricing/queen-mq",
     "description": "Queen MQ client library for PHP with optional Laravel integration",
     "type": "library",
-    "license": "MIT",
+    "license": "Apache-2.0",
+    "homepage": "https://queenmq.com",
+    "keywords": [
+        "message-queue",
+        "queue",
+        "postgresql",
+        "postgres",
+        "laravel",
+        "broker",
+        "fifo",
+        "consumer-groups"
+    ],
+    "support": {
+        "issues": "https://github.com/queen-mq/queen/issues",
+        "source": "https://github.com/queen-mq/queen",
+        "docs": "https://queenmq.com/use/clients/php-laravel"
+    },
     "require": {
         "php": "^8.3",
         "guzzlehttp/guzzle": "^7.0",

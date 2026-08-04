@@ -1,10 +1,24 @@
 ---
 import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
-import { config } from "virtual:nimbus/config";
+
+// The site's only other link out of here is the header logo, which lands the
+// reader on the homepage and nothing more. These are the seven top-level
+// groups from the sidebar config in astro.config.ts, so a reader who arrives
+// on a dead URL can jump straight to the section they were after. Trailing
+// slashes match the canonical form the pages declare.
+const sections = [
+  { href: "/start/", label: "Start here", blurb: "What Queen is, and the first message" },
+  { href: "/use/", label: "Use Queen", blurb: "Queues, partitions, consumer groups, streams" },
+  { href: "/full-examples/", label: "Full examples", blurb: "Whole programs you can run" },
+  { href: "/reference/", label: "Reference", blurb: "HTTP API, queenctl, configuration" },
+  { href: "/selfhost/", label: "Self-hosting", blurb: "Running the broker and sizing it" },
+  { href: "/internals/", label: "Internals", blurb: "How the broker works underneath" },
+  { href: "/benchmarks/", label: "Benchmarks", blurb: "Measured runs and the rigs behind them" },
+];
 ---
 
-<BaseLayout title={`Page not found · ${config.title}`} description="The page you're looking for doesn't exist.">
+<BaseLayout title="Page not found" description="The page you're looking for doesn't exist.">
   <div class="flex flex-col min-h-screen">
     <Header />
     <main class="flex-1 mx-auto max-w-2xl w-full px-6 py-24 text-center">
@@ -24,6 +38,27 @@ import { config } from "virtual:nimbus/config";
       >
         Back home
       </a>
+
+      <div class="mt-14 text-left">
+        <h2 class="text-sm font-semibold text-foreground">Or pick a section</h2>
+        <ul class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2 list-none p-0">
+          {
+            sections.map((section) => (
+              <li class="m-0">
+                <a
+                  href={section.href}
+                  class="block h-full rounded-lg border border-border px-4 py-3 no-underline transition-colors hover:border-border-strong"
+                >
+                  <span class="block text-sm font-medium text-foreground">{section.label}</span>
+                  <span class="mt-0.5 block text-[0.8125rem] text-muted-foreground leading-snug">
+                    {section.blurb}
+                  </span>
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </div>
     </main>
   </div>
 </BaseLayout>

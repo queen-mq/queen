@@ -22,9 +22,9 @@ Every broker serves a dashboard on its own port. There is nothing to deploy: the
 built single-page application is compiled into the binary with `rust_embed` from
 `server/webapp/dist`, and the bytes are read out of the executable at request time.
 
-There is **no `QUEEN_STATIC_DIR`**. No runtime override exists, no directory is read
-from disk, and pointing a volume at the container changes nothing. If you need a
-different dashboard, you rebuild the binary.
+The bundle is fixed at build time: there is no `QUEEN_STATIC_DIR` and no runtime
+static-directory override, so a volume mounted at the container does not change
+what is served. If you need a different dashboard, you rebuild the binary.
 
 ## How it is served
 
@@ -47,7 +47,7 @@ including the dashboard's own HTTP layer, read as success. A phantom endpoint no
 fails loudly.
 
 Assets are served with a content type and nothing else: no `Cache-Control`, no
-`ETag`, no compression negotiation. For a handful of operators that is fine. If the
+`ETag`, no compression negotiation. If the
 dashboard is on a hot path, put a reverse proxy or CDN in front and let it add
 caching.
 
@@ -76,9 +76,9 @@ Nothing here grants anything: with auth off the API was already open to anyone
 who can reach the port, and the broker's boot log says so. The dashboard adds
 visibility, not privilege.
 
-**Broker-direct with auth on** (`JWT_ENABLED=true`), the dashboard cannot work:
-its HTTP layer sends no bearer token, and the broker holds no user accounts and
-no browser sessions to authenticate one. The broker answers `/auth/me` with
+**Broker-direct with auth on** (`JWT_ENABLED=true`), the dashboard is
+`queen_proxy`'s: the app's HTTP layer sends no bearer token, and the broker holds
+no user accounts and no browser sessions to authenticate one. The broker answers `/auth/me` with
 `401 {"code":"auth_required"}`, the app's login redirect lands on `/auth/login`,
 and the broker serves a static page there saying exactly that: use the proxy,
 or run with auth off. The page is terminal, so there is no redirect loop.

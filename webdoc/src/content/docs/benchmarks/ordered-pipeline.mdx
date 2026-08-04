@@ -175,10 +175,10 @@ partitions and consumer rows are being updated tens of thousands of times a seco
 claimable partitions gets more expensive. 25,000 events per second is the sustainable point with
 margin, and that is why the certified run is at 25,000 and not higher.
 
-## Two real bugs this run found
+## Two broker fixes this run produced
 
-Reaching this result required fixing the broker, not tuning the loader, and both fixes are in the
-stored procedures that ship today.
+Reaching this result required fixing the broker rather than tuning the loader, and both fixes are
+in the stored procedures that ship today.
 
 **A livelock on mass partition creation.** `ON CONFLICT DO NOTHING` against a key currently being
 inserted by another open transaction waits on that transaction's id until it commits. With

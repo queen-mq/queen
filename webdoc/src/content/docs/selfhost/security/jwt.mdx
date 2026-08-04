@@ -168,7 +168,8 @@ write-only case behaves the way it does.
 So a producer holding only `write-only` passes `POST /api/v1/push` and is rejected
 with `403 Insufficient permissions` on every read and every consume route: pop, ack,
 transaction, listings, all of it. That is the intended shape for a pure producer;
-it is also the single most common surprise when rolling authentication out.
+it is also the first thing to check when a client starts collecting 403s after
+authentication goes on.
 
 The route classification is prefix-based:
 
@@ -189,8 +190,8 @@ The route classification is prefix-based:
   and any route not listed above
 
 The last line is the important one: an unrecognised path defaults to `read-write`,
-not to `public`. The per-route table with the level for every registered route is in
-the [reference](/reference).
+not to `public`. The per-route table with the level for every registered route is the
+[route table](/reference/http/routes/).
 
 <Aside type="note">
 Turning JWT on turns the broker-served dashboard off, deliberately. The app
@@ -276,14 +277,17 @@ else (a wrong secret, an unreachable JWKS endpoint, a role mapping that matches
 nothing) starts cleanly and fails per request, so verify with a real token against
 a real route before you cut traffic over.
 
-## What this does not give you
+## What sits outside JWT
 
-- **No tenant separation.** A valid admin token sees every queue in the broker.
+JWT gives one broker a per-route access level for each caller. Four properties
+come from elsewhere:
+
+- **Tenant separation.** A valid admin token sees every queue in the broker.
   Separation is the tenancy header plus a gateway:
   [multi-tenant hosting](/selfhost/multi-tenant).
-- **No per-queue permissions.** The access level is per route, not per resource.
-- **No revocation.** There is no deny-list; a token is valid until `exp`. Keep
+- **Per-queue permissions.** The access level is per route, not per resource.
+- **Revocation.** There is no deny-list; a token is valid until `exp`. Keep
   lifetimes short, and remember `exp` is optional to the validator.
-- **No transport security.** The token travels in a header over whatever the
+- **Transport security.** The token travels in a header over whatever the
   listener speaks, which is plaintext HTTP. See
   [Trust boundaries](/selfhost/security).

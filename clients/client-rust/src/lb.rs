@@ -327,7 +327,10 @@ mod tests {
         // first live backend would quietly serialize every admin call onto one.
         let lb = lb(3, Strategy::Affinity);
         let picks: std::collections::HashSet<usize> = (0..9).map(|_| lb.pick(None)).collect();
-        assert!(picks.len() > 1, "keyless affinity picks pinned to one backend");
+        assert!(
+            picks.len() > 1,
+            "keyless affinity picks pinned to one backend"
+        );
     }
 
     #[test]
@@ -342,7 +345,10 @@ mod tests {
         // retry_after is 50ms in these tests.
         std::thread::sleep(Duration::from_millis(60));
         let picks: std::collections::HashSet<usize> = (0..9).map(|_| lb.pick(None)).collect();
-        assert!(picks.contains(&1), "backend was never given a second chance");
+        assert!(
+            picks.contains(&1),
+            "backend was never given a second chance"
+        );
     }
 
     #[test]

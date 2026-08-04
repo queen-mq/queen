@@ -1,3 +1,13 @@
+// Package queen is the Go client for Queen MQ, a partitioned message queue that
+// runs on the PostgreSQL you already operate. It covers the whole HTTP API:
+// pushing messages, consuming them one ordered lane at a time with consumer
+// groups, acknowledgements and lease renewal, multi-queue transactions, the
+// dead letter queue, and the administrative endpoints.
+//
+// Start at New, which takes a single broker URL, a list of URLs for failover, or
+// a ClientConfig for full control. From a client, Queue returns a fluent builder
+// for push and consume, Transaction groups operations into one atomic call, and
+// Admin exposes queue management.
 package queen
 
 import (

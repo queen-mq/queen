@@ -1,0 +1,53 @@
+# Cloudflare static-asset response headers.
+#
+# Nothing was cached before this file existed: every asset shipped
+# `cache-control: public, max-age=0, must-revalidate`, so a reader moving
+# between two docs pages revalidated 22 assets (54 on a page with diagrams),
+# each one a round trip that returned an empty 304. That also defeats Astro's
+# hover prefetch, which only helps if the prefetched bytes are still there when
+# the click lands.
+#
+# The paths below match what `pnpm build` actually emits into dist/.
+
+# Content-hashed by the bundler: the filename changes when the bytes change,
+# so the response never has to be revalidated.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Not content-hashed. A week is short enough that a regenerated figure, social
+# card or search index reaches readers on its own, and long enough to cover a
+# reading session.
+/charts/*
+  Cache-Control: public, max-age=604800
+
+/og/*
+  Cache-Control: public, max-age=604800
+
+/pagefind/*
+  Cache-Control: public, max-age=604800
+
+# Every page has a markdown twin at `<page>/index.md`. The twins carry the same
+# text as the HTML and cannot declare a canonical of their own, so left
+# indexable they double the crawlable surface with pure duplicates.
+#
+# `llms.txt` and `llms-full.txt` are deliberately NOT listed here. They are the
+# entry points we want AI crawlers taking freely, and neither duplicates a
+# single ranking page.
+# Both forms are listed on purpose. The splat is documented as greedy across
+# `/`, which makes `/*.md` enough on its own, but every twin this rule exists
+# for lives two or more segments deep (`/use/streams/index.md`). If the splat
+# ever stops crossing a segment boundary the first rule silently matches
+# nothing and the whole duplicate surface goes back to being indexable, so the
+# explicit form is kept as insurance. Same header either way, and overlapping
+# rules merge, so a request that matches both is unaffected.
+/*.md
+  X-Robots-Tag: noindex
+
+/*/index.md
+  X-Robots-Tag: noindex
+
+/404
+  X-Robots-Tag: noindex

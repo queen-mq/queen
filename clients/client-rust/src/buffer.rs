@@ -222,8 +222,60 @@ mod tests {
         BufferManager::new(http)
     }
 
+    /// Same unreachable port, but giving up after one attempt: the default three
+    /// attempts with exponential backoff make every failing flush cost three
+    /// seconds of wall clock, and these tests drive a lot of failing flushes.
+    fn impatient_manager() -> Arc<BufferManager> {
+        let config = Config::new("http://127.0.0.1:1").retry_attempts(1);
+        let http =
+            Arc::new(HttpClient::new(config).expect("one http:// URL is a valid configuration"));
+        BufferManager::new(http)
+    }
+
     fn item(n: u64) -> PushItem {
         PushItem::new("orders", serde_json::json!({ "n": n }))
+    }
+
+    /// Put items in a buffer without going through `add`, which flushes on the
+    /// way past `message_count` and so cannot build a buffer big enough to make
+    /// `flush` send more than one chunk.
+    fn seed(m: &Arc<BufferManager>, address: &str, count: u64, opts: BufferOptions) {
+        let mut buffers = m.buffers.lock().unwrap();
+        buffers.insert(
+            address.to_string(),
+            Buffer {
+                items: (0..count).map(item).collect(),
+                opts,
+                first_at: Some(Instant::now()),
+                timer_armed: false,
+            },
+        );
+    }
+
+    /// Whether a timer task is currently armed for this address. Panics if the
+    /// buffer entry is gone, which is itself worth failing on: a flush only
+    /// removes the entry when it succeeded.
+    fn timer_armed(m: &Arc<BufferManager>, address: &str) -> bool {
+        m.buffers
+            .lock()
+            .unwrap()
+            .get(address)
+            .map(|b| b.timer_armed)
+            .expect("no buffer at that address")
+    }
+
+    /// Poll until the buffered count reaches `want`, then return it. A fixed
+    /// sleep would be either flaky on a loaded machine or needlessly slow on an
+    /// idle one.
+    async fn buffered_settles_at(m: &Arc<BufferManager>, want: usize) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let n = m.stats().total_buffered_messages;
+            if n == want || Instant::now() >= deadline {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     #[test]
@@ -306,6 +358,209 @@ mod tests {
         };
         m.add(address("orders", "Default"), item(1), opts);
         let err = m.flush(&address("orders", "Default")).await;
-        assert!(err.is_err(), "unreachable broker must not look like success");
+        assert!(
+            err.is_err(),
+            "unreachable broker must not look like success"
+        );
+    }
+
+    // The time-based flush is the branch every other test in this file avoids
+    // by using a 60s timer — while the shipped default is 1s, so it is the
+    // branch real producers live on. Broken, a low-volume producer's messages
+    // would sit in memory until the process exits.
+    #[tokio::test]
+    async fn the_timer_flushes_a_buffer_that_never_reaches_its_count() {
+        let m = impatient_manager();
+        let opts = BufferOptions {
+            message_count: 1_000,
+            time: Duration::from_millis(80),
+        };
+        let addr = address("orders", "Default");
+        m.add(addr.clone(), item(1), opts);
+        m.add(addr.clone(), item(2), opts);
+
+        assert_eq!(
+            m.stats().total_buffered_messages,
+            2,
+            "two items are nowhere near the 1000-message threshold, so nothing should have gone \
+             out yet"
+        );
+        assert!(timer_armed(&m, &addr), "the first add armed no timer");
+
+        assert_eq!(
+            buffered_settles_at(&m, 0).await,
+            0,
+            "the 80ms timer never fired: the buffer is still holding its messages"
+        );
+    }
+
+    // `timer_armed` is what keeps one timer per *batch* instead of one per
+    // message. If it were never cleared the buffer would flush once and then go
+    // silent forever; if it were never set, or set per add, the batching this
+    // module exists for would collapse into a request per message.
+    #[tokio::test]
+    async fn the_timer_re_arms_for_the_batch_after_it() {
+        let m = impatient_manager();
+        let opts = BufferOptions {
+            message_count: 1_000,
+            time: Duration::from_millis(80),
+        };
+        let addr = address("orders", "Default");
+
+        m.add(addr.clone(), item(1), opts);
+        assert!(timer_armed(&m, &addr));
+        m.add(addr.clone(), item(2), opts);
+        assert!(
+            timer_armed(&m, &addr),
+            "an add while a timer is already armed must leave the flag alone, not schedule a \
+             second flush"
+        );
+
+        assert_eq!(buffered_settles_at(&m, 0).await, 0, "first flush never ran");
+        assert!(
+            !timer_armed(&m, &addr),
+            "the timer task must clear the flag before flushing, or the next batch waits forever"
+        );
+
+        m.add(addr.clone(), item(3), opts);
+        assert_eq!(
+            m.stats().total_buffered_messages,
+            1,
+            "the third item did not land in the buffer"
+        );
+        assert!(timer_armed(&m, &addr), "the timer did not re-arm");
+        assert_eq!(
+            buffered_settles_at(&m, 0).await,
+            0,
+            "the re-armed timer never fired: only the first batch would ever be sent"
+        );
+    }
+
+    // The buffer keeps the options of the add that created it. Worth pinning
+    // because the call site is `push_items`, where the options come from a
+    // per-call builder and so look like they should retune an existing buffer.
+    #[tokio::test]
+    async fn the_add_that_creates_a_buffer_fixes_its_thresholds() {
+        let m = impatient_manager();
+        let addr = address("orders", "Default");
+        m.add(
+            addr.clone(),
+            item(0),
+            BufferOptions {
+                message_count: 1_000,
+                time: Duration::from_secs(60),
+            },
+        );
+        for i in 1..3 {
+            m.add(
+                addr.clone(),
+                item(i),
+                BufferOptions {
+                    message_count: 2,
+                    time: Duration::from_secs(60),
+                },
+            );
+        }
+
+        // Give any flush task that was wrongly spawned a chance to run: on a
+        // current-thread runtime nothing spawned gets polled until we await.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            m.stats().total_buffered_messages,
+            3,
+            "a later add's message_count=2 retuned the buffer and flushed it"
+        );
+    }
+
+    // `flush` takes its chunk out of the buffer *before* the request and a
+    // failure does not put it back, so a flush that never reaches the broker
+    // loses those messages. Measured rather than assumed, because it is the
+    // difference between "buffering is a latency knob" and "buffering can drop
+    // data on a blip" — the module doc only warns about the crash case.
+    #[tokio::test]
+    async fn a_failed_flush_drops_the_chunk_it_had_already_taken() {
+        let m = impatient_manager();
+        let opts = BufferOptions {
+            message_count: 100,
+            time: Duration::from_secs(60),
+        };
+        let addr = address("orders", "Default");
+        for i in 0..3 {
+            m.add(addr.clone(), item(i), opts);
+        }
+
+        assert!(
+            m.flush(&addr).await.is_err(),
+            "an unreachable broker must not look like success"
+        );
+
+        let s = m.stats();
+        assert_eq!(
+            s.total_buffered_messages, 0,
+            "the chunk was not returned to the buffer, so those three messages are gone"
+        );
+        assert_eq!(
+            s.flushes_performed, 0,
+            "a flush that never reached the broker must not be counted as one"
+        );
+        assert_eq!(
+            s.active_buffers, 1,
+            "the emptied buffer entry survives the failure (only a successful flush removes it)"
+        );
+        assert_eq!(
+            s.oldest_buffer_age,
+            Duration::ZERO,
+            "an empty buffer has no oldest message"
+        );
+    }
+
+    // The loss above is bounded by the chunk size, not by the buffer size: the
+    // send loop drains `message_count` at a time, so everything behind the
+    // failing chunk is still there to retry.
+    #[tokio::test]
+    async fn a_failed_flush_keeps_the_chunks_it_had_not_sent_yet() {
+        let m = impatient_manager();
+        let addr = address("orders", "Default");
+        seed(
+            &m,
+            &addr,
+            250,
+            BufferOptions {
+                message_count: 100,
+                time: Duration::from_secs(60),
+            },
+        );
+
+        assert!(m.flush(&addr).await.is_err());
+        assert_eq!(
+            m.stats().total_buffered_messages,
+            150,
+            "flush must send in message_count-sized chunks: only the 100 in flight are lost"
+        );
+    }
+
+    // `flush_all` is what `Queen::close` calls on the way out. One unreachable
+    // address must not strand the other addresses' messages, and the failure
+    // still has to reach the caller.
+    #[tokio::test]
+    async fn flush_all_drains_every_address_before_reporting_the_failure() {
+        let m = impatient_manager();
+        let opts = BufferOptions {
+            message_count: 100,
+            time: Duration::from_secs(60),
+        };
+        m.add(address("orders", "eu"), item(1), opts);
+        m.add(address("orders", "us"), item(2), opts);
+        m.add(address("other", "eu"), item(3), opts);
+
+        assert!(
+            m.flush_all().await.is_err(),
+            "a shutdown flush that reached nobody must not report success"
+        );
+        assert_eq!(
+            m.stats().total_buffered_messages,
+            0,
+            "flush_all stopped at the first failing address instead of trying the rest"
+        );
     }
 }

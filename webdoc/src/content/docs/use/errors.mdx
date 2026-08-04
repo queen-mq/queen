@@ -17,7 +17,7 @@ sourceOfTruth:
   - clients/client-js/client-v2/streams/runtime/StreamsHttpClient.js
 ---
 
-Three things about error handling in Queen are counter-intuitive enough to be worth stating before the tables: a rejected acknowledgement arrives as HTTP 200, a rolled-back transaction arrives as HTTP 200, and an empty pop arrives as HTTP 204 with no body at all. If your client checks status codes only, it will misread all three.
+Three parts of the contract are worth stating before the tables: a rejected acknowledgement arrives as HTTP 200, a rolled-back transaction arrives as HTTP 200, and an empty pop arrives as HTTP 204 with no body at all. On acks and transactions the per-item `success` field is the signal to branch on, and a 204 is bodiless, so read both alongside the status code.
 
 ## The envelope
 
@@ -63,7 +63,7 @@ Before that guard existed, a call to a nonexistent endpoint came back HTTP 200 w
 
 `401` and `403` only occur when JWT validation is switched on. Access levels are a **role set, not a ladder**: a `write-only` credential passes `POST /api/v1/push` and is rejected with 403 on every read and every consume route, including `/api/v1/pop`. The per-route level is listed in the generated route table in the [reference](/reference).
 
-### Where 200 does not mean success
+### What a 200 means on acks, transactions and stream cycles
 
 <Steps>
 

@@ -1,10 +1,11 @@
 ---
-title: Rust
+title: Rust quickstart
 description: "Install the Rust client, construct it, and use the async API: push, pop, the consume loop, transactions, and the streams DSL."
 type: how-to
 tier: use
 sidebar:
   order: 16
+  label: Rust
 sourceOfTruth:
   - clients/client-rust/src/lib.rs
   - clients/client-rust/src/queue.rs
@@ -31,6 +32,9 @@ It is the only SDK that shares its wire types with the broker. Both depend on
 `crates/queen-protocol`, and the broker's test suite round-trips its own request parsers and
 rendered responses through those types, so a field that drifts on either side fails a test
 instead of reaching a client.
+
+The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+[Versions and compatibility](/reference/compatibility) states what that covers.
 
 ## Install
 

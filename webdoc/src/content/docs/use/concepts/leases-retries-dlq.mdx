@@ -248,10 +248,10 @@ Deletes the dead-letter row and nothing else. A live message cannot be deleted a
 (payloads live in immutable segments), so this returns `404` for any address that has no
 dead-letter row.
 
-What does **not** exist: any bulk replay, bulk purge, or requeue-the-whole-DLQ operation.
-Replay is one message at a time, and because each replay mints a new transaction id, replaying
-twice produces two messages. Nothing purges `queen.log_dlq` on a schedule either; dead-letter
-rows survive retention and are only removed by the two routes above, or by deleting the queue.
+Reprocessing goes one message at a time, through the two routes above, and because each replay
+mints a new transaction id, replaying twice produces two messages. There is no bulk replay,
+bulk purge or requeue-the-whole-DLQ call, and no scheduled purge: dead-letter rows survive
+retention and are removed only by those two routes, or by deleting the queue.
 Budget for that: an unattended dead-letter queue grows without bound.
 
 ## What to reach for

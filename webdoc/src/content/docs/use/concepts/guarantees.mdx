@@ -1,10 +1,11 @@
 ---
-title: Guarantees
-description: "Exactly what Queen promises about ordering, durability and delivery: where duplicates still come from, what deduplication makes exact, and what a broker crash, a database failover and a client crash each look like."
+title: "Delivery guarantees: at-least-once, exactly-once, and where duplicates come from"
+description: "What Queen promises about ordering, durability and delivery: at-least-once by default, why consumption is not exactly-once, where duplicates come from, and what each kind of crash looks like."
 type: concept
 tier: use
 sidebar:
   order: 11
+  label: Guarantees
 sourceOfTruth:
   - server/sql/procedures/001_log_schema.sql
   - server/sql/procedures/003_log_push.sql
@@ -40,7 +41,7 @@ What is **not** promised:
 - **No global ordering.** Two messages in different partitions have no defined relative order,
   even within the same queue. A timestamp is resolved to a position independently in each
   partition, so it is not a consistent cut across a queue.
-- **No ordering of any kind by priority.** Nothing reorders a partition. Delivery follows the
+- **No priority ordering.** Nothing reorders a partition. Delivery follows the
   cursor.
 - **No cross-partition atomic visibility.** A transaction that pushes to several partitions
   commits at once, but consumers of those partitions are independent and will observe the
@@ -152,7 +153,7 @@ Deduplication guards the *push* side. It does not make consumption exactly-once.
 
 ## Where duplicates still come from
 
-Every one of these is normal operation, not a defect:
+Every one of these is normal operation:
 
 - **Lease expiry.** A slow or dead consumer's whole leased span is redelivered.
 - **Any nack.** The cursor clamps at the lowest explicit failure in the call, so messages after
@@ -166,10 +167,10 @@ Every one of these is normal operation, not a defect:
 - **A dead-letter replay.** The replayed message deliberately gets a fresh transaction id, so
   deduplication cannot suppress a second replay of the same payload.
 
-Making them harmless is a design task, and there are only two levers worth using: write
+Making them harmless is a design task, and two levers cover it: write
 handlers that are idempotent on a key you control (the message's `transactionId` is the obvious
 one, since it survives redelivery unchanged), and use deterministic transaction ids on pushes so
-retries collapse inside the deduplication window. Everything else is hope.
+retries collapse inside the deduplication window.
 
 ## What each failure looks like
 

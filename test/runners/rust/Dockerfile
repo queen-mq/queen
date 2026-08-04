@@ -27,6 +27,6 @@ WORKDIR /src/server
 RUN mkdir -p webapp/dist
 
 # Compile the test binaries at build time; ENTRYPOINT just runs them.
-RUN cargo test --no-run
+RUN cargo test --locked --no-run
 
-ENTRYPOINT ["cargo", "test"]
+ENTRYPOINT ["cargo", "test", "--locked"]

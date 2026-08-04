@@ -28,16 +28,24 @@
   },
   "author": "Smartness",
   "license": "Apache-2.0",
+  "homepage": "https://queenmq.com",
   "repository": {
     "type": "git",
     "url": "https://github.com/queen-mq/queen"
   },
+  "bugs": {
+    "url": "https://github.com/queen-mq/queen/issues"
+  },
   "keywords": [
     "message-queue",
     "queue",
+    "postgres",
+    "postgresql",
     "broker",
     "message-queue-system",
     "fifo",
+    "consumer-groups",
+    "dead-letter-queue",
     "streaming",
     "stream-processing",
     "rate-limiter",

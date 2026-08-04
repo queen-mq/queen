@@ -61,7 +61,7 @@ So the cost of adding a group is:
 | New rows written per group | One `log_consumers` row per partition the group actually pops, created on first contact. |
 | Per-ack write | One in-place update of that group's cursor row (no indexed column changes, so PostgreSQL keeps it a heap-only tuple). |
 
-The honest counterpart: **reads do scale with groups.** Each group's pop fetches and decompresses the segments it needs, so N groups reading the same backlog means N decompressions of the same bytes and N sets of pop transactions. Fan-out is free on the write side and linear on the read side.
+The counterpart: **reads do scale with groups.** Each group's pop fetches and decompresses the segments it needs, so N groups reading the same backlog means N decompressions of the same bytes and N sets of pop transactions. Fan-out is free on the write side and linear on the read side.
 
 ## Where a group starts
 

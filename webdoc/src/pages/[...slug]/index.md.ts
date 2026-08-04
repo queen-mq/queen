@@ -9,8 +9,12 @@
  * generate conflicting `[...slug]` paths at root.
  */
 
-import { getIndexedEntries, renderEntryAsMarkdown, type IndexedEntry } from "@cloudflare/nimbus-docs";
+import { getIndexedEntries, type IndexedEntry } from "@cloudflare/nimbus-docs";
 import { config } from "virtual:nimbus/config";
+// `renderEntryAsMarkdown()` from the framework deletes every `<Render />`
+// instead of inlining the partial. This wrapper inlines it first; everything
+// else about the downleveling is still the framework's.
+import { renderEntryMarkdown } from "@/lib/markdown-partials";
 
 export const prerender = true;
 
@@ -46,7 +50,7 @@ export async function GET({ props }: { props: SlugProps }) {
       ? rawImage
       : config.socialImage;
 
-  const markdown = renderEntryAsMarkdown(entry);
+  const markdown = await renderEntryMarkdown(entry);
 
   const body = [
     "---",

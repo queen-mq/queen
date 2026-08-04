@@ -39,12 +39,12 @@ pub use admin::{
 };
 pub use error::{ErrorBody, ErrorCode};
 pub use pop::{Message, PopParams, PopResponse, SubscriptionMode};
+pub use push::{PushItem, PushRequest, PushResult, PushStatus};
 pub use streams::{
     parse_state_key, session_state_key, state_key_for, CycleAck, CycleAckResult, CycleRequest,
     CycleResponse, RegisterRequest, RegisterResponse, SinkPushItem, StateGetRequest,
     StateGetResponse, StateKeyParts, StateOp, StateRow, STATE_KEY_SEP, WATERMARK_STATE_KEY,
 };
-pub use push::{PushItem, PushRequest, PushResult, PushStatus};
 pub use transaction::{
     TransactionRequest, TransactionResponse, TxnAckOperation, TxnOperation, TxnPushItem,
     TxnResultItem,

@@ -53,8 +53,8 @@ deployment surfaces on the same boot with the same message rather than hours
 later.
 
 <Aside type="caution">
-**Numbers are not strict.** An unparseable integer or float silently resolves to
-its default. `DB_POOL_SIZE=16O` (with a letter O) yields 160, not an error.
+**Numbers are parsed leniently.** An unparseable integer or float silently
+resolves to its default. `DB_POOL_SIZE=16O` (with a letter O) yields 160, not an error.
 Several numeric knobs are also clamped after parsing: interval and size knobs are
 floored at 1, and `STATS_INTERVAL_MS` and `METRICS_FLUSH_MS` are floored at
 1000 ms, with a below-floor value raised silently. The protection against a typo
@@ -170,7 +170,7 @@ precedence is fixed and not always the newer name.
 | Database name | `PG_DATABASE`, `PG_DB` | `PG_DATABASE`, then `PG_DB`, then `postgres`. |
 | Pop long-poll timeout | `DEFAULT_TIMEOUT`, `POP_DEFAULT_TIMEOUT_MS` | **`DEFAULT_TIMEOUT` wins.** Setting only `POP_DEFAULT_TIMEOUT_MS` has no effect if `DEFAULT_TIMEOUT` is also set. Default 30000 ms. |
 
-## Variables that do nothing
+## Variables you may see in older manifests
 
 Three categories, and the difference between them matters when you inherit a
 manifest from an older deployment.
@@ -201,11 +201,11 @@ See [Retention and disk](/selfhost/retention).
 
 **Not read at all.** `QUEEN_STATIC_DIR` configures nothing. The dashboard is
 compiled into the binary with `rust_embed` and there is no runtime static-directory
-override, so the published image deliberately does not set the variable. An
-environment variable that configures nothing is worse than an absent one.
+override, so the published image deliberately does not set the variable.
 
 The full list of every variable with the default the code applies is generated
-from `config.rs` at build time; see [Reference](/reference). If a variable is not
+from `config.rs` at build time; see the
+[configuration reference](/reference/config/). If a variable is not
 in that table and not in the three categories above, the broker does not read it.
 
 ## Related

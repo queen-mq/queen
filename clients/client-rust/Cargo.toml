@@ -2,12 +2,19 @@
 name = "queen-mq"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.75"
+# Measured, not aspirational: 1.75 was declared and never checked, and was
+# wrong by eleven releases. The lockfile alone (v4) rules out anything before
+# 1.78, and `icu_*` — pulled in transitively by reqwest's rustls stack — wants
+# 1.86. CI verifies this number on every push; when a dependency raises it, that
+# job goes red instead of a user's build.
+rust-version = "1.86"
 description = "Rust client for Queen MQ — one ordered lane per entity, on the PostgreSQL you already run."
 license = "Apache-2.0"
+homepage = "https://queenmq.com"
 repository = "https://github.com/queen-mq/queen"
-keywords = ["queue", "message-queue", "postgresql", "mq"]
-categories = ["asynchronous", "database"]
+readme = "README.md"
+keywords = ["queue", "message-queue", "postgresql", "broker", "mq"]
+categories = ["asynchronous", "database", "api-bindings"]
 
 [dependencies]
 queen-protocol = { path = "../../crates/queen-protocol", version = "1.0.0" }

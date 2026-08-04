@@ -86,6 +86,65 @@ save(contain(TRANS, 512), 'app/public/queen-logo-transparent.png')   # dark weba
 save(contain(BLACK, 512), 'webdoc/public/queen-logo-black.png')      # docs header
 save(contain(BLACK, 512), 'assets/queen-logo-black.png')             # README
 
+print('social card (GitHub repo social preview: Settings -> Social preview, upload only)')
+# 1280x640 is GitHub's declared size; it renders around 640x320 in most feeds and
+# as small as 320x160 in a Slack unfurl, so everything here is sized to survive a
+# 4x downscale. Dark ground because the transparent master is the colour duck and
+# it has no disc to carry contrast of its own. Not run through quant(): 128 colours
+# bands the duck's gradients and the antialiased type, and GitHub allows 1MB.
+from PIL import ImageDraw, ImageFont
+
+CARD = (1280, 640)
+INTER = P('webdoc', 'public', 'fonts', 'Inter-Bold.ttf')
+
+def _fit(draw, text, font_path, size, max_w):
+    """Largest <=size that fits max_w, and the wrapped lines at that size."""
+    while size > 12:
+        f = ImageFont.truetype(font_path, size)
+        words, lines, cur = text.split(), [], ''
+        for w in words:
+            t = f'{cur} {w}'.strip()
+            if draw.textlength(t, font=f) <= max_w:
+                cur = t
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        if len(lines) <= 2 and all(draw.textlength(l, font=f) <= max_w for l in lines):
+            return f, lines
+        size -= 2
+    return ImageFont.truetype(font_path, 12), [text]
+
+card = Image.new('RGB', CARD, DARK[:3])
+d = ImageDraw.Draw(card)
+
+duck = TRANS.copy()
+duck.thumbnail((360, 360), Image.LANCZOS)
+card.paste(duck, (96, (CARD[1] - duck.height) // 2), duck)
+
+x, right = 520, 96
+col = CARD[0] - x - right
+
+name = ImageFont.truetype(INTER, 88)
+d.text((x, 196), 'Queen MQ', font=name, fill=(255, 255, 255))
+
+tag_font, tag_lines = _fit(d, 'Postgres message queue with per-entity ordering',
+                           INTER, 44, col)
+y = 306
+for line in tag_lines:
+    d.text((x, y), line, font=tag_font, fill=(154, 160, 166))
+    y += tag_font.size + 10
+
+d.line([(x, y + 26), (x + 120, y + 26)], fill=(70, 70, 70), width=3)
+foot = ImageFont.truetype(INTER, 28)
+d.text((x, y + 52), 'queenmq.com   ·   Apache-2.0', font=foot, fill=(120, 126, 132))
+
+out = P('assets', 'queen-social-card.png')
+card.save(out, optimize=True)
+print('  ', os.path.relpath(out, ROOT), CARD, f'{os.path.getsize(out)//1024}KB')
+
 # ---- verification contact sheet (not committed) ----
 def comp(img, bg, sz=210):
     t = img.copy(); t.thumbnail((sz, sz)); c = Image.new('RGBA', t.size, bg)

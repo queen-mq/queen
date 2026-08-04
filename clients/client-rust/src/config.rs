@@ -84,7 +84,9 @@ impl HostHeader {
         // Split host[:port], keeping bracketed IPv6 literals intact.
         let (hostname, port) = if let Some(rest) = authority.strip_prefix('[') {
             let (h, tail) = rest.split_once(']').ok_or_else(|| {
-                Error::Config(format!("hostHeader has an unclosed IPv6 bracket — got '{authority}'"))
+                Error::Config(format!(
+                    "hostHeader has an unclosed IPv6 bracket — got '{authority}'"
+                ))
             })?;
             let port = match tail.strip_prefix(':') {
                 Some(p) => Some(parse_port(p, authority)?),
@@ -334,6 +336,114 @@ mod tests {
 
         let h = HostHeader::parse("acme").unwrap();
         assert_eq!(h.hostname, "acme");
+    }
+
+    // Every one of these is a `mut self` builder method: one that forgot to
+    // assign would compile, chain, and quietly ship the default. Nothing else
+    // in the suite calls most of them.
+    #[test]
+    fn the_builder_setters_all_stick() {
+        let c = Config::urls(["http://a:1", "http://b:2"])
+            .timeout(Duration::from_secs(7))
+            .retry_attempts(5)
+            .failover(false)
+            .strategy(Strategy::RoundRobin)
+            .bearer_token("t0k3n")
+            .header("x-queen-tenant", "acme")
+            .retry_429(Retry429 {
+                max_attempts: None,
+                base: Duration::from_millis(10),
+                cap: Duration::from_secs(1),
+            });
+
+        assert_eq!(c.urls, ["http://a:1", "http://b:2"]);
+        assert_eq!(c.timeout, Duration::from_secs(7));
+        assert_eq!(c.retry_attempts, 5);
+        assert!(!c.failover, "failover(false) did not stick");
+        assert_eq!(c.strategy, Strategy::RoundRobin);
+        assert_eq!(c.bearer_token.as_deref(), Some("t0k3n"));
+        assert_eq!(
+            c.headers,
+            vec![("x-queen-tenant".to_string(), "acme".to_string())]
+        );
+        assert_eq!(c.retry_429.max_attempts, None);
+        assert_eq!(c.retry_429.cap, Duration::from_secs(1));
+        c.validate()
+            .expect("two http:// URLs and a non-Host header are a valid configuration");
+    }
+
+    // 0 would make the retry loop run zero times: the request is never sent and
+    // the caller gets "retry loop produced no error" instead of an answer.
+    #[test]
+    fn zero_retry_attempts_is_rejected_rather_than_skipping_the_request() {
+        let err = Config::new("http://a:1")
+            .retry_attempts(0)
+            .validate()
+            .expect_err("retry_attempts=0 sends nothing at all")
+            .to_string();
+        assert!(err.contains("retry_attempts"), "{err}");
+        assert!(Config::new("http://a:1")
+            .retry_attempts(1)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn the_host_header_setter_parses_at_configuration_time() {
+        let c = Config::new("http://10.0.0.1:6789")
+            .host_header("acme.eu1.queenmq.cloud")
+            .expect("a bare authority is what this accepts");
+        let h = c.host_header.expect("host_header was set");
+        assert_eq!(h.authority, "acme.eu1.queenmq.cloud");
+        assert_eq!(h.hostname, "acme.eu1.queenmq.cloud");
+        assert_eq!(h.port, None);
+
+        // The rejection happens here rather than at the first request, where a
+        // wrong Host reaches another tenant's data instead of erroring.
+        assert!(Config::new("http://10.0.0.1:6789")
+            .host_header("https://acme.queenmq.cloud")
+            .is_err());
+    }
+
+    #[test]
+    fn host_header_handles_the_bracketed_and_bare_edge_forms() {
+        // Surrounding space is trimmed, and what is left is what goes on the
+        // wire verbatim.
+        let h = HostHeader::parse("  acme.local:6711  ").unwrap();
+        assert_eq!(h.authority, "acme.local:6711");
+        assert_eq!(h.hostname, "acme.local");
+        assert_eq!(h.port, Some(6711));
+
+        // A bracketed IPv6 literal without a port keeps its brackets in the
+        // authority but not in the hostname, which is what gets resolved.
+        let h = HostHeader::parse("[::1]").unwrap();
+        assert_eq!(h.authority, "[::1]");
+        assert_eq!(h.hostname, "::1");
+        assert_eq!(h.port, None);
+
+        for bad in [
+            "[::1",        // unclosed bracket
+            "[::1]6711",   // port with no colon
+            "[::1]:65536", // port out of range
+            "[]:6711",     // no host
+            ":6711",       // no host
+            "acme:",       // no port after the colon
+            "acme.local:-1",
+        ] {
+            assert!(HostHeader::parse(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    // Measured, not endorsed. A bare IPv6 literal is not URL-shaped, so it gets
+    // past the guard and then splits on its own last colon, yielding nonsense
+    // that is still accepted. Brackets are the supported form. Pinned here so
+    // that the day this starts erroring it is a deliberate change and not a
+    // surprise for whoever configured `::1`.
+    #[test]
+    fn an_unbracketed_ipv6_literal_is_mis_split_rather_than_refused() {
+        let h = HostHeader::parse("::1").expect("today this parses, wrongly");
+        assert_eq!(h.hostname, ":");
+        assert_eq!(h.port, Some(1));
     }
 
     #[test]

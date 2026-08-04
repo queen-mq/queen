@@ -199,10 +199,7 @@ impl Queen {
                     .into(),
             ));
         }
-        let resp = self
-            .admin()
-            .renew_lease(&message.lease_id, seconds)
-            .await?;
+        let resp = self.admin().renew_lease(&message.lease_id, seconds).await?;
         Ok(resp.success)
     }
 

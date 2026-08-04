@@ -1,6 +1,6 @@
 ---
 title: Upgrades
-description: "The deployment model is always-virgin: the boot-time DDL only creates, so an upgrade is a fresh database plus a traffic cutover, not an in-place migration. Rolling restarts, in-flight leases, and what that model rules out."
+description: "An upgrade is a fresh database plus a traffic cutover, not an in-place migration: the boot-time DDL only creates. Rolling restarts, in-flight leases, and what that rules out."
 type: how-to
 tier: operate
 sidebar:
@@ -18,15 +18,14 @@ sourceOfTruth:
 ---
 
 Queen's deployment model is **always-virgin**: a deployment starts from an empty
-database, and the DDL the broker applies at boot only *creates*. There are no
-migration files, no version table, and no upgrade ALTERs: `CREATE TABLE`
-declares the final shape, once. The consequence is stated plainly up front
-because the whole page follows from it:
+database, and the DDL the broker applies at boot only *creates*. `CREATE TABLE`
+declares the final shape, once, so a deployment carries no migration files, no
+version table and no upgrade ALTERs. The whole page follows from that:
 
-**There is no in-place upgrade path. Upgrading a deployment means standing up
-the new version against a fresh database and cutting traffic over.** Pointing a
+Upgrading a deployment means standing up the new version against a fresh
+database and cutting traffic over. Pointing a
 new build at a database created by an earlier version is unsupported: the boot
-apply will not reshape existing tables, and nothing else will either.
+apply only creates, and leaves existing tables in the shape it found them.
 
 What *is* routine and coordination-free is restarting or replacing replicas of
 the same version. Both halves are below.
@@ -178,29 +177,28 @@ whatever versions are involved:
 
 </Steps>
 
-If you cannot drain (a backlog you must not lose), the only reliable path is to
-read the messages out through the old deployment's own API and push them into
-the new one as new messages, giving each one a deterministic `transactionId` so
-a retry of your copy loop cannot duplicate it. Nothing in the broker does this
-for you.
+If you cannot drain (a backlog you must not lose), copy it at the application
+level: read the messages out through the old deployment's own API and push them
+into the new one as new messages, giving each one a deterministic
+`transactionId` so a retry of your copy loop cannot duplicate it.
 
 ### Rollback
 
-The cutover model makes rollback an argument for patience rather than a
-procedure: the old deployment and its database still exist until you retire
-them. Keep both running (producers stopped, consumers drained) until you are
-confident in the new deployment; rolling back is pointing clients back at the
-old broker. Once you have deleted the old database, there is nothing to roll
-back to: messages pushed to the new deployment in the meantime would need the
+Rollback is the same cutover in the other direction, so it is a matter of
+retiring the old deployment late: the old deployment and its database still
+exist until you do. Keep both running (producers stopped, consumers drained)
+until you are confident in the new deployment; rolling back is pointing clients
+back at the old broker. That route closes once you delete the old database:
+messages pushed to the new deployment in the meantime would need the
 same copy-loop treatment in reverse.
 
 ## Coming from 0.16
 
 The previous Queen broker was a C++ implementation on a different storage engine.
-Version 1.0 is not an update of it, and **there is no data migration**, which
-is the always-virgin model again, not a special case.
+Version 1.0 is not an update of it: moving to it is a cutover of the kind above,
+the always-virgin model again rather than a special case, and it carries no data.
 
-- The `queen migrate` subcommand exists only to say so. It logs that migration
+- The `queen migrate` subcommand reports exactly that. It logs that migration
   is not supported on the log engine and exits 1 without opening a database
   connection.
 - The current engine's data lives in `queen.queues` (queue identity and

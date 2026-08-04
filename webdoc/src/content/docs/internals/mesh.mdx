@@ -103,8 +103,9 @@ cap, so a multi-partition push meant one datagram per partition.
 Two of these are worth separating because they look redundant and are not.
 `MESSAGE_AVAILABLE` is a parked-pop wake, sent on every push. `HOTLIST_DIRTY_BATCH` marks a peer's
 candidate ring, and is sent only on a coalesced dirty transition: a partition pushed a thousand
-times in one flush window produces one hint. A dropped hint is healed by the hot-list's periodic
-reseed floor; a dropped wake is healed by the parked pop's own backoff.
+times in one flush window produces one hint. A dropped hint is healed by
+[the hot-list's](/internals/hotlist/) periodic reseed floor; a dropped wake is healed by the parked
+pop's own backoff.
 
 Queue-carrying frames include the tenant explicitly, and an **absent** tenant is not the same as the
 default tenant. An absent tenant means a peer that predates tenant scoping (a rolling upgrade), and
@@ -131,15 +132,16 @@ State this plainly, because the mechanism above reads as stronger than it is.
 - **Post-handshake frames are unauthenticated JSON.** There is no per-frame MAC and no sequence
   number. Once a connection is accepted, everything on it is trusted.
 - **The frame set includes `MAINTENANCE_MODE_SET`.** So an attacker who can reach the port and replay
-  one captured handshake can put every replica into maintenance mode, which diverts all pushes to the
-  disk spool. `POP_MAINTENANCE_MODE_SET` will likewise pause consumption cluster-wide.
+  one captured handshake can put every replica into maintenance mode, which diverts all pushes to
+  [the disk spool](/selfhost/durability/). `POP_MAINTENANCE_MODE_SET` will likewise pause
+  consumption cluster-wide.
 - **With no secret configured, not even the replay is needed.**
 
 <Aside type="danger">
 **Firewalling the mesh port is a requirement, not advice.** `QUEEN_MESH_PORT` must be reachable only
-from the other brokers in the cluster: a private network, a security group, or a Kubernetes network
-policy. Do not treat `QUEEN_SYNC_SECRET` as a substitute for that. Set it as well, but the network
-boundary is what actually protects the cluster.
+from the other brokers in the cluster: a private network, a security group, or a
+[Kubernetes network policy](/selfhost/kubernetes/). Do not treat `QUEEN_SYNC_SECRET` as a substitute
+for that. Set it as well, but the network boundary is what actually protects the cluster.
 </Aside>
 
 Nothing on the mesh can corrupt or misdeliver messages, because it carries no data-plane writes and
@@ -167,7 +169,8 @@ many peers are alive versus dead by the inbound-liveness threshold, frames sent,
 **dropped**, handshake failures, and the two maintenance flags. With no peers configured the body is
 `{"enabled": false, "reason": "no_peers", ...}`.
 
-`GET /api/v1/system/shared-state` is a different, deliberately minimal route: it always reports
+[`GET /api/v1/system/shared-state`](/reference/http/system/) is a different, deliberately minimal
+route: it always reports
 `enabled: false` with the reason `single_node_segments_broker` plus the two maintenance flags. It is
 not the mesh view.
 

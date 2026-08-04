@@ -59,7 +59,7 @@ The response is one result per item, in request order, at HTTP 201:
 [{"index":0,"message_id":"0198...","transaction_id":"0198...","queueName":"orders","status":"queued"}]
 ```
 
-`status` is `queued` for a message that was written, `duplicate` for one the deduplication window rejected (see [Idempotent producers](/use/examples/dedup)), and `buffered` when the broker is in maintenance mode and diverted the push to its disk spool.
+`status` is `queued` for a message that was written, `duplicate` for one the deduplication window rejected (see [message deduplication](/use/examples/dedup)), and `buffered` when the broker is in maintenance mode and diverted the push to its disk spool.
 
 ## Consuming
 
@@ -147,7 +147,7 @@ The wire response is one item per acknowledgment, in request order, at HTTP 200:
 ```
 
 <Aside type="caution">
-A rejected ack still arrives as HTTP 200. `success` on the item is the only signal that the broker accepted it. A caller that checks only the status code will treat an expired lease as a successful ack and then be surprised by the redelivery.
+A rejected ack still arrives as HTTP 200. `success` on the item is the only signal that the broker accepted it: a caller that checks only the status code reads an expired lease as a successful ack, and the messages redeliver.
 </Aside>
 
 ### Leases and expiry

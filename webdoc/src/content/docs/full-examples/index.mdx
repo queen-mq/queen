@@ -1,6 +1,6 @@
 ---
 title: Full examples
-description: "Three complete programs, simple to complex, in JavaScript, Python and Go: the whole file, not a fragment, and every one of them is run before it ships."
+description: "Three complete programs, simple to complex, in JavaScript, Python, Go and Rust: the whole file, not a fragment, and every one of them is run before it ships."
 type: overview
 tier: use
 sidebar:
@@ -33,27 +33,27 @@ Three of them, in the order they are worth reading:
   />
 </CardGrid>
 
-Each is written three times, once per language, so you can read the one you use and compare it
+Each is written four times, once per language, so you can read the one you use and compare it
 against the one you do not.
 
 ## What "run before it ships" means here
 
-The nine programs live in `examples/full/` in the repository. They are not transcribed into these
+The twelve programs live in `examples/full/` in the repository. They are not transcribed into these
 pages: the build extracts each file between its first and last line and includes it verbatim, so
 what you read is the file that ran.
 
 Every program asserts its own outcome and exits non-zero when an assertion fails. That is the
 part that makes this claim worth anything: a program that only printed "ok" would prove nothing.
 
-To run all nine yourself against a broker of your own:
+To run all twelve yourself against a broker of your own:
 
 ```bash
 QUEEN_URL=http://localhost:6632 examples/full/run.sh
 ```
 
 The script checks the broker answers, installs the JavaScript dependencies on first use, and
-prints a pass or fail line per program. It needs Node 22, Python 3.9 with `httpx`, and Go 1.24,
-and it takes the clients from this repository rather than from the registries, so it exercises
+prints a pass or fail line per program. It needs Node 22, Python 3.9 with `httpx`, Go 1.24 and
+Rust 1.75, and it takes the clients from this repository rather than from the registries, so it exercises
 the code in the tree rather than the last release.
 
 <Aside type="note">

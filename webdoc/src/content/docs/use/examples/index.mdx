@@ -32,7 +32,8 @@ const res = await client
 // docs:end
 ```
 
-`webdoc/scripts/gen-snippets.mjs` walks four directories (the JavaScript, Python and Go client test trees plus the C++ client directory), collects every region, strips the common leading indentation, and writes one partial per region under `src/content/partials/snippets/`. Each partial carries a header naming the file it came from and the suite that runs it, and the fenced block is titled with that same repo-relative path. A page includes it by id:
+`webdoc/scripts/gen-snippets.mjs` walks six directories (the JavaScript, Python, Go and Rust client test trees, the C++ client directory, and `examples/full`, the
+[complete runnable programs](/full-examples)), collects every region, strips the common leading indentation, and writes one partial per region under `src/content/partials/snippets/`. Each partial carries a header naming the file it came from and the suite that runs it, and the fenced block is titled with that same repo-relative path. A page includes it by id:
 
 ```mdx
 <Render file="snippets/js-push" />
@@ -103,7 +104,7 @@ Every region currently marked in the client test trees:
   />
   <LinkCard
     href="/use/examples/dedup"
-    title="Idempotent producers"
+    title="Message deduplication"
     description="Deterministic transaction ids, the window, and life after the window closes."
   />
   <LinkCard

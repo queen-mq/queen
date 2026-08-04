@@ -81,7 +81,10 @@ pub struct GateCtx<'a> {
 impl GateCtx<'_> {
     /// Read a numeric state field, defaulting when absent.
     pub fn num(&self, key: &str, default: f64) -> f64 {
-        self.state.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+        self.state
+            .get(key)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(default)
     }
 
     /// Write a numeric state field.
@@ -438,25 +441,20 @@ impl Reducer {
                         AggregateKind::Min => {
                             if let Some(v) = v {
                                 let cur = obj.get(&f.name).and_then(|x| x.as_f64());
-                                obj.insert(
-                                    f.name.clone(),
-                                    num(cur.map_or(v, |c| c.min(v))),
-                                );
+                                obj.insert(f.name.clone(), num(cur.map_or(v, |c| c.min(v))));
                             }
                         }
                         AggregateKind::Max => {
                             if let Some(v) = v {
                                 let cur = obj.get(&f.name).and_then(|x| x.as_f64());
-                                obj.insert(
-                                    f.name.clone(),
-                                    num(cur.map_or(v, |c| c.max(v))),
-                                );
+                                obj.insert(f.name.clone(), num(cur.map_or(v, |c| c.max(v))));
                             }
                         }
                         AggregateKind::Avg => {
                             if let Some(v) = v {
                                 let sum =
-                                    obj.get("__avg_sum").and_then(|x| x.as_f64()).unwrap_or(0.0) + v;
+                                    obj.get("__avg_sum").and_then(|x| x.as_f64()).unwrap_or(0.0)
+                                        + v;
                                 let count = obj
                                     .get("__avg_count")
                                     .and_then(|x| x.as_f64())
@@ -654,15 +652,24 @@ mod tests {
         assert_eq!(parse_iso_ms("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_iso_ms("1970-01-01T00:00:00.000Z"), Some(0));
         assert_eq!(parse_iso_ms("1970-01-01T00:00:01.500Z"), Some(1500));
-        assert_eq!(parse_iso_ms("2026-08-04T10:00:00.000Z"), Some(1_785_837_600_000));
+        assert_eq!(
+            parse_iso_ms("2026-08-04T10:00:00.000Z"),
+            Some(1_785_837_600_000)
+        );
         // Postgres renders microseconds; only the first three digits matter.
         assert_eq!(
             parse_iso_ms("2026-08-04T10:00:00.123456Z"),
             Some(1_785_837_600_123)
         );
         // Short fractions are padded, not truncated: .1 is 100ms, not 1ms.
-        assert_eq!(parse_iso_ms("2026-08-04T10:00:00.1Z"), Some(1_785_837_600_100));
-        assert_eq!(parse_iso_ms("2026-08-04T10:00:00.12Z"), Some(1_785_837_600_120));
+        assert_eq!(
+            parse_iso_ms("2026-08-04T10:00:00.1Z"),
+            Some(1_785_837_600_100)
+        );
+        assert_eq!(
+            parse_iso_ms("2026-08-04T10:00:00.12Z"),
+            Some(1_785_837_600_120)
+        );
     }
 
     #[test]
@@ -697,21 +704,34 @@ mod tests {
             "tumb:60"
         );
         assert_eq!(
-            Window::new(WindowKind::Sliding { size: 60, slide: 10 }).tag(),
+            Window::new(WindowKind::Sliding {
+                size: 60,
+                slide: 10
+            })
+            .tag(),
             "slide:60:10"
         );
-        assert_eq!(Window::new(WindowKind::Session { gap: 30 }).tag(), "sess:30");
         assert_eq!(
-            Window::new(WindowKind::Cron { every: Every::Minute }).tag(),
+            Window::new(WindowKind::Session { gap: 30 }).tag(),
+            "sess:30"
+        );
+        assert_eq!(
+            Window::new(WindowKind::Cron {
+                every: Every::Minute
+            })
+            .tag(),
             "cron:minute"
         );
     }
 
     #[test]
     fn sliding_requires_size_to_be_a_multiple_of_slide() {
-        assert!(Window::new(WindowKind::Sliding { size: 60, slide: 10 })
-            .validate()
-            .is_ok());
+        assert!(Window::new(WindowKind::Sliding {
+            size: 60,
+            slide: 10
+        })
+        .validate()
+        .is_ok());
         let err = Window::new(WindowKind::Sliding { size: 60, slide: 7 })
             .validate()
             .unwrap_err();
@@ -736,9 +756,15 @@ mod tests {
             Window::new(WindowKind::Tumbling { seconds: 60 }).idle_flush_ms,
             5_000
         );
-        assert_eq!(Window::new(WindowKind::Session { gap: 30 }).idle_flush_ms, 1_000);
         assert_eq!(
-            Window::new(WindowKind::Cron { every: Every::Minute }).idle_flush_ms,
+            Window::new(WindowKind::Session { gap: 30 }).idle_flush_ms,
+            1_000
+        );
+        assert_eq!(
+            Window::new(WindowKind::Cron {
+                every: Every::Minute
+            })
+            .idle_flush_ms,
             30_000
         );
     }
@@ -857,7 +883,10 @@ mod tests {
         let s = Sink {
             queue: "out".into(),
             partition: SinkPartition::Derived(Arc::new(|v| {
-                v.get("tenant").and_then(|t| t.as_str()).unwrap_or("none").to_string()
+                v.get("tenant")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("none")
+                    .to_string()
             })),
         };
         assert_eq!(

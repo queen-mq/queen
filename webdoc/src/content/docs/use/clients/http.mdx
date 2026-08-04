@@ -1,6 +1,6 @@
 ---
-title: Using Queen over HTTP
-description: "Base URL, auth header, the exact push/pop/ack request and response shapes, the bodiless 204, and a complete curl walkthrough."
+title: HTTP quickstart
+description: "Use Queen from any language over plain HTTP: base URL, auth header, the exact push/pop/ack shapes, the bodiless 204, and a complete curl walkthrough."
 type: how-to
 tier: use
 sidebar:
@@ -31,11 +31,15 @@ eight routes:
 Everything else (queue configuration, DLQ, traces, status, analytics, consumer group
 management) is documented with its access level in [Reference](/reference).
 
+This API is the only compatibility surface Queen commits to, which is what makes writing
+against it directly a reasonable choice. [Versions and compatibility](/reference/compatibility)
+states what that covers and what changes without notice.
+
 ## Conventions
 
-**Base URL.** `http://host:6632` by default (`PORT`). The broker has **no TLS listener**: for
-HTTPS you terminate TLS in front of it, either with the Queen proxy or with any reverse proxy.
-There is no CORS layer either, so a browser cannot call the broker directly across origins.
+**Base URL.** `http://host:6632` by default (`PORT`). For HTTPS you terminate TLS in front of
+the broker, either with the Queen proxy or with any reverse proxy: the broker has no TLS
+listener, and no CORS layer either, so a browser cannot call it directly across origins.
 
 **Content type.** Send `Content-Type: application/json` on every request with a body.
 Responses are `application/json` (including `/metrics`, which returns a JSON snapshot) except
@@ -138,7 +142,7 @@ least one of the two is required there, otherwise it is a `400`).
 
 | Query parameter | Default | Effect |
 | --- | --- | --- |
-| `batch` | 1 | Maximum messages returned. |
+| `batch` | 200 | Maximum messages returned. |
 | `partitions` | 1 | Claim up to N partitions in one call. `batch` becomes the global cap across all of them, and every claimed partition shares one `leaseId`. |
 | `wait` | false | Long-poll: park the request until a message arrives or the timeout expires. |
 | `timeout` | 30000 ms | Long-poll window in **milliseconds**. The server-side default comes from `DEFAULT_TIMEOUT`, then `POP_DEFAULT_TIMEOUT_MS`, then 30000. |

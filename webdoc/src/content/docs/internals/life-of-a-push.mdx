@@ -49,8 +49,8 @@ requests can have contributed frames to any one of them.
 
 ## 1. The handler: mint, dedup, group
 
-`POST /api/v1/push` takes a body with an `items` array. An empty array answers `201` with `[]`
-immediately.
+[`POST /api/v1/push`](/reference/http/push/) takes a body with an `items` array. An empty array
+answers `201` with `[]` immediately.
 
 For each item the handler:
 
@@ -106,12 +106,12 @@ accumulate while permits are scarce, and a freed permit fires a large bundle. Co
 thereby decoupled from partition count.
 
 The broker exposes the ratio directly. `queen_batch_items_fired_total` and
-`queen_fusion_items_per_batch` are on `/metrics/prometheus`, and the `fusion` log target emits a
-`bundle summary` line about every ten seconds with `commits`, `segments` and
+`queen_fusion_items_per_batch` are on [`/metrics/prometheus`](/reference/prometheus/), and the
+`fusion` log target emits a `bundle summary` line about every ten seconds with `commits`, `segments` and
 `segments_per_commit`. Segments far exceeding commits is the direct evidence that fusion is
 coalescing across partitions.
 
-`QUEEN_V2_FUSION_HOLD_MS` (default 15) is a **liveness backstop tick**, not a batching window.
+`QUEEN_V2_FUSION_HOLD_MS` (default 3) is a **liveness backstop tick**, not a batching window.
 It exists so a group held because a permit was freed on another shard eventually gets retried.
 Lowering it does nothing under load, because arrivals and completions already wake the shard.
 
@@ -253,15 +253,17 @@ answers `201`.
 
 Two things happen after that:
 
-**Discovery.** Each pushed `(tenant, queue, partition)` is marked pending on the hot-list rings,
-quietly: the local wake is coalesced into a 5 ms tick, so a hot queue costs at most one wake per
+**Discovery.** Each pushed `(tenant, queue, partition)` is marked pending on the
+[hot-list rings](/internals/hotlist/), quietly: the local wake is coalesced into a 5 ms tick, so a
+hot queue costs at most one wake per
 tick instead of one wake per push (each of which is itself proportional to the number of parked
 consumers). Peers still get an immediate batched `MESSAGE_AVAILABLE`. With `QUEEN_HOTLIST=0` the
 push instead wakes parked pops directly with partition hints.
 
 **Error spooling.** Items that came back `error` (meaning the transaction that would have stored
-them failed) are written to the disk spool and relabelled `buffered`, so a client that only
-checks the HTTP status code does not silently lose them. The background drain replays them, and
+them failed) are written to [the disk spool](/selfhost/durability/) and relabelled `buffered`, so a
+client that only checks the HTTP status code does not silently lose them. The background drain
+replays them, and
 deduplication on the preserved `transactionId` makes the replay idempotent. A spool write failure
 downgrades the item to `failed`.
 

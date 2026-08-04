@@ -18,14 +18,15 @@ sourceOfTruth:
 
 The broker is one process with one listener. It binds `0.0.0.0:PORT` (6632) with a
 plain TCP listener, serves both the HTTP API and the dashboard from that port, and
-by default authenticates nobody. There is no TLS listener in the binary and no CORS
+authenticates callers only once `JWT_ENABLED` is on. TLS termination and CORS
+live outside the binary: there is no TLS listener in the binary and no CORS
 layer anywhere in `server/src`.
 
-That is a deliberate shape, not an omission: the broker is designed to sit inside a
-trusted network segment with something in front of it. But it means every security
-property of a Queen deployment comes from a decision you make outside the broker.
+That shape puts the broker inside a trusted network segment with something in
+front of it, which means every security property of a Queen deployment comes
+from a decision you make around the broker.
 This page draws each boundary explicitly, then routes to the three mechanisms the
-broker does implement.
+broker implements.
 
 ## The boundaries, listed
 
@@ -141,14 +142,15 @@ database with `PG_USE_SSL` off by default, meaning the connection is plaintext u
 you turn it on. See [PostgreSQL TLS](/selfhost/security/postgres-tls) for what the
 two available modes do and do not prove.
 
-One schema is deliberately wide open at the database level: `019_streams_schema.sql`
+One schema is granted broadly at the database level: `019_streams_schema.sql`
 grants `USAGE` on `queen_streams` and `SELECT, INSERT, UPDATE, DELETE` on
 `queen_streams.queries` and `queen_streams.state` to `PUBLIC`. Any role with a
 connection to that database can read and rewrite stream definitions and stream
-state, regardless of what the HTTP layer allows, and nothing purges that state.
+state, regardless of what the HTTP layer allows, and retention never touches that
+state.
 
 Payload encryption is the one thing that survives a database compromise, and only
-for queues flagged for it. There is a sharp edge worth reading before you rely on it:
+for queues flagged for it. Its failure mode is worth reading before you rely on it:
 [Payload encryption at rest](/selfhost/security/encryption).
 
 ## A posture that holds

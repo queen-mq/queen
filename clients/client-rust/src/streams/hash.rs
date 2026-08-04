@@ -168,10 +168,7 @@ mod tests {
             tumbling(60, 5000),
             vec![
                 ("kind", s("aggregate")),
-                (
-                    "fields",
-                    Json::StrArray(vec!["count".into(), "sum".into()]),
-                ),
+                ("fields", Json::StrArray(vec!["count".into(), "sum".into()])),
             ],
             vec![("kind", s("sink")), ("queue", s("out"))],
         ];
