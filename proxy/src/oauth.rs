@@ -438,20 +438,24 @@ async fn google_start(
     let next = safe_next(q.next.as_deref());
     let nonce = random_hex(24);
     let state = sign_state(state_key(), &nonce, &next, STATE_TTL_S);
-    let url = format!(
-        "{GOOGLE_AUTHORIZE_URL}?{}",
-        qs(&[
-            ("client_id", &cid),
-            ("redirect_uri", &redirect_uri),
-            ("response_type", "code"),
-            ("scope", "openid email profile"),
-            ("access_type", "online"),
-            ("include_granted_scopes", "true"),
-            ("prompt", "select_account"),
-            ("state", &state),
-            ("nonce", &nonce),
-        ])
-    );
+    let mut params: Vec<(&str, &str)> = vec![
+        ("client_id", &cid),
+        ("redirect_uri", &redirect_uri),
+        ("response_type", "code"),
+        ("scope", "openid email profile"),
+        ("access_type", "online"),
+        ("include_granted_scopes", "true"),
+        ("prompt", "select_account"),
+        ("state", &state),
+        ("nonce", &nonce),
+    ];
+    // With exactly one allowed domain, hint Google's account chooser at it. This
+    // is UX, NOT a control: `hd` on the authorize URL is a suggestion the user
+    // can ignore, and the enforcement lives in validate_google_claims.
+    if let [only] = st.cfg.google_allowed_domains.as_slice() {
+        params.push(("hd", only));
+    }
+    let url = format!("{GOOGLE_AUTHORIZE_URL}?{}", qs(&params));
     redirect(StatusCode::FOUND, &url, None)
 }
 
@@ -513,9 +517,18 @@ async fn google_callback(
             return err_400("invalid_request", "google id_token verification failed");
         }
     };
-    let gid = match validate_google_claims(&claims, &nonce) {
+    let gid = match validate_google_claims(&claims, &nonce, &st.cfg.google_allowed_domains) {
         Ok(g) => g,
-        Err(e) => return claim_err_response(e),
+        Err(e) => {
+            if matches!(e, ClaimErr::DomainNotAllowed) {
+                tracing::warn!(
+                    target: "oauth",
+                    hd = claims.hd.as_deref().unwrap_or(""),
+                    "google login refused: domain not in GOOGLE_ALLOWED_DOMAINS"
+                );
+            }
+            return claim_err_response(e);
+        }
     };
 
     finish_oauth(&st, &headers, "google", &gid.sub, &gid.email, &next).await
@@ -584,6 +597,10 @@ struct GoogleClaims {
     email: Option<String>,
     email_verified: Option<Value>,
     nonce: Option<String>,
+    /// Google Workspace hosted domain. Present only for Workspace accounts;
+    /// absent for consumer (gmail.com) ones. Carried so the domain allowlist can
+    /// be enforced — see `validate_google_claims`.
+    hd: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -598,12 +615,31 @@ enum ClaimErr {
     MissingSub,
     MissingEmail,
     EmailUnverified,
+    DomainNotAllowed,
 }
 
 /// Pure OIDC claim check: nonce must match the signed-state nonce, sub + email
-/// must be present, and the email MUST be verified (`email_verified` accepted as
-/// bool `true` or the string `"true"`, matching real Google payloads).
-fn validate_google_claims(claims: &GoogleClaims, expected_nonce: &str) -> Result<OidcIdentity, ClaimErr> {
+/// must be present, the email MUST be verified (`email_verified` accepted as
+/// bool `true` or the string `"true"`, matching real Google payloads), and — when
+/// `allowed_domains` is non-empty — the account must belong to one of those
+/// domains.
+///
+/// The domain is taken from the `hd` claim OR from the email's own domain.
+/// Either is Google-attested: `hd` is set for Workspace accounts, and a verified
+/// email at a Workspace domain can only be issued by that Workspace. Accepting
+/// both means a consumer account with a verified address at an allowed domain
+/// still gets in, which is the behaviour operators expect from something spelled
+/// "allowed domains".
+///
+/// An EMPTY list means no domain restriction. That is not the same as "open":
+/// with auto-provision off, an identity that matches no existing user row is
+/// rejected regardless. The list is what closes the door once auto-provision is
+/// on.
+fn validate_google_claims(
+    claims: &GoogleClaims,
+    expected_nonce: &str,
+    allowed_domains: &[String],
+) -> Result<OidcIdentity, ClaimErr> {
     match claims.nonce.as_deref() {
         Some(n) if n == expected_nonce => {}
         _ => return Err(ClaimErr::NonceMismatch),
@@ -615,7 +651,17 @@ fn validate_google_claims(claims: &GoogleClaims, expected_nonce: &str) -> Result
     if !json_truthy(claims.email_verified.as_ref()) {
         return Err(ClaimErr::EmailUnverified);
     }
-    Ok(OidcIdentity { sub: sub.to_string(), email: email.to_lowercase() })
+    let email = email.to_lowercase();
+    if !allowed_domains.is_empty() {
+        let hd = claims.hd.as_deref().unwrap_or("").trim().to_lowercase();
+        let email_domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
+        let ok = allowed_domains.iter().any(|d| d == &hd)
+            || allowed_domains.iter().any(|d| d == email_domain);
+        if !ok {
+            return Err(ClaimErr::DomainNotAllowed);
+        }
+    }
+    Ok(OidcIdentity { sub: sub.to_string(), email })
 }
 
 fn claim_err_response(e: ClaimErr) -> Response {
@@ -625,6 +671,11 @@ fn claim_err_response(e: ClaimErr) -> Response {
         ClaimErr::MissingEmail => err_400("invalid_request", "id_token missing email"),
         ClaimErr::EmailUnverified => {
             errors::err_403("email_unverified", "provider email is not verified")
+        }
+        // Deliberately does not echo the rejected domain: the caller already
+        // knows which account they used, and the reply is reachable by anyone.
+        ClaimErr::DomainNotAllowed => {
+            errors::err_403("domain_not_allowed", "google account domain is not allowed")
         }
     }
 }
@@ -886,7 +937,9 @@ async fn resolve_oauth(
             Ok(u)
         }
         Resolution::Provision => {
-            let u = provision_user(pool, email, provider, provider_id).await?;
+            let u =
+                provision_user(pool, email, provider, provider_id, &st.cfg.autoprovision_default_role)
+                    .await?;
             record_op(
                 st,
                 u.tenant_id,
@@ -966,6 +1019,7 @@ async fn provision_user(
     email: &str,
     provider: &str,
     provider_id: &str,
+    default_role: &str,
 ) -> Result<UserRef, ResolveErr> {
     let tenant_slug = std::env::var("QUEEN_PROXY_AUTOPROVISION_TENANT")
         .ok()
@@ -1006,7 +1060,50 @@ async fn provision_user(
     .await
     .map_err(|e| ResolveErr::Db(e.to_string()))?;
 
+    // Grant the default role on every cluster of the auto-provision tenant.
+    // Without this the account exists, the login succeeds, /auth/me returns an
+    // empty `clusters` array and every call 403s — which looks like a broken
+    // deploy rather than a permissions decision. In the same transaction as the
+    // user and identity rows on purpose: a half-provisioned human is exactly
+    // the state that is confusing to diagnose.
+    //
+    // "Every cluster of the tenant" is the only rule that needs no extra
+    // configuration and is correct on a single-cluster cell, which is what a
+    // self-hosted proxy is. `role` is validated at boot (config::CLUSTER_ROLES),
+    // so it cannot violate the CHECK here.
+    let granted = tx
+        .execute(
+            "INSERT INTO queen_proxy.cluster_roles(user_id, cluster_id, role) \
+             SELECT $1::text::uuid, c.id, $2 \
+               FROM queen_proxy.clusters c \
+              WHERE c.tenant_id = $3::text::uuid \
+             ON CONFLICT (user_id, cluster_id) DO NOTHING",
+            &[&user_id.to_string(), &default_role, &tenant_id.to_string()],
+        )
+        .await
+        .map_err(|e| ResolveErr::Db(e.to_string()))?;
+
     tx.commit().await.map_err(|e| ResolveErr::Db(e.to_string()))?;
+
+    if granted == 0 {
+        // Not an error: the tenant genuinely has no clusters yet. Say so, because
+        // the symptom the user reports ("I can log in but everything is empty")
+        // is identical to the bug this grant exists to prevent.
+        tracing::warn!(
+            target: "oauth",
+            tenant = %tenant_slug,
+            email = %email,
+            "auto-provisioned a user but the tenant has no clusters to grant on"
+        );
+    } else {
+        tracing::info!(
+            target: "oauth",
+            email = %email,
+            role = %default_role,
+            clusters = granted,
+            "auto-provisioned user granted default role"
+        );
+    }
     Ok(UserRef { user_id, tenant_id })
 }
 
@@ -1613,32 +1710,40 @@ mod tests {
             email: Some("User@Example.com".to_string()),
             email_verified: Some(email_verified),
             nonce: Some(nonce.to_string()),
+            hd: None,
         }
+    }
+
+    /// No domain restriction — the shape every pre-existing test asserts.
+    const ANY_DOMAIN: &[String] = &[];
+
+    fn domains(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
     fn google_verified_email_ok_and_lowercased() {
         let c = gclaims(json!(true), "n1");
-        let id = validate_google_claims(&c, "n1").expect("verified claims ok");
+        let id = validate_google_claims(&c, "n1", ANY_DOMAIN).expect("verified claims ok");
         assert_eq!(id.sub, "google-sub-123");
         assert_eq!(id.email, "user@example.com");
         // string "true" also accepted (real Google payloads vary)
         let c2 = gclaims(json!("true"), "n1");
-        assert!(validate_google_claims(&c2, "n1").is_ok());
+        assert!(validate_google_claims(&c2, "n1", ANY_DOMAIN).is_ok());
     }
 
     #[test]
     fn google_unverified_email_rejected() {
         let c = gclaims(json!(false), "n1");
-        assert_eq!(validate_google_claims(&c, "n1"), Err(ClaimErr::EmailUnverified));
+        assert_eq!(validate_google_claims(&c, "n1", ANY_DOMAIN), Err(ClaimErr::EmailUnverified));
         let c2 = gclaims(json!("false"), "n1");
-        assert_eq!(validate_google_claims(&c2, "n1"), Err(ClaimErr::EmailUnverified));
+        assert_eq!(validate_google_claims(&c2, "n1", ANY_DOMAIN), Err(ClaimErr::EmailUnverified));
     }
 
     #[test]
     fn google_nonce_mismatch_rejected() {
         let c = gclaims(json!(true), "n1");
-        assert_eq!(validate_google_claims(&c, "different"), Err(ClaimErr::NonceMismatch));
+        assert_eq!(validate_google_claims(&c, "different", ANY_DOMAIN), Err(ClaimErr::NonceMismatch));
     }
 
     #[test]
@@ -1648,8 +1753,75 @@ mod tests {
             email: None,
             email_verified: Some(json!(true)),
             nonce: Some("n1".to_string()),
+            hd: None,
         };
-        assert_eq!(validate_google_claims(&c, "n1"), Err(ClaimErr::MissingEmail));
+        assert_eq!(validate_google_claims(&c, "n1", ANY_DOMAIN), Err(ClaimErr::MissingEmail));
+    }
+
+    // --- Google domain allowlist --------------------------------------------
+
+    #[test]
+    fn google_domain_allowed_via_hd_claim() {
+        let mut c = gclaims(json!(true), "n1");
+        c.hd = Some("Smartpricing.IT".to_string());
+        c.email = Some("alice@smartpricing.it".to_string());
+        let id = validate_google_claims(&c, "n1", &domains(&["smartpricing.it"]))
+            .expect("hd matches the allowlist");
+        assert_eq!(id.email, "alice@smartpricing.it");
+    }
+
+    #[test]
+    fn google_domain_allowed_via_email_when_hd_absent() {
+        // Workspace sets `hd`; this covers the case where it does not arrive but
+        // the verified address is still at an allowed domain.
+        let mut c = gclaims(json!(true), "n1");
+        c.hd = None;
+        c.email = Some("alice@smartpricing.it".to_string());
+        assert!(validate_google_claims(&c, "n1", &domains(&["smartpricing.it"])).is_ok());
+    }
+
+    #[test]
+    fn google_domain_rejected_when_neither_matches() {
+        let mut c = gclaims(json!(true), "n1");
+        c.hd = Some("evil.example".to_string());
+        c.email = Some("attacker@evil.example".to_string());
+        assert_eq!(
+            validate_google_claims(&c, "n1", &domains(&["smartpricing.it"])),
+            Err(ClaimErr::DomainNotAllowed)
+        );
+    }
+
+    #[test]
+    fn google_domain_empty_allowlist_allows_any() {
+        let mut c = gclaims(json!(true), "n1");
+        c.email = Some("someone@gmail.com".to_string());
+        assert!(validate_google_claims(&c, "n1", ANY_DOMAIN).is_ok());
+    }
+
+    #[test]
+    fn google_domain_check_runs_after_verification() {
+        // An unverified email must not be reported as a domain problem: the
+        // stronger rejection wins so the log says what actually happened.
+        let mut c = gclaims(json!(false), "n1");
+        c.email = Some("attacker@evil.example".to_string());
+        assert_eq!(
+            validate_google_claims(&c, "n1", &domains(&["smartpricing.it"])),
+            Err(ClaimErr::EmailUnverified)
+        );
+    }
+
+    #[test]
+    fn google_domain_multiple_and_subdomain_is_not_a_match() {
+        let mut c = gclaims(json!(true), "n1");
+        c.hd = None;
+        c.email = Some("u@sub.smartpricing.it".to_string());
+        // Exact match only — a subdomain is a different domain.
+        assert_eq!(
+            validate_google_claims(&c, "n1", &domains(&["smartpricing.it", "smartness.com"])),
+            Err(ClaimErr::DomainNotAllowed)
+        );
+        c.email = Some("u@smartness.com".to_string());
+        assert!(validate_google_claims(&c, "n1", &domains(&["smartpricing.it", "smartness.com"])).is_ok());
     }
 
     // --- GitHub email selection --------------------------------------------

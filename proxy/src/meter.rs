@@ -654,6 +654,8 @@ mod tests {
             operator_enabled: false,
             google_client_id: None,
             google_client_secret: None,
+            google_allowed_domains: Vec::new(),
+            autoprovision_default_role: "viewer".to_string(),
             github_client_id: None,
             github_client_secret: None,
             meter_flush_ms: 1000,

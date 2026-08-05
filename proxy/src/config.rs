@@ -23,6 +23,46 @@ pub fn env_u64(key: &str, default: u64) -> u64 {
     env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+/// The roles `queen_proxy.cluster_roles.role` accepts (001_init.sql CHECK).
+/// Kept here so a bad `QUEEN_PROXY_DEFAULT_ROLE` is caught at boot rather than
+/// as a constraint violation on somebody's first login.
+pub const CLUSTER_ROLES: [&str; 4] = ["admin", "producer", "consumer", "viewer"];
+
+/// Validate `QUEEN_PROXY_DEFAULT_ROLE`, falling back to the least-privileged
+/// role. Deliberately NOT fatal: an unusable default role only matters when
+/// auto-provisioning is on, and downgrading to `viewer` cannot escalate
+/// anything. The warning is what makes it findable.
+pub fn resolve_default_role(raw: Option<String>) -> String {
+    match raw {
+        None => "viewer".to_string(),
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            if CLUSTER_ROLES.contains(&v.as_str()) {
+                v
+            } else {
+                tracing::warn!(
+                    target: "config",
+                    value = %v,
+                    valid = ?CLUSTER_ROLES,
+                    "QUEEN_PROXY_DEFAULT_ROLE is not a valid cluster role; using viewer"
+                );
+                "viewer".to_string()
+            }
+        }
+    }
+}
+
+/// Comma-separated list, trimmed and lowercased, empty entries dropped. An
+/// unset or all-whitespace value yields an empty Vec.
+pub fn csv_lower(key: &str) -> Vec<String> {
+    env::var(key)
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Grace window past a cache entry's TTL during which the last known-good
 /// value may still be served, but only when pxdb failed to *answer* (PLAN §2:
 /// "keep serving cached clusters (fail-open for known good) ... pxdb down ≠
@@ -158,6 +198,26 @@ pub struct Config {
     pub operator_enabled: bool,
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
+    /// Google Workspace domains allowed to sign in, lowercased. EMPTY MEANS ANY
+    /// verified Google account, which is only a closed door because
+    /// auto-provision is off by default — an unknown identity still has to
+    /// match an existing `queen_proxy.users` row. Turn auto-provision on
+    /// without setting this and any verified Google account on earth can create
+    /// itself an account.
+    ///
+    /// Checked against the `hd` claim OR the email's domain (see
+    /// `validate_google_claims`).
+    pub google_allowed_domains: Vec<String>,
+    /// Cluster role granted to an auto-provisioned user, on every cluster of
+    /// the auto-provision tenant. Without a grant a provisioned user logs in
+    /// successfully and then 403s on everything, which reads as a broken deploy
+    /// rather than a permissions decision — so this exists to make
+    /// auto-provisioning produce a usable account or none at all.
+    ///
+    /// `QUEEN_PROXY_DEFAULT_ROLE`, default `viewer`. An unrecognised value
+    /// falls back to `viewer` with a warning: a typo must not be able to
+    /// escalate, and `viewer` is the least it can be.
+    pub autoprovision_default_role: String,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
     // metering
@@ -207,10 +267,56 @@ impl Config {
             operator_enabled: env_bool("QUEEN_PROXY_OPERATOR_ENABLED", false),
             google_client_id: env_opt("GOOGLE_CLIENT_ID"),
             google_client_secret: env_opt("GOOGLE_CLIENT_SECRET"),
+            google_allowed_domains: csv_lower("GOOGLE_ALLOWED_DOMAINS"),
+            autoprovision_default_role: resolve_default_role(env_opt("QUEEN_PROXY_DEFAULT_ROLE")),
             github_client_id: env_opt("GITHUB_CLIENT_ID"),
             github_client_secret: env_opt("GITHUB_CLIENT_SECRET"),
             meter_flush_ms: env_u64("QUEEN_PROXY_METER_FLUSH_MS", 15_000),
             spool_dir: env_str("QUEEN_PROXY_SPOOL_DIR", "./queen-proxy-spool"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_role_unset_is_viewer() {
+        assert_eq!(resolve_default_role(None), "viewer");
+    }
+
+    #[test]
+    fn default_role_accepts_every_valid_role() {
+        for r in CLUSTER_ROLES {
+            assert_eq!(resolve_default_role(Some(r.to_string())), r);
+        }
+    }
+
+    #[test]
+    fn default_role_is_case_and_space_insensitive() {
+        assert_eq!(resolve_default_role(Some("  ADMIN ".to_string())), "admin");
+    }
+
+    #[test]
+    fn default_role_invalid_downgrades_to_viewer() {
+        // `member` is the plausible wrong guess: it is not in the CHECK, and
+        // silently becoming `admin` would be the dangerous failure mode.
+        assert_eq!(resolve_default_role(Some("member".to_string())), "viewer");
+        assert_eq!(resolve_default_role(Some("".to_string())), "viewer");
+        assert_eq!(resolve_default_role(Some("root".to_string())), "viewer");
+    }
+
+    #[test]
+    fn csv_lower_trims_lowercases_and_drops_empties() {
+        std::env::set_var("QUEEN_TEST_CSV", " Smartpricing.IT , ,smartness.com,");
+        assert_eq!(csv_lower("QUEEN_TEST_CSV"), vec!["smartpricing.it", "smartness.com"]);
+        std::env::remove_var("QUEEN_TEST_CSV");
+    }
+
+    #[test]
+    fn csv_lower_unset_is_empty() {
+        std::env::remove_var("QUEEN_TEST_CSV_ABSENT");
+        assert!(csv_lower("QUEEN_TEST_CSV_ABSENT").is_empty());
     }
 }
