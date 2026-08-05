@@ -107,13 +107,15 @@ async def test_recoveryMidStreamResume(client):
 
     for _ in range(5):
         await client.queue(src).partition("p").push([{"data": {"v": 1}}])
-    handle1 = await build().run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+    handle1 = await build().run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     await drain_until(client, sink, until=lambda out: len(out) >= 1, timeout_ms=5000)
     await handle1.stop()
     m1 = handle1.metrics()
 
     for _ in range(5):
         await client.queue(src).partition("p").push([{"data": {"v": 1}}])
+    # No subscription_mode here on purpose: the group already exists, so run 2
+    # must resume from its stored cursor - that is exactly what is asserted.
     handle2 = await build().run(query_id=query_id, url=STREAMS_URL, batch_size=50)
     await sleep(3000)
     await handle2.stop()

@@ -47,7 +47,7 @@ export async function eventTimeBucketsByExtractor(client) {
     .aggregate({ count: () => 1, sum: m => m.v })
     .map((agg, ctx) => ({ windowKey: ctx.windowKey, ...agg }))
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   // The 10:00 window closes when the 10:01:05 event advances the
   // watermark past its end. The 10:01 window stays open until either
@@ -85,7 +85,10 @@ export async function eventTimeLateDropExcludesEvent(client) {
   await client.queue(src).create()
   await client.queue(sink).create()
 
-  // Run 1: advance the watermark by emitting a fresh event.
+  // Run 1: advance the watermark by emitting a fresh event. The push happens
+  // before the runner's consumer group exists, so run 1 asks for 'all' — with
+  // the broker default of 'new' the watermark never moves and the "late"
+  // event in run 2 is not late at all.
   await client.queue(src).partition('p').push([
     { data: { v: 100, eventTs: '2026-01-01T11:00:00Z' } }
   ])
@@ -103,7 +106,7 @@ export async function eventTimeLateDropExcludesEvent(client) {
     .to(client.queue(sink))
     .run(handler)
 
-  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
   await sleep(2000)
   await handle1.stop()
 
@@ -150,7 +153,7 @@ export async function eventTimeAllowedLatenessIncluded(client) {
     .to(client.queue(sink))
     .run(handler)
 
-  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
   await sleep(2000)
   await handle1.stop()
 
@@ -202,7 +205,7 @@ export async function eventTimeLateIncludePolicy(client) {
     .to(client.queue(sink))
     .run(handler)
 
-  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
   await sleep(2000)
   await handle1.stop()
 

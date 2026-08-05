@@ -302,3 +302,86 @@ func TestPushMultipleMessages(t *testing.T) {
 
 	t.Logf("Multiple message push working for queue: %s", queueName)
 }
+
+// TestPushTransactionIdWithEscapedCharacters pins the charset contract of the push
+// path from the Go side, because Go is the SDK that trips it on DEFAULT settings:
+// encoding/json has SetEscapeHTML(true) by default, so & < > go on the wire as
+// six-character \u escapes. The broker borrow-parses queue/partition/transactionId,
+// and for one release ANY escape there was a 400 that discarded the whole batch --
+// which dead-lettered messages whose transaction id merely contained an ampersand.
+func TestPushTransactionIdWithEscapedCharacters(t *testing.T) {
+	client := requireClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	queueName := generateQueueName("push-esc")
+	if _, err := client.Queue(queueName).Create().Execute(ctx); err != nil {
+		t.Fatalf("Failed to create queue: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		txn  string
+	}{
+		{"html_ampersand", "pull:Booking.com&Expedia"},
+		{"html_angle_brackets", "listing:<1>2"},
+		{"quote", `quote:"x"`},
+		{"backslash", `slash:a\b`},
+		{"solidus", "date:2026/07/BK-11"},
+		{"non_ascii", "unicode:citt\u00e0"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			responses, err := client.Queue(queueName).
+				Push(map[string]interface{}{"n": 1}).
+				TransactionID(tc.txn).
+				Execute(ctx)
+			if err != nil {
+				t.Fatalf("push with transactionId %q failed: %v", tc.txn, err)
+			}
+			if len(responses) != 1 {
+				t.Fatalf("expected 1 response, got %d", len(responses))
+			}
+			if responses[0].Status != "queued" && responses[0].Status != "duplicate" {
+				t.Errorf("transactionId %q: got status %q", tc.txn, responses[0].Status)
+			}
+		})
+	}
+}
+
+// TestPushPartitionWithEscapedCharacters covers the second borrowed field. The
+// same 400 fired on the partition, not just the transactionId -- and unlike the
+// queue name, the partition is NOT charset-validated anywhere (the SDK has a
+// ValidatePartitionName, but it has no call sites), so an OTA-derived partition
+// like "hotel:<main>&annex" reaches the broker verbatim.
+func TestPushPartitionWithEscapedCharacters(t *testing.T) {
+	client := requireClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	queueName := generateQueueName("push-esc-part")
+	if _, err := client.Queue(queueName).Create().Execute(ctx); err != nil {
+		t.Fatalf("Failed to create queue: %v", err)
+	}
+
+	for _, partition := range []string{
+		"hotel:<main>&annex",
+		`quote:"x"`,
+		"date:2026/07",
+	} {
+		responses, err := client.Queue(queueName).
+			Partition(partition).
+			Push(map[string]interface{}{"n": 1}).
+			Execute(ctx)
+		if err != nil {
+			t.Fatalf("push to partition %q failed: %v", partition, err)
+		}
+		if len(responses) != 1 {
+			t.Fatalf("partition %q: expected 1 response, got %d", partition, len(responses))
+		}
+		if responses[0].Status != "queued" && responses[0].Status != "duplicate" {
+			t.Errorf("partition %q: got status %q", partition, responses[0].Status)
+		}
+	}
+}

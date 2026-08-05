@@ -929,6 +929,7 @@ async fn a_per_request_lease_override_beats_the_queue_setting() {
             .group(&group)
             .wait(false)
             .lease_seconds(1)
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .unwrap();

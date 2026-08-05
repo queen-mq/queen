@@ -41,7 +41,7 @@ async def test_tumblingBasicWindowSum(client):
         .window_tumbling(seconds=2, idle_flush_ms=800)
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["amount"]})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
     await push_task
     emits = await drain_until(
@@ -87,7 +87,7 @@ async def test_tumblingPerPartitionIsolation(client):
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["amount"]})
         .map(lambda agg, ctx: {"partition": ctx["partition"], **agg})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, max_partitions=4, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, max_partitions=4, reset=True)
     )
     await task
     emits = await drain_until(
@@ -142,7 +142,7 @@ async def test_tumblingAggregateAllStats(client):
             "avg":   lambda m: m["v"],
         })
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
     emits = await drain_until(client, sink, until=lambda out: len(out) >= 1, timeout_ms=10000)
     await handle.stop()
@@ -176,7 +176,7 @@ async def test_tumblingGracePeriodDelaysClose(client):
         .window_tumbling(seconds=2, grace_period=4, idle_flush_ms=500)
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["v"]})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
     await sleep(3000)
     early = await drain_sink(client, sink, timeout_ms=500)
@@ -215,7 +215,7 @@ async def test_tumblingIdleFlushClosesQuietPartitions(client):
         .window_tumbling(seconds=1, idle_flush_ms=700)
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["v"]})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
     emits = await drain_until(client, sink, until=lambda out: len(out) >= 1, timeout_ms=8000)
     await handle.stop()

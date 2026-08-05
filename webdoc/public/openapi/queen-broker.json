@@ -142,16 +142,16 @@
                       "type": "object",
                       "properties": {
                         "queue": {
-                          "type": "string"
+                          "description": "Rust type `CowStr<'a>`."
                         },
                         "partition": {
-                          "type": "string"
+                          "description": "Rust type `CowStr<'a>`."
                         },
                         "payload": {
                           "description": "Any JSON value."
                         },
                         "transactionId": {
-                          "type": "string"
+                          "description": "Rust type `CowStr<'a>`."
                         }
                       },
                       "required": [

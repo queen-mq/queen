@@ -31,6 +31,7 @@ PUSH=false
 MULTIARCH=false
 TAG_LATEST=false
 TAG_OVERRIDE=""
+PLATFORM_OVERRIDE=""
 
 usage() {
     cat <<'EOF'
@@ -39,6 +40,11 @@ usage: ./build.sh [broker|proxy|all] [options]
   --push              push to the registry instead of loading into the local daemon
   --multiarch         build linux/amd64 + linux/arm64 (implies --push; needs a
                       docker-container builder, see the error text if missing)
+  --platform P        build for P instead of the host arch, e.g. linux/amd64.
+                      Cross-building runs the whole Rust compile under QEMU, so
+                      it is slow; it is also the only way to get a deployable
+                      image for an amd64 cluster from an arm64 machine.
+  --amd64             shorthand for --platform linux/amd64
   --latest            also tag :latest
   --registry REG      registry/namespace (default: ghcr.io/queen-mq,
                       override with $QUEEN_REGISTRY)
@@ -54,6 +60,8 @@ while [ $# -gt 0 ]; do
         broker|proxy|all) TARGET="$1" ;;
         --push)       PUSH=true ;;
         --multiarch)  MULTIARCH=true; PUSH=true ;;
+        --platform)   PLATFORM_OVERRIDE="$2"; shift ;;
+        --amd64)      PLATFORM_OVERRIDE="linux/amd64" ;;
         --latest)     TAG_LATEST=true ;;
         --registry)   REGISTRY="$2"; shift ;;
         --tag)        TAG_OVERRIDE="$2"; shift ;;
@@ -66,9 +74,27 @@ done
 command -v jq >/dev/null || { echo "build.sh: jq is required" >&2; exit 1; }
 command -v docker >/dev/null || { echo "build.sh: docker is required" >&2; exit 1; }
 
-# Multi-arch manifests need the docker-container driver; the default `docker`
-# driver silently cannot produce them, so fail here with the fix rather than
-# letting buildx error halfway through a Rust release build.
+HOST_PLATFORM="linux/$(docker version --format '{{.Server.Arch}}')"
+
+if [ "$MULTIARCH" = true ] && [ -n "$PLATFORM_OVERRIDE" ]; then
+    echo "build.sh: --multiarch and --platform are mutually exclusive" >&2
+    exit 2
+fi
+
+if [ "$MULTIARCH" = true ]; then
+    PLATFORMS="linux/amd64,linux/arm64"
+elif [ -n "$PLATFORM_OVERRIDE" ]; then
+    PLATFORMS="$PLATFORM_OVERRIDE"
+else
+    # Host arch only — the safe default for iterating, and USELESS for a cluster
+    # whose nodes are a different architecture: the pod dies with `exec format
+    # error`. Use --amd64 (or --multiarch) to produce something deployable.
+    PLATFORMS="$HOST_PLATFORM"
+fi
+
+# A multi-platform manifest needs the docker-container driver; the default
+# `docker` driver silently cannot produce one, so fail here with the fix rather
+# than letting buildx error halfway through a Rust release build.
 if [ "$MULTIARCH" = true ]; then
     DRIVER=$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/{print $2; exit}')
     if [ "$DRIVER" != "docker-container" ]; then
@@ -79,11 +105,26 @@ build.sh: --multiarch needs a docker-container builder (current driver: ${DRIVER
 EOF
         exit 1
     fi
-    PLATFORMS="linux/amd64,linux/arm64"
-else
-    # Host arch only. Emulating the other one costs a full Rust release build
-    # under QEMU/Rosetta — fine for a release, painful for iterating.
-    PLATFORMS="linux/$(docker version --format '{{.Server.Arch}}')"
+fi
+
+# A single foreign platform does NOT need that driver, but it does need QEMU
+# binfmt registered, otherwise the first RUN in the foreign stage dies with
+# "exec format error" — the same symptom as deploying the wrong arch, which
+# makes it worth naming here.
+if [ "$PLATFORMS" != "$HOST_PLATFORM" ] && [ "$MULTIARCH" != true ]; then
+    if ! docker buildx inspect --bootstrap 2>/dev/null | grep -q "$PLATFORMS"; then
+        cat >&2 <<EOF
+build.sh: this builder does not advertise $PLATFORMS (host is $HOST_PLATFORM).
+
+Register QEMU emulation once, then retry:
+
+    docker run --privileged --rm tonistiigi/binfmt --install all
+
+Docker Desktop ships this already; a plain dockerd usually does not.
+EOF
+        exit 1
+    fi
+    echo "==> cross-building $PLATFORMS on $HOST_PLATFORM under emulation — this is slow"
 fi
 
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)

@@ -36,7 +36,7 @@ async def test_eventTimeBucketsByExtractor(client):
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["v"]})
         .map(lambda agg, ctx: {"windowKey": ctx["windowKey"], **agg})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
     emits = await drain_until(client, sink, until=lambda out: len(out) >= 1, timeout_ms=10000)
     await handle.stop()
@@ -80,7 +80,7 @@ async def test_eventTimeLateDropExcludesEvent(client):
         {"data": {"v": 100, "eventTs": "2026-01-01T11:00:00Z"}}
     ])
     handle1 = await _build_event_time_stream(client, src, sink, **common).run(
-        query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True
+        query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True
     )
     await sleep(2000)
     await handle1.stop()
@@ -120,7 +120,7 @@ async def test_eventTimeAllowedLatenessIncluded(client):
         {"data": {"v": 1, "eventTs": "2026-01-01T11:00:00Z"}}
     ])
     handle1 = await _build_event_time_stream(client, src, sink, **common).run(
-        query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True
+        query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True
     )
     await sleep(2000)
     await handle1.stop()
@@ -160,7 +160,7 @@ async def test_eventTimeLateIncludePolicy(client):
         {"data": {"v": 1, "eventTs": "2026-01-01T11:00:00Z"}}
     ])
     handle1 = await _build_event_time_stream(client, src, sink, **common).run(
-        query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True
+        query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True
     )
     await sleep(2000)
     await handle1.stop()

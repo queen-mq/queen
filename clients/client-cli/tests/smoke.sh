@@ -67,7 +67,9 @@ run "partition describe"       partition describe "$QUEUE" Default
 # partition seek + clear require a CG; tested below
 
 # 5) Messages
-TX_LINE=$("$BIN" --server "$SERVER" pop "$QUEUE" -n 1 --cg peek 2>/dev/null | head -1)
+# --from-mode all: the 'peek' CG is created after the bootstrap push, and
+# the broker seeds new groups at the tail by default.
+TX_LINE=$("$BIN" --server "$SERVER" pop "$QUEUE" -n 1 --cg peek --from-mode all 2>/dev/null | head -1)
 TX=$(echo "$TX_LINE" | python3 -c 'import sys,json;d=json.loads(sys.stdin.read() or "{}");print(d.get("transactionId",""))')
 PID=$(echo "$TX_LINE" | python3 -c 'import sys,json;d=json.loads(sys.stdin.read() or "{}");print(d.get("partitionId",""))')
 

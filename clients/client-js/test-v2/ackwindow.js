@@ -30,11 +30,12 @@ const TENANT = '00000000-0000-0000-0000-000000000001'
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
 
-async function popRetry(client, queue, { batch = 3, group = null, partition = null, tries = 30 } = {}) {
+async function popRetry(client, queue, { batch = 3, group = null, partition = null, tries = 30, mode = null } = {}) {
     for (let i = 0; i < tries; i++) {
         let b = client.queue(queue).batch(batch).wait(false)
         if (group) b = b.group(group)
         if (partition) b = b.partition(partition)
+        if (mode) b = b.subscriptionMode(mode)
         const msgs = await b.pop()
         if (msgs && msgs.length > 0) return msgs
         await sleep(150)
@@ -192,7 +193,9 @@ export async function emptyPartitionCursorSealsAfterRetention(client) {
         [0, 1, 2, 3, 4, 5].map(n => ({ data: { n }, transactionId: `${queue}-tx-${n}` })))
 
     // Consume + ack only the first two: committed lands at 1, the rest stays.
-    const first = await popRetry(client, queue, { batch: 2, group })
+    // First contact for g-seal, and the 6 messages are already pushed: the
+    // group has to ask for the backlog it is about to half-consume.
+    const first = await popRetry(client, queue, { batch: 2, group, mode: 'all' })
     if (first.length !== 2) return { success: false, message: `expected 2 messages, got ${first.length}` }
     const ackr = await client.ack(first, true, { group })
     if (ackr.success !== true) return { success: false, message: `ack failed: ${ackr.error}` }
@@ -245,7 +248,11 @@ export async function emptyPartitionCursorSealsAfterRetention(client) {
     })()
     if (!dpart0) return { success: false, message: 'delayed queue segments never appeared' }
 
-    const dempty = await client.queue(dqueue).partition('Default').group(group).batch(1).wait(false).pop()
+    // First contact for g-seal on THIS queue too (metadata is queue-scoped), and
+    // the 2 delayed messages are already pushed: under the default 'new' the
+    // cursor would seed at last_offset and the guard below could not tell a seed
+    // from a seal. 'all' seeds at -1, so a non -1 cursor can only be the seal.
+    const dempty = await client.queue(dqueue).partition('Default').group(group).subscriptionMode('all').batch(1).wait(false).pop()
     if (dempty && dempty.length > 0) return { success: false, message: 'delayed message delivered early?' }
     const dcommitted = await committedOf(dpart0.id, group)
     const dsegs = await segmentCount(dpart0.id)

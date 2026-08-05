@@ -55,7 +55,7 @@ export async function slidingEventsAppearInOverlappingWindows(client) {
     .windowSliding({ size: 4, slide: 2, idleFlushMs: 1000 })
     .aggregate({ count: () => 1, sum: m => m.v })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   await itemPushPromise
   // Allow idle flush to close trailing windows.

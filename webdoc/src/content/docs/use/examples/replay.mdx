@@ -73,7 +73,7 @@ await client
   .consume(async messages => { await reindex(messages) })
 ```
 
-`all` is the default, and it seeds the cursor just below the oldest **retained** offset, so a fresh group reads every message still on disk. The alternatives are `subscriptionMode('new')` (or `subscriptionFrom('now')`), which seeds at the partition's current end and skips the backlog entirely, and `subscriptionFrom('<ISO timestamp>')`, which seeds at that point in history.
+`all` seeds the cursor just below the oldest **retained** offset, so a fresh group reads every message still on disk. It is what you must ask for explicitly: a grouped pop that sends no mode gets `new` (the broker default, `DEFAULT_SUBSCRIPTION_MODE`), which seeds at the partition's current end and skips the backlog entirely. `subscriptionFrom('now')` is equivalent to `new`, and `subscriptionFrom('<ISO timestamp>')` seeds at that point in history. A pop with no consumer group is always `all` and ignores the mode.
 
 The first pop of a `(queue, group)` pair also writes a durable registration recording the mode and timestamp. A partition created *later* seeds from that stored timestamp rather than from its own end, so adding partitions does not silently hide their backlog from an existing group.
 

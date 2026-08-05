@@ -194,8 +194,11 @@ func TestConsumerGroup(t *testing.T) {
 		return nil
 	}
 
+	// The group is created by this first consume, after the 5 pushes: ask for
+	// the backlog explicitly (the broker seeds new groups at the tail).
 	err = client.Queue(queueName).
 		Group(groupName).
+		SubscriptionMode(queen.SubscriptionModeAll).
 		Limit(5).
 		Consume(ctx, handler).
 		Execute(ctx)

@@ -565,6 +565,7 @@ async fn an_auto_ack_pop_commits_every_lane_it_claimed() {
             .batch(10)
             .partitions(8)
             .wait(false)
+            .subscription_mode(SubscriptionMode::All)
             .pop_auto_ack()
             .await
             .unwrap();
@@ -1010,6 +1011,7 @@ async fn a_partition_stays_ordered_under_concurrent_consumers() {
         .limit((LANES * PER_LANE) as u64)
         .wait(false)
         .idle(Duration::from_secs(6))
+        .subscription_mode(SubscriptionMode::All)
         .consume(move |msg| {
             let sink = Arc::clone(&sink);
             async move {
@@ -1070,6 +1072,7 @@ async fn concurrent_consumers_never_deliver_the_same_message_twice() {
         .limit(N as u64)
         .wait(false)
         .idle(Duration::from_secs(6))
+        .subscription_mode(SubscriptionMode::All)
         .consume(move |msg| {
             let sink = Arc::clone(&sink);
             async move {
@@ -1131,6 +1134,7 @@ async fn many_producers_can_push_the_same_queue_at_once() {
             .batch(200)
             .partitions(16)
             .wait(false)
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .unwrap();
@@ -1426,6 +1430,7 @@ async fn a_renewed_lease_lets_a_slow_handler_finish() {
         .wait(false)
         .renew_lease(Duration::from_millis(800))
         .idle(Duration::from_secs(10))
+        .subscription_mode(SubscriptionMode::All)
         .consume(move |_msg| {
             let counter = Arc::clone(&counter);
             async move {
@@ -1484,6 +1489,7 @@ async fn a_lease_override_shorter_than_the_handler_loses_the_message() {
             .group("g-lost")
             .wait(false)
             .lease_seconds(1)
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .unwrap();
@@ -1767,6 +1773,7 @@ async fn every_ack_status_is_accepted_and_does_what_it_says() {
                 .group("g-status")
                 .batch(1)
                 .wait(false)
+                .subscription_mode(SubscriptionMode::All)
                 .pop()
                 .await
                 .unwrap();
@@ -1843,6 +1850,7 @@ async fn a_sustained_push_consume_cycle_stays_consistent() {
             .batch(100)
             .partitions(8)
             .wait(false)
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .unwrap();

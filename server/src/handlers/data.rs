@@ -1,7 +1,10 @@
 #![allow(unused_imports)]
 use super::*;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -12,6 +15,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use deadpool_postgres::Pool;
+use serde::de::{self, Deserializer, Visitor};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -26,14 +30,114 @@ use crate::util::{uuidv7_bytes, FnvHashMap};
 use crate::admission::Lane;
 
 // ------------------------------------------------------------------ push
+
+/// A JSON string field taken straight out of the request body: BORROWED when the
+/// literal needs no unescaping (the overwhelmingly common case), OWNED only when
+/// serde_json had to unescape it.
+///
+/// Why this exists. A bare `&'a str` field cannot be deserialized from a JSON
+/// literal containing ANY escape sequence — unescaping needs an owned buffer, so
+/// serde_json calls `visit_str` and the `&str` impl answers `invalid type: string
+/// "...", expected a borrowed string`. That is a parse error for the WHOLE body
+/// (there is one `from_slice` per request), i.e. a 400 that discards every item in
+/// the batch. It is not a corner case: Go's `encoding/json` escapes `&`, `<` and
+/// `>` as six-character \u sequences BY DEFAULT (SetEscapeHTML), Guzzle (the
+/// PHP/Laravel SDK) escapes `/` and
+/// all non-ASCII, and every JSON encoder escapes `"` and `\`. So a transaction id
+/// like `Bed&Breakfast-771` from the Go SDK, or `2026/07/BK-11` from PHP, made the
+/// broker 400 its own first-party clients.
+///
+/// Why a newtype and not `Cow<'a, str>` directly. `#[serde(borrow)]` only rewires a
+/// field whose type is *literally* `Cow<'a, str>` (serde_derive's `is_cow` check).
+/// `Option<Cow<'a, str>>` does not match and silently falls back to the blanket
+/// `impl Deserialize for Cow`, which is ALWAYS-OWNED — an allocation on every push
+/// for `partition` and `transactionId`, on the one path in this broker that is
+/// tuned per-allocation. This newtype behaves identically bare and inside `Option`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CowStr<'a>(Cow<'a, str>);
+
+impl<'a> CowStr<'a> {
+    #[inline]
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'a> std::ops::Deref for CowStr<'a> {
+    type Target = str;
+    #[inline]
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for CowStr<'a> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<'a>(PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> Visitor<'de> for V<'a> {
+            type Value = CowStr<'a>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a string")
+            }
+            /// Hot path: the literal had no escape, so it is a slice of the request
+            /// body. Zero allocation — byte-identical to the `&'a str` field this
+            /// replaced.
+            #[inline]
+            fn visit_borrowed_str<E: de::Error>(self, v: &'de str) -> Result<CowStr<'a>, E> {
+                // Unreachable by construction: serde_json's tokenizer rejects a raw
+                // 0x00-0x1F byte inside a string literal, so a value that needed no
+                // unescaping cannot carry one. Asserted, not scanned, so the clean
+                // path stays free.
+                debug_assert!(!v.as_bytes().iter().any(|&b| b < 0x20));
+                Ok(CowStr(Cow::Borrowed(v)))
+            }
+            #[inline]
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<CowStr<'a>, E> {
+                reject_control::<E>(v)?;
+                Ok(CowStr(Cow::Owned(v.to_owned())))
+            }
+            #[inline]
+            fn visit_string<E: de::Error>(self, v: String) -> Result<CowStr<'a>, E> {
+                reject_control::<E>(&v)?;
+                Ok(CowStr(Cow::Owned(v)))
+            }
+        }
+        d.deserialize_str(V(PhantomData))
+    }
+}
+
+/// The ONE charset restriction the push path genuinely depends on. The layer-1
+/// dedup key below and the fusion group key (`fusion.rs`) are both composed by
+/// joining fields on `\x1f`; a `\x1f` inside a field would alias two distinct
+/// (queue, partition, txn) triples onto one key — silently fusing two partitions
+/// into one segment. Until now that invariant held only by accident: the only way
+/// to write a 0x1F inside a JSON string is a \u escape, and every escape failed
+/// the borrow. Enforced here instead, in the ONLY arm that can ever see one (a
+/// value that was unescaped), so the clean path pays nothing.
+#[cold]
+fn reject_control<E: de::Error>(v: &str) -> Result<(), E> {
+    if v.as_bytes().iter().any(|&b| b < 0x20) {
+        return Err(E::custom(
+            "control characters are not allowed in queue, partition or transactionId",
+        ));
+    }
+    Ok(())
+}
+
+/// Wire limit on `transactionId`, dictated by the u16 length prefix the segment
+/// frame codec writes for it (`frames::pack_frames`).
+pub(crate) const MAX_TXN_BYTES: usize = u16::MAX as usize;
+
 #[derive(Deserialize)]
 struct PushItem<'a> {
-    queue: &'a str,
-    partition: Option<&'a str>,
+    #[serde(borrow)]
+    queue: CowStr<'a>,
+    #[serde(borrow)]
+    partition: Option<CowStr<'a>>,
     #[serde(borrow)]
     payload: &'a RawValue,
-    #[serde(rename = "transactionId")]
-    transaction_id: Option<&'a str>,
+    #[serde(borrow, rename = "transactionId")]
+    transaction_id: Option<CowStr<'a>>,
 }
 
 #[derive(Deserialize)]
@@ -104,11 +208,30 @@ pub async fn handle_push(
 ) -> Response {
     let parsed: PushBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     let n = parsed.items.len();
     if n == 0 {
         return json(StatusCode::CREATED, "[]".to_string());
+    }
+
+    // The segment frame codec stores the transaction id behind a u16 length
+    // (frames.rs `pack_frames`), so a longer one used to be silently TRUNCATED by
+    // the `as u16` cast while `body_len` still counted the full length — a corrupt
+    // frame, not a rejected push. Enforce the wire limit at the boundary that can
+    // still answer, and reject the whole batch rather than write a bad segment.
+    if let Some(bad) = parsed
+        .items
+        .iter()
+        .position(|it| it.transaction_id.as_deref().is_some_and(|t| t.len() > MAX_TXN_BYTES))
+    {
+        return json(
+            StatusCode::BAD_REQUEST,
+            json_err(
+                "bad body: ",
+                format_args!("transactionId of item {bad} exceeds the {MAX_TXN_BYTES}-byte limit"),
+            ),
+        );
     }
 
     // producer_sub is stamped ONLY from the validated JWT `sub` (never the body).
@@ -140,10 +263,11 @@ pub async fn handle_push(
         let mid_str = uuid_bytes_to_string(&mid);
         let txn = it
             .transaction_id
+            .as_deref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| mid_str.clone());
-        let queue = it.queue.to_string();
-        let partition = it.partition.unwrap_or("Default").to_string();
+        let queue = it.queue.as_str().to_string();
+        let partition = it.partition.as_deref().unwrap_or("Default").to_string();
 
         let mut seen_key =
             String::with_capacity(queue.len() + partition.len() + txn.len() + 2);
@@ -280,7 +404,7 @@ pub async fn handle_push(
     {
         let mut per_q: HashMap<&str, u64> = HashMap::new();
         for it in &parsed.items {
-            *per_q.entry(it.queue).or_insert(0) += 1;
+            *per_q.entry(it.queue.as_str()).or_insert(0) += 1;
         }
         for (q, msgs) in per_q {
             st.metrics.per_queue.add_push(tenant.as_str(), q, msgs);
@@ -336,10 +460,11 @@ pub async fn handle_push(
     for i in error_leaders {
         let it = &parsed.items[i];
         let txn = state.results.lock().unwrap()[i].txn.clone();
-        let (payload, encrypted) = spool_payload(&st, it.queue, tenant.as_str(), it.payload, &mut enc_flags).await;
+        let (payload, encrypted) =
+            spool_payload(&st, it.queue.as_str(), tenant.as_str(), it.payload, &mut enc_flags).await;
         let ok = st.file_buffer.write_event(
-            it.queue,
-            it.partition.unwrap_or("Default"),
+            it.queue.as_str(),
+            it.partition.as_deref().unwrap_or("Default"),
             tenant.as_str(),
             &txn,
             producer_sub.as_deref(),
@@ -428,21 +553,29 @@ async fn buffer_all(
         let mid_str = uuid_bytes_to_string(&uuidv7_bytes());
         let txn = it
             .transaction_id
+            .as_deref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| mid_str.clone());
-        let partition = it.partition.unwrap_or("Default");
+        let partition = it.partition.as_deref().unwrap_or("Default");
         // RUSTFIX item 8: spool the encrypted envelope for an encrypted queue.
-        let (payload, encrypted) = spool_payload(st, it.queue, tenant, it.payload, &mut enc_flags).await;
-        let ok = st
-            .file_buffer
-            .write_event(it.queue, partition, tenant, &txn, producer_sub, encrypted, &payload);
+        let (payload, encrypted) =
+            spool_payload(st, it.queue.as_str(), tenant, it.payload, &mut enc_flags).await;
+        let ok = st.file_buffer.write_event(
+            it.queue.as_str(),
+            partition,
+            tenant,
+            &txn,
+            producer_sub,
+            encrypted,
+            &payload,
+        );
         if !ok {
             all_ok = false;
         }
         results.push(ItemResult {
             message_id: mid_str,
             txn,
-            queue: it.queue.to_string(),
+            queue: it.queue.as_str().to_string(),
             status: if ok { "buffered" } else { "failed" },
             dup_of: None,
         });
@@ -472,7 +605,10 @@ pub struct PopParams {
     #[serde(rename = "consumerGroup")]
     consumer_group: Option<String>,
     // Subscription seeding for a NEW (partition, group) cursor on first contact:
-    // subscriptionMode 'new' | 'all' (default), subscriptionFrom 'now' | ISO
+    // subscriptionMode 'new' | 'all', subscriptionFrom 'now' | ISO. When omitted,
+    // the broker applies DEFAULT_SUBSCRIPTION_MODE (default 'new' — see
+    // config::normalize_subscription_mode). Group-less "queue mode" pops are
+    // hard-pinned to 'all' by the SQL and ignore both.
     // timestamp | '' (default). Threaded to the log pop SPs (p_sub_mode /
     // p_sub_from); existing cursors are never re-seeded.
     #[serde(rename = "subscriptionMode")]
@@ -566,7 +702,11 @@ pub async fn handle_pop(
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
-    let sub_mode = p.subscription_mode.unwrap_or_else(|| "all".to_string());
+    let sub_mode = p
+        .subscription_mode
+        .as_deref()
+        .map(crate::config::normalize_subscription_mode)
+        .unwrap_or_else(|| st.default_subscription_mode.clone());
     let sub_from = p.subscription_from.unwrap_or_default();
     let worker = uuid_bytes_to_string(&uuidv7_bytes());
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -1687,7 +1827,11 @@ pub async fn handle_pop_partition(
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
-    let sub_mode = p.subscription_mode.unwrap_or_else(|| "all".to_string());
+    let sub_mode = p
+        .subscription_mode
+        .as_deref()
+        .map(crate::config::normalize_subscription_mode)
+        .unwrap_or_else(|| st.default_subscription_mode.clone());
     let sub_from = p.subscription_from.unwrap_or_default();
     let worker = uuid_bytes_to_string(&uuidv7_bytes());
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -1840,7 +1984,11 @@ pub async fn handle_pop_discover(
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
-    let sub_mode = p.subscription_mode.unwrap_or_else(|| "all".to_string());
+    let sub_mode = p
+        .subscription_mode
+        .as_deref()
+        .map(crate::config::normalize_subscription_mode)
+        .unwrap_or_else(|| st.default_subscription_mode.clone());
     let sub_from = p.subscription_from.unwrap_or_default();
     let worker = uuid_bytes_to_string(&uuidv7_bytes());
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -2347,7 +2495,7 @@ pub async fn handle_ack(
 ) -> Response {
     let a: AckSingle = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     let group = a.consumer_group.clone().unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     let acks = vec![Ack {
@@ -2368,7 +2516,7 @@ pub async fn handle_ack_batch(
 ) -> Response {
     let b: AckBatch = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     let group = b.consumer_group.clone().unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     let acks: Vec<Ack> = b
@@ -3219,7 +3367,7 @@ pub async fn handle_transaction(
 ) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     let txn_id = uuid_bytes_to_string(&uuidv7_bytes());
     // Authenticated producer identity (JWT sub), stamped onto every pushed frame
@@ -3845,13 +3993,13 @@ mod protocol_conformance {
         let parsed: PushBody = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.items.len(), 2);
 
-        assert_eq!(parsed.items[0].queue, "orders");
-        assert_eq!(parsed.items[0].partition, None);
-        assert_eq!(parsed.items[0].transaction_id, None);
+        assert_eq!(parsed.items[0].queue.as_str(), "orders");
+        assert_eq!(parsed.items[0].partition.as_deref(), None);
+        assert_eq!(parsed.items[0].transaction_id.as_deref(), None);
         assert_eq!(parsed.items[0].payload.get(), r#"{"n":1}"#);
 
-        assert_eq!(parsed.items[1].partition, Some("eu"));
-        assert_eq!(parsed.items[1].transaction_id, Some("txn-7"));
+        assert_eq!(parsed.items[1].partition.as_deref(), Some("eu"));
+        assert_eq!(parsed.items[1].transaction_id.as_deref(), Some("txn-7"));
         assert_eq!(parsed.items[1].payload.get(), "null");
     }
 
@@ -4149,5 +4297,183 @@ mod protocol_conformance {
         assert!(parsed.success, "paused must not read as failure");
         assert!(parsed.is_paused());
         assert!(parsed.is_empty());
+    }
+}
+
+/// The push body parser's charset contract. This is the ONLY body parse in the
+/// broker that borrows a JSON string into a `&str`-shaped field, and for one
+/// release it rejected every escape sequence -- which meant the Go SDK's default
+/// HTML escaping made the broker 400 its own client, taking the whole batch with
+/// it. Each case below is a real encoder's real default.
+#[cfg(test)]
+mod push_body_charset {
+    use super::*;
+
+    // `value_literal` is the text as it appears INSIDE the JSON string literal.
+    fn one(field: &str, value_literal: &str) -> String {
+        match field {
+            "queue" => format!(r#"{{"items":[{{"queue":"{value_literal}","payload":1}}]}}"#),
+            "partition" => format!(
+                r#"{{"items":[{{"queue":"q","partition":"{value_literal}","payload":1}}]}}"#
+            ),
+            _ => format!(
+                r#"{{"items":[{{"queue":"q","payload":1,"transactionId":"{value_literal}"}}]}}"#
+            ),
+        }
+    }
+
+    fn field_of<'a>(p: &'a PushBody<'a>, field: &str) -> &'a str {
+        match field {
+            "queue" => p.items[0].queue.as_str(),
+            "partition" => p.items[0].partition.as_deref().unwrap(),
+            _ => p.items[0].transaction_id.as_deref().unwrap(),
+        }
+    }
+
+    /// Every escape a first-party SDK emits BY DEFAULT must parse, on all three
+    /// borrowed fields, and must arrive unescaped.
+    #[test]
+    fn escapes_that_real_sdks_emit_are_accepted_and_unescaped() {
+        // (literal inside the JSON, expected decoded value, which encoder emits it)
+        let cases: &[(&str, &str, &str)] = &[
+            (r"a\u0026b", "a&b", "Go encoding/json, SetEscapeHTML default true"),
+            (r"a\u003cb\u003ec", "a<b>c", "Go encoding/json, < and >"),
+            (r#"a\"b"#, "a\"b", "every JSON encoder: quote"),
+            (r"a\\b", r"a\b", "every JSON encoder: backslash"),
+            (r"2026\/07\/BK-11", "2026/07/BK-11", "PHP json_encode / Guzzle: solidus"),
+            (r"citt\u00e0", "città", "PHP + httpx<0.28: non-ASCII"),
+            (r"a\u0041b", "aAb", "escape of a plain ASCII char"),
+            ("Bed&Breakfast-771", "Bed&Breakfast-771", "JS/Python/Rust: literal &"),
+            ("città", "città", "JS/Python/Rust: raw UTF-8"),
+        ];
+        for field in ["queue", "partition", "transactionId"] {
+            for (lit, want, who) in cases {
+                let body = one(field, lit);
+                let parsed: PushBody = serde_json::from_slice(body.as_bytes())
+                    .unwrap_or_else(|e| panic!("{field} / {who}: {lit} -> {e}"));
+                assert_eq!(field_of(&parsed, field), *want, "{field} / {who}");
+            }
+        }
+    }
+
+    /// The clean path must stay ZERO-COPY. If this ever reads Owned, the push hot
+    /// path has silently grown three allocations per message -- which is exactly
+    /// what the obvious `Option<Cow<'a, str>>` spelling does, because
+    /// `#[serde(borrow)]` only rewires a BARE `Cow<'a, str>` field.
+    #[test]
+    fn an_unescaped_body_is_still_borrowed_not_copied() {
+        let body = br#"{"items":[{"queue":"orders","partition":"eu","payload":{"n":1},"transactionId":"evt-0198f5f0-2c9d-7000-9c0e-6d3b2a1f4c55"}]}"#;
+        let p: PushBody = serde_json::from_slice(body).unwrap();
+        let it = &p.items[0];
+        assert!(matches!(it.queue.0, Cow::Borrowed(_)), "queue was copied");
+        assert!(
+            matches!(it.partition.as_ref().unwrap().0, Cow::Borrowed(_)),
+            "partition was copied"
+        );
+        assert!(
+            matches!(it.transaction_id.as_ref().unwrap().0, Cow::Borrowed(_)),
+            "transactionId was copied"
+        );
+    }
+
+    /// Control characters stay rejected, for a stated reason: the layer-1 dedup key
+    /// (handle_push) and the fusion group key (fusion.rs) are both composed by
+    /// joining fields on 0x1F. A 0x1F inside a field would alias two distinct
+    /// (queue, partition, txn) triples onto one key.
+    #[test]
+    fn control_characters_are_rejected_on_every_borrowed_field() {
+        for field in ["queue", "partition", "transactionId"] {
+            for lit in [r"a\u001fb", r"a\u0000b", r"a\nb", r"a\tb", r"a\rb"] {
+                let body = one(field, lit);
+                let err = serde_json::from_slice::<PushBody>(body.as_bytes())
+                    .err()
+                    .unwrap_or_else(|| panic!("{field}: {lit} must not parse"));
+                assert!(
+                    err.to_string().contains("control character"),
+                    "{field} / {lit}: {err}"
+                );
+            }
+        }
+    }
+
+    /// A raw control byte can never reach the BORROWED arm -- serde_json's own
+    /// tokenizer rejects it. That is what makes the check above free on the hot
+    /// path, so it is pinned rather than assumed.
+    #[test]
+    fn serde_json_itself_rejects_a_raw_control_byte_in_a_string() {
+        let mut body = String::from(r#"{"items":[{"queue":"a"#);
+        body.push('\u{1f}');
+        body.push_str(r#"b","payload":1}]}"#);
+        let err = serde_json::from_slice::<PushBody>(body.as_bytes())
+            .err()
+            .expect("a raw control byte must not parse");
+        assert!(err.to_string().contains("control character"), "{err}");
+    }
+
+    /// The payload is parsed as &RawValue and was never affected -- it must stay
+    /// that way, escapes and all, byte for byte verbatim.
+    #[test]
+    fn payload_escapes_are_preserved_verbatim() {
+        let body = br#"{"items":[{"queue":"q","payload":{"k\u0026":[{"z":"<\"\\"}]}}]}"#;
+        let p: PushBody = serde_json::from_slice(body).unwrap();
+        assert_eq!(p.items[0].payload.get(), r#"{"k\u0026":[{"z":"<\"\\"}]}"#);
+    }
+
+    /// One poisoned item used to discard the whole batch: there is a single
+    /// from_slice for the entire request. Pins that a mixed batch survives.
+    #[test]
+    fn one_escaped_item_no_longer_discards_the_whole_batch() {
+        let body = br#"{"items":[
+            {"queue":"q","payload":1,"transactionId":"clean-1"},
+            {"queue":"q","payload":2,"transactionId":"pull:Booking.com\u0026Expedia"},
+            {"queue":"q","payload":3,"transactionId":"clean-3"}
+        ]}"#;
+        let p: PushBody = serde_json::from_slice(body).unwrap();
+        assert_eq!(p.items.len(), 3);
+        assert_eq!(
+            p.items[1].transaction_id.as_deref(),
+            Some("pull:Booking.com&Expedia")
+        );
+    }
+
+    /// The response renderer must escape what the parser now accepts, or a
+    /// transactionId containing a quote produces an invalid JSON response.
+    #[test]
+    fn rendered_results_are_valid_json_for_every_accepted_value() {
+        let results = vec![ItemResult {
+            message_id: "0190aaaa-0000-7000-8000-000000000001".into(),
+            txn: "a\"b\\c&d<e>f".into(),
+            queue: "q\"1".into(),
+            status: "queued",
+            dup_of: None,
+        }];
+        let rendered = render_push_results(&results);
+        let back: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(back[0]["transaction_id"], "a\"b\\c&d<e>f");
+        assert_eq!(back[0]["queueName"], "q\"1");
+    }
+
+    /// Every 400 this handler can emit must itself be valid JSON. The body used to
+    /// be built with a raw format!, and a serde error embeds the offending value in
+    /// Debug quotes -- so the error body for a bad push was unparseable.
+    #[test]
+    fn the_bad_body_error_is_itself_valid_json() {
+        let err = serde_json::from_slice::<PushBody>(br#"{"items":[{"queue":true}]}"#)
+            .err()
+            .expect("a bool queue must not parse");
+        let body = json_err("bad body: ", err);
+        let back: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            back["error"].as_str().unwrap().starts_with("bad body: "),
+            "{body}"
+        );
+    }
+
+    /// transactionId is length-prefixed with a u16 in the segment frame codec, so
+    /// an over-long one used to be silently truncated into a corrupt frame. The
+    /// limit is now enforced at the HTTP boundary.
+    #[test]
+    fn the_txn_wire_limit_matches_the_frame_codec() {
+        assert_eq!(MAX_TXN_BYTES, u16::MAX as usize);
     }
 }

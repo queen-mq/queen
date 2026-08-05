@@ -58,6 +58,12 @@ func reachable(url string) bool {
 	return r.StatusCode >= 200 && r.StatusCode < 300
 }
 
+// replayAll is the subscription mode these tests hand to the stream runner and
+// to their own sink drains. Every scenario here pushes before the consumer
+// group exists (the runner's group is "streams.<queryID>", fresh per run), and
+// the broker seeds a fresh group at the partition tail unless asked for "all".
+const replayAll = queen.SubscriptionModeAll
+
 var nameCounter int64
 
 // mkName builds a unique test queue / query name. Mirror of JS mkName.

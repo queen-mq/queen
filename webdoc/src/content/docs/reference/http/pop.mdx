@@ -39,7 +39,7 @@ query string, have access level **read-write**, and return the same response sha
 | `timeout` | integer, ms | `30000` | all three |
 | `leaseSeconds` | integer | the queue's `leaseTime`, else `60` | all three |
 | `consumerGroup` | string | `__QUEUE_MODE__` | all three |
-| `subscriptionMode` | string | `all` | all three |
+| `subscriptionMode` | string | `new` (`DEFAULT_SUBSCRIPTION_MODE`) | all three |
 | `subscriptionFrom` | string | empty | all three |
 | `namespace` | string | empty | discovery only |
 | `task` | string | empty | discovery only |

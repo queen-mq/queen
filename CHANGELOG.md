@@ -3,7 +3,58 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 1.0.0-beta.3
+
+**A push was rejected whenever a JSON escape appeared in `queue`, `partition` or
+`transactionId`.** Those three fields deserialized into borrowed `&str`, and serde cannot
+borrow a string literal that needs unescaping, so the parse failed for the whole request
+body: HTTP 400, every item in the batch discarded. The trigger was any escape at all, not
+one bad character. Go's `encoding/json` escapes `&`, `<` and `>` by default, so a
+transaction id like `Bed&Breakfast-771` from the Go SDK was rejected; Guzzle escapes `/`
+and all non-ASCII, so `2026/07/BK-11` was rejected from PHP; and `"` and a backslash are
+escaped by every JSON encoder, so they failed from every client including Queen's own Rust
+one. The C++ broker copied these fields into owned strings and had none of this, which made
+it a regression introduced with the Rust push path.
+
+The fields now deserialize through a `Cow` newtype that still borrows when the literal
+needs no unescaping, so the push path keeps its per-item allocation count. Control
+characters remain rejected, now deliberately and with an error that says so: the layer-1
+dedup key and the fusion group key are both composed by joining these fields on `0x1F`, an
+invariant that until now held only because every escape happened to fail.
+
+Three defects found alongside it are fixed in the same pass:
+
+- **Error bodies were not valid JSON.** Fourteen handlers built `{"error":"..."}` with a
+  raw `format!`, and a serde error embeds the offending value in quotes, so the response to
+  a malformed request could not itself be parsed. They now route through the existing
+  escaping helper.
+- **An over-long `transactionId` was silently truncated.** The segment frame codec
+  length-prefixes it with a `u16` while computing the body length from the full size, so a
+  transaction id above 65535 bytes produced a frame whose declared length disagreed with
+  its contents. The limit is now enforced at the HTTP boundary and asserted in the codec.
+- **Dead-lettered messages could be unreplayable.** DLQ replay rebuilds a push body with
+  `serde_json` and feeds it back through this parser, so a message on a queue or partition
+  whose name contained a quote or a backslash could never be replayed. Existing stuck rows
+  become replayable.
+
+**A new consumer group now starts at the tail, not at the beginning of the backlog.** The
+C++ broker honored `DEFAULT_SUBSCRIPTION_MODE` and the shipped charts set it to `new`; the
+Rust port dropped the variable and hardcoded the per-request default to `all`. A chart that
+still said `new` was therefore serving `all`, and the first group created after traffic
+resumed replayed the whole retained log. The variable is honored again and its default is
+`new`. Set `DEFAULT_SUBSCRIPTION_MODE=all` to restore the previous behavior without a
+rebuild.
+
+This changes only grouped consumers on their first contact. Existing groups resume from
+their stored cursor as before, and a pop with no `consumerGroup` is unaffected: the SQL
+pins those to `all` regardless.
+
+**`subscriptionMode=new-only` did the opposite of what it advertised.** The Go SDK exports
+it as an alias of `new`, the CLI offers it in `--from-mode`, and the JS README shows it in
+use, but the SQL compares the mode literally, so `new-only` missed the `new` branch and
+replayed the entire backlog. The broker now normalizes it. Any unrecognized value still
+resolves to `all`, which is the safe direction.
+
 
 **Two fixes in the Rust SDK, both found by putting its test suite under audit.**
 

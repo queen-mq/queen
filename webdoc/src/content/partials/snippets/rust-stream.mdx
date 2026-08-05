@@ -17,7 +17,7 @@ let handle = Stream::from(q.queue(&src))
     .to(q.queue(&sink))
     .run(
         &q,
-        RunOptions::new(unique("st-tumbling-q"))
+        RunOptions::new(&query)
             .reset(true)
             .batch_size(50)
             .max_wait(Duration::from_millis(300)),

@@ -229,6 +229,11 @@ func popBench(ctx context.Context, q *queen.Queen, queueName string) ([]time.Dur
 				}
 				msgs, perr := q.Queue(queueName).
 					Group("queenctl-bench").
+					// bench pushes first and drains afterwards, so it must ask for
+					// the backlog explicitly: the broker's default subscription
+					// mode is "new", which would seed this group at the tail and
+					// report zero consumed.
+					SubscriptionMode(queen.SubscriptionModeAll).
 					AutoAck(true).
 					Batch(benchBatch).
 					Wait(true).

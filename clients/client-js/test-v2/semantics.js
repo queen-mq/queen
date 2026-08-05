@@ -47,7 +47,11 @@ const baseUrl = () => TEST_CONFIG.baseUrls[0]
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const uniq = prefix => `test-sem-${prefix}-${Date.now()}`
 
-/** Raw pop via fetch — used where the client builder has no knob (leaseSeconds). */
+/**
+ * Raw pop via fetch — used where the client builder has no knob (leaseSeconds).
+ * Callers that name a consumer group and expect the backlog they pushed must
+ * pass subscriptionMode: 'all' (the broker default seeds new groups at the tail).
+ */
 async function rawPop(queue, params = {}) {
     const qs = new URLSearchParams({ batch: '1', wait: 'false', ...params })
     const res = await fetch(`${baseUrl()}/api/v1/pop/queue/${queue}?${qs}`)
@@ -58,10 +62,11 @@ async function rawPop(queue, params = {}) {
 }
 
 /** Pop retrying briefly — rides out push→visibility latency (fusion hold). */
-async function popRetry(client, queue, { group = null, batch = 1, tries = 20 } = {}) {
+async function popRetry(client, queue, { group = null, batch = 1, tries = 20, mode = null } = {}) {
     for (let i = 0; i < tries; i++) {
         let b = client.queue(queue).batch(batch).wait(false)
         if (group) b = b.group(group)
+        if (mode) b = b.subscriptionMode(mode)
         const msgs = await b.pop()
         if (msgs.length > 0) return msgs
         await sleep(150)
@@ -374,8 +379,9 @@ export async function leasedBacklogNotStrandedByEmptyPolls(client) {
     await client.queue(queue).partition('Default')
         .push([{ data: { n: 1 }, transactionId: `${queue}-tx` }])
 
-    // Worker A claims the only partition and never acks.
-    const a = await popRetry(client, queue, { group })
+    // Worker A claims the only partition and never acks. It is the group's
+    // first contact and the message is already there, so it must ask for 'all'.
+    const a = await popRetry(client, queue, { group, mode: 'all' })
     if (a.length !== 1) return { success: false, message: 'Worker A did not get the message' }
 
     // Worker B (same group) polls empty repeatedly while A holds the lease.
@@ -437,7 +443,10 @@ export async function pushOnlyQueueIsDiscoverable(client) {
     // (b) Namespace-discovery pop must find it.
     let found = false
     for (let i = 0; i < 10 && !found; i++) {
-        const qs = new URLSearchParams({ namespace: ns, batch: '1', wait: 'false', consumerGroup: `${ns}-cg` })
+        const qs = new URLSearchParams({
+            namespace: ns, batch: '1', wait: 'false',
+            consumerGroup: `${ns}-cg`, subscriptionMode: 'all'
+        })
         const popRes = await fetch(`${baseUrl()}/api/v1/pop?${qs}`)
         if (popRes.status === 200) {
             const pb = await popRes.json()
@@ -478,7 +487,7 @@ export async function messageDetailKeepsFullShape(client) {
         .push([{ data: { hello: 'world' }, transactionId: tx }])
 
     // Pop (don't ack) so a consumer row exists for consumerGroups[].
-    const msgs = await popRetry(client, queue, { group })
+    const msgs = await popRetry(client, queue, { group, mode: 'all' })
     if (msgs.length !== 1) return { success: false, message: 'Message not delivered' }
     const pid = msgs[0].partitionId
 
@@ -773,7 +782,7 @@ export async function popLeaseSecondsOverride(client) {
     // Claim with a 1-second per-request override.
     let got = []
     for (let i = 0; i < 20 && got.length === 0; i++) {
-        got = await rawPop(queue, { consumerGroup: group, leaseSeconds: '1' })
+        got = await rawPop(queue, { consumerGroup: group, leaseSeconds: '1', subscriptionMode: 'all' })
         if (got.length === 0) await sleep(150)
     }
     if (got.length !== 1) return { success: false, message: 'Message not delivered on override pop' }

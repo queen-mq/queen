@@ -35,7 +35,7 @@ export async function streamMapFilterSink(client) {
     .filter(m => m.data.type !== 'heartbeat')
     .map(m => ({ ...m.data, marked: true }))
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true, subscriptionMode: 'all' })
 
   // 20 messages should land on the sink (10 orders + 10 logs).
   const drained = await drainUntil(client, sink, {
@@ -81,7 +81,7 @@ export async function streamFlatMapFanout(client) {
       { id: m.data.id, copy: 4 }
     ])
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true, subscriptionMode: 'all' })
 
   const drained = await drainUntil(client, sink, {
     until: out => out.length >= 20,
@@ -114,7 +114,7 @@ export async function streamForeachCapturesAll(client) {
   const handle = await Stream
     .from(client.queue(src))
     .foreach((value) => { captured.push(value) })
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   // Wait until at-least-once semantics catch up to 12 messages.
   const start = Date.now()
@@ -152,7 +152,7 @@ export async function streamKeyByDoesNotCrash(client) {
     .keyBy(m => m.data.region)
     .map(m => m.data)
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true, subscriptionMode: 'all' })
 
   const drained = await drainUntil(client, sink, {
     until: out => out.length >= 6,
@@ -192,7 +192,7 @@ export async function streamAsyncMap(client) {
       return { ...m.data, asyncEnriched: true }
     })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 100, reset: true, subscriptionMode: 'all' })
 
   const drained = await drainUntil(client, sink, {
     until: out => out.length >= 5,

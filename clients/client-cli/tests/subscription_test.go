@@ -15,7 +15,10 @@ import (
 // "subscriptionMode" semantics on the broker:
 //  - 'all'         : the CG sees every message (historical + future)
 //  - 'new'         : the CG starts at the time it first subscribes
-//  - 'new-only'    : same as 'new' but stricter against historical leaks
+//  - 'new-only'    : alias for 'new' (the broker normalizes it)
+//
+// 'new' is now the broker's DEFAULT, so any CG that is first contacted after
+// its backlog was pushed has to pass --from-mode all to see it.
 //
 // We test through `queenctl pop` (one-shot) which mirrors the JS snippet
 // `client.queue(q).group(g).subscriptionMode('new').pop()`.
@@ -107,8 +110,9 @@ func TestReplay_SeekToBeginning(t *testing.T) {
 		map[string]any{"i": 2},
 		map[string]any{"i": 3},
 	})
-	// Drain the CG once.
-	got := popN(t, q, 10, "--cg", "ct-replay", "--auto-ack", "--timeout", "5s")
+	// Drain the CG once. --from-mode all because the group is created after
+	// the push and the broker now defaults new groups to 'new'.
+	got := popN(t, q, 10, "--cg", "ct-replay", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	if len(got) != 3 {
 		t.Fatalf("setup drain: got %d, want 3", len(got))
 	}
@@ -116,7 +120,7 @@ func TestReplay_SeekToBeginning(t *testing.T) {
 	runOK(t, "replay", q, "--cg", "ct-replay", "--to", "beginning")
 	time.Sleep(200 * time.Millisecond)
 	// CG should now see the historical 3 again.
-	again := popN(t, q, 10, "--cg", "ct-replay", "--auto-ack", "--timeout", "5s")
+	again := popN(t, q, 10, "--cg", "ct-replay", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	if len(again) != 3 {
 		t.Errorf("after replay-to-beginning: got %d, want 3", len(again))
 	}
@@ -137,13 +141,13 @@ func TestReplay_SeekToTimestamp(t *testing.T) {
 	pushOne(t, q, "", map[string]any{"phase": "after"})
 
 	// Drain everything once.
-	got := popN(t, q, 10, "--cg", "ct-replay-ts", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 10, "--cg", "ct-replay-ts", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	if len(got) != 4 {
 		t.Fatalf("setup drain: got %d, want 4", len(got))
 	}
 	runOK(t, "replay", q, "--cg", "ct-replay-ts", "--to", cutoff)
 	time.Sleep(200 * time.Millisecond)
-	post := popN(t, q, 10, "--cg", "ct-replay-ts", "--auto-ack", "--timeout", "5s")
+	post := popN(t, q, 10, "--cg", "ct-replay-ts", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	// Only messages with createdAt > cutoff should resurface. Allow some
 	// slack: the broker resolves timestamps at second granularity and the
 	// "before" messages may sit on the boundary, so accept 2 or 4.
@@ -168,7 +172,7 @@ func TestReplay_SeekToEndDrainsCG(t *testing.T) {
 	})
 	time.Sleep(300 * time.Millisecond)
 	// Drain via the same CG we will then seek to end.
-	popN(t, q, 10, "--cg", "ct-replay-end", "--auto-ack", "--timeout", "5s")
+	popN(t, q, 10, "--cg", "ct-replay-end", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	// Push more, then seek-to-end so they are skipped.
 	pushOne(t, q, "", map[string]any{"i": 4})
 	pushOne(t, q, "", map[string]any{"i": 5})

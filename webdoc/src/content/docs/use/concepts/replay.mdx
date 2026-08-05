@@ -27,7 +27,7 @@ A pop carries two optional parameters:
 
 | Parameter | Values | Effect on a cursor being created |
 | --- | --- | --- |
-| `subscriptionMode` | `all` (default), `new` | `all` delivers the whole retained backlog; `new` skips it. |
+| `subscriptionMode` | `new` (default), `all` | `all` delivers the whole retained backlog; `new` skips it. A pop with no `consumerGroup` is always `all`. |
 | `subscriptionFrom` | `now`, an ISO 8601 timestamp | `now` behaves like `new`; a timestamp starts at that point in the log. |
 
 The critical qualifier: **seeding happens only on the first contact between a consumer group

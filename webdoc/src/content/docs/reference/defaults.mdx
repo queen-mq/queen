@@ -58,6 +58,7 @@ changes what a client observes.
 | `DB_POOL_SIZE` | `160` | Upper bound on concurrent PostgreSQL work. A request that cannot get a pooled connection at all answers 500 with `{"error":"pool"}`. |
 | `QUEEN_STMT_TIMEOUT_MS` | `30000` | A statement past this is abandoned, cancelled server-side, and its pooled connection is quarantined. |
 | `DEFAULT_TIMEOUT` / `POP_DEFAULT_TIMEOUT_MS` | `30000` | How long a `wait=true` pop parks when the client sends no `timeout`. |
+| `DEFAULT_SUBSCRIPTION_MODE` | `new` | Where a consumer group starts when its first pop sends no `subscriptionMode`: `new` at the partition's tail, `all` at the oldest retained offset. Only consulted on a group's first contact, and ignored entirely by group-less pops, which are always `all`. |
 | `POP_WAIT_INITIAL_INTERVAL_MS` | `100` | First re-query interval of a parked pop; grows past `POP_WAIT_BACKOFF_THRESHOLD` (3) by `POP_WAIT_BACKOFF_MULTIPLIER` (2.0) up to `POP_WAIT_MAX_INTERVAL_MS` (1000). A push-wake resets it. |
 | `RETENTION_INTERVAL` | `5000` | Maintenance cycle cadence, leader-gated by one advisory lock, so only one instance sweeps per cycle. |
 | `RETENTION_BATCH_SIZE` | `1000` | Maximum segment rows deleted per bounded step, and partitions deleted per cleanup batch. |
@@ -111,7 +112,7 @@ is reset to the value in this table, not left alone. See
 | | `wait` | `false` |
 | | `timeout` | the configured pop timeout (30000 ms) |
 | | `consumerGroup` | `__QUEUE_MODE__` |
-| | `subscriptionMode` | `all` |
+| | `subscriptionMode` | `new` (`DEFAULT_SUBSCRIPTION_MODE`); always `all` when `consumerGroup` is absent |
 | | `leaseSeconds` | queue `leaseTime`, else 60 |
 | `GET /api/v1/pop/queue/:queue/partition/:partition` | same, except `partitions` | ignored (a specific pop is one partition) |
 | `GET /api/v1/pop` (discovery) | `namespace` / `task` | none (a call with neither is a 400) |

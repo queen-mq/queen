@@ -41,7 +41,7 @@ pub async fn handle_configure(
 ) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
 
     // The C++ configure route only rejects a missing/non-string `queue`; an EMPTY

@@ -25,6 +25,7 @@ lib/build
 
 helm
 helm_queen
+helm_v1
 upgrade.sh
 upgrade_queen.sh
 start.sh

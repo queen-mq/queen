@@ -149,7 +149,7 @@ least one of the two is required there, otherwise it is a `400`).
 | `consumerGroup` | queue mode | The group whose cursor advances. |
 | `autoAck` | false | Commit the cursor inside the pop transaction. At-most-once. |
 | `leaseSeconds` | queue's `leaseTime` | Per-request lease override, in seconds. No SDK exposes this. |
-| `subscriptionMode` | `all` | `all` or `new`, applied **only** when this `(partition, group)` cursor is created. |
+| `subscriptionMode` | `new` | `all` or `new`, applied **only** when this `(partition, group)` cursor is created. The broker default comes from `DEFAULT_SUBSCRIPTION_MODE`. A pop with no `consumerGroup` always uses `all`. |
 | `subscriptionFrom` | none | `now` or an ISO timestamp, same first-contact-only rule. |
 
 A successful pop is `200`:

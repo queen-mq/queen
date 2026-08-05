@@ -520,9 +520,11 @@ export async function transactionAckWithConsumerGroup(client) {
         { data: { value: 2 } }
     ])
 
-    // Pop with consumer group
+    // Pop with consumer group. Both groups here are created after the push,
+    // so they must ask for 'all' to see the backlog under test.
     const messages = await client.queue('test-queue-v2-txn-cg-a')
         .group(consumerGroup)
+        .subscriptionMode('all')
         .batch(2)
         .wait(false)
         .pop()
@@ -554,6 +556,7 @@ export async function transactionAckWithConsumerGroup(client) {
     // Verify: Using a different consumer group should still see the messages
     const messagesOtherGroup = await client.queue('test-queue-v2-txn-cg-a')
         .group('other-consumer-group')
+        .subscriptionMode('all')
         .batch(2)
         .wait(false)
         .pop()

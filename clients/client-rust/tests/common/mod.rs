@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use queen_mq::{Config, Message, Queen, QueueOptions};
+use queen_mq::{Config, Message, Queen, QueueOptions, SubscriptionMode};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -104,6 +104,12 @@ pub async fn sleep_ms(ms: u64) {
 /// A push is not instantly poppable: fusion holds frames briefly to batch the
 /// write, and a queue with `windowBuffer` holds them deliberately. Every test
 /// that pushes then pops has to ride that out or it is timing-flaky.
+///
+/// A named group asks for `all` explicitly. The callers push first and expect
+/// that backlog back, which the broker's own default (`new`, seeding the cursor
+/// at the tail) does not give a group meeting the queue for the first time. The
+/// mode is ignored for a group that already has a cursor, and group-less pops
+/// are pinned to `all` by the broker regardless.
 pub async fn pop_retry(
     queen: &Queen,
     queue: &str,
@@ -114,7 +120,7 @@ pub async fn pop_retry(
     for _ in 0..tries {
         let mut b = queen.queue(queue).batch(batch).wait(false);
         if let Some(g) = group {
-            b = b.group(g);
+            b = b.group(g).subscription_mode(SubscriptionMode::All);
         }
         let msgs = b.pop().await.expect("pop failed");
         if !msgs.is_empty() {
@@ -176,6 +182,9 @@ where
             .batch(100)
             .partitions(8)
             .wait(false)
+            // The sink usually holds messages before the first drain, and this
+            // group has never met it.
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .expect("drain pop failed");

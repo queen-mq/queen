@@ -21,7 +21,11 @@ func TestTail_BasicHandlerDelivery(t *testing.T) {
 	createQueue(t, q)
 	pushOne(t, q, "", map[string]any{"hello": "world"})
 
+	// The broker's default subscription mode is 'new', which seeds a
+	// brand-new CG at the partition tail. Every tail here creates its CG
+	// AFTER the push, so it has to ask for the backlog explicitly.
 	out := runOK(t, "tail", q, "--cg", "ct-tail-basic", "--auto-ack",
+		"--from", "all",
 		"--limit", "1", "--idle-millis", "3000")
 	msgs := parseNDJSONMessages(t, out)
 	if len(msgs) != 1 {
@@ -43,6 +47,7 @@ func TestTail_DrainsExactCount(t *testing.T) {
 	pushNDJSON(t, q, "", items)
 
 	out := runOK(t, "tail", q, "--cg", "ct-drain", "--auto-ack",
+		"--from", "all",
 		"--limit", "10", "--idle-millis", "3000")
 	msgs := parseNDJSONMessages(t, out)
 	if len(msgs) != 10 {
@@ -145,6 +150,7 @@ func TestTail_PartitionFilter(t *testing.T) {
 		"--cg", "ct-tail-part",
 		"--partition", "p0",
 		"--auto-ack",
+		"--from", "all",
 		"--limit", "1",
 		"--idle-millis", "3000")
 	msgs := parseNDJSONMessages(t, out)
@@ -170,6 +176,7 @@ func TestTail_MultiPartitionMaxN(t *testing.T) {
 	out := runOK(t, "tail", q,
 		"--cg", "ct-tail-v4",
 		"--auto-ack",
+		"--from", "all",
 		"--max-partitions", "3",
 		"--limit", "6",
 		"--idle-millis", "3000")
@@ -201,6 +208,7 @@ func TestTail_NDJSONFormat(t *testing.T) {
 	createQueue(t, q)
 	pushNDJSON(t, q, "", []any{map[string]any{"i": 1}, map[string]any{"i": 2}})
 	out := runOK(t, "tail", q, "--cg", "ct-ndjson", "--auto-ack",
+		"--from", "all",
 		"--limit", "2", "--idle-millis", "2000")
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
 	if len(lines) != 2 {

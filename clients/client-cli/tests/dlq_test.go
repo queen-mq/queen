@@ -24,8 +24,10 @@ func TestDLQ_FailingMessageReachesDLQ(t *testing.T) {
 	// Pop + nack up to retryLimit+1 times. Each nack increments the retry
 	// counter; once it crosses the limit the broker moves the message to
 	// the DLQ.
+	// --from-mode all: the CG is created after the push, and the broker's
+	// default mode ('new') would seed it past the message we want to fail.
 	for i := 0; i < 3; i++ {
-		got := popN(t, q, 1, "--cg", "ct-dlq", "--timeout", "5s")
+		got := popN(t, q, 1, "--cg", "ct-dlq", "--from-mode", "all", "--timeout", "5s")
 		if len(got) == 0 {
 			break
 		}
@@ -72,7 +74,7 @@ func TestDLQ_ListFiltersByQueue(t *testing.T) {
 	for _, qn := range []string{target, other} {
 		pushOne(t, qn, "", map[string]any{"q": qn})
 		for i := 0; i < 3; i++ {
-			got := popN(t, qn, 1, "--cg", "ct-dlq-multi", "--timeout", "5s")
+			got := popN(t, qn, 1, "--cg", "ct-dlq-multi", "--from-mode", "all", "--timeout", "5s")
 			if len(got) == 0 {
 				break
 			}
@@ -111,7 +113,7 @@ func TestDLQ_DrainDryRun(t *testing.T) {
 	runOK(t, "queue", "configure", q, "--retry-limit", "1", "--lease-time", "5")
 	pushOne(t, q, "", map[string]any{"v": 1})
 	for i := 0; i < 3; i++ {
-		got := popN(t, q, 1, "--cg", "ct-drain-dry", "--timeout", "5s")
+		got := popN(t, q, 1, "--cg", "ct-drain-dry", "--from-mode", "all", "--timeout", "5s")
 		if len(got) == 0 {
 			break
 		}
@@ -152,7 +154,7 @@ func TestDLQ_ManualRequeueViaPushAndDelete(t *testing.T) {
 	runOK(t, "queue", "configure", q, "--retry-limit", "1", "--lease-time", "5")
 	pushOne(t, q, "", map[string]any{"r": 1})
 	for i := 0; i < 3; i++ {
-		got := popN(t, q, 1, "--cg", "ct-mreq", "--timeout", "5s")
+		got := popN(t, q, 1, "--cg", "ct-mreq", "--from-mode", "all", "--timeout", "5s")
 		if len(got) == 0 {
 			break
 		}
@@ -186,7 +188,7 @@ func TestDLQ_ManualRequeueViaPushAndDelete(t *testing.T) {
 	// 2. delete the DLQ row.
 	runOK(t, "messages", "delete", pid, tx, "--yes")
 	// 3. the requeued message is back in the live queue.
-	got := popN(t, q, 1, "--cg", "ct-mreq-after", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 1, "--cg", "ct-mreq-after", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Errorf("re-pushed message did not surface (popped %d)", len(got))
 	}

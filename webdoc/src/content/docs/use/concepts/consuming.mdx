@@ -71,7 +71,7 @@ request with neither is rejected with `400`. Because the response can mix queues
 | `wait` | `false` | Long-poll instead of returning immediately when there is nothing to deliver. |
 | `timeout` | `30000` ms | How long `wait=true` may block. The broker default comes from `DEFAULT_TIMEOUT`, falling back to `POP_DEFAULT_TIMEOUT_MS`, then to 30000. |
 | `leaseSeconds` | queue's `leaseTime` | Per-request lease override. A positive value wins over the queue configuration; the fallback when a queue has none is 60 seconds. |
-| `subscriptionMode` | `all` | `all` or `new`. Only consulted on a group's first contact. |
+| `subscriptionMode` | `new` | `all` or `new`. Only consulted on a group's first contact. The broker default comes from `DEFAULT_SUBSCRIPTION_MODE`; a pop with no `consumerGroup` is always `all`. |
 | `subscriptionFrom` | empty | `now`, or an ISO 8601 timestamp. Only consulted on a group's first contact. |
 
 Those are the values the **broker** applies when a parameter is absent. The SDKs layer their own

@@ -239,7 +239,7 @@ pub async fn handle_update_subscription(
 ) -> Response {
     let b: SubscriptionBody = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     let ts = match b.subscription_timestamp.filter(|s| !s.is_empty()) {
         Some(t) => t,
@@ -327,7 +327,7 @@ pub async fn handle_seek_consumer_group(
 ) -> Response {
     let (to_end, ts) = match parse_seek(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"{e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("", e)),
     };
     let client = match st.pool.get().await {
         Ok(c) => c,
@@ -361,7 +361,7 @@ pub async fn handle_seek_partition(
     } else {
         match parse_seek(&body) {
             Ok(v) => v,
-            Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"{e}\"}}")),
+            Err(e) => return json(StatusCode::BAD_REQUEST, json_err("", e)),
         }
     };
     let client = match st.pool.get().await {

@@ -672,6 +672,7 @@ async fn an_auto_ack_pop_takes_no_lease_and_commits_immediately() {
             .queue(&queue)
             .group("g-auto")
             .wait(false)
+            .subscription_mode(SubscriptionMode::All)
             .pop_auto_ack()
             .await
             .unwrap();
@@ -747,6 +748,18 @@ async fn a_multi_partition_pop_drains_several_lanes_under_one_lease() {
     let q = broker!();
     let queue = unique("pop-multipart");
     create_queue(&q, &queue, QueueOptions::default()).await;
+
+    // Register the group BEFORE pushing. The broker's default subscription mode is
+    // "new", so a group first seen after the pushes would seed at the tail and read
+    // nothing. Seeding it while the queue is empty keeps the documented snippet
+    // below free of a subscription_mode call it has no business teaching.
+    q.queue(&queue)
+        .group("g-multi")
+        .batch(1)
+        .wait(false)
+        .pop()
+        .await
+        .unwrap();
 
     for lane in ["a", "b", "c"] {
         q.queue(&queue)
@@ -918,6 +931,7 @@ async fn batch_caps_the_whole_claim_not_each_partition() {
         .batch(10)
         .partitions(LANES as i32)
         .wait(false)
+        .subscription_mode(SubscriptionMode::All)
         .pop()
         .await
         .expect("pop failed");
@@ -938,6 +952,7 @@ async fn batch_caps_the_whole_claim_not_each_partition() {
         .group("g-single-lane")
         .batch(want as i32)
         .wait(false)
+        .subscription_mode(SubscriptionMode::All)
         .pop()
         .await
         .expect("pop failed");
@@ -1020,6 +1035,16 @@ async fn consume_processes_and_acks_each_message() {
     let queue = unique("consume-each");
     create_queue(&q, &queue, QueueOptions::default()).await;
 
+    // Seed the group before the pushes: see the note in the multi-partition pop
+    // test. The broker's default subscription mode is "new".
+    q.queue(&queue)
+        .group("g-consume")
+        .batch(1)
+        .wait(false)
+        .pop()
+        .await
+        .unwrap();
+
     q.queue(&queue)
         .push_many((0..5).map(|n| serde_json::json!({ "n": n })))
         .await
@@ -1091,6 +1116,7 @@ async fn consume_batch_settles_the_whole_claim_at_once() {
         .limit(6)
         .wait(false)
         .idle(Duration::from_secs(5))
+        .subscription_mode(SubscriptionMode::All)
         .consume_batch(move |msgs| {
             let counter = Arc::clone(&counter);
             async move {
@@ -1192,6 +1218,7 @@ async fn a_failing_handler_nacks_and_the_message_comes_back() {
         .limit(1)
         .wait(false)
         .idle(Duration::from_secs(5))
+        .subscription_mode(SubscriptionMode::All)
         .consume(|_msg| async { Err::<(), _>("handler exploded") })
         .await
         .unwrap();
@@ -1224,6 +1251,7 @@ async fn auto_ack_off_leaves_the_message_claimed() {
         .wait(false)
         .auto_ack(false)
         .idle(Duration::from_secs(5))
+        .subscription_mode(SubscriptionMode::All)
         .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) })
         .await
         .unwrap();
@@ -1285,6 +1313,7 @@ async fn a_long_polling_consumer_stops_on_its_limit() {
         .limit(4)
         .poll_timeout(Duration::from_secs(3))
         .idle(Duration::from_secs(20))
+        .subscription_mode(SubscriptionMode::All)
         .consume(move |msg| {
             let sink = Arc::clone(&sink);
             async move {
@@ -1381,6 +1410,7 @@ async fn a_consumer_can_settle_a_multi_partition_claim_message_by_message() {
         .limit(want)
         .wait(false)
         .idle(Duration::from_secs(20))
+        .subscription_mode(SubscriptionMode::All)
         .consume(move |msg| {
             let sink = Arc::clone(&sink);
             async move {
@@ -1469,6 +1499,7 @@ async fn a_failing_batch_handler_nacks_the_whole_claim() {
         .limit(4)
         .wait(false)
         .idle(Duration::from_secs(5))
+        .subscription_mode(SubscriptionMode::All)
         .consume_batch(move |msgs| {
             let counter = Arc::clone(&counter);
             async move {
@@ -1624,6 +1655,7 @@ async fn a_few_thousand_messages_round_trip_without_loss() {
             .group("g-load")
             .batch(500)
             .wait(false)
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .unwrap();

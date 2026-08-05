@@ -189,7 +189,7 @@ every worker stops. It never returns on its own unless you set `limit`, `idleMil
 | `.wait(bool)` | `true` | Long-poll the pop. |
 | `.timeoutMillis(n)` | `30000` | Long-poll window. Short values let a shutdown flag be observed sooner. |
 | `.renewLease(true, ms)` | off | Renew the batch's lease every `ms` while the handler runs. |
-| `.subscriptionMode(m)` | none | `all` or `new`, applied only when the group's cursor is created. |
+| `.subscriptionMode(m)` | none (broker applies `new`) | `all` or `new`, applied only when the group's cursor is created. |
 | `.subscriptionFrom(t)` | none | `now` or an ISO timestamp, same first-contact-only rule. |
 | `consume(fn, { signal })` | n/a | An `AbortSignal` that stops every worker. |
 

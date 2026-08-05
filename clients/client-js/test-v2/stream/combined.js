@@ -58,7 +58,8 @@ export async function combinedFullPipeline(client) {
       url: STREAMS_URL,
       batchSize: 100,
       maxPartitions: 4,
-      reset: true
+      reset: true,
+      subscriptionMode: 'all'
     })
 
   // Wait long enough for windowEnd to pass + idle flush to close all 3
@@ -117,8 +118,8 @@ export async function combinedTwoConcurrentStreams(client) {
     .to(client.queue(sinkB))
 
   const [handleA, handleB] = await Promise.all([
-    streamA.run({ queryId: qA, url: STREAMS_URL, batchSize: 50, reset: true }),
-    streamB.run({ queryId: qB, url: STREAMS_URL, batchSize: 50, reset: true })
+    streamA.run({ queryId: qA, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' }),
+    streamB.run({ queryId: qB, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
   ])
 
   // Wait until the FULL totals are present on each sink. Each stream sees

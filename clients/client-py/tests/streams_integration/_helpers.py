@@ -60,11 +60,15 @@ async def push_spread(client, queue_name: str, items: list) -> None:
 
 
 async def drain_sink(client, queue_name: str, timeout_ms: float = 5000, group: Optional[str] = None) -> list:
+    # The drain group is brand new and is created AFTER the stream wrote to the
+    # sink, so it must ask for 'all' explicitly: the broker's default
+    # subscription mode is 'new', which would seed the cursor at the tail and
+    # hand back nothing.
     cg = group or f"drain-{int(time.time()*1000)}-{random.randint(0, 999_999)}"
     out: list = []
     start = asyncio.get_event_loop().time()
     while (asyncio.get_event_loop().time() - start) * 1000 < timeout_ms:
-        popped = await client.queue(queue_name).group(cg).batch(1).wait(False).pop()
+        popped = await client.queue(queue_name).group(cg).subscription_mode("all").batch(1).wait(False).pop()
         if not popped:
             break
         for m in popped:
@@ -86,7 +90,10 @@ async def drain_until(
     while (asyncio.get_event_loop().time() - start) * 1000 < timeout_ms:
         if until(out):
             break
-        popped = await client.queue(queue_name).group(cg).batch(1).wait(True).timeout_millis(500).pop()
+        popped = await (
+            client.queue(queue_name).group(cg).subscription_mode("all")
+            .batch(1).wait(True).timeout_millis(500).pop()
+        )
         if popped:
             for m in popped:
                 out.append(m)

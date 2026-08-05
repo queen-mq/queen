@@ -8,6 +8,16 @@
 //! assertions are on *totals* rather than on how many windows a batch happened
 //! to split into, so they do not become flaky when a cycle lands either side of
 //! a boundary.
+//!
+//! Most of the `run` calls below ask for `SubscriptionMode::All`, and it is the
+//! same reason every time. `run` returns as soon as the query is registered; the
+//! pop loop starts after it. So everything a test pushes races the group's first
+//! contact with the partition, which is the one moment the mode is read — and
+//! under the broker default (`new`, seeding at the tail) whatever wins that race
+//! is skipped, partially and silently. On a queue the test itself just created,
+//! `all` is the same backlog minus the race. The two tests that assert the
+//! opposite — that a backlog stays invisible — say so explicitly and are
+//! deliberately left on the default.
 
 mod common;
 
@@ -137,7 +147,9 @@ async fn a_stateless_pipeline_maps_filters_and_sinks() {
             &q,
             RunOptions::new(unique("st-stateless-q"))
                 .reset(true)
-                .batch_size(50),
+                .batch_size(50)
+                // The source was filled before the runner registered its group.
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -179,7 +191,12 @@ async fn flat_map_expands_one_record_into_several() {
                 .unwrap_or_default()
         })
         .to(q.queue(&sink))
-        .run(&q, RunOptions::new(unique("st-flatmap-q")).reset(true))
+        .run(
+            &q,
+            RunOptions::new(unique("st-flatmap-q"))
+                .reset(true)
+                .subscription_mode(SubscriptionMode::All),
+        )
         .await
         .unwrap();
 
@@ -205,6 +222,22 @@ async fn a_tumbling_window_sums_and_closes_every_window() {
     create_queue(&q, &src, QueueOptions::default()).await;
     create_queue(&q, &sink, QueueOptions::default()).await;
 
+    // Register the runner's group while the source is still empty. `run()` returns
+    // as soon as the query is registered and only then spawns the pop loop, so the
+    // group's first contact with a partition races the pushes below; under the
+    // default mode ("new") whatever already landed in that partition is skipped.
+    // Seeding here instead of passing subscription_mode keeps the documented
+    // snippet free of a setter it has no business teaching. `reset(true)` drops
+    // queen_streams.state only, never the cursor, so this survives the register.
+    let query = unique("st-tumbling-q");
+    q.queue(&src)
+        .group(stream_group(&query))
+        .batch(1)
+        .wait(false)
+        .pop()
+        .await
+        .unwrap();
+
     // docs:start(rust-stream)
     let handle = Stream::from(q.queue(&src))
         .window_tumbling(2)
@@ -214,7 +247,7 @@ async fn a_tumbling_window_sums_and_closes_every_window() {
         .to(q.queue(&sink))
         .run(
             &q,
-            RunOptions::new(unique("st-tumbling-q"))
+            RunOptions::new(&query)
                 .reset(true)
                 .batch_size(50)
                 .max_wait(Duration::from_millis(300)),
@@ -264,7 +297,8 @@ async fn window_state_is_isolated_per_partition() {
             RunOptions::new(unique("st-isolation-q"))
                 .reset(true)
                 .max_partitions(8)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -337,7 +371,8 @@ async fn every_aggregate_field_computes() {
             &q,
             RunOptions::new(unique("st-aggfields-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -399,7 +434,8 @@ async fn the_idle_flush_closes_a_window_on_a_partition_that_went_quiet() {
             &q,
             RunOptions::new(unique("st-idleflush-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -451,7 +487,8 @@ async fn a_sliding_window_counts_each_event_in_several_windows() {
             &q,
             RunOptions::new(unique("st-sliding-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -494,7 +531,8 @@ async fn a_session_window_closes_after_silence() {
             &q,
             RunOptions::new(unique("st-session-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -540,7 +578,8 @@ async fn a_cron_window_aligns_to_the_wall_clock() {
             &q,
             RunOptions::new(unique("st-cron-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -581,6 +620,7 @@ async fn key_by_splits_state_within_a_partition() {
             &q,
             RunOptions::new(unique("st-keyby-q"))
                 .reset(true)
+                .subscription_mode(SubscriptionMode::All)
                 .max_wait(Duration::from_millis(300)),
         )
         .await
@@ -641,7 +681,8 @@ async fn event_time_windows_by_the_payloads_timestamp_and_drops_late_events() {
             RunOptions::new(unique("st-eventtime-q"))
                 .reset(true)
                 .batch_size(50)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -721,7 +762,8 @@ async fn on_late_include_accumulates_a_late_event_instead_of_dropping_it() {
             &q,
             RunOptions::new(unique("st-lateinclude-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -798,6 +840,7 @@ async fn a_custom_fold_accumulates_across_a_window() {
             &q,
             RunOptions::new(unique("st-reduce-q"))
                 .reset(true)
+                .subscription_mode(SubscriptionMode::All)
                 .max_wait(Duration::from_millis(300)),
         )
         .await
@@ -851,7 +894,8 @@ async fn foreach_runs_a_side_effect_with_window_context() {
             &q,
             RunOptions::new(unique("st-foreach-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -907,7 +951,8 @@ async fn a_post_reducer_map_reshapes_the_emitted_value() {
             &q,
             RunOptions::new(unique("st-post-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -975,6 +1020,7 @@ async fn a_gate_lets_a_prefix_through_and_holds_the_rest_in_order() {
             RunOptions::new(unique("st-gate-q"))
                 .reset(true)
                 .batch_size(10)
+                .subscription_mode(SubscriptionMode::All)
                 .max_wait(Duration::from_millis(300)),
         )
         .await
@@ -1033,7 +1079,8 @@ async fn a_gate_that_denies_everything_commits_nothing() {
             &q,
             RunOptions::new(unique("st-gate-deny-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1106,7 +1153,8 @@ async fn a_gate_behind_a_filter_settles_every_claimed_message() {
             RunOptions::new(&query)
                 .reset(true)
                 .batch_size(10)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1186,7 +1234,8 @@ async fn a_gate_behind_a_flat_map_acks_the_message_not_its_records() {
             &q,
             RunOptions::new(&query)
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1251,7 +1300,8 @@ async fn a_gate_that_denies_half_an_expanded_message_commits_none_of_it() {
             &q,
             RunOptions::new(&query)
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1313,6 +1363,7 @@ async fn a_gate_ack_counts_messages_even_when_a_filter_thinned_them() {
             RunOptions::new(&query)
                 .reset(true)
                 .batch_size(10)
+                .subscription_mode(SubscriptionMode::All)
                 .max_wait(Duration::from_millis(300)),
         )
         .await
@@ -1396,7 +1447,8 @@ async fn state_survives_a_restart_of_the_runner() {
             &q,
             RunOptions::new(&query)
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1472,7 +1524,8 @@ async fn two_queries_over_one_queue_keep_separate_state() {
             &q,
             RunOptions::new(unique("st-twoqueries-qa"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1486,7 +1539,8 @@ async fn two_queries_over_one_queue_keep_separate_state() {
             &q,
             RunOptions::new(unique("st-twoqueries-qb"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1535,7 +1589,8 @@ async fn a_stream_reports_its_work_and_stops_cleanly() {
             &q,
             RunOptions::new(unique("st-metrics-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1583,7 +1638,8 @@ async fn a_stream_over_many_partitions_keeps_every_message() {
                 .reset(true)
                 .max_partitions(16)
                 .batch_size(200)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1653,7 +1709,8 @@ async fn an_event_time_idle_flush_waits_for_the_watermark_not_the_wall_clock() {
             &q,
             RunOptions::new(unique("st-etflush-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1743,7 +1800,8 @@ async fn allowed_lateness_admits_a_straggler_inside_the_tolerance_and_drops_the_
             &q,
             RunOptions::new(unique("st-lateness-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1828,7 +1886,8 @@ async fn a_window_without_a_reducer_annotates_and_passes_records_straight_throug
             &q,
             RunOptions::new(unique("st-annotate-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1882,7 +1941,8 @@ async fn a_post_reducer_filter_drops_whole_emits() {
             RunOptions::new(unique("st-postfilter-q"))
                 .reset(true)
                 .max_partitions(4)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1938,7 +1998,8 @@ async fn a_post_reducer_flat_map_fans_one_emit_into_several_sink_messages() {
             &q,
             RunOptions::new(unique("st-postfanout-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -1992,7 +2053,8 @@ async fn to_partitioned_routes_by_the_emitted_value_not_the_source_lane() {
             &q,
             RunOptions::new(unique("st-topart-q"))
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -2054,7 +2116,8 @@ async fn a_failing_foreach_aborts_the_cycle_before_the_ack() {
             &q,
             RunOptions::new(&query)
                 .reset(true)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -2116,7 +2179,8 @@ async fn a_named_consumer_group_replaces_the_default_streams_group() {
             RunOptions::new(&query)
                 .reset(true)
                 .consumer_group(&group)
-                .max_wait(Duration::from_millis(200)),
+                .max_wait(Duration::from_millis(200))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();
@@ -2165,8 +2229,8 @@ async fn a_stream_can_start_at_the_tail_instead_of_replaying_the_backlog() {
         create_queue(&q, name, QueueOptions::default()).await;
     }
 
-    // A backlog that predates both queries. Neither of these two RunOptions
-    // setters had a call site, and the default ("all") would replay all of it.
+    // A backlog that predates both queries. The queries below deliberately do NOT
+    // ask for "all", so this backlog must stay invisible to them.
     for i in 0..3 {
         q.queue(&src)
             .partition("one")
@@ -2273,6 +2337,7 @@ async fn a_cancel_token_stops_the_runner_like_stop_does() {
             RunOptions::new(unique("st-cancel-q"))
                 .reset(true)
                 .cancel(cancel.clone())
+                .subscription_mode(SubscriptionMode::All)
                 .max_wait(Duration::from_millis(200)),
         )
         .await
@@ -2340,6 +2405,7 @@ async fn two_runners_under_one_query_id_share_the_cursor() {
             .max_partitions(4)
             .batch_size(50)
             .max_wait(Duration::from_millis(300))
+            .subscription_mode(SubscriptionMode::All)
     };
 
     let a = build(&q).run(&q, opts().reset(true)).await.unwrap();
@@ -2412,7 +2478,8 @@ async fn a_windowed_stream_totals_hundreds_of_messages_across_lanes_exactly() {
                 .reset(true)
                 .max_partitions(8)
                 .batch_size(200)
-                .max_wait(Duration::from_millis(300)),
+                .max_wait(Duration::from_millis(300))
+                .subscription_mode(SubscriptionMode::All),
         )
         .await
         .unwrap();

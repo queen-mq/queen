@@ -79,7 +79,7 @@ pub async fn handle_get_maintenance(State(st): State<Arc<AppState>>) -> Response
 pub async fn handle_set_maintenance(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
     let b: MaintenanceBody = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     let enabled = match b.enabled {
         Some(v) => v,
@@ -138,7 +138,7 @@ pub async fn handle_get_pop_maintenance(State(st): State<Arc<AppState>>) -> Resp
 pub async fn handle_set_pop_maintenance(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
     let b: MaintenanceBody = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     let enabled = match b.enabled {
         Some(v) => v,

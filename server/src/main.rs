@@ -325,6 +325,7 @@ async fn main() {
         metrics: metrics.clone(),
         stmt_timeout: cfg.stmt_timeout,
         pop_default_timeout_ms: cfg.pop_default_timeout_ms,
+        default_subscription_mode: cfg.default_subscription_mode.clone(),
         pop_wait_initial_interval_ms: cfg.pop_wait_initial_interval_ms,
         pop_wait_backoff_threshold: cfg.pop_wait_backoff_threshold,
         pop_wait_backoff_multiplier: cfg.pop_wait_backoff_multiplier,

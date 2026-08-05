@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 94 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 95 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 ### Server
 
@@ -148,6 +148,7 @@ The broker is configured entirely through environment variables: 94 of them, lis
 
 | Variable | Type | Default | Also read as |
 | --- | --- | --- | --- |
+| `DEFAULT_SUBSCRIPTION_MODE` | string | `new` |  |
 | `QUEEN_ADMISSION_INIT` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |
 | `QUEEN_ADMISSION_MAX` | integer | `128` |  |
 | `QUEEN_ADMISSION_MIN` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |

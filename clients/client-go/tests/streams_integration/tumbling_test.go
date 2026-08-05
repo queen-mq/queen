@@ -56,6 +56,7 @@ func TestTumblingBasicWindowSum(t *testing.T) {
 	defer cancel()
 	r, err := stream.Run(ctx, streams.RunOptions{
 		QueryID: queryID, URL: queenURL, BatchSize: 50, Reset: true,
+		SubscriptionMode: replayAll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +124,7 @@ func TestTumblingAggregateAllStats(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 50, Reset: true})
+	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 50, Reset: true, SubscriptionMode: replayAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ func TestTumblingIdleFlushClosesQuietPartitions(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 50, Reset: true})
+	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 50, Reset: true, SubscriptionMode: replayAll})
 	if err != nil {
 		t.Fatal(err)
 	}

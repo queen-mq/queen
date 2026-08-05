@@ -27,7 +27,7 @@ func drainUntil(t *testing.T, qb *queen.QueueBuilder, until func([]*queen.Messag
 			break
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		batch, err := qb.Group(cg).Batch(1).Wait(true).TimeoutMillis(500).Pop(ctx)
+		batch, err := qb.Group(cg).SubscriptionMode(replayAll).Batch(1).Wait(true).TimeoutMillis(500).Pop(ctx)
 		cancel()
 		if err != nil || len(batch) == 0 {
 			continue
@@ -98,6 +98,7 @@ func TestStreamMapFilterSink(t *testing.T) {
 	defer cancel()
 	r, err := stream.Run(ctx, streams.RunOptions{
 		QueryID: queryID, URL: queenURL, BatchSize: 100, Reset: true,
+		SubscriptionMode: replayAll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +154,7 @@ func TestStreamFlatMapFanout(t *testing.T) {
 	defer cancel()
 	r, err := stream.Run(ctx, streams.RunOptions{
 		QueryID: queryID, URL: queenURL, BatchSize: 100, Reset: true,
+		SubscriptionMode: replayAll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +198,7 @@ func TestStreamForeachCapturesAll(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 50, Reset: true})
+	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 50, Reset: true, SubscriptionMode: replayAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +256,7 @@ func TestStreamKeyByDoesNotCrash(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 100, Reset: true})
+	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 100, Reset: true, SubscriptionMode: replayAll})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +302,7 @@ func TestStreamAsyncMap(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 100, Reset: true})
+	r, err := stream.Run(ctx, streams.RunOptions{QueryID: queryID, URL: queenURL, BatchSize: 100, Reset: true, SubscriptionMode: replayAll})
 	if err != nil {
 		t.Fatal(err)
 	}

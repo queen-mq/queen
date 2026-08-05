@@ -42,7 +42,7 @@ fn unwrap_stream_result(txt: &str) -> serde_json::Value {
 pub async fn handle_streams_register(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
     let mut root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     // Required-field validation mirrors the C++ route (400 before the SP).
     let field = |k: &str| root.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).is_some();
@@ -88,7 +88,7 @@ pub async fn handle_streams_register(State(st): State<Arc<AppState>>, body: Byte
 pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
     let mut root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
     if let Some(obj) = root.as_object_mut() {
         obj.insert("idx".to_string(), serde_json::json!(0));
@@ -159,7 +159,7 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
 pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json(StatusCode::BAD_REQUEST, format!("{{\"error\":\"bad body: {e}\"}}")),
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
 
     let query_id = match root.get("query_id").and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {

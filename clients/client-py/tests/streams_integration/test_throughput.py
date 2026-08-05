@@ -43,7 +43,7 @@ async def test_throughput5kAcross20Partitions(client):
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["v"]})
         .map(lambda agg, ctx: {"partition": ctx["partition"], **agg})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=200, max_partitions=8, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=200, max_partitions=8, reset=True)
     )
 
     def predicate(out):
@@ -101,7 +101,7 @@ async def test_throughputManyWindowsSinglePartition(client):
         .window_tumbling(seconds=1, idle_flush_ms=600)
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["v"]})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
 
     emits = await drain_until(

@@ -97,6 +97,9 @@ class TestQueenStreamsE2E:
                 .run(
                     query_id=QUERY_ID,
                     url=QUEEN_URL,
+                    # The 10k messages are already in the source queue when this
+                    # group is created, so the replay has to be asked for.
+                    subscription_mode="all",
                     batch_size=100,
                     max_partitions=4,
                     reset=True,
@@ -137,7 +140,10 @@ class TestQueenStreamsE2E:
             cg = f"e2e-drain-{int(time.time())}"
             deadline = time.monotonic() + 30.0
             while time.monotonic() < deadline:
-                popped = await q.queue(SINK_QUEUE).group(cg).batch(500).wait(True).timeout_millis(1000).pop()
+                popped = await (
+                    q.queue(SINK_QUEUE).group(cg).subscription_mode("all")
+                    .batch(500).wait(True).timeout_millis(1000).pop()
+                )
                 if not popped:
                     if sink_messages:
                         break

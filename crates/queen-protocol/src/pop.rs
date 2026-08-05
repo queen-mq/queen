@@ -140,9 +140,11 @@ impl PopResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SubscriptionMode {
-    /// Start at the messages arriving from now on.
+    /// Start at the messages arriving from now on. The broker's default when the
+    /// pop names a consumer group and sends no mode (`DEFAULT_SUBSCRIPTION_MODE`).
     New,
-    /// Start at the beginning of the partition. The broker's default.
+    /// Start at the beginning of the retained backlog. Always applied to group-less
+    /// "queue mode" pops, which ignore the mode entirely.
     All,
 }
 

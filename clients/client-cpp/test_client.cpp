@@ -631,6 +631,7 @@ bool test_consumer_group(const std::string& server_url) {
     int group01_messages = 0;
     client.queue("test-queue-v2-consume-group")
         .group("test-group-01")
+        .subscription_mode("all")
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
@@ -641,6 +642,7 @@ bool test_consumer_group(const std::string& server_url) {
     int group02_messages = 0;
     client.queue("test-queue-v2-consume-group")
         .group("test-group-02")
+        .subscription_mode("all")
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
@@ -671,6 +673,7 @@ bool test_consumer_group_with_partition(const std::string& server_url) {
     client.queue("test-queue-v2-consume-group-with-partition")
         .partition("test-partition-01")
         .group("test-group-01")
+        .subscription_mode("all")
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
@@ -682,6 +685,7 @@ bool test_consumer_group_with_partition(const std::string& server_url) {
     client.queue("test-queue-v2-consume-group-with-partition")
         .partition("test-partition-01")
         .group("test-group-02")
+        .subscription_mode("all")
         .batch(messages_to_push)
         .limit(1)
         .wait(false)
@@ -875,6 +879,7 @@ bool test_transaction_ack_with_consumer_group(const std::string& server_url) {
     // Pop with consumer group
     auto messages = client.queue(queue_a)
         .group(consumer_group)
+        .subscription_mode("all")
         .batch(2)
         .wait(false)
         .pop();
@@ -908,6 +913,7 @@ bool test_transaction_ack_with_consumer_group(const std::string& server_url) {
     // Verify: Using a different consumer group should still see the messages
     auto messages_other_group = client.queue(queue_a)
         .group("other-consumer-group-cpp")
+        .subscription_mode("all")
         .batch(2)
         .wait(false)
         .pop();
@@ -1041,10 +1047,13 @@ bool test_subscription_mode_new(const std::string& server_url) {
     
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
-    // Default mode - should get all messages
+    // The replay baseline for the contrast below. This used to rely on the broker
+    // default being "all"; that default is now "new", so the baseline has to ask
+    // for the backlog explicitly or the comparison with "new" is vacuous.
     int all_messages_count = 0;
     client.queue("test-queue-v2-subscription-mode-new")
         .group("group-all")
+        .subscription_mode("all")
         .batch(10)
         .wait(false)
         .limit(1)

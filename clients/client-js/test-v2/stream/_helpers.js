@@ -84,6 +84,11 @@ export async function pushSpread(client, queueName, items) {
  * immediately, return the concatenated list of messages. Stops when a
  * pop returns 0 messages OR cumulative timeout is hit.
  *
+ * NOTE on subscription mode: the drain group is created AFTER the stream has
+ * already emitted onto the sink, so it must ask for 'all' explicitly — with
+ * the broker default of 'new' its cursor would be seeded at the sink's tail
+ * and the emits under test would be invisible.
+ *
  * NOTE on batch size: we use batch=1 so that each ack triggers
  * `acked_count >= batch_size` in queen.partition_consumers and the lease
  * is released between pops. With a larger batch the lease would stay
@@ -99,6 +104,7 @@ export async function drainSink(client, queueName, { timeoutMs = 5000, group } =
     const popped = await client
       .queue(queueName)
       .group(cg)
+      .subscriptionMode('all')
       .batch(1)
       .wait(false)
       .pop()
@@ -127,6 +133,7 @@ export async function drainUntil(client, queueName, { until, timeoutMs = 15_000,
     const popped = await client
       .queue(queueName)
       .group(cg)
+      .subscriptionMode('all')
       .batch(1)
       .wait(true)
       .timeoutMillis(500)

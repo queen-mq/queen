@@ -36,6 +36,10 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     pub stmt_timeout: Duration,
     pub pop_default_timeout_ms: u64,
+    /// Effective subscription mode for a grouped pop that sends none (`new` | `all`,
+    /// from DEFAULT_SUBSCRIPTION_MODE). Group-less "queue mode" pops ignore this —
+    /// the SQL hard-pins them to `all`.
+    pub default_subscription_mode: String,
     // RUSTFIX item 19: exponential-backoff knobs for the long-poll re-query interval.
     pub pop_wait_initial_interval_ms: u64,
     pub pop_wait_backoff_threshold: u32,

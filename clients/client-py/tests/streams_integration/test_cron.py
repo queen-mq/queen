@@ -62,7 +62,7 @@ async def test_cronEverySecondLive(client):
         .window_cron(every="second", idle_flush_ms=500)
         .aggregate({"count": lambda m: 1})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
     await task
     emits = await drain_until(client, sink, until=lambda out: len(out) >= 4, timeout_ms=10000)

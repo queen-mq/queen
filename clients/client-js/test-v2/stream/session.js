@@ -38,7 +38,7 @@ export async function sessionGapClosesAndStartsNew(client) {
     .windowSession({ gap: 2, idleFlushMs: 500 })
     .aggregate({ count: () => 1, sum: m => m.v })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   await pushPromise
   // Wait for idle flush to close the second (still-open) session.
@@ -80,7 +80,7 @@ export async function sessionIdleFlushClosesQuietSession(client) {
     .windowSession({ gap: 1, idleFlushMs: 500 })
     .aggregate({ count: () => 1, sum: m => m.v })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   // Wait for gap + flush to elapse.
   const emits = await drainUntil(client, sink, {
@@ -125,7 +125,7 @@ export async function sessionMultipleKeysIndependent(client) {
     .aggregate({ count: () => 1, sum: m => m.v })
     .map((v, ctx) => ({ user: ctx.key, ...v }))
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   const emits = await drainUntil(client, sink, {
     until: out => out.length >= 2, timeoutMs: 8000

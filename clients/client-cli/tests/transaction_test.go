@@ -172,7 +172,7 @@ func TestTx_DryRun(t *testing.T) {
 	a := uniqueQueue(t, "tx-dry-a")
 	createQueue(t, a)
 	pushOne(t, a, "", map[string]any{"v": 1})
-	got := popN(t, a, 1, "--cg", "ct-tx-dry", "--timeout", "5s")
+	got := popN(t, a, 1, "--cg", "ct-tx-dry", "--from-mode", "all", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Fatalf("setup pop: got %d", len(got))
 	}
@@ -189,7 +189,7 @@ func TestTx_DryRun(t *testing.T) {
 	runOK(t, "tx", "-f", writeBundle(t, bundle), "--dry-run")
 	// The message should still be visible to a fresh CG; dry-run did not
 	// commit any ack against ct-tx-dry, so a different CG also sees it.
-	resA := popN(t, a, 1, "--cg", "ct-tx-dry-other", "--timeout", "10s")
+	resA := popN(t, a, 1, "--cg", "ct-tx-dry-other", "--from-mode", "all", "--timeout", "10s")
 	if len(resA) != 1 {
 		t.Errorf("dry-run shouldn't have acked; fresh CG got %d msgs", len(resA))
 	}

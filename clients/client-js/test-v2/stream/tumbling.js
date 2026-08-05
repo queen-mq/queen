@@ -39,7 +39,7 @@ export async function tumblingBasicWindowSum(client) {
     .windowTumbling({ seconds: 2, idleFlushMs: 800 })
     .aggregate({ count: () => 1, sum: m => m.amount })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   await itemPushPromise
   // Wait until the total count across all emits = 8 (idle flush must
@@ -94,7 +94,7 @@ export async function tumblingPerPartitionIsolation(client) {
     .aggregate({ count: () => 1, sum: m => m.amount })
     .map((agg, ctx) => ({ partition: ctx.partition, ...agg }))
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, maxPartitions: 4, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, maxPartitions: 4, reset: true, subscriptionMode: 'all' })
 
   await itemPushPromise
   // Wait until total count across all emits = 18 (3 customers × 6 events).
@@ -168,7 +168,7 @@ export async function tumblingAggregateAllStats(client) {
       avg:   m => m.v
     })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   // Wait for idle flush to fire and emit the closed window (3s + grace + slack).
   const emits = await drainUntil(client, sink, {
@@ -216,7 +216,7 @@ export async function tumblingGracePeriodDelaysClose(client) {
     .windowTumbling({ seconds: 2, gracePeriod: 4, idleFlushMs: 500 })
     .aggregate({ count: () => 1, sum: m => m.v })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   // After ~3s the window's end is past, but grace=4s means it should NOT
   // be closed yet (close at ~ windowStart + 2 + 4 = 6s after first event).
@@ -265,7 +265,7 @@ export async function tumblingIdleFlushClosesQuietPartitions(client) {
     .windowTumbling({ seconds: 1, idleFlushMs: 700 })
     .aggregate({ count: () => 1, sum: m => m.v })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   // Wait for idle flush to fire.
   const emits = await drainUntil(client, sink, {
@@ -300,7 +300,7 @@ export async function tumblingForeachCtxHasWindowAndPartition(client) {
     .windowTumbling({ seconds: 1, idleFlushMs: 700 })
     .aggregate({ count: () => 1, sum: m => m.v })
     .foreach((value, ctx) => { captured.push({ value, ctx }) })
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   const start = Date.now()
   while (captured.length < 1 && Date.now() - start < 8000) await sleep(100)

@@ -49,7 +49,7 @@ func TestGateTokenBucketBasic(t *testing.T) {
 	defer cancel()
 	r, err := stream.Run(ctx, streams.RunOptions{
 		QueryID: queryID, URL: queenURL, BatchSize: 10, MaxPartitions: 2,
-		MaxWaitMillis: 500, Reset: true,
+		MaxWaitMillis: 500, Reset: true, SubscriptionMode: replayAll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,8 @@ func TestGateTokenBucketBasic(t *testing.T) {
 	cg := "rl-test"
 	arrivals := make(map[string][]int)
 	for atomic.LoadInt64(&drained) < int64(expected) && time.Now().Before(deadline) {
-		batch, err := testClient.Queue(sink).Group(cg).Batch(50).Wait(true).TimeoutMillis(500).Pop(context.Background())
+		batch, err := testClient.Queue(sink).Group(cg).SubscriptionMode(replayAll).
+			Batch(50).Wait(true).TimeoutMillis(500).Pop(context.Background())
 		if err != nil || len(batch) == 0 {
 			continue
 		}

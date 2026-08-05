@@ -81,7 +81,7 @@ export async function cronEverySecondLive(client) {
     .windowCron({ every: 'second', idleFlushMs: 500 })
     .aggregate({ count: () => 1 })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   await pushPromise
   const emits = await drainUntil(client, sink, {

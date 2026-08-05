@@ -249,6 +249,8 @@ pub struct Config {
     // pop long-poll (RUSTFIX item 19). Default idle wait 30s (DEFAULT_TIMEOUT); the
     // re-query interval backs off exponentially instead of a fixed poll.
     pub pop_default_timeout_ms: u64,
+    /// Canonical `new` | `all`, already normalized by `normalize_subscription_mode`.
+    pub default_subscription_mode: String,
     pub pop_wait_initial_interval_ms: u64,
     pub pop_wait_backoff_threshold: u32,
     pub pop_wait_backoff_multiplier: f64,
@@ -398,6 +400,29 @@ impl FileBufferConfig {
 // returns "" verbatim; only a genuinely-unset var falls back to the default.
 // (RUSTFIX item 6 — the old `.filter(|v| !v.is_empty())` treated ""` as unset,
 // which silently restored default lists e.g. for JWT_SKIP_PATHS="".)
+/// Canonicalize a subscription mode to one of the two spellings the SQL actually
+/// understands.
+///
+/// `004_log_pop.sql` matches with `COALESCE(p_sub_mode,'all') = 'new'` — an EXACT
+/// string compare — so every other spelling falls through to full-backlog replay.
+/// That silently broke a documented alias: the Go SDK exports
+/// `SubscriptionModeNewOnly = "new-only"` ("alias for SubscriptionModeNew"), the
+/// CLI advertises `all|new|new-only` in `--from-mode`, and the JS README shows
+/// `.subscriptionMode('new-only')` as real usage — yet `new-only` reached the SQL
+/// verbatim, missed the `= 'new'` arm, and replayed everything: the exact opposite
+/// of what it advertises, on every client, with no test catching it.
+///
+/// Anything not recognized as "start at the tail" still resolves to `all`, which is
+/// both the historical fallthrough and the safe direction (a consumer that replays
+/// too much is recoverable; one that skips messages is not). That deliberately keeps
+/// working the informal spellings already in the test suites, e.g. `from_beginning`.
+pub(crate) fn normalize_subscription_mode(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "new" | "new-only" | "new_only" | "newonly" => "new".to_string(),
+        _ => "all".to_string(),
+    }
+}
+
 fn env_str(k: &str, def: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| def.to_string())
 }
@@ -706,6 +731,23 @@ pub fn load() -> Config {
         // POP_DEFAULT_TIMEOUT_MS, then 30000 — not the old 2000.
         pop_default_timeout_ms: env_int("DEFAULT_TIMEOUT", env_int("POP_DEFAULT_TIMEOUT_MS", 30000))
             .max(1) as u64,
+        // Subscription mode applied when a pop names a consumer group but does NOT
+        // send subscriptionMode. `new` = the group starts at the tail; `all` = it
+        // replays the whole retained backlog.
+        //
+        // Two things happened here. The C++ broker honored DEFAULT_SUBSCRIPTION_MODE
+        // and the shipped charts set it to `new`; the Rust port dropped the env var
+        // (this file had no "subscription" in it at all) AND hardcoded the
+        // per-request default to `all`. So a chart that still says `new` was
+        // silently serving `all`, and the first group created after traffic resumed
+        // replayed from the start. This restores the env var — same treatment as
+        // DEFAULT_TIMEOUT above — and makes `new` the default it always claimed to
+        // be. Set DEFAULT_SUBSCRIPTION_MODE=all to get the old Rust behavior back
+        // without a rebuild.
+        default_subscription_mode: normalize_subscription_mode(&env_str(
+            "DEFAULT_SUBSCRIPTION_MODE",
+            "new",
+        )),
         pop_wait_initial_interval_ms: env_int("POP_WAIT_INITIAL_INTERVAL_MS", 100).max(1) as u64,
         pop_wait_backoff_threshold: env_int("POP_WAIT_BACKOFF_THRESHOLD", 3).max(0) as u32,
         pop_wait_backoff_multiplier: env_f64("POP_WAIT_BACKOFF_MULTIPLIER", 2.0),
@@ -847,5 +889,41 @@ mod tests {
         let m = mask("hunter2-super-secret");
         assert!(!m.contains("hunter2"), "mask leaked the secret: {m}");
         assert_eq!(m, "<set:20 chars>");
+    }
+}
+
+#[cfg(test)]
+mod subscription_mode_tests {
+    use super::normalize_subscription_mode;
+
+    /// `new-only` is documented as an alias of `new` by the Go SDK constant, the
+    /// CLI --from-mode help and the JS README, but the SQL compares the literal
+    /// exactly, so it used to reach `= 'new'`, miss, and replay the whole backlog:
+    /// the exact opposite of what it advertises.
+    #[test]
+    fn documented_aliases_of_new_all_resolve_to_new() {
+        for raw in ["new", "new-only", "new_only", "newonly", "NEW", " New-Only "] {
+            assert_eq!(normalize_subscription_mode(raw), "new", "{raw}");
+        }
+    }
+
+    /// Anything unrecognized keeps resolving to `all`: that is both the historical
+    /// fallthrough and the safe direction. Replaying too much is recoverable;
+    /// skipping messages is not.
+    #[test]
+    fn everything_else_resolves_to_all() {
+        for raw in ["all", "ALL", "from_beginning", "earliest", "", "garbage"] {
+            assert_eq!(normalize_subscription_mode(raw), "all", "{raw}");
+        }
+    }
+
+    /// The output must be one of the two spellings the SQL understands, never a
+    /// pass-through of the caller's text.
+    #[test]
+    fn output_is_always_one_of_the_two_sql_literals() {
+        for raw in ["new", "all", "whatever", "new-only"] {
+            let m = normalize_subscription_mode(raw);
+            assert!(m == "new" || m == "all", "{raw} -> {m}");
+        }
     }
 }

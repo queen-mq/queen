@@ -41,7 +41,7 @@ async def test_combinedFullPipeline(client):
         .map(lambda agg, ctx: {"user": ctx["partition"], "windowKey": ctx["windowKey"], **agg})
         .filter(lambda v: v["count"] > 0)
         .foreach(lambda value: captured.append(value))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=100, max_partitions=4, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=100, max_partitions=4, reset=True)
     )
 
     start = asyncio.get_event_loop().time()
@@ -90,8 +90,8 @@ async def test_combinedTwoConcurrentStreams(client):
     )
 
     handle_a, handle_b = await asyncio.gather(
-        stream_a.run(query_id=q_a, url=STREAMS_URL, batch_size=50, reset=True),
-        stream_b.run(query_id=q_b, url=STREAMS_URL, batch_size=50, reset=True),
+        stream_a.run(query_id=q_a, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True),
+        stream_b.run(query_id=q_b, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True),
     )
 
     emits_a, emits_b = await asyncio.gather(

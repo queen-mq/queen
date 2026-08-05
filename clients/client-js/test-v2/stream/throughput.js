@@ -58,7 +58,8 @@ export async function throughput5kAcross20Partitions(client) {
       url: STREAMS_URL,
       batchSize: 200,
       maxPartitions: 8,
-      reset: true
+      reset: true,
+      subscriptionMode: 'all'
     })
 
   // Wait until we have at least 20 partition emits — possibly more if
@@ -130,7 +131,7 @@ export async function throughputManyWindowsSinglePartition(client) {
     .windowTumbling({ seconds: 1, idleFlushMs: 600 })
     .aggregate({ count: () => 1, sum: m => m.v })
     .to(client.queue(sink))
-    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+    .run({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
 
   // Wait for all 200 messages to be reflected in emits.
   const emits = await drainUntil(client, sink, {

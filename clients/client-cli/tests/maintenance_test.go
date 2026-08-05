@@ -114,8 +114,11 @@ func TestMaintenance_PopScopeBlocksPops(t *testing.T) {
 	pushOne(t, q, "", map[string]any{"v": 1})
 
 	runOK(t, "maintenance", "on", "--pop", "--yes")
+	// The blocked pop short-circuits before the CG is created, so the pop
+	// after maintenance-off is this group's FIRST contact: it needs
+	// --from-mode all to see the message pushed above.
 	got := popN(t, q, 5,
-		"--cg", "ct-maint-pop", "--auto-ack",
+		"--cg", "ct-maint-pop", "--from-mode", "all", "--auto-ack",
 		"--wait=false", "--timeout", "300ms",
 	)
 	if len(got) != 0 {
@@ -128,7 +131,7 @@ func TestMaintenance_PopScopeBlocksPops(t *testing.T) {
 	// moment to refresh.
 	time.Sleep(500 * time.Millisecond)
 	got = popN(t, q, 5,
-		"--cg", "ct-maint-pop", "--auto-ack", "--timeout", "5s",
+		"--cg", "ct-maint-pop", "--from-mode", "all", "--auto-ack", "--timeout", "5s",
 	)
 	if len(got) != 1 {
 		t.Errorf("after maintenance off: got %d, want 1", len(got))

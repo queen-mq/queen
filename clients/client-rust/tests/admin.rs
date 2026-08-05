@@ -9,7 +9,8 @@ mod common;
 use std::time::Duration;
 
 use queen_mq::{
-    AckStatus, DlqParams, DlqResponse, Message, Queen, QueueOptions, SeekRequest, TraceRequest,
+    AckStatus, DlqParams, DlqResponse, Message, Queen, QueueOptions, SeekRequest, SubscriptionMode,
+    TraceRequest,
 };
 
 use common::*;
@@ -41,6 +42,7 @@ async fn pop_lane(
             .group(group)
             .batch(10)
             .wait(false)
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .expect("lane pop failed");
@@ -381,6 +383,7 @@ async fn a_consumer_can_settle_its_message_inside_a_transaction() {
         .limit(1)
         .idle(Duration::from_secs(15))
         .wait(false)
+        .subscription_mode(SubscriptionMode::All)
         .consume(move |msg| {
             let queen = handoff.clone();
             let sink = sink_name.clone();
@@ -1283,6 +1286,7 @@ async fn renewing_a_lease_reports_what_it_extended() {
             .batch(10)
             .partitions(2)
             .wait(false)
+            .subscription_mode(SubscriptionMode::All)
             .pop()
             .await
             .unwrap();

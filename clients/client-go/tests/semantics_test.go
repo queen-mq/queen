@@ -112,13 +112,21 @@ func rawPop(t *testing.T, queue string, params map[string]string) []rawMessage {
 
 // popRetryClient pops through the typed client, retrying briefly to ride out
 // push->visibility latency (broker-side fusion hold).
-func popRetryClient(ctx context.Context, t *testing.T, client *queen.Queen, queueName, group string, batch int) []*queen.Message {
+//
+// The optional mode is the subscriptionMode sent with the pop. It only bites on
+// a group's FIRST contact: new groups are seeded at the partition tail by
+// default, so a test that pushes BEFORE the group exists must pass "all" to get
+// the backlog.
+func popRetryClient(ctx context.Context, t *testing.T, client *queen.Queen, queueName, group string, batch int, mode ...string) []*queen.Message {
 	t.Helper()
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
 		qb := client.Queue(queueName).Batch(batch).Wait(false)
 		if group != "" {
 			qb = qb.Group(group)
+		}
+		if len(mode) > 0 && mode[0] != "" {
+			qb = qb.SubscriptionMode(mode[0])
 		}
 		msgs, err := qb.Pop(ctx)
 		if err != nil {
@@ -202,7 +210,7 @@ func TestRetryStatusBudgetFreeAndDlqByDefault(t *testing.T) {
 
 	// 6 'retry' cycles — twice the default budget. Every cycle must redeliver.
 	for i := 0; i < 6; i++ {
-		msgs := popRetryClient(ctx, t, client, queueName, group, 1)
+		msgs := popRetryClient(ctx, t, client, queueName, group, 1, queen.SubscriptionModeAll)
 		if len(msgs) != 1 {
 			t.Fatalf("cycle %d: message not redelivered after 'retry' ack (budget charged?)", i)
 		}
@@ -218,7 +226,7 @@ func TestRetryStatusBudgetFreeAndDlqByDefault(t *testing.T) {
 	// Exhaust the real budget with failed acks -> must dead-letter even though
 	// the queue was never configured (DLQ-by-default contract).
 	for i := 0; i < 5; i++ {
-		msgs := popRetryClient(ctx, t, client, queueName, group, 1)
+		msgs := popRetryClient(ctx, t, client, queueName, group, 1, queen.SubscriptionModeAll)
 		if len(msgs) == 0 {
 			break
 		}
@@ -247,7 +255,7 @@ func TestDlqStatusBypassesRetries(t *testing.T) {
 		t.Fatalf("push: %v", err)
 	}
 
-	msgs := popRetryClient(ctx, t, client, queueName, group, 1)
+	msgs := popRetryClient(ctx, t, client, queueName, group, 1, queen.SubscriptionModeAll)
 	if len(msgs) != 1 {
 		t.Fatalf("message not delivered")
 	}
@@ -289,7 +297,7 @@ func TestLeaseExpiryDoesNotChargeRetryBudget(t *testing.T) {
 
 	// 4 expiry cycles (double the budget): pop, never ack, let the lease lapse.
 	for i := 0; i < 4; i++ {
-		msgs := popRetryClient(ctx, t, client, queueName, group, 1)
+		msgs := popRetryClient(ctx, t, client, queueName, group, 1, queen.SubscriptionModeAll)
 		if len(msgs) != 1 {
 			t.Fatalf("cycle %d: message not redelivered after lease expiry (budget charged?)", i)
 		}
@@ -302,7 +310,7 @@ func TestLeaseExpiryDoesNotChargeRetryBudget(t *testing.T) {
 	// Explicit failures must still have the full budget available.
 	dlqSeen := false
 	for i := 0; i < 4; i++ {
-		msgs := popRetryClient(ctx, t, client, queueName, group, 1)
+		msgs := popRetryClient(ctx, t, client, queueName, group, 1, queen.SubscriptionModeAll)
 		if len(msgs) == 0 {
 			break
 		}
@@ -335,7 +343,7 @@ func TestLeaselessAckAfterExpiry(t *testing.T) {
 		t.Fatalf("push: %v", err)
 	}
 
-	msgs := popRetryClient(ctx, t, client, queueName, group, 1)
+	msgs := popRetryClient(ctx, t, client, queueName, group, 1, queen.SubscriptionModeAll)
 	if len(msgs) != 1 {
 		t.Fatalf("message not delivered")
 	}
@@ -360,7 +368,7 @@ func TestLeaselessAckAfterExpiry(t *testing.T) {
 		Push(map[string]interface{}{"n": 2}).Execute(ctx); err != nil {
 		t.Fatalf("push 2: %v", err)
 	}
-	msgs2 := popRetryClient(ctx, t, client, queueName, group, 1)
+	msgs2 := popRetryClient(ctx, t, client, queueName, group, 1, queen.SubscriptionModeAll)
 	if len(msgs2) != 1 {
 		t.Fatalf("second message not delivered")
 	}
@@ -447,7 +455,11 @@ func TestPopLeaseSecondsOverride(t *testing.T) {
 	// Claim with a 1-second override against the 60s queue lease.
 	var got []rawMessage
 	for i := 0; i < 20 && len(got) == 0; i++ {
-		got = rawPop(t, queueName, map[string]string{"consumerGroup": group, "leaseSeconds": "1"})
+		// First contact of this group, and the message was pushed before it
+		// existed: ask for the backlog instead of the tail-seeded default.
+		got = rawPop(t, queueName, map[string]string{
+			"consumerGroup": group, "leaseSeconds": "1", "subscriptionMode": "all",
+		})
 		if len(got) == 0 {
 			time.Sleep(150 * time.Millisecond)
 		}

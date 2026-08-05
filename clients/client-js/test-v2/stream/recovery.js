@@ -113,7 +113,10 @@ export async function recoveryMidStreamResume(client) {
   for (let i = 0; i < 5; i++) {
     await client.queue(src).partition('p').push([{ data: { v: 1 } }])
   }
-  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true })
+  // Run 1 creates the source consumer group AFTER the pushes, so it has to
+  // ask for the backlog. Run 2 reuses the same group and resumes from its
+  // stored cursor — the mode is only consulted on a group's first contact.
+  const handle1 = await buildStream({ queryId, url: STREAMS_URL, batchSize: 50, reset: true, subscriptionMode: 'all' })
   // Wait for at least one closed-window emit.
   await drainUntil(client, sink, { until: out => out.length >= 1, timeoutMs: 5000 })
   await handle1.stop()

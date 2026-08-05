@@ -44,7 +44,7 @@ async def test_slidingEventsAppearInOverlappingWindows(client):
         .window_sliding(size=4, slide=2, idle_flush_ms=1000)
         .aggregate({"count": lambda m: 1, "sum": lambda m: m["v"]})
         .to(client.queue(sink))
-        .run(query_id=query_id, url=STREAMS_URL, batch_size=50, reset=True)
+        .run(query_id=query_id, url=STREAMS_URL, subscription_mode="all", batch_size=50, reset=True)
     )
     await task
     await sleep(6000)

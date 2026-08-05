@@ -194,9 +194,11 @@ Cancel the `ctx` to stop every worker; the workers return `ctx.Err()`, which `Ex
 filters out so a clean cancellation is not reported as a failure.
 
 <Aside type="note">
-The package exports `SubscriptionModeNewOnly = "new-only"` alongside `SubscriptionModeNew`, but
-the broker matches the string `new` exactly. `new-only` falls through to the `all` behaviour and
-seeds the cursor at the beginning of the partition. Use `queen.SubscriptionModeNew`.
+The package exports `SubscriptionModeNewOnly = "new-only"` alongside `SubscriptionModeNew`.
+The broker now normalizes `new-only` to `new`, so the alias behaves as its name promises. Older
+brokers matched the string `new` exactly, so `new-only` fell through to `all` and seeded the
+cursor at the beginning of the partition. Prefer `queen.SubscriptionModeNew` if you talk to a
+broker older than this one.
 </Aside>
 
 `AutoAck` is client-side. The worker never sends `autoAck` to the server: it calls

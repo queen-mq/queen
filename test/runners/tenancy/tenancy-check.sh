@@ -196,7 +196,11 @@ say ""
 say "== 6. a consumer-group NAME shared by both tenants keeps independent cursors =="
 G=shared-cg
 # Tenant A drains the group on queen-a (autoAck advances A's cursor server-side).
-call GET "$A" "$TA" "/api/v1/pop/queue/$Q?consumerGroup=$G&batch=50&partitions=8&autoAck=true&wait=true&timeout=8000"
+# subscriptionMode=all on the FIRST contact of each tenant's '$G': the messages this
+# section consumes were pushed back in §2/§4, before this group existed, and the
+# broker's default (DEFAULT_SUBSCRIPTION_MODE=new) would seed the cursor at the tail
+# and deliver nothing — which would turn every assertion below into a vacuous pass.
+call GET "$A" "$TA" "/api/v1/pop/queue/$Q?consumerGroup=$G&batch=50&partitions=8&autoAck=true&subscriptionMode=all&wait=true&timeout=8000"
 GA1=$(nmsgs); GTAG=$(tags)
 eq "A's first '$G' pop sees only A's payloads" "A" "$GTAG"
 [ "$GA1" -ge 1 ] && ok "A's first '$G' pop delivered $GA1 message(s)" \
@@ -204,7 +208,7 @@ eq "A's first '$G' pop sees only A's payloads" "A" "$GTAG"
 call GET "$A" "$TA" "/api/v1/pop/queue/$Q?consumerGroup=$G&batch=50&partitions=8&autoAck=true"
 eq "A's '$G' cursor is now drained" "0" "$(nmsgs)"
 # The interesting one: B's cursor for the SAME group name must be untouched.
-call GET "$B" "$TB" "/api/v1/pop/queue/$Q?consumerGroup=$G&batch=50&partitions=8&autoAck=true&wait=true&timeout=8000"
+call GET "$B" "$TB" "/api/v1/pop/queue/$Q?consumerGroup=$G&batch=50&partitions=8&autoAck=true&subscriptionMode=all&wait=true&timeout=8000"
 GB1=$(nmsgs); GTAG=$(tags)
 [ "$GB1" -ge 1 ] && ok "B's '$G' cursor was NOT advanced by A ($GB1 message(s) delivered)" \
   || bad "B's '$G' cursor was advanced by tenant A's consumption — messages hidden"

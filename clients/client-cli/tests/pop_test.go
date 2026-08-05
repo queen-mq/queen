@@ -24,7 +24,9 @@ func TestPop_NonEmptyQueue(t *testing.T) {
 	q := uniqueQueue(t, "pop-non-empty")
 	createQueue(t, q)
 	pushOne(t, q, "", map[string]any{"hello": "world"})
-	got := popN(t, q, 1, "--cg", "ct-pn", "--auto-ack", "--timeout", "5s")
+	// Named CGs are seeded at the tail under the broker's default 'new'
+	// mode; a group created after the push must ask for the backlog.
+	got := popN(t, q, 1, "--cg", "ct-pn", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(got))
 	}
@@ -54,7 +56,7 @@ func TestPop_AckThroughCLI(t *testing.T) {
 	q := uniqueQueue(t, "pop-ack")
 	createQueue(t, q)
 	pushOne(t, q, "", map[string]any{"hi": 1})
-	got := popN(t, q, 1, "--cg", "ct-ack", "--timeout", "5s")
+	got := popN(t, q, 1, "--cg", "ct-ack", "--from-mode", "all", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Fatalf("pop got %d, want 1", len(got))
 	}
@@ -76,12 +78,12 @@ func TestPop_LeaseExpiryReDelivery(t *testing.T) {
 	q := uniqueQueue(t, "pop-lease-expiry")
 	runOK(t, "queue", "configure", q, "--lease-time", "1")
 	pushOne(t, q, "", map[string]any{"x": 1})
-	first := popN(t, q, 1, "--cg", "ct-lease", "--timeout", "5s")
+	first := popN(t, q, 1, "--cg", "ct-lease", "--from-mode", "all", "--timeout", "5s")
 	if len(first) != 1 {
 		t.Fatalf("first pop got %d, want 1", len(first))
 	}
 	time.Sleep(2200 * time.Millisecond)
-	second := popN(t, q, 1, "--cg", "ct-lease", "--timeout", "5s")
+	second := popN(t, q, 1, "--cg", "ct-lease", "--from-mode", "all", "--timeout", "5s")
 	if len(second) != 1 {
 		t.Errorf("after lease expiry, got %d, want 1 (re-delivery)", len(second))
 	}
@@ -98,7 +100,7 @@ func TestPop_BatchSizeRespected(t *testing.T) {
 		map[string]any{"i": 4},
 		map[string]any{"i": 5},
 	})
-	got := popN(t, q, 3, "--cg", "ct-bsize", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 3, "--cg", "ct-bsize", "--from-mode", "all", "--auto-ack", "--timeout", "5s")
 	if len(got) != 3 {
 		t.Errorf("expected 3 messages, got %d", len(got))
 	}
@@ -111,7 +113,7 @@ func TestPop_PartitionScoped(t *testing.T) {
 	pushOne(t, q, "p0", map[string]any{"p": "p0"})
 	pushOne(t, q, "p1", map[string]any{"p": "p1"})
 
-	got := popN(t, q, 5, "--cg", "ct-part", "--partition", "p0", "--auto-ack", "--timeout", "5s")
+	got := popN(t, q, 5, "--cg", "ct-part", "--from-mode", "all", "--partition", "p0", "--auto-ack", "--timeout", "5s")
 	if len(got) != 1 {
 		t.Fatalf("expected 1 from p0, got %d", len(got))
 	}
@@ -148,7 +150,7 @@ func TestPop_V4MultiPartitionBasic(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	got := popN(t, q, 100,
-		"--cg", "ct-v4-basic", "--max-partitions", "3",
+		"--cg", "ct-v4-basic", "--from-mode", "all", "--max-partitions", "3",
 		"--wait=false", "--timeout", "1s")
 	if len(got) != 6 {
 		t.Fatalf("v4 multi-partition: got %d, want 6", len(got))
@@ -184,7 +186,7 @@ func TestPop_V4GlobalCap(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	got := popN(t, q, 10,
-		"--cg", "ct-v4-cap", "--max-partitions", "5",
+		"--cg", "ct-v4-cap", "--from-mode", "all", "--max-partitions", "5",
 		"--batch", "10", "--wait=false")
 	if len(got) != 10 {
 		t.Errorf("global cap test: got %d, want 10", len(got))
@@ -206,7 +208,7 @@ func TestPop_V4DefaultOnePartition(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	got := popN(t, q, 100, "--cg", "ct-v4-def", "--wait=false")
+	got := popN(t, q, 100, "--cg", "ct-v4-def", "--from-mode", "all", "--wait=false")
 	if len(got) != 5 {
 		t.Errorf("default 1-partition pop: got %d, want 5", len(got))
 	}

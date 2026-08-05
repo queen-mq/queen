@@ -447,9 +447,11 @@ async def test_transaction_ack_with_consumer_group(client):
         {"data": {"value": 2}}
     ])
 
-    # Pop with consumer group
+    # Pop with consumer group. The group is created here, after the push, so it
+    # has to ask for 'all' to see the backlog (server default is 'new').
     messages = await (client.queue("test-queue-v2-txn-cg-a")
         .group(consumer_group)
+        .subscription_mode("all")
         .batch(2)
         .wait(False)
         .pop())
@@ -478,6 +480,7 @@ async def test_transaction_ack_with_consumer_group(client):
     # Verify: Using a different consumer group should still see the messages
     messages_other_group = await (client.queue("test-queue-v2-txn-cg-a")
         .group("other-consumer-group")
+        .subscription_mode("all")
         .batch(2)
         .wait(False)
         .pop())
