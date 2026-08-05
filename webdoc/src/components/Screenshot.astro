@@ -1,0 +1,74 @@
+---
+/**
+ * A screenshot of the bundled dashboard.
+ *
+ * Deliberately not `Chart`: that component pairs a light and a dark SVG and
+ * shows the one matching the reader's theme. The dashboard has no light theme
+ * to photograph (app/src/main.js forces dark and scrubs stored preferences), so
+ * there is one file per figure and it is dark on both surfaces. The frame below
+ * is what keeps a dark image from floating on a light page.
+ *
+ * `src` is the file's base name under public/screenshots; the component appends
+ * `.png`. Figures come from a seeded local broker, not from production.
+ */
+interface Props {
+  /** Base name of the file under public/screenshots, without the extension. */
+  src: string;
+  /** What the screenshot shows, for readers who cannot see it. Required. */
+  alt: string;
+  /** One line under the figure: what it demonstrates. */
+  caption?: string;
+}
+
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const { src, alt, caption } = Astro.props;
+
+/**
+ * Intrinsic size from the PNG header, so the browser reserves the right box
+ * before the bytes land and the prose under a figure does not jump.
+ *
+ * A PNG starts with an 8-byte signature, then the IHDR chunk: 4 bytes length,
+ * 4 bytes type, then width and height as big-endian uint32 at offsets 16 and 20.
+ */
+function intrinsicSize(name: string): { width: number; height: number } | null {
+  // Two candidates on purpose. `import.meta.url` points at this source file
+  // under `astro dev`, but at a bundled chunk during `astro build`, where the
+  // relative walk lands outside the project and the read fails: dev emitted the
+  // attributes and the built pages silently dropped them. `process.cwd()` is
+  // the project root for both commands, and is tried first.
+  const candidates = [
+    join(process.cwd(), "public", "screenshots", `${name}.png`),
+    new URL(`../../public/screenshots/${name}.png`, import.meta.url),
+  ];
+  for (const file of candidates) {
+    try {
+      const buf = readFileSync(file as string);
+      if (buf.length < 24 || buf.toString("ascii", 12, 16) !== "IHDR") continue;
+      const width = buf.readUInt32BE(16);
+      const height = buf.readUInt32BE(20);
+      if (width > 0 && height > 0) return { width, height };
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  // A missing figure is already a visible broken image and the markdown lint
+  // catches the reference; do not fail the build a second time here.
+  return null;
+}
+
+const size = intrinsicSize(src);
+---
+
+<figure class="nb-shot">
+  <img
+    src={`/screenshots/${src}.png`}
+    alt={alt}
+    width={size?.width}
+    height={size?.height}
+    loading="lazy"
+    decoding="async"
+  />
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>

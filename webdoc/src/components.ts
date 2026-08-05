@@ -18,6 +18,7 @@ import { LinkButton } from "./components/ui/link-button";
 import { LinkCard } from "./components/ui/link-card";
 import { PackageManagers } from "./components/ui/package-managers";
 import Render from "./components/Render.astro";
+import Screenshot from "./components/Screenshot.astro";
 import { Step, Steps } from "./components/ui/steps";
 import { Tabs, TabItem } from "./components/ui/tabs";
 
@@ -39,6 +40,7 @@ export const components = {
   LinkCard,
   PackageManagers,
   Render,
+  Screenshot,
   Step,
   Steps,
   TabItem,

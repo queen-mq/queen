@@ -52,7 +52,7 @@ const nimbusConfig = defineNimbusConfig({
   site: "https://queenmq.com",
   title: "Queen MQ",
   description:
-    "A message queue on the PostgreSQL you already run: one ordered FIFO lane per entity, consumer groups, replay and a dead-letter queue, in one stateless binary.",
+    "A message queue on the PostgreSQL you already run: one ordered FIFO lane per entity, consumer groups, replay, a dead-letter queue and a dashboard, in one binary.",
   locale: "en",
   homeLabel: "Queen MQ",
   github: "https://github.com/queen-mq/queen",

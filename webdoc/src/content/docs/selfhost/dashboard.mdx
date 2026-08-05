@@ -26,6 +26,12 @@ The bundle is fixed at build time: there is no `QUEEN_STATIC_DIR` and no runtime
 static-directory override, so a volume mounted at the container does not change
 what is served. If you need a different dashboard, you rebuild the binary.
 
+<Screenshot
+  src="dashboard-overview"
+  alt="The dashboard overview. A header counts stored messages, queues, partitions, consumer groups, pending and completed. Below it a table gives throughput, pending delta, parked consumers, fill ratio, time lag, errors, partitions and retention, each with its current value, a sentence of context and a sparkline over the selected window."
+  caption="The overview, on a local broker under a seeded workload. The rates are whatever that workload produced; the measured figures live under Benchmarks."
+/>
+
 ## How it is served
 
 The dashboard is the router's **fallback**, registered after every real route, so
@@ -103,6 +109,12 @@ Every view is tenant-scoped except one, and the exception is labelled on screen.
 | Dead Letter | `/dlq` | the dead-letter listing, with purge |
 | System | `/system` | **cell-level**: host CPU and memory, worker metrics, PostgreSQL internals, the disk spool, the maintenance switch |
 
+<Screenshot
+  src="dashboard-consumer-groups"
+  alt="The consumer groups view. Seven group and queue pairs are listed, sorted worst first, each with a partition count. Two are flagged red with every partition behind and a time lag around sixteen minutes; the other five are green and show a dash in both lag columns."
+  caption="Five groups keeping pace and two that stopped, separated by the broker's own offsets rather than by inference. The two slow readers here are deliberate."
+/>
+
 Three properties of this UI are worth knowing before you read a number off it.
 
 **The System view is not about your tenant.** Host resources, PostgreSQL internals
@@ -111,10 +123,22 @@ so on screen, and behind a proxy it answers only for an operator principal. Read
 a cell figure as a tenant figure is the specific mistake the shell is built to
 prevent.
 
+<Screenshot
+  src="dashboard-system"
+  alt="The System view. A banner across the top reads cell operator: host resources, the disk spool and Postgres internals for this cell, shared by every tenant on it, not scoped to the current one. Under it are the file buffer state, CPU and memory charts, the database pool and the broker worker list, each tagged cell-level."
+  caption="The banner and the cell-level tags are the whole point: nothing below them is scoped to your tenant."
+/>
+
 **The dead-letter view inspects and purges. It has no replay control.** An earlier
 version of this UI had a retry button that posted to a path the broker did not
 route; the request fell through to the static fallback and reported success while
 doing nothing. The control was removed rather than left lying.
+
+<Screenshot
+  src="dashboard-dlq"
+  alt="The dead letter view. Three tiles summarise the messages on the page, the partitions they came from and the most frequent error. A table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and a single Purge action."
+  caption="Purge is the only action on a row. The tiles also say they are computed from the page, not from a broker-side total."
+/>
 
 **An unknown is not a zero.** Panels carry explicit loading, error and
 last-updated state, and a failed call renders as a failure instead of a confident

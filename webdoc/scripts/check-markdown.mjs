@@ -93,6 +93,7 @@ const REGISTERED_COMPONENTS = (() => {
 const HANDLED = new Map([
   ["Render", "src/lib/markdown-partials.ts (expanded to the partial's markdown)"],
   ["Chart", "src/lib/markdown-partials.ts (componentMap: alt text, caption, source)"],
+  ["Screenshot", "src/lib/markdown-partials.ts (componentMap: alt text, caption)"],
   ["PackageManagers", "nimbus-docs downleveler (rendered as a sh block)"],
   ["LinkCard", "nimbus-docs downleveler (rendered as a link list item)"],
 ]);

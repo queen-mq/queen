@@ -60,7 +60,8 @@ const HOME_LEAD =
   "all on: **50+ billion messages across 24 hours**. Consumer groups, replay and a " +
   "dead-letter queue at both ends. Windowed aggregation that commits its state, its output " +
   "and its acks in one transaction. One stateless binary next to the Postgres you already " +
-  "run. No cluster, no rebalancing, no JVM.";
+  "run, with the operations dashboard compiled into it: queue health, per-group lag and " +
+  "message inspection, with nothing extra to deploy. No cluster, no rebalancing, no JVM.";
 
 /**
  * The alt text of the architecture diagram. It is written for a reader who

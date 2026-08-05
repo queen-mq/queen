@@ -151,6 +151,29 @@ const componentMap = {
   },
 
   /**
+   * A dashboard screenshot becomes its description, for the same reason a
+   * `<Chart />` does: a PNG of a dark web application carries nothing to a
+   * reader consuming markdown, and the `alt` is already written for someone who
+   * cannot see it. No `source` here, since a screenshot is captured from a
+   * running broker rather than rendered from a tracked artifact.
+   */
+  Screenshot: ({ attrs }: { attrs: Record<string, string | boolean> }): string => {
+    const str = (key: string): string => {
+      const value = attrs[key];
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const alt = str("alt");
+    const caption = str("caption");
+    const src = str("src");
+
+    const parts: string[] = [];
+    if (alt) parts.push(`**Screenshot.** ${alt}`);
+    else if (src) parts.push(`**Screenshot.** \`${src}\``);
+    if (caption) parts.push(caption);
+    return parts.length > 0 ? `\n${parts.join("\n\n")}\n` : "";
+  },
+
+  /**
    * The accordion family, unwrapped to its text.
    *
    * The downleveler knows the other paired components but not these four, so
