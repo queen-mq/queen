@@ -5,6 +5,23 @@ Release history for the Queen MQ server and client SDKs. Full release notes live
 
 ## 1.0.0-beta.4
 
+**Google sign-in through the proxy could never complete.** The token exchange died with
+`bad_gateway` / "google token exchange failed", and the underlying error was a TLS one:
+`peer closed connection without sending TLS close_notify`. The proxy's self-contained HTTP
+client sends `Connection: close` and reads to end-of-stream, but a peer that closes the TCP
+connection without a TLS close_notify surfaces through rustls as `UnexpectedEof`, and the
+read loops treated any read error as a failure — so a response that had already arrived in
+full was thrown away. Google's token endpoint closes exactly that way. Both read loops now
+treat it as the end of the message, which also unblocks the JWKS fetch that verifies the
+returned id_token; the JWKS path would have failed a step later for the same reason.
+
+Tolerating an abrupt close is only safe if a genuinely truncated response is still
+rejected, so response parsing now validates the body against `Content-Length` and returns
+`truncated body` when it is short. The chunked path already required its terminating
+zero-size chunk. `Transfer-Encoding: chunked` takes precedence over `Content-Length`, per
+RFC 9112.
+
+
 **The dashboard reported messages as pending after they had been consumed and
 acknowledged.** Two independent accounting defects, both around the group-less
 `__QUEUE_MODE__` cursor, both visible only to grouped ("bus mode") consumers — the data

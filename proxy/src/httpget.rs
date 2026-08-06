@@ -147,7 +147,21 @@ where
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        let n = stream.read(&mut chunk).await.map_err(|e| format!("read: {e}"))?;
+        let n = match stream.read(&mut chunk).await {
+            Ok(n) => n,
+            // A peer that closes the TCP connection without sending TLS
+            // close_notify surfaces through rustls as UnexpectedEof. With
+            // `Connection: close` the close IS the end of the message, and
+            // Google's token endpoint closes exactly this way — treating it as
+            // an error made every token exchange fail with
+            // "google token exchange failed" while the body had already
+            // arrived in full. Safe to accept because parse_response verifies
+            // the body against Content-Length (and dechunk requires the
+            // terminating zero chunk), so a genuinely truncated response is
+            // still rejected, just further down and with a clearer message.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("read: {e}")),
+        };
         if n == 0 {
             break;
         }
@@ -224,7 +238,14 @@ where
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        let n = stream.read(&mut chunk).await.map_err(|e| format!("read: {e}"))?;
+        let n = match stream.read(&mut chunk).await {
+            Ok(n) => n,
+            // Same close_notify tolerance as exchange_req — see the comment
+            // there. This is the JWKS path: without it, a Google id_token
+            // could never be verified even once the token exchange succeeded.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("read: {e}")),
+        };
         if n == 0 {
             break; // EOF (Connection: close)
         }
@@ -253,19 +274,38 @@ fn parse_response(raw: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     let mut chunked = false;
+    let mut content_length: Option<usize> = None;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("transfer-encoding")
+            let k = k.trim();
+            if k.eq_ignore_ascii_case("transfer-encoding")
                 && v.to_ascii_lowercase().contains("chunked")
             {
                 chunked = true;
+            } else if k.eq_ignore_ascii_case("content-length") {
+                content_length = v.trim().parse::<usize>().ok();
             }
         }
     }
     if chunked {
-        dechunk(body)
-    } else {
-        Ok(body.to_vec())
+        // dechunk already rejects a truncated body: it needs the terminating
+        // zero-size chunk and checks each declared chunk length.
+        return dechunk(body);
+    }
+    // This is what makes tolerating an abrupt (close_notify-less) EOF safe in
+    // the read loops above: a short body is a truncated response, not a valid
+    // one, and it must not reach the JSON parser as if it were complete.
+    // Transfer-Encoding wins over Content-Length per RFC 9112, hence the early
+    // return above.
+    match content_length {
+        Some(len) if body.len() < len => Err(format!(
+            "truncated body: Content-Length {len}, received {}",
+            body.len()
+        )),
+        // A server may append nothing after the body; trim any surplus so the
+        // caller sees exactly the declared message.
+        Some(len) => Ok(body[..len].to_vec()),
+        None => Ok(body.to_vec()),
     }
 }
 
@@ -304,4 +344,63 @@ fn tls_config() -> rustls::ClientConfig {
         .expect("rustls: safe default protocol versions")
         .with_root_certificates(roots)
         .with_no_client_auth()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn res(head: &str, body: &str) -> Vec<u8> {
+        format!("{head}\r\n\r\n{body}").into_bytes()
+    }
+
+    #[test]
+    fn content_length_exact_is_accepted() {
+        let r = res("HTTP/1.1 200 OK\r\nContent-Length: 5", "hello");
+        assert_eq!(parse_response(&r).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn content_length_short_is_rejected_as_truncated() {
+        // The case tolerating a close_notify-less EOF could otherwise let
+        // through: connection died mid-body.
+        let r = res("HTTP/1.1 200 OK\r\nContent-Length: 11", "hello");
+        let e = parse_response(&r).unwrap_err();
+        assert!(e.contains("truncated body"), "unexpected error: {e}");
+    }
+
+    #[test]
+    fn surplus_after_content_length_is_trimmed() {
+        let r = res("HTTP/1.1 200 OK\r\nContent-Length: 5", "hellojunk");
+        assert_eq!(parse_response(&r).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn no_content_length_returns_whole_body() {
+        let r = res("HTTP/1.1 200 OK\r\nServer: x", "hello");
+        assert_eq!(parse_response(&r).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn chunked_wins_over_content_length_and_validates_terminator() {
+        // Transfer-Encoding takes precedence (RFC 9112); a bogus Content-Length
+        // alongside it must not be applied.
+        let r = res(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 999",
+            "5\r\nhello\r\n0\r\n\r\n",
+        );
+        assert_eq!(parse_response(&r).unwrap(), b"hello");
+
+        let truncated = res(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked",
+            "5\r\nhel",
+        );
+        assert!(parse_response(&truncated).is_err());
+    }
+
+    #[test]
+    fn non_2xx_still_fails_before_body_handling() {
+        let r = res("HTTP/1.1 400 Bad Request\r\nContent-Length: 2", "no");
+        assert!(parse_response(&r).unwrap_err().contains("400"));
+    }
 }
