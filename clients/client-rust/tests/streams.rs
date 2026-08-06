@@ -854,7 +854,20 @@ async fn a_custom_fold_accumulates_across_a_window() {
             .unwrap();
     }
 
-    let out = drain_until(&q, &sink, Duration::from_secs(30), |m| !m.is_empty()).await;
+    // Tumbling windows are aligned to absolute epoch multiples (engine.rs uses
+    // floor_div(ts, size) * size), not to when the stream started, so these three
+    // pushes can straddle a 2s boundary and the reducer then emits one message per
+    // window -- 6 and 5 instead of a single 30. The product across every emit is
+    // still 30, so drain until the whole input is accounted for. Stopping at the
+    // first message, as this did, read one window's partial product and failed
+    // whenever the burst happened to cross a boundary.
+    let out = drain_until(&q, &sink, Duration::from_secs(30), |m| {
+        m.iter()
+            .filter_map(|x| x.data["product"].as_f64())
+            .fold(1.0, |a, b| a * b)
+            >= 30.0
+    })
+    .await;
     handle.stop().await.unwrap();
 
     let product: f64 = out
