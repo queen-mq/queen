@@ -3,6 +3,35 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.0.0-beta.4
+
+**The dashboard reported messages as pending after they had been consumed and
+acknowledged.** Two independent accounting defects, both around the group-less
+`__QUEUE_MODE__` cursor, both visible only to grouped ("bus mode") consumers — the data
+plane was never affected, and no message was ever delivered or retained wrongly.
+
+- **The Messages list showed `pending` forever.** `list_messages_v1` derived a frame's
+  status from a join pinned to the `__QUEUE_MODE__` cursor alone. A partition consumed by
+  named consumer groups has no such row, so the join produced all NULLs, neither the
+  completed nor the processing branch could fire, and every frame fell through to the
+  `pending` fallback. The same select was already counting named groups two lines below,
+  which is why a row could render `pending` next to `1/1 groups`. The status is now derived
+  the way the message-detail endpoint already derived it: named groups decide when the
+  partition has any, and the group-less cursor decides only when it has none.
+
+- **A single group-less pop could pin a queue's pending count high forever.** The stats
+  refresh took the worst cursor across every consumer group without distinguishing them.
+  Popping without a `consumerGroup` seeds a `__QUEUE_MODE__` cursor at the head of the
+  backlog — on every partition of the queue for a wildcard pop, and even when that pop
+  returns nothing — so one debug pop or load-test run left a permanent floor under
+  `pending_messages` that no amount of real consumption could drain. The same precedence
+  rule now applies: named groups when they exist, the group-less cursor only otherwise.
+  Applied identically in the queue-detail and queue-list paths.
+
+Retention deliberately keeps the old across-all-groups watermark: there, including the
+group-less cursor is the conservative choice, because deleting a segment a consumer might
+still want is not recoverable.
+
 ## 1.0.0-beta.3
 
 **A push was rejected whenever a JSON escape appeared in `queue`, `partition` or
