@@ -485,8 +485,19 @@ BEGIN
     -- No index on queen.log_txns.created_at: the scan is bounded by the txns
     -- window's steady-state size (O(rate x window)) — acceptable for a
     -- dashboard listing, same trade the seg version made over seg_dedup.
-    -- A frame is consumed iff its offset <= committed; dead_letter wins (the
-    -- quarantined head frame lives in queen.log_dlq addressed by offset).
+    -- STATUS PRECEDENCE — identical to the message-DETAIL path (db.rs
+    -- ::seg_message_detail's `g` CTE + handlers/messages.rs): a frame is
+    -- completed once every NAMED consumer group has committed past its offset;
+    -- the group-less '__QUEUE_MODE__' cursor decides only when the partition
+    -- carries no named group at all. Deriving the status from the __QUEUE_MODE__
+    -- row ALONE (what this select used to do) made every bus-consumed frame read
+    -- 'pending' forever: a partition consumed by named groups has no
+    -- __QUEUE_MODE__ row, so that join was all-NULLs, neither the completed nor
+    -- the processing branch could fire, and the frame fell through to the ELSE —
+    -- contradicting the busStatus counters built two lines below it, which DO
+    -- count named groups ("pending" next to "1/1 groups"). dead_letter still
+    -- wins (the quarantined head frame lives in queen.log_dlq addressed by
+    -- offset).
     SELECT COALESCE(jsonb_agg(v2.obj ORDER BY v2.created_at DESC, v2.off DESC), '[]'::jsonb)
     INTO v_v2
     FROM (
@@ -530,20 +541,18 @@ BEGIN
                                     WHERE dl.partition_id = t.partition_id
                                       AND dl."offset" = t.base_offset + th.idx)
                            THEN 'dead_letter'
-                       WHEN c.partition_id IS NOT NULL
-                            AND t.base_offset + th.idx <= c.committed
+                       -- named groups decide whenever the partition has any...
+                       WHEN g.bus_groups > 0 AND g.bus_passed = g.bus_groups
                            THEN 'completed'
-                       WHEN c.lease_expires_at IS NOT NULL AND c.lease_expires_at > NOW()
+                       -- ...and the group-less cursor only when it has none.
+                       WHEN g.bus_groups = 0 AND COALESCE(g.qmode_passed, false)
+                           THEN 'completed'
+                       WHEN COALESCE(g.any_lease_live, false)
                            THEN 'processing'
                        ELSE 'pending'
                    END AS final_status,
-                   (SELECT COUNT(*)::integer FROM queen.log_consumers c2
-                    WHERE c2.partition_id = t.partition_id
-                      AND c2.consumer_group <> '__QUEUE_MODE__'
-                      AND t.base_offset + th.idx <= c2.committed) AS consumed_by_groups,
-                   (SELECT COUNT(*)::integer FROM queen.log_consumers c2
-                    WHERE c2.partition_id = t.partition_id
-                      AND c2.consumer_group <> '__QUEUE_MODE__') AS total_bus_groups
+                   g.bus_passed::integer AS consumed_by_groups,
+                   g.bus_groups::integer AS total_bus_groups
             FROM queen.log_txns t
             JOIN queen.log_partitions p ON p.id = t.partition_id
             -- Queue identity is the queen.queues id now: this join IS the
@@ -552,9 +561,34 @@ BEGIN
             -- namespace/task/priority directly. Track B: scoped to v_tenant
             -- (from the `_tenant` filter key).
             JOIN queen.queues q ON q.id = p.queue_id AND q.tenant_id = v_tenant
+            -- Kept for the emitted `leaseExpiresAt` ONLY (not for the status):
+            -- that key means the queue-mode lease, exactly as the detail path's
+            -- 'leaseExpiresAt' does (seg_message_detail's qmode_lease).
             LEFT JOIN queen.log_consumers c
                 ON c.partition_id = p.id AND c.consumer_group = '__QUEUE_MODE__'
             CROSS JOIN LATERAL queen.log_unnest_hashes(t.hashes) th
+            -- Per-frame group aggregate — the list-side twin of
+            -- seg_message_detail's `g` CTE. LATERAL because the offset under test
+            -- (base_offset + idx) only exists after the frame unnest. One indexed
+            -- aggregate over the partition's cursors (PK-prefixed by
+            -- partition_id) now answers all four questions and REPLACES the two
+            -- correlated COUNT subqueries this select ran per frame, so the fix
+            -- costs a scan less than the bug did. An aggregate with no GROUP BY
+            -- always returns exactly one row (bus_groups 0, the bool_ors NULL,
+            -- hence the COALESCEs above), so no frame can be dropped here.
+            CROSS JOIN LATERAL (
+                SELECT COUNT(*) FILTER (
+                           WHERE cg.consumer_group <> '__QUEUE_MODE__')       AS bus_groups,
+                       COUNT(*) FILTER (
+                           WHERE cg.consumer_group <> '__QUEUE_MODE__'
+                             AND t.base_offset + th.idx <= cg.committed)      AS bus_passed,
+                       bool_or(cg.consumer_group = '__QUEUE_MODE__'
+                               AND t.base_offset + th.idx <= cg.committed)    AS qmode_passed,
+                       bool_or(cg.lease_expires_at IS NOT NULL
+                               AND cg.lease_expires_at > NOW())               AS any_lease_live
+                FROM queen.log_consumers cg
+                WHERE cg.partition_id = t.partition_id
+            ) g
             WHERE t.created_at >= v_from_ts AND t.created_at < v_to_ts
               AND (v_queue IS NULL OR q.name = v_queue)
               AND (v_partition IS NULL OR p.name = v_partition)

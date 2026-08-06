@@ -83,9 +83,12 @@ GRANT EXECUTE ON FUNCTION queen.log_oldest_pending_at_v1(UUID, BIGINT) TO PUBLIC
 -- a wire-compat telemetry label — no table carries a storage column anymore —
 -- and stats.rs prints the summary verbatim).
 --
--- Per-partition math (worst = most-behind cursor, MIN(committed) across the
--- partition's groups; no consumer rows => committed -1 => the whole retained
--- range is pending, matching the seg-era refresh's COALESCE(next_seq, 0)):
+-- Per-partition math (worst = most-behind cursor that still matters:
+-- MIN(committed) across the partition's NAMED groups, falling back to the
+-- group-less '__QUEUE_MODE__' cursor only when the partition has no named group
+-- — see the `worst` CTE below for why the plain MIN was wrong; no consumer rows
+-- => committed -1 => the whole retained range is pending, matching the seg-era
+-- refresh's COALESCE(next_seq, 0)):
 --   total    = last_offset - log_start + 1          (retained frames, exact)
 --   pending  = last_offset - GREATEST(worst, log_start-1)
 --   processing = SUM over live leases of batch_end - committed (the leased
@@ -106,8 +109,26 @@ DECLARE
     v_log_parts BIGINT;
 BEGIN
     -- ------------------------------------------------------------------ queues
+    -- A frame is consumed when every NAMED group has committed past it; the
+    -- group-less '__QUEUE_MODE__' cursor speaks for the partition only when no
+    -- named group does (the same precedence the message-detail path applies —
+    -- db.rs::seg_message_detail). A plain MIN over ALL rows, which is what this
+    -- CTE used to take, let ONE abandoned group-less pop pin pending high
+    -- forever: on first contact 004_log_pop's WILDCARD and DISCOVERY paths seed
+    -- a __QUEUE_MODE__ cursor at GREATEST(log_start-1, -1) on EVERY partition of
+    -- the queue at once (the partition-addressed log_pop_v1 seeds only the
+    -- partition it was aimed at), and they do so BEFORE delivering, so even a
+    -- group-less pop that returns nothing parks a cursor at the head of the
+    -- backlog. MIN then reported the whole retained range as pending forever,
+    -- with every named group fully caught up and nothing left to deliver.
+    -- COALESCE = precedence: the named-group MIN when it exists, the queue-mode
+    -- cursor otherwise. Partitions with no named group compute exactly as before.
     WITH worst AS (
-        SELECT c.partition_id, MIN(c.committed) AS committed
+        SELECT c.partition_id,
+               COALESCE(
+                   MIN(c.committed) FILTER (WHERE c.consumer_group <> '__QUEUE_MODE__'),
+                   MIN(c.committed) FILTER (WHERE c.consumer_group =  '__QUEUE_MODE__')
+               ) AS committed
         FROM queen.log_consumers c
         GROUP BY c.partition_id
     ),
@@ -357,8 +378,16 @@ BEGIN
         FROM queen.log_partitions lp
         WHERE lp.queue_id = v_queue_id
     ),
+    -- Named groups first, '__QUEUE_MODE__' only in their absence — same
+    -- precedence, and the same abandoned-group-less-cursor failure, as
+    -- log_refresh_all_stats_v1's `worst` above (see that comment); this reader
+    -- must agree with the queue's stats row, not contradict it.
     worst AS (
-        SELECT c.partition_id, MIN(c.committed) AS committed
+        SELECT c.partition_id,
+               COALESCE(
+                   MIN(c.committed) FILTER (WHERE c.consumer_group <> '__QUEUE_MODE__'),
+                   MIN(c.committed) FILTER (WHERE c.consumer_group =  '__QUEUE_MODE__')
+               ) AS committed
         FROM queen.log_consumers c
         JOIN parts pa ON pa.id = c.partition_id
         GROUP BY c.partition_id
@@ -496,8 +525,16 @@ BEGIN
         FROM queen.log_partitions lp
         WHERE lp.queue_id = v_queue_id
     ),
+    -- Named groups first, '__QUEUE_MODE__' only in their absence — same
+    -- precedence, and the same abandoned-group-less-cursor failure, as
+    -- log_refresh_all_stats_v1's `worst` above (see that comment); this reader
+    -- must agree with the queue's stats row, not contradict it.
     worst AS (
-        SELECT c.partition_id, MIN(c.committed) AS committed
+        SELECT c.partition_id,
+               COALESCE(
+                   MIN(c.committed) FILTER (WHERE c.consumer_group <> '__QUEUE_MODE__'),
+                   MIN(c.committed) FILTER (WHERE c.consumer_group =  '__QUEUE_MODE__')
+               ) AS committed
         FROM queen.log_consumers c
         JOIN parts pa ON pa.id = c.partition_id
         GROUP BY c.partition_id
