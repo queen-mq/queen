@@ -54,16 +54,15 @@ rust-embed = "8"
 # Pure-Rust, no C deps (consistent with the ring/no-cmake build).
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "std", "time", "json"] }
-
-[dev-dependencies]
-# Canonical wire types, shared with the Rust client. A DEV dependency on
-# purpose: the request parsers here are zero-copy (`PushItem<'a>` borrows out of
-# the request body) and the responses are rendered by hand into a pre-sized
-# String, both of which are load-bearing for push/pop throughput and neither of
-# which can be replaced by owned serde types. Instead, the conformance tests in
-# `handlers::data::protocol_conformance` round-trip this crate's types through
-# the broker's own structs and rendered bytes, so a field that drifts on either
-# side fails a test instead of silently reaching a client.
+# Canonical wire types, shared with the Rust client. The HTTP request parsers
+# stay zero-copy (`PushItem<'a>` borrows out of the request body) and the
+# responses are still rendered by hand into a pre-sized String — both are
+# load-bearing for push/pop throughput and neither uses these owned serde
+# types. They are a regular dependency (was dev-only) because the embedded
+# library facade (src/embedded/) takes and returns them as its public API; the
+# conformance tests in `handlers::data::protocol_conformance` keep pinning the
+# hand-rendered bytes to these types, so a field that drifts on either side
+# fails a test instead of silently reaching a client.
 queen-protocol = { path = "../crates/queen-protocol" }
 
 [profile.release]
