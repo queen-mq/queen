@@ -158,6 +158,11 @@ pub struct FrameRef<'a> {
     pub trace_id: Option<[u8; 16]>,
     pub producer_sub: Option<&'a str>,
     pub payload: &'a [u8],
+    // Parsed for wire completeness; production readers branch on the queue's
+    // encryption flag instead, so only the pack/unpack round-trip test reads
+    // this. Allowed because the plain (non-test) binary build would otherwise
+    // flag it, and CI compiles with -D warnings.
+    #[allow(dead_code)]
     pub encrypted: bool,
 }
 
