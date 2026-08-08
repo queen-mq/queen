@@ -1,15 +1,63 @@
 [package]
-name = "queen"
+# crates.io package name. The bare name "queen" is taken on crates.io by an
+# unrelated crate, so the package publishes as queen-engine while the [lib]
+# below keeps the import path `use queen::...` (and the [[bin]] keeps the
+# binary name) — nothing in the repo tooling or in user code changes.
+name = "queen-engine"
 version = "1.0.0-beta.4"
 edition = "2021"
+# Measured floor, not copied: `cargo +1.88 check` passes for both feature sets;
+# 1.86 fails because jsonwebtoken -> simple_asn1 floors `time` at 0.3.55, which
+# requires rustc 1.88. (The queen-mq client sits at 1.86 — different dep tree.)
+rust-version = "1.88"
+description = "The QueenMQ broker engine: a PostgreSQL-backed message broker with partitions, consumer groups, transactions and streams — embeddable in-process as queen::Broker, or run as the standalone queen binary."
+license = "Apache-2.0"
+homepage = "https://queenmq.com"
+repository = "https://github.com/queen-mq/queen"
+readme = "README.md"
+keywords = ["queue", "message-queue", "postgresql", "broker", "embedded"]
+categories = ["asynchronous", "database", "network-programming"]
+# Internal bench/ops artifacts that must not ship in the .crate. webapp/dist is
+# deliberately NOT excluded: the tracked subset keeps the `server` feature
+# compiling from a packaged crate (rust-embed hard-errors on a missing folder);
+# the full dashboard bundle is a repo/Docker build product, not crate content.
+exclude = [
+  "runAcd.png",
+  "runAcd.csv",
+  "fusion_directspawn_experiment.rs.txt",
+  "plot_run.py",
+  "mesh-verify.sh",
+  "pop-targeted-verify.sh",
+  "setup-broker.sh",
+  "Dockerfile",
+  ".dockerignore",
+]
+
+[lib]
+name = "queen"
+path = "src/lib.rs"
 
 [[bin]]
 name = "queen"
 path = "src/main.rs"
+# The binary is the full HTTP broker; embedders build with
+# default-features = false and never compile it.
+required-features = ["server"]
+
+[features]
+# Default ON so every in-repo workflow (cargo build/test, Dockerfile, CI) is
+# byte-identical to the pre-feature layout. `server` covers what only the HTTP
+# broker needs: the axum serve stack, the embedded dashboard, and the process
+# tracing subscriber. The embedded library path (queen::Broker) never needs it.
+default = ["server"]
+server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = "0.7"
+# Lean by default: the embedded facade and the handlers need only axum's core
+# extractor/response types plus Query. The hyper/http1 serve stack is pulled in
+# by the `server` feature above.
+axum = { version = "0.7", default-features = false, features = ["query"] }
 tokio-postgres = "0.7"
 deadpool-postgres = "0.14"
 serde = { version = "1", features = ["derive"] }
@@ -46,14 +94,19 @@ jsonwebtoken = "9"
 libc = "0.2"
 # Embed the built Vue dashboard (webapp/dist) into the binary so the broker
 # serves the SPA with zero external files — single self-contained binary.
-rust-embed = "8"
+# Optional: only the `server` feature serves the dashboard; an embedding
+# application brings its own UI.
+rust-embed = { version = "8", optional = true }
 # Structured logging (LOGGING_PLAN.md). `tracing` macros + a `tracing-subscriber`
 # fmt layer with an EnvFilter that honours LOG_LEVEL/RUST_LOG (previously the
 # Helm-injected LOG_LEVEL was dead). `time` feature = RFC3339 UTC timestamps
 # without pulling chrono; `json` = the QUEEN_LOG_JSON=1 structured formatter.
 # Pure-Rust, no C deps (consistent with the ring/no-cmake build).
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "std", "time", "json"] }
+# Optional: obs::init installs the process-wide subscriber for the BINARY only.
+# The library never installs one (the host application owns tracing), so
+# embedders do not compile it.
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["fmt", "env-filter", "ansi", "std", "time", "json"] }
 # Canonical wire types, shared with the Rust client. The HTTP request parsers
 # stay zero-copy (`PushItem<'a>` borrows out of the request body) and the
 # responses are still rendered by hand into a pre-sized String — both are
@@ -63,7 +116,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # conformance tests in `handlers::data::protocol_conformance` keep pinning the
 # hand-rendered bytes to these types, so a field that drifts on either side
 # fails a test instead of silently reaching a client.
-queen-protocol = { path = "../crates/queen-protocol" }
+queen-protocol = { path = "../crates/queen-protocol", version = "1.0.0" }
 
 [profile.release]
 opt-level = 3

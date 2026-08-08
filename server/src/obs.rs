@@ -39,6 +39,10 @@ use std::sync::Arc;
 /// `RUST_LOG`, else the Helm-injected `LOG_LEVEL`, else `info`; both accept the
 /// full `EnvFilter` syntax (`info,queen::pop=debug`). `QUEEN_LOG_JSON=1`
 /// switches to a one-object-per-line JSON formatter for structured shippers.
+///
+/// Binary-only (`server` feature): the library must never install a global
+/// subscriber — the embedding application owns tracing.
+#[cfg(feature = "server")]
 pub fn init() {
     use tracing_subscriber::fmt::time::UtcTime;
     use tracing_subscriber::EnvFilter;

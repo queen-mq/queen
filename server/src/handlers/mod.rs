@@ -424,6 +424,10 @@ mod consumer_groups;
 mod maintenance;
 mod streams;
 mod standalone;
+// Dashboard SPA assets (rust-embed): HTTP-broker only. The embedded library
+// serves no static files, so the module and its rust-embed dependency are
+// gated out of default-features = false builds.
+#[cfg(feature = "server")]
 mod static_files;
 mod analytics;
 
@@ -436,6 +440,7 @@ pub use consumer_groups::*;
 pub use maintenance::*;
 pub use streams::*;
 pub use standalone::*;
+#[cfg(feature = "server")]
 pub use static_files::*;
 pub use analytics::*;
 

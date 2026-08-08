@@ -120,3 +120,24 @@ jobs:
           cargo check --manifest-path crates/queen-protocol/Cargo.toml --locked --all-targets
           cargo check --manifest-path clients/client-rust/Cargo.toml --locked \
             --all-targets --all-features
+
+  # Same promise for the broker crate (queen-engine), which declares its own,
+  # HIGHER floor: 1.88, forced by jsonwebtoken -> simple_asn1 -> time. The two
+  # pins are intentionally different — the client's tree stops at 1.86. This job
+  # also proves the embedders' shape compiles: default-features = false must
+  # keep building (with the bin skipped via required-features), or the published
+  # library breaks for every consumer while every other job, which builds the
+  # full server, stays green.
+  server-msrv-and-lean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.88"
+      - name: cargo check on the declared MSRV, full and lean
+        run: |
+          cargo check --manifest-path server/Cargo.toml --locked --all-targets
+          cargo check --manifest-path server/Cargo.toml --locked \
+            --all-targets --no-default-features

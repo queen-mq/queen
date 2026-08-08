@@ -620,10 +620,13 @@ impl Broker {
         String::from_utf8(bytes.to_vec()).map_err(|e| Error::Decode(e.to_string()))
     }
 
-    /// Liveness document (`status`, `database`, `engine`, `version`). The
-    /// handler answers 200 healthy and 503 unhealthy, both with the same
-    /// document shape — both parse here, so read `status == "unhealthy"` from
-    /// the document rather than expecting an `Err` during a DB outage.
+    /// Health document (`status`, `database`, `engine`, `version`). It makes a
+    /// real database round trip, so it is a READINESS signal, not liveness —
+    /// same doctrine as the HTTP `/health`: do not wire it to a restart
+    /// policy. The handler answers 200 healthy and 503 unhealthy, both with
+    /// the same document shape — both parse here, so read
+    /// `status == "unhealthy"` from the document rather than expecting an
+    /// `Err` during a DB outage.
     pub async fn health(&self) -> Result<serde_json::Value, Error> {
         let resp = crate::handlers::handle_health(State(self.inner.st.clone())).await;
         let (status, bytes) = read_response(resp).await;
