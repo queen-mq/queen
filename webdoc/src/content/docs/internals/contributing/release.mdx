@@ -43,6 +43,7 @@ Everything else carries its own version, or none at all.
 | Artifact | Where its version lives |
 | --- | --- |
 | Broker image | `server/server.json` |
+| `queen-engine` (the broker crate) | `server/Cargo.toml`, which must say the same string as `server/server.json`: the first is what crates.io serves, the second is what the built binary reports on `/health` |
 | JavaScript client | `clients/client-js/package.json` |
 | Python client | `clients/client-py/pyproject.toml` |
 | PHP/Laravel client | nowhere: `composer.json` has no `version` field; Packagist reads the git tag |
@@ -129,19 +130,24 @@ Four channels have no workflow. Each needs a command run by a maintainer.
 | PyPI | `queen-mq` | `clients/client-py/publish.sh`, which builds the wheel and sdist and uploads with twine |
 | Go modules | `github.com/smartpricing/queen/clients/client-go` | push a `clients/client-go/vX.Y.Z` tag; the module proxy picks it up |
 | Packagist | `smartpricing/queen-mq` | push a `vX.Y.Z` tag; a webhook makes Packagist pull it |
-| crates.io | `queen-protocol`, then `queen-mq` | `cargo publish` from `crates/queen-protocol`, **then** from `clients/client-rust` |
+| crates.io | `queen-protocol`, then `queen-mq` and `queen-engine` | `cargo publish` from `crates/queen-protocol`, **then** from `clients/client-rust` and from `server/` (the broker package; its library is the embedded engine) |
 
 The C++ client needs nothing published: consumers take `clients/client-cpp/queen_client.hpp` at
 the tag.
 
 <Aside type="caution">
-The two crates.io publishes are ordered, not interchangeable. `queen-mq` depends on
-`queen-protocol` by path *and* by version; cargo rewrites the path away when it packages, so
-the client cannot be published until the version it names is already on the registry. Publish
-`queen-protocol` first, wait for the index to update, then publish `queen-mq`. Running
-`cargo package --allow-dirty --no-verify` in `clients/client-rust` before the first publish
-reports `no matching package named queen-protocol found`, which is this ordering and not a
-misconfiguration.
+The crates.io publishes are ordered, not interchangeable. Both `queen-mq` and `queen-engine`
+depend on `queen-protocol` by path *and* by version; cargo rewrites the path away when it
+packages, so neither can be published until the protocol version they name is already on the
+registry. Publish `queen-protocol` first, wait for the index to update, then publish the
+other two in either order. Running `cargo package --allow-dirty --no-verify` in either
+consumer before the first publish reports `no matching package named queen-protocol found`,
+which is this ordering and not a misconfiguration. One more crates.io quirk applies to the
+engine, the only prerelease crate of the three: a prerelease version (a `-beta.N`) is not
+matched by a plain `"1"` requirement, so a prerelease engine publish is invisible to plain
+requirements. Consumers must write a requirement that itself names a prerelease, such as
+`queen-engine = "1.0.0-beta.4"`, which then also matches later prereleases and the eventual
+1.0.0.
 </Aside>
 
 Two tag shapes are load-bearing and easy to get wrong. Both nested Go modules need the
@@ -153,8 +159,8 @@ shapes, alongside the plain `vX.Y.Z` broker tags.
 ## Order
 
 The broker tag and image go first, because every SDK is released *against* a broker; then npm,
-because most downstream consumers wait on it; then PyPI; then the two crates, protocol before
-client; then the Go module tag; then the plain
+because most downstream consumers wait on it; then PyPI; then the three crates, protocol before
+client and engine; then the Go module tag; then the plain
 `vX.Y.Z` tag that Packagist and the C++ header hang off; then the CLI tag, which triggers its own
 workflow.
 

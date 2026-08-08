@@ -70,6 +70,7 @@ whatever your PostgreSQL already does.
 - **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent inside a configurable window, enforced in the database rather than a cache.
 - **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
 - **Six client SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an HTTP request is a first-class client.
+- **An embeddable engine.** The broker is a Rust library before it is a binary: a product can run the same engine inside its own process instead of shipping a second container. See [Embedding the engine](#embedding-the-engine).
 
 > *Why "Queen"? Because years ago, when I first read "queue", I read it as "queen" in my mind. The name stuck.*
 
@@ -184,7 +185,7 @@ test/run.sh
 - **`/health` talks to the database.** It answers `503` when PostgreSQL is unreachable, which is
   correct for readiness and wrong for liveness. Do not wire it to a restart policy.
 
-More: **[Contributing](CONTRIBUTING.md)** · **[Developer guide](DEVELOPING.md)** ·
+More: **[Contributing](CONTRIBUTING.md)** ·
 **[queenmq.com/internals/contributing](https://queenmq.com/internals/contributing)**
 
 ## Clients
@@ -207,15 +208,64 @@ broker both depend on [`crates/queen-protocol`](crates/queen-protocol), and the 
 tests round-trip its request parsers and rendered responses through those types. A renamed
 field fails a test instead of reaching a client.
 
+## Embedding the engine
+
+The clients above talk to a broker. There is a second way in, for Rust products that want to
+*be* one: the broker crate has a library target, and the same engine that serves HTTP in the
+container runs inside your process. `Broker::start` connects to PostgreSQL, applies the
+schema, starts the background machinery and hands back typed operations — push, pop with
+long-poll, ack, leases, transactions, configure, delete, the DLQ, metrics. Each one invokes
+the same handler functions the HTTP router dispatches to, so behaviour and defaults are the
+broker's by construction, not a reimplementation's. What it buys you is one process to build,
+version and supervise instead of two.
+
+```toml
+[dependencies]
+queen-engine = { version = "1.0.0-beta.4", default-features = false }
+```
+
+The package is named `queen-engine` — the bare crates.io name `queen` belongs to an unrelated
+crate — but the library still imports as `queen`. `default-features = false` skips the HTTP
+server, the dashboard and the tracing subscriber: an embedding application owns its own
+surface and its own logging. (`queen-mq` remains the HTTP *client*; this crate is the broker.)
+
+```rust
+use queen::{Broker, BrokerConfig};
+use queen::protocol as qp;
+
+let broker = Broker::start(
+    BrokerConfig::new().pg("localhost", 5432, "postgres", "postgres", "postgres"),
+)
+.await?;
+
+broker.configure(&qp::ConfigureRequest::new("jobs")).await?;
+broker.push(vec![qp::PushItem::new("jobs", serde_json::json!({"n": 1}))]).await?;
+let popped = broker.pop("jobs", &qp::PopParams::default()).await?;
+```
+
+Facts to know before you build on it. One `Broker` per process lifetime is the supported
+shape; the admission arbiter is process-global, so a second concurrent instance or a
+start-shutdown-start cycle degrades maintenance metering. A push answered `status:"buffered"`
+sits in a per-instance temp spool by default and does not survive a restart — configure
+`spool_dir` if you want the outage spool to be durable. N embedded instances over one
+PostgreSQL coordinate through the database exactly like N binaries do, minus the mesh:
+cross-instance wake-ups ride the periodic floors instead of peer frames. And the v1 surface
+is the data plane plus the DLQ; consumer-group administration, listings, traces and streams
+still need the HTTP surface. The engine is not a lighter Queen — it is the same engine, minus
+the HTTP layer, at the same PostgreSQL cost.
+
+Guide: **[queenmq.com/use/embed](https://queenmq.com/use/embed)** · API reference:
+**[queenmq.com/reference/engine](https://queenmq.com/reference/engine)**.
+
 ## Repository layout
 
 | Path | What it is |
 | --- | --- |
-| `server/` | The broker. Rust, crate `queen-seg-rust`, binary `queen-seg`. Schema and stored procedures in `server/sql/`, embedded at compile time. |
+| `server/` | The broker. Rust, package `queen-engine`, library `queen`, binary `queen`. Schema and stored procedures in `server/sql/`, embedded at compile time. |
 | `proxy/` | Multi-tenant gateway: API keys, quotas, rate limits, metering, console. Its own PostgreSQL. |
 | `app/` | The Vue dashboard, compiled into the broker binary. |
 | `clients/` | The six SDKs and the `queenctl` CLI. |
-| `crates/` | Crates shared between the broker and a client. Today: `queen-protocol`, the wire types. |
+| `crates/` | Crates shared between the broker and a client. Today: `queen-protocol`, the wire types — a regular dependency of both, and the request/response types of the embedded engine. |
 | `webdoc/` | This project's documentation site (Astro). Large parts of it are generated from the source in `server/` and `proxy/`. |
 | `test/` | The Docker test harness: every client suite against a freshly built broker. |
 | `benchmark-queen/` | Benchmark sessions with their raw artifacts. Every number on the website comes from here. |
@@ -229,7 +279,7 @@ route classes, the OpenAPI documents and the benchmark figures are all derived a
 and CI fails when any of them falls behind the code.
 
 - [Start here](https://queenmq.com/start): what Queen is, why it exists, and where its limits are
-- [Use Queen](https://queenmq.com/use): the model, the SDKs, worked examples
+- [Use Queen](https://queenmq.com/use): the model, the SDKs, the embedded engine, worked examples
 - [Self-hosting](https://queenmq.com/selfhost): deployment, PostgreSQL, high availability, security, operations, multi-tenancy
 - [Internals](https://queenmq.com/internals): segments, offsets, the push and pop paths, the schema
 - [Reference](https://queenmq.com/reference): routes, configuration, metrics, client APIs

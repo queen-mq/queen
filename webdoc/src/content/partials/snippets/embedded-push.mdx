@@ -1,0 +1,21 @@
+---
+params: []
+description: "Verified snippet extracted from server/tests/embedded_smoke.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from server/tests/embedded_smoke.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="server/tests/embedded_smoke.rs"
+let first = broker
+    .push(vec![
+        qp::PushItem::new(q.clone(), serde_json::json!({"n": 1}))
+            .transaction_id(txn_id.clone()),
+        qp::PushItem::new(q.clone(), serde_json::json!({"n": 2})),
+        qp::PushItem::new(q.clone(), serde_json::json!({"n": 3})),
+    ])
+    .await
+    .expect("push");
+```

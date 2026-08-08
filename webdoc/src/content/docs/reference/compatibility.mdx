@@ -1,6 +1,6 @@
 ---
 title: Versions and compatibility
-description: "What 1.0.0 covers, why the HTTP API is the only compatibility surface, what the boot-time schema apply does and does not do, and why coming from 0.16 means a fresh database."
+description: "What 1.0.0 covers, why the HTTP API is the stable compatibility surface and where the beta embedded Rust API stands, what the boot-time schema apply does and does not do, and why coming from 0.16 means a fresh database."
 type: reference
 tier: operate
 sidebar:
@@ -44,6 +44,18 @@ ignore fields it does not know. Second, some fields are **opaque by contract**.
 rewrite while their meaning changed completely: `seq` now carries a segment's
 base offset and `startOff` a frame index within it. A client that treats them as
 tokens to hand back is correct; a client that does arithmetic on them is not.
+
+## The embedded Rust API is beta
+
+Since 1.0.0 the broker crate also ships a library target: `queen-engine` on
+crates.io, importing as `queen`, whose [engine API](/reference/engine) runs the
+broker in-process. That Rust surface is a second contract and it is explicitly
+**beta**: the types can change between releases while it hardens, and it does
+not follow the HTTP surface's stability promise yet. What does carry over is the
+wire vocabulary, because the engine's requests and responses are the
+`queen-protocol` types, the same crate the Rust client compiles against. Build
+against the engine expecting to read release notes; build against HTTP expecting
+not to.
 
 ## The schema is applied at every boot
 

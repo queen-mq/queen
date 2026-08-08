@@ -1,0 +1,157 @@
+---
+title: Embed the engine
+description: "Run the Queen broker inside your Rust process: one binary to ship, the same engine, the same PostgreSQL semantics."
+type: how-to
+tier: use
+status: beta
+sidebar:
+  order: 28
+  label: Embed the engine
+sourceOfTruth:
+  - server/src/lib.rs
+  - server/src/embedded/mod.rs
+  - server/src/embedded/boot.rs
+  - server/Cargo.toml
+verifiedBy:
+  - server/tests/embedded_smoke.rs
+---
+
+The clients pages describe how to talk to a broker. This page is for a different reader: a
+Rust product that wants to *contain* one. The broker crate has a library target, and
+`Broker::start` boots the same engine the standalone binary runs, inside your process,
+against the PostgreSQL you point it at. There is no second container to build, version,
+deploy and supervise. Your process is the broker.
+
+Every operation on the handle invokes the same handler functions the broker's HTTP router
+dispatches to, with the HTTP layer skipped. Behaviour, defaults and edge cases are the
+broker's by construction: an embedded push is a broker push, an embedded transaction is the
+broker's atomic ack plus push. This is not a lighter Queen. It is the same engine at the
+same PostgreSQL cost, minus one network hop and one deployment unit.
+
+<Aside type="note">
+The embedded API is published as **beta**. The HTTP API remains the stable compatibility
+surface; the Rust surface can still change between releases. [Versions and
+compatibility](/reference/compatibility) states both contracts.
+</Aside>
+
+## Install
+
+```toml
+[dependencies]
+queen-engine = { version = "1.0.0-beta.4", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+```
+
+The package is named `queen-engine` (the bare crates.io name `queen` belongs to an
+unrelated crate), but the library imports as `queen`. `default-features = false` skips the
+`server` feature: the axum serve stack, the embedded dashboard and the tracing subscriber
+stay out of your build. The crate needs Rust 1.88.
+
+The `server` feature exists for the repository's own binary. A broker built from the
+crates.io package with default features serves the API but not a working dashboard: the
+dashboard bundle is a build product of the repository and the Docker image, not crate
+content.
+
+`queen-mq` is the HTTP client. This crate is the broker itself.
+
+## Start
+
+<Render file="snippets/embedded-start" />
+
+`start` connects to PostgreSQL, fails fast if it is unreachable, applies the schema under
+an advisory lock (disable with `apply_schema(false)` if the schema is managed externally
+and the role has no DDL rights), recovers the on-disk spool, and spawns the background
+machinery on your tokio runtime. It returns once the broker is ready to serve.
+
+`Broker` is cheap to clone and every clone shares the same engine. Call `shutdown()` on the
+way out: it stops the loops the handle owns, closes the connection pool and reports any
+undrained spool events.
+
+## Produce and consume
+
+<Render file="snippets/embedded-push" />
+
+Requests and responses are the [queen-protocol](/use/clients/rust) types, re-exported as
+`queen::protocol`. Push results carry per-item outcomes (queued, duplicate, buffered) in
+request order. Popping claims a lease exactly as over HTTP:
+
+```rust
+let params = qp::PopParams {
+    batch: Some(10),
+    consumer_group: Some("workers".into()),
+    subscription_mode: Some(qp::SubscriptionMode::All),
+    ..Default::default()
+};
+let popped = broker.pop("orders", &params).await?;
+for m in &popped.messages {
+    broker.ack(&qp::AckRequest {
+        transaction_id: m.transaction_id.clone(),
+        partition_id: m.partition_id.clone(),
+        status: qp::AckStatus::Completed,
+        consumer_group: Some(m.consumer_group.clone()),
+        lease_id: Some(m.lease_id.clone()),
+        error: None,
+    }).await?;
+}
+```
+
+With `wait: Some(true)` a pop parks directly on the broker's in-process waker and is woken
+by a concurrent push, replacing the HTTP long-poll choreography. An empty claim returns an
+empty response, never an error.
+
+## Transactions
+
+The broker's atomic handoff works unchanged: ack the input and push the next stage in one
+database transaction, guarded by the input's lease.
+
+<Render file="snippets/embedded-transaction" />
+
+A rollback (an expired required lease, a duplicate push) comes back as `success: false`
+with the reason in `error`, exactly as over HTTP.
+
+## What it puts in your process
+
+The engine spawns its background work on your tokio runtime: the commit fusion shards, the
+retention and stats loops, the spool drain, the hotlist ticks. The library never installs a
+tracing subscriber and never touches the panic hook; install your own subscriber to see the
+broker's logs. The standalone broker runs with `panic = "abort"` and a supervisor. Embedded
+under unwind, a panicking background loop dies silently and its subsystem stops, so treat a
+broker panic in your logs as a restart signal.
+
+<Aside type="caution">
+One `Broker` per process lifetime is the supported shape. The admission arbiter is a
+process-wide singleton: a second concurrent instance, or a start, shutdown, start cycle,
+still routes maintenance writers through the first instance's arbiter. For a full teardown,
+restart the process.
+</Aside>
+
+## What it does to your PostgreSQL
+
+The same things the binary does. Schema apply at boot under an advisory lock; a connection
+pool sized by `pool_size` (env `DB_POOL_SIZE` defaults to 160, size it down for an
+application fleet); the retention sweep and the stats refresh, advisory-locked so exactly
+one instance per cycle does the work no matter how many brokers share the database.
+
+Multiple embedded instances over one PostgreSQL are the already-supported multi-broker
+topology, minus the mesh: leases, acks, deduplication and maintenance coordinate through
+the database, and cross-instance wake-ups ride the periodic floors instead of peer frames
+(a parked pop re-polls within a second, wildcard discovery within the reseed interval,
+configuration changes within the reconcile interval).
+
+<Aside type="caution">
+A push answered `status: "buffered"` sits in an on-disk spool. Embedded, that spool
+defaults to a per-instance temp directory and does not survive a restart: configure
+`spool_dir` with a stable path if you want outage durability, and never share one spool
+directory between two instances.
+</Aside>
+
+## Not offered
+
+Consumer-group administration (list, seek, delete), queue listings, traces and the streams
+runner endpoints are not exposed in the beta surface; run the HTTP broker alongside if you
+need them, or drive them through [queenctl](/reference/queenctl) against a broker that
+serves HTTP. Tenancy and JWT auth do not apply in-process: the embedded broker is
+single-tenant and trusts its caller, and it logs a warning if their env knobs are set.
+
+The full surface, argument by argument: [Engine API reference](/reference/engine).

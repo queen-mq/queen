@@ -1,0 +1,35 @@
+---
+params: []
+description: "Verified snippet extracted from server/tests/embedded_smoke.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from server/tests/embedded_smoke.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="server/tests/embedded_smoke.rs"
+let txn = broker
+    .transaction(
+        &qp::TransactionRequest::new(vec![
+            qp::TxnOperation::Ack(qp::TxnAckOperation {
+                transaction_id: m0.transaction_id.clone(),
+                partition_id: m0.partition_id.clone(),
+                status: qp::AckStatus::Completed,
+                consumer_group: Some(group.to_string()),
+                lease_id: Some(m0.lease_id.clone()),
+                error: None,
+            }),
+            qp::TxnOperation::Push {
+                items: vec![qp::TxnPushItem::new(
+                    q2.clone(),
+                    serde_json::json!({"stage": 2}),
+                )],
+            },
+        ])
+        .with_required_leases([m0.lease_id.clone()]),
+    )
+    .await
+    .expect("transaction");
+assert!(txn.success, "transaction must commit: {txn:?}");
+```

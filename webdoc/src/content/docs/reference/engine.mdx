@@ -1,0 +1,139 @@
+---
+title: Engine API
+description: "The embedded broker's Rust surface: BrokerConfig, Broker's operations, error types, and what the beta does not expose."
+type: reference
+status: beta
+sidebar:
+  order: 29
+  label: Engine (Rust)
+sourceOfTruth:
+  - server/src/lib.rs
+  - server/src/embedded/mod.rs
+  - server/src/embedded/boot.rs
+  - crates/queen-protocol/src/lib.rs
+verifiedBy:
+  - server/tests/embedded_smoke.rs
+---
+
+The crates.io package is `queen-engine`; the library imports as `queen`. The public surface
+is `queen::Broker`, `queen::BrokerConfig`, the two error enums, `queen::DeleteQueueResult`
+(the one response type not in the protocol crate), the `queen::VERSION` const, and
+`queen::protocol` (a re-export of `queen-protocol`, so every other request and response
+type below is the same type the Rust client uses). Everything else in the crate is private
+and carries no stability promise. The whole surface is **beta**: the HTTP API is the stable
+contract, this one can still change between releases.
+
+Every operation calls the same handler function the HTTP router dispatches to and parses
+the rendered response back into the protocol types, so semantics match the
+[HTTP reference](/reference/http) route by route. Where an HTTP status carried the meaning,
+the mapping is stated in the notes below.
+
+## BrokerConfig
+
+```rust
+let broker = Broker::start(
+    BrokerConfig::new()
+        .pg("localhost", 5432, "postgres", "postgres", "postgres")
+        .pool_size(16)
+        .spool_dir("/var/lib/myapp/queen-spool"),
+)
+.await?;
+```
+
+Unset fields fall back to the same environment variables the binary reads, so an embedded
+broker in a container behaves like the image; a set field wins over env, with one
+exception noted in the table (`apply_schema`, whose env kill switch also gates the apply
+inside the engine, so either side saying no wins).
+
+| Field | Env fallback | Default | Meaning |
+| --- | --- | --- | --- |
+| `pg_host` / `pg_port` / `pg_user` / `pg_password` / `pg_database` | `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` | localhost, 5432, postgres, postgres, postgres | The PostgreSQL to run on. |
+| `pg_use_ssl` / `pg_ssl_reject_unauthorized` | `PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED` | false / true | TLS to PostgreSQL, and whether the chain is verified. |
+| `stmt_timeout_ms` | `QUEEN_STMT_TIMEOUT_MS` | 30000 | Per-statement timeout. |
+| `pool_size` | `DB_POOL_SIZE` | 160 | Connection pool size. Size it down for an application fleet: every instance owns a pool. |
+| `apply_schema` | `QUEEN_APPLY_SCHEMA` | true | Apply schema and procedures at start (advisory-locked, idempotent). Off, the role needs no DDL rights. Either side saying no wins: `QUEEN_APPLY_SCHEMA=0` skips the apply even with the field set true. |
+| `spool_dir` | `FILE_BUFFER_DIR` | per-instance temp dir | Stable directory for the outage spool. The temp default does not survive a restart and is removed on a clean empty shutdown. Never share it between instances. |
+| `retention` | none | true | Run the retention sweep (advisory-locked, one sweeper per cycle across instances). |
+| `stats_refresh` | none | true | Run the stats reconciler feeding status and analytics reads. |
+| `system_metrics` | none | true | Write per-instance worker and system metric rows. |
+| `log_reports` | none | true | Emit the periodic rates and sizes log blocks through `tracing`. |
+
+`QUEEN_*` tuning knobs are honoured like the binary's, with the HTTP-only ones inert.
+Two are deliberately ignored and log a warning if set: `QUEEN_TENANCY_HEADER` (embedded is
+single-tenant by construction) and `JWT_ENABLED` (there is no HTTP surface; the in-process
+caller is trusted). Silently inert because their machinery does not exist embedded: the
+inter-instance mesh family (`QUEEN_SYNC_ENABLED`, `QUEEN_MESH_PEERS`, `QUEEN_SYNC_SECRET`
+and the heartbeat knobs; cross-instance wake-ups ride the periodic database floors
+instead, see [Embed the engine](/use/embed)) and `QUEEN_MAX_BODY_BYTES` (no request body
+to cap). A malformed boolean env value makes the binary exit; `Broker::start` returns
+`StartError::Config` instead.
+
+## Broker
+
+`Broker` is `Clone` (one shared engine per clone). All operations take `&self`. Types named
+below live in `queen::protocol`, except `DeleteQueueResult`, which the crate defines itself.
+
+### Data plane
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `push(Vec<PushItem>)` | `Vec<PushResult>` | Per-item outcomes in request order; a partial failure is not an `Err`. The maintenance-mode spool path (HTTP 500 with a result array) also returns the array. |
+| `pop(queue, &PopParams)` | `PopResponse` | Wildcard pop. An empty claim (HTTP 204) is an empty response, not an error. `wait: true` parks on the in-process waker up to `timeout_millis`. |
+| `pop_partition(queue, partition, &PopParams)` | `PopResponse` | One named partition. |
+| `pop_discover(&PopParams)` | `PopResponse` | Namespace or task discovery; at least one of `namespace` and `task` is required, else `Error::InvalidRequest`. |
+| `ack(&AckRequest)` | `AckResult` | A rejected ack (expired lease, unknown message) is `Ok` with `success: false`, as over HTTP. `Err` means the request was malformed. |
+| `ack_batch(&AckBatchRequest)` | `Vec<AckResult>` | One consumer group per batch; per-item outcomes in order. |
+| `renew_lease(lease_id, seconds)` | `RenewLeaseResponse` | Best effort: an unknown or expired lease is `success: false`, not an `Err`. |
+| `transaction(&TransactionRequest)` | `TransactionResponse` | Atomic ack plus push. A rollback is `Ok` with `success: false` and the database's reason in `error`. |
+
+### Queues and DLQ
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `configure(&ConfigureRequest)` | `ConfigureResponse` | Create or reconfigure a queue. An in-body error is promoted to `Err`. |
+| `delete_queue(name)` | `DeleteQueueResult` | Idempotent: a missing queue is `existed: false`, not an error. |
+| `dlq(&DlqParams)` | `DlqResponse` | Dead-lettered messages, filtered by queue, group, limit, offset. |
+| `retry_message(partition_id, transaction_id)` | `serde_json::Value` | Replays the DLQ snapshot and drops the DLQ row. |
+| `delete_message(partition_id, transaction_id)` | `serde_json::Value` | Deletes one message and its DLQ row, if any. |
+
+### Observability and lifecycle
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `metrics()` | `serde_json::Value` | The `/metrics` document: counters, latencies, cache and pool gauges, per-queue rates. |
+| `prometheus()` | `String` | The same families in Prometheus text exposition format. |
+| `health()` | `serde_json::Value` | The health document: a real database round trip, so a readiness signal, not liveness (do not wire it to a restart policy). Healthy (200) and unhealthy (503) both parse; read `status` from the document. |
+| `shutdown()` | `usize` | Aborts the loops the handle owns, closes the pool, removes an empty auto spool dir, returns the count of undrained spool events. Later calls are no-ops. |
+
+## Errors
+
+```rust
+pub enum StartError { Config(String), Pool(String), Connect(String), Schema(String) }
+
+pub enum Error {
+    InvalidRequest(String),
+    NotFound(String),
+    Broker { status: Option<u16>, message: String },
+    Decode(String),
+}
+```
+
+`Error::status()` exposes the HTTP code behind the mapping. `InvalidRequest` and `NotFound`
+are terminal; a `Broker` error with a 5xx status is usually transient (pool exhaustion, a
+database hiccup) and worth a retry with backoff, while a `Broker` error with `status: None`
+is a semantic failure reported inside a 200 body (a failed pop, a configure error).
+`Decode` means the broker's rendered bytes did not parse into the protocol type, which the
+conformance and end-to-end tests exist to prevent; treat it as a bug.
+
+## Not present
+
+Consumer-group administration (list, details, lagging, seek, delete), queue and message
+listings, traces, the streams runner endpoints, maintenance-mode switches and the
+standalone identity routes have no embedded equivalent in the beta. The dashboard is not
+served (build with `default-features = false`; the `server` feature exists for the binary).
+
+## Same engine, other surfaces
+
+The [HTTP reference](/reference/http) documents the routes these calls map to, and the
+[Rust client](/reference/sdk/rust) offers the same protocol types over HTTP for processes
+that should not contain the broker.

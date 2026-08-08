@@ -1,0 +1,19 @@
+---
+params: []
+description: "Verified snippet extracted from server/tests/embedded_smoke.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from server/tests/embedded_smoke.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="server/tests/embedded_smoke.rs"
+let broker = Broker::start(
+    BrokerConfig::new()
+        .pg(host, port, "postgres", "postgres", "postgres")
+        .pool_size(12),
+)
+.await
+.expect("broker start");
+```

@@ -30,7 +30,7 @@ The Go client takes a `context.Context` on every network call and separates buil
 executing: a builder chain is inert until you call `Execute(ctx)`, `Pop(ctx)` or `Get(ctx)`.
 It requires Go 1.24 and depends only on `github.com/google/uuid` and `github.com/jackc/pgx/v5`.
 
-The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+The SDKs ship at the broker's version, and the HTTP API is the stable compatibility surface.
 [Versions and compatibility](/reference/compatibility) states what that covers.
 
 ```bash

@@ -193,6 +193,20 @@ reach. The properties that follow from that:
   stores plaintext on queues flagged for encryption, with only a warning in the
   log.
 
+## The embedded engine is beta, and one per process
+
+The broker can run inside a Rust application ([Embed the engine](/use/embed)).
+Its boundaries are its own: one `Broker` per process lifetime (the admission
+arbiter is a process-wide singleton, and a start, shutdown, start cycle keeps
+metering maintenance through the first instance's arbiter); shutdown is best
+effort (engine loops without handles run until process exit, with the connection
+pool closed under them); the outage spool defaults to a per-instance temp
+directory, so `status: "buffered"` pushes do not survive a restart unless a
+stable `spool_dir` is configured; and the surface is the data plane plus the
+DLQ, with no consumer-group administration, listings, traces or streams. The
+Rust API itself is beta: [Versions and compatibility](/reference/compatibility)
+states what that means.
+
 ## Smaller edges
 
 - **Payloads must be JSON.** The push path parses each payload as a JSON value.

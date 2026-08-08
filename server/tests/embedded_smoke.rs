@@ -89,6 +89,7 @@ async fn embedded_end_to_end() {
     );
     std::env::remove_var("QUEEN_HOTLIST");
 
+    // docs:start(embedded-start)
     let broker = Broker::start(
         BrokerConfig::new()
             .pg(host, port, "postgres", "postgres", "postgres")
@@ -96,6 +97,7 @@ async fn embedded_end_to_end() {
     )
     .await
     .expect("broker start");
+    // docs:end
 
     let q = unique("emb-q");
     let q2 = unique("emb-q2");
@@ -119,6 +121,7 @@ async fn embedded_end_to_end() {
 
     // ------------------------------------------------------------- push
     let txn_id = unique("emb-txn");
+    // docs:start(embedded-push)
     let first = broker
         .push(vec![
             qp::PushItem::new(q.clone(), serde_json::json!({"n": 1}))
@@ -128,6 +131,7 @@ async fn embedded_end_to_end() {
         ])
         .await
         .expect("push");
+    // docs:end
     assert_eq!(first.len(), 3);
     assert!(
         first.iter().all(|r| r.status == qp::PushStatus::Queued),
@@ -170,6 +174,7 @@ async fn embedded_end_to_end() {
     // ------------------------------------------------------ transaction
     // Handoff: ack message[0] and push its successor to q2, guarded by the lease.
     let m0 = &popped.messages[0];
+    // docs:start(embedded-transaction)
     let txn = broker
         .transaction(
             &qp::TransactionRequest::new(vec![
@@ -193,6 +198,7 @@ async fn embedded_end_to_end() {
         .await
         .expect("transaction");
     assert!(txn.success, "transaction must commit: {txn:?}");
+    // docs:end
     assert_eq!(txn.results.len(), 2, "{txn:?}");
     assert!(txn.results.iter().all(|r| r.success), "{txn:?}");
 

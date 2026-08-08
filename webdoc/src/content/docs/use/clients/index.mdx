@@ -26,7 +26,7 @@ a proxy answers `429` or `403`.
 If your language is not here, the HTTP API is the SDK. The whole message plane is eight
 routes and one header. See the [HTTP quickstart](/use/clients/http).
 
-The SDKs ship at the broker's version, and the HTTP API is the only compatibility surface.
+The SDKs ship at the broker's version, and the HTTP API is the stable compatibility surface.
 [Versions and compatibility](/reference/compatibility) states what that covers.
 
 ## The matrix
@@ -293,3 +293,14 @@ contract, is set out in [versions and compatibility](/reference/compatibility).
     description="Base URL, auth header, the push/pop/ack shapes, the bodiless 204, and a complete curl walkthrough."
   />
 </CardGrid>
+
+Every column above is a way to talk to a broker process. There is one more option that is
+not a client at all: a Rust application can contain the broker, running the same engine
+in-process with no second deployment unit. It serves a different reader (a product that
+ships Queen inside its own binary) and has its own boundaries, so it gets its own page.
+
+<LinkCard
+  href="/use/embed"
+  title="Embed the engine"
+  description="crates.io queen-engine: the broker as a library inside your Rust process. Beta."
+/>

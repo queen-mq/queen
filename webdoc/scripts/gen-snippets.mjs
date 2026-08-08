@@ -58,6 +58,16 @@ const SOURCES = [
     suite: "Rust client suite",
     command: "test/run.sh --suite rust-client",
   },
+  // The embedded engine's end-to-end smoke: a real in-process broker against a
+  // throwaway Postgres. Gated on QUEEN_EMBEDDED_TEST_PG, hence the explicit
+  // command instead of a test/run.sh suite.
+  {
+    dir: "server/tests",
+    lang: "rust",
+    suite: "Embedded broker smoke",
+    command:
+      "QUEEN_EMBEDDED_TEST_PG=localhost:5464 cargo test --manifest-path server/Cargo.toml --test embedded_smoke -- --ignored",
+  },
   // The complete programs behind the Full examples section. These are whole
   // files rather than regions: each one is marked from its first line to its
   // last, so what a reader copies is exactly what runs.
