@@ -310,9 +310,15 @@ pub struct Config {
     // Retention/metrics background-job knobs (RUSTFIX item 20 — C++ JobsConfig,
     // config.hpp:286-329). `retention_batch_size` bounds each metrics-purge DELETE;
     // `metrics_retention_days` is the worker/system-metrics purge window (default
-    // 90, matching the C++ RetentionService, not the old hardcoded 7). Under the
-    // segments engine `retention_parallelism` has no work to do (retention runs one
-    // bounded step at a time) — read for config-compat and documented inert.
+    // 90, matching the C++ RetentionService, not the old hardcoded 7).
+    // `retention_parallelism` is LIVE again (2026-08-10): it is the number of
+    // concurrent per-partition step workers in retention phases 1-3. It was
+    // parsed-and-ignored from the log-engine port until then, which is why the
+    // deletion rate was capped at one partition at a time — the measured ceiling
+    // (~13.8k step rows/s) sat just under what 1M msg/s needs (~14.6k), so the
+    // DB grew without bound at 1M and held fine at 600k. Batch size cannot
+    // substitute: the step cost is per-row, and a bigger batch only lengthens
+    // the push-allocator lock hold (see retention.rs module docs).
     //
     // `partition_cleanup_days` IS live again (2026-07-30): retention phase 4 deletes
     // empty, inactive-for-that-long partitions via
@@ -321,10 +327,11 @@ pub struct Config {
     // Floor of 1 day is the C++ clamp; the off switch is the enabled flag, so 0 does
     // not silently mean "delete everything quiet since a second ago".
     pub retention_batch_size: usize,
-    /// Inert (retention runs one bounded step at a time), but printed in the boot
-    /// `config: jobs` line: the docs promise every knob's EFFECTIVE value is
-    /// visible there, and an operator who sets this deserves to see it read back
-    /// rather than infer from behaviour that it did nothing.
+    /// Concurrent per-partition step workers in retention phases 1-3. Default 1
+    /// (the historical serial cycle — existing deployments do not change
+    /// behaviour by upgrading); clamped to retention::MAX_PARALLELISM. Each
+    /// worker holds one maintenance-lane admission slot and one pooled
+    /// connection while it runs, so raise QUEEN_ADMISSION_SHARE_MAINT with it.
     pub retention_parallelism: usize,
     pub metrics_retention_days: i32,
     pub partition_cleanup_days: i32,

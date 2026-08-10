@@ -247,6 +247,16 @@ pub struct AdmissionCfg {
     pub tick: Duration,
     /// Guaranteed minimum share of B per lane (push, pop, ack, maint).
     pub share: [f64; LANES],
+    /// Per-lane FLOOR on the adaptive cap (push, pop, ack, maint), on top of
+    /// LANE_MIN_CAP. Needed by lanes whose transactions are long and few: the
+    /// controller only widens a cap on a probe, and a probe needs
+    /// LANE_JUDGE_MIN_DONE completions inside one tick, which a lane running
+    /// ~250 ms transactions can never reach. Such a lane decays to LANE_MIN_CAP
+    /// and stays there forever. Measured 2026-08-10: retention with 4 fan-out
+    /// workers sat at cap 2 with 4 waiters for the whole run, i.e. no faster
+    /// than the serial cycle it replaced. A caller that KNOWS its lane's
+    /// concurrency (RETENTION_PARALLELISM) states it here instead.
+    pub lane_min_cap: [f64; LANES],
     /// Static budget while the signal is degraded (nosync mode).
     pub nosync_budget: u64,
     pub trace: bool,
@@ -401,6 +411,9 @@ struct Core {
     // p99_pop 9.25 ms at 8 slots vs 45.75 ms at ~25). B stays the global
     // safety ceiling; caps find each lane's sweet spot inside it.
     cap: [f64; LANES],
+    /// Per-lane floor for `cap` (AdmissionCfg::lane_min_cap), already raised to
+    /// at least LANE_MIN_CAP at construction.
+    lane_min: [f64; LANES],
     lane_saturated: [bool; LANES],
     done_count: [u64; LANES],
     busy_ns: [u128; LANES],
@@ -492,10 +505,17 @@ impl Admission {
                 nosync_ticks: 0,
                 cap: {
                     let mut c0 = [1.0f64; LANES];
-                    for l in 0..LANES {
-                        c0[l] = (budget * cfg2.share[l]).max(2.0);
+                    for (l, c) in c0.iter_mut().enumerate() {
+                        *c = (budget * cfg2.share[l]).max(2.0).max(cfg2.lane_min_cap[l]);
                     }
                     c0
+                },
+                lane_min: {
+                    let mut m0 = [LANE_MIN_CAP; LANES];
+                    for (l, m) in m0.iter_mut().enumerate() {
+                        *m = cfg2.lane_min_cap[l].max(LANE_MIN_CAP);
+                    }
+                    m0
                 },
                 lane_saturated: [false; LANES],
                 done_count: [0; LANES],
@@ -669,7 +689,7 @@ impl Admission {
             // NOT a floor on the cap — the pop lane's optimum can sit well
             // below its share (sparse-lane regime), and pinning the cap at the
             // share would force the contention this controller exists to avoid.
-            let gmin = LANE_MIN_CAP;
+            let gmin = c.lane_min[l];
             if c.lane_backoff[l] > 0 {
                 c.lane_backoff[l] -= 1;
             } else {
@@ -1003,6 +1023,7 @@ mod tests {
             train_gap: Duration::from_micros(300),
             tick: Duration::from_millis(500),
             share: [0.25, 0.40, 0.30, 0.05],
+            lane_min_cap: [0.0; LANES],
             nosync_budget: 16,
             trace: false,
         }

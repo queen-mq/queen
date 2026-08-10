@@ -105,6 +105,17 @@ async fn main() {
             cfg.admission_share_ack,
             cfg.admission_share_maint,
         ],
+        // The maintenance lane's concurrency is KNOWN, not discovered: it is
+        // exactly the retention fan-out width plus the cycle's own slot for
+        // phases 4-5. Stating it as a floor is what keeps the adaptive cap from
+        // decaying to LANE_MIN_CAP and pinning retention at the serial rate —
+        // the lane's transactions are far too long and too few to ever earn a
+        // probe (see AdmissionCfg::lane_min_cap).
+        lane_min_cap: {
+            let mut m = [0.0f64; admission::LANES];
+            m[admission::Lane::Maint as usize] = (cfg.retention_parallelism + 1) as f64;
+            m
+        },
         nosync_budget: cfg.admission_nosync_budget,
         trace: cfg.admission_trace,
     });

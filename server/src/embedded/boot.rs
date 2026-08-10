@@ -250,6 +250,14 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
             cfg.admission_share_ack,
             cfg.admission_share_maint,
         ],
+        // Same reasoning as main.rs: the maintenance lane's concurrency is the
+        // retention fan-out width plus the cycle's own slot, and it must not
+        // decay below it (AdmissionCfg::lane_min_cap).
+        lane_min_cap: {
+            let mut m = [0.0f64; admission::LANES];
+            m[admission::Lane::Maint as usize] = (cfg.retention_parallelism + 1) as f64;
+            m
+        },
         nosync_budget: cfg.admission_nosync_budget,
         trace: cfg.admission_trace,
     });

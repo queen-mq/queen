@@ -30,10 +30,25 @@
 //! backlog is drained in many short transactions instead of one sweep-length
 //! lock hold, and pushes interleave between batches. Cutoffs are computed
 //! CALLER-side from one `now()` (one consistent clock per cycle); a NULL cutoff
-//! disables that rule. Partitions are iterated in ascending id order — the one
-//! global total order shared with the multi-partition lockers
-//! (006_log_maintenance header) —
-//! though with single-row locks per step the steps cannot deadlock regardless.
+//! disables that rule.
+//!
+//! PARALLELISM (2026-08-10): phases 1-3 fan out over `RETENTION_PARALLELISM`
+//! workers, each on its own pooled connection and its own maintenance-lane slot,
+//! pulling partitions off a shared cursor. This is the ONLY way to raise the
+//! deletion rate: the per-step row count is bounded by the push-latency budget
+//! (the step holds the same `log_partitions` row lock the push allocator takes,
+//! so a bigger batch buys nothing and stalls pushes — measured at 1M msg/s,
+//! batch 8000 pushed client p99 from 0,6 s to 20 s and absorbed no more rows,
+//! because the step cost is per-ROW, not per-CALL). Concurrency is safe for the
+//! same reason the batching is: every step autocommits and takes exactly ONE
+//! partition row lock, so two workers on two partitions never contend and a
+//! single-row lock cannot deadlock whatever order partitions are visited in.
+//! What the fan-out gives up is the ascending-id global visit order; nothing
+//! depends on it — 006_log_maintenance's multi-partition lockers order among
+//! THEMSELVES, and no step driven here ever takes a second lock. Phase 4 is
+//! excluded on purpose: it is the one step that is not per-partition ("one call
+//! handles a batch"), so it is the one that can hold more than one lock, and it
+//! stays serial on the cycle's own connection.
 //!
 //! The advisory lock is now SESSION-scoped (`pg_try_advisory_lock`) because
 //! there is no cycle transaction to scope it to; it is explicitly released with
@@ -46,6 +61,8 @@
 //! A failing cycle is logged and swallowed so the loop survives — a transient DB
 //! error must not kill background maintenance.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use deadpool_postgres::Pool;
@@ -57,6 +74,20 @@ use crate::db;
 /// (server/src/services/retention_service.cpp:73), now session-level (see module
 /// docs). A replica that can't acquire it skips the cycle.
 const CLEANUP_LOCK_ID: i64 = 737_001;
+
+/// Ceiling on RETENTION_PARALLELISM. Each worker holds a maintenance-lane
+/// admission slot AND a pooled connection for the length of its share of the
+/// cycle, so an operator who types a big number would starve the lane rather
+/// than speed it up (the lane is a fraction of the admission budget —
+/// QUEEN_ADMISSION_SHARE_MAINT). 16 is above any measured need: the 2026-08-10
+/// 1M msg/s rig needs ~14.6k step rows/s, which 4 workers cover ~3x over.
+const MAX_PARALLELISM: usize = 16;
+
+/// The ceiling must leave room for the measured need: 1M msg/s wants ~14.6k step
+/// rows/s against the ~13.8k serial ceiling, i.e. 2 workers to break even and 4
+/// for margin. Lowering this below 4 would silently cap the fix, so it fails the
+/// build instead.
+const _: () = assert!(MAX_PARALLELISM >= 4);
 
 /// Sub-cadence of the partition-cleanup phase. The other phases are keyed to
 /// message age and want the 5s cycle; this one is keyed to a window measured in
@@ -103,6 +134,7 @@ pub fn spawn(pool: Pool, cfg: &Config) {
     let knobs = Knobs {
         metrics_retention_days: cfg.metrics_retention_days,
         batch_size: cfg.retention_batch_size,
+        parallelism: cfg.retention_parallelism.clamp(1, MAX_PARALLELISM),
         partition_cleanup_days: cfg.partition_cleanup_enabled.then_some(cfg.partition_cleanup_days),
     };
     tracing::info!(
@@ -110,6 +142,7 @@ pub fn spawn(pool: Pool, cfg: &Config) {
         interval_ms = cfg.retention_interval_ms,
         advisory_lock = CLEANUP_LOCK_ID,
         batch_size = knobs.batch_size,
+        parallelism = knobs.parallelism,
         metrics_retention_days = knobs.metrics_retention_days,
         // None = QUEEN_PARTITION_CLEANUP_ENABLED=false, i.e. phase 4 never runs.
         partition_cleanup_days = ?knobs.partition_cleanup_days,
@@ -125,6 +158,9 @@ pub fn spawn(pool: Pool, cfg: &Config) {
 struct Knobs {
     metrics_retention_days: i32,
     batch_size: usize,
+    /// Concurrent per-partition step workers in phases 1-3 (RETENTION_PARALLELISM,
+    /// clamped to MAX_PARALLELISM). 1 = the historical serial cycle.
+    parallelism: usize,
     /// `None` = partition cleanup disabled (QUEEN_PARTITION_CLEANUP_ENABLED
     /// false). `Some(days)` = the inactivity window for phase 4. Folding the
     /// flag into the Option keeps "is it on" and "how old" from disagreeing.
@@ -234,11 +270,11 @@ async fn run_cycle(
     knobs: Knobs,
     sweep_partitions: bool,
 ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
-    // Maintenance-lane admission for the whole stepped cycle: one slot, held
-    // across the SP steps (bounded by the cycle itself). The individual step
-    // commits do not feed the train sensor — a held slot without commit_done
-    // contributes accounting, never fake samples.
-    let _slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
+    // Maintenance-lane admission for the leader's OWN database work: the
+    // advisory lock and the work-list query. The individual step commits do not
+    // feed the train sensor — a held slot without commit_done contributes
+    // accounting, never fake samples.
+    let slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
     let client = pool.get().await?;
     let got: bool = client
         .query_one("SELECT pg_try_advisory_lock($1)", &[&CLEANUP_LOCK_ID])
@@ -247,7 +283,13 @@ async fn run_cycle(
     if !got {
         return Ok(Outcome::Skipped);
     }
-    let res = cycle_body(&client, knobs, sweep_partitions).await;
+    // Hand the slot to cycle_body, which releases it before the fan-out and
+    // takes a fresh one for the phases that DO run on this connection (4 and 5).
+    // Holding it across the fan-out would spend a maintenance slot on a task
+    // that is only awaiting its workers — at the lane's decayed cap of 2 that
+    // was HALF the lane, and it made the fan-out exactly as slow as the serial
+    // cycle it replaced (measured 2026-08-10).
+    let res = cycle_body(pool, &client, slot, knobs, sweep_partitions).await;
     // Session lock: MUST unlock before the connection returns to the pool, or a
     // healthy pooled session would keep leader-gating every other cycle forever.
     // If this fails the connection itself is almost certainly broken — the
@@ -274,7 +316,9 @@ async fn run_cycle(
 }
 
 async fn cycle_body(
+    pool: &Pool,
     client: &deadpool_postgres::Client,
+    leader_slot: Option<crate::admission::Slot>,
     knobs: Knobs,
     sweep_partitions: bool,
 ) -> Result<Outcome, Box<dyn std::error::Error + Send + Sync>> {
@@ -301,81 +345,32 @@ async fn cycle_body(
     // AND a positive window — encoded as at least one non-NULL cutoff). The
     // swept-queue count is keyed by queues.id, not name: names repeat across
     // tenants, so a name-keyed set would collapse distinct queues into one.
-    let mut segments_deleted: i64 = 0;
-    let mut retention_queues: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let stmt = client
-        .prepare_cached(
-            "SELECT (queen.log_retention_step_v1($1::text::uuid, $2::text::timestamptz, \
-             $3::text::timestamptz, $4::int))::text",
-        )
-        .await?;
-    for w in &work {
-        if w.all_cutoff.is_none() && w.completed_cutoff.is_none() {
-            continue;
-        }
-        retention_queues.insert(w.queue_id.as_str());
-        loop {
-            let row = client
-                .query_one(&stmt, &[&w.pid, &w.all_cutoff, &w.completed_cutoff, &max_rows])
-                .await?;
-            let (deleted, done) = step_result(row.get(0));
-            segments_deleted += deleted;
-            // The step contract (006_log_maintenance) is done:true whenever
-            // nothing was deleted,
-            // so `!done` implies progress; the deleted==0 arm is a defensive
-            // stop against a contract break looping us forever.
-            if done || deleted == 0 {
-                break;
-            }
-        }
-    }
+    // Phases 1-3 are per-partition and independent, so each runs as a FAN-OUT
+    // over `knobs.parallelism` workers (see run_phase). The phases still run in
+    // order relative to each other — only the visit order WITHIN a phase stops
+    // being ascending-by-id, which nothing depends on (module docs).
+    let work = Arc::new(work);
+    let par = knobs.parallelism;
+    // The leader does no database work until phase 4: release its admission
+    // slot so the fan-out workers can have it (see run_cycle).
+    drop(leader_slot);
+
+    // Phase 1: retention rules 1+2, gated as in the retired seg engine's sweep
+    // (retention_enabled AND a positive window — encoded as at least one
+    // non-NULL cutoff). The swept-queue count is keyed by queues.id, not name:
+    // names repeat across tenants, so a name-keyed set would collapse distinct
+    // queues into one.
+    let (segments_deleted, touched) = run_phase(pool, Phase::Retention, &work, par, max_rows).await?;
+    let retention_queues: std::collections::HashSet<String> = touched.into_iter().collect();
 
     // Phase 2: log_txns hash-sidecar purge — EVERY log partition (the 900s floor
     // in the cutoff makes the window always applicable; 001_log_schema header).
-    let mut txns_purged: i64 = 0;
-    let stmt = client
-        .prepare_cached(
-            "SELECT (queen.log_txns_purge_step_v1($1::text::uuid, $2::text::timestamptz, \
-             $3::int))::text",
-        )
-        .await?;
-    for w in &work {
-        loop {
-            let row = client
-                .query_one(&stmt, &[&w.pid, &w.txns_cutoff, &max_rows])
-                .await?;
-            let (deleted, done) = step_result(row.get(0));
-            txns_purged += deleted;
-            if done || deleted == 0 {
-                break;
-            }
-        }
-    }
+    let (txns_purged, _) = run_phase(pool, Phase::Txns, &work, par, max_rows).await?;
 
     // Phase 3: max_wait_time_seconds eviction — applies regardless of
     // retention_enabled (a queue configured with ONLY maxWaitTimeSeconds still
     // gets swept), matching the old db::seg_evict_max_wait / C++ EvictionService.
-    // Sums segment rows deleted, the same number the old Rust helper returned.
-    let mut max_wait: i64 = 0;
-    let stmt = client
-        .prepare_cached(
-            "SELECT (queen.log_evict_max_wait_step_v1($1::text::uuid, $2::text::timestamptz, \
-             $3::int))::text",
-        )
-        .await?;
-    for w in &work {
-        let Some(cutoff) = &w.max_wait_cutoff else {
-            continue;
-        };
-        loop {
-            let row = client.query_one(&stmt, &[&w.pid, &cutoff, &max_rows]).await?;
-            let (deleted, done) = step_result(row.get(0));
-            max_wait += deleted;
-            if done || deleted == 0 {
-                break;
-            }
-        }
-    }
+    let (max_wait, _) = run_phase(pool, Phase::MaxWait, &work, par, max_rows).await?;
 
     // Phase 4: delete EMPTY, long-inactive partitions —
     // queen.log_partition_cleanup_step_v1, the restored C++
@@ -387,6 +382,8 @@ async fn cycle_body(
     // per-partition list would only add a round trip. Its own sub-cadence
     // (PARTITION_SWEEP_EVERY) and its off switch are folded into
     // knobs.partition_cleanup_days.
+    // Phases 4 and 5 run on THIS connection again, so take a slot back.
+    let _slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
     let mut partitions_deleted: i64 = 0;
     let partitions_scanned = sweep_partitions && knobs.partition_cleanup_days.is_some();
     if let (true, Some(days)) = (sweep_partitions, knobs.partition_cleanup_days) {
@@ -441,6 +438,158 @@ async fn cycle_body(
         partitions_scanned,
         metrics,
     })
+}
+
+/// Which per-partition step family a fan-out round drives. Phase 4 is
+/// deliberately absent — see the module docs' PARALLELISM note.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Retention,
+    Txns,
+    MaxWait,
+}
+
+impl Phase {
+    fn sql(self) -> &'static str {
+        match self {
+            Phase::Retention => {
+                "SELECT (queen.log_retention_step_v1($1::text::uuid, $2::text::timestamptz, \
+                 $3::text::timestamptz, $4::int))::text"
+            }
+            Phase::Txns => {
+                "SELECT (queen.log_txns_purge_step_v1($1::text::uuid, $2::text::timestamptz, \
+                 $3::int))::text"
+            }
+            Phase::MaxWait => {
+                "SELECT (queen.log_evict_max_wait_step_v1($1::text::uuid, $2::text::timestamptz, \
+                 $3::int))::text"
+            }
+        }
+    }
+}
+
+/// Drive one phase across the whole work list with `parallelism` workers.
+///
+/// The split is a shared CURSOR, not a static chunking: partition backlogs are
+/// wildly uneven (one partition can hold a million rows while its neighbour
+/// holds none), and a static split would leave workers idle behind whoever drew
+/// the deep ones.
+///
+/// Returns (rows deleted by the phase, queue ids touched — only phase 1
+/// populates it, for the swept-queue count).
+async fn run_phase(
+    pool: &Pool,
+    phase: Phase,
+    work: &Arc<Vec<WorkItem>>,
+    parallelism: usize,
+    max_rows: i32,
+) -> Result<(i64, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
+    if work.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    let n = parallelism.clamp(1, work.len());
+    let cursor = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(n);
+    for _ in 0..n {
+        let pool = pool.clone();
+        let work = Arc::clone(work);
+        let cursor = Arc::clone(&cursor);
+        handles.push(tokio::spawn(async move {
+            phase_worker(pool, phase, work, cursor, max_rows).await
+        }));
+    }
+    // Join ALL workers before reporting an error: a worker that fails must not
+    // leave its siblings running against a connection the cycle has abandoned.
+    // The cycle then fails as it always did (run_loop logs and retries next
+    // tick), so a partial sweep is retried, never counted.
+    let mut deleted = 0i64;
+    let mut queues: Vec<String> = Vec::new();
+    let mut first_err: Option<Box<dyn std::error::Error + Send + Sync>> = None;
+    for h in handles {
+        match h.await {
+            Ok(Ok((d, q))) => {
+                deleted += d;
+                queues.extend(q);
+            }
+            Ok(Err(e)) => {
+                first_err.get_or_insert(e);
+            }
+            Err(join) => {
+                first_err.get_or_insert(Box::new(join));
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok((deleted, queues)),
+    }
+}
+
+/// One fan-out worker: its own admission slot, its own pooled connection, its
+/// own prepared statement, pulling partitions off the shared cursor until the
+/// work list is exhausted.
+async fn phase_worker(
+    pool: Pool,
+    phase: Phase,
+    work: Arc<Vec<WorkItem>>,
+    cursor: Arc<AtomicUsize>,
+    max_rows: i32,
+) -> Result<(i64, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
+    let _slot = crate::admission::lane_slot(crate::admission::Lane::Maint).await;
+    let client = pool.get().await?;
+    let stmt = client.prepare_cached(phase.sql()).await?;
+    let mut deleted_total: i64 = 0;
+    let mut queues: Vec<String> = Vec::new();
+    loop {
+        let Some(w) = work.get(cursor.fetch_add(1, Ordering::Relaxed)) else {
+            break;
+        };
+        // The step contract (006_log_maintenance) is done:true whenever nothing
+        // was deleted, so `!done` implies progress; the deleted==0 arm is a
+        // defensive stop against a contract break looping us forever.
+        match phase {
+            Phase::Retention => {
+                if w.all_cutoff.is_none() && w.completed_cutoff.is_none() {
+                    continue;
+                }
+                queues.push(w.queue_id.clone());
+                loop {
+                    let row = client
+                        .query_one(&stmt, &[&w.pid, &w.all_cutoff, &w.completed_cutoff, &max_rows])
+                        .await?;
+                    let (deleted, done) = step_result(row.get(0));
+                    deleted_total += deleted;
+                    if done || deleted == 0 {
+                        break;
+                    }
+                }
+            }
+            Phase::Txns => loop {
+                let row = client
+                    .query_one(&stmt, &[&w.pid, &w.txns_cutoff, &max_rows])
+                    .await?;
+                let (deleted, done) = step_result(row.get(0));
+                deleted_total += deleted;
+                if done || deleted == 0 {
+                    break;
+                }
+            },
+            Phase::MaxWait => {
+                let Some(cutoff) = &w.max_wait_cutoff else {
+                    continue;
+                };
+                loop {
+                    let row = client.query_one(&stmt, &[&w.pid, cutoff, &max_rows]).await?;
+                    let (deleted, done) = step_result(row.get(0));
+                    deleted_total += deleted;
+                    if done || deleted == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok((deleted_total, queues))
 }
 
 /// One partition's row in the cycle work list. Cutoffs are prerendered
@@ -507,6 +656,7 @@ mod tests {
         let on = Knobs {
             metrics_retention_days: 90,
             batch_size: 1000,
+            parallelism: 1,
             partition_cleanup_days: true.then_some(30),
         };
         let off = Knobs {
@@ -515,6 +665,29 @@ mod tests {
         };
         assert_eq!(on.partition_cleanup_days, Some(30));
         assert_eq!(off.partition_cleanup_days, None);
+    }
+
+    /// Each fan-out phase must drive its OWN step SP. A copy-paste here would
+    /// not fail loudly: the cycle would keep reporting deletions while one rule
+    /// silently never ran, which is exactly the class of bug that let log_txns
+    /// grow unbounded at 1M msg/s before the parallelism landed.
+    #[test]
+    fn each_phase_drives_its_own_step_sp() {
+        assert!(Phase::Retention.sql().contains("log_retention_step_v1"));
+        assert!(Phase::Txns.sql().contains("log_txns_purge_step_v1"));
+        assert!(Phase::MaxWait.sql().contains("log_evict_max_wait_step_v1"));
+        // Phase 4 is serial by design and must never be reachable from the fan-out.
+        for p in [Phase::Retention, Phase::Txns, Phase::MaxWait] {
+            assert!(!p.sql().contains("log_partition_cleanup_step_v1"));
+        }
+    }
+
+    /// The clamp floors at 1 (0 must not mean "no retention") and caps at the
+    /// ceiling, which itself is pinned at compile time next to MAX_PARALLELISM.
+    #[test]
+    fn parallelism_ceiling_covers_the_measured_need() {
+        assert_eq!(0usize.clamp(1, MAX_PARALLELISM), 1);
+        assert_eq!(99usize.clamp(1, MAX_PARALLELISM), MAX_PARALLELISM);
     }
 
     /// Pins the guards that make the delete safe. All three tables are keyed by
