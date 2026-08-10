@@ -25,7 +25,7 @@ generated configuration reference under [/reference](https://queenmq.com/referen
 
 ```toml
 [dependencies]
-queen-engine = { version = "1.0.0-beta.4", default-features = false }
+queen-engine = { version = "1.0.0", default-features = false }
 ```
 
 `default-features = false` skips the HTTP serve stack, the dashboard and the

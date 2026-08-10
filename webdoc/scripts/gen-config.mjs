@@ -191,7 +191,6 @@ const EXTRA_VARS = [
 /** Still parsed and logged at boot, but wired to nothing. */
 const INERT = new Map([
   ["QUEEN_V2_FUSION_FRAMES", "kept for env compatibility; no longer a flush trigger (fusion.rs)"],
-  ["RETENTION_PARALLELISM", "read and ignored; retention runs one bounded step at a time"],
 ]);
 
 function groupOf(name) {

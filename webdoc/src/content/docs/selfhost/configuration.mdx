@@ -193,11 +193,11 @@ logs a warning at boot if it finds any of them set, so a deployment that still
 carries them is told rather than left tuning a control loop that is not there.
 See [flow control](/internals/flow-control).
 
-**Read but inert.** `RETENTION_PARALLELISM` is parsed and printed in the boot
-`config: jobs` line, but the log engine's maintenance cycle has no work for it:
-retention runs one bounded step at a time. It is kept for configuration
-compatibility. `PARTITION_CLEANUP_DAYS` used to be in this list and is now live.
-See [Retention and disk](/selfhost/retention).
+**Read but inert.** `QUEEN_V2_FUSION_FRAMES` is parsed and printed at boot but is
+no longer a flush trigger for the fusion engine. `RETENTION_PARALLELISM` and
+`PARTITION_CLEANUP_DAYS` used to be in this list and are both live again: as of
+1.0.0 the first is the retention fan-out width, and it is the only lever that
+raises the deletion rate. See [Retention and disk](/selfhost/retention).
 
 **Not read at all.** `QUEEN_STATIC_DIR` configures nothing. The dashboard is
 compiled into the binary with `rust_embed` and there is no runtime static-directory

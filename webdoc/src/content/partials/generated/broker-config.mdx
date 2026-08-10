@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 95 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 96 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 ### Server
 
@@ -116,6 +116,7 @@ The broker is configured entirely through environment variables: 95 of them, lis
 | `QUEEN_PARTITION_CLEANUP_ENABLED` | boolean | `true` |  |
 | `RETENTION_BATCH_SIZE` | integer | `1000` |  |
 | `RETENTION_INTERVAL` | integer | `5000` |  |
+| `RETENTION_PARALLELISM` | integer | `1` |  |
 | `STATS_INTERVAL_MS` | integer | `10000` |  |
 
 ### Durability spool
@@ -180,4 +181,3 @@ The broker still parses these and still prints them in its boot configuration bl
 | Variable | Default | Status |
 | --- | --- | --- |
 | `QUEEN_V2_FUSION_FRAMES` | `500` | kept for env compatibility; no longer a flush trigger (fusion.rs) |
-| `RETENTION_PARALLELISM` | `1` | read and ignored; retention runs one bounded step at a time |

@@ -83,6 +83,31 @@ unit test in `retention.rs` pins the by-id invariant: it asserts the join text i
 `p.queue_id = qq.id` and that no name-bridge table appears in the query.
 </Aside>
 
+### The fan-out
+
+`RETENTION_PARALLELISM` (default **1**, the historical serial cycle, clamped to 16) is the number of
+concurrent per-partition step workers in phases 1-3. Each takes its own pooled connection, its own
+maintenance-lane admission slot and its own prepared statement, and pulls partitions off a **shared
+cursor** rather than a static slice of the work list. Backlogs are not evenly distributed, and a
+static split ends with one worker draining a deep partition while the rest idle. Phase 4 is excluded
+on purpose: it is the one step that is not per-partition, so it is the one that can hold more than
+one lock. Phase 5 is a few statements on the cycle's own connection.
+
+This is the only lever that raises the deletion rate. The per-step row count is bounded by the
+push-latency budget, because the step takes the same `log_partitions` row lock the push allocator
+takes: measured at 1M msg/s, a batch of 8000 pushed client p99 from 0.6 s to 20 s and absorbed no
+more rows, since the step cost is per row and not per call. Serial, the measured ceiling is ~13.8k
+step rows/s against the ~14.6k that 1M msg/s produces, which is why the database grew without bound
+at 1M and held fine at 600k.
+
+The maintenance lane has to be *told* the width. A lane's admission cap only widens on a probe, and a
+probe needs a minimum number of completions inside one tick, which a lane running ~250 ms
+transactions never reaches: it decays to the global minimum and stays there. Measured, four fan-out
+workers sat at cap 2 with 4 waiters for a whole run, no faster than the serial cycle they replaced.
+Both `main.rs` and the embedded boot path therefore state the lane's floor as
+`RETENTION_PARALLELISM + 1`, the workers plus the cycle's own slot for phases 4-5, instead of letting
+the controller discover a concurrency it already knows.
+
 ## The retention step
 
 ```sql
@@ -299,8 +324,14 @@ purge error is logged, rate-limited to once a minute, and the cycle still report
 Every step takes **exactly one** `log_partitions` row lock, and holds it only for its own bounded
 transaction. Because no step ever holds two partition locks, the steps cannot deadlock against the
 multi-partition lockers (`log_push_multi_v1` and `log_transaction_wire_v1`, which pre-lock ascending by
-id) no matter what order retention iterates in. Retention still iterates ascending by id, so there is
-one global total order everywhere rather than an argument for why a second one is safe.
+id) no matter what order retention iterates in.
+
+That is also what makes the fan-out safe. Above `RETENTION_PARALLELISM` 1 the ascending-id global
+visit order is gone (workers pull from a shared cursor), and nothing depends on it: a transaction
+holding a single row lock cannot be part of a lock cycle, and two workers on two partitions do not
+contend at all. The multi-partition lockers order among *themselves*, which is where the ordering
+argument actually lives. Phase 4 is the one step that can hold more than one lock, and it is the one
+phase that stays serial.
 
 ## What retention does not touch
 
@@ -315,8 +346,6 @@ one global total order everywhere rather than an argument for why a second one i
   explicitly (both tables are foreign-key-less by design, so no cascade can reach them), then
   deletes the `queen.queues` row, whose cascade takes the partitions, segments, cursors, watermarks,
   queue-scoped subscription rows and per-queue metrics with it.
-- **Parallelism.** `RETENTION_PARALLELISM` is likewise read and ignored; retention runs one bounded step
-  at a time.
 
 ## What you will see in the logs
 

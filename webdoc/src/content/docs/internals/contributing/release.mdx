@@ -61,15 +61,15 @@ broker image, npm, PyPI, crates.io, Packagist, the Go module tag and the CLI tag
 version tells you which broker it was released against without a compatibility matrix.
 
 <Aside type="note">
-The tree is on 1.0.0, but the prereleases no longer move together. The broker carries
-`1.0.0-beta.2` (`server/server.json`, mirrored in `server/Cargo.toml`). The proxy
-(`proxy/Cargo.toml`), the dashboard (`app/package.json`) and the operator console
-(`proxy/console/package.json`) are still on `1.0.0-beta.1`, because beta.2 was a broker-only
-release and nothing outside `server/` was rebuilt for it. So a `queen-proxy` image and a
-`queen` image from the same day can legitimately report different prerelease numbers, and only
-the `MAJOR.MINOR.PATCH` in front of the suffix is the alignment the rule above promises.
-The JavaScript and Python clients carry `1.0.0`, and so do the Rust client and
-`queen-protocol`. The Go module, the CLI and the Packagist
+At 1.0.0 the numbers agree again. The broker carries `1.0.0` (`server/server.json`, mirrored
+in `server/Cargo.toml`), and so do the proxy (`proxy/Cargo.toml`), the dashboard
+(`app/package.json`), the operator console (`proxy/console/package.json`), the JavaScript and
+Python clients, the Rust client and `queen-protocol`. They did not during the betas: the
+broker reached `1.0.0-beta.4` while everything outside `server/` stayed on `1.0.0-beta.1`,
+because those releases were broker-only and nothing else was rebuilt for them. So a
+`queen-proxy` image and a `queen` image from the same *beta* day can legitimately report
+different prerelease numbers, and there only the `MAJOR.MINOR.PATCH` in front of the suffix
+is the alignment the rule above promises. The Go module, the CLI and the Packagist
 package take their version from git tags, so they are aligned by tagging at release time and
 not by editing a file. `README.md` points at `ghcr.io/queen-mq/queen:latest`, but its prose
 still carries 0.16-era numbers.
@@ -142,12 +142,12 @@ packages, so neither can be published until the protocol version they name is al
 registry. Publish `queen-protocol` first, wait for the index to update, then publish the
 other two in either order. Running `cargo package --allow-dirty --no-verify` in either
 consumer before the first publish reports `no matching package named queen-protocol found`,
-which is this ordering and not a misconfiguration. One more crates.io quirk applies to the
-engine, the only prerelease crate of the three: a prerelease version (a `-beta.N`) is not
-matched by a plain `"1"` requirement, so a prerelease engine publish is invisible to plain
-requirements. Consumers must write a requirement that itself names a prerelease, such as
-`queen-engine = "1.0.0-beta.4"`, which then also matches later prereleases and the eventual
-1.0.0.
+which is this ordering and not a misconfiguration. A second crates.io quirk retired at 1.0.0
+and is worth knowing if you publish another prerelease: a prerelease version (a `-beta.N`) is
+not matched by a plain `"1"` requirement, so while the engine was the only prerelease crate of
+the three its publishes were invisible to plain requirements, and consumers had to name a
+prerelease themselves (`queen-engine = "1.0.0-beta.4"`). Now that all three are release
+versions, a plain `queen-engine = "1"` resolves.
 </Aside>
 
 Two tag shapes are load-bearing and easy to get wrong. Both nested Go modules need the
@@ -194,7 +194,7 @@ no longer holds.
 
 | It says | Actually |
 | --- | --- |
-| the version is `0.14.1.beta.1` in `server/server.json` | it is `1.0.0-beta.2`, shipping as `1.0.0` |
+| the version is `0.14.1.beta.1` in `server/server.json` | it is `1.0.0` |
 | the release covers "the C++ broker binary, libqueen, and five client SDKs" | there is no C++ broker and no `lib/`. The image carries the Rust broker, the dashboard and `queenctl` |
 | the pre-release checklist runs `cd lib && make test-contention` | that directory does not exist. The gate is `test/run.sh`. See [Testing](/internals/contributing/testing) |
 | user-facing docs live in `docs/*.html`, and a version bump has to edit `docs/index.html` and `docs/quickstart.html` | that site is retired. Documentation is `webdoc/`, and it is built and gated by its own workflow |

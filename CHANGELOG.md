@@ -3,6 +3,48 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.0.0
+
+First stable release. The broker, the proxy, the dashboard and the operator console all carry
+`1.0.0`. The prerelease numbers had drifted apart — the proxy, the dashboard and the console
+never moved past `1.0.0-beta.1`, because the later betas were broker-only — and this release
+puts them back on one number.
+
+**The broker is embeddable as a Rust library.** `queen-engine` publishes the same engine the
+container runs, importable as `queen::Broker`: `Broker::start` applies the schema, starts the
+background machinery and hands back typed operations — push, pop with long-poll, ack, leases,
+transactions, configure, delete, the DLQ, metrics. Each one invokes the handler functions the
+HTTP router dispatches to, so behaviour and defaults are the broker's by construction rather
+than a reimplementation's. `default-features = false` drops the `server` feature, which is
+the axum serve stack, the embedded dashboard and the process tracing subscriber; with the
+default features the `queen` binary is byte-identical to the pre-feature layout. The package
+publishes as `queen-engine` because the bare crates.io name `queen` belongs to an unrelated
+crate, while the library still imports as `queen`. Measured MSRV is 1.88. The Rust surface is
+published as **beta**: the HTTP API remains the stable compatibility contract.
+
+**`RETENTION_PARALLELISM` does something again.** It was parsed and ignored through the
+log-engine port, which pinned deletion at one partition at a time — a measured ceiling of
+~13.8k step rows/s against the ~14.6k that 1M msg/s produces, so the database grew without
+bound at 1M and held fine at 600k. Retention phases 1-3 now fan out over that many workers,
+each on its own pooled connection and its own maintenance-lane admission slot, pulling
+partitions off a shared cursor rather than a static split, so one deep backlog cannot leave a
+single worker running alone. Phase 4, partition cleanup, stays serial on the cycle's own
+connection: it is the one step that is not per-partition, so it is the one that can hold more
+than one lock at a time. The value is clamped to 16 and defaults to 1 — the historical serial
+cycle — so upgrading changes nothing until it is set.
+
+Raising `RETENTION_BATCH_SIZE` is not a substitute. The step cost is per row, and the step
+takes the same `log_partitions` row lock the push allocator takes, so at 1M msg/s a batch of
+8000 pushed client p99 from 0.6 s to 20 s and absorbed no more rows.
+
+**The admission controller can be told a lane's concurrency instead of discovering it.** A
+lane's cap only widens on a probe, and a probe needs a minimum number of completions inside
+one tick, which a lane running ~250 ms transactions never reaches: it decays to the global
+minimum and stays there. Measured, retention with 4 fan-out workers sat at cap 2 with 4
+waiters for a whole run — no faster than the serial cycle it replaced. Both the binary and
+the embedded boot path now state the maintenance lane's floor as `RETENTION_PARALLELISM + 1`.
+Raise `QUEEN_ADMISSION_SHARE_MAINT` along with the parallelism.
+
 ## 1.0.0-beta.4
 
 **Google sign-in through the proxy could never complete.** The token exchange died with

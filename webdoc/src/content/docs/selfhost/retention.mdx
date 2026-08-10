@@ -95,6 +95,16 @@ in many short transactions with pushes interleaving between them, instead of one
 sweep-length lock hold. Because no step ever holds two partition locks, the steps
 cannot deadlock against the multi-partition writers.
 
+The deletion *rate* scales with `RETENTION_PARALLELISM` (default **1**, the
+historical serial cycle, clamped to 16) and with nothing else. Above 1, the three
+phases below fan out over that many workers, each on its own pooled connection and
+its own maintenance-lane admission slot, pulling partitions off a shared cursor so
+that one deep backlog cannot leave a single worker sweeping alone. A larger
+`RETENTION_BATCH_SIZE` is not an alternative: the step cost is per row, so a bigger
+batch absorbs no more rows per second and only lengthens the row lock the push
+allocator is waiting on. Raise `QUEEN_ADMISSION_SHARE_MAINT` along with the
+parallelism, because each worker holds one maintenance slot while it runs.
+
 The three phases are:
 
 | Phase | Applies to | Cutoff |
@@ -163,8 +173,10 @@ empty and idle for `PARTITION_CLEANUP_DAYS` (30), on a phase that runs at most
 once a minute. "Empty" excludes dead-letter rows and streaming state, so the row
 above (the DLQ one) pins its partition in place too. Set
 `QUEEN_PARTITION_CLEANUP_ENABLED=false` for the older behaviour of keeping every
-partition row forever. `RETENTION_PARALLELISM` is still read for configuration
-compatibility and does nothing under this engine.
+partition row forever. This is also the one phase `RETENTION_PARALLELISM` does not
+fan out. It is not per-partition (one call handles a batch), so it is the one step
+that can hold more than one lock, and it stays serial on the cycle's own
+connection.
 
 ## Watching disk growth
 

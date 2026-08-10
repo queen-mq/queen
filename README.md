@@ -221,7 +221,7 @@ version and supervise instead of two.
 
 ```toml
 [dependencies]
-queen-engine = { version = "1.0.0-beta.4", default-features = false }
+queen-engine = { version = "1.0.0", default-features = false }
 ```
 
 The package is named `queen-engine` — the bare crates.io name `queen` belongs to an unrelated
