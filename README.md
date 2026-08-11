@@ -7,9 +7,14 @@
 **The queue that doesn't fall apart at the other end of your workload.**
 
 Every entity gets its own FIFO lane, created on first push, so a slow consumer on one never
-stalls another. One broker held **400,000 ordered partitions**, and sustains **600,000
-messages a second** with leases, explicit acks, deduplication and retention all on:
-**50+ billion messages across 24 hours**.
+stalls another. That design has two ends, and one broker holds both.
+
+**A million messages a second for 24 hours**: 86,369,975,300 messages with leases, explicit acks,
+deduplication and retention all on, zero restarts, broker memory flat at 4.1 GB. And **a million
+ordered partitions** in one PostgreSQL, none preallocated, created during the run at a thousand a
+second while serving 200,000 messages a second with zero push, pop or ack errors: the lanes and
+their consumer-group cursors weigh 641 MB. The cardinality run is an hour long and runs with
+deduplication off; both sets of conditions are on their pages.
 Consumer groups, replay and a dead-letter queue at both ends. Windowed aggregation that commits
 its state, its output and its acks in one transaction. One stateless binary on the
 PostgreSQL you already run. No cluster, no JVM.
