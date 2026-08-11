@@ -2067,12 +2067,32 @@ LANGUAGE sql STABLE
 AS $$
     SELECT p.id, p.name, p.last_write_at
     FROM queen.log_partitions p
-    JOIN queen.queues q ON q.id = p.queue_id AND q.name = p_queue AND q.tenant_id = p_tenant
     LEFT JOIN queen.log_consumers c
       ON c.partition_id = p.id AND c.consumer_group = p_group
-    -- The index bound. now() is STABLE and the window is a parameter, so this is one
-    -- constant per execution, not a per-row expression.
-    WHERE p.last_write_at >= now()
+    -- The queue is resolved by SCALAR SUBQUERY, not by joining queen.queues as a
+    -- relation, and that is load-bearing under a GENERIC plan — which is the plan the
+    -- broker gets, because it calls this through prepare_cached.
+    --
+    -- Joined as a relation, `queues` can only ever drive the nested loop, so `p` is the
+    -- inner side and PostgreSQL drops its (queue_id, last_write_at) ordering from the
+    -- join pathkeys. The planner then reaches this ORDER BY with an unordered Bitmap
+    -- Index Scan and has to materialize and SORT the entire window before the LIMIT can
+    -- look at it — measured start-up cost 4391 against a real schema. The bound still
+    -- holds, so the query stays correct and fast in steady state, but the work stops
+    -- being proportional to the LIMIT and becomes proportional to the whole window: a
+    -- burst that writes far more partitions than one page would sort all of them.
+    --
+    -- As a subquery it is an InitPlan pseudo-constant, so log_partitions becomes the
+    -- OUTER relation, keeps an ordered Index Scan, and the tie groups collapse into an
+    -- Incremental Sort the LIMIT can terminate early: start-up cost 310 on the same
+    -- data. queen.queues has a UNIQUE (tenant_id, name), so the subquery is
+    -- single-valued by construction; an absent queue yields NULL and therefore no rows,
+    -- exactly what the join did.
+    WHERE p.queue_id = (SELECT q.id FROM queen.queues q
+                        WHERE q.name = p_queue AND q.tenant_id = p_tenant)
+      -- The index bound. now() is STABLE and the window is a parameter, so this is one
+      -- constant per execution, not a per-row expression.
+      AND p.last_write_at >= now()
                              - make_interval(secs => p_window_ms::double precision / 1000.0)
       AND (p.last_write_at, p.id) > (p_after_write, p_after_id)
       AND p.last_offset > COALESCE(c.committed, -1)

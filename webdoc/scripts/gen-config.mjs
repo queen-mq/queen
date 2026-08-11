@@ -186,6 +186,16 @@ const EXTRA_VARS = [
     aliases: [],
     // Same derived floor as QUEEN_ADMISSION_INIT.
   },
+  {
+    name: "QUEEN_HOTLIST_RESEED_WINDOW_MS",
+    type: "integer",
+    def: "120000 (max of 4x QUEEN_HOTLIST_RESEED_MS and 120000)",
+    aliases: [],
+    // config.rs parses a literal 0 and then REWRITES it before load() returns,
+    // so the scraped default would publish 0 — which reads as "no window" and
+    // is the opposite of what the broker applies. Stated here as the value the
+    // defaults actually produce.
+  },
 ];
 
 /** Still parsed and logged at boot, but wired to nothing. */
