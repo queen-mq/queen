@@ -1,0 +1,40 @@
+2026-08-10T09:00:04.878183534Z  INFO schema: applied schema.sql + procedures procedures=23
+2026-08-10T09:00:04.878229805Z  INFO auth: JWT auth disabled — API and dashboard are open (standalone); set JWT_ENABLED=true to require tokens
+2026-08-10T09:00:04.878235222Z  INFO boot: config: server version="1.0.0-beta.4" port=6632 pool=300 stmt_timeout_ms=30000 max_body_bytes=<default>
+2026-08-10T09:00:04.878246074Z  INFO boot: config: postgres host=qbench-pg port=5432 user=postgres password=<set:8 chars> database=postgres use_ssl=false ssl_reject_unauthorized=true
+2026-08-10T09:00:04.878249764Z  INFO boot: config: auth enabled=false algorithm=HS256 secret=<unset> public_key=<unset> jwks_url= issuer= audience= clock_skew_s=30 skip_paths=["/health", "/metrics/prometheus", "/metrics", "/"]
+2026-08-10T09:00:04.878253567Z  INFO boot: config: sync enabled=true mesh_active=false server_id=81f592db06a9 mesh_port=6633 peers=[] secret=<unset> heartbeat_ms=1000 dead_threshold_ms=5000 cache_refresh_ms=60000
+2026-08-10T09:00:04.87825695Z  INFO boot: config: engine fusion_shards=16 fusion_frames=500 fusion_hold_ms=30 dedup_cache=true dedup_cache_mb=6144 ack_registry=true ack_registry_mb=64 ack_fusion=true ack_fusion_shards=16 ack_fusion_hold_ms=3 hotlist=true hotlist_shards=16 hotlist_window_batch=100 hotlist_reseed_ms=30000 hotlist_idle_sweep_ms=300000 zstd_level=3
+2026-08-10T09:00:04.878263071Z  INFO boot: config: flow pop_default_timeout_ms=30000 pop_wait_initial_ms=100 pop_wait_backoff_threshold=3 pop_wait_backoff_multiplier=2.0 pop_wait_max_ms=1000 admission=189/189/128 admission_pool_reserve=16 admission_train_gap_us=300 admission_tick_ms=500 admission_shares=push=0.25 pop=0.4 ack=0.3 maint=0.1 admission_nosync_budget=64
+2026-08-10T09:00:04.878267693Z  INFO boot: config: jobs retention_interval_ms=5000 retention_batch_size=1000 retention_parallelism=4 metrics_retention_days=90 partition_cleanup=true partition_cleanup_days=30 stats_interval_ms=10000 metrics_flush_ms=60000 apply_schema=true
+2026-08-10T09:00:04.878270013Z  INFO boot: config: file_buffer dir=/var/lib/queen/buffers flush_interval_ms=100 max_batch_size=100 max_events_per_file=10000
+2026-08-10T09:00:04.878272314Z  INFO boot: config: security encryption_key=<unset> tenancy_header=false
+2026-08-10T09:00:04.878274529Z  INFO boot: config: logging level=info json=false rates_ms=10000 top_n_queues=10
+2026-08-10T09:00:04.878276675Z  INFO retention: service started interval_ms=5000 advisory_lock=737001 batch_size=1000 parallelism=4 metrics_retention_days=90 partition_cleanup_days=Some(30)
+2026-08-10T09:00:04.878283151Z  INFO stats: reconciler started interval_ms=10000 advisory_lock=737002
+2026-08-10T09:00:04.878287169Z  INFO metrics: collector started flush_ms=60000 replica=81f592db06a9
+2026-08-10T09:00:04.887775393Z  INFO spool: drain loop started dir=/var/lib/queen/buffers flush_ms=100
+2026-08-10T09:00:04.887820648Z  INFO boot: QUEEN_ACK_FUSION on shards=16 hold_ms=3
+2026-08-10T09:00:04.887849989Z  INFO boot: QUEEN_HOTLIST on shards=16 window_batch=100
+2026-08-10T09:00:04.887868171Z  INFO reconcile: state reconcile loop started interval_ms=60000
+2026-08-10T09:00:04.887872466Z  INFO reconcile: hot-list/gate idle sweep started sweep_ms=300000
+2026-08-10T09:00:04.887875311Z  INFO mesh: mesh sync enabled but no peers configured — local waker only
+2026-08-10T09:00:04.888129212Z  INFO boot: listening version="1.0.0-beta.4" addr=0.0.0.0:6632 fusion_shards=16 fusion_frames=500 hold_ms=30 zstd=3 pool=300
+2026-08-10T09:00:14.872968685Z  INFO fusion: bundle summary commits=1 segments=1 segments_per_commit=1.0
+2026-08-10T09:00:14.884476224Z  INFO hotlist: floor timers leased_parks=1 promote_clear=0 promote_requeue=0
+2026-08-10T09:00:14.88900399Z  INFO rates: broker rates scope="global" push_s="20" pop_s="10" ack_s="0" txn_s="0" p50_push_ms="14.63" p99_push_ms="14.63" p99_pop_ms="12.58" p99_ack_ms="0.00" ack_hit_pct="100.0" pop_empty_pct="99.8" parked=0 pool="41/300" pool_waiting=0 adm_budget=189 adm_mode="normal" adm_lanes=push:29/28w0 pop:5/55w0 ack:1/36w0 maint:2/5w0 trains_s="0.6" txn_train="1.7" txn_train_p95=3 cycle_ms="7.46" oldest_wait_ms="40.4" adm_last="init" visits_s="1" cands_visit="1.3" ready_age_p50="0" ready_age_p95="0" ring_oldest_ms="0" ring_depth=0 buffered=false
+2026-08-10T09:00:14.889030711Z  INFO rates: queue rates tenant=00000000-0000-0000-0000-000000000001 queue=segbench push_s="20" pop_s="10" ack_s="0" lag_ms="18" hot="1/1"
+2026-08-10T09:00:14.891034044Z  INFO sizes: broker sizes dedup="0/6144MB(0%)" dedup_suppressed=0 ack_reg="0e/0.0MB" hotlist="1rings/0ready/2wheel" spool_pending=0 spool_healthy=true pool="41/300" pool_waiting=0 adm_commits=12 rss_gb="0.04"
+2026-08-10T09:00:14.893635554Z  INFO ack-fusion: coalesce summary commits=1 rows=1 rows_per_commit="1.00"
+2026-08-10T09:00:14.89367351Z  INFO ack-reg: hit rate hits=1 misses=0 hit_rate=100.0% entries=0 resident_mb=0.0MB
+2026-08-10T09:00:14.899216451Z  INFO stats: refresh elapsed_ms=19 summary={"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-08-10T09:00:14.880Z", "queuesUpdated": 1, "segPartitions": 4}
+2026-08-10T09:00:24.872700174Z  INFO fusion: bundle summary commits=4735 segments=4886 segments_per_commit=1.0318901795142554
+2026-08-10T09:00:24.886170168Z  INFO hotlist: floor timers leased_parks=4 promote_clear=4720 promote_requeue=142
+2026-08-10T09:00:24.893024755Z  INFO rates: broker rates scope="global" push_s="49252" pop_s="49232" ack_s="49052" txn_s="0" p50_push_ms="2.67" p99_push_ms="17.67" p99_pop_ms="6.03" p99_ack_ms="0.00" ack_hit_pct="100.0" pop_empty_pct="99.5" parked=0 pool="76/300" pool_waiting=0 adm_budget=189 adm_mode="normal" adm_lanes=push:2/23w0 pop:3/36w0 ack:1/16w0 maint:5/5w0 trains_s="282.7" txn_train="5.1" txn_train_p95=19 cycle_ms="1.49" oldest_wait_ms="3.7" adm_last="init" visits_s="492" cands_visit="1.2" ready_age_p50="0" ready_age_p95="0" ring_oldest_ms="0" ring_depth=0 buffered=false
+2026-08-10T09:00:24.893049471Z  INFO rates: queue rates tenant=00000000-0000-0000-0000-000000000001 queue=segbench push_s="49252" pop_s="49232" ack_s="49052" lag_ms="6" hot="1/1"
+2026-08-10T09:00:24.893090706Z  INFO sizes: broker sizes dedup="14/6144MB(0%)" dedup_suppressed=0 ack_reg="18e/0.1MB" hotlist="1rings/0ready/1101wheel" spool_pending=0 spool_healthy=true pool="76/300" pool_waiting=0 adm_commits=14326 rss_gb="0.20"
+2026-08-10T09:00:24.893270486Z  INFO ack-fusion: coalesce summary commits=4621 rows=4892 rows_per_commit="1.06"
+2026-08-10T09:00:24.893285576Z  INFO ack-reg: hit rate hits=4892 misses=0 hit_rate=100.0% entries=18 resident_mb=0.1MB
+2026-08-10T09:00:24.898991312Z  INFO stats: refresh elapsed_ms=18 summary={"tasks": {"tasksUpdated": 0}, "engine": "segments", "system": {"systemUpdated": 1}, "namespaces": {"namespacesUpdated": 0}, "refreshedAt": "2026-08-10T09:00:24.881Z", "queuesUpdated": 1, "segPartitions": 200}
+2026-08-10T09:00:34.872141278Z  INFO fusion: bundle summary commits=24035 segments=25245 segments_per_commit=1.0503432494279177
+2026-08-10T09:00:34.888315637Z  INFO hotlist: floor timers leased_parks=4 promote_clear=22292 promote_requeue=2651

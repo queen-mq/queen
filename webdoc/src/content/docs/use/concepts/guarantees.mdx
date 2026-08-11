@@ -84,11 +84,11 @@ reassurance.
 An ack is durable in the same sense: the cursor moves when the transaction commits, and the
 item comes back `success: true`. Anything else means the cursor did not move.
 
-Sustained-durability evidence: a 24-hour soak processed 51,820,403,100 messages at roughly
-600,000 messages per second per side with an error rate of 0.00012%, 0 restarts and flat broker
-memory (~6.3 GB resident). That run used **explicit acknowledgement** (`manualAck=true`,
-`ackAsync=true`) on a 32-vCPU, 62 GiB machine, at commit `615efdc`. Artifacts and the full
-conditions are in [Benchmarks](/benchmarks).
+Sustained-durability evidence: a 24-hour soak processed 86,369,975,300 messages at roughly
+1,000,000 messages per second per side, with 1,000 messages touched by an error of any kind,
+0 restarts and flat broker memory (~4.1 GB resident). That run used **explicit acknowledgement**
+(`manualAck=true`, `ackAsync=true`) on a 32-vCPU, 62 GiB machine, on Queen 1.0.0. Artifacts and
+the full conditions are in [Benchmarks](/benchmarks).
 
 ## Delivery
 

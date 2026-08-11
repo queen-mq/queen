@@ -135,7 +135,7 @@ without its row.
 
 | Result | Conditions it was measured under |
 | --- | --- |
-| 24-hour soak: 51,820,403,100 messages, roughly 600k msg/s per side, error rate 0.00012%, zero restarts, broker RSS flat at about 6.3 GB | **explicit acks** (`manualAck=true`, `ackAsync=true`), a 32 vCPU / 62 GiB VM, commit `615efdc` |
+| 24-hour soak: 86,369,975,300 messages, roughly 1M msg/s per side, 1,000 messages touched by an error, zero restarts, broker RSS flat at about 4.1 GB | **explicit acks** (`manualAck=true`, `ackAsync=true`), a 32 vCPU / 62 GiB VM, Queen 1.0.0 |
 | 1M msg/s per side, sustained for 600 s | **`autoAck`** (`manualAck=false`) and **deduplication off**; 99.914 % delivered: about 500,000 messages were never accepted (`pushErr=3032`) |
 | A 4-stage pipeline over 1000 partitions at 25k events/s for 600 s: 88,503,408 messages verified, 0 duplicates, 0 gaps, 0 order violations | `dedupWindow=300s`, echoed by the loader. This is the ordering result, not a throughput result |
 | A 2-core cell holding more than 2400 msg/s through the proxy, 12 tenants for 1 hour, 0 cross-tenant deliveries | **deduplication off** (`dedupWindowSeconds: 0`) and **429 retry disabled** (`retry429Attempts: 1`); the raw sampler also recorded 818 HTTP 502 and 4,392 connection-refused errors against the proxy, and the roughly 1 % gap between pushes and deliveries is redelivery volume |

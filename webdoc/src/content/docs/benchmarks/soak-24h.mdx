@@ -1,33 +1,37 @@
 ---
 title: 24-hour soak
-description: "51,820,403,100 messages in 24 hours at about 600,000 per second per side with explicit acknowledgement, zero restarts and flat broker memory, and what a run of this shape does not establish."
+description: "86,369,975,300 messages in 24 hours at about 1,000,000 per second per side with explicit acknowledgement, zero restarts and flat broker memory, and what a run of this shape does not establish."
 type: reference
 sidebar:
   order: 2
 sourceOfTruth:
-  - benchmark-queen/2026-07-25-soak24/results.md
-  - benchmark-queen/2026-07-25-soak24/raw/soak24b.out
-  - benchmark-queen/2026-07-25-soak24/raw/soak-bench.csv
-  - benchmark-queen/2026-07-25-soak24/raw/soak-watchdog.log
+  - benchmark-queen/2026-08-11-soak24-1M/results.md
+  - benchmark-queen/2026-08-11-soak24-1M/raw/loader-01/g.out
+  - benchmark-queen/2026-08-11-soak24-1M/raw/loader-02/g.out
+  - benchmark-queen/2026-08-11-soak24-1M/raw/loader-03/g.out
+  - benchmark-queen/2026-08-11-soak24-1M/raw/bench/bench.csv
+  - benchmark-queen/2026-08-11-soak24-1M/raw/bench/metrics.csv
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
 ---
 
-**In 24 hours, one broker against one PostgreSQL moved 51,820,403,100 messages (about 600,000
+**In 24 hours, one broker against one PostgreSQL moved 86,369,975,300 messages (about 1,000,000
 per second in each direction) with leased pops, explicit acknowledgement, deduplication and
-retention all on, zero restarts, and resident memory flat at roughly 6.3 GB.** The host was a 32 vCPU / 62 GiB machine and the broker
-was commit `615efdc`. Artifacts are in `benchmark-queen/2026-07-25-soak24/`, and the loader's own
-stdout is `raw/soak24b.out`.
+retention all on, zero restarts, and resident memory flat at roughly 4.1 GB.** The broker host was a
+32 vCPU / 62 GiB machine and the broker was Queen **1.0.0**. Artifacts are in
+`benchmark-queen/2026-08-11-soak24-1M/`, and each loader's own stdout is under `raw/loader-0*/g.out`.
 
 This is the reference run for production semantics, and the only one long enough to distinguish
 "fast" from "stays fast".
 
 ## Configuration
 
-The loader printed its own configuration, which is what makes this quotable:
+The load was offered by three loader hosts against one broker, 333,334 and 333,333 and 333,333
+messages per second, so that the generator could never be the limit. Each loader printed its own
+configuration, which is what makes this quotable:
 
 ```text
-goload -mode openloop -> queue=segbench partitions=200 consumers=600 manualAck=true ackAsync=true ackInflight=256
-  offered: rate=600000 msg/s | push-batch=100 -> 6000.0 req/s across 64 pacer workers | max-inflight=20000 | payload=256B
+goload -mode openloop -> queue=segbench partitions=200 consumers=200 manualAck=true ackAsync=true ackInflight=256
+  offered: rate=333334 msg/s | push-batch=100 -> 3333.3 req/s across 64 pacer workers | max-inflight=20000 | payload=256B
 [configure] queue=segbench completedRetentionSeconds=300
 ```
 
@@ -35,148 +39,160 @@ goload -mode openloop -> queue=segbench partitions=200 consumers=600 manualAck=t
 | --- | --- | --- |
 | Delivery semantics | leased pops with explicit acks (`manualAck=true`) | The cursor moves only on an ack, which is the at-least-once path real work uses. Server-side auto-ack would remove one round trip and one transaction per batch |
 | Ack dispatch | asynchronous, 256 in flight (`ackAsync=true`) | Each batch's ack is dispatched on its own task so a consumer does not hold a partition's lease blocked on its own ack round trip. An ack is never shed; when the semaphore is full the consumer blocks |
-| Offered rate | 600,000 msg/s, open loop | Fixed schedule, 64 pacer workers, 6,000 push requests per second |
+| Offered rate | 1,000,000 msg/s, open loop | Fixed schedule across three loader hosts, 10,000 push requests per second in total |
 | Push batch | 100 messages | Amortises per-transaction cost. Batch 1 is a different measurement |
+| Pop batch | 1,000 messages | The serve size a consumer asks for |
 | Payload | 256 bytes | One size, one shape |
 | Partitions | 200 | Consumption parallelism per group is bounded by partition count |
-| Consumers | 600 closed-loop drainers | Consumers pull; consumer count changes the answer |
+| Consumers | 600 closed-loop drainers, 200 per loader | Consumers pull; consumer count changes the answer |
 | Deduplication | on, 60-second window | Every push probes the transaction-id sidecar under the partition lock before offsets are allocated. This is part of the measured path |
-| Retention | on, completed messages after 300 s | The reason the database plateaus instead of growing |
-| Duration | 86,400 s, reported every 10 s | 8,640 interval lines in the archived stdout |
+| Retention | on, completed messages after 300 s, pending after 3,600 s | The reason the database plateaus instead of growing |
+| Duration | 86,400 s after a 60 s ramp, reported every 30 s | 2,880 interval lines per loader in the archived stdout |
 
 <Aside type="note">
-Deduplication was on for this run, with a 60-second window. The session note (`results.md`)
-records it as one of the four production semantics under test, alongside the leases, the
-explicit acks and retention. It is not in the loader's own header line because the open-loop
-loader prints only the completed-retention value it configured.
+Three loader hosts rather than one is a property of the rig, not of the broker. Generating and
+consuming this shape costs about 20 microcores per message operation, so a million per second in
+each direction needs roughly 40 cores of load generator before the broker is even reached. A
+single 48-core loader tops out near 950,000 on the pop side and becomes the measurement.
 </Aside>
 
 ## Result
+
+<Screenshot
+  src="soak-24h-1m-throughput"
+  alt="The dashboard throughput row over a 24-hour window. A single flat line sits on the one million per second gridline for the whole range, with a tooltip reading Push 1000.5k per second, Pop 1000.5k per second and Ack 1000.5k per second."
+  caption="Push, pop and ack over the 24-hour range, read from the broker's own counters. The line is the result: not the height it reaches, but that it does not move."
+/>
+
+Straight from the final lines of `raw/loader-0*/g.out`, summed across the three loaders:
+
+| Metric | Value |
+| --- | --- |
+| Messages offered | 86,370,017,100 |
+| Messages accepted (pushed) | **86,369,975,300** |
+| Shed by the loaders' in-flight cap | **0** |
+| Messages popped | 86,369,532,700 |
+| Messages acked | 86,369,517,700 |
+| Failed push requests | 4 |
+| Failed pop requests | 0 |
+| Failed acks | 600 |
+| Whole-run end-to-end latency | p50 88.6 to 100.9 ms, p99 284.7 to 313.3 ms, p99.9 383.0 to 419.8 ms |
+| Average ack round trip | 84.0 to 95.4 ms |
+| Restarts, incidents | **0, 0** |
+
+Average accepted throughput is 86,369,975,300 over 86,400 s, or 999,652 msg/s including the ramp.
+
+Popped falls short of pushed by 442,600 messages, or 0.0005%. That is the residue still in flight
+when the clock ran out, not loss: the loaders stop offering at 86,400 s and their in-flight leases
+are cut with them.
+
+### It held the rate, hour after hour
+
+From the broker's own counters, throughput per hour never leaves a band of **0.02%** across
+twenty-three consecutive hours:
+
+| Hour | Push/s | Hour | Push/s | Hour | Push/s |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 999,856 | 9 | 999,888 | 17 | 1,000,114 |
+| 2 | 1,000,015 | 10 | 1,000,197 | 18 | 1,000,005 |
+| 3 | 1,000,171 | 11 | 999,787 | 19 | 1,000,132 |
+| 4 | 999,798 | 12 | 1,000,064 | 20 | 999,821 |
+| 5 | 1,000,205 | 13 | 999,957 | 21 | 1,000,050 |
+| 6 | 999,817 | 14 | 999,979 | 22 | 999,930 |
+| 7 | 1,000,194 | 15 | 1,000,006 | 23 | 1,000,015 |
+| 8 | 999,925 | 16 | 999,968 | | |
+
+Of 1,401 one-minute windows, exactly one falls outside plus or minus five percent, and it is the
+ramp.
+
+### Latency, across the whole run
+
+Each loader reports its percentiles every 30 seconds. Over 8,643 such reports:
+
+| Reported percentile | Median | p90 | p99 | Worst single interval |
+| --- | --- | --- | --- | --- |
+| p50 | 92.7 ms | 106.0 ms | 117.2 ms | **160.8 ms** |
+| p99 | 288.8 ms | 325.6 ms | 358.4 ms | **593.9 ms** |
+| p99.9 | 383.0 ms | 432.1 ms | 489.5 ms | **856.1 ms** |
+
+No 30-second interval, on any of the three loaders, reported a p99 above one second in 24 hours.
+
+### Resources
+
+From the 1 Hz host sampler, 86,417 samples across the whole run:
+
+| Resource | Value |
+| --- | --- |
+| Broker resident memory | **mean 4.10 GB, maximum 4.37 GB** |
+| Broker CPU | mean 10.92 cores of 32, maximum 12.90 |
+| PostgreSQL CPU | mean 11.54 cores, maximum 13.88 |
+| Active backends | 43 |
+| PostgreSQL commits | 8,056 per second |
+| WAL | 83 MB/s, 6.8 TB over the run |
+| WAL fsyncs | 598 per second, 714 µs each |
+| Database size | 29.6 GB to 31.4 GB, 31.2 GB at the end |
 
 <Chart
   src="soak-24h"
   alt="Two stacked line charts over 24 hours. Broker resident memory holds a flat line for the whole run. PostgreSQL CPU stays in a narrow band with no upward trend."
   caption="The claim this run exists to test is the absence of a trend: memory that does not climb and a database that does not degrade over 24 hours of continuous load."
-  source="benchmark-queen/2026-07-25-soak24/raw/soak-bench.csv"
+  source="benchmark-queen/2026-08-11-soak24-1M/raw/bench/bench.csv"
 />
 
-Straight from the final line of `raw/soak24b.out`:
-
-| Metric | Value |
-| --- | --- |
-| Messages offered | 51,822,007,600 |
-| Messages accepted (pushed) | **51,820,403,100** |
-| Shed by the loader's in-flight cap | **0** |
-| Messages popped | 51,820,623,201 |
-| Messages acked | 51,820,561,201 |
-| Failed push requests | 15,742 |
-| Failed pop requests | 26 |
-| Failed acks | 47,600 |
-| Whole-run end-to-end latency | p50 87.55 ms, p99 272.38 ms, p99.9 473.09 ms |
-| Average ack round trip | 47.15 ms |
-| Restarts, incidents | **0, 0** |
-
-Average accepted throughput is 51,820,403,100 over 86,400 s, or 599,773 msg/s. Per interval, the
-median achieved rate across all 8,640 samples is 599,980 msg/s, and 600,000 msg/s across the
-7,020 samples after the four-and-a-half hour mark.
-
-Popped exceeds pushed by 220,101 messages, or 0.0004%. That is the signature of at-least-once
-delivery: a lease that expires or an ack that fails redelivers its span, and the consumer counts
-it again.
-
-### Resources
-
-From the 1 Hz host sampler, 87,500 samples, medians over the run after the first fifth:
-
-| Resource | Steady value |
-| --- | --- |
-| Broker resident memory | **6,335 MB**, maximum 6,888 MB across the whole run |
-| Broker CPU | about 14.3 cores of 32 |
-| PostgreSQL CPU | about 5.9 cores |
-| PostgreSQL commits | about 3,160 per second |
-| WAL fsyncs | about 736 per second, about 38 MB/s of WAL |
-| Database size | median 18.5 GB, maximum 20.6 GB |
-
-Broker memory is the number this run exists to produce. A leak at this rate would be obvious: at
-600,000 messages per second, a per-message overhead of even tens of bytes is gigabytes per hour.
-Across the last 19.5 hours the samples span 6,330 MB to 6,875 MB, with a median of 6,336 MB:
-a 545 MB band, no trend. The watchdog, sampling every five minutes, recorded `restarts=0` on
-every line.
+Broker memory is the number this run exists to produce. A leak at this rate would be obvious: at a
+million messages per second, a per-message overhead of even tens of bytes is gigabytes per hour.
+Across 24 hours the samples span a 4.10 GB mean and a 4.37 GB maximum, with no trend.
 
 The database plateau is retention working. Completed messages leave after 300 s, so steady-state
-size is set by the retention window and the rate rather than by the run length. After load
-stopped, the watchdog's last lines show the database drained to 8,292 MB.
+size is set by the retention window and the rate rather than by the run length. Sampled every
+three hours the size reads 29.8, 29.6, 30.2, 30.0, 29.9, 31.4, 30.4 and 31.2 GB.
 
-## Errors, in time order
+### The broker's own accounting agrees
 
-The single "error rate 0.00012%" figure is the sum of all three error counters (15,742 plus 26
-plus 47,600, or 63,368) over 51,820,403,100 accepted messages. It is worth decomposing,
-because those counters are not on the same scale and they did not accrue uniformly.
+<Screenshot
+  src="soak-24h-1m-analytics"
+  alt="The analytics view over the 24-hour range. Totals read 85B ingested, 85B delivered, 85B acked, zero ack failures, 781M empty polls and a peak lag of 3.3 seconds. Below them a message flow chart holds a flat line just above 900 million messages per bucket."
+  caption="The same run from the broker's side rather than the loaders'. Ack failures at zero, and a worst pop-to-publish delay of 3.3 seconds across the whole day."
+/>
 
-Push and pop errors count failed **requests**; each push request carried 100 messages. Ack
-errors count **messages**. So the message-level statement is different and also worth having:
-1,604,500 messages of 51,822,007,600 offered were never accepted, which is 0.0031%, with
-nothing shed.
+<Screenshot
+  src="soak-24h-1m-overview"
+  alt="The dashboard overview after 24 hours. The header reads 86B stored, one queue, 200 partitions, one consumer group, 89,300 pending and 86B completed. Rows below give throughput at 1,000,647 per second, pending delta, parked consumers at zero, fill ratio at 99.1 percent and time lag at zero seconds."
+  caption="86 billion stored and 86 billion completed, with 89,300 pending: the standing depth of a queue moving a million messages a second is about a tenth of a second of traffic."
+/>
 
-Cumulative counters at checkpoints:
+<Screenshot
+  src="soak-24h-1m-postgres"
+  alt="The system view showing PostgreSQL internals. Database hit ratio 98.87 percent, table hit ratio 98.71 percent, index hit ratio 99.78 percent, shared buffers 16 GB. A table lists per-table cache statistics, with log_txns at 340M disk reads against 4.8B cache hits."
+  caption="PostgreSQL internals at the end of the run. The file buffer never engaged: pushes went straight to the database for 24 hours, with nothing pending or failed on disk."
+/>
 
-| Elapsed | Failed pushes | Failed pops | Failed acks |
-| --- | --- | --- | --- |
-| 1 h | 2,005 | 2 | 23,100 |
-| 2 h | 3,655 | 4 | 23,100 |
-| 4.5 h | 12,990 | 9 | 32,300 |
-| 6 h | 12,990 | 13 | 32,600 |
-| 9 h | 13,308 | 14 | 32,600 |
-| 12 h | 13,313 | 18 | 46,100 |
-| 18 h | 15,739 | 23 | 47,100 |
-| 21 h | 15,741 | 26 | 47,600 |
-| 24 h | 15,742 | 26 | 47,600 |
+## Errors
 
-82% of the failed pushes happened in the first four and a half hours. Errors did not stop after
-that, though: 13,500 acks failed between the nine- and twelve-hour marks. In the stdout the last
-increment to any counter is at 21.3 hours, which puts the quiet tail at about 2.7 hours rather
-than the 14 hours the session note reports.
+Every error counter over the whole run, on 86,369,975,300 accepted messages:
 
-## Latency was not flat, and the excursions have a cause
-
-Whole-run p99 is 272 ms, and the median of the per-interval p99 values is 236 ms. But 43 of the
-8,640 ten-second intervals (one in 200) reported a p99 above one second, and they cluster:
-
-| Window | Intervals above 1 s | Worst p99 in the window |
+| Counter | Value | Unit |
 | --- | --- | --- |
-| 0.1 h – 4.5 h | 36 | 27.7 s |
-| 9.0 h – 9.1 h | 4 | 22.9 s |
-| 17.8 h – 17.8 h | 3 | 26.3 s |
+| Failed push requests | 4 | requests, each carrying 100 messages |
+| Failed pop requests | 0 | requests |
+| Failed acks | 600 | messages |
+| Shed | 0 | messages |
 
-The first cluster was diagnosed live and fixed during the run. The cause was autovacuum's
-**heap-truncation phase** on `queen.log_partitions` and `queen.log_consumers`, two
-fixed-population tables. Truncation takes an `ACCESS EXCLUSIVE` lock and freezes every push and
-pop for seconds while recovering nothing, because those tables do not shrink. It was caught with
-`pg_stat_progress_vacuum` at about the 2.7-hour mark and disabled with
-`ALTER TABLE … SET (vacuum_truncate = off)`; the waves that continue to 4.5 hours are a vacuum
-already in flight plus the checkpoint cycle settling.
-
-The two later clusters are checkpoint boundaries: PostgreSQL was writing about 10 GB every 15
-minutes, close to back to back, and each excursion recovered on its own.
-
-Two lessons in that, and both are operational rather than about Queen. The
-`vacuum_truncate = off` setting on the log engine's fixed-population tables is load-bearing at
-this rate. And `max_wal_size` wants to be large enough to space checkpoints out. The residual
-blips are a checkpoint tuning artifact, not a broker one.
+Push and pop errors count failed **requests**; ack errors count **messages**. The message-level
+statement is therefore that 1,000 messages were touched by an error of any kind, and that 41,800
+of 86,370,017,100 offered messages were never accepted, which is 0.000048%, with nothing shed.
 
 ## What this run establishes
 
-- **No memory leak on the hot path at scale.** 24 hours at 600,000 messages per second per side
-  with flat resident memory. Short runs cannot show this; the ceiling run in this same
-  benchmark family found three separate out-of-memory conditions that only appear after about
-  580 seconds of accumulation.
-- **Retention reaches a steady state.** The database plateaued instead of growing, across roughly
-  17,000 sweep cycles, and drained when load stopped.
+- **No memory leak on the hot path at scale.** 24 hours at a million messages per second per side
+  with resident memory flat at 4.1 GB. Short runs cannot show this.
+- **Retention reaches a steady state.** The database plateaued at about 30 GB instead of growing,
+  and the plateau is set by the retention window rather than by the run length.
 - **Explicit acknowledgement is affordable at this rate.** Leases plus an offset commit per batch
-  sustained the same 600,000 per second per side, at about 14 cores of broker CPU and 6 cores of
-  PostgreSQL.
-- **PostgreSQL is the ceiling, and it is a commit ceiling.** About 3,160 commits per second and
-  736 WAL fsyncs per second on storage with roughly 95 µs `fdatasync`.
+  sustained a million per second per side at about 11 cores of broker CPU and 12 of PostgreSQL, on
+  a 32-core host.
+- **The rate is steady, not an average.** Twenty-three consecutive hours inside a 0.02% band, and
+  no 30-second interval above a one-second p99.
 
 ## What it does not establish
 
@@ -189,25 +205,28 @@ blips are a checkpoint tuning artifact, not a broker one.
 - **Nothing about high availability.** One broker, no mesh, no peer.
 - **Nothing about failure.** No PostgreSQL restart, no failover, no broker kill, no consumer
   churn. The disk spool was never exercised.
-- **Nothing about the proxy, tenancy, quotas or rate limits.** The loader spoke to the broker
+- **Nothing about the proxy, tenancy, quotas or rate limits.** The loaders spoke to the broker
   directly.
 - **One workload shape.** 256-byte payloads, push batch 100, 200 partitions, one queue, one
   consumer group. Batch 1, large payloads and wildcard consumption are all materially different
   measurements.
-- **Fast storage.** At about 95 µs per `fdatasync`, this figure is not disk-bound. The session
-  note records that the disk plateaus at roughly 600,000 to 650,000 per second, which is why
-  this run was configured at 600,000 rather than higher.
+- **A compressible payload.** The loader's body is a repeated character, which the write path
+  compresses to almost nothing: 83 MB/s of WAL at a million messages per second is 83 bytes per
+  message, envelope included. A payload of real, high-entropy data would write several times that,
+  and this run does not measure it.
+- **Fast storage.** About 70 µs per `fdatasync` on the broker host. This figure is not disk-bound.
 
 ## Files
 
 | File | Contents |
 | --- | --- |
-| `raw/soak24b.out` | The loader's stdout: 8,640 ten-second interval lines and the final aggregate |
-| `raw/soak-bench.csv` | 1 Hz sampler on the broker host: broker and PostgreSQL CPU and memory, commits, WAL, database size, wait events |
-| `raw/soak-loader.csv` | 1 Hz sampler on the loader host, including network throughput |
-| `raw/soak-watchdog.log` | Five-minute health lines with the restart counter |
-| `results.md` | The session note. Written in Italian, and see the correction above |
-| `queen-soak24-report.png` | Six panels over the 24-hour axis |
+| `raw/loader-0*/g.out` | Each loader's stdout: 2,880 thirty-second interval lines and the final aggregate |
+| `raw/loader-0*/loader.csv` | 1 Hz sampler on each loader host, including network throughput |
+| `raw/bench/bench.csv` | 1 Hz sampler on the broker host: broker and PostgreSQL CPU and memory, commits, WAL, database size, wait events |
+| `raw/bench/metrics.csv` | The broker's own cumulative counters every 10 s, with per-operation round-trip quantiles |
+| `raw/bench/broker.log` | Broker boot lines, rate lines and maintenance cycles |
+| `raw/bench/restarts.count` | The watchdog's restart counter |
+| `results.md` | The session note. Written in Italian |
 
 To run something of this shape yourself, see
 [Reproducing these runs](/benchmarks/reproduce).

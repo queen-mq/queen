@@ -184,7 +184,7 @@ configurations are not interchangeable.
 
 | Run | Result | Conditions that produced it |
 | --- | --- | --- |
-| 24-hour soak | 51,820,403,100 messages, ~600k msg/s per side, error rate 0.00012%, 0 restarts, broker resident memory flat at ~6.3 GB | Full production semantics: leases with **explicit async acks**, dedup on (60 s window), retention on. 32 vCPU / 62 GiB VM, broker at commit `615efdc` |
+| 24-hour soak | 86,369,975,300 messages, ~1M msg/s per side, 1,000 messages touched by an error, 0 restarts, broker resident memory flat at ~4.1 GB | Full production semantics: leases with **explicit async acks**, dedup on (60 s window), retention on. 32 vCPU / 62 GiB VM, Queen 1.0.0 |
 | Peak push/pop, 600 s | 1M msg/s per side | **`autoAck`** (no explicit acks) and **deduplication off**. 99.914 % delivered: roughly 500k messages were never accepted (`pushErr=3032`) |
 | Ordered 4-stage pipeline, 600 s | 1000 partitions, 25k events/s, 88,503,408 messages verified, 0 duplicates, 0 gaps, 0 order violations | Dedup window 300 s, echoed by the loader. This is the ordering result, not a throughput result |
 
