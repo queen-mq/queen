@@ -18,7 +18,7 @@ thousand log files or ten thousand processes, and a consumer stuck on one lane n
 blocks another.
 
 The point of that design is **range**. The same broker holds a workload of thousands of
-lanes each seeing a message every second or two, and a workload of 600 000 messages a
+lanes each seeing a message every second or two, and a workload of 1 000 000 messages a
 second, without changing its architecture and without you choosing which of the two you
 were building for. Systems that specialise in one end tend to fall off the other: measured
 side by side, the closest PostgreSQL-based alternative is faster than Queen on sparse lanes

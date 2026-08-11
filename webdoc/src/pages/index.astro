@@ -89,9 +89,9 @@ const differentiators: { title: string; body: string; href?: string }[] = [
 
 const proof = [
   {
-    figure: "51.8B",
+    figure: "86.4B",
     unit: "messages",
-    body: "24 hours of continuous load at ~600k msg/s per side with explicit acknowledgement, 0.00012% errors, zero restarts, broker memory flat.",
+    body: "24 hours of continuous load at ~1M msg/s per side with explicit acknowledgement, 1,000 messages touched by an error, zero restarts, broker memory flat.",
     href: "/benchmarks/soak-24h",
   },
   {
@@ -135,8 +135,8 @@ const notFor = [
         <p class="mt-6 max-w-2xl text-lg text-muted-foreground leading-relaxed">
           Every entity gets its own FIFO lane, created on first push, so a slow consumer on one
           never stalls another. One broker held <strong>400,000 ordered partitions</strong>, and
-          sustains <strong>600,000 messages a second</strong> with leases, explicit acks,
-          deduplication and retention all on: <strong>50+ billion messages across 24 hours</strong>.
+          sustains <strong>1,000,000 messages a second</strong> with leases, explicit acks,
+          deduplication and retention all on: <strong>86 billion messages across 24 hours</strong>.
           Consumer groups, replay and a dead-letter queue at both ends. Windowed aggregation that
           commits its state, its output and its acks in one transaction. One stateless binary next
           to the Postgres you already run, with the operations dashboard compiled into it: queue

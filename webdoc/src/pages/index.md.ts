@@ -56,8 +56,8 @@ const HOME_EYEBROW = "Queen MQ 1.0 · Apache 2.0";
 const HOME_LEAD =
   "Every entity gets its own FIFO lane, created on first push, so a slow consumer on one " +
   "never stalls another. One broker held **400,000 ordered partitions**, and sustains " +
-  "**600,000 messages a second** with leases, explicit acks, deduplication and retention " +
-  "all on: **50+ billion messages across 24 hours**. Consumer groups, replay and a " +
+  "**1,000,000 messages a second** with leases, explicit acks, deduplication and retention " +
+  "all on: **86 billion messages across 24 hours**. Consumer groups, replay and a " +
   "dead-letter queue at both ends. Windowed aggregation that commits its state, its output " +
   "and its acks in one transaction. One stateless binary next to the Postgres you already " +
   "run, with the operations dashboard compiled into it: queue health, per-group lag and " +
@@ -105,9 +105,9 @@ const differentiators = [
 
 const proof = [
   {
-    figure: "51.8B",
+    figure: "86.4B",
     unit: "messages",
-    body: "24 hours of continuous load at ~600k msg/s per side with explicit acknowledgement, 0.00012% errors, zero restarts, broker memory flat.",
+    body: "24 hours of continuous load at ~1M msg/s per side with explicit acknowledgement, 1,000 messages touched by an error, zero restarts, broker memory flat.",
     href: "/benchmarks/soak-24h",
   },
   {
