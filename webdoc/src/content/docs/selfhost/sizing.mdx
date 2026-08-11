@@ -108,6 +108,38 @@ leased batch exists per (partition, consumer group), so a single-partition queue
 cannot be consumed in parallel by one group. Choose the count for the parallelism
 you need, and then know what it costs to keep.
 
+### What a million partitions actually costs
+
+A dedicated run took the partition count to 1,000,000 on one broker and one
+PostgreSQL, creating them during the run at a thousand a second. What it measured:
+
+| | |
+| --- | --- |
+| `log_partitions`, 1,000,000 rows | 315 MB |
+| `log_consumers`, 1,000,000 cursors | 326 MB |
+| Retention sweep, `RETENTION_PARALLELISM=4` | 108 s, then 149, 204, 296, **402 s and still climbing** |
+| Retention sweep, `RETENTION_PARALLELISM=16` | settles near **195 s**, deleting 4,002 rows/s against the 4,000 the rate creates |
+| Broker resident memory | **about 5 KB per partition**, 5.03 GB for a million |
+| Deduplication cache, 60 s window | **does not converge**: it grew 235 MB per minute after the space was complete, which is one hash per message retained rather than one per in-window message |
+
+Two operational conclusions, both of which cost a failed run to learn:
+
+- **Raise `RETENTION_PARALLELISM` with cardinality.** At a million partitions the
+  default of 4 produces a sweep that grows monotonically and never catches up. A
+  sweep duration that climbs from one cycle to the next is the signal.
+- **Deduplication does not reach a steady state at this cardinality, at any cache
+  size.** Its reclamation is block-granular and a block seals only when it fills, so
+  at a fifth of a message per second per partition no block ever seals. The cache
+  grew past 6 GB and then past 16 GB against a documented requirement of 192 MB for
+  this rate and window. At 6 GB the run collapsed after twenty minutes, from 200,000
+  messages per second to 2,673 with a p50 of 19 seconds; correctness held throughout,
+  because a suppressed partition falls back to an authoritative SQL probe, but the
+  cost moves onto PostgreSQL until the pool saturates. Until this is fixed, a
+  partition space this wide wants deduplication off.
+
+The whole run, including the collapse, is on
+[A million ordered partitions](/benchmarks/cardinality-1m).
+
 ## Connections and consumers
 
 Each instance opens up to `DB_POOL_SIZE` connections, default **160**. Multiply by
@@ -127,6 +159,21 @@ Both report their occupancy in the `sizes` log block, and neither affects
 correctness: the deduplication probe in SQL is authoritative, and an ack-registry
 miss falls back to the SQL path.
 
+**Size the deduplication cache from the rate and the window**, because the default
+is a starting point rather than an answer:
+
+```text
+needed_mb ≈ 16 × msg_rate(msg/s) × dedup_window_seconds / 1e6
+```
+
+Underneath that figure the cache stops holding the working set, partitions that do
+not fit enter a suppressed state, and every push to one of them pays a full-window
+SQL probe instead of a broker lookup. **Correctness is unaffected**, because the SQL
+probe is the authority. Throughput is very much affected: the cost moves onto
+PostgreSQL, and it does not degrade gently. Watch `dedup_suppressed` in the `sizes`
+block. A nonzero value that keeps growing means the cache is undersized for the
+shape you are running, and the answer is the formula, not patience.
+
 ## What the published runs mean
 
 These are the only performance figures in this documentation, and each one is
@@ -136,6 +183,7 @@ without its row.
 | Result | Conditions it was measured under |
 | --- | --- |
 | 24-hour soak: 86,369,975,300 messages, roughly 1M msg/s per side, 1,000 messages touched by an error, zero restarts, broker RSS flat at about 4.1 GB | **explicit acks** (`manualAck=true`, `ackAsync=true`), a 32 vCPU / 62 GiB VM, Queen 1.0.0 |
+| 1,000,000 ordered partitions on one broker, created during the run at 1,000/s, serving 200k msg/s with 0 push, pop or ack errors; p50 27.5 ms and p99 115 ms once the space was up | **explicit acks**, retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space. One hour, of which 43 minutes on the completed space. With deduplication on the cache does not reach a steady state at this cardinality, which is why it is off here and documented on the page |
 | 1M msg/s per side, sustained for 600 s | **`autoAck`** (`manualAck=false`) and **deduplication off**; 99.914 % delivered: about 500,000 messages were never accepted (`pushErr=3032`) |
 | A 4-stage pipeline over 1000 partitions at 25k events/s for 600 s: 88,503,408 messages verified, 0 duplicates, 0 gaps, 0 order violations | `dedupWindow=300s`, echoed by the loader. This is the ordering result, not a throughput result |
 | A 2-core cell holding more than 2400 msg/s through the proxy, 12 tenants for 1 hour, 0 cross-tenant deliveries | **deduplication off** (`dedupWindowSeconds: 0`) and **429 retry disabled** (`retry429Attempts: 1`); the raw sampler also recorded 818 HTTP 502 and 4,392 connection-refused errors against the proxy, and the roughly 1 % gap between pushes and deliveries is redelivery volume |
@@ -146,6 +194,11 @@ What they legitimately imply:
   assume it is, and the broker's memory is stable over a day at high rate.
 - Total order per partition survives at scale: the pipeline run verified 88.5
   million messages with zero ordering violations at a thousand partitions.
+- Cardinality is not a structural ceiling: a million lanes cost 641 MB of rows and
+  about 5 KB of broker memory each. It is not purely a sizing problem either. The
+  retention parallelism has to be raised to match the count, and deduplication does
+  not reach a steady state at this cardinality at any cache size, which is why the
+  cardinality run has it off.
 - Throughput is a function of what you switch on. The highest number in the table
   is also the one with deduplication off and at-most-once delivery, and it dropped
   half a million messages. The lowest is a two-core shared cell with a rate

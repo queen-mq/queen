@@ -3,7 +3,7 @@ title: Throughput ceiling
 description: "One million messages per second per side for 600 seconds, with server-side auto-ack, deduplication off, and 500,600 offered messages never accepted. A ceiling, not a production expectation."
 type: reference
 sidebar:
-  order: 3
+  order: 4
 sourceOfTruth:
   - benchmark-queen/2026-07-23-3test-report/results.md
   - benchmark-queen/2026-07-23-3test-report/raw/t1.out
@@ -110,10 +110,17 @@ single-attempt setting rather than of the broker.
 **Nothing was verified per message.** The loader counted offered, accepted and popped. It did not
 number the messages and check the set on arrival.
 
-For what the same broker does under production semantics, read
-[the 24-hour soak](/benchmarks/soak-24h): explicit acknowledgement, 600,000 per second per side,
-for 24 hours. The gap between 600,000 and 1,000,000 is roughly what leases plus an offset commit
-per batch cost on this hardware.
+**This page has been overtaken, and that is the most useful thing on it.** It was published as a
+ceiling: the cheapest per-message path, on a July build, holding a million per second for 600
+seconds. The [24-hour soak](/benchmarks/soak-24h) now reaches the same million per second per
+side on the shipping 1.0.0 build with leased pops, explicit acknowledgement, deduplication and
+retention all on, and holds it for 24 hours rather than 10 minutes. More work per message, 144
+times the duration, same rate.
+
+So the honest reading of this run today is historical: it records what the cheap path cost in
+July, and the gap it was measuring has since closed. The page stays because the site does not
+delete measurements it has published, and because the accumulation failures documented below are
+still the clearest account of what breaks at this rate.
 
 ## What the ceiling run found that shorter runs missed
 

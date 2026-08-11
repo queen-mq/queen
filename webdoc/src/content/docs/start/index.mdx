@@ -17,13 +17,30 @@ drains independently. Ten thousand partitions cost ten thousand index rows, not 
 thousand log files or ten thousand processes, and a consumer stuck on one lane never
 blocks another.
 
-The point of that design is **range**. The same broker holds a workload of thousands of
-lanes each seeing a message every second or two, and a workload of 1 000 000 messages a
-second, without changing its architecture and without you choosing which of the two you
-were building for. Systems that specialise in one end tend to fall off the other: measured
-side by side, the closest PostgreSQL-based alternative is faster than Queen on sparse lanes
-and stops serving the offered rate at roughly a twentieth of Queen's sustained throughput.
-[See the numbers, with their conditions](/benchmarks/comparison).
+The point of that design is **range**, and range is a claim that only measurement settles.
+So it was measured at both ends, on the same binary, with leases, explicit acknowledgement,
+deduplication and retention on in both:
+
+- **1 000 000 messages a second**, sustained for 24 hours. 86,369,975,300 messages, zero
+  restarts, broker memory flat at 4.1 GB. [The soak](/benchmarks/soak-24h).
+- **1 000 000 ordered partitions** in one PostgreSQL, none of them preallocated, created
+  during the run at a thousand a second and drained with zero push, pop or ack errors. The
+  million lanes and their consumer-group cursors weigh 641 MB of rows.
+  [The cardinality run](/benchmarks/cardinality-1m).
+
+Nothing about the architecture changes between those two. What changes is the value of two
+sizing knobs, and the cardinality page names both.
+
+That range is the whole bet, because most systems are built for one end of it. A design that
+gives each entity a physical object (a log with its own files, a queue with its own process)
+pays for cardinality in structure, and a design that re-derives ordering from a scan on every
+read pays for throughput in standing rows. Queen was measured against three of them on one
+machine with matched resources, and the honest summary of that campaign is that **the cost
+curves cross**: the closest PostgreSQL-based alternative is faster than Queen on sparse lanes
+and stops serving the offered rate at roughly a twentieth of Queen's sustained throughput,
+while Kafka is cheaper per message than anything on PostgreSQL and refuses topic creation
+somewhere between 2 000 and 5 000 partitions on default settings.
+[Every cell, with its conditions and its caveats](/benchmarks/comparison).
 
 Everything else follows from that choice. The broker is one stateless Rust binary that
 holds no cluster membership and no partition assignments, so you scale it by starting

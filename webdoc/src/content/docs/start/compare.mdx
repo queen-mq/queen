@@ -218,12 +218,21 @@ dispersion is unknown.
 percentiles, because its group is a value in a header rather than an object. Kafka
 refuses topic creation somewhere between 2 000 and 5 000 partitions per topic on
 default settings, and its p95 has already reached 23 727 ms at 8 000 partitions.
-Queen at 80 000 ordered lanes runs a p95 of 2 494 ms.
+Queen at 80 000 ordered lanes runs a p95 of 2 494 ms on this pipeline, and on a
+dedicated run it has held **1 000 000 ordered partitions**, created during the run at
+a thousand a second, at p50 27.5 ms and p99 115 ms once the space was up.
+[The cardinality run](/benchmarks/cardinality-1m).
 
-**Sustained throughput.** Queen holds 600 000 msg/s for three hours with leases,
-explicit acks, deduplication and retention all active: 6.82 billion messages, zero
-errors. pgmq's ordered-consume path tops out between 20 000 and 40 000 msg/s on the
-same machine, with deduplication and retention absent because it has neither.
+**Sustained throughput.** Queen holds **1 000 000 msg/s per side for 24 hours** with
+leases, explicit acks, deduplication and retention all active: 86 369 975 300
+messages, zero restarts. pgmq's ordered-consume path tops out between 20 000 and
+40 000 msg/s on the same machine, with deduplication and retention absent because it
+has neither.
+
+Those last two paragraphs are the argument this whole page exists to make, and they
+are about the same binary. A million ordered lanes, and a million messages a second.
+The systems above each own one end of that and pay for it at the other, which is not
+a criticism of any of them: it is what their designs are for.
 
 ## What comes with each bet
 
@@ -272,12 +281,19 @@ which is a second runtime with its own state backend. The full surface is in
 ## Choosing something else
 
 Each of these systems is the right answer to a question of its own, and at any
-single point on the map a specialist may well beat Queen. What none of them
-does is span the map: pgmq owns sparse and wide and stops at roughly a twentieth
-of Queen's sustained rate; Kafka owns throughput and cost per message and cannot
-express the cardinality; RabbitMQ needs a live object per lane. Queen's claim is
-not that it wins a point. It is that you do not have to know which point you are
-on before you choose, and you do not have to migrate when the workload moves.
+single point on the map a specialist may well beat Queen. pgmq owns sparse and wide
+and stops at roughly a twentieth of Queen's sustained rate; Kafka owns throughput and
+cost per message and cannot express the cardinality; RabbitMQ needs a live object per
+lane. What the measured runs support is not that Queen wins a point, but that it
+covers the span: **a million ordered partitions** at one end,
+**a million messages a second for 24 hours** at the other, same binary, same
+semantics, two sizing knobs between them.
+
+That is worth something specific. It means you do not have to know which point you
+are on before you choose, and you do not have to migrate when the workload moves,
+which in practice it does: the queue that was ten thousand chat sessions at a trickle
+becomes a million of them, or the pipeline that was wide and idle turns into a
+firehose after one product launch.
 
 | Choose | When |
 | --- | --- |

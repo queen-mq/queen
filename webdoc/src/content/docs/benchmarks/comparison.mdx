@@ -3,7 +3,7 @@ title: Cross-broker comparison
 description: "Queen, Kafka, RabbitMQ and pgmq on one machine with matched resources: the same workload at four shapes, with CPU, memory, disk and the conditions that make each row true."
 type: reference
 sidebar:
-  order: 6
+  order: 7
 sourceOfTruth:
   - benchmark-queen/crossbench/results/2026-08-04-scale-campaign/FULL-TABLE.md
   - benchmark-queen/crossbench/results/2026-08-04-scale-campaign/NIGHT-REPORT.md
@@ -144,6 +144,15 @@ ordered lanes takes p50 from 110 to 101 (fewer properties contend for one lane, 
 head-of-line blocking) while p95 goes 1 923 to 2 494 and p99 7 054 to 15 385 (the ring lap
 grows with lane count). Both effects are real and they pull in opposite directions.
 
+<Aside type="note">
+The tail figures above are this pipeline's, and this pipeline puts 10 to 30 ms of simulated work
+on every message across twelve stages. A later run measured the cardinality axis on its own, with
+no synthetic work in the consumers, and reached **1 000 000 ordered partitions** at p99 115 ms.
+The two are not in conflict and neither supersedes the other: they are the same lane count
+question asked of two different workloads, and the topology, not the lane count, is what produces
+the seconds. See [A million ordered partitions](/benchmarks/cardinality-1m).
+</Aside>
+
 **RabbitMQ at 12 000 queues does not keep up on this shape**, serving 57% of the offered
 rate. This is the shape it is not built for, and no tuning we applied changed that: ordering
 per key means a queue per key, and the queue is a live server-side object.
@@ -199,11 +208,12 @@ pop/s, 1.90 million gave 2 358, 3.06 million gave 1 250. Service rate falls roug
 inverse of queue depth, which is what "one full table scan per read" predicts.
 
 **Queen's comparable figure** is this campaign's own three-hour soak, recorded in
-`NIGHT-REPORT.md`: 600 000 msg/s sustained with leases, explicit asynchronous acks, a 60-second
-deduplication window and retention active, 6.82 billion messages, zero push, pop or ack errors,
-flat lag, p50 120 ms. That is 15 to 30 times pgmq's ordered-consume ceiling, and Queen is doing
-more work per message: pgmq has neither deduplication nor retention as concepts. The 24-hour run
-at the same semantics is [the soak](/benchmarks/soak-24h).
+`NIGHT-REPORT.md`, because it ran on this machine: 600 000 msg/s sustained with leases, explicit
+asynchronous acks, a 60-second deduplication window and retention active, 6.82 billion messages,
+zero push, pop or ack errors, flat lag, p50 120 ms. That is 15 to 30 times pgmq's ordered-consume
+ceiling, and Queen is doing more work per message: pgmq has neither deduplication nor retention as
+concepts. On the dedicated bench rig, at the same semantics, the figure is
+[1 000 000 msg/s per side for 24 hours](/benchmarks/soak-24h).
 
 ## What each shape is telling you
 
@@ -215,8 +225,10 @@ holds:
   whole table. With few groups it has no depth; with a full table it has no speed. At one
   group per queue it served **6%** of a 12 000 deliveries/s target.
 - **Queen** pays per partition and gains per message in a partition. Its latency is a lap of
-  the ready ring, and each visit yields rate divided by partitions. Sparse and wide is its
-  worst case; dense is its best.
+  the ready ring, and each visit yields rate divided by partitions. Dense is its best case, and
+  sparse and wide is the one it has to be sized for rather than the one it fails at: the
+  dedicated cardinality run holds a million lanes at p50 27.5 ms and p99 115 ms, and what it
+  costs is a retention parallelism scaled to the count and deduplication switched off.
 - **Kafka** pays per physical partition, in files, memory and tail latency, and buys a much
   lower CPU cost per message than anything on PostgreSQL.
 - **RabbitMQ** pays per queue object, and per-key ordering means a queue per key.

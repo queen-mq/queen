@@ -55,13 +55,15 @@ const HOME_EYEBROW = "Queen MQ 1.0 · Apache 2.0";
  */
 const HOME_LEAD =
   "Every entity gets its own FIFO lane, created on first push, so a slow consumer on one " +
-  "never stalls another. One broker held **400,000 ordered partitions**, and sustains " +
-  "**1,000,000 messages a second** with leases, explicit acks, deduplication and retention " +
-  "all on: **86 billion messages across 24 hours**. Consumer groups, replay and a " +
-  "dead-letter queue at both ends. Windowed aggregation that commits its state, its output " +
-  "and its acks in one transaction. One stateless binary next to the Postgres you already " +
-  "run, with the operations dashboard compiled into it: queue health, per-group lag and " +
-  "message inspection, with nothing extra to deploy. No cluster, no rebalancing, no JVM.";
+  "never stalls another. That design has two ends, and one broker holds both: " +
+  "**1,000,000 messages a second** sustained for 24 hours, and **1,000,000 ordered " +
+  "partitions** created during a run at a thousand a second and drained with zero errors. " +
+  "Leases, explicit acks, deduplication and retention are on in both. Consumer groups, " +
+  "replay and a dead-letter queue at both ends. Windowed aggregation that commits its " +
+  "state, its output and its acks in one transaction. One stateless binary next to the " +
+  "Postgres you already run, with the operations dashboard compiled into it: queue health, " +
+  "per-group lag and message inspection, with nothing extra to deploy. No cluster, no " +
+  "rebalancing, no JVM.";
 
 /**
  * The alt text of the architecture diagram. It is written for a reader who
@@ -75,7 +77,7 @@ const HOME_DIAGRAM =
 const differentiators = [
   {
     title: "One ordered lane per entity",
-    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. Ten thousand ordered lanes is a normal number here, and a consumer stuck on one never blocks another.",
+    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. One broker has held a million of them, and a consumer stuck on one never blocks another.",
   },
   {
     title: "No rebalancing, because there is nothing to rebalance",
@@ -87,7 +89,7 @@ const differentiators = [
   },
   {
     title: "Acknowledgement is an offset commit",
-    body: "Consumption state is one cursor per partition and consumer group. There is no per-message delivery record to store, scan or clean up, which is why ten thousand partitions stay cheap.",
+    body: "Consumption state is one cursor per partition and consumer group. There is no per-message delivery record to store, scan or clean up, which is why a million partitions and their cursors weigh 641 MB.",
   },
   {
     title: "Windowed aggregation, in the same transaction",
@@ -118,9 +120,9 @@ const proof = [
   },
   {
     figure: "1M",
-    unit: "msg/s per side",
-    body: "The ceiling, measured with auto-ack and deduplication off, 99.914% of what was offered. A lab number, published with its conditions.",
-    href: "/benchmarks/peak",
+    unit: "ordered partitions",
+    body: "A million FIFO lanes in one PostgreSQL, none preallocated, created during the run at a thousand a second and drained with zero push, pop or ack errors.",
+    href: "/benchmarks/cardinality-1m",
   },
 ];
 

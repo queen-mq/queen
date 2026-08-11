@@ -3,7 +3,7 @@ title: Reproducing these runs
 description: "The loader, its six modes and the flags that matter, how to build a capped cell rig, and the handful of knobs that move the result more than anything else."
 type: how-to
 sidebar:
-  order: 6
+  order: 8
 sourceOfTruth:
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
   - benchmark-queen/2026-07-29-vm-campaign/goload/cloud.go
@@ -73,7 +73,7 @@ These are the ones that change *what* is being measured rather than how hard:
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-manual-ack` (openloop) / `-auto-ack` (cloud) | leased pop with explicit ack in `cloud`; `openloop` defaults to server-side auto-ack | Server-side auto-ack removes a round trip and a transaction per batch and is at-most-once. This single flag is most of the difference between the 600,000 and 1,000,000 per second figures on this site |
+| `-manual-ack` (openloop) / `-auto-ack` (cloud) | leased pop with explicit ack in `cloud`; `openloop` defaults to server-side auto-ack | Server-side auto-ack removes a round trip and a transaction per batch and is at-most-once. It used to be most of the gap between this site's throughput figures; on the 1.0.0 build the 24-hour soak reaches a million per second per side *with* explicit acks, so the flag now costs latency and headroom rather than rate |
 | `-ack-async` | off | Dispatch each batch's ack on its own task so a consumer does not hold a lease blocked on its own ack. Never sheds an ack: it blocks when `-ack-inflight` is full |
 | `-dedup-window` | 0, meaning **off**, in `openloop` and `cloud`; 300 in `cm` | Turns on the exact per-partition duplicate probe under the partition row lock. Not free, and the reason "deduplication off" is part of two headlines here |
 | `-push-batch` | 10 (openloop), 1 (cloud) | Amortises per-transaction cost. Batch 1 is the honest small-message shape and a much lower ceiling |
@@ -111,19 +111,33 @@ a ~2 s p99 into 358 ms. Before believing any ceiling, check the loader's own idl
 
 2. Start the broker against it, and let it apply its own schema.
 
-3. Run the loader from the other machine, in the 24-hour soak's shape: explicit asynchronous
-   acks, push batch 100, 200 partitions, 600 consumers.
+3. Run the loader in the 24-hour soak's shape: explicit asynchronous acks, push batch 100, 200
+   partitions, 600 consumers. **From three loader hosts, not one**, at 333,334 and 333,333 and
+   333,333 messages per second, 200 consumers each. A single machine cannot offer this rate
+   without becoming the measurement, which is why the soak's rig has three.
 
    ```bash
-   ./goload -mode openloop -url http://BROKER:6632 -rate 600000 -push-batch 100 -partitions 200 -consumers 600 -pop-batch 500 -manual-ack -ack-async -ack-inflight 256 -max-inflight 20000 -idle-conns 8192 -payload 256 -duration 86400 -report 10
+   ./goload -mode openloop -url http://BROKER:6632 -rate 333334 -push-batch 100 -partitions 200 -consumers 200 -pop-batch 1000 -manual-ack -ack-async -ack-inflight 256 -max-inflight 20000 -idle-conns 8192 -payload 256 -duration 86400 -report 30
    ```
 
-   The soak's archived header records the rate, push batch, partition and consumer counts, both
-   ack settings, `-max-inflight` and the payload size. `-pop-batch 500` comes from that session's
-   note, and `-idle-conns 8192` is the value the sessions settled on rather than one recorded for
-   that run. See the knobs list below for why it matters.
+   Each loader's archived header records its rate, push batch, partition and consumer counts,
+   both ack settings, `-max-inflight` and the payload size. `-idle-conns 8192` is the value the
+   sessions settled on rather than one recorded for that run. See the knobs list below for why it
+   matters.
 
-4. Sample both hosts at 1 Hz alongside the run. The archived sessions used small shell samplers
+4. For the cardinality shape instead, the same loader takes a partition space far larger than
+   its active set, and creates it as it goes:
+
+   ```bash
+   ./goload -mode openloop -url http://BROKER:6632 -rate 200000 -push-batch 100 -partitions 1000000 -consumers 300 -manual-ack -ack-async -ack-inflight 256 -max-inflight 20000 -payload 256 -report 30
+   ```
+
+   That run needs two broker settings raised with it, and gets them wrong loudly if they are
+   not: `QUEEN_DEDUP_CACHE_MB` sized from the formula on
+   [Capacity and sizing](/selfhost/sizing), and `RETENTION_PARALLELISM` at 16. See
+   [A million ordered partitions](/benchmarks/cardinality-1m).
+
+5. Sample both hosts at 1 Hz alongside the run. The archived sessions used small shell samplers
    writing CSV: broker and PostgreSQL CPU and memory, `pg_stat_database` commit deltas, WAL
    records and fsyncs, database size, active backends and the top wait event on the broker side;
    loader CPU, memory and network on the other.
@@ -224,9 +238,10 @@ bill its CPU to Postgres, which quietly inflates the thing being measured.
 
 Roughly in order of effect, from the archived sessions:
 
-1. **Delivery semantics.** Server-side auto-ack versus leased pop with an explicit ack. On the
-   single-node rig this is the difference between 1,000,000 and 600,000 messages per second per
-   side.
+1. **Delivery semantics.** Server-side auto-ack versus leased pop with an explicit ack. This was
+   the largest single lever on the July build, worth about 400,000 messages per second per side.
+   On 1.0.0 both paths reach a million per second per side on the single-node rig, so what the
+   flag now buys is headroom and latency rather than peak rate.
 2. **Push batch size.** The per-transaction cost is amortised across the batch. Batch 100 and
    batch 1 are different measurements of different systems, and every headline here names which.
 3. **Idle connections.** `-idle-conns` at or above the concurrent worker count was worth about

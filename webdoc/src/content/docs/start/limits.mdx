@@ -252,13 +252,15 @@ states what that means.
 
 The last row is the one to read closely, because the cost curves cross there.
 Measured side by side on one machine, pgmq is faster than Queen on sparse lanes
-and flat in cardinality where Queen's tail grows. What it does not do is hold the
-rate: its ordered-consume path tops out between 20 000 and 40 000 messages per
-second and collapses above that, against 600 000 sustained for Queen, and it has
-no consumer groups, no replay, no deduplication and no dead-letter queue. Choose
-by which of those two limits your workload runs into, not by the headline. The
-full tables are in
-[Cross-broker comparison](/benchmarks/comparison).
+and flat in cardinality where Queen's tail grows on that pipeline. What it does not
+do is hold the rate: its ordered-consume path tops out between 20 000 and 40 000
+messages per second and collapses above that, against 1 000 000 per side sustained
+for 24 hours by Queen, and it has no consumer groups, no replay, no deduplication
+and no dead-letter queue. Choose by which of those two limits your workload runs
+into, not by the headline. The full tables are in
+[Cross-broker comparison](/benchmarks/comparison), and Queen's own cardinality
+ceiling, a million ordered partitions, is on
+[A million ordered partitions](/benchmarks/cardinality-1m).
 
 If none of those is disqualifying, the design reasoning behind the trade-offs is
 in [Why Queen exists](/start/why), the architectural comparison is in
