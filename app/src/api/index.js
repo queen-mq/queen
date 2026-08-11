@@ -98,8 +98,13 @@ export const consumers = {
     }),
   seek: (name, queue, options, config) =>
     client.post(`/api/v1/consumer-groups/${encodeURIComponent(name)}/queues/${encodeURIComponent(queue)}/seek`, options, config),
+  // `{toEnd:true}` EXPLICIT, never a null body. The broker's per-partition handler
+  // defaults an *empty* body to toEnd, but this client sets a default
+  // `Content-Type: application/json`, so axios' transformRequest stringifies a null
+  // payload into the 4 literal bytes `null` — non-empty, and not a struct, so
+  // parse_seek answers 400 {"error":"bad body"} and the button never worked.
   seekPartition: (name, queue, partition, config) =>
-    client.post(`/api/v1/consumer-groups/${encodeURIComponent(name)}/queues/${encodeURIComponent(queue)}/partitions/${encodeURIComponent(partition)}/seek`, null, config),
+    client.post(`/api/v1/consumer-groups/${encodeURIComponent(name)}/queues/${encodeURIComponent(queue)}/partitions/${encodeURIComponent(partition)}/seek`, { toEnd: true }, config),
 }
 
 // ============================================
