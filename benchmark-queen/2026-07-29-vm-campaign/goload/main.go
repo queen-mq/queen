@@ -454,6 +454,53 @@ func olPercentile(counts []int64, p float64) float64 {
 	return olBucketMid(len(counts)-1) / 1000.0
 }
 
+// scatterMultiplier picks the multiplier that spreads a small active window
+// across a large partition space.
+//
+// It has to be coprime with the space, or the mapping stops being a bijection
+// and the run silently writes to a subset. It also has to be far from a small
+// residue: a hardcoded 1_000_003 against a space of 1_000_000 is 3 modulo the
+// space, so consecutive slots would land three apart and the window would stay
+// contiguous in all but name. Fibonacci hashing gives both: space/phi, nudged
+// odd and then up until it is coprime.
+func scatterMultiplier(space uint64) uint64 {
+	a := uint64(float64(space) * 0.6180339887498949)
+	if a%2 == 0 {
+		a++
+	}
+	for gcd(a, space) != 1 {
+		a += 2
+	}
+	return a
+}
+
+func gcd(a, b uint64) uint64 {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+// partitionIndex places request n of second sec inside the active window.
+//
+//	mult == 0  rotate: the window is contiguous and advances one window per
+//	           second, so the count of partitions ever written grows by active
+//	           per second until the space is covered. Best case for B-tree
+//	           locality.
+//	mult != 0  scatter: the same window, permuted across the whole space by a
+//	           coprime multiplier. Worst case: consecutive writes land in
+//	           unrelated pages. Still a bijection, so coverage is unchanged.
+//
+// Pure and package level so both properties can be tested: exactly `active`
+// distinct partitions per second, and full coverage after space/active seconds.
+func partitionIndex(mult, sec, n, active, space uint64) uint64 {
+	slot := (sec*active + n%active) % space
+	if mult != 0 {
+		return (slot * mult) % space
+	}
+	return slot
+}
+
 func runOpenLoopMode(args []string) {
 	fs := flag.NewFlagSet("goload-openloop", flag.ExitOnError)
 	url := fs.String("url", "http://127.0.0.1:6632", "broker base URL")
@@ -484,6 +531,8 @@ func runOpenLoopMode(args []string) {
 	authToken := fs.String("token", "", "Bearer token (tenant API key). Set it to aim the run at queen_proxy instead of the broker; empty = straight to the broker, the historical shape")
 	hostHeader := fs.String("host-header", "", "Host header the proxy routes on (cluster slug). Only meaningful together with -token")
 	minPopWait := fs.Int("min-pop-wait", 0, "minPopWaitTime ms set by goload's own t=0 configure (0 = off): broker holds an under-full pop up to this window so serves carry near-full batches")
+	activeParts := fs.Int("active-partitions", 0, "how many DISTINCT partitions receive pushes in any given second, out of the -partitions space (0 = all of them, the historical round robin). A large space with a small working set is the shape a million partitions is for")
+	activePolicy := fs.String("active-policy", "rotate", "how the active window moves when -active-partitions is set: rotate (contiguous window, advances one window per second) | scatter (same size, spread across the space by a coprime stride)")
 	_ = fs.String("mode", "openloop", "run mode: max | app | openloop")
 	_ = fs.Parse(args)
 
@@ -596,9 +645,37 @@ func runOpenLoopMode(args []string) {
 	var inflight int64
 	lat := newOLHist()
 
+	// Partition selection. The historical shape (-active-partitions 0) is plain
+	// round robin over the whole space: every partition is written every cycle, so
+	// the space and the per-second working set are the same number.
+	//
+	// A large space with a small working set is a different workload, and the one a
+	// million partitions is for: a million entities of which only a thousand are
+	// active in any given second. See partitionIndex for the two policies.
+	space := uint64(*partitions)
+	active := uint64(*activeParts)
+	if active == 0 || active > space {
+		active = space
+	}
+	var scatterMult uint64
+	if *activePolicy == "scatter" {
+		scatterMult = scatterMultiplier(space)
+	}
+	t0Parts := time.Now()
 	var rr uint64
 	nextPart := func() string {
-		return fmt.Sprintf("p%d", int(atomic.AddUint64(&rr, 1)%uint64(*partitions)))
+		n := atomic.AddUint64(&rr, 1)
+		if active == space {
+			return fmt.Sprintf("p%d", n%space)
+		}
+		sec := uint64(time.Since(t0Parts) / time.Second)
+		return fmt.Sprintf("p%d", partitionIndex(scatterMult, sec, n, active, space))
+	}
+	// Self-documenting header, same discipline as the offered-rate line: the
+	// derived numbers are what make a run quotable without reading the flags back.
+	if active != space {
+		fmt.Printf("  partitions: space=%d | active=%d/s (%s) | %.0f msg/s per active partition | space covered in %.0f s\n",
+			space, active, *activePolicy, float64(*rate)/float64(active), float64(space)/float64(active))
 	}
 
 	// In-flight cap: a buffered-channel semaphore. Acquired NON-BLOCKINGLY at
