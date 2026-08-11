@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 96 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 98 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 ### Server
 
@@ -99,7 +99,9 @@ The broker is configured entirely through environment variables: 96 of them, lis
 | `QUEEN_DEDUP_CACHE_MB` | integer | `512` |  |
 | `QUEEN_HOTLIST` | boolean | `true` |  |
 | `QUEEN_HOTLIST_IDLE_SWEEP_MS` | integer | `300_000` |  |
+| `QUEEN_HOTLIST_RESEED_FULL_MS` | integer | `300_000` |  |
 | `QUEEN_HOTLIST_RESEED_MS` | integer | `30000` |  |
+| `QUEEN_HOTLIST_RESEED_WINDOW_MS` | integer | `0` |  |
 | `QUEEN_HOTLIST_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |
 | `QUEEN_HOTLIST_WINDOW_BATCH` | integer | `100` |  |
 | `QUEEN_V2_FUSION_HOLD_MS` | integer | `3` |  |

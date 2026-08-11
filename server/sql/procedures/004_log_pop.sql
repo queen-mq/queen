@@ -1992,3 +1992,90 @@ AS $$
     ORDER BY p.id
     LIMIT GREATEST(p_limit, 1);
 $$;
+
+-- ============================================================================
+-- 19-wildcard-hotlist §8 — WINDOWED reseed: the same enumeration bounded to the
+-- partitions written in the last p_window_ms.
+--
+-- Why it exists (measured in prod 2026-08-11, 9.5k partitions on one queue, 63
+-- rings, 4 sources, reseed every 30s): the full walk above is Θ(partitions in
+-- the queue) per ring per interval, and its cost is NOT the partition scan — the
+-- bitmap over (queue_id) costs 5ms — it is the 9,573 log_consumers PK probes the
+-- LEFT JOIN pays, 38,292 of the query's 39,700 shared buffers. It ran 8.2×/s to
+-- return ZERO rows and was the single largest consumer of the database: 2,089,774
+-- ms/hour, more total time than the entire pop path at 24× the call count.
+--
+-- The bound is sound because of an invariant the push path already maintains: a
+-- partition can only BECOME pending by being written, and every push bumps
+-- last_write_at (quantized to ≤1/s, 003_log_push). Acks and retention only ever
+-- REMOVE pendingness. So "pending and not already in the ring" is a subset of
+-- "written recently", for any window wider than the interval since the ring was
+-- last known good. The events that create pendingness WITHOUT a push — a
+-- backward/timestamp seek, which moves committed down — are covered by their own
+-- forced full walk at the call site (handlers/consumer_groups.rs) and, across
+-- brokers, by the mesh hint that walk broadcasts.
+--
+-- The window is a SEPARATE FUNCTION rather than a `p_window_ms <= 0 OR …` branch
+-- inside v1 on purpose. The broker calls these through prepare_cached, so the plan
+-- can be GENERIC, and a parameter inside an OR does not fold at plan time: the index
+-- bound on (queue_id, last_write_at) would be lost exactly in the case that matters.
+-- Two statements, two plans, no branch. v1 is left byte-identical — it is still the
+-- full walk, and it is the revert path (QUEEN_HOTLIST_RESEED_FULL_MS=0).
+--
+-- ORDERING IS LOAD-BEARING, and this is the part that is not obvious. The keyset
+-- runs on (last_write_at, id), NOT on id, because under a GENERIC plan `ORDER BY
+-- p.id` lets the planner satisfy the sort from log_partitions_pkey and apply the
+-- window as a mere filter — measured: it walks the PK and merge-joins the whole of
+-- log_consumers, i.e. the optimisation silently evaporates on exactly the plan the
+-- broker ends up with. Ordering by the index's own leading columns removes that
+-- alternative structurally, so the access path no longer depends on the planner
+-- estimating an unknown parameter. Verified under `plan_cache_mode =
+-- force_generic_plan`: Index Cond carries both the window and the cursor bound.
+--
+-- Measured on the prod shape (9.5k partitions, one queue): 49.049 ms → 0.375 ms,
+-- 39,700 → 160 buffers, on idx_log_partitions_queue_write (queue_id, last_write_at),
+-- which already exists. No new index, no DDL beyond this function.
+--
+-- The cursor is the (r_write, r_id) of the last row of the previous page, so the
+-- caller echoes back what this returned and never has to hold a clock of its own.
+-- Pass ('-infinity', NIL uuid) to start a walk. Ties on last_write_at are ordered by
+-- id, and the push path quantizes that column to 1s, so a page boundary landing
+-- inside a tie group re-reads that group's index entries and the row comparison
+-- discards the ones already seen: progress is guaranteed, and the re-read is bounded
+-- by one second of writes.
+-- ============================================================================
+-- DROP of the CURRENT signature = the boot-idempotency half of DROP+CREATE, the same
+-- convention log_pop_v1 states in its header: CREATE OR REPLACE cannot change a
+-- return type, and a differing argument list silently creates an OVERLOAD instead of
+-- replacing — which every later boot would then recreate forever. The second DROP is
+-- the interim 6-argument shape that existed only inside this branch (keyset on id,
+-- returning two columns); it never shipped, but a rig that ran an intermediate build
+-- would otherwise keep a dead overload whose defaulted tenant makes 6-argument calls
+-- ambiguous (SQLSTATE 42725).
+DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_window_v1(TEXT, TEXT, TIMESTAMPTZ, UUID, INTEGER, BIGINT, UUID);
+DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_window_v1(TEXT, TEXT, UUID, INTEGER, BIGINT, UUID);
+CREATE OR REPLACE FUNCTION queen.log_hotlist_reseed_window_v1(
+    p_queue TEXT,
+    p_group TEXT,
+    p_after_write TIMESTAMPTZ,
+    p_after_id UUID,
+    p_limit INTEGER,
+    p_window_ms BIGINT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+) RETURNS TABLE(r_id UUID, r_name TEXT, r_write TIMESTAMPTZ)
+LANGUAGE sql STABLE
+AS $$
+    SELECT p.id, p.name, p.last_write_at
+    FROM queen.log_partitions p
+    JOIN queen.queues q ON q.id = p.queue_id AND q.name = p_queue AND q.tenant_id = p_tenant
+    LEFT JOIN queen.log_consumers c
+      ON c.partition_id = p.id AND c.consumer_group = p_group
+    -- The index bound. now() is STABLE and the window is a parameter, so this is one
+    -- constant per execution, not a per-row expression.
+    WHERE p.last_write_at >= now()
+                             - make_interval(secs => p_window_ms::double precision / 1000.0)
+      AND (p.last_write_at, p.id) > (p_after_write, p_after_id)
+      AND p.last_offset > COALESCE(c.committed, -1)
+    ORDER BY p.last_write_at, p.id
+    LIMIT GREATEST(p_limit, 1);
+$$;

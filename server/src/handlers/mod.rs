@@ -100,6 +100,11 @@ pub struct AppState {
     pub hotlist: Arc<crate::hotlist::HotList>,
     // §8 reseed/cold-start interval (ms). QUEEN_HOTLIST_RESEED_MS (default 30s).
     pub hotlist_reseed_ms: i64,
+    // §8 how often that reseed is a FULL walk instead of the windowed one, and how
+    // far back the windowed one looks. QUEEN_HOTLIST_RESEED_FULL_MS (default 5 min,
+    // 0 = always full) and QUEEN_HOTLIST_RESEED_WINDOW_MS (resolved at load).
+    pub hotlist_reseed_full_ms: i64,
+    pub hotlist_reseed_window_ms: i64,
     // Track B (PLAN_QUEEN_PROXY_CLOUD.md §5): native tenant scoping flag
     // (QUEEN_TENANCY_HEADER). Off ⇒ every request is the default tenant and the
     // pid-ownership gate is skipped (vacuously true — no non-default queues exist),

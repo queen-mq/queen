@@ -353,6 +353,8 @@ async fn main() {
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
+        hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
+        hotlist_reseed_window_ms: cfg.hotlist_reseed_window_ms,
         tenancy_enabled: cfg.tenancy_header,
         ownership_ok: std::sync::Mutex::new(std::collections::HashSet::new()),
         auth_enabled: cfg.auth.enabled,
@@ -444,6 +446,8 @@ async fn main() {
         let hl = hotlist.clone();
         let pool_r = pool.clone();
         let interval_ms = cfg.hotlist_reseed_ms;
+        let full_ms = cfg.hotlist_reseed_full_ms;
+        let window_ms = cfg.hotlist_reseed_window_ms;
         let dump_top_n = cfg.log_top_n_queues;
         tokio::spawn(async move {
             use std::sync::atomic::Ordering::Relaxed;
@@ -463,7 +467,7 @@ async fn main() {
                     match pool_r.get().await {
                         Ok(client) => {
                             crate::handlers::hotlist_reseed_scan(
-                                &hl, &client, &d.qkey, &d.group, now,
+                                &hl, &client, &d.qkey, &d.group, now, full_ms, window_ms,
                             )
                             .await
                         }

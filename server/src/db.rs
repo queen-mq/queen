@@ -434,6 +434,45 @@ pub async fn hotlist_reseed(
     Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }
 
+// 19-wildcard-hotlist §8: the WINDOWED reseed — the same page, bounded to the
+// partitions written in the last `window_ms`. A separate prepared statement, not a
+// parameter on the one above: under a generic plan a window folded into an OR loses
+// the (queue_id, last_write_at) index bound, which is the whole point.
+//
+// The keyset is (last_write_at, id) — see the SQL header for why the ordering is
+// load-bearing. Both halves cross the wire as TEXT and are cast in SQL, the same
+// idiom the uuid parameters already use: the cursor is then purely an echo of what
+// the previous page returned, so the broker holds no timestamp type, no timezone and
+// no clock of its own. Returns (id, name, write) — `write` is the next page's cursor.
+pub async fn hotlist_reseed_window(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: &str,
+    after_write: &str,
+    after_id: &str,
+    limit: i32,
+    window_ms: i64,
+    tenant: &str,
+) -> Result<Vec<(String, String, String)>, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT r_id::text, r_name, r_write::text \
+             FROM queen.log_hotlist_reseed_window_v1\
+             ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,$7::text::uuid)",
+        )
+        .await?;
+    let rows = client
+        .query(
+            &stmt,
+            &[&queue, &group, &after_write, &after_id, &limit, &window_ms, &tenant],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect())
+}
+
 // 19-wildcard-hotlist §6: a queue's deferral config (delayed_processing,
 // window_buffer) in seconds, for the broker's hot-list mark routing / wheel /
 // skip-window decision. TASK M adds min_pop_wait_time (MILLISECONDS) to the same

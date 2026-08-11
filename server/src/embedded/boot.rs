@@ -375,6 +375,8 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
+        hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
+        hotlist_reseed_window_ms: cfg.hotlist_reseed_window_ms,
         tenancy_enabled: cfg.tenancy_header,
         ownership_ok: std::sync::Mutex::new(std::collections::HashSet::new()),
         auth_enabled: cfg.auth.enabled,
@@ -453,6 +455,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         let hl = hotlist.clone();
         let pool_r = pool.clone();
         let interval_ms = cfg.hotlist_reseed_ms;
+        // Embedded HA has no mesh (embedded/mod.rs): cross-instance discovery IS this
+        // floor. The windowed pass carries that job — a peer's push is a recent write
+        // by definition — while the full walk stays the repair path underneath it.
+        let full_ms = cfg.hotlist_reseed_full_ms;
+        let window_ms = cfg.hotlist_reseed_window_ms;
         tasks.push(tokio::spawn(async move {
             let mut iv = tokio::time::interval(std::time::Duration::from_millis(2000));
             loop {
@@ -461,8 +468,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
                 for d in hl.periodic_reseed_due(now, interval_ms) {
                     match pool_r.get().await {
                         Ok(client) => {
-                            crate::handlers::hotlist_reseed_scan(&hl, &client, &d.qkey, &d.group, now)
-                                .await
+                            crate::handlers::hotlist_reseed_scan(
+                                &hl, &client, &d.qkey, &d.group, now, full_ms, window_ms,
+                            )
+                            .await
                         }
                         Err(_) => break, // pool busy — retry next tick
                     }

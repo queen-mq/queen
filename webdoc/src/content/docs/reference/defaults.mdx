@@ -67,6 +67,7 @@ changes what a client observes.
 | `STATS_INTERVAL_MS` | `10000` | Cadence of the stats reconciler that feeds the dashboard's pending and total counts. |
 | `QUEEN_CACHE_REFRESH_INTERVAL_MS` | `60000` | How long a lost peer notification can leave a stale per-queue cache in place. |
 | `QUEEN_HOTLIST` | on | Broker-side candidate selection for wildcard pops. |
+| `QUEEN_HOTLIST_RESEED_FULL_MS` | `300000` | How often a ring is re-derived from *every* partition of its queue instead of only the recently written ones. It bounds how long a partition wrongly missing from a ring can stay missing. `0` makes every reseed a full walk. |
 | `QUEEN_ACK_FUSION` | on | Coalesces full-batch acks into one commit per flush. |
 | `QUEEN_DEDUP_CACHE` | on, `512` MB | Broker-side dedup cache. Correctness never depends on it; disabled, SQL probes the full window. |
 | `JWT_ENABLED` | `false` | No authentication. Every route is open, including admin ones. |

@@ -1563,7 +1563,16 @@ async fn hotlist_pop_attempt(
             crate::hotlist::trace_now_ms());
     }
     if cands.is_empty() && need_reseed {
-        hotlist_reseed_scan(&st.hotlist, &client, qkey, group, now_ms).await;
+        hotlist_reseed_scan(
+            &st.hotlist,
+            &client,
+            qkey,
+            group,
+            now_ms,
+            st.hotlist_reseed_full_ms,
+            st.hotlist_reseed_window_ms,
+        )
+        .await;
         cands = st.hotlist.take_batch(qkey, group, k, want, now_ms);
     }
     if cands.is_empty() {
@@ -1774,8 +1783,17 @@ fn finish_pop_serve(
 // probably-pending partitions in id order (bounded ~10k pages), interning each
 // name + remembering its id and marking it into the ring, then stamp the reseed
 // clock. This is the cold-start populator AND the correctness floor for any
-// missed mark / dropped mesh hint. Errors abandon the walk (the next attempt
-// retries) — the ring simply stays as-is, never wrong.
+// missed mark / dropped mesh hint.
+//
+// The scan comes in two shapes and this entry point picks between them per ring
+// (see HotList::reseed_mode): a FULL walk over every partition of the queue, and a
+// WINDOWED walk over the partitions written recently. Measured in prod on
+// 2026-08-11 (9.5k partitions on one queue, 63 rings, reseed every 30s), the full
+// walk cost 49ms and returned zero rows — 2,089,774 ms of database time per hour,
+// more than the entire pop path at 24x the call count. The windowed walk answers
+// the same question on the same data in 0.375ms. The full walk stays as the floor
+// for the classes a window cannot see, just at a cadence that reflects how rare
+// they are.
 pub(crate) async fn hotlist_reseed_scan(
     hl: &crate::hotlist::HotList,
     client: &deadpool_postgres::Client,
@@ -1786,27 +1804,138 @@ pub(crate) async fn hotlist_reseed_scan(
     qkey: &str,
     group: &str,
     now_ms: i64,
+    full_interval_ms: i64,
+    window_ms: i64,
+) {
+    let mode = hl.reseed_mode(qkey, group, now_ms, full_interval_ms, window_ms);
+    hotlist_reseed_run(hl, client, qkey, group, now_ms, mode, false).await;
+}
+
+// 19-wildcard-hotlist §8: a reseed that is FORCED full and that also hands its rows
+// to the mesh.
+//
+// The windowed pass is sound against everything a push creates; the one thing it is
+// blind to by construction is a cursor moving BACKWARDS, which makes old partitions
+// pending with no write to date them. That is a seek (log_seek_consumer_group_v1 /
+// log_seek_partition_v1) and it is why reseed_after_seek exists at all.
+//
+// Broadcasting matters because the local walk only fixes the ring of the broker that
+// served the seek. Before windowing, every peer healed within one reseed interval
+// (≤30s) because every peer walked everything that often; with the full walk moved to
+// a slower cadence that recovery would stretch to the full interval. So the seek's own
+// rows are pushed into the same coalescing dirty set the push path uses, and the
+// existing 20ms flusher carries them as an ordinary HOTLIST_DIRTY batch — no new frame
+// type, so a peer mid rolling-upgrade handles it exactly as it always has.
+pub(crate) async fn hotlist_reseed_full_broadcast(
+    hl: &crate::hotlist::HotList,
+    client: &deadpool_postgres::Client,
+    qkey: &str,
+    group: &str,
+    now_ms: i64,
+) {
+    hotlist_reseed_run(
+        hl,
+        client,
+        qkey,
+        group,
+        now_ms,
+        crate::hotlist::ReseedMode::Full,
+        true,
+    )
+    .await;
+}
+
+// The shared keyset walk. `mode` picks the SQL; `broadcast` additionally queues each
+// discovered partition as a mesh dirty hint.
+//
+// Errors abandon the walk (the next attempt retries) — the ring simply stays as-is,
+// never wrong. The clock is stamped even on a failed walk, deliberately: it is the
+// cadence throttle, and NOT stamping it would turn a database that is refusing this
+// query into a hot retry loop on the pop path. A failed FULL walk does not advance the
+// full clock, so the next attempt is full again.
+async fn hotlist_reseed_run(
+    hl: &crate::hotlist::HotList,
+    client: &deadpool_postgres::Client,
+    qkey: &str,
+    group: &str,
+    now_ms: i64,
+    mode: crate::hotlist::ReseedMode,
+    broadcast: bool,
 ) {
     let (tenant, queue) = split_tenant_queue(qkey);
-    let mut after = NIL_UUID.to_string();
+    // The two scans keyset on different columns — the full walk on id, the windowed
+    // one on (last_write_at, id) — so the cursor carries both halves and each mode
+    // advances the part it owns. `after_write` is an opaque echo of the timestamp the
+    // previous page returned; '-infinity' starts a walk.
+    let mut after_id = NIL_UUID.to_string();
+    let mut after_write = "-infinity".to_string();
+    let mut ok = true;
     for _ in 0..HOTLIST_RESEED_MAX_PAGES {
-        let rows = match db::hotlist_reseed(client, queue, group, &after, HOTLIST_RESEED_PAGE, tenant).await
-        {
-            Ok(r) => r,
-            Err(_) => break,
+        let rows = match mode {
+            crate::hotlist::ReseedMode::Full => {
+                match db::hotlist_reseed(
+                    client,
+                    queue,
+                    group,
+                    &after_id,
+                    HOTLIST_RESEED_PAGE,
+                    tenant,
+                )
+                .await
+                {
+                    Ok(r) => {
+                        if let Some((id, _)) = r.last() {
+                            after_id = id.clone();
+                        }
+                        r
+                    }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            crate::hotlist::ReseedMode::Window(window_ms) => {
+                match db::hotlist_reseed_window(
+                    client,
+                    queue,
+                    group,
+                    &after_write,
+                    &after_id,
+                    HOTLIST_RESEED_PAGE,
+                    window_ms,
+                    tenant,
+                )
+                .await
+                {
+                    Ok(r) => {
+                        if let Some((id, _, write)) = r.last() {
+                            after_id = id.clone();
+                            after_write = write.clone();
+                        }
+                        r.into_iter().map(|(id, name, _)| (id, name)).collect::<Vec<_>>()
+                    }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
         };
         if rows.is_empty() {
             break;
         }
         for (id, name) in &rows {
             hl.reseed_row(qkey, group, id, name, now_ms);
+            if broadcast {
+                hl.note_dirty(qkey, name);
+            }
         }
-        after = rows.last().map(|(id, _)| id.clone()).unwrap_or(after);
         if rows.len() < HOTLIST_RESEED_PAGE as usize {
             break;
         }
     }
-    hl.reseed_done(qkey, group, now_ms);
+    hl.reseed_done(qkey, group, now_ms, mode.is_full() && ok);
 }
 
 // GET /api/v1/pop/queue/:queue/partition/:partition — pop from ONE named

@@ -161,7 +161,8 @@ correctness:
 | --- | --- | --- |
 | Periodic reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, default 60000 ms | Re-reads both maintenance flags from `queen.system_state` (the database is the truth) and clears the per-queue lease and encryption caches, so a lost config invalidation heals within one interval. |
 | Pop long-poll backoff | Up to `POP_WAIT_MAX_INTERVAL_MS`, default 1000 ms | A parked pop re-queries on its own schedule regardless of wakes, so a dropped wake costs at most one interval of latency. |
-| Hot-list reseed floor | `QUEEN_HOTLIST_RESEED_MS`, default 30000 ms | Rebuilds a candidate ring from PostgreSQL even when it is non-empty, recovering a partition dropped by a missed mark or a dropped hint. |
+| Hot-list reseed floor | `QUEEN_HOTLIST_RESEED_MS`, default 30000 ms | Rebuilds a candidate ring from PostgreSQL even when it is non-empty, recovering a partition dropped by a missed mark or a dropped hint. Bounded to the partitions written in the last `QUEEN_HOTLIST_RESEED_WINDOW_MS`, which covers every case a push can create, and so every dropped hint. |
+| Hot-list full reseed | `QUEEN_HOTLIST_RESEED_FULL_MS`, default 300000 ms | The same walk over every partition of the queue. This is the one that recovers pendingness no write explains, such as a ring entry cleared in error or a claim stranded by a dropped pop. A backward seek does not wait for it: the broker that serves the seek walks in full immediately and tells its peers over the mesh. |
 
 The reconcile loop runs unconditionally, on a single broker too, because
 reconverging on the database is useful even without peers.

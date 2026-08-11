@@ -302,6 +302,14 @@ fn seek_succeeded(txt: &str) -> bool {
 // seek-to-end (cursor moved FORWARD) re-adds nothing — no false positive — while a
 // backward/timestamp seek re-adds exactly the re-pending partitions. Over-marking
 // would be a harmless ~0.2ms empty probe; under-marking is the bug we are closing.
+//
+// FULL and BROADCASTING, not the ordinary reseed (2026-08-11, with the windowed
+// floor): a seek is the one operation that makes OLD partitions pending without
+// writing them, so the windowed scan is blind to it by construction — it must be the
+// full walk. And the walk only repairs the ring of the broker that served the seek;
+// the peers used to heal within one ≤30s floor because every peer walked everything
+// that often, which the slower full cadence no longer guarantees. Handing the rows to
+// the mesh dirty set restores that immediacy over the existing frame.
 async fn reseed_after_seek(
     st: &Arc<AppState>,
     client: &deadpool_postgres::Client,
@@ -313,7 +321,7 @@ async fn reseed_after_seek(
     if st.hotlist.enabled() && seek_succeeded(txt) {
         let now_ms = crate::util::now_epoch_ms();
         let qkey = crate::handlers::tenant_queue_key(tenant, queue);
-        super::data::hotlist_reseed_scan(&st.hotlist, client, &qkey, group, now_ms).await;
+        super::data::hotlist_reseed_full_broadcast(&st.hotlist, client, &qkey, group, now_ms).await;
     }
 }
 

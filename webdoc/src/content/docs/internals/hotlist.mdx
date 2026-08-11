@@ -183,8 +183,27 @@ partition. Fast consumers rarely hit it: their ack's promote wins the race.
 | --- | --- | --- |
 | Wheel tick | 50 ms | promote every due wheel entry across every ring and wake the affected queues, so a deferred or lease-parked partition becomes claimable even when every consumer is parked |
 | Wake tick | 5 ms | one `notify_waiters` per queue that received push-path marks since the last tick |
-| Reseed floor | 2 s tick, per-ring interval `QUEEN_HOTLIST_RESEED_MS` (30 s) | re-derive a ring's contents from PostgreSQL |
+| Reseed floor | 2 s tick, per-ring interval `QUEEN_HOTLIST_RESEED_MS` (30 s) | re-derive a ring's contents from PostgreSQL, over the partitions written in the last `QUEEN_HOTLIST_RESEED_WINDOW_MS` |
+| Full reseed | per ring, `QUEEN_HOTLIST_RESEED_FULL_MS` (300 s) | the same, over every partition of the queue |
 | Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS` (300 s) | drop rings and wake gates for queues nobody touched |
+
+The reseed floor comes in two shapes because the two jobs it does have very different costs. Nearly
+all of its work is discovering data a push created, and a push always stamps `last_write_at`, so the
+scan can be bounded to the partitions written recently and still see everything a push can produce.
+That bound is what the floor runs on its ordinary interval. Measured on a production queue with 9563
+partitions the difference is 49 ms against 0.375 ms, and 39700 buffers against 160, because the cost
+of the walk is not reading the partitions but probing `log_consumers` once per partition.
+
+What the bounded scan cannot see is pendingness that no write explains: a ring entry cleared in
+error, a claim stranded by a dropped pop, a lease park left behind by a lost promote, a mesh hint
+dropped past its bound, a cursor moved backwards by a seek on another broker. Those are repair
+cases, and the full walk is what recovers them, which is why its interval is really an answer to
+"how long may a repair stay hidden". Setting `QUEEN_HOTLIST_RESEED_FULL_MS` to 0 makes every reseed
+a full walk again.
+
+A seek does not wait for either cadence. It runs a full walk on the spot and hands the partitions it
+finds to the mesh, so the other brokers re-add them from the ordinary dirty hint rather than from
+their own next full walk.
 
 The wake tick is why the push path marks quietly. Waking parked pops per push costs one
 `notify_waiters` (itself proportional to the number of parked consumers) for every single push.

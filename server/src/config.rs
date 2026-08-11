@@ -360,6 +360,28 @@ pub struct Config {
     // Reseed / cold-start interval (ms) — §8 correctness floor for missed marks /
     // dropped mesh hints. Default 30s; lower for tests / tighter cross-broker floor.
     pub hotlist_reseed_ms: i64,
+    // How often a reseed is a FULL walk over every partition of the queue instead of
+    // the windowed walk over recently-written ones (ms). Default 5 min.
+    //
+    // The window is sound for everything a push creates, because a push is the only
+    // way a partition BECOMES pending and every push bumps last_write_at. What only
+    // the full walk finds: a ring entry wrongly cleared, an INFLIGHT stranded by a
+    // dropped pop future, a WHEEL park left behind by a lost promote-on-ack, a mesh
+    // hint dropped past the coalescing bound, and a backward seek on another broker.
+    // Every one of those is a repair path, so this knob is really "how long may a
+    // repair hide" — and it trades directly against database CPU, because the full
+    // walk is Theta(partitions in the queue) per ring while the windowed one is
+    // Theta(partitions written in the window).
+    //
+    // 0 makes EVERY reseed full: the exact pre-windowing behaviour, kept as a
+    // config-only kill switch.
+    pub hotlist_reseed_full_ms: i64,
+    // Lookback of the windowed reseed (ms). 0 = derive it as max(4x reseed interval,
+    // 120s). Wider than the interval on purpose: the window must survive a few
+    // skipped or failed passes, last_write_at is quantized to 1s by the push path,
+    // and the broker's clock is not the database's. Cost is linear in the partitions
+    // actually written in the window, so generosity here is nearly free.
+    pub hotlist_reseed_window_ms: i64,
     // Idle-eviction sweep cadence (ms) for the per-(tenant,queue) hot-list rings and
     // long-poll wake gates. Both use a second-chance flag, so a queue is dropped after
     // [sweep, 2×sweep) with no mark / pop / parked waiter and no live ring entry. This
@@ -594,6 +616,8 @@ pub fn log_effective(cfg: &Config) {
         hotlist_shards = cfg.hotlist_shards,
         hotlist_window_batch = cfg.hotlist_window_batch,
         hotlist_reseed_ms = cfg.hotlist_reseed_ms,
+        hotlist_reseed_full_ms = cfg.hotlist_reseed_full_ms,
+        hotlist_reseed_window_ms = cfg.hotlist_reseed_window_ms,
         hotlist_idle_sweep_ms = cfg.hotlist_idle_sweep_ms,
         zstd_level = cfg.zstd_level,
         "config: engine"
@@ -714,7 +738,7 @@ pub fn load() -> Config {
     let admission_floor =
         ((pool_size as u64).saturating_sub(admission_pool_reserve) * 2 / 3).max(8) as i64;
 
-    Config {
+    let mut cfg = Config {
         port: env_str("PORT", "6632"),
         pg,
         pool_size,
@@ -816,11 +840,23 @@ pub fn load() -> Config {
             .max(1) as usize,
         hotlist_window_batch: env_int("QUEEN_HOTLIST_WINDOW_BATCH", 100).max(1) as u32,
         hotlist_reseed_ms: env_int("QUEEN_HOTLIST_RESEED_MS", 30000).max(1),
+        hotlist_reseed_full_ms: env_int("QUEEN_HOTLIST_RESEED_FULL_MS", 300_000).max(0),
+        // 0 = derive. Resolved to a concrete value right after the struct is built,
+        // so the boot line and every reader see the number actually in force.
+        hotlist_reseed_window_ms: env_int("QUEEN_HOTLIST_RESEED_WINDOW_MS", 0).max(0),
         hotlist_idle_sweep_ms: env_int("QUEEN_HOTLIST_IDLE_SWEEP_MS", 300_000).max(0) as u64,
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
         tenancy_header: env_bool("QUEEN_TENANCY_HEADER", false),
+    };
+    // §8 windowed reseed: 0 means "derive". Four intervals of slack so the window
+    // survives a few skipped or failed passes, floored at 120s because the pop
+    // candidate scan already treats 2 minutes of last_write_at staleness as
+    // absorbed (001_log_schema.sql) and the push path quantizes that column to 1s.
+    if cfg.hotlist_reseed_window_ms == 0 {
+        cfg.hotlist_reseed_window_ms = (cfg.hotlist_reseed_ms.saturating_mul(4)).max(120_000);
     }
+    cfg
 }
 
 #[cfg(test)]
