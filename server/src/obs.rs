@@ -386,7 +386,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 0.0
             };
             let (ack_entries, ack_bytes) = h.ack_registry.footprint();
-            let rings = h.hotlist.ring_sizes();
+            let rings = h.hotlist.ring_sizes(crate::util::now_epoch_ms());
             let ready: usize = rings.iter().map(|x| x.ready).sum();
             let wheel: usize = rings.iter().map(|x| x.wheel).sum();
             let rss_gb = h.metrics.resident_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);

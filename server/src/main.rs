@@ -452,7 +452,8 @@ async fn main() {
         tokio::spawn(async move {
             use std::sync::atomic::Ordering::Relaxed;
             let mut iv = tokio::time::interval(std::time::Duration::from_millis(2000));
-            let mut last_reseeds = 0u64;
+            let (mut last_full, mut last_window) = (0u64, 0u64);
+            let (mut last_failed, mut last_dropped) = (0u64, 0u64);
             let mut last_report = crate::util::now_epoch_ms();
             loop {
                 iv.tick().await;
@@ -475,18 +476,49 @@ async fn main() {
                     }
                 }
                 // Observability (~30s cadence): reseeds/s + ring sizes per (queue,group).
+                //
+                // F1 (PLAN_HOTLIST_FOLLOWUP.md): full and windowed passes are reported
+                // SEPARATELY. They differ by ~130x in database cost (49ms vs 0.375ms
+                // measured in prod on 2026-08-11), so one summed counter answered
+                // neither "what is the reseed costing" nor "is this ring windowed or
+                // full" — on the night of the deploy that split was only readable from
+                // Query Insights, because the two modes are separate SQL functions and
+                // the database could distinguish what the broker could not.
                 if now - last_report >= 30_000 {
-                    let reseeds = hl.reseeds.load(Relaxed);
-                    let delta = reseeds.saturating_sub(last_reseeds);
+                    let full = hl.reseeds_full.load(Relaxed);
+                    let window = hl.reseeds_window.load(Relaxed);
+                    let failed = hl.reseeds_failed.load(Relaxed);
+                    let dropped = hl.reseeds_dropped.load(Relaxed);
+                    let full_delta = full.saturating_sub(last_full);
+                    let window_delta = window.saturating_sub(last_window);
+                    // `reseeds_delta`/`per_s` keep their old names AND their old
+                    // meaning (both modes together) so existing greps and dashboards
+                    // do not break on the split.
+                    let delta = full_delta + window_delta;
                     let secs = ((now - last_report) as f64 / 1000.0).max(1.0);
-                    let mut sizes = hl.ring_sizes();
+                    let mut sizes = hl.ring_sizes(now);
                     let rings = sizes.len();
                     let ready: usize = sizes.iter().map(|x| x.ready).sum();
                     let wheel: usize = sizes.iter().map(|x| x.wheel).sum();
+                    // "Repaired recently enough?" — twice the interval the full walk is
+                    // actually running at, which with the kill switch (full_ms = 0,
+                    // every pass full) is the reseed cadence itself. A ring past it is
+                    // either failing its full walk (B2) or has never had one.
+                    let overdue_ms = if full_ms > 0 { 2 * full_ms } else { 2 * interval_ms };
+                    let stale = |x: &crate::hotlist::RingSize| {
+                        x.full_age_ms < 0 || x.full_age_ms > overdue_ms
+                    };
+                    let full_overdue = sizes.iter().filter(|x| stale(x)).count();
                     tracing::info!(
                         target: "hotlist",
                         reseeds_delta = delta,
                         per_s = format!("{:.2}", delta as f64 / secs),
+                        full_delta,
+                        window_delta,
+                        full_per_s = format!("{:.2}", full_delta as f64 / secs),
+                        failed_delta = failed.saturating_sub(last_failed),
+                        dropped_delta = dropped.saturating_sub(last_dropped),
+                        full_overdue,
                         rings,
                         ready,
                         wheel,
@@ -497,9 +529,25 @@ async fn main() {
                     // Rank by (ready+wheel) desc and show only the busiest non-empty
                     // rings — the old `.take(24)` over a HashMap surfaced an arbitrary,
                     // unstable subset (the "a caso" the operator complained about).
+                    //
+                    // A ring OVERDUE for its full walk prints too even when it is empty:
+                    // that is exactly the shape of the failure the ages exist to reveal
+                    // (a ring pinned to Full by a walk that keeps erroring holds nothing,
+                    // so a busiest-first filter would hide it precisely when it matters).
                     sizes.sort_by(|a, b| (b.ready + b.wheel).cmp(&(a.ready + a.wheel)));
-                    let nonempty = sizes.iter().filter(|x| x.ready + x.wheel > 0).count();
-                    for r in sizes.iter().filter(|x| x.ready + x.wheel > 0).take(dump_top_n) {
+                    let show = |x: &&crate::hotlist::RingSize| x.ready + x.wheel > 0 || stale(x);
+                    let shown_total = sizes.iter().filter(|x| show(&x)).count();
+                    for r in sizes.iter().filter(show).take(dump_top_n) {
+                        // The mode this ring's NEXT walk will run — the same predicate
+                        // reseed_begin uses, so the operator reads the answer instead of
+                        // deriving it from an age and a config value. Approximate only
+                        // within the ring's de-phasing offset, right at the boundary.
+                        let next = if full_ms <= 0 || r.full_age_ms < 0 || r.full_age_ms >= full_ms
+                        {
+                            "full"
+                        } else {
+                            "window"
+                        };
                         tracing::info!(
                             target: "hotlist",
                             tenant = %r.tenant,
@@ -507,11 +555,19 @@ async fn main() {
                             group = %r.group,
                             ready = r.ready,
                             wheel = r.wheel,
-                            shown = format!("{}/{}", dump_top_n.min(nonempty), nonempty),
+                            next,
+                            // -1 = never walked in that mode. `full_age_ms` past
+                            // `overdue_ms` is the ring to look at.
+                            full_age_ms = r.full_age_ms,
+                            reseed_age_ms = r.reseed_age_ms,
+                            shown = format!("{}/{}", dump_top_n.min(shown_total), shown_total),
                             "ring"
                         );
                     }
-                    last_reseeds = reseeds;
+                    last_full = full;
+                    last_window = window;
+                    last_failed = failed;
+                    last_dropped = dropped;
                     last_report = now;
                 }
             }
@@ -553,16 +609,29 @@ async fn main() {
             },
             on_hotlist_dirty: {
                 // 19-wildcard-hotlist §5: a peer's dirty hint marks our hot-list
-                // (idempotent, no re-broadcast). mark_remote wakes any parked
-                // wildcard pop on a vuoto→pending transition. No-op when the flag
-                // is off. Disjoint from MESSAGE_AVAILABLE (a pop wake), so no
-                // double-marking. Same tenant-less fan-out contract as above.
+                // (idempotent, no re-broadcast). The mark wakes any parked wildcard
+                // pop on a vuoto→pending transition. No-op when the flag is off.
+                // Disjoint from MESSAGE_AVAILABLE (a pop wake), so no double-marking.
+                // Same tenant-less fan-out contract as above, now crossed with the
+                // hint's scope: a group-less hint (a push, or any peer predating the
+                // field) marks every ring of the queue; a group-carrying one (a seek /
+                // group-delete repair) marks that group's ring alone. Runs on the mesh
+                // inbound task once per frame ITEM, so all four lanes stay one hash
+                // lookup — never a scan of `queues`.
                 let hl = hotlist.clone();
-                Box::new(move |t: Option<&str>, q: &str, p: &str| {
+                Box::new(move |t: Option<&str>, q: &str, p: &str, g: Option<&str>| {
                     let now = crate::util::now_epoch_ms();
-                    match t {
-                        Some(t) => hl.mark_remote(&handlers::tenant_queue_key(t, q), p, now),
-                        None => hl.mark_remote_all_tenants(q, p, now),
+                    match (t, g) {
+                        (Some(t), None) => {
+                            hl.mark_remote(&handlers::tenant_queue_key(t, q), p, now);
+                        }
+                        (Some(t), Some(g)) => {
+                            hl.mark_remote_group(&handlers::tenant_queue_key(t, q), p, g, now);
+                        }
+                        (None, None) => hl.mark_remote_all_tenants(q, p, now),
+                        (None, Some(g)) => {
+                            hl.mark_remote_group_all_tenants(q, p, g, now);
+                        }
                     }
                 })
             },

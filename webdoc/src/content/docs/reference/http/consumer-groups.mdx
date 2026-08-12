@@ -252,11 +252,28 @@ Seeks one named partition.
 An unknown partition returns `{"success": false, "error": "Partition not found"}`
 at `404`.
 
-After a successful seek the broker re-seeds its in-memory discovery ring for
-(queue, group) from committed database state and wakes parked pops, so a backward
-seek starts redelivering immediately instead of waiting for the periodic reseed.
-The reseed only re-adds partitions whose `last_offset` is genuinely ahead of
-`committed`, so a seek to end adds nothing.
+After a successful seek the broker repairs its in-memory discovery ring for
+(queue, group) and wakes parked pops, so a backward seek starts redelivering
+immediately instead of waiting for the periodic reseed. A queue-wide seek
+re-derives the ring from committed database state, which only re-adds partitions
+whose `last_offset` is genuinely ahead of `committed`, so a seek to end adds
+nothing; a single-partition seek marks that one partition. The other brokers are
+told over the mesh, and the seek also writes a durable repair marker they read on
+their reconcile pass, so a peer that missed the frame repairs within one interval
+rather than at its next full reseed. See [the hot-list](/internals/hotlist).
+
+If that repair fails on this broker, the cursor still moved, so the response is
+still `200` and still `"success": true`, with two extra keys:
+
+```json
+{
+  "hotlistRepaired": false,
+  "warning": "the cursor moved, but re-discovering the partitions it made pending failed on this broker; delivery of the replayed messages resumes at the next full reseed"
+}
+```
+
+A seek whose repair worked is byte-identical to what it has always been: neither
+key appears.
 
 ## DELETE routes
 
@@ -306,6 +323,14 @@ group from its in-memory ring on every queue and from the "already seeded" cache
 so first contact re-seeds cold instead of trusting stale state. There is no
 separate reset-offsets route: `seek` and `DELETE` are the two mechanisms.
 </Aside>
+
+Like a seek, a delete is a cursor move that writes nothing, so the other brokers
+cannot discover it on their own: they still hold a ring for the group name and
+would keep serving from it. The broker that runs the delete therefore repairs the
+queues it holds a ring for and hands the result to its peers, and the delete also
+publishes a durable repair marker for the peers whose queues this broker does not
+poll. Before the reseed was windowed this healed within one 30-second floor
+because every broker walked every partition that often.
 
 ## Access levels
 

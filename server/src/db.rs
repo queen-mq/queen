@@ -443,7 +443,14 @@ pub async fn hotlist_reseed(
 // load-bearing. Both halves cross the wire as TEXT and are cast in SQL, the same
 // idiom the uuid parameters already use: the cursor is then purely an echo of what
 // the previous page returned, so the broker holds no timestamp type, no timezone and
-// no clock of its own. Returns (id, name, write) — `write` is the next page's cursor.
+// no clock of its own.
+//
+// `cutoff` is the SAME kind of echo and exists for the same reason (B1): the lower
+// bound of a walk is derived once, by its first page, and every later page passes back
+// what that page reported. Pass None to start a walk. Returns the page's rows —
+// (id, name, write), `write` being the next page's cursor — alongside the cutoff the
+// walk is now pinned to; an empty page has none to report, and there is no later page
+// to pin anyway.
 pub async fn hotlist_reseed_window(
     client: &deadpool_postgres::Client,
     queue: &str,
@@ -452,24 +459,90 @@ pub async fn hotlist_reseed_window(
     after_id: &str,
     limit: i32,
     window_ms: i64,
+    cutoff: Option<&str>,
     tenant: &str,
-) -> Result<Vec<(String, String, String)>, tokio_postgres::Error> {
+) -> Result<(Vec<(String, String, String)>, Option<String>), tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
-            "SELECT r_id::text, r_name, r_write::text \
+            "SELECT r_id::text, r_name, r_write::text, r_cutoff::text \
              FROM queen.log_hotlist_reseed_window_v1\
-             ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,$7::text::uuid)",
+             ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
+              $7::text::uuid,$8::text::timestamptz)",
         )
         .await?;
+    // Tenant seventh and cutoff eighth, matching the SQL: the cutoff is APPENDED after
+    // the tenant rather than sitting next to the window it pins, so that the previous
+    // release's 7-argument call still resolves against this function during a rolling
+    // upgrade. See the parameter list in 004_log_pop.sql for the failure it avoids.
     let rows = client
         .query(
             &stmt,
-            &[&queue, &group, &after_write, &after_id, &limit, &window_ms, &tenant],
+            &[&queue, &group, &after_write, &after_id, &limit, &window_ms, &tenant, &cutoff],
         )
         .await?;
+    // Every row of one page carries the same cutoff (one constant per execution), so
+    // the first is as good as any. Read as an Option even though the SQL cannot return
+    // NULL while `window_ms` is bound: a background walk must degrade to re-deriving
+    // the bound, never panic inside a `get`.
+    let cutoff = rows.first().and_then(|r| r.get::<_, Option<String>>(3));
+    Ok((
+        rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect(),
+        cutoff,
+    ))
+}
+
+// A3 (PLAN_HOTLIST_FOLLOWUP.md): one row of queen.hotlist_repairs — "this
+// (tenant, queue, group) had a cursor moved backwards, and no write dates it".
+pub struct HotlistRepair {
+    pub tenant: String,
+    pub queue: String,
+    pub group: String,
+    /// `Some` ⇒ only this partition became pending (a per-partition seek), so the
+    /// reader marks exactly it; `None` ⇒ the whole queue, so the reader owes a full
+    /// walk.
+    pub partition: Option<String>,
+    /// Opaque echo of the publisher's timestamp. The reader compares it for CHANGE and
+    /// never for order (see `hotlist_repairs_all`), so no clock — the broker's or the
+    /// database's — takes part in deciding what a repair means.
+    pub repair_at: String,
+}
+
+// A3: the whole repair table, once per reconcile interval per broker.
+//
+// The whole table, and not a `repair_at > watermark` range, because commit order is
+// not timestamp order: `now()` is stamped when the publishing transaction STARTS, so a
+// long consumer-group delete can commit a row dated BEFORE one a later, faster seek
+// already advanced a watermark past — and that repair would then never be read by
+// anyone. Nudging the watermark backwards by a slack window only converts the miss into
+// its opposite (a row sitting at the boundary is re-read on every single pass, so one
+// seek would cost a full walk per ring per minute for the length of the prune window).
+// The caller instead remembers what it acted on and reacts to CHANGE, which needs no
+// ordering and cannot skip.
+//
+// Unbounded on purpose: the primary key holds this to one row per
+// (tenant, queue, group) and the publisher's prune drops anything older than an hour,
+// so the result is tens of rows in production — bounded by administration, not by
+// traffic.
+pub async fn hotlist_repairs_all(
+    client: &deadpool_postgres::Client,
+) -> Result<Vec<HotlistRepair>, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT tenant_id::text, queue_name, consumer_group, partition_name, \
+                    repair_at::text \
+             FROM queen.hotlist_repairs",
+        )
+        .await?;
+    let rows = client.query(&stmt, &[]).await?;
     Ok(rows
         .iter()
-        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .map(|r| HotlistRepair {
+            tenant: r.get(0),
+            queue: r.get(1),
+            group: r.get(2),
+            partition: r.get(3),
+            repair_at: r.get(4),
+        })
         .collect())
 }
 
@@ -1734,6 +1807,22 @@ pub async fn delete_consumer_group_for_queue_seg(
             &[&queue, &group, &tenant],
         )
         .await?;
+    // A3/A1: publish the repair for the peers, which keep a stamped ring for this group
+    // name and cannot see a pendingness no write created (the local ring is dropped by
+    // the handler and cold-starts). Only when cursors actually went: with no row,
+    // COALESCE(committed, -1) already read -1 and every ring already had this queue's
+    // partitions pending. Unlike its all-queues sibling this delete has no SQL proc to
+    // ride, so the announcement is its own statement — the two DELETEs above are already
+    // separate transactions, so this changes no atomicity that existed.
+    if n > 0 {
+        client
+            .execute(
+                "SELECT queen.hotlist_repair_publish_v1($3::text::uuid, $1, $2, NULL, \
+                 'consumer-group-delete-queue')",
+                &[&queue, &group, &tenant],
+            )
+            .await?;
+    }
     Ok(n)
 }
 

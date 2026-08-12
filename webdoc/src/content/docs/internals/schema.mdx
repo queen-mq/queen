@@ -242,7 +242,18 @@ re-apply so no ambiguous overload survives.
 
 ### 001_log_schema.sql (tables)
 
-The four `log_*` tables above (`log_dlq` lives in `005_log_ack`), plus one helper.
+The four `log_*` tables above (`log_dlq` lives in `005_log_ack`), plus `queen.hotlist_repairs` and
+one helper.
+
+`queen.hotlist_repairs` is not a log table: it is the durable announcement of a **deliberate cursor
+move**, which is the one class of pendingness the windowed reseed cannot see (nothing was written).
+`PRIMARY KEY (tenant_id, queue_name, consumer_group)`, one nullable `partition_name` (`NULL` = the
+whole queue), a `repair_at` timestamp indexed for the readers and a `reason`. A seek and a
+consumer-group delete write it in their own transaction; every broker reads it on the reconcile
+pass and repairs the rings named there; rows older than an hour are pruned inline by the writer.
+Two repairs naming different partitions widen to `NULL` rather than one being lost. It is a
+publication channel, not a general lost-notification repair: an entry cleared in error, a stranded
+claim or a stale lease park are still the full walk's job.
 
 | Function | Role |
 | --- | --- |
@@ -271,7 +282,7 @@ one place in the system where an offset is assigned.
 | `log_has_pending_v1(p_queue TEXT, p_group TEXT, p_tenant UUID DEFAULT …) RETURNS BOOLEAN` | cheap indexed superset probe: does any partition have `last_offset > COALESCE(committed, -1)`. Coarse on retention gaps by contract; the pop resolves the truth under the row lock |
 | `log_pop_list_v1(p_queue, p_group, p_partitions TEXT[], p_budget, p_lease_seconds, p_worker, p_auto_ack, p_max_partitions, p_sub_mode, p_sub_from, p_skip_window BOOLEAN DEFAULT FALSE, p_tenant) RETURNS TABLE(meta JSONB, blobs BYTEA[], states JSONB)` | the hot-list serve path: claim from a caller-supplied candidate list and return a **tri-state verdict** per evaluated candidate: `took` (with `lastOff`), `empty`, or `leased` (with `until`) |
 | `log_hotlist_reseed_v1(p_queue TEXT, p_group TEXT, p_after_id UUID, p_limit INTEGER, p_tenant UUID DEFAULT …) RETURNS TABLE(r_id UUID, r_name TEXT)` | keyset-paginated enumeration of probably-pending partitions in id order, for ring reseeding. Includes lease-held partitions; pass the nil UUID to start a walk |
-| `log_hotlist_reseed_window_v1(p_queue TEXT, p_group TEXT, p_after_write TIMESTAMPTZ, p_after_id UUID, p_limit INTEGER, p_window_ms BIGINT, p_tenant UUID DEFAULT …) RETURNS TABLE(r_id UUID, r_name TEXT, r_write TIMESTAMPTZ)` | the same enumeration bounded to partitions written in the last `p_window_ms`, which is what the reseed floor runs between full walks. Keyset on `(last_write_at, id)` so the access path stays on `idx_log_partitions_queue_write` even under a generic plan; pass `('-infinity', nil UUID)` to start a walk |
+| `log_hotlist_reseed_window_v1(p_queue TEXT, p_group TEXT, p_after_write TIMESTAMPTZ, p_after_id UUID, p_limit INTEGER, p_window_ms BIGINT, p_cutoff TIMESTAMPTZ DEFAULT NULL, p_tenant UUID DEFAULT …) RETURNS TABLE(r_id UUID, r_name TEXT, r_write TIMESTAMPTZ, r_cutoff TIMESTAMPTZ)` | the same enumeration bounded to partitions written in the last `p_window_ms`, which is what the reseed floor runs between full walks. Keyset on `(last_write_at, id)` so the access path stays on `idx_log_partitions_queue_write` even under a generic plan; pass `('-infinity', nil UUID)` to start a walk. `p_cutoff` is the lower bound the walk is pinned to: `NULL` means "first page, derive it from `p_window_ms` and return it in `r_cutoff`", and later pages echo it back, so the bound cannot creep forward between pages while the cursor climbs. `DROP`-and-`CREATE`, including of 1.0.1-beta.1's shape, which would otherwise survive as a second candidate for a defaulted call |
 
 `log_pop_v1` is `DROP`-and-`CREATE` rather than `CREATE OR REPLACE`, because its `OUT` row type is
 part of the signature and `OR REPLACE` refuses return-type changes, which would brick the boot
@@ -328,6 +339,7 @@ guard (it supplies namespace, task, priority and tenant scoping in the same touc
 | `log_seek_one_v1(p_partition_id UUID, p_last_offset BIGINT, p_log_start BIGINT, p_group TEXT, p_to_end BOOLEAN, p_timestamp TIMESTAMPTZ) RETURNS VOID` | seek one cursor: to `last_offset` for end, else just before the first segment at or after the timestamp (segment-granular). Releases any lease and resets retry and attempt state; creates the row if absent |
 | `log_seek_consumer_group_v1(p_group TEXT, p_queue TEXT, p_to_end BOOLEAN DEFAULT FALSE, p_timestamp TIMESTAMPTZ DEFAULT NULL, p_tenant UUID DEFAULT …) RETURNS JSONB` | seek every partition of a queue |
 | `log_seek_partition_v1(p_group TEXT, p_queue TEXT, p_partition TEXT, p_to_end BOOLEAN DEFAULT FALSE, p_timestamp TIMESTAMPTZ DEFAULT NULL, p_tenant UUID DEFAULT …) RETURNS JSONB` | seek one named partition |
+| `hotlist_repair_publish_v1(p_tenant UUID, p_queue TEXT, p_group TEXT, p_partition TEXT, p_reason TEXT) RETURNS VOID` | announce a cursor move in `queen.hotlist_repairs` for the peers to read: upsert on `(tenant, queue, group)`, widening `partition_name` to `NULL` when a second repair names a different partition, and prune rows older than an hour in the same call. Called by both seeks and by both consumer-group deletes, inside their own transaction |
 | `get_consumer_groups_v4(p_tenant UUID DEFAULT …) RETURNS JSONB` | consumer-group listing |
 | `list_messages_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | message browsing; a segment `seq` carries `base_offset` and `frameIdx` carries `offset - base_offset` |
 | `get_dlq_messages_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | DLQ browsing over `log_dlq`; payload comes from the snapshot, `createdAt` is `failed_at` (per-frame enqueue time is not recoverable from an opaque blob), `producerSub` is null |

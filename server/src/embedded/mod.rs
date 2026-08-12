@@ -71,9 +71,36 @@
 //!   between two instances — with `FILE_BUFFER_DIR` set, a second in-process
 //!   Broker gets a private subdir of it for the same reason.
 //! * **No mesh.** N embedded instances over one Postgres stay correct (leases,
-//!   acks, dedup and maintenance coordinate through the database), but
-//!   cross-instance wake-ups ride the periodic floors (pop backoff ≤ 1s,
-//!   wildcard reseed ≤ 30s, config reconcile ≤ 60s) instead of peer frames.
+//!   acks, dedup and maintenance coordinate through the database), but every
+//!   cross-instance notice a broker fleet sends as a peer frame is a periodic
+//!   READ of the database here, so it costs its floor rather than the ~20ms a
+//!   frame takes: a parked pop re-polls on its own backoff (≤ 1s), a config
+//!   invalidation rides the reconcile loop (`QUEEN_CACHE_REFRESH_INTERVAL_MS`,
+//!   60s), and another instance's PUSH enters this instance's wildcard
+//!   candidate ring on the WINDOWED reseed — one `QUEEN_HOTLIST_RESEED_MS`
+//!   (30s) plus that ring's de-phasing offset — because a push is a recent
+//!   write by definition.
+//!
+//!   Since 1.0.1 that last floor is two numbers rather than one, and the
+//!   second is where an embedded fleet is genuinely worse off than a broker
+//!   fleet. Anything that makes OLD partitions pending with NO write — a
+//!   backward seek, a consumer-group delete — is invisible to the windowed
+//!   pass by construction. A broker peer is told over the mesh; embedded has
+//!   no frame to receive, so it waits for the durable repair marker
+//!   (`queen.hotlist_repairs`) that the operation writes in its own
+//!   transaction and this instance's reconcile loop polls: one interval (60s),
+//!   after a 5s settle at start. Which side of that this surface sits on
+//!   matters: seek and consumer-group delete are NOT exposed here (see below),
+//!   so an embedded instance only ever READS those markers — the publisher is
+//!   an HTTP broker sharing this database, whether driven by its API or by
+//!   `queenctl`. Everything else a
+//!   windowed pass cannot see (a ring entry cleared in error, a claim stranded
+//!   by a dropped pop, a stale lease park) waits for the FULL walk,
+//!   `QUEEN_HOTLIST_RESEED_FULL_MS` (300s) plus its offset, exactly as in the
+//!   broker. Lower `QUEEN_CACHE_REFRESH_INTERVAL_MS` to buy the marker latency
+//!   back; `QUEEN_HOTLIST_RESEED_FULL_MS=0` makes every pass a full walk at
+//!   the 30s cadence instead (and stops the marker poll, which then has
+//!   nothing to add), at the database cost the windowing exists to avoid.
 //! * **Not exposed in v1**: consumer-group administration (list/seek/delete),
 //!   queue listings, traces and the streams surface — the DLQ is covered
 //!   ([`Broker::dlq`], [`Broker::retry_message`], [`Broker::delete_message`]).

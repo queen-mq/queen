@@ -94,7 +94,7 @@ cap, so a multi-partition push meant one datagram per partition.
 | 2 | `MESSAGE_AVAILABLE_BATCH` | `{items:[{queue, partition, tenant}]}` | same, once per item (one send for a whole multi-partition push) |
 | 3 | `HEARTBEAT` | none | liveness only |
 | 4 | `HELLO` | `{server_id, nonce, mac}` | connection handshake; see below |
-| 5 | `HOTLIST_DIRTY_BATCH` | `{items:[{queue, partition, tenant}]}` | mark the peer's hot-list rings pending (idempotent, commutative); no re-broadcast |
+| 5 | `HOTLIST_DIRTY_BATCH` | `{items:[{queue, partition, tenant, group?}]}` | mark the peer's hot-list rings pending (idempotent, commutative); no re-broadcast. With `group` the mark is scoped to that group's ring alone, which is what a cursor move means; without it, to every ring of the queue, which is what a push means |
 | 10 | `QUEUE_CONFIG_SET` | `{queue, tenant}` | drop the cached lease time and encryption flag for that queue |
 | 11 | `QUEUE_CONFIG_DELETE` | `{queue, tenant}` | same invalidation |
 | 40 | `MAINTENANCE_MODE_SET` | `{enabled}` | flip the maintenance atomic |
@@ -103,9 +103,15 @@ cap, so a multi-partition push meant one datagram per partition.
 Two of these are worth separating because they look redundant and are not.
 `MESSAGE_AVAILABLE` is a parked-pop wake, sent on every push. `HOTLIST_DIRTY_BATCH` marks a peer's
 candidate ring, and is sent only on a coalesced dirty transition: a partition pushed a thousand
-times in one flush window produces one hint. A dropped hint is healed by
+times in one flush window produces one hint. A dropped hint for a push is healed by
 [the hot-list's](/internals/hotlist/) periodic reseed floor; a dropped wake is healed by the parked
-pop's own backoff.
+pop's own backoff. A dropped hint for a **cursor move** is healed by neither, because the reseed
+floor is bounded to recently written partitions and a seek writes nothing: that one has a durable
+marker table under it, read on the reconcile pass.
+
+`group` was added the same way `tenant` was, as an optional field on an existing frame rather than
+a new tag: a peer mid rolling-upgrade drops a tag it does not know, but ignores a field it does not
+know and does the queue-wide mark it has always done, which is a superset of the scoped one.
 
 Queue-carrying frames include the tenant explicitly, and an **absent** tenant is not the same as the
 default tenant. An absent tenant means a peer that predates tenant scoping (a rolling upgrade), and

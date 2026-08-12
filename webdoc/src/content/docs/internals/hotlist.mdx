@@ -8,7 +8,10 @@ sidebar:
 sourceOfTruth:
   - server/src/hotlist.rs
   - server/src/handlers/data.rs
+  - server/src/handlers/consumer_groups.rs
+  - server/src/reconcile.rs
   - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/010_log_admin.sql
   - server/src/config.rs
 ---
 
@@ -88,6 +91,14 @@ A mark is applied to **every existing group ring** of the queue, because a push 
 pending for every group already polling it. A group nobody polls has no ring and therefore no
 allocation; it will discover the partition through the reseed floor on first contact.
 
+One shape of mark is narrower than that. A backward seek or a consumer-group delete makes
+partitions pending for **one** group, so those paths mark that group's ring alone and the dirty
+hint they enqueue carries the group name with it. Marking queue-wide would arm every other group's
+ring for nothing, which on the production queue measured below is 9563 entries per uninvolved
+group. The group is an optional field on the existing frame, so a peer running an older build
+ignores it and does the queue-wide mark it has always done: a superset, and therefore safe during
+a rolling upgrade.
+
 Every mark increments the slot's epoch and adds the pushed frame count to `batch_count`. Then the
 state decides:
 
@@ -153,8 +164,29 @@ partition in between, the epoch moved, the compare-and-swap fails, and the entry
 that push's data is real and nobody has claimed it. Every ordering of the race degrades to a false
 positive.
 
-On a deferral queue (`delayedProcessing` or `windowBuffer` set) an `empty` verdict never hard-clears
-at all: it schedules a bounded revisit instead, between 50 ms and 1000 ms.
+## The deferral deadline
+
+On a deferral queue (`delayedProcessing` or `windowBuffer` set) an `empty` verdict is ambiguous in
+a way it is not anywhere else: the partition may hold nothing, or it may hold something the
+visibility cut still hides. So it schedules a bounded revisit, between 50 ms and 1000 ms, rather
+than clearing.
+
+That ambiguity has a deadline, and the revisit is bounded by it. A partition asserted pending at
+`T` can hide data no later than `T` plus the deferral cut, so once that much time has passed with
+no new mark, an empty claim means what it means on a plain queue and the entry clears. Every mark
+and every reseed row slides the instant forward, so a partition still being written is never
+called empty. The grace added on top of the cut is two clock pads plus one full revisit ceiling,
+which guarantees at least one confirming probe on either queue shape, so the broker has to be
+about 1.6 seconds out from PostgreSQL before a single skewed probe could clear anything.
+
+Until August 2026 there was no deadline: the revisit was unconditional, which made the deferral
+state a one-way door. No sequence of pops could return an entry to `IDLE`, so it cycled
+`READY` to `INFLIGHT` to `WHEEL` to `READY` at the revisit floor forever (measured: 1098 empty
+claims per simulated minute on a `windowBuffer` queue, about 18 per second), and the idle sweep,
+which requires every entry idle, could never reclaim the queue. One ordinary push, delivered and
+drained, was enough to arm it; a peer's seek broadcast armed every partition of the queue at once.
+Clearing on the deadline is not a correctness event: a partition whose data a window is still
+hiding was written moments ago, so the windowed reseed re-adds it.
 
 ## Promote on ack
 
@@ -199,11 +231,16 @@ error, a claim stranded by a dropped pop, a lease park left behind by a lost pro
 dropped past its bound, a cursor moved backwards by a seek on another broker. Those are repair
 cases, and the full walk is what recovers them, which is why its interval is really an answer to
 "how long may a repair stay hidden". Setting `QUEEN_HOTLIST_RESEED_FULL_MS` to 0 makes every reseed
-a full walk again.
+a full walk again, and reverts with it the repair machinery the windowing made necessary (below).
 
-A seek does not wait for either cadence. It runs a full walk on the spot and hands the partitions it
-finds to the mesh, so the other brokers re-add them from the ordinary dirty hint rather than from
-their own next full walk.
+`QUEEN_HOTLIST_RESEED_WINDOW_MS` is clamped rather than taken literally, whether it was derived or
+set by hand. The floor is one reseed interval plus that ring's widest de-phasing offset, which is
+the longest gap two consecutive passes of one ring can leave: a window narrower than the gap leaves
+a band of writes that neither pass covers, which is the exact invariant the window exists to
+preserve. The ceiling is one week, because a lookback wider than the partition set is a full walk
+run through the index built for a narrow one, and the way to ask for that is
+`QUEEN_HOTLIST_RESEED_FULL_MS=0`. A value the broker had to move is named in a `boot` warning with
+the value actually in force.
 
 The wake tick is why the push path marks quietly. Waking parked pops per push costs one
 `notify_waiters` (itself proportional to the number of parked consumers) for every single push.
@@ -228,14 +265,76 @@ Three things about it are deliberate:
   check-in (a client disconnect) cannot be re-linked by a mark or a promote, which only bump the
   epoch. The reseed is its last resort. (The serve path also arms a drop guard that re-appends
   checked-out candidates if the future is dropped, so this is the second line of defence.)
-- **It is jittered.** Each `(queue, group)` gets a fixed random phase offset in the first 15
-  seconds, so groups that registered together at cold start never reseed as one synchronised keyset
-  scan storm.
+- **It is jittered in proportion to what it de-phases.** Each `(queue, group)` gets a fixed random
+  phase, spread over a fifth of the interval or 15 seconds, whichever is larger: 15 seconds for the
+  30-second cadence, 60 seconds for the 300-second full walk. So groups that registered together at
+  cold start never reseed as one synchronised keyset scan storm. A flat 15 seconds was right for
+  the cadence it was written for and wrong as soon as the same offset also had to de-phase an
+  interval ten times longer: rings that cold-started together came due together, and the expensive
+  walks bunched into a 15-second band every 5 minutes. The average was unaffected, the peak was
+  not.
+- **A walk holds a ticket on the ring it started on.** It used to re-resolve `(queue, group)` by
+  name for every row and again when it stamped its completion, so a group forgotten and recreated
+  mid-walk received a stamp it had not earned and then skipped its own cold-start full walk for up
+  to 5 minutes. The ticket carries the ring identity; a stamp whose ring is no longer the one in
+  the map is dropped and counted.
+- **The windowed variant pins its cutoff for the whole walk.** Each page is a separate statement, so
+  deriving `now() - window` per page let the lower bound creep forward while the keyset cursor
+  climbed from the oldest row, and a partition written into the band between the two was skipped by
+  that pass. The first page derives the cutoff and returns it, later pages echo it back exactly as
+  they echo the keyset, and the broker never holds a clock of the database's.
 
 The periodic floor runs even when the ring is *non-empty*. That is the part that matters: it is what
 recovers a partition erroneously dropped from a busy ring (a cross-broker false clear, a
 stale-config hard clear, a missed mark, a dropped mesh hint) within one interval. The pop path also
 reseeds opportunistically when it finds the ring cold.
+
+## When a cursor moves backwards
+
+Two operations make old partitions pending without writing anything: a backward seek, and a
+consumer-group delete (which removes the group's cursor rows, so every partition holding data reads
+as uncommitted again). Neither moves `last_write_at`, so the windowed pass is blind to both by
+construction, and before the windowing they healed simply because every broker walked everything
+every 30 seconds. Three mechanisms replace that, in decreasing order of speed.
+
+**The broker that serves the operation repairs itself immediately.** A queue-wide seek or a group
+delete runs a full walk on the spot for the affected `(queue, group)` rings. A seek scoped to one
+partition marks that one partition instead: it used to run the whole-queue walk and broadcast the
+group's entire pending set because one cursor moved, which on a 9563-partition queue is the most
+expensive query in the system answering a question nobody asked.
+
+**The peers are told over the mesh**, from the same walk: its rows go out as ordinary dirty hints,
+carrying the group they belong to, so a peer re-adds exactly those partitions rather than waiting
+for its own next full walk.
+
+**A durable marker underneath**, because the mesh drops frames by design when a peer is slow or
+down. That was survivable when a dropped hint cost 30 seconds; with the windowed floor it would
+cost a replay a full-walk interval. So both operations also write a row into
+`queen.hotlist_repairs` inside their own transaction, keyed `(tenant, queue, group)` and naming a
+partition when the repair is that narrow. Every broker reads the table on the reconcile cadence
+(`QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60 s), acts on what it has not acted on already, and marks the
+named partition or owes a full walk for a queue-wide row. Rows are pruned after an hour, which is
+longer than any broker can be absent and still hold a stamped ring: one that was offline longer
+cold-starts every ring it has.
+
+The reader compares each row's `(timestamp, partition)` against what it last applied and acts on
+any change, rather than tracking a high-water mark. A watermark would be wrong in a way that fails
+silently: `now()` is the transaction's start time, so a long-running group delete can commit a row
+dated *before* one a later, faster seek already pushed the watermark past, and that repair would
+never be read at all.
+
+This whole layer exists only because the windowed pass cannot see a cursor move, so
+`QUEEN_HOTLIST_RESEED_FULL_MS=0` switches all of it off together with the windowing: every pass is
+a full walk at the 30-second cadence again, the fan-out and the delete's repair walk do not run,
+and the marker poll is skipped. The markers are still *written*, so a mixed cluster keeps working.
+A single-partition seek still sends its one hint, which is a push-shaped event rather than a
+fan-out.
+
+A repair walk that fails is reported rather than swallowed. The cursor move itself committed, so
+the seek still answers 200, but the body carries `hotlistRepaired: false` and a warning saying that
+redelivery resumes at the next full reseed, and the broker logs the failure with the queue and
+group. An operator who clicked "replay from yesterday" used to get an unqualified success and no
+replay.
 
 ## Memory, and the idle sweep
 
@@ -275,20 +374,42 @@ start; a surviving stale ring that hides the re-consume until the next floor is 
 
 The `hotlist` log target emits a `reseed floor` line about every 30 seconds with the reseed delta
 and rate, the number of live rings, total ready and wheel entries, and the local and remote mark
-counters. It then emits one `ring` line per busiest non-empty ring, ranked by `ready + wheel` and
-limited to `QUEEN_LOG_TOPN_QUEUES` (default 10). Ranking matters: an earlier version walked a hash
-map and showed an arbitrary, unstable subset.
+counters. It then emits one `ring` line per ring, ranked by `ready + wheel` and limited to
+`QUEEN_LOG_TOPN_QUEUES` (default 10). Ranking matters: an earlier version walked a hash map and
+showed an arbitrary, unstable subset.
+
+The two reseed modes are counted separately, because they differ by about 130x in database cost and
+one summed number answers neither "what is the reseed costing" nor "is this ring windowed or full".
+`reseeds_delta` and `per_s` keep their old names and their old meaning, the sum, so existing
+dashboards survive; `full_delta`, `window_delta` and `full_per_s` split it. `failed_delta` counts
+walks that ended on a database error and `dropped_delta` walks whose ring was replaced underneath
+them. `full_overdue` counts rings whose last full walk is older than twice the interval it should
+be running at, which includes rings that have never had one.
+
+Each `ring` line carries `next` (the mode its next walk will run, the answer rather than the
+arithmetic), `full_age_ms` and `reseed_age_ms`, with `-1` meaning never. A ring that is overdue for
+its full walk prints even when it holds nothing, which is deliberate: a ring pinned to full mode by
+a walk that keeps failing is empty, so a busiest-first filter hid it exactly when it mattered. That
+same failure also warns on its own, at three consecutive failures and then on each doubling, per
+ring: a database refusing this query refuses it for every ring, and one line per ring per pass
+buries the cause it is reporting.
 
 For latency debugging, `QUEEN_HOTLIST_TRACE=<queue-prefix>` emits bounded mark, wake and serve
 breadcrumbs for matching queues. It is off by default and costs one `Option` check when off.
 
 ## Interaction with the mesh
 
-With peers configured, a local mark also enqueues a coalesced `(queue, partition)` dirty hint,
-flushed to peers as a batched frame. The enqueue happens on **every** local push, not only on a
-local ring transition, because the pushing broker usually has no consumer for the peers' groups
+With peers configured, a local mark also enqueues a coalesced `(queue, partition, group?)` dirty
+hint, flushed to peers as a batched frame. The enqueue happens on **every** local push, not only on
+a local ring transition, because the pushing broker usually has no consumer for the peers' groups
 (so no local ring and no transition), and the peers are exactly who need the hint. The coalescing
-set deduplicates, so a partition pushed a thousand times in one flush window costs one hint. The
-set is bounded at 200,000 entries and drops beyond that; the loss is healed by the reseed floor.
-Received marks never re-broadcast. With no peers configured the whole mechanism is skipped, so a
-single broker pays neither the lock traffic nor the allocation.
+set deduplicates, so a partition pushed a thousand times in one flush window costs one hint; the
+group is part of the identity, so an ungrouped hint and a grouped one for the same partition are
+both kept and both applied, and the ungrouped one is a superset of the other. The set is bounded at
+200,000 entries and drops beyond that. Received marks never re-broadcast. With no peers configured
+the whole mechanism is skipped, so a single broker pays neither the lock traffic nor the
+allocation.
+
+A dropped hint for a **push** is healed by the reseed floor, which is what the window covers by
+construction. A dropped hint for a **cursor move** is not, and is covered by the durable repair
+marker instead.

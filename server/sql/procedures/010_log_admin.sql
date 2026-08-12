@@ -59,6 +59,52 @@
 -- ============================================================================
 
 -- ============================================================================
+-- queen.hotlist_repair_publish_v1: announce that a (queue, group)'s cursors moved
+-- BACKWARDS, durably, to every broker (A3, PLAN_HOTLIST_FOLLOWUP.md).
+--
+-- Called from inside the operation that moves the cursor, so the announcement shares
+-- its transaction: a marker written as a second statement afterwards is lost if the
+-- broker dies in the gap, which is the one property this exists to provide. Being SQL
+-- rather than broker code also means an operator (or an older broker) calling the seek
+-- functions directly still publishes.
+--
+-- p_partition scopes the repair: a name marks that one partition on the reader's ring,
+-- NULL makes it walk the queue. On conflict with a pending repair of a DIFFERENT
+-- partition the scope WIDENS to NULL — the primary key is what keeps this table at one
+-- row per (tenant, queue, group), so the alternative to widening is dropping one of the
+-- two repairs, and over-repairing costs one empty SKIP LOCKED probe per partition while
+-- under-repairing costs a replay.
+--
+-- The prune rides along: a broker offline longer than the window cold-starts every ring
+-- it holds anyway (full_reseed_ms = 0), so an hour is generous rather than load-bearing.
+-- Callers publishing several queues at once call this per queue and re-run the prune,
+-- which is an indexed no-op after the first.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.hotlist_repair_publish_v1(
+    p_tenant UUID,
+    p_queue TEXT,
+    p_group TEXT,
+    p_partition TEXT,
+    p_reason TEXT
+) RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO queen.hotlist_repairs AS r
+        (tenant_id, queue_name, consumer_group, partition_name, repair_at, reason)
+    VALUES (p_tenant, p_queue, p_group, p_partition, now(), p_reason)
+    ON CONFLICT (tenant_id, queue_name, consumer_group) DO UPDATE SET
+        partition_name = CASE
+            WHEN r.partition_name IS NOT DISTINCT FROM EXCLUDED.partition_name
+            THEN r.partition_name ELSE NULL END,
+        repair_at = EXCLUDED.repair_at,
+        reason = EXCLUDED.reason;
+
+    DELETE FROM queen.hotlist_repairs WHERE repair_at < now() - interval '1 hour';
+END;
+$$;
+
+-- ============================================================================
 -- queen.log_delete_consumer_group_v1: drop a group's LOG cursor state.
 -- Removes every queen.log_consumers row for the group (across all partitions
 -- of every queue) and its per-(queue, group) empty-scan watermarks. The shared
@@ -82,14 +128,38 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_deleted INTEGER;
+    v_queues TEXT[];
+    v_q TEXT;
 BEGIN
     -- Queue identity is the queen.queues id now (log_queues is merged away).
-    DELETE FROM queen.log_consumers c
-    USING queen.log_partitions p
-    JOIN queen.queues q ON q.id = p.queue_id
-    WHERE c.partition_id = p.id AND c.consumer_group = p_group
-      AND q.tenant_id = p_tenant;
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    --
+    -- A3/A1: the delete RETURNS the queues it touched, so the announcement below costs
+    -- no second pass over log_consumers (a group predicate alone is not indexed — the
+    -- PK is (partition_id, consumer_group) — so re-deriving the set would repeat this
+    -- statement's whole scan).
+    WITH del AS (
+        DELETE FROM queen.log_consumers c
+        USING queen.log_partitions p
+        JOIN queen.queues q ON q.id = p.queue_id
+        WHERE c.partition_id = p.id AND c.consumer_group = p_group
+          AND q.tenant_id = p_tenant
+        RETURNING q.name AS queue_name
+    )
+    SELECT count(*), array_agg(DISTINCT queue_name) INTO v_deleted, v_queues FROM del;
+
+    -- One repair per queue whose cursors actually went. A queue where the group held
+    -- none needs none: with no row, COALESCE(c.committed, -1) already read -1 there, so
+    -- this delete changed nothing a ring could be wrong about. Locally the ring is
+    -- dropped by the handler and cold-starts; this is for the PEERS, which keep a
+    -- stamped ring for the same group name and cannot see a pendingness no write
+    -- created. Same transaction as the delete, so no broker can read one without the
+    -- other.
+    IF v_queues IS NOT NULL THEN
+        FOREACH v_q IN ARRAY v_queues LOOP
+            PERFORM queen.hotlist_repair_publish_v1(
+                p_tenant, v_q, p_group, NULL, 'consumer-group-delete');
+        END LOOP;
+    END IF;
 
     -- Drop the empty-scan watermark so a later group of the same name does not
     -- inherit a stale "queue is empty since T" floor and silently skip cold
@@ -226,6 +296,13 @@ BEGIN
     WHERE w.queue_id = q.id AND q.name = p_queue AND q.tenant_id = p_tenant
       AND w.consumer_group = p_group;
 
+    -- A3: publish the repair in the seek's own transaction. Unconditionally, including
+    -- toEnd: deciding whether a cursor actually moved BACKWARDS means making
+    -- log_seek_one_v1 report per partition, which changes its return type (a DROP +
+    -- CREATE migration hazard) to save a handful of walks on an operation that happens
+    -- a few times a day. If precision is ever wanted, that is where it goes.
+    PERFORM queen.hotlist_repair_publish_v1(p_tenant, p_queue, p_group, NULL, 'seek-queue');
+
     RETURN jsonb_build_object(
         'success', true,
         'consumerGroup', p_group,
@@ -283,6 +360,13 @@ BEGIN
     USING queen.queues q
     WHERE w.queue_id = q.id AND q.name = p_queue AND q.tenant_id = p_tenant
       AND w.consumer_group = p_group;
+
+    -- A3, scoped to the one partition that moved: a reader marks exactly it, which is
+    -- what the seeking broker did locally (A2) and what its mesh hint carried. The
+    -- whole-queue walk only comes back if a SECOND partition of the same (queue, group)
+    -- is seeked before the readers catch up (hotlist_repair_publish_v1 widens).
+    PERFORM queen.hotlist_repair_publish_v1(
+        p_tenant, p_queue, p_group, p_partition, 'seek-partition');
 
     RETURN jsonb_build_object(
         'success', true,
@@ -928,6 +1012,13 @@ GRANT EXECUTE ON FUNCTION queen.log_delete_consumer_group_v1(TEXT, BOOLEAN, UUID
 GRANT EXECUTE ON FUNCTION queen.log_seek_one_v1(UUID, BIGINT, BIGINT, TEXT, BOOLEAN, TIMESTAMPTZ) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.log_seek_consumer_group_v1(TEXT, TEXT, BOOLEAN, TIMESTAMPTZ, UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.log_seek_partition_v1(TEXT, TEXT, TEXT, BOOLEAN, TIMESTAMPTZ, UUID) TO PUBLIC;
+-- A3: the group delete and both seeks above publish a repair marker, and they are
+-- SECURITY INVOKER, so a non-owner caller needs the table rights too — otherwise
+-- granting the seek and then calling it fails on the announcement instead of the seek.
+-- SELECT is for the brokers' poll (queen.hotlist_repairs), DELETE for the prune that
+-- rides in the publish.
+GRANT EXECUTE ON FUNCTION queen.hotlist_repair_publish_v1(UUID, TEXT, TEXT, TEXT, TEXT) TO PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE ON queen.hotlist_repairs TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v4(UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.list_messages_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_dlq_messages_v1(JSONB) TO PUBLIC;

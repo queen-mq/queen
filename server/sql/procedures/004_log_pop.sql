@@ -2043,6 +2043,23 @@ $$;
 -- inside a tie group re-reads that group's index entries and the row comparison
 -- discards the ones already seen: progress is guaranteed, and the re-read is bounded
 -- by one second of writes.
+--
+-- THE CUTOFF IS ONE VALUE PER WALK, NOT ONE PER PAGE (B1). Each page is its own
+-- statement, so `now()` differs between them: the lower bound crept forward while the
+-- cursor climbed from the OLDEST row, and a partition written into the band between
+-- the two — [cursor, now_of_this_page - window) — was excluded by the bound although
+-- the cursor had not reached it yet, so that pass never saw it. Bounded rather than
+-- lost (the next pass restarts its cursor and the default window is 4x the cadence),
+-- but it made the walk's coverage a race instead of an invariant.
+--
+-- So the cutoff is derived HERE on the first page — the broker has no clock of the
+-- database's and must not grow one — and returned as r_cutoff, exactly the way the
+-- keyset is returned as (r_write, r_id): the caller echoes an opaque timestamp back
+-- on every later page and the walk's lower bound stops moving. A NULL p_cutoff means
+-- "derive it", which is the first page and every single-page walk. The set the walk
+-- can return then only GROWS while it runs (a concurrent push bumps last_write_at
+-- forward, above the cursor, where the walk still reaches it), which is the property
+-- that makes one pass self-contained.
 -- ============================================================================
 -- DROP of the CURRENT signature = the boot-idempotency half of DROP+CREATE, the same
 -- convention log_pop_v1 states in its header: CREATE OR REPLACE cannot change a
@@ -2051,21 +2068,60 @@ $$;
 -- the interim 6-argument shape that existed only inside this branch (keyset on id,
 -- returning two columns); it never shipped, but a rig that ran an intermediate build
 -- would otherwise keep a dead overload whose defaulted tenant makes 6-argument calls
--- ambiguous (SQLSTATE 42725).
-DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_window_v1(TEXT, TEXT, TIMESTAMPTZ, UUID, INTEGER, BIGINT, UUID);
+-- ambiguous (SQLSTATE 42725). The third is 1.0.1-beta.1's shape, which this revision
+-- replaces: leaving it in place would make it the SECOND candidate for the 6-argument
+-- call the tests make (both trail-default their remaining parameters), i.e. that same
+-- 42725, and the two would answer different questions.
+-- The CURRENT shape, dropped first and for the least obvious reason: schema.rs re-applies
+-- every file at every boot, and the CREATE below is a plain CREATE (it cannot be CREATE OR
+-- REPLACE — the return type gained r_cutoff). Without this line the first boot succeeds and
+-- EVERY LATER ONE dies with "function already exists with same argument types", i.e. a
+-- broker that comes up green and then crash-loops the next time it restarts.
+DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_window_v1(TEXT, TEXT, TIMESTAMPTZ, UUID, INTEGER, BIGINT, UUID, TIMESTAMPTZ);
+-- The interim shapes: the 8-argument one with p_cutoff BEFORE p_tenant (which broke the
+-- previous release's 7-argument call — see the parameter list), the 6-argument keyset-on-id
+-- original, and the 7-argument shape 1.0.1-beta.1 shipped. The last must go even though the
+-- new function absorbs its calls through defaults: two candidates matching one 7-argument
+-- call is the 42725 ambiguity.
+DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_window_v1(TEXT, TEXT, TIMESTAMPTZ, UUID, INTEGER, BIGINT, TIMESTAMPTZ, UUID);
 DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_window_v1(TEXT, TEXT, UUID, INTEGER, BIGINT, UUID);
-CREATE OR REPLACE FUNCTION queen.log_hotlist_reseed_window_v1(
+DROP FUNCTION IF EXISTS queen.log_hotlist_reseed_window_v1(TEXT, TEXT, TIMESTAMPTZ, UUID, INTEGER, BIGINT, UUID);
+CREATE FUNCTION queen.log_hotlist_reseed_window_v1(
     p_queue TEXT,
     p_group TEXT,
     p_after_write TIMESTAMPTZ,
     p_after_id UUID,
     p_limit INTEGER,
     p_window_ms BIGINT,
-    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
-) RETURNS TABLE(r_id UUID, r_name TEXT, r_write TIMESTAMPTZ)
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001',
+    -- NULL = "this is the first page, derive the cutoff from p_window_ms and hand it
+    -- back". Every later page passes the r_cutoff it received.
+    --
+    -- APPENDED LAST, after p_tenant, and that position is load-bearing even though it
+    -- reads worse next to the window it pins. schema.rs re-applies every file at every
+    -- boot, so the FIRST new broker of a rolling upgrade drops and recreates this
+    -- function while the other replicas are still running the previous release and still
+    -- calling the 7-argument shape. With p_cutoff in the middle, their seventh argument
+    -- is a uuid landing on a timestamptz parameter, the call resolves to nothing, and
+    -- every windowed reseed on every not-yet-upgraded pod fails until it is replaced —
+    -- silently, because those binaries predate the error logging added alongside this.
+    -- Verified against a real PostgreSQL, not reasoned about: with p_cutoff seventh the
+    -- old call is `function ... does not exist`; appended eighth it resolves and defaults
+    -- to NULL, which COALESCE below turns into exactly the pre-cutoff behaviour.
+    --
+    -- The 7-argument function must still be DROPped above rather than left beside this
+    -- one: two candidates both matching a 7-argument call is the 42725 ambiguity this
+    -- file's other headers warn about.
+    p_cutoff TIMESTAMPTZ DEFAULT NULL
+) RETURNS TABLE(r_id UUID, r_name TEXT, r_write TIMESTAMPTZ, r_cutoff TIMESTAMPTZ)
 LANGUAGE sql STABLE
 AS $$
-    SELECT p.id, p.name, p.last_write_at
+    SELECT p.id, p.name, p.last_write_at,
+           -- The bound this page actually applied, for the next page to echo. now() is
+           -- transaction_timestamp, so every evaluation inside one statement returns the
+           -- same instant and this can never disagree with the WHERE clause below.
+           COALESCE(p_cutoff,
+                    now() - make_interval(secs => p_window_ms::double precision / 1000.0))
     FROM queen.log_partitions p
     LEFT JOIN queen.log_consumers c
       ON c.partition_id = p.id AND c.consumer_group = p_group
@@ -2090,10 +2146,13 @@ AS $$
     -- exactly what the join did.
     WHERE p.queue_id = (SELECT q.id FROM queen.queues q
                         WHERE q.name = p_queue AND q.tenant_id = p_tenant)
-      -- The index bound. now() is STABLE and the window is a parameter, so this is one
-      -- constant per execution, not a per-row expression.
-      AND p.last_write_at >= now()
-                             - make_interval(secs => p_window_ms::double precision / 1000.0)
+      -- The index bound. Both branches are STABLE and the window is a parameter, so
+      -- this is one constant per execution, not a per-row expression: the index scan
+      -- evaluates it once as a runtime key, which is why an ABSOLUTE p_cutoff costs
+      -- exactly what the derived one did (verified under force_generic_plan — the
+      -- Index Cond still carries the window and the cursor bound together).
+      AND p.last_write_at >= COALESCE(p_cutoff,
+              now() - make_interval(secs => p_window_ms::double precision / 1000.0))
       AND (p.last_write_at, p.id) > (p_after_write, p_after_id)
       AND p.last_offset > COALESCE(c.committed, -1)
     ORDER BY p.last_write_at, p.id

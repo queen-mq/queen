@@ -8,8 +8,11 @@
 //! * no inter-instance mesh: peers are a static host:port list that does not
 //!   fit an application fleet, and every cross-instance channel has a periodic
 //!   DB-truth floor (reconcile / hotlist reseed / pop backoff), so N embedded
-//!   instances over one Postgres stay correct with slightly higher
-//!   cross-instance wake latencies;
+//!   instances over one Postgres stay correct, each channel at the cost of its
+//!   own floor rather than of a frame. The floors are NOT uniformly small and
+//!   the module doc in `embedded/mod.rs` states each one: since the windowed
+//!   reseed (1.0.1) a cursor moved backwards on another instance is repaired
+//!   by the durable marker this file polls below, not by the reseed;
 //! * boot failures return [`StartError`] instead of exiting the process, and
 //!   the loops spawned HERE keep their `JoinHandle`s so `shutdown()` can abort
 //!   them. (Loops spawned inside the engine constructors — fusion shards, the
@@ -455,9 +458,13 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         let hl = hotlist.clone();
         let pool_r = pool.clone();
         let interval_ms = cfg.hotlist_reseed_ms;
-        // Embedded HA has no mesh (embedded/mod.rs): cross-instance discovery IS this
-        // floor. The windowed pass carries that job — a peer's push is a recent write
-        // by definition — while the full walk stays the repair path underneath it.
+        // Embedded HA has no mesh (embedded/mod.rs): cross-instance discovery of a
+        // PUSH is this floor and nothing else. The windowed pass carries that job — a
+        // peer's push is a recent write by definition — while the full walk stays the
+        // repair path underneath it. What the windowed pass cannot see because no write
+        // explains it is NOT this loop's to find: a cursor moved backwards elsewhere
+        // reaches this instance through the repair markers the reconcile loop polls
+        // below, which is the closest embedded gets to a mesh hint.
         let full_ms = cfg.hotlist_reseed_full_ms;
         let window_ms = cfg.hotlist_reseed_window_ms;
         tasks.push(tokio::spawn(async move {
@@ -494,6 +501,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
             use std::sync::atomic::Ordering::Relaxed;
             // Small initial delay so boot-time seeding settles first.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // A3: see reconcile::apply_hotlist_repairs. This matters MORE here than in
+            // the broker: an embedded instance has no mesh, so the durable marker is its
+            // only cross-instance notice that another instance moved a cursor — without
+            // it the sole repair is the 300s full walk.
+            let mut repaired = crate::reconcile::AppliedRepairs::default();
             loop {
                 if let Ok(c) = pool_r.get().await {
                     if let Ok(m) = db::get_system_flag(&c, "maintenance_mode").await {
@@ -514,6 +526,8 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
                             tracing::info!(target: "reconcile", flag = "pop_maintenance_mode", from = %prev, to = %pm, "flag changed");
                         }
                     }
+                    crate::reconcile::apply_hotlist_repairs(&state, &c, &mut repaired)
+                        .await;
                 }
                 state.lease_cache.lock().unwrap().clear();
                 state.enc_cache.lock().unwrap().clear();

@@ -53,6 +53,14 @@ Several numeric knobs are also clamped after parsing. Interval and size knobs
 are floored at 1, and `STATS_INTERVAL_MS` and `METRICS_FLUSH_MS` are floored at
 1000 ms: a value below the floor is raised without comment.
 
+One clamp does comment, because the value it protects is a correctness
+invariant rather than a sanity floor. `QUEEN_HOTLIST_RESEED_WINDOW_MS` is held
+to at least one `QUEEN_HOTLIST_RESEED_MS` plus that interval's de-phasing
+offset, which is the longest gap two consecutive passes of one ring can leave;
+below it there is a band of writes no pass ever covers. It is also held below a
+one-week ceiling. Either way the broker logs a `boot` warning naming the
+variable, the value you set and the value in force.
+
 ## The effective configuration is printed at boot
 
 After the JWT configuration is validated, the broker emits one `boot` block per

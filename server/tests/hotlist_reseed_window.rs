@@ -9,11 +9,12 @@
 //!
 //! The unit tests in `hotlist.rs` cover the POLICY (which scan runs when). This
 //! covers the SQL, which they cannot reach: set equivalence with the full walk,
-//! the bound itself, and keyset pagination across `last_write_at` ties. Those
-//! ties are not exotic — the push path quantizes `last_write_at` to at most one
-//! bump per second per partition, so a busy queue routinely has thousands of
-//! partitions sharing one value, and a cursor that mishandled them would either
-//! loop forever or skip a page.
+//! the bound itself, keyset pagination across `last_write_at` ties, and the
+//! bound holding still for the length of a walk. Those ties are not exotic — the
+//! push path quantizes `last_write_at` to at most one bump per second per
+//! partition, so a busy queue routinely has thousands of partitions sharing one
+//! value, and a cursor that mishandled them would either loop forever or skip a
+//! page.
 //!
 //! Needs a throwaway Postgres, so it is `#[ignore]` for a plain `cargo test`:
 //!
@@ -28,6 +29,9 @@
 use queen::{Broker, BrokerConfig};
 
 const NIL: &str = "00000000-0000-0000-0000-000000000000";
+// config::DEFAULT_TENANT. Named explicitly by both walks below only because the cutoff is
+// the LAST parameter and positional binding cannot skip the one before it.
+const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 
 fn unique(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
@@ -52,24 +56,41 @@ async fn full_walk(c: &tokio_postgres::Client, queue: &str, group: &str) -> Vec<
 
 /// Every partition id the WINDOWED walk returns for `window_ms`, paginated at
 /// `page` rows exactly the way `hotlist_reseed_run` paginates it: cursor
-/// ('-infinity', nil) to start, then the last row's (write, id).
-async fn windowed_walk(
+/// ('-infinity', nil) to start, then the last row's (write, id), and the cutoff
+/// derived by the first page echoed back on every later one.
+///
+/// `pin_cutoff = false` is the CONTROL, not a mode the broker has: it re-derives
+/// `now() - window` per page, which is what 1.0.1-beta.1 did and what B1 fixed.
+/// `pause_ms` stalls the walk between its FIRST and second page, which is where
+/// a bound that moves with the clock overtakes a cursor that does not.
+async fn windowed_walk_paced(
     c: &tokio_postgres::Client,
     queue: &str,
     group: &str,
     window_ms: i64,
     page: i32,
-) -> (Vec<String>, usize) {
+    pin_cutoff: bool,
+    pause_ms: u64,
+) -> (Vec<String>, usize, Option<String>) {
     let mut after_write = "-infinity".to_string();
     let mut after_id = NIL.to_string();
+    let mut cutoff: Option<String> = None;
     let mut out = Vec::new();
     let mut pages = 0usize;
     loop {
         let rows = c
             .query(
-                "SELECT r_id::text, r_write::text FROM queen.log_hotlist_reseed_window_v1\
-                 ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6)",
-                &[&queue, &group, &after_write, &after_id, &page, &window_ms],
+                // The tenant is named explicitly only because the cutoff sits AFTER it and
+                // positional binding cannot skip a parameter. That order is deliberate:
+                // see the parameter list in 004_log_pop.sql — the cutoff is appended last
+                // so the previous release's 7-argument call keeps resolving through a
+                // rolling upgrade.
+                "SELECT r_id::text, r_write::text, r_cutoff::text \
+                 FROM queen.log_hotlist_reseed_window_v1\
+                 ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
+                  $7::text::uuid,$8::text::timestamptz)",
+                &[&queue, &group, &after_write, &after_id, &page, &window_ms,
+                  &DEFAULT_TENANT, &cutoff],
             )
             .await
             .expect("windowed walk");
@@ -83,11 +104,29 @@ async fn windowed_walk(
         let last = rows.last().unwrap();
         after_id = last.get::<_, String>(0);
         after_write = last.get::<_, String>(1);
+        if pin_cutoff && cutoff.is_none() {
+            cutoff = Some(last.get::<_, String>(2));
+        }
         if rows.len() < page as usize {
             break;
         }
         assert!(pages < 200, "keyset made no progress: {pages} pages");
+        if pause_ms > 0 && pages == 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(pause_ms)).await;
+        }
     }
+    (out, pages, cutoff)
+}
+
+/// The broker's own shape: pinned cutoff, no pauses.
+async fn windowed_walk(
+    c: &tokio_postgres::Client,
+    queue: &str,
+    group: &str,
+    window_ms: i64,
+    page: i32,
+) -> (Vec<String>, usize) {
+    let (out, pages, _) = windowed_walk_paced(c, queue, group, window_ms, page, true, 0).await;
     (out, pages)
 }
 
@@ -223,5 +262,77 @@ async fn windowed_reseed_matches_the_full_walk() {
     let (empty, _) = windowed_walk(&c, &queue, group, 0, 1_000_000).await;
     assert!(empty.is_empty(), "a zero window returned {} rows", empty.len());
 
+    // ------------------------------------------- the cutoff is per WALK (B1)
+    // Four partitions bunched against the OLD edge of a 5s window, which is where
+    // the bug lived: the walk climbs from the OLDEST row, so a bound that
+    // re-derives `now() - window` on every page creeps up through the rows the
+    // cursor has not reached yet and that pass never returns them.
+    //
+    // Each walk gets a freshly seeded queue, so both start the same distance from
+    // their own data and the only difference between them is the pinning.
+    let pinq = unique("pinq");
+    seed_bunched(&c, &pinq).await;
+    // One row a page, stalled 1.5s between the first and the second: by then
+    // `now() - 5s` has passed the age of every remaining row while the cursor is
+    // still on the first.
+    let (pinned, _, cut) = windowed_walk_paced(&c, &pinq, group, 5_000, 1, true, 1_500).await;
+    assert_eq!(
+        pinned.len(),
+        4,
+        "a walk pinned to one cutoff must cover the window it started on, got {:?}",
+        pinned
+    );
+    assert!(cut.is_some(), "the first page must report the cutoff it derived");
+
+    // The control: the same walk re-deriving the bound per page, which is what
+    // 1.0.1-beta.1 did — it sees the first row and then nothing. If this ever
+    // stops losing rows, the assertion above has stopped testing anything.
+    let creepq = unique("creepq");
+    seed_bunched(&c, &creepq).await;
+    let (creeping, _, _) = windowed_walk_paced(&c, &creepq, group, 5_000, 1, false, 1_500).await;
+    assert!(
+        creeping.len() < pinned.len(),
+        "the per-page bound was expected to skip rows the pinned one keeps, \
+         got {} of {}",
+        creeping.len(),
+        pinned.len()
+    );
+
+    // An explicit cutoff is the bound in force and p_window_ms is then unread,
+    // which is what every page after the first relies on. '-infinity' against a
+    // zero window is the sharpest form of it: that window alone returns nothing.
+    let unbounded = c
+        .query(
+            "SELECT r_id::text FROM queen.log_hotlist_reseed_window_v1\
+             ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
+              $7::text::uuid,$8::text::timestamptz)",
+            &[&pinq, &group, &"-infinity", &NIL, &1_000i32, &0i64,
+              &DEFAULT_TENANT, &Some("-infinity")],
+        )
+        .await
+        .expect("cutoff walk")
+        .len();
+    assert_eq!(unbounded, 4, "an explicit cutoff must override p_window_ms");
+
     broker.shutdown().await;
+}
+
+/// A queue of four pending partitions written 4.0, 3.9, 3.8 and 3.7 seconds ago:
+/// all inside a 5s window at seed time, all outside it 1.5 seconds later.
+async fn seed_bunched(c: &tokio_postgres::Client, queue: &str) {
+    c.execute(
+        "INSERT INTO queen.queues(name) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&queue],
+    )
+    .await
+    .expect("queue");
+    c.execute(
+        "INSERT INTO queen.log_partitions(queue_id,name,last_offset,log_start,last_write_at)
+         SELECT (SELECT id FROM queen.queues WHERE name=$1), 'p'||g, 10, 0,
+                now() - ((4100 - g*100) || ' milliseconds')::interval
+         FROM generate_series(1,4) g",
+        &[&queue],
+    )
+    .await
+    .expect("partitions");
 }

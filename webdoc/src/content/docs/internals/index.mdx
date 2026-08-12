@@ -111,7 +111,7 @@ shared state elects a leader with an advisory lock so replicas never double-work
 | Hot-list wake tick | 5 ms | none | one coalesced wake per queue that received pushes |
 | Hot-list reseed floor | 2 s tick, per ring `QUEEN_HOTLIST_RESEED_MS` | none | re-derives ring contents from PostgreSQL, bounded to recently written partitions |
 | Hot-list full reseed | per ring, `QUEEN_HOTLIST_RESEED_FULL_MS`, 300000 ms | none | the same over every partition of the queue, the floor for pendingness no write explains |
-| Reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60000 ms | none | re-reads maintenance flags, drops per-queue caches |
+| Reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60000 ms | none | re-reads maintenance flags, drops per-queue caches, applies the hot-list repair markers a seek or a group delete published |
 | Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS`, 300000 ms | none | drops rings and wake gates for queues nobody touched |
 | Spool drain | `FILE_BUFFER_FLUSH_MS`, 100 ms | none | replays disk-spooled pushes once the database is reachable |
 

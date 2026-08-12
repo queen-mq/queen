@@ -113,11 +113,56 @@ const MAX_LEASE_REVISIT_MS: i64 = 1000;
 // §6: bounded backoff for a revisit on a deferral queue that popped empty.
 const REVISIT_MIN_MS: i64 = 50;
 const REVISIT_MAX_MS: i64 = 1000;
-// §8: max per-group phase offset for the periodic reseed floor. A fixed random
-// offset in [0, this) per (queue,group) de-synchronizes the reseed of many groups
-// that registered together (cold start), so the background floor never fires as
-// one synchronized keyset-scan storm.
+// §8: the de-phasing span of the periodic reseed floor at the DEFAULT 30s cadence,
+// and the unit each ring's fixed phase is drawn in. A fixed random offset per
+// (queue,group) de-synchronizes the reseed of many groups that registered together
+// (cold start), so the background floor never fires as one synchronized keyset-scan
+// storm.
+//
+// D1 (PLAN_HOTLIST_FOLLOWUP.md): this constant was sized for a 30s cadence and was
+// then reused verbatim as the de-phasing of the 300s FULL walk — a tenth of the
+// spread it needs. Every ring cold-starts together after a restart, so production's
+// 63 rings came due inside the same 15s band every 5 minutes: the average is ~10x
+// below the pre-windowing floor, the peak was not. `GroupRing::jitter_ms` now scales
+// the span to the interval it actually de-phases; at the 30s cadence the floor below
+// keeps it at exactly today's [0, 15_000), so that behaviour is unchanged.
 pub const RESEED_JITTER_MS: i64 = 15_000;
+// D1: how much of a LONG interval is spent spreading its walks — a fifth, which keeps
+// the default full walk inside the 300s + 60s worst-case repair the release notes
+// state, and turns 63 co-registered rings from ~4 walks/s in one band into ~1/s.
+const RESEED_JITTER_DIV: i64 = 5;
+
+// B2 (PLAN_HOTLIST_FOLLOWUP.md): how many CONSECUTIVE failed walks on one ring are
+// worth a WARN. A failed full walk deliberately does not advance `full_reseed_ms`, so
+// the ring stays pinned to Full and keeps retrying the expensive query — the
+// conservative direction and the pre-windowing behaviour, but until now a silent one:
+// nothing said that a ring had been failing its full walk for an hour. Three at the
+// 30s floor is ~90s of a ring not reseeding: long enough to sit out a single pool
+// hiccup, short enough to beat the 300s full cadence the failure is stalling.
+const RESEED_FAIL_WARN_AT: u32 = 3;
+
+/// Does a streak of `n` consecutive failed walks warrant a line?
+///
+/// Past the third, only the powers of two do. A database refusing this query refuses
+/// it for every ring, so "one line per ring per pass" is 63 lines every 30s in
+/// production — a flood that buries the cause it is reporting — while a doubling
+/// sequence keeps the count itself visible for as long as the stall lasts.
+fn reseed_fail_warns(n: u32) -> bool {
+    n == RESEED_FAIL_WARN_AT || (n > RESEED_FAIL_WARN_AT && n.is_power_of_two())
+}
+
+/// The widest offset [`GroupRing::jitter_ms`] can draw for `interval_ms` — the span
+/// itself, which is the de-phasing band every ring's fixed phase is spread across.
+///
+/// Public because it is half of a CONFIGURATION invariant and not merely a detail of
+/// the tick: the longest a ring can go between two consecutive passes is
+/// `interval_ms + max_reseed_jitter_ms(interval_ms)`, and `config::from_env` floors the
+/// windowed reseed's lookback at exactly that (C1) — a shorter window leaves a band of
+/// time no pass ever covers. One definition, so the two cannot drift apart.
+pub const fn max_reseed_jitter_ms(interval_ms: i64) -> i64 {
+    let scaled = interval_ms / RESEED_JITTER_DIV;
+    if scaled > RESEED_JITTER_MS { scaled } else { RESEED_JITTER_MS }
+}
 
 /// One (tenant, queue, group) ring whose periodic reseed floor (§8) is due. A named
 /// struct, not a tuple: the caller must not be able to mis-order the composite key
@@ -128,7 +173,7 @@ pub struct ReseedDue {
     pub group: String,
 }
 
-/// Which reseed scan to run for a (queue, group) — see [`HotList::reseed_mode`].
+/// Which reseed scan to run for a (queue, group) — see [`HotList::reseed_begin`].
 ///
 /// The two differ ONLY in the SQL they call: `Full` runs the classic keyset walk over
 /// every partition of the queue, `Window(ms)` runs the same walk bounded to partitions
@@ -150,6 +195,117 @@ impl ReseedMode {
     }
 }
 
+/// A claim on ONE ring for the duration of ONE reseed walk.
+///
+/// The walk used to re-resolve (queue, group) BY NAME on every row and again when it
+/// stamped, so a `forget_group` + recreate mid-walk let the stamp land on a ring that
+/// never earned it — the new ring then believed it had just been full-walked and
+/// skipped its cold start for up to `hotlist_reseed_full_ms` (B3). The ticket carries
+/// the Arcs the walk started on, and [`HotList::reseed_finish`] stamps only if the ring
+/// is still the one in the map.
+///
+/// Holding the `QueueState` Arc also pins it against `evict_idle`, whose
+/// `Arc::strong_count == 1` guard cannot fire while a ticket lives — so the QUEUE half
+/// of the identity is stable by construction and only the group ring can be swapped
+/// underneath a walk.
+pub struct ReseedTicket {
+    qkey: Box<str>,
+    group: Box<str>,
+    // Both None ⇔ the hot-list is disabled. `reseed_begin` must not even look the queue
+    // up in that case (an unpolled name has to cost nothing), so there is nothing to
+    // pin and every ticket method degrades to a no-op.
+    qstate: Option<Arc<QueueState>>,
+    ring: Option<Arc<GroupRing>>,
+    mode: ReseedMode,
+    started_ms: i64,
+}
+
+impl ReseedTicket {
+    fn new(
+        qkey: &str,
+        group: &str,
+        qstate: Arc<QueueState>,
+        ring: Arc<GroupRing>,
+        mode: ReseedMode,
+        started_ms: i64,
+    ) -> ReseedTicket {
+        ReseedTicket {
+            qkey: qkey.into(),
+            group: group.into(),
+            qstate: Some(qstate),
+            ring: Some(ring),
+            mode,
+            started_ms,
+        }
+    }
+
+    fn disabled(qkey: &str, group: &str, started_ms: i64) -> ReseedTicket {
+        ReseedTicket {
+            qkey: qkey.into(),
+            group: group.into(),
+            qstate: None,
+            ring: None,
+            mode: ReseedMode::Full,
+            started_ms,
+        }
+    }
+
+    pub fn mode(&self) -> ReseedMode {
+        self.mode
+    }
+    #[allow(dead_code)]
+    pub fn is_full(&self) -> bool {
+        self.mode.is_full()
+    }
+    /// The composite key the walk binds to SQL and logs under.
+    pub fn qkey(&self) -> &str {
+        &self.qkey
+    }
+    pub fn group(&self) -> &str {
+        &self.group
+    }
+    /// The instant the walk claimed the ring — the one clock every row and the stamp
+    /// are dated from, so a slow walk cannot date its own rows after its stamp.
+    #[allow(dead_code)]
+    pub fn started_ms(&self) -> i64 {
+        self.started_ms
+    }
+}
+
+/// One coalesced hot-list dirty hint: "(tenant,queue)/partition became pending".
+///
+/// `group` is the SCOPE of the hint and mirrors the scope of the mark that produced
+/// it (see `mark_inner`): `None` = "pending for every consumer group" — what a push
+/// means, and the only shape a pre-1.0.1 peer can send or understand. `Some(g)` =
+/// "pending for group `g` only" — what a seek / consumer-group delete means, where a
+/// queue-wide mark would set 9,563 partitions pending on every OTHER group's ring for
+/// nothing.
+///
+/// `group` is part of `Hash`/`Eq`, so `(q,p,None)` and `(q,p,Some(g))` are distinct
+/// members and neither masks the other. A push during a seek's flush window produces
+/// both; the peer applies both; the ungrouped one is a superset of the grouped one and
+/// marking is idempotent, so the result is the ungrouped semantics — never less.
+///
+/// Field order is load-bearing for the derived `Ord`: (qkey, partition, group) gives
+/// tests a stable sort.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DirtyHint {
+    /// The composite `handlers::tenant_queue_key(tenant, queue)`; split onto the wire.
+    pub qkey: Box<str>,
+    pub partition: Box<str>,
+    pub group: Option<Box<str>>,
+}
+
+impl DirtyHint {
+    pub fn new(qkey: &str, partition: &str, group: Option<&str>) -> DirtyHint {
+        DirtyHint {
+            qkey: qkey.into(),
+            partition: partition.into(),
+            group: group.map(|g| g.into()),
+        }
+    }
+}
+
 /// One ring's observability snapshot (`ring_sizes`). `ready` is exact; `wheel` is the
 /// heap length (an upper bound — it includes not-yet-drained stale entries).
 pub struct RingSize {
@@ -158,6 +314,13 @@ pub struct RingSize {
     pub group: String,
     pub ready: usize,
     pub wheel: usize,
+    /// F1: ms since this ring's last SUCCESSFUL full walk; -1 = never full-walked.
+    /// The one number that answers "which mode is this ring in, and when was it last
+    /// repaired" without reading Query Insights — a ring pinned to Full by a failing
+    /// walk (B2) is invisible without it, because such a ring is typically EMPTY.
+    pub full_age_ms: i64,
+    /// F1: ms since its last reseed of any mode; -1 = never reseeded.
+    pub reseed_age_ms: i64,
 }
 
 /// A candidate handed to the handler for one SQL `log_pop_list_v1` call.
@@ -285,6 +448,12 @@ struct SubRing {
     // measured directly, the latency variable every admission law so far has
     // been blind to (instrumented 2026-08-03).
     ready_since: Vec<i64>,
+    // Epoch-ms of the last time something ASSERTED this partition pending — a mark
+    // (push, mesh hint, transaction commit) or a reseed row, the only two ways an
+    // entry ever enters the ring. Read on exactly one path: the deferral-queue empty
+    // verdict, which uses it to tell a partition whose data is merely not visible YET
+    // from one that holds nothing at all (see `ghost`).
+    pending_since: Vec<i64>,
     ready_head: u32, // shard-local pos, NIL if empty
     ready_tail: u32,
     // (revisit_at snapshot, local pos). Stale entries (state changed or
@@ -301,6 +470,7 @@ impl SubRing {
             epoch: Vec::new(),
             drained: Vec::new(),
             ready_since: Vec::new(),
+            pending_since: Vec::new(),
             state: Vec::new(),
             revisit_at: Vec::new(),
             batch_count: Vec::new(),
@@ -323,6 +493,7 @@ impl SubRing {
             self.batch_count.resize(need, 0);
             self.drained.resize(need, false);
             self.ready_since.resize(need, 0);
+            self.pending_since.resize(need, 0);
         }
     }
 
@@ -404,6 +575,46 @@ impl SubRing {
     }
 }
 
+/// Has a deferral-queue entry outlived the only reason an empty claim is ambiguous
+/// on such a queue?
+///
+/// `Empty` on a queue with `delayedProcessing`/`windowBuffer` has two readings: the
+/// partition holds nothing, or it holds something the visibility cut still hides. So
+/// the empty path revisits instead of clearing — but until 2026-08-12 it revisited
+/// FOREVER, and that made the deferral state a one-way door: no sequence of pops
+/// could return an entry to IDLE. Two measured consequences (the E2 tests below):
+/// the entry ping-ponged READY→INFLIGHT→WHEEL→READY at the revisit floor — 1,098
+/// empty claims per 60s of simulated time on a windowBuffer queue, ~18/s — and,
+/// because `evict_idle` requires every entry IDLE, the whole `QueueState` was pinned
+/// for the process lifetime. One ordinary push, consumed, was enough to arm it; a
+/// peer's seek broadcast arms it on every partition of the queue at once (9,563 in
+/// production), on the seeking group's ring — and, from a peer that predates the
+/// group-carrying hint, on every ring the queue has. PLAN_HOTLIST_FOLLOWUP.md E2.
+///
+/// The ambiguity has a deadline, and it is exactly the cut: a partition asserted
+/// pending at T can hide data no later than T + delayed/window. Past that, an empty
+/// claim with no mark since (the epoch CAS at the call site) says the partition holds
+/// nothing — a mesh over-mark, a seek broadcast, a partition another consumer of the
+/// group drained — so it clears exactly like a plain queue's. `pending_since` is
+/// bumped by every mark and every reseed row, so a partition still being written
+/// keeps sliding its own deadline forward and is never called a ghost. The 2×pad
+/// grace plus one full `REVISIT_MAX_MS` buys at least one confirming revisit on
+/// EITHER queue shape — the windowBuffer backoff is the 50ms floor, the delayed one
+/// the 1s clamp — so no single probe that raced the cut on a skewed clock can clear
+/// an entry, and the broker has to be ~1.6s out from PG before it can be wrong at all.
+///
+/// Being wrong here delays, never loses: a wrongly cleared entry is re-added by the
+/// next mark, or by the §8 reseed floor — the WINDOWED one, since a partition whose
+/// data a windowBuffer is still hiding was by definition written moments ago.
+///
+/// Reached only from a checkin, i.e. only for an entry a `take_batch` claimed, i.e.
+/// only for one a mark or a reseed put in the ring — so `pending_since` is always
+/// set by the time this reads it.
+fn ghost(sub: &SubRing, local: u32, cfg: &DeferCfg, now_ms: i64) -> bool {
+    let cut_ms = cfg.delayed.max(cfg.window) as i64 * 1000;
+    now_ms - sub.pending_since[local as usize] >= cut_ms + 2 * pad_ms() + REVISIT_MAX_MS
+}
+
 // ------------------------------------------------------------------ group
 
 struct GroupRing {
@@ -419,11 +630,18 @@ struct GroupRing {
     // stale WHEEL park, a dropped mesh hint. The full walk is their recovery, so
     // this clock is what bounds how long any of them can hide.
     full_reseed_ms: Mutex<i64>,
-    // §8: fixed per-group phase offset [0, RESEED_JITTER_MS) so the periodic reseed
-    // floor of co-registered groups lands at staggered instants (never one storm).
-    // Applied to BOTH clocks: the full walk is the expensive one, so de-phasing it
-    // matters more than de-phasing the windowed pass.
-    reseed_jitter_ms: i64,
+    // §8: fixed per-group phase in [0, RESEED_JITTER_MS), scaled by `jitter_ms` into
+    // the span of whichever interval is being de-phased, so the periodic reseed floor
+    // of co-registered groups lands at staggered instants (never one storm). Applied
+    // to BOTH clocks: the full walk is the expensive one, so de-phasing it matters
+    // more than de-phasing the windowed pass — which is exactly what a CONSTANT
+    // offset stopped doing once the two clocks were 10x apart (D1).
+    reseed_phase_ms: i64,
+    // B2: consecutive walks on THIS ring that ended on a SQL error, reset by the first
+    // one that does not. Per ring rather than global because that is the unit that gets
+    // pinned to Full: a queue whose reseed query times out while every other queue's
+    // succeeds is invisible in an aggregate. Read and written only by `reseed_finish`.
+    reseed_fail_streak: std::sync::atomic::AtomicU32,
     take_cursor: Mutex<usize>,
 }
 
@@ -437,9 +655,23 @@ impl GroupRing {
             subs,
             reseed_ms: Mutex::new(0),
             full_reseed_ms: Mutex::new(0),
-            reseed_jitter_ms: (rand::random::<u32>() as i64) % RESEED_JITTER_MS,
+            reseed_phase_ms: (rand::random::<u32>() as i64) % RESEED_JITTER_MS,
+            reseed_fail_streak: std::sync::atomic::AtomicU32::new(0),
             take_cursor: Mutex::new(0),
         }
+    }
+
+    /// D1: this ring's fixed offset for an interval of `interval_ms`, in
+    /// `[0, max(interval_ms / RESEED_JITTER_DIV, RESEED_JITTER_MS))`.
+    ///
+    /// The floor keeps the 30s cadence byte-identical to the pre-D1 broker (span
+    /// 15_000, so the phase IS the offset); a long interval — the 300s full walk —
+    /// gets a span proportional to itself, which is what actually spreads the walks
+    /// instead of bunching them into one 15s band per period. Monotone in the
+    /// interval, so no configuration ends up de-phased LESS than it used to be.
+    fn jitter_ms(&self, interval_ms: i64) -> i64 {
+        let span = max_reseed_jitter_ms(interval_ms);
+        self.reseed_phase_ms.saturating_mul(span) / RESEED_JITTER_MS
     }
 }
 
@@ -573,10 +805,12 @@ pub struct HotList {
     by_queue: Mutex<HashMap<String, HashSet<String>>>,
     notifier: OnceLock<Arc<Notifier>>,
     trace_prefix: Option<String>,
-    // Coalesced local vuoto→pending transitions as (qkey, partition), drained by
-    // main's mesh flusher (§5), which splits the qkey back onto the wire. Received
-    // (remote) marks never enqueue here (no re-broadcast).
-    dirty: Mutex<HashSet<(Box<str>, Box<str>)>>,
+    // Coalesced local vuoto→pending transitions, drained by main's mesh flusher (§5),
+    // which splits the qkey back onto the wire. Received (remote) marks never enqueue
+    // here (no re-broadcast). The element carries the SCOPE of the mark that produced
+    // it (`DirtyHint::group`), so a push still means "pending for every group" while a
+    // seek's repair costs the peers one ring instead of all of them.
+    dirty: Mutex<HashSet<DirtyHint>>,
     // TASK M: has ANY queue on this broker ever been seen with
     // min_pop_wait_time > 0? A monotonic latch, set by set_queue_cfg. It exists
     // so the pop path can answer "is this feature in play at all" with ONE relaxed
@@ -586,8 +820,20 @@ pub struct HotList {
     // on the (still correct, per-queue-gated) slower predicate until restart,
     // which is the cheap direction to be wrong in.
     any_min_pop_wait: std::sync::atomic::AtomicBool,
-    // Observability.
-    pub reseeds: std::sync::atomic::AtomicU64,
+    // Observability. F1 (PLAN_HOTLIST_FOLLOWUP.md): the reseed used to bump ONE
+    // counter for both scans, so the 30s log line reported full and windowed passes
+    // summed — and the two differ by a factor of 130 in database cost (49ms vs
+    // 0.375ms measured in prod on 2026-08-11). The split is what makes the walk's cost
+    // readable from the broker instead of from Query Insights. Bumped in exactly one
+    // place, `reseed_finish`.
+    pub reseeds_full: std::sync::atomic::AtomicU64,
+    pub reseeds_window: std::sync::atomic::AtomicU64,
+    /// Walks that ended on a SQL error, in either mode. A full walk that keeps failing
+    /// keeps its ring pinned to Full (B2) — this is the global signal that says so.
+    pub reseeds_failed: std::sync::atomic::AtomicU64,
+    /// Walks whose ring was replaced under them (B3): the stamp was discarded, so the
+    /// new ring still owes its cold-start full walk.
+    pub reseeds_dropped: std::sync::atomic::AtomicU64,
     pub marks_local: std::sync::atomic::AtomicU64,
     pub marks_remote: std::sync::atomic::AtomicU64,
 }
@@ -613,7 +859,10 @@ impl HotList {
             trace_prefix: std::env::var("QUEEN_HOTLIST_TRACE").ok().filter(|v| !v.is_empty()),
             dirty: Mutex::new(HashSet::new()),
             any_min_pop_wait: std::sync::atomic::AtomicBool::new(false),
-            reseeds: std::sync::atomic::AtomicU64::new(0),
+            reseeds_full: std::sync::atomic::AtomicU64::new(0),
+            reseeds_window: std::sync::atomic::AtomicU64::new(0),
+            reseeds_failed: std::sync::atomic::AtomicU64::new(0),
+            reseeds_dropped: std::sync::atomic::AtomicU64::new(0),
             marks_local: std::sync::atomic::AtomicU64::new(0),
             marks_remote: std::sync::atomic::AtomicU64::new(0),
         })
@@ -746,6 +995,112 @@ impl HotList {
 
     // -------------------------------------------------------------- marks
 
+    /// Apply one mark to ONE ring. Returns whether the partition became newly
+    /// claimable on it (a vuoto→pending transition, i.e. something to wake for).
+    fn mark_ring(
+        &self,
+        ring: &GroupRing,
+        qkey: &str,
+        partition: &str,
+        idx: u32,
+        cfg: &DeferCfg,
+        count: u32,
+        now_ms: i64,
+    ) -> bool {
+        let mut woke = false;
+        let sh = (idx as usize) % self.shards;
+        let local = idx / self.shards as u32;
+        let mut sub = ring.subs[sh].lock().unwrap();
+        sub.ensure(local);
+        if self.trace_prefix.is_some() && self.traced(qkey) {
+            let (t, q) = crate::handlers::split_tenant_queue(qkey);
+            eprintln!("[hlt] mark q={} p={} st={} tn={} t={}", q, partition,
+                sub.state[local as usize], t, crate::hotlist::trace_now_ms());
+        }
+        sub.epoch[local as usize] = sub.epoch[local as usize].wrapping_add(1);
+        sub.batch_count[local as usize] =
+            sub.batch_count[local as usize].saturating_add(count);
+        // A write restarts the deferral clock the empty verdict reasons about:
+        // on a windowBuffer queue THIS mark is what pushes the visibility cut
+        // forward, so the ghost test below must never fire on a partition that
+        // is still being written to.
+        sub.pending_since[local as usize] = now_ms;
+        match sub.state[local as usize] {
+            IDLE => {
+                if cfg.delayed > 0 {
+                    // §6: delayed ⇒ wheel at commit_ts + D (broker now ≈ PG
+                    // commit; SQL enforces the exact cut, wheel only schedules).
+                    let at = now_ms + cfg.delayed as i64 * 1000 + pad_ms();
+                    sub.wheel_schedule(local, at);
+                } else if cfg.window > 0 {
+                    // §6: windowBuffer ⇒ hold until first_mark + W, unless the
+                    // batch is already fat (early promotion).
+                    if sub.batch_count[local as usize] >= self.window_batch {
+                        sub.ready_push_tail(local);
+                        woke = true;
+                    } else {
+                        let at = now_ms + cfg.window as i64 * 1000;
+                        sub.wheel_schedule(local, at);
+                    }
+                } else {
+                    sub.ready_push_tail(local);
+                    woke = true;
+                }
+            }
+            WHEEL => {
+                // A new push while deferred. windowBuffer batch-full ⇒ promote
+                // early; otherwise keep the existing deadline (delayed governs,
+                // window keeps its first-mark deadline).
+                if cfg.window > 0
+                    && cfg.delayed == 0
+                    && sub.batch_count[local as usize] >= self.window_batch
+                {
+                    // stale heap entry is skipped lazily on drain.
+                    sub.revisit_at[local as usize] = 0;
+                    sub.ready_push_tail(local);
+                    woke = true;
+                } else if cfg.window == 0
+                    && cfg.delayed == 0
+                    && sub.revisit_at[local as usize] <= now_ms + pad_ms()
+                {
+                    // Plain queue: every WHEEL entry is a lease park shaped
+                    // core+PAD (own post-serve backstop `now+lease+PAD`, or a
+                    // foreign `until+PAD`, both capped MAX_LEASE_REVISIT_MS).
+                    // revisit_at ≤ now+PAD ⟺ the lease core has passed and only
+                    // the safety pad remains — and this mark PROVES data is
+                    // pending, so promote instead of sitting out the pad.
+                    // NEVER promote inside the core: a claim there re-finds the
+                    // live lease (`leased` verdict → re-park churn), which is
+                    // the race the park exists to avoid. Idempotent by
+                    // construction (state flips to READY; later marks take the
+                    // READY arm), so no reschedule and no wheel-heap spam.
+                    // Canaries for the herd risk: `leased`/`empty` verdict
+                    // rates and pop_empty_pct must not rise.
+                    sub.revisit_at[local as usize] = 0;
+                    sub.ready_push_tail(local);
+                    woke = true;
+                }
+            }
+            READY => { /* already claimable */ }
+            INFLIGHT => { /* epoch bump ⇒ checkin re-appends (§4) */ }
+            _ => {}
+        }
+        woke
+    }
+
+    /// `only_group` is the SCOPE of the mark, and the hint it queues carries the same
+    /// scope — there is no way to emit a hint that claims more than the mark did:
+    ///
+    /// * `None` — every EXISTING group ring of the queue. This is what a push means:
+    ///   the partition is pending for every consumer group already polling it. A group
+    ///   nobody polls has no ring (no allocation) and discovers the partition via
+    ///   reseed on first contact (§8).
+    /// * `Some(g)` — only `g`'s ring, and only if it already exists. The seek /
+    ///   consumer-group-delete repair: those make partitions pending for ONE group, and
+    ///   a queue-wide mark would put 9,563 partitions in every other group's ring for
+    ///   nothing.
+    ///
+    /// Returns whether the targeted ring existed (always true for `None`).
     fn mark_inner(
         &self,
         qkey: &str,
@@ -754,101 +1109,52 @@ impl HotList {
         now_ms: i64,
         broadcast: bool,
         wake: bool,
-    ) {
+        only_group: Option<&str>,
+    ) -> bool {
         if !self.enabled || partition.is_empty() {
-            return;
+            return false;
         }
         // One global `queues` lookup for the whole mark (was two: a separate
         // cfg_of + qstate each locked it — hot under the push rate).
         let s = self.qstate(qkey);
         let cfg = *s.cfg.lock().unwrap();
         let idx = s.intern.lock().unwrap().intern(partition);
-        // A mark is incondizionato across every EXISTING group ring of the queue:
-        // a push makes the partition pending for every consumer group already
-        // polling it. A group nobody polls has no ring (no allocation) and will
-        // discover the partition via reseed on first contact (§8).
         let groups = s.groups.lock().unwrap();
-        // R4: a queue with NO group ring still has parked pops to wake. A
-        // partition-targeted long-poll (handle_pop_partition) parks on the queue GATE
-        // and never registers a ring, so gating the wake purely on a ring transition
-        // strands a tenant whose only consumer is partition-targeted: its own push
-        // would never wake it and it would burn the whole long-poll on the backoff
-        // floor. A ring-less queue therefore always counts as a transition — the wake
-        // is still coalesced through the tick, so this is one notify per queue per
-        // tick, never a per-push storm.
-        let mut woke = groups.is_empty();
-        for ring in groups.values() {
-            let sh = (idx as usize) % self.shards;
-            let local = idx / self.shards as u32;
-            let mut sub = ring.subs[sh].lock().unwrap();
-            sub.ensure(local);
-            if self.trace_prefix.is_some() && self.traced(qkey) {
-                let (t, q) = crate::handlers::split_tenant_queue(qkey);
-                eprintln!("[hlt] mark q={} p={} st={} tn={} t={}", q, partition,
-                    sub.state[local as usize], t, crate::hotlist::trace_now_ms());
+        // R4: a queue with NO ring for what we are marking still has parked pops to
+        // wake. A partition-targeted long-poll (handle_pop_partition) parks on the
+        // queue GATE and never registers a ring, so gating the wake purely on a ring
+        // transition strands a tenant whose only consumer is partition-targeted: its
+        // own push would never wake it and it would burn the whole long-poll on the
+        // backoff floor. A ring-less mark therefore always counts as a transition —
+        // the wake is still coalesced through the tick, so this is one notify per
+        // queue per tick, never a per-push storm. A group-scoped mark for a group with
+        // no local ring extends that in the same conservative direction: one
+        // notify_waiters on an admin path, and every woken pop short-circuits in
+        // memory (data.rs) without touching the pool.
+        let mut woke;
+        let hit;
+        match only_group {
+            None => {
+                woke = groups.is_empty();
+                hit = true;
+                for ring in groups.values() {
+                    woke |= self.mark_ring(ring, qkey, partition, idx, &cfg, count, now_ms);
+                }
             }
-            sub.epoch[local as usize] = sub.epoch[local as usize].wrapping_add(1);
-            sub.batch_count[local as usize] =
-                sub.batch_count[local as usize].saturating_add(count);
-            match sub.state[local as usize] {
-                IDLE => {
-                    if cfg.delayed > 0 {
-                        // §6: delayed ⇒ wheel at commit_ts + D (broker now ≈ PG
-                        // commit; SQL enforces the exact cut, wheel only schedules).
-                        let at = now_ms + cfg.delayed as i64 * 1000 + pad_ms();
-                        sub.wheel_schedule(local, at);
-                    } else if cfg.window > 0 {
-                        // §6: windowBuffer ⇒ hold until first_mark + W, unless the
-                        // batch is already fat (early promotion).
-                        if sub.batch_count[local as usize] >= self.window_batch {
-                            sub.ready_push_tail(local);
-                            woke = true;
-                        } else {
-                            let at = now_ms + cfg.window as i64 * 1000;
-                            sub.wheel_schedule(local, at);
-                        }
-                    } else {
-                        sub.ready_push_tail(local);
+            Some(g) => {
+                // `get`, never `QueueState::group`: a hint must not be able to ALLOCATE
+                // per-group state, or a peer — or an untrusted tenant's group name —
+                // could pin a ring per name it invents.
+                match groups.get(g) {
+                    Some(ring) => {
+                        hit = true;
+                        woke = self.mark_ring(ring, qkey, partition, idx, &cfg, count, now_ms);
+                    }
+                    None => {
+                        hit = false;
                         woke = true;
                     }
                 }
-                WHEEL => {
-                    // A new push while deferred. windowBuffer batch-full ⇒ promote
-                    // early; otherwise keep the existing deadline (delayed governs,
-                    // window keeps its first-mark deadline).
-                    if cfg.window > 0
-                        && cfg.delayed == 0
-                        && sub.batch_count[local as usize] >= self.window_batch
-                    {
-                        // stale heap entry is skipped lazily on drain.
-                        sub.revisit_at[local as usize] = 0;
-                        sub.ready_push_tail(local);
-                        woke = true;
-                    } else if cfg.window == 0
-                        && cfg.delayed == 0
-                        && sub.revisit_at[local as usize] <= now_ms + pad_ms()
-                    {
-                        // Plain queue: every WHEEL entry is a lease park shaped
-                        // core+PAD (own post-serve backstop `now+lease+PAD`, or a
-                        // foreign `until+PAD`, both capped MAX_LEASE_REVISIT_MS).
-                        // revisit_at ≤ now+PAD ⟺ the lease core has passed and only
-                        // the safety pad remains — and this mark PROVES data is
-                        // pending, so promote instead of sitting out the pad.
-                        // NEVER promote inside the core: a claim there re-finds the
-                        // live lease (`leased` verdict → re-park churn), which is
-                        // the race the park exists to avoid. Idempotent by
-                        // construction (state flips to READY; later marks take the
-                        // READY arm), so no reschedule and no wheel-heap spam.
-                        // Canaries for the herd risk: `leased`/`empty` verdict
-                        // rates and pop_empty_pct must not rise.
-                        sub.revisit_at[local as usize] = 0;
-                        sub.ready_push_tail(local);
-                        woke = true;
-                    }
-                }
-                READY => { /* already claimable */ }
-                INFLIGHT => { /* epoch bump ⇒ checkin re-appends (§4) */ }
-                _ => {}
             }
         }
         drop(groups);
@@ -869,7 +1175,7 @@ impl HotList {
                 // Bounded: drop the hint if the coalescing set is huge (loss is healed
                 // by the reseed floor — §5/§8).
                 if d.len() < 200_000 {
-                    d.insert((qkey.into(), partition.into()));
+                    d.insert(DirtyHint::new(qkey, partition, only_group));
                 }
             }
         } else {
@@ -890,6 +1196,7 @@ impl HotList {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
+        hit
     }
 
     /// Local mark that ALSO wakes parked pops (transaction commit / DLQ move / any
@@ -897,7 +1204,7 @@ impl HotList {
     /// group ring, wakes on a vuoto→pending transition, and (with peers) queues a
     /// coalesced mesh dirty hint (§5).
     pub fn mark_local(&self, qkey: &str, partition: &str, count: u32, now_ms: i64) {
-        self.mark_inner(qkey, partition, count, now_ms, true, true);
+        self.mark_inner(qkey, partition, count, now_ms, true, true, None);
     }
 
     /// Local mark WITHOUT the internal wake — for the push handler, which already
@@ -905,13 +1212,38 @@ impl HotList {
     /// marked). Still queues the mesh dirty hint (with peers). Avoids the redundant
     /// second notify_waiters per push (the flag-on push-RTT regression).
     pub fn mark_local_quiet(&self, qkey: &str, partition: &str, count: u32, now_ms: i64) {
-        self.mark_inner(qkey, partition, count, now_ms, true, false);
+        self.mark_inner(qkey, partition, count, now_ms, true, false, None);
     }
 
     /// Remote mark (a peer's mesh dirty hint): same effect, wakes parked pops (the
     /// receiving broker has no other wake for this), no re-broadcast (§5).
     pub fn mark_remote(&self, qkey: &str, partition: &str, now_ms: i64) {
-        self.mark_inner(qkey, partition, 1, now_ms, false, true);
+        self.mark_inner(qkey, partition, 1, now_ms, false, true, None);
+    }
+
+    /// One partition made pending for ONE group with no write behind it — a
+    /// per-partition seek. Marks that group's ring, wakes, and queues a
+    /// group-carrying hint: the targeted twin of [`Self::mark_local`], for the case
+    /// where the queue-wide walk-and-broadcast would be 9,563 partitions of work to
+    /// repair one cursor. Returns whether this broker held a ring for the group.
+    ///
+    /// (The per-partition seek that calls it is A2 in PLAN_HOTLIST_FOLLOWUP.md; the
+    /// mark and its hint land first because the seek path is only cheap once they exist.)
+    #[allow(dead_code)]
+    pub fn mark_local_group(&self, qkey: &str, partition: &str, group: &str, now_ms: i64) -> bool {
+        self.mark_inner(qkey, partition, 1, now_ms, true, true, Some(group))
+    }
+
+    /// A peer's group-carrying hint: marks only that ring, no re-broadcast. An EMPTY
+    /// group degrades to [`Self::mark_remote`] — over-marking every ring costs one
+    /// empty SKIP LOCKED probe each, while marking a ring named "" would be a silent
+    /// no-op, so the safe direction is the wider one.
+    pub fn mark_remote_group(&self, qkey: &str, partition: &str, group: &str, now_ms: i64) -> bool {
+        if group.is_empty() {
+            self.mark_remote(qkey, partition, now_ms);
+            return true;
+        }
+        self.mark_inner(qkey, partition, 1, now_ms, false, true, Some(group))
     }
 
     /// Remote mark from a peer that sent NO tenant (a pre-Track-B build, i.e. a
@@ -933,7 +1265,7 @@ impl HotList {
         }
         if !self.tenancy {
             let qkey = crate::handlers::tenant_queue_key(crate::config::DEFAULT_TENANT, queue);
-            self.mark_inner(&qkey, partition, 1, now_ms, false, true);
+            self.mark_inner(&qkey, partition, 1, now_ms, false, true, None);
             return;
         }
         let keys: Vec<String> = match self.by_queue.lock().unwrap().get(queue) {
@@ -941,8 +1273,42 @@ impl HotList {
             None => return,
         };
         for k in keys {
-            self.mark_inner(&k, partition, 1, now_ms, false, true);
+            self.mark_inner(&k, partition, 1, now_ms, false, true, None);
         }
+    }
+
+    /// Group-carrying hint from a peer that sent NO tenant. Same two-lane contract as
+    /// [`Self::mark_remote_all_tenants`] — tenancy OFF ⇒ one DEFAULT_TENANT key and no
+    /// scan; tenancy ON ⇒ fan out over the `by_queue` index only, never over `queues`,
+    /// because this runs on the mesh INBOUND task once per frame item. Returns whether
+    /// ANY tenant held a ring for the group.
+    pub fn mark_remote_group_all_tenants(
+        &self,
+        queue: &str,
+        partition: &str,
+        group: &str,
+        now_ms: i64,
+    ) -> bool {
+        if !self.enabled || queue.is_empty() || partition.is_empty() {
+            return false;
+        }
+        if group.is_empty() {
+            self.mark_remote_all_tenants(queue, partition, now_ms);
+            return true;
+        }
+        if !self.tenancy {
+            let qkey = crate::handlers::tenant_queue_key(crate::config::DEFAULT_TENANT, queue);
+            return self.mark_inner(&qkey, partition, 1, now_ms, false, true, Some(group));
+        }
+        let keys: Vec<String> = match self.by_queue.lock().unwrap().get(queue) {
+            Some(set) => set.iter().cloned().collect(),
+            None => return false,
+        };
+        let mut hit = false;
+        for k in keys {
+            hit |= self.mark_inner(&k, partition, 1, now_ms, false, true, Some(group));
+        }
+        hit
     }
 
     /// Learn a partition's id↔name (from a pop response / reseed) for the ack
@@ -1324,10 +1690,11 @@ impl HotList {
                 Verdict::Empty => {
                     // Epoch-CAS (§4): clear only if no mark raced.
                     if sub.epoch[local as usize] == r.epoch {
-                        if cfg.is_deferral() {
-                            // §6: deferral ⇒ never hard-clear; revisit with a
-                            // bounded backoff (a fixed floor here; phase 2 could
-                            // read the exact earliest-visible from the SQL meta).
+                        if cfg.is_deferral() && !ghost(&sub, local, &cfg, now_ms) {
+                            // §6: deferral ⇒ never hard-clear while the partition
+                            // may simply not be VISIBLE yet; revisit with a bounded
+                            // backoff (a fixed floor here; phase 2 could read the
+                            // exact earliest-visible from the SQL meta).
                             let back = if cfg.delayed > 0 {
                                 (cfg.delayed as i64 * 1000).clamp(REVISIT_MIN_MS, REVISIT_MAX_MS)
                             } else {
@@ -1335,8 +1702,11 @@ impl HotList {
                             };
                             sub.wheel_schedule(local, now_ms + back);
                         } else {
+                            // Plain queue, or a deferral entry the grace has
+                            // outlived (`ghost`): nothing is pending here.
                             sub.state[local as usize] = IDLE;
                             sub.batch_count[local as usize] = 0;
+                            sub.pending_since[local as usize] = 0;
                         }
                     } else {
                         // A mark raced during dispatch — re-append (§4).
@@ -1350,9 +1720,9 @@ impl HotList {
     // ------------------------------------------------------------ reseed
 
     /// Reseed policy (§8): does this (queue, group) need a keyset reseed now
-    /// (ring cold / stale beyond `interval_ms`)? Caller runs the SQL scan and
-    /// feeds rows via [`reseed_row`], then calls [`reseed_done`]. `force` marks
-    /// a fresh (never-reseeded) group as cold-start.
+    /// (ring cold / stale beyond `interval_ms`)? The caller then opens the walk with
+    /// [`Self::reseed_begin`], feeds rows via [`Self::reseed_row`] and closes it with
+    /// [`Self::reseed_finish`]. Read-only: this stamps nothing.
     pub fn reseed_due(&self, qkey: &str, group: &str, now_ms: i64, interval_ms: i64) -> bool {
         if !self.enabled {
             return false;
@@ -1363,13 +1733,16 @@ impl HotList {
         last == 0 || now_ms - last >= interval_ms
     }
 
-    /// Which scan the next reseed of this (queue, group) should run.
+    /// Open a reseed walk on this (queue, group): pick the scan and CLAIM the ring the
+    /// rows will land on. Replaces the old by-name `reseed_mode`; see [`ReseedTicket`]
+    /// for why the identity has to be carried rather than re-resolved.
     ///
-    /// [`ReseedMode::Full`] whenever the ring has never been reseeded (cold start —
-    /// a fresh ring, a restarted broker, a group whose ring was evicted or dropped
-    /// by `forget_group`, a group whose first contact bulk-seeded every partition of
-    /// the queue at once) or whenever the last full walk is older than
-    /// `full_interval_ms`. [`ReseedMode::Window`] otherwise.
+    /// The mode policy is unchanged. [`ReseedMode::Full`] whenever the ring has never
+    /// been full-walked (cold start — a fresh ring, a restarted broker, a group whose
+    /// ring was evicted or dropped by `forget_group`, a group whose first contact
+    /// bulk-seeded every partition of the queue at once) or whenever the last full walk
+    /// is older than `full_interval_ms` plus this ring's phase offset.
+    /// [`ReseedMode::Window`] otherwise.
     ///
     /// `full_interval_ms <= 0` pins every scan to Full: the exact pre-windowing
     /// behaviour, kept as a config-only kill switch (`QUEEN_HOTLIST_RESEED_FULL_MS=0`)
@@ -1377,66 +1750,136 @@ impl HotList {
     ///
     /// The cold-start test is `full_reseed_ms == 0`, NOT `reseed_ms == 0`: a ring that
     /// somehow ran a windowed pass first must still owe its full walk.
-    pub fn reseed_mode(
+    pub fn reseed_begin(
         &self,
         qkey: &str,
         group: &str,
         now_ms: i64,
         full_interval_ms: i64,
         window_ms: i64,
-    ) -> ReseedMode {
+    ) -> ReseedTicket {
         // Disabled first, and before qstate: every other hook is a no-op when the
         // hot-list is off, and `qstate` would ALLOCATE a ring for the name — the
         // shared-cell memory bound says an unpolled name must cost nothing.
-        if !self.enabled || full_interval_ms <= 0 {
-            return ReseedMode::Full;
+        if !self.enabled {
+            return ReseedTicket::disabled(qkey, group, now_ms);
         }
         let s = self.qstate(qkey);
         let ring = s.group(group, self.shards);
-        let last_full = *ring.full_reseed_ms.lock().unwrap();
-        if last_full == 0 || now_ms - last_full >= full_interval_ms + ring.reseed_jitter_ms {
+        let mode = if full_interval_ms <= 0 {
             ReseedMode::Full
         } else {
-            ReseedMode::Window(window_ms)
+            let last_full = *ring.full_reseed_ms.lock().unwrap();
+            if last_full == 0
+                || now_ms - last_full >= full_interval_ms + ring.jitter_ms(full_interval_ms)
+            {
+                ReseedMode::Full
+            } else {
+                ReseedMode::Window(window_ms)
+            }
+        };
+        ReseedTicket::new(qkey, group, s, ring, mode, now_ms)
+    }
+
+    /// A ticket pinned to Full whatever the clocks say — the seek / group-delete repair
+    /// path, whose whole reason to exist is that a cursor moved backwards and no
+    /// windowed scan can see it.
+    pub fn reseed_begin_full(&self, qkey: &str, group: &str, now_ms: i64) -> ReseedTicket {
+        if !self.enabled {
+            return ReseedTicket::disabled(qkey, group, now_ms);
         }
+        let s = self.qstate(qkey);
+        let ring = s.group(group, self.shards);
+        ReseedTicket::new(qkey, group, s, ring, ReseedMode::Full, now_ms)
+    }
+
+    /// A3: a durable repair marker (`queen.hotlist_repairs`, published by the seek and
+    /// consumer-group-delete SQL) says a cursor of this (queue, group) moved BACKWARDS
+    /// on some broker. Put the ring back where a cold start would leave it — owing a
+    /// full walk, and owing it now — so the repair does not wait for the 300s full
+    /// cadence on a broker whose mesh hint was dropped.
+    ///
+    /// It only ever flips the two clocks; the walk itself belongs to the background
+    /// floor, which already owns the "one pooled client at a time" discipline.
+    ///
+    /// NEVER allocates. A marker naming a (queue, group) this broker holds no ring for
+    /// is correctly ignored: that group has no ring precisely because nothing here polls
+    /// it, and it reseeds cold on first contact (§8). Allocating would let one tenant's
+    /// seek loop pin per-group state on every broker of a shared cell.
+    ///
+    /// `reseed_ms = 1`, not 0, is load-bearing: 0 is the never-reseeded sentinel and
+    /// `periodic_reseed_due` skips it deliberately (cold start is the pop path's job,
+    /// and claiming it here would be the boot-time scan storm the phase offsets exist to
+    /// avoid). A zero would therefore defer the repair until the next pop — which on a
+    /// group whose consumers are all parked in a long poll is exactly the stall being
+    /// repaired. Backdated to 1, the 2s floor loop claims the ring on its next tick.
+    ///
+    /// Returns whether a ring was found, so the caller can report what it repaired.
+    pub fn request_full_walk(&self, qkey: &str, group: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let Some(s) = self.qstate_existing(qkey) else {
+            return false;
+        };
+        // Non-creating lookup, for the same reason the group-scoped mark uses one.
+        let Some(ring) = s.groups.lock().unwrap().get(group).cloned() else {
+            return false;
+        };
+        *ring.full_reseed_ms.lock().unwrap() = 0;
+        *ring.reseed_ms.lock().unwrap() = 1;
+        true
     }
 
     /// Queue a coalesced mesh dirty hint for (queue, partition) without touching the
     /// local ring — the peers' half of a reseed that discovered pendingness no push
     /// created (a backward seek). Same bounded set and same no-peers fast path as the
-    /// push-path hint in [`Self::mark_inner`]; the frame carries no consumer group, so
-    /// a peer marks the partition on every ring it holds for that queue. That is an
-    /// over-mark by construction and costs at most one empty SKIP LOCKED probe each
-    /// (§1 "stale in eccesso") — the alternative, a new frame type carrying the group,
-    /// would be dropped outright by any peer still on an older binary.
-    pub fn note_dirty(&self, qkey: &str, partition: &str) {
+    /// push-path hint in [`Self::mark_inner`].
+    ///
+    /// `group` scopes the hint exactly as it scopes a mark: `Some(g)` tells a peer that
+    /// only `g`'s ring is affected, which is what a seek actually did; `None` is the
+    /// queue-wide over-mark, costing a peer at most one empty SKIP LOCKED probe per
+    /// ring (§1 "stale in eccesso"). The field rides the EXISTING frame as an optional
+    /// JSON key, so a peer on an older binary simply ignores it and does the over-mark
+    /// it always did — a new frame type would have been dropped outright.
+    pub fn note_dirty(&self, qkey: &str, partition: &str, group: Option<&str>) {
         if !self.enabled || !self.mesh_active || qkey.is_empty() || partition.is_empty() {
             return;
         }
         let mut d = self.dirty.lock().unwrap();
         if d.len() < 200_000 {
-            d.insert((qkey.into(), partition.into()));
+            d.insert(DirtyHint::new(qkey, partition, group));
         }
     }
 
-    /// Feed one reseed row: intern the name, remember the id, and mark the
-    /// partition pending WITHOUT broadcasting (a reseed is local discovery).
-    pub fn reseed_row(&self, qkey: &str, group: &str, id: &str, name: &str, now_ms: i64) {
-        if !self.enabled {
+    /// Feed one reseed row: intern the name, remember the id, and mark the partition
+    /// pending WITHOUT broadcasting (a reseed is local discovery).
+    ///
+    /// The row lands on the TICKET's ring, not on whatever a by-name lookup resolves to
+    /// now, so a `forget_group` mid-walk cannot make these rows the new ring's problem —
+    /// and the per-row `queues`/`groups` lookups disappear (9,563 rows × 2 mutex
+    /// acquisitions on production's full walk). `now_ms` is the ticket's start, which is
+    /// what every caller passed here anyway.
+    pub fn reseed_row(&self, ticket: &ReseedTicket, id: &str, name: &str) {
+        let (Some(s), Some(ring)) = (ticket.qstate.as_ref(), ticket.ring.as_ref()) else {
             return;
-        }
-        let cfg = self.cfg_of(qkey);
-        let s = self.qstate(qkey);
-        {
+        };
+        let now_ms = ticket.started_ms;
+        let cfg = *s.cfg.lock().unwrap();
+        // `note_id` interns the name itself, so one lock answers both.
+        let idx = {
             let mut it = s.intern.lock().unwrap();
             it.note_id(name, id);
-        }
-        let idx = s.intern.lock().unwrap().idx_of(name).unwrap();
-        let ring = s.group(group, self.shards);
+            it.intern(name)
+        };
         let sh = (idx as usize) % self.shards;
         let local = idx / self.shards as u32;
         let mut sub = ring.subs[sh].lock().unwrap();
         sub.ensure(local);
+        // PG says this partition is pending, which is the same assertion a mark
+        // makes — restart the deferral clock so an entry the floor just re-seeded
+        // is not cleared by the next empty verdict on its deferral grace.
+        sub.pending_since[local as usize] = now_ms;
         // Re-add an untracked (IDLE) partition, OR reclaim a stray INFLIGHT one:
         // an INFLIGHT entry whose pop was dropped between take_batch and checkin
         // (client disconnect) is otherwise stranded forever — a mark/promote can
@@ -1458,8 +1901,7 @@ impl HotList {
         // expiry; a released lease redelivers now. On a DEFERRAL queue the wheel
         // deadline IS the visibility cut (delayed/window), so it is left untouched.
         // READY is already claimable.
-        let s = sub.state[local as usize];
-        match s {
+        match sub.state[local as usize] {
             IDLE | INFLIGHT => {
                 if cfg.delayed > 0 {
                     sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + pad_ms());
@@ -1512,7 +1954,7 @@ impl HotList {
             };
             for (gname, ring) in groups {
                 let last = *ring.reseed_ms.lock().unwrap();
-                if last != 0 && now_ms - last >= interval_ms + ring.reseed_jitter_ms {
+                if last != 0 && now_ms - last >= interval_ms + ring.jitter_ms(interval_ms) {
                     out.push(ReseedDue { qkey: qname.clone(), group: gname });
                 }
             }
@@ -1557,7 +1999,10 @@ impl HotList {
         (oldest_ms.max(0.0), depth)
     }
 
-    pub fn ring_sizes(&self) -> Vec<RingSize> {
+    /// F1: `now_ms` is the clock the two ages are taken against — a ring that has never
+    /// been walked in a given mode reports -1 rather than a huge age, so "never" and
+    /// "long ago" stay distinguishable in the log line.
+    pub fn ring_sizes(&self, now_ms: i64) -> Vec<RingSize> {
         let queues: Vec<(String, Arc<QueueState>)> = {
             self.queues
                 .lock()
@@ -1585,36 +2030,108 @@ impl HotList {
                     ready += sg.len_ready;
                     wheel += sg.wheel.len();
                 }
+                let age = |stamp: i64| if stamp == 0 { -1 } else { (now_ms - stamp).max(0) };
+                let full_age_ms = age(*ring.full_reseed_ms.lock().unwrap());
+                let reseed_age_ms = age(*ring.reseed_ms.lock().unwrap());
                 out.push(RingSize {
                     tenant: tenant.to_string(),
                     queue: queue.to_string(),
                     group: gname,
                     ready,
                     wheel,
+                    full_age_ms,
+                    reseed_age_ms,
                 });
             }
         }
         out
     }
 
-    /// Mark this (queue, group) reseeded at `now_ms` (resets the interval clock)
-    /// and wake parked pops (the reseed may have populated the ring).
-    /// Stamp a completed reseed. `was_full` also advances the full-walk clock, which
-    /// is what schedules the next one; a windowed pass must never advance it, or the
-    /// classes only a full walk can see would be deferred forever.
-    pub fn reseed_done(&self, qkey: &str, group: &str, now_ms: i64, was_full: bool) {
-        if !self.enabled {
-            return;
+    /// Close a reseed walk: stamp the clocks, count the pass, and wake parked pops (the
+    /// walk may have populated the ring). Consumes the ticket, so a walk cannot stamp
+    /// twice. `ok` = every page came back without a SQL error.
+    ///
+    /// The stamp lands only if the ring is still the one the walk started on. A stamp is
+    /// not evidence, it is a CLAIM OF COVERAGE — "this ring has been walked" — and a ring
+    /// created after the walk began has no coverage. Dropping the claim leaves its
+    /// `full_reseed_ms` at 0, so its very next [`Self::reseed_begin`] is Full and it
+    /// cold-starts: exactly what `forget_group` intends. The rows already fed are NOT
+    /// rolled back — they went to the ticket's own ring, which after a forget is
+    /// unreachable and dies with the last Arc.
+    ///
+    /// `mode.is_full() && ok` is what advances the full-walk clock, which is what
+    /// schedules the next one; a windowed pass must never advance it, or the classes
+    /// only a full walk can see would be deferred forever. A FAILED full walk likewise
+    /// leaves it, so the ring stays pinned to Full and keeps retrying (B2) — the
+    /// conservative direction, now at least counted in `reseeds_failed`.
+    ///
+    /// Returns whether the stamp landed.
+    pub fn reseed_finish(&self, ticket: ReseedTicket, ok: bool) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (Some(s), Some(ring)) = (ticket.qstate.as_ref(), ticket.ring.as_ref()) else {
+            return false;
+        };
+        // NON-creating lookup, on the ticket's OWN QueueState: creating here would
+        // resurrect a forgotten ring carrying a fresh stamp, which is precisely the bug.
+        let current = s.groups.lock().unwrap().get(&*ticket.group).cloned();
+        let same = matches!(&current, Some(r) if Arc::ptr_eq(r, ring));
+        if !same {
+            self.reseeds_dropped.fetch_add(1, Relaxed);
+            let (tenant, queue) = crate::handlers::split_tenant_queue(&ticket.qkey);
+            tracing::warn!(
+                target: "hotlist",
+                tenant = %tenant,
+                queue = %queue,
+                group = %ticket.group,
+                full = ticket.mode.is_full(),
+                "reseed stamp dropped: the ring was replaced mid-walk (the new one still owes its full walk)"
+            );
+            self.wake(&ticket.qkey);
+            return false;
         }
-        let s = self.qstate(qkey);
-        let ring = s.group(group, self.shards);
-        *ring.reseed_ms.lock().unwrap() = now_ms;
-        if was_full {
-            *ring.full_reseed_ms.lock().unwrap() = now_ms;
+        *ring.reseed_ms.lock().unwrap() = ticket.started_ms;
+        if ticket.mode.is_full() {
+            if ok {
+                *ring.full_reseed_ms.lock().unwrap() = ticket.started_ms;
+            }
+            self.reseeds_full.fetch_add(1, Relaxed);
+        } else {
+            self.reseeds_window.fetch_add(1, Relaxed);
         }
-        self.reseeds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.wake(qkey);
+        if ok {
+            ring.reseed_fail_streak.store(0, Relaxed);
+        } else {
+            self.reseeds_failed.fetch_add(1, Relaxed);
+            // B2: the ring is now pinned to Full until a walk succeeds. Say so —
+            // periodically, not per failure (see `reseed_fail_warns`) — and do NOT fall
+            // back to the windowed scan, which would trade a loud stall for a quiet
+            // blindness to exactly the classes only the full walk can see.
+            let streak = ring.reseed_fail_streak.fetch_add(1, Relaxed) + 1;
+            if reseed_fail_warns(streak) {
+                let (tenant, queue) = crate::handlers::split_tenant_queue(&ticket.qkey);
+                tracing::warn!(
+                    target: "hotlist",
+                    tenant = %tenant,
+                    queue = %queue,
+                    group = %ticket.group,
+                    full = ticket.mode.is_full(),
+                    consecutive_failures = streak,
+                    "reseed walk keeps failing; this ring stays pinned to the FULL walk \
+                     until one succeeds, so nothing it alone can discover is being found"
+                );
+            }
+        }
+        self.wake(&ticket.qkey);
+        true
+    }
+
+    /// F1: what the single `reseeds` counter used to report, for anyone who wants the
+    /// old number (the log line still prints it as `reseeds_delta`, which it computes
+    /// from the two deltas so the sum and its parts come from one read each).
+    #[allow(dead_code)]
+    pub fn reseeds_total(&self) -> u64 {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.reseeds_full.load(Relaxed) + self.reseeds_window.load(Relaxed)
     }
 
     // -------------------------------------------------------- background
@@ -1724,9 +2241,14 @@ impl HotList {
     /// (014_consumer_groups.sql) and the `seeded_groups` purge beside it: on a shared
     /// cell `workers` is a universal group name, and one tenant's DELETE must not
     /// cold-start every other tenant's ring.
-    pub fn forget_group_all_queues(&self, tenant: &str, group: &str) {
+    ///
+    /// Returns the composite keys whose ring was actually dropped. A1: the local ring
+    /// cold-starts by itself, but the PEERS keep a stamped ring for the same group name
+    /// and no write dates the pendingness a cursor delete creates — so the caller walks
+    /// exactly these queues once more and broadcasts what it finds.
+    pub fn forget_group_all_queues(&self, tenant: &str, group: &str) -> Vec<String> {
         if !self.enabled {
-            return;
+            return Vec::new();
         }
         let queues: Vec<(String, Arc<QueueState>)> = {
             self.queues
@@ -1737,12 +2259,15 @@ impl HotList {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         };
+        let mut dropped = Vec::new();
         for (qname, s) in queues {
             let removed = s.groups.lock().unwrap().remove(group).is_some();
             if removed {
                 self.wake(&qname);
+                dropped.push(qname);
             }
         }
+        dropped
     }
 
     /// Idle eviction (shared-cell memory bound). Drop the whole `QueueState` — interning
@@ -1828,9 +2353,10 @@ impl HotList {
         self.by_queue.lock().unwrap().len()
     }
 
-    /// Drain up to `max` coalesced local dirty transitions for the mesh flusher
-    /// (§5). Returns (qkey, partition) pairs; the set is cleared.
-    pub fn drain_dirty(&self, max: usize) -> Vec<(String, String)> {
+    /// Drain up to `max` coalesced local dirty transitions for the mesh flusher (§5);
+    /// the drained entries are cleared. The hints go to the wire as they are — the
+    /// flusher never re-shapes them, so a 50k drain every 20ms costs no second Vec.
+    pub fn drain_dirty(&self, max: usize) -> Vec<DirtyHint> {
         if !self.enabled {
             return Vec::new();
         }
@@ -1838,13 +2364,11 @@ impl HotList {
         if d.is_empty() {
             return Vec::new();
         }
-        let take: Vec<(Box<str>, Box<str>)> = d.iter().take(max).cloned().collect();
+        let take: Vec<DirtyHint> = d.iter().take(max).cloned().collect();
         for k in &take {
             d.remove(k);
         }
-        take.into_iter()
-            .map(|(q, p)| (String::from(q), String::from(p)))
-            .collect()
+        take
     }
 }
 
@@ -1881,6 +2405,35 @@ mod tests {
     // to isolate the ring mechanics from the DB-backed reseed.
     fn reg(h: &HotList, q: &str, g: &str) {
         h.ensure_group(q, g);
+    }
+
+    // One reseed walk exactly as data.rs runs it: claim the ring, feed the rows PG
+    // returned, stamp. Returns whether the stamp landed (B3's identity check).
+    fn walk(h: &HotList, q: &str, g: &str, now: i64, rows: &[(&str, &str)]) -> bool {
+        let t = h.reseed_begin_full(q, g, now);
+        for (id, name) in rows {
+            h.reseed_row(&t, id, name);
+        }
+        h.reseed_finish(t, true)
+    }
+
+    // …and the rows without the stamp, for the tests that only care what a row does
+    // to the ring (an unfinished ticket is simply dropped, like an abandoned walk).
+    fn walk_rows(h: &HotList, q: &str, g: &str, now: i64, rows: &[(&str, &str)]) {
+        let t = h.reseed_begin_full(q, g, now);
+        for (id, name) in rows {
+            h.reseed_row(&t, id, name);
+        }
+    }
+
+    // D1: the widest offset any ring can draw for an interval — the bound every
+    // "is it due yet" assertion has to hold for, since the phase is random per ring.
+    fn max_jitter_ms(interval_ms: i64) -> i64 {
+        (interval_ms / RESEED_JITTER_DIV).max(RESEED_JITTER_MS)
+    }
+
+    fn hint(q: &str, p: &str) -> DirtyHint {
+        DirtyHint::new(q, p, None)
     }
 
     #[test]
@@ -1955,8 +2508,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0); // no "g" ring yet → lost
         assert!(h.take_batch("q", "g", 10, u32::MAX, 0).is_empty());
         // reseed is what recovers it
-        h.reseed_row("q", "g", "id0", "p0", 0);
-        h.reseed_done("q", "g", 0, true);
+        walk(&h, "q", "g", 0, &[("id0", "p0")]);
         assert_eq!(names(&h.take_batch("q", "g", 10, u32::MAX, 0)), vec!["p0"]);
     }
 
@@ -2478,7 +3030,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0); // same partition → deduped
         h.mark_remote("q", "p1", 0); // remote → never dirty
         let d = h.drain_dirty(100);
-        assert_eq!(d, vec![("q".to_string(), "p0".to_string())]);
+        assert_eq!(d, vec![hint("q", "p0")]);
         assert!(h.drain_dirty(100).is_empty()); // drained
     }
 
@@ -2494,7 +3046,7 @@ mod tests {
         // ring is populated — a subsequent take (as a woken pop would do) sees it.
         assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 0)), vec!["p0"]);
         // the mesh dirty hint is still enqueued (peers, if any, get it).
-        assert_eq!(h.drain_dirty(10), vec![("q".to_string(), "p0".to_string())]);
+        assert_eq!(h.drain_dirty(10), vec![hint("q", "p0")]);
     }
 
     // C1 wake coalescing: a push-path (quiet) mark flags its queue for the wake tick
@@ -2567,7 +3119,7 @@ mod tests {
         // Steady state: the group has completed at least one reseed at t=100
         // (last != 0; a t=0 stamp would read as "never reseeded" and be excluded).
         let base = 100i64;
-        h.reseed_done("q", "g", base, true);
+        walk(&h, "q", "g", base, &[]);
         h.mark_local("q", "p_keep", 1, base); // a continuously-written partition
         h.mark_local("q", "p_lost", 1, base); // has backlog, about to be falsely cleared
         let c = h.take_batch("q", "g", 2, u32::MAX, base);
@@ -2588,11 +3140,15 @@ mod tests {
         // The ring is NON-empty (p_keep is ready) ⇒ the pop-path empty-ring reseed
         // can NEVER trigger. ring_sizes confirms it (and exercises the observability
         // snapshot the VM log line uses).
-        assert_eq!(h.ring_sizes()[0].ready, 1, "ring must be non-empty (p_keep ready)");
+        assert_eq!(
+            h.ring_sizes(base)[0].ready,
+            1,
+            "ring must be non-empty (p_keep ready)"
+        );
         // Not due before the interval; due after interval + the max per-group jitter,
         // regardless of the busy ring.
         assert!(h.periodic_reseed_due(base + 1_000, 30_000).is_empty());
-        let due_at = base + 30_000 + RESEED_JITTER_MS + 1;
+        let due_at = base + 30_000 + max_jitter_ms(30_000) + 1;
         assert_eq!(
             due_keys(&h.periodic_reseed_due(due_at, 30_000)),
             vec![("q".to_string(), "g".to_string())],
@@ -2600,8 +3156,7 @@ mod tests {
         );
         // The background task runs the keyset scan: reseed_row for the still-pending
         // p_lost (exactly what log_hotlist_reseed_v1 returns: last_offset>committed).
-        h.reseed_row("q", "g", "id_lost", "p_lost", due_at);
-        h.reseed_done("q", "g", due_at, true);
+        walk(&h, "q", "g", due_at, &[("id_lost", "p_lost")]);
         let got: HashSet<String> = names(&h.take_batch("q", "g", 5, u32::MAX, due_at)).into_iter().collect();
         assert!(
             got.contains("p_lost"),
@@ -2663,9 +3218,7 @@ mod tests {
     fn reseed_seeds_ring_and_sets_clock() {
         let h = hl1();
         assert!(h.reseed_due("q", "g", 1000, 30_000)); // cold
-        h.reseed_row("q", "g", "id0", "p0", 1000);
-        h.reseed_row("q", "g", "id1", "p1", 1000);
-        h.reseed_done("q", "g", 1000, true);
+        walk(&h, "q", "g", 1000, &[("id0", "p0"), ("id1", "p1")]);
         assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 1000)), vec!["p0", "p1"]);
         assert!(!h.reseed_due("q", "g", 1000, 30_000)); // just reseeded
         assert!(h.reseed_due("q", "g", 40_000, 30_000)); // stale again
@@ -2679,6 +3232,21 @@ mod tests {
     // they call, and every row either produces goes through `reseed_row`, so the
     // ring-repair behaviours above already cover the row handling for both.
 
+    // The mode the next walk WOULD run. `reseed_begin` is the only way to ask, and its
+    // ticket is a claim on the ring: dropping it unstamped is exactly the no-op an
+    // abandoned walk is.
+    fn mode_now(h: &HotList, q: &str, g: &str, now: i64, full_ms: i64, win_ms: i64) -> ReseedMode {
+        h.reseed_begin(q, g, now, full_ms, win_ms).mode()
+    }
+
+    // One completed pass in whichever mode the clocks choose; returns that mode.
+    fn pass(h: &HotList, q: &str, g: &str, now: i64, full_ms: i64, win_ms: i64) -> ReseedMode {
+        let t = h.reseed_begin(q, g, now, full_ms, win_ms);
+        let m = t.mode();
+        h.reseed_finish(t, true);
+        m
+    }
+
     #[test]
     fn reseed_mode_is_full_until_a_full_walk_has_run() {
         let h = hl1();
@@ -2686,18 +3254,19 @@ mod tests {
         // broker, an evicted ring, a group whose first contact bulk-seeded every
         // partition of the queue at once (log_pop_v1's seed INSERT) — none of those
         // partitions were necessarily written recently.
-        assert_eq!(h.reseed_mode("q", "g", 1_000, 300_000, 120_000), ReseedMode::Full);
-        // A WINDOWED pass must not satisfy that debt.
-        h.reseed_done("q", "g", 1_000, false);
+        assert_eq!(mode_now(&h, "q", "g", 1_000, 300_000, 120_000), ReseedMode::Full);
+        // A pass that did NOT complete its full walk cannot satisfy that debt either.
+        let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
+        assert!(h.reseed_finish(t, false));
         assert_eq!(
-            h.reseed_mode("q", "g", 2_000, 300_000, 120_000),
+            mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
             ReseedMode::Full,
-            "a windowed pass must never stand in for the cold-start full walk"
+            "a failed walk must never stand in for the cold-start full walk"
         );
-        // Only a full one does.
-        h.reseed_done("q", "g", 2_000, true);
+        // Only a completed full one does.
+        assert_eq!(pass(&h, "q", "g", 2_000, 300_000, 120_000), ReseedMode::Full);
         assert_eq!(
-            h.reseed_mode("q", "g", 3_000, 300_000, 120_000),
+            mode_now(&h, "q", "g", 3_000, 300_000, 120_000),
             ReseedMode::Window(120_000)
         );
     }
@@ -2708,18 +3277,18 @@ mod tests {
         // Not t=0: 0 is the "never reseeded" sentinel on both clocks, exactly as it
         // already is for reseed_due. Real callers pass now_epoch_ms().
         let base = 1_000_000;
-        h.reseed_done("q", "g", base, true);
+        walk(&h, "q", "g", base, &[]);
         // Inside the interval: windowed, whatever the ring's jitter is.
         assert_eq!(
-            h.reseed_mode("q", "g", base + 299_999, 300_000, 120_000),
+            mode_now(&h, "q", "g", base + 299_999, 300_000, 120_000),
             ReseedMode::Window(120_000)
         );
         // Past interval + the maximum jitter: full, whatever the ring's jitter is.
-        // (The bound is stated with RESEED_JITTER_MS rather than the ring's own
-        // offset because the offset is random per ring by design — the assertion
+        // (The bound is stated with the widest offset the interval admits, not the
+        // ring's own, because the offset is random per ring by design — the assertion
         // has to hold for every draw.)
         assert_eq!(
-            h.reseed_mode("q", "g", base + 300_000 + RESEED_JITTER_MS, 300_000, 120_000),
+            mode_now(&h, "q", "g", base + 300_000 + max_jitter_ms(300_000), 300_000, 120_000),
             ReseedMode::Full
         );
     }
@@ -2731,24 +3300,22 @@ mod tests {
         // pass runs far more often than the full interval.
         let h = hl1();
         let base = 1_000_000;
-        h.reseed_done("q", "g", base, true);
+        walk(&h, "q", "g", base, &[]);
         let mut t = 0;
-        for _ in 0..20 {
+        for _ in 0..30 {
             t += 30_000;
-            if h.reseed_mode("q", "g", base + t, 300_000, 120_000).is_full() {
+            if pass(&h, "q", "g", base + t, 300_000, 120_000).is_full() {
                 break;
             }
-            h.reseed_done("q", "g", base + t, false);
         }
         // Bound = interval + max jitter + one polling step: the floor only samples
         // every `interval_ms`, so the first tick at or past the deadline can be up to
         // one step late. Anything beyond that means the full clock is being moved.
         assert!(
-            t <= 300_000 + RESEED_JITTER_MS + 30_000,
+            t <= 300_000 + max_jitter_ms(300_000) + 30_000,
             "a full walk must come due within one interval (+jitter, +one step) of the \
              last one, got {t}ms of windowed passes"
         );
-        assert!(h.reseed_mode("q", "g", base + t, 300_000, 120_000).is_full());
     }
 
     #[test]
@@ -2756,20 +3323,20 @@ mod tests {
         // QUEEN_HOTLIST_RESEED_FULL_MS=0 is the config-only revert to the pre-windowing
         // behaviour. It must hold even right after a full walk.
         let h = hl1();
-        h.reseed_done("q", "g", 1_000, true);
-        assert_eq!(h.reseed_mode("q", "g", 1_001, 0, 120_000), ReseedMode::Full);
-        assert_eq!(h.reseed_mode("q", "g", 999_999, 0, 120_000), ReseedMode::Full);
+        walk(&h, "q", "g", 1_000, &[]);
+        assert_eq!(mode_now(&h, "q", "g", 1_001, 0, 120_000), ReseedMode::Full);
+        assert_eq!(mode_now(&h, "q", "g", 999_999, 0, 120_000), ReseedMode::Full);
     }
 
     #[test]
     fn reseed_mode_is_per_group_and_per_tenant() {
         let h = hl1t();
         let (a, b) = (k("t1", "orders"), k("t2", "orders"));
-        h.reseed_done(&a, "g1", 1_000, true);
+        walk(&h, &a, "g1", 1_000, &[]);
         // A full walk for one (tenant, queue, group) says nothing about any other.
-        assert_eq!(h.reseed_mode(&a, "g1", 2_000, 300_000, 120_000), ReseedMode::Window(120_000));
-        assert_eq!(h.reseed_mode(&a, "g2", 2_000, 300_000, 120_000), ReseedMode::Full);
-        assert_eq!(h.reseed_mode(&b, "g1", 2_000, 300_000, 120_000), ReseedMode::Full);
+        assert_eq!(mode_now(&h, &a, "g1", 2_000, 300_000, 120_000), ReseedMode::Window(120_000));
+        assert_eq!(mode_now(&h, &a, "g2", 2_000, 300_000, 120_000), ReseedMode::Full);
+        assert_eq!(mode_now(&h, &b, "g1", 2_000, 300_000, 120_000), ReseedMode::Full);
     }
 
     #[test]
@@ -2778,37 +3345,467 @@ mod tests {
         // with no write to date them, so peers cannot discover it from a windowed pass
         // and must be told over the existing HOTLIST_DIRTY frame.
         let h = hl1();
-        h.note_dirty("q", "p0");
-        h.note_dirty("q", "p0"); // the set coalesces
-        h.note_dirty("q", "p1");
+        h.note_dirty("q", "p0", None);
+        h.note_dirty("q", "p0", None); // the set coalesces
+        h.note_dirty("q", "p1", None);
         let mut got = h.drain_dirty(100);
         got.sort();
-        assert_eq!(
-            got,
-            vec![("q".to_string(), "p0".to_string()), ("q".to_string(), "p1".to_string())]
-        );
+        assert_eq!(got, vec![hint("q", "p0"), hint("q", "p1")]);
         assert!(h.drain_dirty(100).is_empty(), "drain clears the set");
 
         // No peers ⇒ nothing is queued at all (the single-broker fast path).
         let solo = HotList::new(true, 1, 100, false, false);
-        solo.note_dirty("q", "p0");
+        solo.note_dirty("q", "p0", None);
         assert!(solo.drain_dirty(100).is_empty());
 
         // Disabled ⇒ no-op, like every other hook.
         let off = HotList::new(false, 1, 100, true, false);
-        off.note_dirty("q", "p0");
+        off.note_dirty("q", "p0", None);
         assert!(off.drain_dirty(100).is_empty());
+    }
+
+    // ------------------------------------------------------- group-scoped hints
+    //
+    // The hint carries the SCOPE of the mark that produced it. A push means "pending
+    // for every group" and keeps sending no group at all; a seek / group-delete means
+    // "pending for THIS group", and saying so is what keeps the peers' repair from
+    // costing every other group of the queue a full ring of ghost entries.
+
+    // The two scopes are different set members: a push landing inside a seek's 20ms
+    // flush window must not be swallowed by the seek's narrower hint, nor the other way
+    // round. Both are sent, the peer applies both, and the wider one wins by being a
+    // superset — the direction that is never wrong.
+    #[test]
+    fn dirty_hints_of_different_scope_do_not_mask_each_other() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.mark_local("q", "p0", 1, 0); // the push: queue-wide
+        h.mark_local_group("q", "p0", "g", 0); // the seek: group-scoped
+        h.mark_local("q", "p0", 1, 0); // …and each scope still coalesces
+        h.mark_local_group("q", "p0", "g", 0);
+        let mut got = h.drain_dirty(100);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![DirtyHint::new("q", "p0", None), DirtyHint::new("q", "p0", Some("g"))]
+        );
+    }
+
+    #[test]
+    fn group_scoped_mark_touches_only_that_ring() {
+        let h = hl1();
+        reg(&h, "q", "g1");
+        reg(&h, "q", "g2");
+        h.mark_remote_group("q", "p0", "g1", 0);
+        assert_eq!(names(&h.take_batch("q", "g1", 5, u32::MAX, 0)), vec!["p0"]);
+        assert!(
+            h.take_batch("q", "g2", 5, u32::MAX, 0).is_empty(),
+            "a hint scoped to g1 must leave every other group's ring alone"
+        );
+        // A remote mark never re-broadcasts, group-scoped or not.
+        assert!(h.drain_dirty(10).is_empty());
+    }
+
+    // A hint must never be able to ALLOCATE per-group state — otherwise a peer, or an
+    // untrusted tenant inventing group names, pins one ring per name. It must still
+    // wake the queue gate: a partition-targeted long-poll registers no ring at all
+    // (R4), and a woken pop that finds nothing costs one in-memory short-circuit.
+    #[tokio::test]
+    async fn group_scoped_mark_never_creates_a_ring() {
+        let h = hl1();
+        let n = Notifier::new(false);
+        h.attach_notifier(n.clone());
+        reg(&h, "q", "known");
+        let n2 = n.clone();
+        let waiter =
+            tokio::spawn(async move { n2.wait_queue("q", std::time::Duration::from_secs(2)).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !h.mark_remote_group("q", "p0", "never-polled", 0),
+            "an unheld group must report a miss"
+        );
+        assert!(waiter.await.unwrap(), "the queue gate must still be woken");
+        let rings = h.ring_sizes(0);
+        assert_eq!(rings.len(), 1, "no ring may be allocated by a hint: {:?}", rings.len());
+        assert_eq!(rings[0].group, "known");
+    }
+
+    // Tenancy on, one queue name held by two tenants: a group-carrying hint from a peer
+    // that sent no tenant fans out over `by_queue` exactly like the tenant-less push
+    // hint does — and still only over the named group's rings.
+    #[test]
+    fn group_scoped_hint_from_a_tenantless_peer_fans_out() {
+        let h = hl1t();
+        for t in [TA, TB] {
+            reg(&h, &k(t, "orders"), "g");
+            reg(&h, &k(t, "orders"), "other");
+        }
+        assert!(h.mark_remote_group_all_tenants("orders", "p0", "g", 0));
+        for t in [TA, TB] {
+            assert_eq!(
+                names(&h.take_batch(&k(t, "orders"), "g", 5, u32::MAX, 0)),
+                vec!["p0"],
+                "every tenant holding the name must be marked"
+            );
+            assert!(
+                h.take_batch(&k(t, "orders"), "other", 5, u32::MAX, 0).is_empty(),
+                "…and only on the group the hint named"
+            );
+        }
+        // A name no tenant holds is a pure miss — no scan, nothing marked.
+        assert!(!h.mark_remote_group_all_tenants("no-such-queue", "p0", "g", 0));
+    }
+
+    // Degradation: an EMPTY group is not a ring named "" — it is a peer whose field we
+    // could not read, so it must widen to the queue-wide mark, never narrow to nothing.
+    #[test]
+    fn an_empty_group_on_a_hint_degrades_to_the_queue_wide_mark() {
+        let h = hl1();
+        reg(&h, "q", "g1");
+        reg(&h, "q", "g2");
+        assert!(h.mark_remote_group("q", "p0", "", 0));
+        assert_eq!(names(&h.take_batch("q", "g1", 5, u32::MAX, 0)), vec!["p0"]);
+        assert_eq!(names(&h.take_batch("q", "g2", 5, u32::MAX, 0)), vec!["p0"]);
     }
 
     #[test]
     fn reseed_mode_never_creates_a_ring_it_did_not_need() {
-        // reseed_mode is called on the pop path before the scan; it must not be a way
+        // reseed_begin is called on the pop path before the scan; it must not be a way
         // for an unpolled name to allocate state (the shared-cell memory bound).
         let h = hl1();
         assert_eq!(h.queue_count(), 0);
         let off = HotList::new(false, 1, 100, true, false);
-        assert_eq!(off.reseed_mode("q", "g", 1_000, 300_000, 120_000), ReseedMode::Full);
+        let t = off.reseed_begin("q", "g", 1_000, 300_000, 120_000);
+        assert_eq!(t.mode(), ReseedMode::Full);
         assert_eq!(off.queue_count(), 0, "disabled must allocate nothing");
+        // …and a disabled ticket is inert end to end: no row lands, no stamp does.
+        off.reseed_row(&t, "id0", "p0");
+        assert!(!off.reseed_finish(t, true));
+        assert_eq!(off.queue_count(), 0);
+    }
+
+    // ------------------------------------------------------------ B3: the ticket
+    //
+    // The walk used to re-resolve (queue, group) by NAME on every row and again when it
+    // stamped. A `forget_group` + recreate mid-walk therefore landed the stamp on a ring
+    // that had never been walked, and that ring then skipped its cold start for up to
+    // one full interval — the delete's whole purpose, silently undone.
+
+    // (full, window, failed, dropped) in one read.
+    fn counters(h: &HotList) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            h.reseeds_full.load(Relaxed),
+            h.reseeds_window.load(Relaxed),
+            h.reseeds_failed.load(Relaxed),
+            h.reseeds_dropped.load(Relaxed),
+        )
+    }
+
+    #[test]
+    fn reseed_finish_stamps_when_the_ring_is_unchanged() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
+        assert!(t.mode().is_full(), "a cold ring owes a full walk");
+        h.reseed_row(&t, "id0", "p0");
+        assert!(h.reseed_finish(t, true), "an untouched ring must take its stamp");
+        assert_eq!(
+            mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Window(120_000),
+            "the full walk is now on the clock"
+        );
+        assert_eq!(counters(&h), (1, 0, 0, 0));
+    }
+
+    #[test]
+    fn reseed_finish_drops_the_stamp_when_the_ring_was_forgotten() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
+        h.reseed_row(&t, "id0", "p0");
+        // The group is deleted and immediately re-registered by the next poll.
+        h.forget_group("q", "g");
+        h.ensure_group("q", "g");
+        assert!(
+            !h.reseed_finish(t, true),
+            "a ring created after the walk began has no coverage to claim"
+        );
+        assert_eq!(
+            mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Full,
+            "the new ring must still cold-start"
+        );
+        assert_eq!(counters(&h), (0, 0, 0, 1), "the pass counts as dropped and nothing else");
+    }
+
+    #[test]
+    fn reseed_finish_drops_the_stamp_after_forget_group_all_queues() {
+        let h = hl1();
+        let qk = k(TA, "orders");
+        reg(&h, &qk, "workers");
+        let t = h.reseed_begin(&qk, "workers", 1_000, 300_000, 120_000);
+        h.forget_group_all_queues(TA, "workers");
+        h.ensure_group(&qk, "workers");
+        assert!(!h.reseed_finish(t, true));
+        assert_eq!(mode_now(&h, &qk, "workers", 2_000, 300_000, 120_000), ReseedMode::Full);
+    }
+
+    // The rows are NOT rolled back on a dropped stamp — they went to the ring the walk
+    // started on, which after the forget is unreachable and dies with the last Arc. What
+    // must not happen is the new ring inheriting them: a mark is evidence from a snapshot
+    // the delete has since invalidated.
+    #[test]
+    fn reseed_rows_land_on_the_ticket_ring_not_the_recreated_one() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let t = h.reseed_begin_full("q", "g", 0);
+        h.reseed_row(&t, "id0", "p0"); // before the delete
+        h.forget_group("q", "g");
+        h.ensure_group("q", "g");
+        h.reseed_row(&t, "id1", "p1"); // after it — same ticket, dead ring
+        h.reseed_finish(t, true);
+        assert!(
+            h.take_batch("q", "g", 5, u32::MAX, 0).is_empty(),
+            "no row from the abandoned walk may reach the recreated ring"
+        );
+    }
+
+    // A failed walk still throttles: NOT stamping the cadence clock would turn a
+    // database refusing this query into a hot retry loop on the pop path. The full clock
+    // stays put, so the ring keeps retrying the full walk — the conservative direction,
+    // and the one B2 asks to be made visible rather than "fixed" into blindness.
+    #[test]
+    fn a_failed_full_walk_still_stamps_the_cadence_clock_but_not_the_full_clock() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
+        assert!(h.reseed_finish(t, false), "the stamp lands: the ring is unchanged");
+        assert!(!h.reseed_due("q", "g", 1_500, 30_000), "the cadence clock moved");
+        assert_eq!(
+            mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Full,
+            "the full clock did not: the next attempt is full again"
+        );
+    }
+
+    // ---------------------------------------------------------------- F1 counters
+
+    #[test]
+    fn per_mode_counters_split_full_and_window() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        assert!(pass(&h, "q", "g", 1_000, 300_000, 120_000).is_full());
+        assert_eq!(counters(&h), (1, 0, 0, 0));
+        assert_eq!(
+            pass(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Window(120_000)
+        );
+        assert_eq!(counters(&h), (1, 1, 0, 0));
+        assert_eq!(h.reseeds_total(), 2, "the old single counter is the sum");
+    }
+
+    #[test]
+    fn a_failed_walk_counts_in_its_mode_and_in_failed() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
+        h.reseed_finish(t, false);
+        assert_eq!(
+            counters(&h),
+            (1, 0, 1, 0),
+            "a failed pass is still a full pass attempted — and is what B2 counts"
+        );
+    }
+
+    #[test]
+    fn a_dropped_stamp_counts_only_as_dropped() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
+        h.forget_group("q", "g");
+        h.ensure_group("q", "g");
+        h.reseed_finish(t, true);
+        assert_eq!(counters(&h), (0, 0, 0, 1), "nothing was stamped, so no mode counted it");
+        assert_eq!(h.reseeds_total(), 0);
+    }
+
+    // The per-ring log line has to answer "when was this ring last repaired" without
+    // arithmetic, and to keep "never" distinguishable from "long ago".
+    #[test]
+    fn ring_sizes_reports_the_age_since_the_last_full_walk() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let r = &h.ring_sizes(1_000)[0];
+        assert_eq!((r.full_age_ms, r.reseed_age_ms), (-1, -1), "never walked");
+        walk(&h, "q", "g", 1_000, &[]);
+        let r = &h.ring_sizes(1_500)[0];
+        assert_eq!((r.full_age_ms, r.reseed_age_ms), (500, 500));
+        // A windowed pass resets the cadence age and leaves the full one growing —
+        // which is exactly the pair that says "this ring is in windowed mode".
+        assert_eq!(
+            pass(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Window(120_000)
+        );
+        let r = &h.ring_sizes(2_500)[0];
+        assert_eq!((r.full_age_ms, r.reseed_age_ms), (1_500, 500));
+    }
+
+    // ------------------------------------------------------------ B2 failure streak
+
+    // The re-warn shape. A database refusing this query refuses it for every ring, so
+    // the sequence has to keep the count visible without turning 63 rings into a log
+    // flood every 30s.
+    #[test]
+    fn a_failing_walk_warns_on_a_streak_and_then_only_on_doublings() {
+        assert!(!reseed_fail_warns(1), "one failure is a hiccup, not a stall");
+        assert!(!reseed_fail_warns(2));
+        assert!(reseed_fail_warns(3), "the first line, ~90s into a ring not reseeding");
+        assert!(!reseed_fail_warns(5), "…then quiet until the count doubles");
+        assert!(reseed_fail_warns(8));
+        assert!(reseed_fail_warns(1024), "and it never goes fully silent");
+    }
+
+    // The streak is per RING, not global: a queue whose reseed query times out while
+    // every other queue's succeeds is exactly what an aggregate hides.
+    #[test]
+    fn the_failure_streak_is_per_ring_and_resets_on_success() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let h = hl1();
+        reg(&h, "q", "g");
+        reg(&h, "q", "other");
+        let streak = |g: &str| {
+            h.queues.lock().unwrap()["q"].groups.lock().unwrap()[g]
+                .reseed_fail_streak
+                .load(Relaxed)
+        };
+        for i in 0..3 {
+            let t = h.reseed_begin("q", "g", 1_000 + i, 300_000, 120_000);
+            h.reseed_finish(t, false);
+        }
+        assert_eq!(streak("g"), 3, "three consecutive failures on this ring");
+        assert_eq!(streak("other"), 0, "…and none on the queue's other ring");
+        let t = h.reseed_begin("q", "g", 2_000, 300_000, 120_000);
+        h.reseed_finish(t, true);
+        assert_eq!(streak("g"), 0, "one success closes the stall");
+    }
+
+    // ------------------------------------------------------- A3 repair markers
+
+    // A durable repair marker is the floor under a mesh hint the peer never received.
+    // Honouring it means putting the ring back where a cold start would leave it: owing
+    // a FULL walk, because the pendingness a moved cursor creates has no write to date
+    // it and no windowed pass can find it.
+    #[test]
+    fn request_full_walk_puts_the_ring_back_into_full_mode() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        walk(&h, "q", "g", 1_000, &[]);
+        assert_eq!(
+            mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
+            ReseedMode::Window(120_000),
+            "a freshly full-walked ring is windowed"
+        );
+        assert!(h.request_full_walk("q", "g"));
+        assert_eq!(mode_now(&h, "q", "g", 2_000, 300_000, 120_000), ReseedMode::Full);
+    }
+
+    // The regression guard for `reseed_ms = 1` instead of 0. Zero is the never-reseeded
+    // sentinel that `periodic_reseed_due` deliberately skips (cold start belongs to the
+    // pop path), so a zero here would defer the repair until the next pop — and a group
+    // whose consumers are all parked in a long poll is precisely the stall being
+    // repaired. Silent if you get it wrong, hence the explicit test.
+    #[test]
+    fn request_full_walk_makes_the_background_floor_claim_the_ring_now() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        let base = 1_000_000;
+        walk(&h, "q", "g", base, &[]);
+        assert!(
+            h.periodic_reseed_due(base + 1_000, 30_000).is_empty(),
+            "just reseeded: not due"
+        );
+        h.request_full_walk("q", "g");
+        assert_eq!(
+            due_keys(&h.periodic_reseed_due(base + 1_000, 30_000)),
+            vec![("q".to_string(), "g".to_string())],
+            "the 2s floor loop must claim it on its next tick, not at the next pop"
+        );
+    }
+
+    // A marker naming something this broker does not poll must cost nothing and, above
+    // all, allocate nothing: the table is written by any tenant's seek, and a repair that
+    // could create per-group state would let one of them pin memory on every broker of a
+    // shared cell.
+    #[test]
+    fn request_full_walk_never_creates_a_ring_it_did_not_hold() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        assert!(!h.request_full_walk("q", "unknown-group"), "no ring, nothing repaired");
+        assert!(!h.request_full_walk("unknown-queue", "g"));
+        assert_eq!(h.queue_count(), 1, "no QueueState was allocated");
+        assert_eq!(h.ring_sizes(0).len(), 1, "and no ring was");
+        // Disabled ⇒ no-op, like every other hook.
+        let off = HotList::new(false, 1, 100, true, false);
+        assert!(!off.request_full_walk("q", "g"));
+    }
+
+    // ------------------------------------------------------------------- D1 jitter
+
+    // Every ring cold-starts together after a restart and is then stamped at the same
+    // instant, so the de-phasing is the ONLY thing that keeps the full walks from firing
+    // as one burst per period. A constant 15s offset spread a 30s cadence well and a
+    // 300s one barely at all (63 production rings inside one 15s band, ~4 walks/s of the
+    // 49ms query); the span now scales with the interval.
+    #[test]
+    fn full_walk_de_phasing_scales_with_the_full_interval() {
+        let h = hl1();
+        let base = 1_000_000i64;
+        let rings = 200;
+        for i in 0..rings {
+            walk(&h, &format!("q{i}"), "g", base, &[]);
+        }
+        let full_at = |at: i64| {
+            (0..rings)
+                .filter(|i| mode_now(&h, &format!("q{i}"), "g", at, 300_000, 120_000).is_full())
+                .count()
+        };
+        // Nobody early, everybody by the widest offset the interval admits.
+        assert_eq!(full_at(base + 299_999), 0, "no ring may come due before its interval");
+        assert_eq!(
+            full_at(base + 300_000 + max_jitter_ms(300_000)),
+            rings,
+            "every ring must come due within interval + max jitter"
+        );
+        // The point of D1: the spread is no longer capped at the 30s cadence's constant.
+        // With 200 rings drawing uniform phases, all of them landing inside the old 15s
+        // band has probability 0.25^200 — this is a behavioural assertion, not a flaky one.
+        assert!(
+            full_at(base + 300_000 + RESEED_JITTER_MS) < rings,
+            "the full walks must spread past the old constant band"
+        );
+    }
+
+    // …and the 30s cadence keeps EXACTLY its old de-phasing: the scaled span floors at
+    // RESEED_JITTER_MS, which for a 30s interval is what it always was.
+    #[test]
+    fn the_reseed_cadence_keeps_its_original_jitter_band() {
+        let h = hl1();
+        let base = 1_000_000i64;
+        let rings = 200;
+        for i in 0..rings {
+            walk(&h, &format!("q{i}"), "g", base, &[]);
+        }
+        assert_eq!(max_jitter_ms(30_000), RESEED_JITTER_MS);
+        assert!(
+            h.periodic_reseed_due(base + 30_000 - 1, 30_000).is_empty(),
+            "no ring is due before the interval"
+        );
+        assert_eq!(
+            h.periodic_reseed_due(base + 30_000 + RESEED_JITTER_MS, 30_000).len(),
+            rings,
+            "every ring is due within interval + the original 15s band"
+        );
     }
 
     #[test]
@@ -2844,8 +3841,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0); // epoch bump only — still not in the ring
         assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(), "mark cannot re-add INFLIGHT");
         // The reseed floor re-adds the still-pending partition (last_offset>committed).
-        h.reseed_row("q", "g", "id0", "p0", 0);
-        h.reseed_done("q", "g", 0, true);
+        walk(&h, "q", "g", 0, &[("id0", "p0")]);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 0)),
             vec!["p0"],
@@ -2864,8 +3860,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0); // p0 INFLIGHT, epoch snapshot
         // reseed reclaims it back to READY while the "pop" is still in flight.
-        h.reseed_row("q", "g", "id0", "p0", 0);
-        h.reseed_done("q", "g", 0, true);
+        walk(&h, "q", "g", 0, &[("id0", "p0")]);
         // A second pop can now take it (redundant probe — allowed).
         assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 0)), vec!["p0"]);
         // The original pop finally checks in Took: state is INFLIGHT (the 2nd pop's),
@@ -2913,7 +3908,7 @@ mod tests {
         // reclaim the stale wheel entry — a secondary backstop below the bounded
         // re-probe, for entries stranded by other paths (e.g. a dropped INFLIGHT
         // pop) that the lease cap does not cover.
-        h.reseed_row("q", "g", "id0", "p0", 500);
+        walk_rows(&h, "q", "g", 500, &[("id0", "p0")]);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 500)),
             vec!["p0"],
@@ -2932,7 +3927,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0); // parked in the wheel at 5000ms (window)
         assert!(h.take_batch("q", "g", 1, u32::MAX, 1_000).is_empty());
         // Reseed must leave the deferral deadline intact.
-        h.reseed_row("q", "g", "id0", "p0", 1_000);
+        walk_rows(&h, "q", "g", 1_000, &[("id0", "p0")]);
         assert!(
             h.take_batch("q", "g", 1, u32::MAX, 1_000).is_empty(),
             "deferral wheel entry must stay parked until its window is due"
@@ -2964,8 +3959,8 @@ mod tests {
         let h = hl1();
         reg(&h, "q", "g1");
         reg(&h, "q", "g2");
-        h.reseed_done("q", "g1", 1000, true);
-        h.reseed_done("q", "g2", 1000, true);
+        walk(&h, "q", "g1", 1000, &[]);
+        walk(&h, "q", "g2", 1000, &[]);
         // A stale ready entry that survived (a consumed partition the delete removes).
         h.mark_local("q", "p0", 1, 1000);
         assert!(h.has_ready("q", "g1", 1000));
@@ -3147,7 +4142,7 @@ mod tests {
         let base = 100i64;
         for t in [TA, TB] {
             reg(&h, &k(t, "orders"), "workers");
-            h.reseed_done(&k(t, "orders"), "workers", base, true);
+            walk(&h, &k(t, "orders"), "workers", base, &[]);
         }
         assert!(h.periodic_reseed_due(base + 1_000, 30_000).is_empty());
         let due_at = base + 30_000 + RESEED_JITTER_MS + 1;
@@ -3483,6 +4478,176 @@ mod tests {
         assert!(!h.min_pop_wait_in_play(), "deferrals must not arm the pop wait");
         h.set_queue_cfg("c", 0, 0, 10, 1);
         assert!(h.min_pop_wait_in_play(), "a configured window arms it");
+    }
+
+    // ---------------------------------------------------------------- E2
+    // A whole cycle of main's background loops over one simulated minute: the 50ms
+    // wheel tick, a consumer claiming whatever the ring offers, and the SQL coming
+    // back with nothing. Returns how many claims the ring handed out.
+    fn drive_empty(h: &HotList, from_ms: i64, to_ms: i64) -> usize {
+        let mut claims = 0;
+        let mut t = from_ms;
+        while t < to_ms {
+            h.tick(t);
+            let c = h.take_batch("q", "g", 8, u32::MAX, t);
+            if !c.is_empty() {
+                claims += 1;
+                h.checkin(
+                    "q",
+                    "g",
+                    c.iter()
+                        .map(|x| CheckinResult {
+                            name: x.name.clone(),
+                            epoch: x.epoch,
+                            verdict: Verdict::Empty,
+                            drained: false,
+                        })
+                        .collect(),
+                    t,
+                    true,
+                    60_000,
+                );
+            }
+            t += 50;
+        }
+        claims
+    }
+
+    // E2 (PLAN_HOTLIST_FOLLOWUP.md). The mesh dirty hint carries no consumer group, so
+    // a peer's seek broadcast marks the partition on EVERY ring the peer holds for the
+    // queue — including rings with nothing pending. On a plain queue that ghost costs
+    // one empty SKIP LOCKED probe and clears. On a DEFERRAL queue the empty verdict
+    // used to revisit unconditionally, which made the entry permanent: measured here
+    // before the fix, 1,100 empty claims per simulated minute (~18/s, the 50ms revisit
+    // floor), still claimable an hour later, and — since `evict_idle` requires every
+    // entry IDLE — the QueueState pinned for the process lifetime.
+    #[test]
+    fn deferral_ghost_from_a_seek_broadcast_clears_and_frees_the_ring() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0, 0); // windowBuffer 5s ⇒ deferral queue
+        h.mark_remote("q", "p0", 0); // one T_HOTLIST_DIRTY_BATCH item, no data behind it
+        // The ghost is allowed its ladder — one cut plus the confirming grace — and
+        // nothing after it.
+        assert!(drive_empty(&h, 0, 30_000) <= 200, "the revisit ladder must be bounded");
+        assert_eq!(
+            drive_empty(&h, 30_000, 60_000),
+            0,
+            "a ghost must stop probing, not ping-pong READY→WHEEL forever"
+        );
+        // The consumer leaves. The reconcile sweep must now be able to reclaim the ring
+        // (the claims above kept it active, so the first sweep is its second chance).
+        h.evict_idle();
+        assert_eq!(h.evict_idle(), 1, "a queue holding only ghosts must be reclaimable");
+        assert_eq!(h.queue_count(), 0);
+    }
+
+    // …and no seek is needed to arm it: one ordinary push, delivered, left the same
+    // permanent entry (1,098 empty claims per simulated minute before the fix), so
+    // every deferral queue that had ever served a message pinned its own ring.
+    #[test]
+    fn a_drained_deferral_partition_returns_to_idle() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0, 0);
+        h.mark_local("q", "p0", 1, 0);
+        h.tick(5_100); // the window elapses
+        let c = h.take_batch("q", "g", 8, u32::MAX, 5_100);
+        assert_eq!(names(&c), vec!["p0"]);
+        h.checkin(
+            "q",
+            "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Took, drained: true }],
+            5_100,
+            true,
+            60_000,
+        );
+        assert_eq!(
+            drive_empty(&h, 5_100, 65_000),
+            1,
+            "the caught-up partition takes one confirming probe, then clears"
+        );
+        h.evict_idle();
+        assert_eq!(h.evict_idle(), 1, "a fully drained deferral queue must be reclaimable");
+    }
+
+    // The other side of the ghost test, and the reason it is dated from the last MARK
+    // and not from the claim: on a windowBuffer queue the SQL debounce measures a quiet
+    // period since the last write, so a partition under continuous writes claims EMPTY
+    // while holding data. Every mark slides `pending_since`, so such an entry keeps its
+    // place in the ring for as long as the writes last, however many empty claims it
+    // serves in between.
+    #[test]
+    fn continuous_writes_never_make_a_deferral_entry_a_ghost() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 0, 5, 0, 0);
+        let mut t = 0i64;
+        while t < 60_000 {
+            h.mark_local_quiet("q", "p0", 1, t); // the push that keeps the window unquiet
+            let claimed = h.take_batch("q", "g", 8, u32::MAX, t);
+            if !claimed.is_empty() {
+                h.checkin(
+                    "q",
+                    "g",
+                    vec![CheckinResult {
+                        name: "p0".into(),
+                        epoch: claimed[0].epoch,
+                        verdict: Verdict::Empty,
+                        drained: false,
+                    }],
+                    t,
+                    true,
+                    60_000,
+                );
+            }
+            h.tick(t);
+            t += 500;
+        }
+        h.evict_idle();
+        h.evict_idle();
+        assert_eq!(h.queue_count(), 1, "a written-to partition must stay tracked");
+        h.tick(t + 6_000);
+        assert_eq!(
+            names(&h.take_batch("q", "g", 8, u32::MAX, t + 6_000)),
+            vec!["p0"],
+            "…and must still be delivered once the window finally goes quiet"
+        );
+    }
+
+    // The broker schedules the wheel from ITS OWN clock and the SQL enforces the cut
+    // from PG's, so a single empty claim on a deferral queue can be a probe that raced
+    // the cut. One is never enough to clear an entry — the grace is one full
+    // REVISIT_MAX_MS past the cut, which is at least one confirming revisit on either
+    // queue shape (50ms floor for windowBuffer, 1s clamp for delayed).
+    #[test]
+    fn one_empty_claim_never_clears_a_deferral_entry() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        h.set_queue_cfg("q", 2, 0, 0, 0); // delayed 2s
+        h.mark_local("q", "p0", 1, 0);
+        h.tick(2_400); // mark + D + pad
+        let c = h.take_batch("q", "g", 1, u32::MAX, 2_400);
+        assert_eq!(names(&c), vec!["p0"]);
+        h.checkin(
+            "q", "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Empty, drained: false }],
+            2_400, true, 60_000,
+        );
+        h.tick(4_600);
+        let c = h.take_batch("q", "g", 1, u32::MAX, 4_600);
+        assert_eq!(names(&c), vec!["p0"], "the first empty claim must only revisit");
+        // Past cut + 2×pad + REVISIT_MAX_MS with no mark since: a ghost.
+        h.checkin(
+            "q", "g",
+            vec![CheckinResult { name: "p0".into(), epoch: c[0].epoch, verdict: Verdict::Empty, drained: false }],
+            4_600, true, 60_000,
+        );
+        h.tick(10_000);
+        assert!(
+            h.take_batch("q", "g", 1, u32::MAX, 10_000).is_empty(),
+            "the confirmed ghost clears to IDLE"
+        );
     }
 
     #[test]

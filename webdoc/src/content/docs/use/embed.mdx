@@ -135,9 +135,28 @@ one instance per cycle does the work no matter how many brokers share the databa
 
 Multiple embedded instances over one PostgreSQL are the already-supported multi-broker
 topology, minus the mesh: leases, acks, deduplication and maintenance coordinate through
-the database, and cross-instance wake-ups ride the periodic floors instead of peer frames
-(a parked pop re-polls within a second, wildcard discovery within the reseed interval,
-configuration changes within the reconcile interval).
+the database, and every cross-instance notice a broker fleet would send as a peer frame is
+a periodic read of the database instead. A parked pop re-polls within a second.
+Configuration changes land within the reconcile interval (`QUEEN_CACHE_REFRESH_INTERVAL_MS`,
+60 s). Another instance's push enters this instance's wildcard candidate ring on the
+windowed reseed, one `QUEEN_HOTLIST_RESEED_MS` (30 s) plus that ring's de-phasing offset,
+because a push is by definition a recent write.
+
+<Aside type="caution">
+One case is genuinely worse embedded than with two brokers, and it is worth knowing before
+you run a fleet. A backward seek or a consumer-group delete makes old partitions pending
+without writing anything, so the windowed reseed cannot see it. A broker peer is told over
+the mesh in milliseconds; an embedded instance has no mesh to be told on, and picks the
+repair up from a durable marker row the operation writes, polled on the reconcile interval
+(60 s, and 5 s after start before the first poll). Note which side of that this surface is
+on: seek and consumer-group delete are not exposed here, so an embedded instance only ever
+*reads* those markers. The publisher is an HTTP broker sharing the database, driven by its
+API or by [queenctl](/reference/queenctl). Lower `QUEEN_CACHE_REFRESH_INTERVAL_MS` if that
+latency matters. Everything the
+markers do not announce (a ring entry cleared in error, a claim stranded by a dropped pop)
+waits for the full reseed at `QUEEN_HOTLIST_RESEED_FULL_MS` (300 s), exactly as it does in
+the broker.
+</Aside>
 
 <Aside type="caution">
 A push answered `status: "buffered"` sits in an on-disk spool. Embedded, that spool

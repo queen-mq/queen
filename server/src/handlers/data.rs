@@ -1807,46 +1807,99 @@ pub(crate) async fn hotlist_reseed_scan(
     full_interval_ms: i64,
     window_ms: i64,
 ) {
-    let mode = hl.reseed_mode(qkey, group, now_ms, full_interval_ms, window_ms);
-    hotlist_reseed_run(hl, client, qkey, group, now_ms, mode, false).await;
+    let ticket = hl.reseed_begin(qkey, group, now_ms, full_interval_ms, window_ms);
+    // The background floor discards the outcome on purpose: a failed pass here is a
+    // ring that keeps its clocks and retries, and B2 already reports the streak from
+    // `reseed_finish` — one line per ring per failed pass would be a flood. The
+    // event-driven repairs below are the ones an operator is waiting on, and those
+    // report per call.
+    let _ = hotlist_reseed_run(hl, client, ticket, false).await;
 }
 
-// 19-wildcard-hotlist §8: a reseed that is FORCED full and that also hands its rows
-// to the mesh.
+/// What one reseed walk did. Minimal on purpose, and EXTENDED BY ADDING fields: the
+/// seek path reflects it in its HTTP response (A4) and the repair paths log it.
+pub(crate) struct ReseedOutcome {
+    /// Which scan ran. Always `Full` on the repair paths that read this today; carried
+    /// because the field set is the shared one and the periodic floor returns it too.
+    #[allow(dead_code)]
+    pub mode: crate::hotlist::ReseedMode,
+    pub rows: usize,
+    /// Every page came back without a SQL error. False means the ring was NOT repaired
+    /// — the walk stopped wherever it broke.
+    pub ok: bool,
+    /// `reseed_finish`'s identity check passed (B3). False means the ring was replaced
+    /// mid-walk, which leaves the NEW ring owing a cold-start full walk — a repair by
+    /// another route, not a lost one.
+    pub stamped: bool,
+}
+
+// 19-wildcard-hotlist §8: a reseed that is FORCED full — the repair every cursor move
+// with no write behind it owes its own ring, and (when broadcasting) the peers' rings.
 //
 // The windowed pass is sound against everything a push creates; the one thing it is
 // blind to by construction is a cursor moving BACKWARDS, which makes old partitions
 // pending with no write to date them. That is a seek (log_seek_consumer_group_v1 /
-// log_seek_partition_v1) and it is why reseed_after_seek exists at all.
+// log_seek_partition_v1) or a consumer-group delete (A1), and it is why
+// reseed_after_seek exists at all.
 //
 // Broadcasting matters because the local walk only fixes the ring of the broker that
-// served the seek. Before windowing, every peer healed within one reseed interval
+// served the request. Before windowing, every peer healed within one reseed interval
 // (≤30s) because every peer walked everything that often; with the full walk moved to
-// a slower cadence that recovery would stretch to the full interval. So the seek's own
+// a slower cadence that recovery would stretch to the full interval. So the repair's own
 // rows are pushed into the same coalescing dirty set the push path uses, and the
 // existing 20ms flusher carries them as an ordinary HOTLIST_DIRTY batch — no new frame
 // type, so a peer mid rolling-upgrade handles it exactly as it always has.
-pub(crate) async fn hotlist_reseed_full_broadcast(
+//
+// C2: `broadcast` is that half, and the caller turns it OFF under
+// QUEEN_HOTLIST_RESEED_FULL_MS=0. That knob is documented as the revert to
+// pre-windowing behaviour, and pre-windowing this fan-out did not exist — with every
+// periodic pass full again at the 30s cadence, every peer re-discovers the seek within
+// one floor exactly as it used to, so the frames buy nothing and the kill switch is
+// honest. The local walk still runs: it predates the windowing by a year.
+//
+// A failed walk is REPORTED here rather than swallowed (A4). This path is the one an
+// operator is synchronously waiting on — "replay from yesterday" — and its failure used
+// to be an HTTP 200 with no replay and nothing in the logs.
+pub(crate) async fn hotlist_reseed_full(
     hl: &crate::hotlist::HotList,
     client: &deadpool_postgres::Client,
     qkey: &str,
     group: &str,
     now_ms: i64,
-) {
-    hotlist_reseed_run(
-        hl,
-        client,
-        qkey,
-        group,
-        now_ms,
-        crate::hotlist::ReseedMode::Full,
-        true,
-    )
-    .await;
+    broadcast: bool,
+) -> ReseedOutcome {
+    let ticket = hl.reseed_begin_full(qkey, group, now_ms);
+    let out = hotlist_reseed_run(hl, client, ticket, broadcast).await;
+    if !out.ok {
+        let (tenant, queue) = split_tenant_queue(qkey);
+        tracing::warn!(
+            target: "hotlist",
+            tenant = %tenant,
+            queue = %queue,
+            group = %group,
+            rows = out.rows,
+            broadcast,
+            "forced full reseed FAILED: the cursor move committed but the partitions it \
+             made pending were not re-discovered; this ring recovers on its next full walk"
+        );
+    } else if !out.stamped {
+        let (tenant, queue) = split_tenant_queue(qkey);
+        tracing::warn!(
+            target: "hotlist",
+            tenant = %tenant,
+            queue = %queue,
+            group = %group,
+            rows = out.rows,
+            "forced full reseed landed on a ring that was replaced mid-walk; the new one \
+             cold-starts full, so the repair is deferred to its first contact"
+        );
+    }
+    out
 }
 
-// The shared keyset walk. `mode` picks the SQL; `broadcast` additionally queues each
-// discovered partition as a mesh dirty hint.
+// The shared keyset walk. The ticket carries the ring the rows land on and the mode
+// that picks the SQL; `broadcast` additionally queues each discovered partition as a
+// mesh dirty hint.
 //
 // Errors abandon the walk (the next attempt retries) — the ring simply stays as-is,
 // never wrong. The clock is stamped even on a failed walk, deliberately: it is the
@@ -1856,20 +1909,27 @@ pub(crate) async fn hotlist_reseed_full_broadcast(
 async fn hotlist_reseed_run(
     hl: &crate::hotlist::HotList,
     client: &deadpool_postgres::Client,
-    qkey: &str,
-    group: &str,
-    now_ms: i64,
-    mode: crate::hotlist::ReseedMode,
+    ticket: crate::hotlist::ReseedTicket,
     broadcast: bool,
-) {
-    let (tenant, queue) = split_tenant_queue(qkey);
+) -> ReseedOutcome {
+    let mode = ticket.mode();
+    let (tenant, queue) = split_tenant_queue(ticket.qkey());
+    let group = ticket.group();
     // The two scans keyset on different columns — the full walk on id, the windowed
     // one on (last_write_at, id) — so the cursor carries both halves and each mode
     // advances the part it owns. `after_write` is an opaque echo of the timestamp the
     // previous page returned; '-infinity' starts a walk.
     let mut after_id = NIL_UUID.to_string();
     let mut after_write = "-infinity".to_string();
+    // B1: the windowed walk's lower bound belongs to the WALK, not to the page. Each
+    // page is its own statement with its own now(), so re-deriving it per page let the
+    // bound creep forward while the cursor climbed from the oldest row — a partition
+    // written into the band between the two was excluded by the bound before the cursor
+    // reached it. The first page derives the cutoff and reports it; the rest echo it
+    // back, exactly like the keyset cursor beside it.
+    let mut cutoff: Option<String> = None;
     let mut ok = true;
+    let mut seen = 0usize;
     for _ in 0..HOTLIST_RESEED_MAX_PAGES {
         let rows = match mode {
             crate::hotlist::ReseedMode::Full => {
@@ -1896,7 +1956,9 @@ async fn hotlist_reseed_run(
                 }
             }
             crate::hotlist::ReseedMode::Window(window_ms) => {
-                match db::hotlist_reseed_window(
+                // Bound before the match: the borrow of `cutoff` in the argument list
+                // would otherwise outlive the arms that assign it.
+                let page = db::hotlist_reseed_window(
                     client,
                     queue,
                     group,
@@ -1904,14 +1966,18 @@ async fn hotlist_reseed_run(
                     &after_id,
                     HOTLIST_RESEED_PAGE,
                     window_ms,
+                    cutoff.as_deref(),
                     tenant,
                 )
-                .await
-                {
-                    Ok(r) => {
+                .await;
+                match page {
+                    Ok((r, cut)) => {
                         if let Some((id, _, write)) = r.last() {
                             after_id = id.clone();
                             after_write = write.clone();
+                        }
+                        if cutoff.is_none() {
+                            cutoff = cut;
                         }
                         r.into_iter().map(|(id, name, _)| (id, name)).collect::<Vec<_>>()
                     }
@@ -1925,17 +1991,24 @@ async fn hotlist_reseed_run(
         if rows.is_empty() {
             break;
         }
+        seen += rows.len();
         for (id, name) in &rows {
-            hl.reseed_row(qkey, group, id, name, now_ms);
+            hl.reseed_row(&ticket, id, name);
             if broadcast {
-                hl.note_dirty(qkey, name);
+                // Scoped to the group this walk is repairing: the peers' rings for
+                // every OTHER group of the queue learn nothing from a seek that moved
+                // one cursor, and marking them would be 9,563 partitions of ghost
+                // entries each. A peer too old to read the field over-marks, exactly
+                // as it did before the field existed.
+                hl.note_dirty(ticket.qkey(), name, Some(ticket.group()));
             }
         }
         if rows.len() < HOTLIST_RESEED_PAGE as usize {
             break;
         }
     }
-    hl.reseed_done(qkey, group, now_ms, mode.is_full() && ok);
+    let stamped = hl.reseed_finish(ticket, ok);
+    ReseedOutcome { mode, rows: seen, ok, stamped }
 }
 
 // GET /api/v1/pop/queue/:queue/partition/:partition — pop from ONE named

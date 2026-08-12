@@ -159,6 +159,50 @@ ALTER TABLE queen.log_consumers SET (
     autovacuum_vacuum_cost_delay = 0,
     vacuum_truncate = off);
 
+-- A3 (PLAN_HOTLIST_FOLLOWUP.md): the durable floor under the mesh hot-list hint.
+--
+-- A hot-list ring only learns that OLD partitions became pending again — a backward
+-- seek, a consumer-group delete, anything that moves a cursor without writing a row —
+-- from the mesh, and the mesh is best-effort by design: a frame is dropped when a
+-- peer's queue is full or the peer is down (server/src/mesh.rs). That was survivable
+-- while every broker walked every partition every 30s; with the windowed floor the
+-- dropped frame costs the replay a full-walk interval. So the cursor move ALSO
+-- publishes a row here, inside the same transaction that performs it, and every broker
+-- polls this table on its reconcile cadence (~60s) and repairs the rings it holds.
+--
+-- Keyed by NAMES, not ids, because that is what a ring is keyed by: the broker has no
+-- queue_id in hand at reseed time. Keyed WITHOUT the partition so the table cannot
+-- grow with traffic — it holds one row per (tenant, queue, group) ever repaired inside
+-- the prune window, i.e. tens of rows in production. `partition_name` is the SCOPE of
+-- the repair, exactly like the group on a mesh hint: a per-partition seek names its
+-- partition and the reader marks only that one, while NULL means "walk the queue".
+-- Two repairs of the same (tenant, queue, group) naming DIFFERENT partitions therefore
+-- widen to NULL rather than losing one of them (queen.hotlist_repair_publish_v1).
+--
+-- This is a publication channel for DELIBERATE cursor moves, not a general lost-
+-- notification repair: an entry wrongly cleared, an INFLIGHT stranded by a dropped pop
+-- future, a stale WHEEL park or a dropped hint for a PUSH are still the full walk's
+-- job. Say so here, or the next reader will assume more.
+CREATE TABLE IF NOT EXISTS queen.hotlist_repairs (
+    tenant_id      UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    queue_name     TEXT NOT NULL,
+    consumer_group TEXT NOT NULL,
+    -- NULL = the whole queue (a queue-wide seek, a group delete).
+    partition_name TEXT,
+    repair_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reason         TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_name, consumer_group)
+);
+-- One user, and it is NOT the brokers: the hourly prune inside
+-- queen.hotlist_repair_publish_v1. The poll deliberately has no predicate here —
+-- db::hotlist_repairs_all reads the whole table (bounded by the primary key and by that
+-- prune) and acts on any CHANGE in (repair_at, partition_name) — because a watermark is
+-- unsound on this data: now() is transaction_timestamp, so a slow group delete commits a
+-- row dated BEFORE one a faster seek already carried the watermark past, and that repair
+-- would be skipped for ever. Pinned by
+-- reconcile.rs::a_repair_that_commits_out_of_timestamp_order_is_still_acted_on.
+CREATE INDEX IF NOT EXISTS idx_hotlist_repairs_at ON queen.hotlist_repairs (repair_at);
+
 -- Helper: explode a 16B-stride hash blob into (idx, h) rows. idx is 0-based.
 -- Used by the push dedup probe (003_log_push) and ack-by-hash resolution
 -- (005_log_ack); pure

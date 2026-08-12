@@ -99,8 +99,11 @@ const RECONNECT_MAX: Duration = Duration::from_secs(5);
 pub struct SyncHandlers {
     pub on_message_available: Box<dyn Fn(Option<&str>, &str, &str) + Send + Sync>,
     // 19-wildcard-hotlist §5: a peer's coalesced hot-list dirty hint — mark the
-    // local hot-list (idempotent, no re-broadcast).
-    pub on_hotlist_dirty: Box<dyn Fn(Option<&str>, &str, &str) + Send + Sync>,
+    // local hot-list (idempotent, no re-broadcast). The trailing argument is the
+    // hint's SCOPE: `Some(group)` marks only that group's ring (a seek / group-delete
+    // repair), `None` marks every ring of the queue — which is what a push means and
+    // what a peer too old to send the field always means.
+    pub on_hotlist_dirty: Box<dyn Fn(Option<&str>, &str, &str, Option<&str>) + Send + Sync>,
     pub on_maintenance: Box<dyn Fn(bool) + Send + Sync>,
     pub on_pop_maintenance: Box<dyn Fn(bool) + Send + Sync>,
     pub on_queue_config_set: Box<dyn Fn(Option<&str>, &str) + Send + Sync>,
@@ -266,15 +269,28 @@ impl MeshTransport {
     /// the batched MESSAGE_AVAILABLE (`{"items":[{queue,partition,tenant}]}`), a
     /// distinct tag so a peer marks its hot-list without conflating it with a pop
     /// wake. Empty input is a no-op.
-    pub fn send_hotlist_dirty_batch(&self, items: &[(String, String)]) {
+    ///
+    /// A group-scoped hint adds `"group"`, which is OMITTED entirely when the hint is
+    /// queue-wide — the push path is 99.99% of items and its frames stay byte-identical
+    /// to 1.0.1-beta.1. Adding an optional field is how `tenant` was added in Track B
+    /// and is safe in both rolling-upgrade directions: an older peer ignores the key and
+    /// does the over-mark it always did; a newer peer reading a frame without it takes
+    /// the same `None` branch. A new frame TAG would instead be dropped outright.
+    pub fn send_hotlist_dirty_batch(&self, items: &[crate::hotlist::DirtyHint]) {
         if items.is_empty() {
             return;
         }
         let arr: Vec<serde_json::Value> = items
             .iter()
-            .map(|(qk, p)| {
-                let (t, q) = crate::handlers::split_tenant_queue(qk);
-                serde_json::json!({ "queue": q, "partition": p, "tenant": t })
+            .map(|h| {
+                let (t, q) = crate::handlers::split_tenant_queue(&h.qkey);
+                let mut it = serde_json::json!({
+                    "queue": q, "partition": &*h.partition, "tenant": t
+                });
+                if let (Some(g), Some(obj)) = (h.group.as_deref(), it.as_object_mut()) {
+                    obj.insert("group".into(), serde_json::Value::from(g));
+                }
+                it
             })
             .collect();
         let payload = serde_json::to_vec(&serde_json::json!({ "items": arr })).unwrap_or_default();
@@ -515,7 +531,14 @@ impl MeshTransport {
                     }
                     let p = it.get("partition").and_then(|x| x.as_str()).unwrap_or("");
                     let t = frame_tenant(it);
-                    (self.handlers.on_hotlist_dirty)(t.as_deref(), q, p);
+                    // Absent, non-string or empty ⇒ None ⇒ today's queue-wide mark.
+                    // Mirrors `frame_tenant` deliberately: an unreadable optional field
+                    // degrades to the safe over-mark, never to a bogus key.
+                    let g = it
+                        .get("group")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty());
+                    (self.handlers.on_hotlist_dirty)(t.as_deref(), q, p, g);
                 }
             }
             T_MAINTENANCE_MODE_SET => {
@@ -820,8 +843,14 @@ mod tests {
             }),
             // route dirty hints to the same channel, tagged, so the e2e test can
             // assert a HOTLIST_DIRTY frame round-trips.
-            on_hotlist_dirty: Box::new(move |t, q, p| {
-                let _ = dtx.send((t.map(|s| s.to_string()), format!("dirty:{q}"), p.to_string()));
+            on_hotlist_dirty: Box::new(move |t, q, p, g| {
+                // The scope rides along in the tag, so a test can tell a group-scoped
+                // hint from the queue-wide one the push path sends.
+                let tag = match g {
+                    Some(g) => format!("dirty:{q}/{g}"),
+                    None => format!("dirty:{q}"),
+                };
+                let _ = dtx.send((t.map(|s| s.to_string()), tag, p.to_string()));
             }),
             on_maintenance: Box::new(|_| {}),
             on_pop_maintenance: Box::new(|_| {}),
@@ -915,7 +944,8 @@ mod tests {
 
         // 19-wildcard-hotlist §5: batched HOTLIST_DIRTY round-trips to a distinct
         // handler (tagged "dirty:" by forwarding_handlers), tenant included.
-        ta.send_hotlist_dirty_batch(&[(crate::handlers::tenant_queue_key(ta_uuid, "q3"), "p3".into())]);
+        let k3 = crate::handlers::tenant_queue_key(ta_uuid, "q3");
+        ta.send_hotlist_dirty_batch(&[crate::hotlist::DirtyHint::new(&k3, "p3", None)]);
         let gd = tokio::time::timeout(Duration::from_secs(2), brx.recv())
             .await
             .expect("no dirty within 2s")
@@ -925,8 +955,20 @@ mod tests {
             (Some(ta_uuid.to_string()), "dirty:q3".to_string(), "p3".to_string())
         );
 
-        // Received-frame counter advanced on B (single + batch + dirty = 3 frames).
-        assert!(tb.stats()["messages_received"].as_u64().unwrap() >= 3);
+        // …and a GROUP-scoped hint carries its scope over the same frame, so the peer
+        // marks one ring instead of every ring of the queue.
+        ta.send_hotlist_dirty_batch(&[crate::hotlist::DirtyHint::new(&k3, "p4", Some("workers"))]);
+        let gg = tokio::time::timeout(Duration::from_secs(2), brx.recv())
+            .await
+            .expect("no grouped dirty within 2s")
+            .unwrap();
+        assert_eq!(
+            gg,
+            (Some(ta_uuid.to_string()), "dirty:q3/workers".to_string(), "p4".to_string())
+        );
+
+        // Received-frame counter advanced on B (single + batch + 2 dirty = 4 frames).
+        assert!(tb.stats()["messages_received"].as_u64().unwrap() >= 4);
     }
 
     // Rolling upgrade, old → new: a frame with no `tenant` field must surface as

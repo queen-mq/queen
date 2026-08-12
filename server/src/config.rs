@@ -373,14 +373,29 @@ pub struct Config {
     // walk is Theta(partitions in the queue) per ring while the windowed one is
     // Theta(partitions written in the window).
     //
-    // 0 makes EVERY reseed full: the exact pre-windowing behaviour, kept as a
-    // config-only kill switch.
+    // 0 is the config-only kill switch, and it restores the pre-windowing broker
+    // (C2, PLAN_HOTLIST_FOLLOWUP.md) — which is more than the periodic cadence:
+    //   * every PERIODIC reseed is a full walk again, at QUEEN_HOTLIST_RESEED_MS;
+    //   * the repair walks that this patch added around a cursor move stop fanning
+    //     their rows out to the peers, and the one it added to the consumer-group
+    //     delete does not run at all. Both existed only because a peer's windowed pass
+    //     cannot see a cursor that moved backwards; with every peer walking everything
+    //     every 30s again, each one re-discovers it within a floor on its own. (A
+    //     PER-PARTITION seek still sends its one hint: that is a single item of the
+    //     same shape and cost as a push's, not the whole-pending-set fan-out this
+    //     bullet is about.);
+    //   * the durable repair markers (queen.hotlist_repairs) are still WRITTEN, so a
+    //     mixed cluster keeps working, but this broker stops polling them.
+    // What still runs is the seek's own LOCAL full walk, which predates the windowing
+    // by a year and is not part of the trade.
     pub hotlist_reseed_full_ms: i64,
     // Lookback of the windowed reseed (ms). 0 = derive it as max(4x reseed interval,
     // 120s). Wider than the interval on purpose: the window must survive a few
     // skipped or failed passes, last_write_at is quantized to 1s by the push path,
     // and the broker's clock is not the database's. Cost is linear in the partitions
-    // actually written in the window, so generosity here is nearly free.
+    // actually written in the window, so generosity here is nearly free. Derived or
+    // explicit, the value in force is the clamped one — see resolve_reseed_window_ms
+    // for the band and why a value below it is unsound rather than merely aggressive.
     pub hotlist_reseed_window_ms: i64,
     // Idle-eviction sweep cadence (ms) for the per-(tenant,queue) hot-list rings and
     // long-poll wake gates. Both use a second-chance flag, so a queue is dropped after
@@ -849,14 +864,77 @@ pub fn load() -> Config {
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
         tenancy_header: env_bool("QUEEN_TENANCY_HEADER", false),
     };
-    // §8 windowed reseed: 0 means "derive". Four intervals of slack so the window
-    // survives a few skipped or failed passes, floored at 120s because the pop
-    // candidate scan already treats 2 minutes of last_write_at staleness as
-    // absorbed (001_log_schema.sql) and the push path quantizes that column to 1s.
-    if cfg.hotlist_reseed_window_ms == 0 {
-        cfg.hotlist_reseed_window_ms = (cfg.hotlist_reseed_ms.saturating_mul(4)).max(120_000);
+    // §8 windowed reseed: derive it when unset, then clamp it — see
+    // resolve_reseed_window_ms. Resolved here, before anything reads the field, so the
+    // boot line and every consumer see the number actually in force.
+    let requested_window_ms = cfg.hotlist_reseed_window_ms;
+    cfg.hotlist_reseed_window_ms =
+        resolve_reseed_window_ms(requested_window_ms, cfg.hotlist_reseed_ms);
+    // Only an OPERATOR's value is worth a warning; the derived one is ours and is
+    // inside the band by construction.
+    if requested_window_ms != 0 && cfg.hotlist_reseed_window_ms != requested_window_ms {
+        if cfg.hotlist_reseed_window_ms > requested_window_ms {
+            tracing::warn!(target: "boot",
+                requested_ms = requested_window_ms,
+                in_force_ms = cfg.hotlist_reseed_window_ms,
+                reseed_ms = cfg.hotlist_reseed_ms,
+                "QUEEN_HOTLIST_RESEED_WINDOW_MS is not wider than the gap two \
+                 consecutive reseeds can leave (QUEEN_HOTLIST_RESEED_MS + its \
+                 de-phasing jitter), which would leave a band of writes no pass ever \
+                 covers; RAISED to {} ms",
+                cfg.hotlist_reseed_window_ms);
+        } else {
+            tracing::warn!(target: "boot",
+                requested_ms = requested_window_ms,
+                in_force_ms = cfg.hotlist_reseed_window_ms,
+                "QUEEN_HOTLIST_RESEED_WINDOW_MS exceeds the ceiling this lookback is \
+                 arithmetically safe at; LOWERED to {} ms — to reseed over everything, \
+                 set QUEEN_HOTLIST_RESEED_FULL_MS=0 instead",
+                cfg.hotlist_reseed_window_ms);
+        }
     }
     cfg
+}
+
+/// The widest windowed-reseed lookback that is still a lookback (C1,
+/// PLAN_HOTLIST_FOLLOWUP.md). One week is already ~5 orders of magnitude short of where
+/// `now() - make_interval(secs => …)` in log_hotlist_reseed_window_v1 walks off the
+/// bottom of `timestamptz`, and it is a guard rail rather than a tuning recommendation:
+/// the way to reseed over EVERYTHING is QUEEN_HOTLIST_RESEED_FULL_MS=0, which runs the
+/// full walk — the query written for that question — instead of a window so wide it
+/// scans the whole partition set through the index built for a narrow one.
+const RESEED_WINDOW_CEILING_MS: i64 = 7 * 24 * 3_600_000;
+
+/// The windowed reseed's lookback that is actually in force, from the raw knob
+/// (`0` = derive) and the reseed cadence.
+///
+/// Derivation: four intervals of slack so the window survives a few skipped or failed
+/// passes, floored at 120s because the pop candidate scan already treats 2 minutes of
+/// `last_write_at` staleness as absorbed (001_log_schema.sql) and the push path
+/// quantizes that column to 1s.
+///
+/// The clamp then applies to BOTH the derived and the operator's value (C1). The floor
+/// is the gap two consecutive passes of one ring can leave — the cadence plus the widest
+/// de-phasing offset that cadence draws — because a window narrower than that is a
+/// permanent blind band: a partition written after one pass read past it and more than
+/// `window` before the next pass starts falls in NEITHER pass's window, and only the full
+/// walk (5 minutes by default) ever comes back for it. That is the exact invariant the
+/// window exists to preserve, and the derivation upheld it while an explicit value was
+/// free to break it. The floor is the MINIMUM that is sound, not a recommendation: the 2s
+/// tick the floor is polled on, the walk's own duration and any broker/database clock
+/// skew all sit outside it, and are what the derivation's 4x margin is really for.
+///
+/// The ceiling wins over the floor when a very long cadence puts the two in conflict:
+/// staying inside the arithmetic is not negotiable, and a cadence that slow has already
+/// chosen its own repair latency.
+fn resolve_reseed_window_ms(requested: i64, reseed_ms: i64) -> i64 {
+    let want = if requested == 0 {
+        reseed_ms.saturating_mul(4).max(120_000)
+    } else {
+        requested
+    };
+    let floor = reseed_ms.saturating_add(crate::hotlist::max_reseed_jitter_ms(reseed_ms));
+    want.max(floor).min(RESEED_WINDOW_CEILING_MS)
 }
 
 #[cfg(test)]
@@ -968,5 +1046,95 @@ mod subscription_mode_tests {
             let m = normalize_subscription_mode(raw);
             assert!(m == "new" || m == "all", "{raw} -> {m}");
         }
+    }
+}
+
+/// C1 (PLAN_HOTLIST_FOLLOWUP.md): the windowed reseed's lookback is only sound above
+/// the gap two consecutive passes of one ring can leave, and only arithmetically safe
+/// below a ceiling. The derivation upheld both; an explicit value used to bypass them.
+#[cfg(test)]
+mod reseed_window_tests {
+    use super::{resolve_reseed_window_ms, RESEED_WINDOW_CEILING_MS};
+    use crate::hotlist::max_reseed_jitter_ms;
+
+    /// The gap the window has to span: one cadence plus the widest de-phasing offset
+    /// that cadence can draw.
+    fn gap(reseed_ms: i64) -> i64 {
+        reseed_ms + max_reseed_jitter_ms(reseed_ms)
+    }
+
+    #[test]
+    fn a_derived_window_is_four_cadences_with_a_two_minute_floor() {
+        // The shipped default: 30s cadence -> 120s, from the 120s floor and from 4x
+        // alike. Both halves of the max() still visible.
+        assert_eq!(resolve_reseed_window_ms(0, 30_000), 120_000);
+        assert_eq!(resolve_reseed_window_ms(0, 1_000), 120_000); // 4x is below the floor
+        assert_eq!(resolve_reseed_window_ms(0, 60_000), 240_000); // 4x is above it
+    }
+
+    #[test]
+    fn a_derived_window_always_clears_the_gap_it_has_to_span() {
+        // The property the clamp exists to guarantee, checked across the cadences an
+        // operator might plausibly set: the derivation must never be the thing that
+        // needs raising.
+        for reseed_ms in [1, 100, 1_000, 5_000, 30_000, 75_000, 120_000, 600_000, 3_600_000] {
+            let w = resolve_reseed_window_ms(0, reseed_ms);
+            assert!(
+                w >= gap(reseed_ms),
+                "derived window {w} does not span the {} ms gap at cadence {reseed_ms}",
+                gap(reseed_ms)
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_window_below_the_gap_between_two_passes_is_raised() {
+        // The foot-gun: 10s of lookback on a 30s cadence leaves ~35s of writes that
+        // NEITHER pass covers, and only the full walk (5 min) ever comes back for them.
+        assert_eq!(resolve_reseed_window_ms(10_000, 30_000), 45_000);
+        assert_eq!(gap(30_000), 45_000);
+        // Below the cadence by one millisecond is the same mistake, more quietly.
+        assert_eq!(resolve_reseed_window_ms(44_999, 30_000), 45_000);
+    }
+
+    #[test]
+    fn the_floor_follows_the_jitter_and_not_a_constant() {
+        // D1 made the de-phasing span a fifth of a long interval, so on a 5-minute
+        // cadence the gap is 360s and a 310s window is short — which a floor written
+        // against the old 15s constant would have accepted.
+        assert_eq!(gap(300_000), 360_000);
+        assert_eq!(resolve_reseed_window_ms(310_000, 300_000), 360_000);
+    }
+
+    #[test]
+    fn an_explicit_window_wide_enough_is_left_exactly_as_set() {
+        // Clamping is a guard rail, not an opinion: anything inside the band survives
+        // verbatim, including a very generous one.
+        assert_eq!(resolve_reseed_window_ms(45_000, 30_000), 45_000);
+        assert_eq!(resolve_reseed_window_ms(600_000, 30_000), 600_000);
+        assert_eq!(resolve_reseed_window_ms(RESEED_WINDOW_CEILING_MS, 30_000),
+                   RESEED_WINDOW_CEILING_MS);
+    }
+
+    #[test]
+    fn an_absurd_window_is_lowered_to_the_ceiling_without_overflowing() {
+        // i64::MAX ms is ~292 million years: make_interval would take it, `now() -`
+        // would not. Nothing here may panic or wrap on the way to saying so.
+        assert_eq!(resolve_reseed_window_ms(i64::MAX, 30_000), RESEED_WINDOW_CEILING_MS);
+        assert_eq!(resolve_reseed_window_ms(RESEED_WINDOW_CEILING_MS + 1, 30_000),
+                   RESEED_WINDOW_CEILING_MS);
+    }
+
+    #[test]
+    fn the_ceiling_wins_when_a_slow_cadence_puts_the_floor_above_it() {
+        // A month-long cadence wants a month-long window; the two clamps disagree and
+        // the arithmetic one has to win. The value is still returned, never a panic
+        // from a reversed clamp range.
+        let month = 30 * 24 * 3_600_000i64;
+        assert!(gap(month) > RESEED_WINDOW_CEILING_MS);
+        assert_eq!(resolve_reseed_window_ms(0, month), RESEED_WINDOW_CEILING_MS);
+        assert_eq!(resolve_reseed_window_ms(1_000, month), RESEED_WINDOW_CEILING_MS);
+        // Same for a cadence so long it would overflow the multiplication outright.
+        assert_eq!(resolve_reseed_window_ms(0, i64::MAX), RESEED_WINDOW_CEILING_MS);
     }
 }
