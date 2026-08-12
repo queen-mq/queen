@@ -3,6 +3,55 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.0.1
+
+**The hot-list reseed asks a bounded question.** The reseed is how a broker rebuilds its
+in-memory candidate ring: for a (queue, group) it enumerates the partitions that still hold
+unconsumed data. It did that by walking every partition of the queue, once per ring per 30
+seconds per broker, and on a production database of 51,552 partitions that had become the
+single largest consumer of the whole instance — measured on one 9,563-partition queue, 49 ms
+per call to return zero rows, 8.2 calls a second, 0.58 cores, more total database time than
+the entire pop path at 24x the call count. The cost was never the partition scan; it was the
+one `log_consumers` primary-key probe the join pays per partition, 38,292 of the query's
+39,700 shared buffers.
+
+It now walks only the partitions written in the last `QUEEN_HOTLIST_RESEED_WINDOW_MS`
+(default: four reseed intervals, floored at 120s), driven by an index that already existed.
+Same question, same answer, 0.375 ms. That bound is sound because a partition can only
+*become* pending by being written, and every push stamps `last_write_at`; acks and retention
+only ever remove pendingness.
+
+**What a window cannot see is a cursor moving backwards**, which is why the full walk stays,
+at `QUEEN_HOTLIST_RESEED_FULL_MS` (default 300s; `0` pins every reseed to the full walk and
+restores the previous behaviour without a rebuild). **This is the one behavioural change to
+weigh before upgrading**: the worst case for repairing a ring that lost a partition with no
+write behind it moves from roughly 45 seconds to roughly 6 minutes. Nothing is lost or
+duplicated by that — the reseed is a cache over PostgreSQL and errs toward over-inclusion —
+but a stall that used to heal itself inside a minute can now take five.
+
+The operations that genuinely move a cursor backwards no longer wait for it. A consumer-group
+delete and a seek both force the full walk on the broker that served them and publish a
+durable repair marker in their own transaction; every other broker applies it on its next
+reconcile pass. Measured on a two-broker stage cluster: 18 seconds from the seek to the peer's
+ring being repaired.
+
+**A ring on a `windowBuffer` or `delayedProcessing` queue can be reclaimed again.** One
+ordinary push was enough to arm an entry that could never return to idle, so the queue's state
+was pinned for the lifetime of the process and burned about 18 empty claims a second forever.
+No seek, no mesh and no replication were required to reach it. On those queues a partition
+that becomes visible again with no new write behind it — a retry delay longer than the
+visibility cut — is now recovered by the reseed floor rather than by that loop, which is the
+exposure plain queues have always had.
+
+**The reseed says what it is doing.** The periodic floor line now separates full from windowed
+passes, counts the ones that failed, and reports each ring's age since its last full walk, so
+"which mode is this ring in, and when was it last repaired" is answerable without arithmetic.
+
+`queen.log_hotlist_reseed_window_v1` gains an absolute cutoff. The argument is appended after
+the tenant rather than beside the window it pins, so a 1.0.1-beta.1 replica keeps resolving
+its call while a rolling upgrade replaces it, and the schema is safe to apply under a running
+previous release.
+
 ## 1.0.0
 
 First stable release. The broker, the proxy, the dashboard and the operator console all carry

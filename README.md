@@ -10,11 +10,11 @@ Every entity gets its own FIFO lane, created on first push, so a slow consumer o
 stalls another. That design has two ends, and one broker holds both.
 
 **A million messages a second for 24 hours**: 86,369,975,300 messages with leases, explicit acks,
-deduplication and retention all on, zero restarts, broker memory flat at 4.1 GB. And **a million
-ordered partitions** in one PostgreSQL, none preallocated, created during the run at a thousand a
-second while serving 200,000 messages a second with zero push, pop or ack errors: the lanes and
-their consumer-group cursors weigh 641 MB. The cardinality run is an hour long and runs with
-deduplication off; both sets of conditions are on their pages.
+deduplication and retention all on, zero restarts, broker memory flat at 4.1 GB. 
+
+And **a million ordered partitions** in one PostgreSQL, none preallocated, created during the run at a thousand a
+second while serving 200,000 messages a second with zero push, pop or ack errors.
+
 Consumer groups, replay and a dead-letter queue at both ends. Windowed aggregation that commits
 its state, its output and its acks in one transaction. One stateless binary on the
 PostgreSQL you already run. No cluster, no JVM.
@@ -37,21 +37,6 @@ PostgreSQL you already run. No cluster, no JVM.
 📚 **[Documentation](https://queenmq.com/)** · 🚀 **[Quickstart](https://queenmq.com/start/quickstart)** · 📊 **[Benchmarks](https://queenmq.com/benchmarks)** · 🛠 **[Develop](#developing-on-queen)**
 
 </div>
-
-> **Looking for the C++ implementation?** Version 1.0.0 replaced it with a Rust broker on a new
-> storage engine, and the C++ tree is not in this branch any more. It is still there in history:
-> browse the repository as it stood at
-> [`70de0aa`](https://github.com/queen-mq/queen/tree/70de0aa954d9b0e7cb7ffafd60bf5f5289e5c11a),
-> the last commit before the merge, or check out the last released C++ version,
-> [`v0.16.0`](https://github.com/queen-mq/queen/tree/v0.16.0). Nothing was deleted, and both stay
-> reachable:
->
-> ```bash
-> git checkout 70de0aa954d9b0e7cb7ffafd60bf5f5289e5c11a
-> ```
->
-> Its documentation described that implementation and does not describe 1.0.0. See
-> [the changelog](CHANGELOG.md) for what changed and what breaks.
 
 Queen MQ is a message queue that keeps its data in PostgreSQL. A queue is split into
 **partitions**, one per entity, created the first time you push to one. Each partition is a
