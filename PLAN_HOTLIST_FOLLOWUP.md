@@ -211,15 +211,46 @@ exactly the kind that hides for months.
 
 ---
 
+---
+
+## F. You cannot see any of this from the logs
+
+### F1. Full and windowed passes are indistinguishable — *do this first*
+
+`server/src/hotlist.rs:1615` (the single `reseeds` counter, bumped by `reseed_done` for
+both modes), `server/src/main.rs:474-492` (the `reseed floor` line).
+
+There is not one `tracing` call anywhere in the reseed walk, and `reseed_done` increments
+one counter for both modes. So the 30s `reseed floor` line reports `reseeds_delta` and
+`per_s` with full and windowed summed together, and nothing anywhere records when a ring
+last completed a full walk. An operator cannot answer "is this ring windowed or full", and
+cannot answer "when was this ring last repaired".
+
+Asked on the night of the deploy, within minutes of it going out, and the only available
+answer was to infer the split from Query Insights — because the two modes are separate SQL
+functions, so the database can distinguish what the broker cannot.
+
+This is first not because it is the worst but because it is the prerequisite: **B2 is
+invisible by construction without it** (a ring whose full walk keeps failing is pinned to
+Full forever and nothing says so), and every other item here is diagnosed by reading these
+same lines.
+
+Fix: split the counter (`reseeds_full` / `reseeds_window`), add both to the `reseed floor`
+line, and put each ring's age-since-last-full-walk on the per-ring lines that already print
+`ready` and `wheel`. Half an hour, and it makes the rest of this list observable.
+
+---
+
 ## Suggested order
 
-1. **A1** (consumer-group delete) — same shape as the seek, already-written fix to copy.
-2. **B3** (`forget_group` identity) — small, self-contained, removes a silent skip.
-3. **C1 + C2** (config clamps, kill-switch coverage) — cheap, and they make the knobs honest.
-4. **B1** (absolute cutoff) — turns the one remaining race into an invariant.
-5. **D1** (jitter scaling) — one line, removes the periodic burst.
-6. **A3** (seek durability) — the design question; needs a decision, not just a patch.
-7. **A2, A4, B2, E1, E2** — the tail.
+1. **F1** (per-mode counters) — the prerequisite; everything below is diagnosed from those lines.
+2. **A1** (consumer-group delete) — same shape as the seek, already-written fix to copy.
+3. **B3** (`forget_group` identity) — small, self-contained, removes a silent skip.
+4. **C1 + C2** (config clamps, kill-switch coverage) — cheap, and they make the knobs honest.
+5. **B1** (absolute cutoff) — turns the one remaining race into an invariant.
+6. **D1** (jitter scaling) — one line, removes the periodic burst.
+7. **A3** (seek durability) — the design question; needs a decision, not just a patch.
+8. **A2, A4, B2, E1, E2** — the tail.
 
 The group-scoped mesh hint (carrying `group` as an optional JSON field on the existing
 `T_HOTLIST_DIRTY_BATCH`, which is wire-compatible: an older peer ignores it and does
