@@ -19,7 +19,7 @@ const structuredData = {
       "@id": "https://queenmq.com/#org",
       name: "Queen MQ",
       url: "https://queenmq.com/",
-      logo: "https://queenmq.com/queen-logo-black.png",
+      logo: "https://queenmq.com/queen-tile.png",
       sameAs: ["https://github.com/queen-mq/queen"],
     },
     {

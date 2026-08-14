@@ -3,6 +3,11 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.0.2
+
+**A new logo.** The duck gives way to a geometric mark — a ring with an exit port and the piece
+that left through it — across the dashboard, the docs, the sign-in page and the README.
+
 ## 1.0.1
 
 **The hot-list reseed asks a bounded question.** The reseed is how a broker rebuilds its

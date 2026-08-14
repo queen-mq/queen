@@ -15,7 +15,7 @@
       <!-- Brand -->
       <div class="brand">
         <div class="brand-mark">
-          <img src="/queen-logo-transparent.png" alt="" />
+          <img src="/queen-mark.svg" alt="" />
           <span class="brand-health" :class="healthDot" :title="healthTitle" />
         </div>
         <div v-if="!props.collapsed" class="brand-text">
