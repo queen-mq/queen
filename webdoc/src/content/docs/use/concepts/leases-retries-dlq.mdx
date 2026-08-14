@@ -18,52 +18,47 @@ verifiedBy:
   - clients/client-js/test-v2/semantics.js
 ---
 
-A pop that is not auto-acknowledged does not remove anything. It takes a **lease** on a span
-of offsets: a claim that expires. Until the lease is released by an ack or expires on its
-own, no other consumer in the same group can take that partition.
+A pop that is not auto-acknowledged removes nothing: it takes a **lease** on a span of
+offsets, a claim that expires. Until an ack releases it, or it expires on its own, no other
+consumer in the same group can take that partition. Three routes drive the lifecycle:
+
+```http
+POST /api/v1/ack                     # status completed, retry, failed or dlq
+POST /api/v1/lease/:leaseId/extend   # give a slow batch more time
+GET  /api/v1/dlq                     # read what was dead-lettered
+```
+
+## What to reach for
+
+- Can succeed later: ack `retry`. No budget charge, immediate redelivery.
+- Broke: ack `failed` with an `error`. The budget decides redelivery or dead-letter.
+- Never again: ack `dlq`. Straight to the dead-letter queue.
+- Needs more time: extend the lease, or raise `leaseTime`. Expiry is not a retry mechanism:
+  it redelivers the whole span, forever, without escalating.
+
+Cursor arithmetic: [Acknowledgement is an offset commit](/use/concepts/ack).
 
 ## What a lease is
 
-A pop resolves the partition's cursor, reads forward from `committed + 1` up to the batch
-budget, and writes the claim onto the `(partition, consumer group)` row: `worker_id` (the
-lease id), `lease_expires_at` (`now + leaseSeconds`) and `batch_end`, the inclusive last
-offset delivered. The leased span is `(committed, batch_end]`.
+A pop reads forward from `committed + 1` up to the batch budget and writes onto the
+`(partition, consumer group)` row: `worker_id` (the lease id), `lease_expires_at`
+(`now + leaseSeconds`) and `batch_end`, the inclusive last offset delivered. The leased
+span is `(committed, batch_end]`; the cursor moves only when you ack, so if nothing acks,
+the span is simply claimed by someone else later.
 
-The cursor itself does **not** move at pop time. It moves when you ack. That is what makes
-the lease recoverable: if nothing acks, the span is simply claimed by someone else later.
+`leaseId` is broker-minted, never client-supplied, one id for all partitions of a
+multi-partition pop. An auto-acked pop takes no lease: it commits the cursor in the reading
+transaction and reports an empty `leaseId`
+([`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs)).
 
-The lease id is returned on the pop response as `leaseId`, a broker-minted identifier, never
-supplied by the client. A pop that claims several partitions in one call uses one lease id
-across all of them.
-
-An auto-acked pop (`autoAck=true`) takes no lease at all: it commits the cursor inside the
-same transaction that reads the messages, and reports an empty `leaseId`. See
-[Guarantees](/use/concepts/guarantees) for what that costs you.
-
-## One in-flight batch per partition and group
-
-The claim skips any row whose lease is still live. So at any moment there is **exactly one
-leased batch per `(partition, consumer group)`**.
-
-This is the single most important consequence for how you shape work:
-
-- A queue with one partition cannot be consumed in parallel by one consumer group. Adding
-  consumers adds pollers that find the partition leased and move on.
-- Parallelism inside a group comes from partitions. Ten partitions can serve ten concurrent
-  leases in the same group.
-- Fan-out comes from consumer groups. Each group has its own cursor and its own lease on the
-  same partition, so groups never block each other.
+The claim skips live leases, so there is **exactly one leased batch per
+`(partition, consumer group)`**: parallelism comes from partitions, fan-out from groups
+([Consuming](/use/concepts/consuming#one-leased-batch-per-partition-group)).
 
 ## Effective lease time
 
-Three sources, in precedence order:
-
-1. `?leaseSeconds=N` on the pop request, when `N > 0`.
-2. The queue's stored `lease_time`.
-3. 60 seconds, if the queue has no stored row or the lookup fails.
-
-The stored value differs depending on how the queue came into existence, and the difference
-is large enough to matter:
+Precedence: `?leaseSeconds=N` on the pop when `N > 0`, then the queue's stored `lease_time`,
+then 60 seconds. The stored value depends on how the queue came into existence:
 
 | How the queue was created | Effective `leaseTime` |
 | --- | --- |
@@ -71,15 +66,10 @@ is large enough to matter:
 | By an explicit `/configure` that omits `leaseTime` | **300 seconds** (the configure default) |
 | By an explicit `/configure` with `leaseTime` set | Whatever you set |
 
-So a queue you never configured redelivers a stalled batch after a minute; the same queue
-after one `/configure` call takes five. The broker caches this per queue and invalidates the
-cache on `/configure`, so a change takes effect on the next pop.
-
-<Aside type="caution">
-`/configure` is a full replace. Any option you omit is reset to its default, including
-`leaseTime`, `retryLimit` and `dedupWindowSeconds`. Send the complete intended configuration
-every time.
-</Aside>
+An unconfigured queue redelivers a stalled batch after a minute; after one `/configure`
+call, five. The broker caches per queue and invalidates on `/configure`, so a change applies
+on the next pop. **`/configure` is a [full replace](/reference/queue-options): any omitted
+option, `leaseTime` and `retryLimit` included, resets to its default.**
 
 ## Extending a lease
 
@@ -87,12 +77,8 @@ every time.
 POST /api/v1/lease/:leaseId/extend
 ```
 
-The body is `{"seconds": 60}`; an empty body or a missing field means 60. The call renews
-**every live lease held by that lease id** (a multi-partition pop renews all of its claims
-in one call) and never shortens one: the new expiry is the later of the current expiry and
-`now + seconds`.
-
-The response always arrives as HTTP `200`:
+The body is `{"seconds": 60}`; an empty body means 60. The call renews **every live lease
+held by that lease id** and never shortens one. The response is always HTTP `200`:
 
 ```json
 {
@@ -105,54 +91,35 @@ The response always arrives as HTTP `200`:
 }
 ```
 
-`renewed` is the number of lease rows actually touched, and `success` is `renewed > 0`. An
-already-expired lease renews nothing and reports `success: false`. Expiry is final, there is
-no reclaim. The three timestamp keys carry the same value (the earliest expiry across the
-renewed rows) under the names different clients look for.
-
-The JavaScript consumer can do this for you: lease auto-renewal is off by default and is
-enabled per consumer, with its own interval.
+`renewed` counts the rows touched; `success` is `renewed > 0`, so an expired lease reports
+`success: false`. Expiry is final, there is no reclaim. The three timestamp keys carry the
+same value (the earliest expiry across the renewed rows) under the names different clients
+look for. The JavaScript consumer can auto-renew: off by default, per consumer.
 
 ## When a lease expires
 
-Nothing dramatic happens at the instant of expiry. There is no timer and no sweeper. The
-next pop for that partition and group simply finds the lease no longer live, claims the row,
-and delivers **from `committed + 1` again**: the entire un-acked span, including messages
-your handler had already finished but not acked.
+There is no timer and no sweeper: the next pop for that partition and group finds the lease
+dead, claims the row, and delivers **from `committed + 1` again**, the entire un-acked
+span, messages your handler finished but did not ack included.
 
-Three properties follow:
+Expiry never charges the retry budget and never dead-letters: a slow consumer is not a
+failing consumer, and a message that always outlives its lease redelivers forever.
+Redelivery increments `attempt_count`, telemetry only.
 
-- Expiry never charges the retry budget. A slow consumer is not a failing consumer.
-- Expiry is not a failure signal, so nothing is dead-lettered by it. A message that always
-  outlives its lease redelivers forever.
-- A batch that redelivers at the same starting offset increments a redelivery counter
-  (`attempt_count`) used for reporting. It is telemetry, not budget.
-
-Redelivery after an explicit nack is **immediate**: releasing the lease also promotes the
-partition back into the broker's candidate set and wakes parked long-polls, so the messages
-come back on the next poll rather than after a delay. Nothing spaces out attempts, so a
-message that fails instantly will be retried as fast as your consumer can poll. If you need
-a gap between attempts, wait inside your handler before nacking.
+An explicit nack redelivers **immediately**: the release promotes the partition back into
+the broker's candidate set and wakes parked long-polls. Nothing spaces out attempts, so if
+you need a gap, wait inside your handler before nacking.
 
 ## The retry budget
 
-The budget is one counter per `(partition, consumer group)`: `batch_retry_count`, compared
-against the queue's `retryLimit` (default 3). It is **not** a per-message counter.
+One counter per `(partition, consumer group)`, not per message: `batch_retry_count`,
+against the queue's `retryLimit` (default 3). An ack whose lowest explicit signal is
+`failed` charges one while budget remains: the lease releases, the cursor keeps the
+completed prefix, the failed message and everything after it redeliver. `retry` and lease
+expiry charge nothing. A completed batch resets the counter, as does a dead-letter filing.
 
-Charging rules, exactly:
-
-- An ack call whose lowest explicit signal is `failed` charges the counter by one, while
-  `batch_retry_count < retryLimit`. The lease is released, the cursor stays at the completed
-  prefix, and the failed message plus everything after it redelivers.
-- `retry` charges nothing. Same redelivery, budget untouched.
-- Lease expiry charges nothing.
-- Completing a batch (the cursor reaching `batch_end` with no explicit signal) resets the
-  counter to zero, as does a dead-letter filing.
-
-So "three retries" means three `failed` acks against that partition and group before the head
-message is dead-lettered, with the counter reset every time a batch gets through cleanly.
-Because the counter is shared by the whole lane, a partition that keeps failing on different
-messages consumes the same budget.
+So "three retries" means three `failed` acks against that lane before the head message
+dead-letters, and a partition failing on different messages spends the same shared budget.
 
 <pre class="mermaid">{`
 stateDiagram-v2
@@ -171,31 +138,21 @@ stateDiagram-v2
   L --> X: failed with no budget left, dead-lettering off
 `}</pre>
 
-Three arrows come straight back to where they started, and only one of them moves the budget.
-Nothing escalates on its own, so the loop through expiry has no exit.
+Three arrows come straight back, and only one moves the budget; the loop through expiry has
+no exit.
 
 ## Transition to the dead-letter queue
 
-When a `failed` ack arrives with the budget already exhausted, or when you ack with status
-`dlq` (which bypasses the remaining budget immediately), the head un-acked message is
-dead-lettered. The hand-off has two halves, because only the broker can decompress a segment:
+A `failed` ack with no budget left, or an ack with status `dlq` (which bypasses what
+remains), dead-letters the head un-acked message. Two halves, because only the broker can
+decompress a segment: SQL advances the cursor over the completed prefix, keeps the lease
+and reports the poison offset; the broker snapshots id, transaction id and payload into a
+`queen.log_dlq` row, advances past the poison message, resets retry state and releases the
+lease. The items report `dlq: true` with your `error`, falling back to `Retries exhausted`.
 
-1. SQL advances the cursor over the completed prefix, **keeps the lease**, and answers
-   `dlq: true` with the poison offset.
-2. The broker decodes the segment covering that offset, extracts the message id, transaction
-   id and payload, and files a `queen.log_dlq` row. That call advances the cursor past the
-   poison message, resets the retry and redelivery state, and releases the lease.
-
-The ack response for those items comes back with `dlq: true`. The recorded error is the
-`error` field you sent on the nack, falling back to any other error in the same call, and
-finally to `Retries exhausted`.
-
-Whether dead-lettering happens at all depends on two queue options, and the combination is
-easy to get wrong: dead-lettering is enabled when `deadLetterQueue` **or**
-`dlqAfterMaxRetries` is true, and both default to true. To turn it off you must set **both**
-to false, and then an exhausted `failed` **drops** the message: the cursor advances past it,
-the retry counter resets, and the payload is gone. That is data loss on purpose, so choose it
-deliberately.
+**Dead-lettering is on when `deadLetterQueue` or `dlqAfterMaxRetries` is true (both default
+true); with both false, an exhausted `failed` drops the message: cursor advanced, payload
+gone.** Choose that data loss deliberately.
 
 <Aside type="caution">
 If retention has already deleted the segment covering the poison message, the broker cannot
@@ -210,19 +167,18 @@ dead-letter path only works inside the retained window. See
 GET /api/v1/dlq
 ```
 
-Query parameters: `queue`, `consumerGroup`, `limit` (default 100), `offset` (default 0). Each
-entry carries `id`, `transactionId`, `partitionId`, `queue`, `partition`, `consumerGroup`,
-`errorMessage`, `retryCount` (the budget consumed when the message was filed), `data` (the
-payload snapshot), `createdAt` and `failedAt`, and `producerSub`, which is always `null`
-because it is not tracked on the snapshot.
+The handler reads exactly four query parameters: `queue`, `consumerGroup`, `limit` (default
+100) and `offset` (default 0). The date and partition filters some SDK builders send are
+silently ignored: filter client-side. `total` counts *this page*, not the whole queue, so
+paginate until a short page comes back.
 
-Note two things about the shape. `createdAt` equals `failedAt`: the original enqueue time of
-one frame is not recoverable from a packed segment, so the dead-letter time is reported for
-both. And `total` in the response is the number of rows in *this page*, not a count of the
-whole dead-letter queue; paginate until a short page comes back.
-
-Payloads are stored verbatim, so on an encryption-enabled queue the stored snapshot is the
-envelope; the broker decrypts on read.
+| Entry field | Notes |
+| --- | --- |
+| `id`, `transactionId`, `partitionId`, `queue`, `partition`, `consumerGroup` | Identity of the filed message |
+| `errorMessage`, `retryCount` | The recorded error, and the budget consumed at filing |
+| `data` | The payload snapshot, stored verbatim; on an encryption-enabled queue it is the envelope, decrypted by the broker on read |
+| `createdAt`, `failedAt` | Always equal: one frame's enqueue time is not recoverable from a packed segment, so the dead-letter time is reported for both |
+| `producerSub` | Always `null`; not tracked on the snapshot |
 
 ## Getting a message out of the dead-letter queue
 
@@ -232,39 +188,21 @@ Two routes, both addressed by `(partitionId, transactionId)`:
 POST /api/v1/messages/:partitionId/:transactionId/retry
 ```
 
-Re-pushes the stored payload snapshot to its original queue and partition, then deletes the
-dead-letter row. The replayed message gets a **fresh transaction id**, because reusing the
-original would be seen as a duplicate by the deduplication window and silently dropped. The order is
-deliberate: the row is removed only after the push is accepted, so a failed push leaves the
-message dead-lettered rather than losing it. If the push succeeds and the cleanup delete
-fails, the response says so (`replayed: true`, `dlqRowRemoved: false`), and the message now
-exists in both places.
+Re-pushes the stored snapshot to its original queue and partition, then deletes the
+dead-letter row. The replay gets a **fresh transaction id**: reusing the original would be
+suppressed as a duplicate. The row is removed only after the push is accepted: a failed
+push leaves the message dead-lettered, and a failed cleanup delete after a successful push
+answers `replayed: true`, `dlqRowRemoved: false`, the message in both places.
 
 ```http
 DELETE /api/v1/messages/:partitionId/:transactionId
 ```
 
-Deletes the dead-letter row and nothing else. A live message cannot be deleted at all
-(payloads live in immutable segments), so this returns `404` for any address that has no
-dead-letter row.
+Deletes the dead-letter row and nothing else. Live messages sit in immutable segments and
+cannot be deleted, so any address without a dead-letter row is a `404`.
 
-Reprocessing goes one message at a time, through the two routes above, and because each replay
-mints a new transaction id, replaying twice produces two messages. There is no bulk replay,
-bulk purge or requeue-the-whole-DLQ call, and no scheduled purge: dead-letter rows survive
-retention and are removed only by those two routes, or by deleting the queue.
-Budget for that: an unattended dead-letter queue grows without bound.
-
-## What to reach for
-
-- A message that can succeed later, and you know it: ack `retry`. No budget, immediate
-  redelivery.
-- A message that broke: ack `failed` with an `error`. The budget decides between redelivery
-  and the dead-letter queue.
-- A message you never want to see again in this batch: ack `dlq`. Straight to the
-  dead-letter queue.
-- A consumer that needs longer than the lease: extend the lease, or raise `leaseTime` on the
-  queue. Do not rely on expiry as a retry mechanism: it redelivers the whole span, forever,
-  without ever escalating.
-
-The exact cursor arithmetic behind all four is on
-[Acknowledgement is an offset commit](/use/concepts/ack).
+Reprocessing is one message at a time, and each replay mints a new id: replaying twice
+produces two messages. There is no bulk replay, purge or scheduled purge: rows survive
+retention and leave only through these routes or queue deletion. The SDK helpers
+`clearQueue()` and `moveMessageToDLQ()` call routes the broker does not register and always
+return `404`. An unattended dead-letter queue grows without bound.

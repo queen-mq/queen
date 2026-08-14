@@ -194,15 +194,15 @@ back rather than waiting.
 **Index churn under high update rates.** At more than 30,000 updates per second, the wildcard
 candidate scans over `log_partitions` and `log_consumers` degraded from about 2 ms to 12–35 ms as
 dead tuples accumulated between autovacuum passes. `041_log_schema.sql` now sets
-threshold-based autovacuum reloptions on both tables. The [24-hour soak](/benchmarks/soak-24h)
+threshold-based autovacuum reloptions on both tables. [Throughput 24h 1M](/benchmarks/soak-24h)
 found the other half of the same story: heap truncation on those two fixed-population
 tables must be disabled.
 
 ## What this run does not establish
 
 - **Not a throughput result.** 25,000 events per second here is a *sustainable* point for this
-  topology with work sleeps, not a ceiling. For the ceiling see
-  [Throughput ceiling](/benchmarks/peak).
+  topology with work sleeps, not a ceiling. The throughput run is
+  [Throughput 24h 1M](/benchmarks/soak-24h).
 - **Not a durability result.** No failure was injected, no broker restarted, no PostgreSQL
   interruption.
 - **No global ordering claim.** The verifier checks order *per property*, which is to say per

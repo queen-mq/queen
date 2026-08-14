@@ -162,11 +162,11 @@ on the same list.
 
 - **Not a 24-hour run.** One hour, of which 43 minutes on the completed space. The plateau is
   measured over that window: tables flat and deletion equal to insertion. The
-  [24-hour soak](/benchmarks/soak-24h) is a separate measurement, on 200 partitions with
+  [Throughput 24h 1M](/benchmarks/soak-24h) is a separate measurement, on 200 partitions with
   deduplication on, and the two do not add up.
 - **Deduplication was off.** That is what made the run possible and it is stated in the
   configuration rather than buried. It puts this run level with what other brokers offer by
-  default, not below it, but it does mean this run and the 24-hour soak are not the same
+  default, not below it, but it does mean this run and Throughput 24h 1M are not the same
   configuration.
 - **One shape.** 200,000 messages a second, a thousand active partitions per second, and a
   contiguous rotating window, which is the friendly case for index locality. The scattered variant

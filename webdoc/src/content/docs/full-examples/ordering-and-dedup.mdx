@@ -11,17 +11,8 @@ verifiedBy:
   - examples/full/go/ordering-and-dedup/main.go
 ---
 
-This is the pair of properties Queen exists for.
-
-The program pushes messages for three customers, interleaved, into one queue but one partition
-per customer. When it reads them back, each customer's messages are in the order they were
-pushed, even though the interleaving across customers is not the order anything was written. That
-is what a partition buys: an ordered lane per entity, and a slow reader on one lane never holds up
-another.
-
-Then it pushes the same message a second time with the same \`transactionId\`. The broker answers
-\`duplicate\` and stores nothing. The check happens inside the database, under the partition's own
-lock, before an offset is allocated, so it is exact rather than best effort.
+This is the pair of properties Queen exists for: an ordered lane per customer, and a repeated
+push refused rather than stored twice.
 
 <Tabs>
   <TabItem label="JavaScript">
@@ -40,12 +31,18 @@ lock, before an offset is allocated, so it is exact rather than best effort.
 
 ## What to take away
 
-Ordering is per partition and never global. If you need two messages to be ordered relative to
-each other, they must share a partition, which usually means partitioning by the entity the
-messages are about.
+The program pushes messages for three customers, interleaved, into one queue but one partition
+per customer. When it reads them back, each customer's messages are in the order they were
+pushed, even though the interleaving across customers is not the order anything was written. That
+is what a partition buys: an ordered lane per entity, and a slow reader on one lane never holds up
+another. Ordering is per partition and never global: if you need two messages to be ordered
+relative to each other, they must share a partition, which usually means partitioning by the
+entity the messages are about.
 
-Deduplication is bounded by a window (one hour by default). Outside it, the same
-\`transactionId\` is a new message again, so the window has to be longer than your longest
-retry.
+Then it pushes the same message a second time with the same \`transactionId\`. The broker answers
+\`duplicate\` and stores nothing. The check happens inside the database, under the partition's own
+lock, before an offset is allocated, so it is exact rather than best effort. Deduplication is
+bounded by a window (one hour by default). Outside it, the same \`transactionId\` is a new message
+again, so the window has to be longer than your longest retry.
 
 Next: [the transactional pipeline](/full-examples/pipeline).

@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Queen MQ, positioned. The comparison page's closing claim, drawn: each
+  system serves a region of (sustained rate x ordered entities), and Queen's
+  region is the span between the two ends of the workload.
+
+  Authoring rules, shared with queen-features.svg:
+    * Transparent background, works on the docs card and on GitHub.
+    * Colour never carries meaning alone. Each competitor's hue is doubled by
+      its adjacent name label and its frontier's shape; Queen is not a colour
+      at all: the mark, the ink stroke, the only 1.5 weight, the only tint.
+      The edges we did not measure are dashed AND said in the footer.
+    * Two stroke weights only. 1 for every frontier and axis, 1.5 for Queen's.
+    * Type never below 12 units (11 CSS px at the README's 880).
+    * BOTH AXES CARRY THE SAME RANGE AND THE SAME SCALE: four decades, 1k to
+      10M, 120 units per decade on each. That is what makes Queen's region a
+      square rather than an arbitrary rectangle, and it is the point of the
+      figure: the same 1,000,000 on both axes. Any point with equal values
+      lands on the 45-degree diagonal, so the square is readable as a fact
+      about the numbers and not as a layout choice. Changing one axis's scale
+      without the other silently destroys that.
+        x: px = 64  + 120 * (log10(msgs per second)  - 3)
+        y: py = 576 - 120 * (log10(ordered entities) - 3)
+    * The only numbers on the figure are Queen's two, and they name two
+      SEPARATE runs on purpose: no run did a million of each at once, so they
+      are written as two lines rather than one corner. Nobody else's numbers
+      appear: the axes stay unnumbered, and a competitor's figure would travel
+      away from the conditions that make it true.
+      Frontiers, from /start/compare "What the measurements say", the
+      benchmarks pages, and (for SQS alone) its published quotas:
+        Kafka     lane ceiling ~5k (refuses topics between 2k and 5k on
+                  defaults; p95 is gone by 8k). Its rate edge is NOT one we
+                  found, so the envelope closes at the edge of the map and
+                  that edge is dashed: it says "past this figure", not a
+                  ceiling we measured.
+        RabbitMQ  ~12k live queues, ~12k msg/s. The rate is the point where
+                  our own dense run stopped keeping up; drawn at 12k, which
+                  is generous to it, and the lane edge is the load-bearing
+                  one.
+        pgmq      ~35k msg/s (its ordered-consume path tops out between 20k
+                  and 40k), flat to 240k lanes.
+        SQS FIFO  both edges are quotas from its docs, hence both dashed:
+                  ~70k msg/s in high throughput mode without batching, and
+                  the 20k in-flight cap, which bounds groups in motion at
+                  once because a group with a batch in flight delivers
+                  nothing more. Its rate sits right of pgmq's and its lane
+                  edge above RabbitMQ's, which is the honest ordering: a
+                  published quota against two rates we measured ourselves.
+                  (Group COUNT has no documented limit, but an absence of a
+                  limit is not a measured extent, so it is not drawn.)
+        Queen     1M msg/s for 24h, and 1M ordered lanes.
+    * A label sits beside its own frontier: on the left just above the line
+      for pgmq, in the right margin at the line's own height for Queen, SQS
+      and Kafka. RabbitMQ is the exception and sits INSIDE the corner it
+      closes, because its frontier and SQS's are 26 units apart and Kafka's
+      runs 46 below it: there is no band beside that line to write in. No
+      knockout is used anywhere: the background is transparent by rule, so a
+      halo would show as a box on GitHub's card.
+    * Colour is set twice on purpose: a class for browsers (CSS variables, so
+      the theme can flip) and a presentation attribute holding the light value
+      (so renderers without custom-property support still produce the light
+      figure instead of black-on-black).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 672" width="960" height="672"
+     role="img" aria-labelledby="qm-title qm-desc" preserveAspectRatio="xMidYMid meet">
+  <title id="qm-title">Where Queen MQ sits: ordered entities against sustained message rate, one region per system</title>
+  <desc id="qm-desc">A map with sustained message rate along the bottom and ordered entities, one FIFO lane each, up the side. Both axes are logarithmic, unnumbered, and carry the same range and the same scale, so a system that reaches the same figure on both draws a square. Each system is drawn as the region it serves. Kafka, in green, holds a low lane ceiling because entities hash onto a partition set sized in advance; its region runs off the right of the map and its closing edge there is dashed, because its rate is not an edge we measured. RabbitMQ, in orange, closes a small corner, one live queue per entity. pgmq, in blue, reaches higher in entities at modest rate, its reads rescanning the standing backlog. SQS FIFO, in magenta and dashed on both edges because both are quotas from its documentation rather than runs, closes a corner at its rate quota and at its in-flight cap, one batch in flight per group. Queen, drawn in ink with its mark and no colour, closes the largest region, and that region is a square: a million messages a second sustained for twenty-four hours, and a million ordered lanes in one database, measured in two separate runs. The corner beyond it, more of both, belongs to nobody on the map.</desc>
+
+  <style>
+    .qm-root {
+      --qm-ink:    #181818;
+      --qm-mut:    #6f6f6f;
+      --qm-line:   #d4d4d4;
+      --qm-hair:   #e9e9e9;
+      --qm-solid:  #767676;
+      --qm-pgmq:   #0050b5;
+      --qm-warn:   #944500;
+      --qm-kafka:  #1a7f37;
+      --qm-rabbit: #c2410c;
+      --qm-sqs:    #b21f6a;
+      --qm-tint:   0.04;
+    }
+    /* Standalone: through the README img, or opened on its own, the OS says. */
+    @media (prefers-color-scheme: dark) {
+      .qm-root {
+        --qm-ink:    #f5f5f5;
+        --qm-mut:    #8d8d8d;
+        --qm-line:   #3a3a3a;
+        --qm-hair:   #262626;
+        --qm-solid:  #8a8a8a;
+        --qm-pgmq:   #79b1f9;
+        --qm-warn:   #dcaf61;
+        --qm-kafka:  #57ab5a;
+        --qm-rabbit: #fb923c;
+        --qm-sqs:    #ef6eae;
+        --qm-tint:   0.07;
+      }
+    }
+    /* Inlined in the docs: the site toggle wins over the OS, in both
+       directions. It sets data-mode="dark" and REMOVES the attribute for
+       light, hence the :not(). Neither selector can match inside a standalone
+       SVG document, so the media query above stays in charge there. */
+    html:not([data-mode="dark"]) .qm-root {
+      --qm-ink:    #181818;
+      --qm-mut:    #6f6f6f;
+      --qm-line:   #d4d4d4;
+      --qm-hair:   #e9e9e9;
+      --qm-solid:  #767676;
+      --qm-pgmq:   #0050b5;
+      --qm-warn:   #944500;
+      --qm-kafka:  #1a7f37;
+      --qm-rabbit: #c2410c;
+      --qm-sqs:    #b21f6a;
+      --qm-tint:   0.04;
+    }
+    html[data-mode="dark"] .qm-root {
+      --qm-ink:    #f5f5f5;
+      --qm-mut:    #8d8d8d;
+      --qm-line:   #3a3a3a;
+      --qm-hair:   #262626;
+      --qm-solid:  #8a8a8a;
+      --qm-pgmq:   #79b1f9;
+      --qm-warn:   #dcaf61;
+      --qm-kafka:  #57ab5a;
+      --qm-rabbit: #fb923c;
+      --qm-sqs:    #ef6eae;
+      --qm-tint:   0.07;
+    }
+
+    .qm-ink    { fill: var(--qm-ink); }
+    .qm-mut    { fill: var(--qm-mut); }
+    .qm-solidf { fill: var(--qm-solid); }
+    .qm-line   { stroke: var(--qm-line); fill: none; }
+    .qm-hair   { stroke: var(--qm-hair); fill: none; }
+    .qm-inkl   { stroke: var(--qm-ink); fill: none; }
+    .qm-inkarea{ fill: var(--qm-ink); fill-opacity: var(--qm-tint); }
+    .qm-pgmql  { stroke: var(--qm-pgmq); fill: none; }
+    .qm-pgmqt  { fill: var(--qm-pgmq); }
+    .qm-warnt  { fill: var(--qm-warn); }
+    .qm-kafkal { stroke: var(--qm-kafka); fill: none; }
+    .qm-kafkaf { fill: var(--qm-kafka); }
+    .qm-rabbitl{ stroke: var(--qm-rabbit); fill: none; }
+    .qm-rabbitt{ fill: var(--qm-rabbit); }
+    .qm-sqsl   { stroke: var(--qm-sqs); fill: none; }
+    .qm-sqst   { fill: var(--qm-sqs); }
+  </style>
+
+  <g class="qm-root"
+     font-family="Inter Variable, Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif">
+
+    <!-- ============================================================
+         BAND A. What we are looking at.
+         ============================================================ -->
+    <text class="qm-mut" fill="#6f6f6f" x="24" y="40" font-size="12" font-weight="600" letter-spacing="1.2">WHERE QUEEN SITS</text>
+    <text class="qm-mut" fill="#6f6f6f" x="936" y="40" font-size="12" font-weight="500" text-anchor="end">the region where each system keeps one ordered lane per entity</text>
+    <line class="qm-hair" stroke="#e9e9e9" x1="24" y1="52" x2="936" y2="52" stroke-width="1"/>
+
+    <!-- ============================================================
+         BAND B. The map.
+         Axes first, then Queen's tinted square under everything, then
+         the four other frontiers, then labels.
+         ============================================================ -->
+
+    <!-- Queen's region, under every other stroke. 360 x 360: a square,
+         because the axes share a scale and Queen reaches 1M on both. -->
+    <path class="qm-inkarea" fill="#181818" fill-opacity="0.04"
+          d="M64 576 V216 H414 a10 10 0 0 1 10 10 V576 Z"/>
+
+    <!-- axes -->
+    <line class="qm-line" stroke="#d4d4d4" x1="64" y1="576" x2="564" y2="576" stroke-width="1"/>
+    <line class="qm-line" stroke="#d4d4d4" x1="64" y1="576" x2="64"  y2="96"  stroke-width="1"/>
+    <path class="qm-solidf" fill="#767676" d="M572 576 l-8 -4 v8 z"/>
+    <path class="qm-solidf" fill="#767676" d="M64 88 l-4 8 h8 z"/>
+
+    <!-- axis titles -->
+    <text class="qm-ink" fill="#181818" x="76" y="106" font-size="12" font-weight="600">ordered entities</text>
+    <text class="qm-mut" fill="#6f6f6f" x="76" y="122" font-size="12">one FIFO lane each</text>
+    <text class="qm-ink" fill="#181818" x="556" y="602" font-size="12" font-weight="600" text-anchor="end">sustained message rate</text>
+
+    <!-- RabbitMQ: a small closed corner. -->
+    <path class="qm-rabbitl" stroke="#c2410c" stroke-width="1"
+          d="M72 446 H183 a10 10 0 0 1 10 10 V566"/>
+
+    <!-- pgmq: higher in entities, modest in rate. -->
+    <path class="qm-pgmql" stroke="#0050b5" stroke-width="1"
+          d="M72 290 H239 a10 10 0 0 1 10 10 V566"/>
+
+    <!-- Kafka: a measured lane ceiling, and a rate that runs off this map.
+         The horizontal is solid because the ceiling is ours; the closing
+         edge is dashed and sits on the map's last decade, because it says
+         "the region continues past the figure", not "the ceiling is here". -->
+    <path class="qm-kafkal" stroke="#1a7f37" stroke-width="1"
+          d="M72 492 H534 a10 10 0 0 1 10 10"/>
+    <path class="qm-kafkal" stroke="#1a7f37" stroke-width="1" stroke-dasharray="4 3"
+          d="M544 502 V566"/>
+
+    <!-- SQS FIFO: a closed corner too, and dashed on both edges, because
+         both are quotas from its documentation rather than runs of ours:
+         the rate quota, and the in-flight cap that bounds how many groups
+         can be in motion at once. Group count has no documented limit, but
+         an absence of a limit is not a measured extent, so it is not drawn. -->
+    <path class="qm-sqsl" stroke="#b21f6a" stroke-width="1" stroke-dasharray="4 3"
+          d="M72 420 H275 a10 10 0 0 1 10 10 V566"/>
+
+    <!-- Queen: the square. Ink, and the only 1.5 stroke in the figure. -->
+    <path class="qm-inkl" stroke="#181818" stroke-width="1.5"
+          d="M72 216 H414 a10 10 0 0 1 10 10 V566"/>
+
+    <!-- ============================================================
+         BAND C. Names on their frontiers, constraints under them.
+         ============================================================ -->
+    <g font-size="13" font-family="JetBrains Mono Variable, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+      <text class="qm-pgmqt" fill="#0050b5" x="72" y="266" text-anchor="start">pgmq</text>
+      <text class="qm-rabbitt" fill="#c2410c" x="72" y="466" text-anchor="start">RabbitMQ</text>
+      <text class="qm-sqst" fill="#b21f6a" x="578" y="414" text-anchor="start">SQS FIFO</text>
+      <text class="qm-kafkaf" fill="#1a7f37" x="578" y="486" text-anchor="start">Kafka</text>
+      <text class="qm-ink" fill="#181818" x="578" y="210" text-anchor="start" font-weight="700">Queen MQ</text>
+    </g>
+
+    <!-- the mark, sized to sit with the name -->
+    <g class="qm-ink" fill="#181818" transform="translate(556,196) scale(0.0625) translate(-2.01,-2.01)">
+      <path d="M 166.295 209.709 A 105.0 105.0 0 1 1 209.709 166.295 L 175.275 147.985 A 66.0 66.0 0 1 0 147.985 175.275 Z"/>
+      <g transform="translate(43.134,43.134) translate(177.458,177.458) scale(0.85) translate(-177.458,-177.458)">
+        <path d="M 209.709 166.295 A 105.0 105.0 0 0 1 166.295 209.709 L 147.985 175.275 A 66.0 66.0 0 0 0 175.275 147.985 Z"/>
+      </g>
+    </g>
+
+    <g font-size="12">
+      <!-- Queen's two figures: two runs, said as two lines so the corner is
+           not read as one run that did both at once. -->
+      <text class="qm-ink" fill="#181818" x="578" y="234">1,000,000 msg/s, sustained for 24 hours</text>
+      <text class="qm-ink" fill="#181818" x="578" y="250">1,000,000 ordered lanes in one database</text>
+
+      <text class="qm-mut" fill="#6f6f6f" x="72" y="282">reads rescan the standing backlog</text>
+      <text class="qm-mut" fill="#6f6f6f" x="72" y="482">one live queue each</text>
+      <text class="qm-mut" fill="#6f6f6f" x="578" y="436">ordering under a rate quota,</text>
+      <text class="qm-mut" fill="#6f6f6f" x="578" y="452">one batch in flight per group</text>
+      <text class="qm-mut" fill="#6f6f6f" x="578" y="508">a partition set sized in advance,</text>
+      <text class="qm-mut" fill="#6f6f6f" x="578" y="524">rate off the right of this map</text>
+      <!-- The warning rides with Kafka's block rather than sitting over the
+           band it describes: every clear spot above that line is crossed by
+           one of the four verticals. -->
+      <text class="qm-warnt" fill="#944500" x="578" y="546">above its line, entities share lanes</text>
+      <text class="qm-mut" fill="#6f6f6f" x="536" y="132" text-anchor="end">more of both: nobody on this map</text>
+    </g>
+
+    <!-- ============================================================
+         BAND D. What the numbers here are, and what the dashes are.
+         ============================================================ -->
+    <line class="qm-hair" stroke="#e9e9e9" x1="24" y1="624" x2="936" y2="624" stroke-width="1"/>
+    <text class="qm-mut" fill="#6f6f6f" x="24" y="646" font-size="12">Axes logarithmic, unnumbered, same scale on both. Queen's two figures are two separate runs.</text>
+    <text class="qm-mut" fill="#6f6f6f" x="936" y="646" font-size="12" text-anchor="end">dashed: an edge we did not measure</text>
+  </g>
+</svg>

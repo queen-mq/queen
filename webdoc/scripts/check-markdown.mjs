@@ -420,12 +420,21 @@ if (!existsSync(HOME_ASTRO)) {
     probes.push(["headline", flatten(hero[1])], ["hero paragraph", flatten(hero[2])]);
   }
 
+  // The limits used to be a `const notFor = [ … ]` and are a paragraph now, so
+  // they are probed out of the section itself. Only the prose before the link
+  // is taken: the link's own text and its arrow are page furniture.
+  const limits = /\{\/\* Limits \*\/\}[\s\S]*?<p\b[^>]*>([\s\S]*?)<a\b/.exec(astro);
+  if (!limits) {
+    fail("src/pages/index.astro", "no `{/* Limits */}` section with a paragraph — check the probe in this script");
+  } else {
+    probes.push(["limits paragraph", flatten(limits[1])]);
+  }
+
   for (const [array, key, label] of [
     ["differentiators", "title", "differentiator title"],
     ["differentiators", "body", "differentiator body"],
     ["proof", "figure", "proof figure"],
     ["proof", "body", "proof body"],
-    ["notFor", null, "limit"],
   ]) {
     const values = astroStrings(astro, array, key);
     if (values === null) {

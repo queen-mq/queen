@@ -15,41 +15,46 @@ sourceOfTruth:
   - server/sql/procedures/003_log_push.sql
 ---
 
-When PostgreSQL is unreachable, a push does not have to fail. The broker appends
-it to an on-disk spool, reports it to the client as `buffered`, and replays it
-once the database comes back. The mechanism is small; this page covers what it
-guarantees and where its coverage ends.
+When PostgreSQL is unreachable a push does not have to fail: it lands in an
+on-disk spool, comes back `buffered`, and replays when the database returns.
+Check the spool at any time:
+
+```bash
+curl -s http://localhost:6632/api/v1/status/buffers
+```
+
+The reply carries a live database ping plus the in-process gauges, present even
+when the database-backed part of a Prometheus scrape is missing:
+
+| Surface | What it tells you |
+| --- | --- |
+| `queen_file_buffer_db_healthy` | 0 while the broker believes PostgreSQL is unreachable |
+| `queen_file_buffer_pending` | events written and not yet replayed |
+| `queen_file_buffer_failed` | spool *write* failures: accepted-then-lost work |
+| `GET /api/v1/system/maintenance` | adds `bufferedMessages` plus a `bufferStats` block: finalized-file count and bytes on disk |
+| The log | enter/leave transitions once each on the `spool` target; `spool_pending` and `spool_healthy` in the periodic `sizes` block |
 
 ## What the spool is
 
-An append-only directory of event files at `FILE_BUFFER_DIR`, default
-`/var/lib/queen/buffers`. Each record is a little-endian `u32` length followed by
-a JSON body carrying the queue, the partition, the resolved tenant, the original
-`transactionId`, the authenticated producer subject if there was one, an
-`encrypted` flag, and the payload verbatim.
+An append-only directory of event files:
 
-An active file is `*.tmp`; a finalized, drainable file is `*.buf`. Names embed a
-13-digit epoch-millisecond stamp and an 8-digit sequence, so a lexical sort is
-FIFO order. A file rotates after `FILE_BUFFER_EVENTS_PER_FILE` events (10000 by
-default).
-
-If the directory cannot be created, the broker logs a `spool` warning and falls
-back to a per-user temporary directory, chosen so that a developer machine does
-not silently drop every buffered push. In production, set `FILE_BUFFER_DIR`
-explicitly and confirm it in the `config: file_buffer` boot line.
+| Property | Value |
+| --- | --- |
+| Location | `FILE_BUFFER_DIR`, default `/var/lib/queen/buffers` |
+| Record | a little-endian `u32` length + a JSON body: queue, partition, resolved tenant, original `transactionId`, authenticated producer subject, an `encrypted` flag, the payload verbatim |
+| Files | active `*.tmp`, finalized drainable `*.buf`; names embed a 13-digit epoch-millisecond stamp and an 8-digit sequence, so a lexical sort is FIFO order |
+| Rotation | after `FILE_BUFFER_EVENTS_PER_FILE` events (10000 by default) |
+| Fallback | a directory that cannot be created logs a `spool` warning and falls back to a per-user temporary directory |
+| Production | set `FILE_BUFFER_DIR` explicitly and confirm it in the `config: file_buffer` boot line |
 
 <Aside type="caution">
-Records are plain buffered appends under a mutex, with **no per-event fsync**.
-A process crash or a host power loss can therefore lose the tail of the
-active file. The reader is built for that case: it stops at the first incomplete
-record instead of failing the file, so the cost is the truncated tail rather
-than the whole file.
-The spool trades a small crash window for not blocking the push path on disk.
+Records are buffered appends under a mutex, **no per-event fsync**: a crash or
+power loss can lose the tail of the active file. The reader stops at the first
+incomplete record, so the cost is that truncated tail, not the whole file: a
+small crash window traded for a push path that never blocks on disk.
 </Aside>
 
 ## How a push becomes buffered
-
-There are exactly two entry points.
 
 <pre class="mermaid">{`
 flowchart TB
@@ -65,19 +70,11 @@ flowchart TB
   RP --> DUP["stored, or duplicate if it already committed"]
 `}</pre>
 
-Both entry points land in the same append-only file, and the per-item status is
-the only place a caller can tell them apart. The drain at the bottom only makes
-progress while the database is reachable and maintenance mode is off.
-
-The first is failure. A push whose database transaction failed (a connection
-error, a statement timeout, a pool acquisition failure) comes back from the write
-path with per-item status `error`, meaning nothing was committed. The broker
-counts those items as database errors, then writes each one to the spool. If the
-spool write succeeds the item is relabelled `buffered`; if the spool write itself
-fails it becomes `failed`, and that item is genuinely lost. Items that were
-in-request duplicates of a spooled item inherit its status. The response is still
-`201`, so a client that only inspects the status code learns nothing: the
-per-item `status` field is the contract.
+The first is failure: a push whose transaction failed (connection error,
+statement timeout, pool exhaustion) is counted as a database error and spooled.
+A successful spool write relabels it `buffered`; a failed one makes it `failed`,
+genuinely lost. In-request duplicates inherit its status. The response is still
+`201`: **the per-item `status` field is the contract**.
 
 ```json
 [
@@ -86,143 +83,98 @@ per-item `status` field is the contract.
 ]
 ```
 
-The second is deliberate: maintenance mode, below.
-
-The spool covers pushes. `POST /api/v1/transaction` has no spool path at
-all: a transaction is all-or-nothing against PostgreSQL, and during an outage it
-fails. The consume side is not buffered either: pops and acks against an
-unreachable database return errors, which is safe, because an unacked lease
-redelivers.
-
-## Watching it
-
-Three in-process Prometheus gauges are always present, even when the
-database-backed part of the scrape is missing:
-
-| Gauge | Meaning |
-| --- | --- |
-| `queen_file_buffer_db_healthy` | 0 while the broker believes PostgreSQL is unreachable |
-| `queen_file_buffer_pending` | events written and not yet replayed |
-| `queen_file_buffer_failed` | spool *write* failures: accepted-then-lost work |
-
-`GET /api/v1/status/buffers` returns the same three values as JSON plus a live
-database ping, and `GET /api/v1/system/maintenance` includes `bufferedMessages`
-and a `bufferStats` block with the finalized-file count and total bytes on disk.
-In the log, the `spool` target reports the enter and leave transitions once each,
-and the periodic `sizes` block carries `spool_pending` and `spool_healthy`.
+The other is [maintenance mode](#maintenance-mode-is-the-deliberate-diversion),
+below. The spool covers pushes only: `POST /api/v1/transaction` is
+all-or-nothing against PostgreSQL and fails during an outage; pops and acks
+error, safely: an unacked lease redelivers.
 
 ## Replay, and why it is idempotent
 
-A background loop runs one drain cycle every `FILE_BUFFER_FLUSH_MS` (100 ms). Each
-cycle finalizes the active file, lists `.buf` files oldest-first, and replays up
-to 10 of them when the database looks healthy or 1 when it does not. A file is
-replayed in batches of `FILE_BUFFER_MAX_BATCH` events (100 by default), each batch
-grouped by (tenant, queue, partition) and written as one multi-segment
-transaction, so a huge spool file never becomes one giant transaction.
+Each cycle finalizes the active file and replays `.buf` files oldest first; no
+file ever becomes one giant transaction.
 
-Idempotence comes from deduplication, not from bookkeeping. Replay preserves each
-event's original `transactionId` and mints only fresh message ids, and it
-explicitly declines to vouch for anything the broker's in-memory dedup cache
-might believe, forcing the SQL probe to check the full dedup window. A batch that
-a previous attempt already committed therefore comes back as
-`status: "duplicate"` and writes nothing.
+| Knob | Role |
+| --- | --- |
+| `FILE_BUFFER_FLUSH_MS` (100 ms) | drain cadence |
+| Files per cycle | up to 10 while the database looks healthy, 1 while it does not |
+| `FILE_BUFFER_MAX_BATCH` (100 events) | one multi-segment transaction per batch, grouped by (tenant, queue, partition) |
+
+Idempotence comes from deduplication, not bookkeeping: replay keeps each event's
+original `transactionId`, mints fresh message ids, and declines to vouch for the
+in-memory dedup cache, so the SQL probe checks the full window. An
+already-committed batch comes back `status: "duplicate"` and writes nothing.
 
 <Aside type="caution">
-That guarantee is exactly as wide as the deduplication window. On a queue
-configured with `dedupWindowSeconds: 0` deduplication is off and replay is **not**
-idempotent: a partially committed drain attempt duplicates. And because the hash
-sidecar is purged on a cutoff of `GREATEST(dedupWindowSeconds,
-completedRetentionSeconds, 900s)`, an outage longer than that window can outlive
-the evidence a replay needs. Long outages plus short windows equal duplicates.
+The guarantee is exactly as wide as the deduplication window. With
+`dedupWindowSeconds: 0` replay is **not** idempotent: a partially committed
+drain attempt duplicates. And the hash sidecar is purged at
+`GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900s)`, so a longer
+outage can outlive the evidence a replay needs.
 </Aside>
 
 ## Failure handling inside the drain
 
-Drain errors are classified, because the two kinds need opposite responses.
+Drain errors are classified; the two kinds need opposite responses.
 
-**Transient** covers a connection-level failure with no SQLSTATE, plus
-`40001` (serialization failure), `40P01` (deadlock detected) and SQLSTATE classes
-`08`, `53`, `57` and `58`. The file is left exactly where it is, the broker marks
-the database unhealthy, and the cycle stops so the head of the FIFO is retried
-next tick. After 10 consecutive transient failures a circuit breaker holds the
-loop off for 5 seconds. Good spool is never discarded during an outage.
+| Class | What counts | Response |
+| --- | --- | --- |
+| **Transient** | a connection-level failure with no SQLSTATE; `40001` (serialization failure), `40P01` (deadlock); SQLSTATE classes `08`, `53`, `57`, `58` | The file stays exactly where it is, the broker marks the database unhealthy, and the cycle stops so the head of the FIFO retries next tick. After 10 consecutive failures a circuit breaker holds the loop off for 5 seconds. Good spool is never discarded during an outage. |
+| **Permanent** | any other server-side SQL error (bad data, a constraint, a custom `RAISE`); a spool file that cannot be read | The same data would fail every retry and block everything behind it. After 5 attempts on the same head file (each logged as `ERROR` on `spool` with `attempt` and `max_attempts`) it moves to `<FILE_BUFFER_DIR>/failed/` and the cycle carries on. If the rename fails the file is deleted: data that can never be stored must not freeze the queue behind it. |
 
-**Permanent** is any other server-side SQL error (bad data, a constraint, a
-custom `RAISE`), plus a spool file that cannot be read. The same data will fail
-every retry, and one such file at the head of the FIFO would block replay of every
-newer message behind it. So the broker counts consecutive permanent failures of
-that specific head file and, after 5 attempts, moves it into
-`<FILE_BUFFER_DIR>/failed/` and carries on with the rest of the cycle. Each
-attempt logs an `ERROR` on the `spool` target with `attempt` and `max_attempts`.
-If the rename fails the file is deleted, on the reasoning that data which can
-never be stored must not be allowed to freeze the queue behind it.
-
-The quarantine directory is invisible to the drain (every listing filters on the
-`.buf` and `.tmp` extensions and does not recurse), so a quarantined file stays
-put until someone looks at it. Treat a non-empty
-`failed/` directory as an alert: nothing else picks those files up, and those
+**A non-empty `failed/` directory is an alert.** Drain listings filter on
+`.buf`/`.tmp` and do not recurse: nothing picks those files up, and those
 messages were accepted and will never be stored.
 
 ## Startup recovery
 
-Before the listener binds, the broker finalizes any `.tmp` file left behind by a
-crash and replays every `.buf` file in FIFO order. The pass is bounded at one
-hour; on the cap it logs a warning and hands the remainder to the background
-drain. If a file fails, recovery marks the database unhealthy, stops, and leaves
-the rest to the drain loop as well.
-
-The consequence for operations is that an instance with a large spool has a slow
-start, and that a spool is only ever recovered by a process that boots with the
-same `FILE_BUFFER_DIR`. See
-[Probes and restarts](/selfhost/probes-restarts) for how that shapes a rolling
-restart.
+Before the listener binds, the broker finalizes any `.tmp` left by a crash and
+replays every `.buf` in FIFO order, bounded at one hour; past the cap, or on a
+file failure (which also marks the database unhealthy), the rest goes to the
+background drain. A large spool means a slow start, and a spool is recovered
+only by a process booting with the same `FILE_BUFFER_DIR`: see
+[Probes and restarts](/selfhost/probes-restarts).
 
 ## Maintenance mode is the deliberate diversion
 
-`POST /api/v1/system/maintenance` with `{"enabled": true}` diverts **every** push
-to the spool before it touches PostgreSQL, and pauses the drain so the spool
-accumulates on purpose. Every item comes back `buffered` with `201`; if any spool
-write fails the response is `500`. Disabling it force-finalizes the active file
-and resumes the drain, which then replays everything.
+```bash
+curl -s -X POST http://localhost:6632/api/v1/system/maintenance -H 'Content-Type: application/json' -d '{"enabled": true}'
+```
 
-This is the tool for a planned database operation (a failover, a `VACUUM FULL`,
-a version upgrade) where you want producers to keep succeeding while writes are
-impossible. What it does not do:
+This diverts **every** push to the spool before it touches PostgreSQL and pauses
+the drain: the tool for a planned failover, `VACUUM FULL` or version upgrade,
+when producers must keep succeeding while writes are impossible. Items come back
+`buffered` with `201`; a failed spool write makes the response `500`. Disabling
+force-finalizes the active file and resumes the drain, which replays everything.
 
-- It does not pause consumers. Pop maintenance is a separate flag,
-  `POST /api/v1/system/maintenance/pop`, and pops keep serving already-stored
-  messages while push maintenance is on.
-- It does not divert transactions. `POST /api/v1/transaction` still writes
-  straight to PostgreSQL, so it will fail if the database is actually down.
-- It is not a per-tenant control. Both flags are cell-wide.
+What it does not do:
 
-The flag is mirrored into `queen.system_state`, so it **survives a restart** and
-is re-read at boot; it is also broadcast to peer instances. Leaving maintenance
-mode on by accident is a silent way to accumulate an unbounded spool, which is
-why `queen_maintenance_mode_enabled` is worth an alert.
+- **Pause consumers**: pop maintenance is a separate flag,
+  `POST /api/v1/system/maintenance/pop`; pops keep serving stored messages.
+- **Divert transactions**: `POST /api/v1/transaction` still writes straight to
+  PostgreSQL and fails if it is down.
+- **Scope to a tenant**: both flags are cell-wide.
+
+The flag is mirrored into `queen.system_state` (it **survives a restart**) and
+broadcast to peers. Left on by accident it grows an unbounded spool:
+`queen_maintenance_mode_enabled` is worth an alert.
 
 ## The limits
 
 The spool is node-local, unreplicated, and unencrypted beyond what the queue
-already asked for. Read those three properties as one sentence: losing the node
-loses its spool.
+already asked for: losing the node loses its spool.
 
-- A spool is drained by the instance that wrote it: there is no transfer
-  and no cross-node visibility. Behind a load balancer, buffered messages are
-  scattered across whichever instances accepted them.
-- Give `FILE_BUFFER_DIR` storage that outlives the container, and keep the pod
-  on the node that holds it. On an ephemeral container filesystem the spool goes
-  with the container, so nothing is left to replay.
-- For a queue with `encryptionEnabled`, the spooled payload is the same
-  AES-256-GCM envelope that would have been stored, and the flag is persisted so
-  the replayed frame is still marked encrypted. For every other queue the payload
-  sits on disk as plaintext JSON. If a malformed `QUEEN_ENCRYPTION_KEY` disabled
-  encryption at boot (which is a warning, not a boot failure), then the spool
-  holds plaintext for flagged queues too.
-- Monitor free space on that volume alongside `queen_file_buffer_pending`. The
-  spool has no size cap and no maximum age: during a
-  long outage it grows until the filesystem fills, at which point spool writes
-  fail and pushes are reported `failed`.
+- A spool is drained only by the instance that wrote it; behind a load balancer,
+  buffered messages scatter across whichever instances accepted them.
+- Give `FILE_BUFFER_DIR` storage that outlives the container and keep the pod on
+  that node; an ephemeral filesystem takes the spool with it.
+- A queue with `encryptionEnabled` spools the stored AES-256-GCM envelope,
+  still flagged encrypted on replay; every other payload is plaintext JSON on
+  disk. A malformed `QUEEN_ENCRYPTION_KEY` that
+  [silently disabled encryption at boot](/selfhost/security/encryption#a-bad-key-silently-stores-plaintext)
+  leaves plaintext for flagged queues too.
+- **No size cap, no maximum age**: a long outage grows the spool until the
+  filesystem fills, spool writes fail, and pushes report `failed`. Monitor free
+  space alongside `queen_file_buffer_pending`.
 
 ## Related pages
 

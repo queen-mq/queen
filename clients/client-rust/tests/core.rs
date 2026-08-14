@@ -21,13 +21,11 @@ async fn push_single_is_queued() {
     let queue = unique("push-single");
     create_queue(&q, &queue, QueueOptions::default()).await;
 
-    // docs:start(rust-push)
     let res = q
         .queue(&queue)
         .push(serde_json::json!({ "hello": "world" }))
         .await
         .unwrap();
-    // docs:end
 
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].status, PushStatus::Queued);
@@ -70,11 +68,9 @@ async fn a_repeated_transaction_id_is_a_duplicate_not_a_second_message() {
     )
     .await;
 
-    // docs:start(rust-push-dedup)
     let txn = format!("{queue}-fixed-txn");
     let item =
         queen_mq::PushItem::new(&queue, serde_json::json!({ "n": 1 })).transaction_id(txn.clone());
-    // docs:end
 
     let first = q
         .queue(&queue)
@@ -771,7 +767,6 @@ async fn a_multi_partition_pop_drains_several_lanes_under_one_lease() {
 
     let mut msgs = Vec::new();
     for _ in 0..25 {
-        // docs:start(rust-pop)
         msgs = q
             .queue(&queue)
             .group("g-multi")
@@ -781,7 +776,6 @@ async fn a_multi_partition_pop_drains_several_lanes_under_one_lease() {
             .pop()
             .await
             .unwrap();
-        // docs:end
         if msgs.len() >= 3 {
             break;
         }
@@ -1053,7 +1047,6 @@ async fn consume_processes_and_acks_each_message() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&seen);
 
-    // docs:start(rust-consume)
     let summary = q
         .queue(&queue)
         .group("g-consume")
@@ -1070,7 +1063,6 @@ async fn consume_processes_and_acks_each_message() {
         })
         .await
         .unwrap();
-    // docs:end
 
     assert_eq!(summary.processed, 5);
     assert_eq!(summary.acked, 5);

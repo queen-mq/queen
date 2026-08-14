@@ -18,11 +18,9 @@ Open a Queen database with `psql` today and you find the log engine, the shared 
 and nothing else. This page is the record of how it got that way: which engines came before, what
 each left behind, and when the leftovers were removed.
 
-One fact frames everything below: **deployments are always-virgin**. A database is born from
-`schema.sql` plus the 23 procedure files, all of which only *create*. Nothing is dropped, migrated
-or folded at boot, because there is never anything pre-existing to drop. Pointing this build at a
-database written by an earlier schema is unsupported: a new version means a fresh database.
-Every removal described here therefore happened in the *source tree*, not in your database.
+One fact frames everything below: **deployments are always-virgin**, born from a boot-time schema
+apply that only creates (the [schema catalogue](/internals/schema) has the mechanism), so every
+removal described here happened in the *source tree*, not in your database.
 
 ## The story, in five stages
 

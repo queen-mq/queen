@@ -12,14 +12,8 @@ verifiedBy:
 ---
 
 The previous two examples each used one queue. Real systems chain them, and the chaining is where
-messages usually get lost.
-
-This program consumes from an orders queue and, for each message, acknowledges the input and
-pushes a derived message to an invoices queue **in one transaction**. Either both happen or
-neither does. There is no window in which the input is acknowledged but the derived message was
-never written, which is the failure that silently drops work in most queue systems.
-
-It then acknowledges one message as failed, and shows it coming back rather than disappearing.
+messages usually get lost. This program closes that gap in one transaction, then fails a message
+on purpose and watches it come back rather than disappear.
 
 <Tabs>
   <TabItem label="JavaScript">
@@ -37,6 +31,11 @@ It then acknowledges one message as failed, and shows it coming back rather than
 </Tabs>
 
 ## What to take away
+
+For each message consumed from the orders queue, the program acknowledges the input and pushes a
+derived message to an invoices queue **in one transaction**. Either both happen or neither does.
+There is no window in which the input is acknowledged but the derived message was never written,
+which is the failure that silently drops work in most queue systems.
 
 The transaction is one PostgreSQL transaction, which is exactly as strong as that sounds and no
 stronger. It does not make the pipeline exactly-once end to end: if the response is lost and the

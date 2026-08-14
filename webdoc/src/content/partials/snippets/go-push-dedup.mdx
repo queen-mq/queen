@@ -1,0 +1,30 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-go/tests/docs_test.go."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-go/tests/docs_test.go by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```go title="clients/client-go/tests/docs_test.go"
+first, err := client.Queue("payments").
+	Partition("customer-42").
+	Push(map[string]any{"orderId": 9137, "amount": 99.5}).
+	TransactionID("order-9137-paid").
+	Execute(ctx)
+if err != nil {
+	return err
+}
+
+retry, err := client.Queue("payments").
+	Partition("customer-42").
+	Push(map[string]any{"orderId": 9137, "amount": 99.5}).
+	TransactionID("order-9137-paid").
+	Execute(ctx)
+if err != nil {
+	return err
+}
+// retry[0].Status == "duplicate": the second push wrote nothing.
+```

@@ -14,14 +14,12 @@ export async function transactionBasicPushAck(client) {
         return { success: false, message: 'No message to consume' }
     }
 
-    // docs:start(js-transaction)
     await client
         .transaction()
         .queue('test-queue-v2-txn-basic-b')
         .push([{ data: { value: messages[0].data.value + 1 } }])
         .ack(messages[0])
         .commit()
-    // docs:end
 
     // Verify message moved to B
     const resultB = await client.queue('test-queue-v2-txn-basic-b').batch(1).wait(false).pop()

@@ -1,27 +1,22 @@
 ---
 params: []
-description: "Verified snippet extracted from clients/client-rust/tests/core.rs."
+description: "Verified snippet extracted from clients/client-rust/tests/docs.rs."
 ---
 
 {/* GENERATED FILE. Do not edit by hand.
-    Extracted from clients/client-rust/tests/core.rs by webdoc/scripts/gen-snippets.mjs
+    Extracted from clients/client-rust/tests/docs.rs by webdoc/scripts/gen-snippets.mjs
     Regenerate with: pnpm --dir webdoc gen
 */}
 
-```rust title="clients/client-rust/tests/core.rs"
+```rust title="clients/client-rust/tests/docs.rs"
 let summary = q
-    .queue(&queue)
-    .group("g-consume")
-    .batch(5)
-    .limit(5)
-    .wait(false)
-    .idle(Duration::from_secs(5))
-    .consume(move |msg| {
-        let sink = Arc::clone(&sink);
-        async move {
-            sink.lock().unwrap().push(msg.data["n"].as_i64().unwrap());
-            Ok::<_, std::convert::Infallible>(())
-        }
+    .queue("orders")
+    .group("billing")
+    .subscription_mode(SubscriptionMode::All)
+    .limit(1)
+    .consume(|message| async move {
+        println!("{}", message.data);
+        Ok::<_, std::convert::Infallible>(())
     })
     .await
     .unwrap();

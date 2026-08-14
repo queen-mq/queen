@@ -38,8 +38,8 @@
  *
  * Same bug class, different component. A benchmark figure is two generated
  * SVGs, and its `alt` is written for a reader who cannot see them: on
- * `/benchmarks/peak/` that is "a ramp of about half a minute, then a band
- * around one million per second held for the rest of the run". The
+ * `/benchmarks/soak-24h/` that is "broker resident memory flat at about
+ * 4.1 GB across the whole run". The
  * downleveler's self-closing rule deleted the tag, so the four benchmark pages
  * published their results section with the figure, its description and its
  * provenance all missing. An agent reading the markdown is exactly the reader

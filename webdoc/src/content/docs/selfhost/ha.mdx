@@ -1,6 +1,6 @@
 ---
 title: High availability
-description: "One to three identical brokers against one PostgreSQL: what the framed-TCP mesh carries, what it does not, which jobs are leader-gated, and why the mesh port must be firewalled."
+description: "One to three identical brokers against one PostgreSQL: a paste-ready pair configuration, what the framed-TCP mesh carries and does not, which jobs are leader-gated, and why the mesh port must be firewalled."
 type: how-to
 tier: operate
 sidebar:
@@ -19,17 +19,71 @@ verifiedBy:
   - server/mesh-verify.sh
 ---
 
-Queen's high-availability model is deliberately small: run one to three identical
-broker processes against **one** PostgreSQL, and put a load balancer in front of
-them. The brokers hold no authoritative state, so there is nothing to replicate
-between them, no quorum, no leader for serving traffic, and no split-brain to
-reason about. PostgreSQL is the only source of truth: messages, offsets, the
-deduplication index, queue configuration, leases and the DLQ all live there.
+Run one to three identical brokers against **one** PostgreSQL, load balancer in
+front. Brokers hold no authoritative state (messages, offsets, dedup, queue
+configuration, leases, DLQ: all PostgreSQL): nothing to replicate, no quorum,
+no serving leader, no split-brain. Replicas cover a broker process dying, a
+rolling restart, one node's network, not losing PostgreSQL: that is
+PostgreSQL tooling's job.
 
-Availability of the *database* is therefore a separate problem, solved with
-PostgreSQL's own tooling. Running three brokers protects you against a broker
-process dying, a rolling restart, and a single node's network. It does not protect
-you against losing PostgreSQL.
+## Configuration for a pair
+
+Condensed from `test/compose/docker-compose.ha.yml`, whose harness version adds
+a runner asserting the mesh is up.
+
+```yaml
+services:
+  pg:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+  queen-a:
+    image: ghcr.io/queen-mq/queen:latest
+    environment:
+      PG_HOST: pg                       # same database for both brokers
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: postgres
+      PORT: "6632"
+      QUEEN_SERVER_ID: queen-a          # distinct per broker
+      QUEEN_MESH_PORT: "6633"
+      QUEEN_MESH_PEERS: "queen-b:6633"  # points at the other broker
+      QUEEN_SYNC_SECRET: "change-me"    # byte-identical on every broker
+      FILE_BUFFER_DIR: /var/lib/queen/buffers   # spool: own volume per broker
+    volumes: ["spool-a:/var/lib/queen/buffers"]
+  queen-b:
+    image: ghcr.io/queen-mq/queen:latest
+    environment:
+      PG_HOST: pg
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: postgres
+      PORT: "6632"
+      QUEEN_SERVER_ID: queen-b
+      QUEEN_MESH_PORT: "6633"
+      QUEEN_MESH_PEERS: "queen-a:6633"
+      QUEEN_SYNC_SECRET: "change-me"
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    volumes: ["spool-b:/var/lib/queen/buffers"]
+volumes:
+  spool-a:
+  spool-b:
+```
+
+**The [disk spool is node-local](/selfhost/durability#the-limits) and must never
+be shared**: each broker drains its own files, and two brokers on one volume
+fight over them.
+
+`QUEEN_SYNC_ENABLED` defaults to `true`; the mesh starts only with at least one
+peer configured, so a single stock broker binds nothing and keeps the
+in-process long-poll waker. A busy mesh port logs `TCP mesh bind failed` and
+serving continues on the local waker.
+
+Three replicas is the designed ceiling: full-mesh connections grow
+quadratically, and `replicas × DB_POOL_SIZE`
+[must fit `max_connections`](/selfhost/postgres#connection-pool-sizing); past
+three the bottleneck is almost always PostgreSQL.
 
 ## The shape
 
@@ -47,73 +101,23 @@ flowchart TB
   C --> PG
 `}</pre>
 
-Everything a client sends travels the solid path and ends in the single database
-at the bottom. The dotted links are the mesh, and a frame dropped on one costs a
-parked pop some latency and nothing else.
-
-Every replica serves every route. A client can be routed to any of them on any
-request; there is no session affinity to maintain and no notion of a partition
-being "owned" by a broker. Leases are rows in `queen.log_consumers`, so a consumer
-that pops from `broker-a` can acknowledge to `broker-c`.
-
-### Configuration for a pair
-
-The minimum: distinct `QUEEN_SERVER_ID`, matching `QUEEN_SYNC_SECRET`, peers
-pointing at each other, and a **separate** `FILE_BUFFER_DIR` per broker.
-
-| Variable | broker-a | broker-b |
-| --- | --- | --- |
-| `PG_HOST` | same | same |
-| `QUEEN_SERVER_ID` | `queen-a` | `queen-b` |
-| `QUEEN_MESH_PORT` | `6633` | `6633` |
-| `QUEEN_MESH_PEERS` | `queen-b:6633` | `queen-a:6633` |
-| `QUEEN_SYNC_SECRET` | identical to b | identical to a |
-| `FILE_BUFFER_DIR` | node-local | node-local, **different volume** |
-
-`test/compose/docker-compose.ha.yml` in the repository is exactly this, with a
-runner that asserts the mesh is up.
-
-<Aside type="caution">
-The disk spool is node-local and must never be shared between brokers. It holds
-pushes accepted while PostgreSQL was unreachable, in append-only files each broker
-finalises and drains on its own. Two brokers pointed at one volume will fight over
-the same files.
-</Aside>
-
-`QUEEN_SYNC_ENABLED` defaults to `true`, but the mesh only starts when sync is
-enabled **and** at least one peer is configured. A single stock broker binds
-nothing and sends nothing: the in-process long-poll waker, which needs no cluster,
-is the only thing live. If the mesh port is already in use, the broker logs a
-`TCP mesh bind failed` warning and keeps serving with the local waker only.
-
-Three replicas is the designed ceiling. The mesh is a full mesh of static peers,
-so connection count grows with the square of the replica count, and every replica
-multiplies your PostgreSQL connection demand: `replicas × DB_POOL_SIZE` has to
-fit inside `max_connections`. Past three brokers, the bottleneck you are fighting
-is almost always PostgreSQL, and another broker will not help.
+A dropped frame costs a parked pop some latency, nothing else. Every replica
+serves every route, no session affinity, no partition ownership: leases are
+rows in `queen.log_consumers`, so a pop from `broker-a` can be acked to
+`broker-c`.
 
 ## What the mesh is
 
-Framed TCP. Each frame is `u32` big-endian length, then one type byte, then a JSON
-payload; the length counts the type byte plus the payload. There are no sequence
-numbers and no per-frame signature, because TCP already provides ordering and
-integrity and the mesh tolerates loss. A length prefix above 16 MiB is rejected
-before any allocation, so a corrupt or hostile peer cannot drive an
-out-of-memory.
-
-The topology is asymmetric on purpose, which sidesteps connection tie-breaking
-entirely: every node listens on the mesh port and dials every configured peer, a
-node **sends** only on its outbound (dialled) connections and **receives** only on
-inbound (accepted) ones. Between any two nodes there are therefore two
-connections, each used one way.
-
-`QUEEN_UDP_PEERS` and `QUEEN_UDP_NOTIFY_PORT` still read the same settings as
-`QUEEN_MESH_PEERS` and `QUEEN_MESH_PORT`. Only the names survive from the retired
-UDP transport; the wire is TCP.
+Framed TCP: `u32` big-endian length, one type byte, a JSON payload. No sequence
+numbers or per-frame signature (TCP orders; the mesh tolerates loss), and
+lengths above 16 MiB are rejected before allocation. Topology, framing, frame
+set: [Mesh internals](/internals/mesh/). The `QUEEN_UDP_*`
+[alias names](/selfhost/configuration#names-with-a-history) are legacy; the
+wire is TCP.
 
 ## What the mesh carries
 
-Four kinds of hint, all best-effort:
+Hints, all best-effort:
 
 | Hint | Effect on the receiving replica |
 | --- | --- |
@@ -121,69 +125,48 @@ Four kinds of hint, all best-effort:
 | **Hot-list dirty hints** (batched) | Marks the peer's in-memory wildcard-pop candidate set for a (queue, partition) that went from empty to pending. Coalesced: sent on the transition, not per message. An item may name a consumer group, which scopes the mark to that group's candidate ring; a hint from a backward seek does, a hint from a push does not. |
 | **Maintenance flips** | `MAINTENANCE_MODE_SET` and `POP_MAINTENANCE_MODE_SET` flip the receiving replica's flags, and keep its spool drain lifecycle in step. |
 | **Queue-config invalidation** | `QUEUE_CONFIG_SET` / `QUEUE_CONFIG_DELETE` drop the peer's cached lease time and encryption flag for that queue. The **value** is not sent, only the instruction to forget. |
-
-Plus `HELLO` at connection setup and a `HEARTBEAT` every
-`QUEEN_SYNC_HEARTBEAT_MS` (default 1000), which is the periodic write that
-detects a dead peer when no hints are flowing.
+| **`HELLO` + `HEARTBEAT`** | `HELLO` at connection setup, then a heartbeat every `QUEEN_SYNC_HEARTBEAT_MS` (default 1000): the periodic write that detects a dead peer when no hints are flowing. |
 
 ## What the mesh does not carry
 
-This is the more useful list. The mesh never carries:
-
-- **Messages.** No payload ever crosses it.
-- **Offsets, acknowledgements or leases.** All of that is `queen.log_consumers`.
-- **Deduplication state.** Dedup is enforced in SQL under the partition row lock,
-  which is why it is exact across every replica without any coordination.
-- **Queue configuration values.** Only invalidations. A replica re-reads the
-  configuration from PostgreSQL lazily.
-- **Cluster membership as authority.** Peer liveness is used for logging and the
-  stats surface. Nothing routes on it, and a replica that believes every peer is
-  dead serves normally.
-- **Any form of leader election.** That is done with PostgreSQL advisory locks.
+| Never on the mesh | Where it actually lives |
+| --- | --- |
+| **Messages** | No payload ever crosses it. |
+| **Offsets, acknowledgements, leases** | All rows in `queen.log_consumers`. |
+| **Deduplication state** | Enforced in SQL under the partition row lock, which is why it is exact across every replica without coordination. |
+| **Queue configuration values** | Only invalidations cross; a replica re-reads the configuration from PostgreSQL lazily. |
+| **Cluster membership as authority** | Peer liveness feeds logging and the stats surface. Nothing routes on it, and a replica that believes every peer is dead serves normally. |
+| **Leader election** | Done with PostgreSQL advisory locks. |
 
 ### Loss is designed in, not tolerated grudgingly
 
-Each peer has a bounded send queue of 1024 frames. When it is full (the peer is
-slow) or closed (the peer is down), the frame is **dropped** and a counter is
-bumped. The send path never blocks a caller and never grows without bound. On
-reconnect, anything that queued while the peer was down is discarded *before* the
-peer is marked connected, because replaying stale wakes is pointless and bursting
-an out-of-date maintenance state onto a peer is actively wrong.
-
-Reconnection backs off from 250 ms to a 5-second ceiling, re-resolving the
-hostname on every attempt, so a peer whose address moved is picked up without a
-separate DNS refresh.
-
-A lost frame costs latency rather than correctness, because every channel the
-mesh accelerates has a periodic floor underneath it that re-reads the database:
+Each peer has a bounded send queue: full or down, the frame is **dropped** and
+a counter bumped; the send path never blocks. On reconnect, frames queued
+meanwhile are discarded *before* the peer is marked connected: stale wakes are
+pointless, a stale maintenance state is actively wrong (depths and backoff:
+[Mesh internals](/internals/mesh/)). A lost frame costs latency, not
+correctness: every accelerated channel has a periodic floor re-reading the
+database.
 
 | Mechanism | Cadence | Heals |
 | --- | --- | --- |
-| Periodic reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, default 60000 ms | Re-reads both maintenance flags from `queen.system_state` (the database is the truth) and clears the per-queue lease and encryption caches, so a lost config invalidation heals within one interval. |
+| Periodic reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, default 60000 ms | Re-reads both maintenance flags from `queen.system_state` (the database is the truth) and clears the per-queue lease and encryption caches, so a lost config invalidation heals within one interval. Runs unconditionally, on a single broker too: reconverging on the database is useful even without peers. |
 | Pop long-poll backoff | Up to `POP_WAIT_MAX_INTERVAL_MS`, default 1000 ms | A parked pop re-queries on its own schedule regardless of wakes, so a dropped wake costs at most one interval of latency. |
 | Hot-list reseed floor | `QUEEN_HOTLIST_RESEED_MS`, default 30000 ms | Rebuilds a candidate ring from PostgreSQL even when it is non-empty, recovering a partition dropped by a missed mark or a dropped hint. Bounded to the partitions written in the last `QUEEN_HOTLIST_RESEED_WINDOW_MS`, which covers every case a **push** can create, and so every dropped push hint. |
 | Hot-list repair markers | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, default 60000 ms | The two operations that make old partitions pending without writing anything, a backward seek and a consumer-group delete, are invisible to the bounded walk above. Each writes a row into `queen.hotlist_repairs` in its own transaction, and every broker reads that table on the reconcile pass and repairs the rings named there. This is the floor under the mesh hint the operation also sends, and it is why a dropped hint on a seek no longer costs a replay a full-walk interval. |
 | Hot-list full reseed | `QUEEN_HOTLIST_RESEED_FULL_MS`, default 300000 ms | The same walk over every partition of the queue. This is the one that recovers pendingness no write explains and no marker announces: a ring entry cleared in error, a claim stranded by a dropped pop, a stale lease park. |
 
-The reconcile loop runs unconditionally, on a single broker too, because
-reconverging on the database is useful even without peers.
-
 ## Leader-gated background jobs
 
-Three background services write on a cadence. Two are gated so exactly one
-replica does the work per cycle, and the gate is a PostgreSQL advisory lock: a
-replica that cannot take it skips that cycle and tries again on the next one.
-There is no persistent leader and no election protocol.
+Two of the three cadenced background writers are advisory-lock gated, so
+exactly one replica works per cycle; one that cannot take the lock skips the
+cycle. No persistent leader, no election protocol.
 
 | Job | Cadence | Gate |
 | --- | --- | --- |
-| Retention and eviction sweep | `RETENTION_INTERVAL`, default 5000 ms | Session lock `737001`, taken with `pg_try_advisory_lock` and released on every exit path. |
+| Retention and eviction sweep | `RETENTION_INTERVAL`, default 5000 ms | Session lock `737001`, taken with `pg_try_advisory_lock` and released on every exit path. Held across a whole cycle of autocommitting steps, which is one of the two reasons the broker needs a [direct PostgreSQL connection](/selfhost/postgres). |
 | Statistics reconciler | `STATS_INTERVAL_MS`, default 10000 ms | Transaction lock `737002`, so it releases with the cycle's commit. Distinct from the retention lock so the two never block each other. |
 | System and worker metrics collector | `METRICS_FLUSH_MS`, default 60000 ms | **Not gated.** Every replica records its own rows, keyed by host and worker; the dashboard aggregates across replicas. |
-
-Because the retention lock is session-scoped and held across a whole cycle of
-autocommitting steps, it is one of the two reasons the broker needs a direct
-PostgreSQL connection. See [PostgreSQL](/selfhost/postgres).
 
 ## The mesh port must be firewalled
 
@@ -224,18 +207,13 @@ start line does the same.
 
 ## What HA does not buy you
 
-Two limits are worth stating plainly, because both are properties of the
-consumption model rather than of the deployment.
+**Replicas do not parallelise a single partition.** One in-flight leased batch
+exists per (partition, consumer group); scaling consumption means more
+partitions.
 
-**Replicas do not parallelise a single partition.** Exactly one in-flight leased
-batch exists per (partition, consumer group). A queue with one partition cannot be
-consumed in parallel by one consumer group, however many brokers you run. Scaling
-consumption means more partitions.
-
-**Replicas do not increase PostgreSQL's capacity.** Every push is a commit and
-every pop and ack is a row update, in the one database all replicas share. Adding
-a broker adds HTTP capacity and connection demand at the same time. When
-throughput stops improving, the answer is in PostgreSQL, not in another broker.
+**Replicas do not add PostgreSQL capacity.** Every push is a commit, every pop
+and ack a row update, in the shared database; when throughput plateaus, look at
+PostgreSQL, not at another broker.
 
 ## Related
 

@@ -108,16 +108,19 @@ import { Queen } from 'queen-mq'
 const client = new Queen('http://localhost:6632')
 ```
 
-Push a message. `data` is your payload, and it must be JSON. The blocks below are
-extracted verbatim from the files the JavaScript suite executes, which is why the
-queue names look like test fixtures; substitute your own:
+Push a message. `data` is your payload, and it must be JSON; `partition` is the
+ordering key, so everything about `customer-42` stays in order while other
+customers move independently:
 
 <Render file="snippets/js-push" />
 
 The result is one entry per item, and `status` is `queued` when the message was
-stored. Now consume it. `.consume()` polls, hands each message to your callback,
-and acknowledges it when the callback resolves; `.limit(1)` makes it stop after
-one message instead of running forever:
+stored. Now consume it. `.group('billing')` names the cursor that remembers what
+this consumer has seen, and since a group created after the push starts at the
+tail by default, `.subscriptionMode('all')` points the new cursor at the
+beginning. `.consume()` polls, hands each message to your callback, and
+acknowledges it when the callback resolves; `.limit(1)` makes it stop after one
+message instead of running forever:
 
 <Render file="snippets/js-consume" />
 
@@ -143,21 +146,24 @@ serde_json = "1"
 Point it at the broker:
 
 ```rust
-use queen_mq::{Config, Queen};
+use queen_mq::{Config, Queen, SubscriptionMode};
 
-let queen = Queen::connect(Config::new("http://localhost:6632"))?;
+let q = Queen::connect(Config::new("http://localhost:6632"))?;
 ```
 
-Push a message. The payload is anything that implements `serde::Serialize`, and it
-must be JSON. The blocks below are extracted verbatim from the files the Rust suite
-executes, which is why the queue names look like test fixtures; substitute your own:
+Push a message. The payload is anything that implements `serde::Serialize`, and
+it must be JSON; the partition is the ordering key, so everything about
+`customer-42` stays in order while other customers move independently:
 
 <Render file="snippets/rust-push" />
 
 The result is one entry per item, and `status` is `Queued` when the message was
-stored. Now consume it. `consume()` polls, hands each message to your closure, and
-acknowledges it when the closure returns `Ok`; `limit(...)` makes it stop after that
-many messages instead of running forever:
+stored. Now consume it. `group("billing")` names the cursor that remembers what
+this consumer has seen, and since a group created after the push starts at the
+tail by default, `SubscriptionMode::All` points the new cursor at the beginning.
+`consume()` polls, hands each message to your closure, and acknowledges it when
+the closure returns `Ok`; `limit(...)` makes it stop after that many messages
+instead of running forever:
 
 <Render file="snippets/rust-consume" />
 
@@ -191,10 +197,12 @@ You did not supply a `transactionId`, so the broker minted one from the message
 id. Supplying your own is what makes a retry of this call idempotent.
 
 Now pop. `wait=true` long-polls instead of returning immediately, and
-`consumerGroup` names the cursor that will remember what you consumed:
+`consumerGroup` names the cursor that will remember what you consumed. A group
+created after the push starts at the tail by default, so `subscriptionMode=all`
+points this new cursor at the beginning:
 
 ```bash
-curl -i "http://localhost:6632/api/v1/pop/queue/orders?batch=1&wait=true&consumerGroup=demo"
+curl -i "http://localhost:6632/api/v1/pop/queue/orders?batch=1&wait=true&consumerGroup=demo&subscriptionMode=all"
 ```
 
 ```json

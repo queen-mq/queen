@@ -13,9 +13,7 @@ async def test_push_message(client):
     queue = await client.queue("test-queue-v2").create()
     assert queue.get("configured") is True
     
-    # docs:start(py-push)
     res = await client.queue("test-queue-v2").push([{"data": {"message": "Hello, world!"}}])
-    # docs:end
 
     assert res[0].get("status") == "queued"
 

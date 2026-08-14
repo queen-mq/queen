@@ -1,6 +1,6 @@
 ---
 title: Capacity planning
-description: "The cost model is commits and fsyncs, not rows; batch size is the dominant lever and partition count drives background work. What the published runs imply, and what they do not."
+description: "The cost model is commits and fsyncs, not rows; batch size is the dominant lever and partition count drives background work. Every published number, with its conditions."
 type: how-to
 tier: operate
 sidebar:
@@ -19,45 +19,12 @@ sourceOfTruth:
 ---
 
 Sizing a Queen deployment means sizing PostgreSQL, because the broker holds no
-data. And sizing PostgreSQL for this workload means counting **transactions**, not
-messages. Every number below follows from that one substitution.
+data, and sizing PostgreSQL for this workload means counting **transactions**,
+not messages. Start by reading where you are:
 
-## The unit of cost is a commit
-
-A push becomes one `queen.log_segments` row per (queue, partition) touched: many
-messages packed as length-prefixed frames, zstd-compressed, stored with
-`STORAGE EXTERNAL` so PostgreSQL does not waste CPU trying to re-compress bytes
-that are already compressed. Writing that row is one transaction, and a
-transaction is one WAL flush.
-
-So the question that decides your hardware is not "how many messages per second"
-but "how many messages ride each commit".
-
-Three mechanisms move that ratio, and only the first is yours to control:
-
-**Client batch size.** A push call carrying N messages for one partition becomes
-one segment row inside one commit. N pushes of one message each cannot be cheaper
-than that, and are usually much more expensive. This is the dominant lever in the
-whole system, ahead of every server-side knob, and it is free.
-
-**Push fusion.** Concurrent pushes are coalesced by the broker before they reach
-PostgreSQL. The batch size is emergent rather than configured: when the broker is
-idle a push fires immediately on its own, and when it is busy the next segment
-accumulates for exactly one in-flight flush round trip. Disjoint partitions are
-additionally bundled into a single multi-segment transaction, so commit rate
-decouples from partition count under load. `QUEEN_V2_FUSION_FRAMES` is retained
-for compatibility and is no longer a flush trigger. There is no frame threshold
-to tune.
-
-**Ack fusion.** Cursor advances are coalesced the same way, one commit per flush
-for many cursors, with a 3 ms hold by default. It is on by default.
-
-The consequence for the failure mode you will actually hit: a saturated Queen is
-almost always commit-bound, not CPU-bound. `queen_db_pool_idle` pinned at zero and
-`pool_waiting` non-zero in the `rates` log block mean requests are queueing for a
-connection while PostgreSQL flushes.
-
-### The four numbers that tell you where you are
+```bash
+curl -s http://localhost:6632/metrics/prometheus | grep -E 'queen_fusion_items_per_batch|queen_batch_rtt_milliseconds'
+```
 
 | Signal | Where | Reading |
 | --- | --- | --- |
@@ -66,52 +33,53 @@ connection while PostgreSQL flushes.
 | `segments_per_commit` | the `fusion` log summary | how many partitions share a transaction |
 | `rows_per_commit` | the `ack-fusion` log summary | cursors per ack commit |
 
-The PostgreSQL-side lever behind all of them is the commit-durability setting,
-which trades data loss on power failure against commit rate. That is a
-PostgreSQL decision with PostgreSQL consequences, and the broker neither sets nor
-depends on it.
+## The unit of cost is a commit
+
+A push becomes one `queen.log_segments` row per (queue, partition) touched: many
+messages packed as length-prefixed frames, zstd-compressed, stored with
+`STORAGE EXTERNAL` so PostgreSQL does not re-compress already-compressed bytes.
+That row is one transaction, and a transaction is one WAL flush, so the question
+that decides your hardware is how many messages ride each commit:
+
+| Mechanism | How it packs a commit |
+| --- | --- |
+| **Client batch size** | a push call carrying N messages for one partition becomes one segment row inside one commit; N single-message pushes cannot be cheaper and are usually much more expensive. The dominant lever in the whole system, ahead of every server-side knob, and it is free |
+| **Push fusion** | concurrent pushes are coalesced by the broker before PostgreSQL. The batch size is emergent, not configured: idle fires a push immediately, busy accumulates the next segment for exactly one in-flight flush round trip. Disjoint partitions are bundled into one multi-segment transaction, so commit rate decouples from partition count under load. `QUEEN_V2_FUSION_FRAMES` is retained for compatibility and is no longer a flush trigger; there is no frame threshold to tune |
+| **Ack fusion** | cursor advances are coalesced the same way, one commit per flush for many cursors, with a 3 ms hold by default. On by default |
+
+A saturated Queen is therefore almost always commit-bound, not CPU-bound:
+`queen_db_pool_idle` pinned at zero with `pool_waiting` non-zero in the `rates`
+log block means requests are queueing for a connection while PostgreSQL flushes.
+The PostgreSQL-side lever behind all of it is the commit-durability setting,
+which trades data loss on power failure against commit rate; the broker neither
+sets nor depends on it.
 
 ## Partition count drives background work, message count does not
 
-Three background loops iterate partitions on a fixed cadence, regardless of
-traffic:
+Three loops iterate partitions on a fixed cadence, regardless of traffic:
 
-- **Retention**, every `RETENTION_INTERVAL` (5000 ms). It builds a work list of
-  every partition of every queue, and its hash-sidecar purge phase runs for
-  **every** partition on **every** cycle: the sidecar is written by every push
-  whether deduplication is on or off, and expires on its own clock.
-- **The stats reconciler**, every `STATS_INTERVAL_MS` (10000 ms), recomputing
-  `queen.stats` with arithmetic that is O(partitions).
-- **The metrics collector**, every `METRICS_FLUSH_MS` (60000 ms), writing one
-  bucket row per active (tenant, queue).
+| Loop | Cadence | Work per cycle |
+| --- | --- | --- |
+| Retention | `RETENTION_INTERVAL` (5000 ms) | builds a work list of every partition of every queue; its hash-sidecar purge runs for **every** partition on **every** cycle, because the sidecar is written by every push whether deduplication is on or off and expires on its own clock |
+| Stats reconciler | `STATS_INTERVAL_MS` (10000 ms) | recomputes `queen.stats`, arithmetic that is O(partitions) |
+| Metrics collector | `METRICS_FLUSH_MS` (60000 ms) | one bucket row per active (tenant, queue) |
 
-An idle deployment with 100 partitions and one with 100,000 differ in steady-state
-PostgreSQL CPU by three orders of magnitude while both move zero messages. If a
-cluster is burning CPU with no traffic, this is why, and the levers are the three
-intervals above. Lengthening them costs freshness in the dashboard and slower
+An idle deployment with 100 partitions and one with 100,000 differ in
+steady-state PostgreSQL CPU by three orders of magnitude while both move zero
+messages. If a cluster burns CPU with no traffic, this is why; the levers are
+the three intervals, and lengthening them costs dashboard freshness and slower
 retention, nothing else.
 
-Two aggravating factors:
-
-- **Partitions are reclaimed only after 30 days of being empty and idle**
-  (`PARTITION_CLEANUP_DAYS`). A partition is created by the first push that names
-  it, and a design that mints one per user or per order carries its background
-  cost for the whole retention window plus that month, and forever if the lane
-  keeps receiving the occasional message, or holds a dead-letter row.
-- **Every message costs 16 bytes in the hash sidecar** for the length of the purge
-  window (`GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900s)`), on top
-  of its compressed payload. That is small per message and very much not small at
-  a billion of them.
-
-Partition count is also what buys you consumer parallelism: exactly one in-flight
-leased batch exists per (partition, consumer group), so a single-partition queue
-cannot be consumed in parallel by one group. Choose the count for the parallelism
-you need, and then know what it costs to keep.
+| What a wide partition space costs | Mechanism |
+| --- | --- |
+| Reclamation lag | a partition is created by the first push that names it and reclaimed only after **30 days empty and idle** (`PARTITION_CLEANUP_DAYS`). One lane per user or per order carries its background cost for the whole retention window plus that month, and forever if it keeps receiving the occasional message or holds a dead-letter row |
+| Sidecar bytes | every message costs **16 bytes** in the hash sidecar for `GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900s)`, on top of its compressed payload. Small per message, very much not small at a billion |
+| What it buys | exactly one in-flight leased batch exists per (partition, consumer group), so partition count is what buys consumer parallelism and a single-partition queue cannot be consumed in parallel by one group |
 
 ### What a million partitions actually costs
 
 A dedicated run took the partition count to 1,000,000 on one broker and one
-PostgreSQL, creating them during the run at a thousand a second. What it measured:
+PostgreSQL, creating them during the run at a thousand a second:
 
 | | |
 | --- | --- |
@@ -120,125 +88,86 @@ PostgreSQL, creating them during the run at a thousand a second. What it measure
 | Retention sweep, `RETENTION_PARALLELISM=4` | 108 s, then 149, 204, 296, **402 s and still climbing** |
 | Retention sweep, `RETENTION_PARALLELISM=16` | settles near **195 s**, deleting 4,002 rows/s against the 4,000 the rate creates |
 | Broker resident memory | **about 5 KB per partition**, 5.03 GB for a million |
-| Deduplication cache, 60 s window | **does not converge**: it grew 235 MB per minute after the space was complete, which is one hash per message retained rather than one per in-window message |
+| Deduplication cache, 60 s window | **does not converge**: it grew 235 MB per minute after the space was complete, one hash per message retained rather than one per in-window message |
 
-Two operational conclusions, both of which cost a failed run to learn:
+Two conclusions, each of which cost a failed run to learn:
 
-- **Raise `RETENTION_PARALLELISM` with cardinality.** At a million partitions the
-  default of 4 produces a sweep that grows monotonically and never catches up. A
-  sweep duration that climbs from one cycle to the next is the signal.
-- **Deduplication does not reach a steady state at this cardinality, at any cache
-  size.** Its reclamation is block-granular and a block seals only when it fills, so
-  at a fifth of a message per second per partition no block ever seals. The cache
-  grew past 6 GB and then past 16 GB against a documented requirement of 192 MB for
-  this rate and window. At 6 GB the run collapsed after twenty minutes, from 200,000
-  messages per second to 2,673 with a p50 of 19 seconds; correctness held throughout,
-  because a suppressed partition falls back to an authoritative SQL probe, but the
-  cost moves onto PostgreSQL until the pool saturates. Until this is fixed, a
-  partition space this wide wants deduplication off.
+| Conclusion | Measured basis |
+| --- | --- |
+| **Raise `RETENTION_PARALLELISM` with cardinality** | at a million partitions the default of 1 cannot keep up, and even 4 produces a sweep that grows monotonically. A sweep duration climbing from cycle to cycle is the signal |
+| **Deduplication does not reach a steady state at this cardinality, at any cache size** | reclamation is block-granular and a block seals only when it fills, so at a fifth of a message per second per partition no block ever seals. The cache grew past 6 GB and then past 16 GB against a documented requirement of 192 MB for this rate and window; at 6 GB the run collapsed after twenty minutes, from 200,000 messages per second to 2,673 with a p50 of 19 seconds. Correctness held throughout, because a suppressed partition falls back to an authoritative SQL probe, but the cost moves onto PostgreSQL until the pool saturates. Until this is fixed, a partition space this wide wants deduplication off |
 
 The whole run, including the collapse, is on
 [A million ordered partitions](/benchmarks/cardinality-1m).
 
 ## Connections and consumers
 
-Each instance opens up to `DB_POOL_SIZE` connections, default **160**. Multiply by
-the number of instances and compare against the database's `max_connections`
-before you scale out; a connection pooler in front of PostgreSQL is a reasonable
-answer, but the arithmetic is yours to do.
+Each instance opens up to `DB_POOL_SIZE` connections, default **160**, and the
+[per-cluster arithmetic against `max_connections`](/selfhost/postgres#connection-pool-sizing)
+is yours to do before you scale out. Parked consumers are cheap: a long-poll pop
+releases its pooled connection *before* parking, so waiting consumers cost
+memory and a wake-up. Concurrent in-flight statements are the scarce resource,
+bounded by the admission arbiter (visible as `adm_budget` and `adm_lanes` in the
+`rates` block).
 
-Parked consumers are cheap. A long-poll pop releases its pooled connection
-*before* parking, so waiting consumers cost memory and a wake-up, not a
-connection. Concurrent in-flight statements are the scarce resource, and the
-admission arbiter (visible as `adm_budget` and `adm_lanes` in the `rates` block)
-is what keeps them bounded.
+Broker memory is dominated by two budgeted caches, `QUEEN_DEDUP_CACHE_MB`
+(default 512) and `QUEEN_ACK_REGISTRY_MB` (default 64). Both report occupancy in
+the `sizes` log block, and neither affects correctness: the SQL deduplication
+probe is authoritative, and an ack-registry miss falls back to the SQL path.
 
-Broker memory is dominated by two explicitly budgeted caches:
-`QUEEN_DEDUP_CACHE_MB` (default 512) and `QUEEN_ACK_REGISTRY_MB` (default 64).
-Both report their occupancy in the `sizes` log block, and neither affects
-correctness: the deduplication probe in SQL is authoritative, and an ack-registry
-miss falls back to the SQL path.
-
-**Size the deduplication cache from the rate and the window**, because the default
-is a starting point rather than an answer:
+**Size the deduplication cache from the rate and the window**, because the
+default is a starting point, not an answer:
 
 ```text
 needed_mb ≈ 16 × msg_rate(msg/s) × dedup_window_seconds / 1e6
 ```
 
-Underneath that figure the cache stops holding the working set, partitions that do
-not fit enter a suppressed state, and every push to one of them pays a full-window
-SQL probe instead of a broker lookup. **Correctness is unaffected**, because the SQL
-probe is the authority. Throughput is very much affected: the cost moves onto
-PostgreSQL, and it does not degrade gently. Watch `dedup_suppressed` in the `sizes`
-block. A nonzero value that keeps growing means the cache is undersized for the
-shape you are running, and the answer is the formula, not patience.
+Underneath that figure, partitions that do not fit enter a suppressed state and
+every push to one pays a full-window SQL probe instead of a broker lookup:
+correctness is unaffected, throughput is very much affected, and it does not
+degrade gently. A `dedup_suppressed` value in the `sizes` block that keeps
+growing means the cache is undersized for the shape you are running, and the
+answer is the formula, not patience.
 
 ## What the published runs mean
 
-These are the only performance figures in this documentation, and each one is
-inseparable from the conditions it was measured under. Do not quote a number
-without its row.
+These are the only performance figures in this documentation, and each is
+inseparable from its conditions. Do not quote a number without its row.
 
 | Result | Conditions it was measured under |
 | --- | --- |
-| 24-hour soak: 86,369,975,300 messages, roughly 1M msg/s per side, 1,000 messages touched by an error, zero restarts, broker RSS flat at about 4.1 GB | **explicit acks** (`manualAck=true`, `ackAsync=true`), a 32 vCPU / 62 GiB VM, Queen 1.0.0 |
+| Throughput 24h 1M: 86,369,975,300 messages, roughly 1M msg/s per side, 1,000 messages touched by an error, zero restarts, broker RSS flat at about 4.1 GB | **explicit acks** (`manualAck=true`, `ackAsync=true`), a 32 vCPU / 62 GiB VM, Queen 1.0.0 |
 | 1,000,000 ordered partitions on one broker, created during the run at 1,000/s, serving 200k msg/s with 0 push, pop or ack errors; p50 27.5 ms and p99 115 ms once the space was up | **explicit acks**, retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space. One hour, of which 43 minutes on the completed space. With deduplication on the cache does not reach a steady state at this cardinality, which is why it is off here and documented on the page |
-| 1M msg/s per side, sustained for 600 s | **`autoAck`** (`manualAck=false`) and **deduplication off**; 99.914 % delivered: about 500,000 messages were never accepted (`pushErr=3032`) |
 | A 4-stage pipeline over 1000 partitions at 25k events/s for 600 s: 88,503,408 messages verified, 0 duplicates, 0 gaps, 0 order violations | `dedupWindow=300s`, echoed by the loader. This is the ordering result, not a throughput result |
 | A 2-core cell holding more than 2400 msg/s through the proxy, 12 tenants for 1 hour, 0 cross-tenant deliveries | **deduplication off** (`dedupWindowSeconds: 0`) and **429 retry disabled** (`retry429Attempts: 1`); the raw sampler also recorded 818 HTTP 502 and 4,392 connection-refused errors against the proxy, and the roughly 1 % gap between pushes and deliveries is redelivery volume |
 
-What they legitimately imply:
+| What they imply | What they do not imply |
+| --- | --- |
+| A single PostgreSQL on commodity hardware is not the bottleneck people assume, and broker memory is stable over a day at high rate | **a latency SLO**: these are throughput and correctness runs, and percentile latency depends on your commit-durability setting, your disk and your batch size |
+| Total order per partition survives at scale: 88.5 million messages verified with zero ordering violations at a thousand partitions | **portability across storage**: commit rate is a storage property first, and a run on NVMe tells you very little about a network volume |
+| Cardinality is not a structural ceiling: a million lanes cost 641 MB of rows and about 5 KB of broker memory each. It is not purely a sizing problem either: retention parallelism has to rise with the count, and deduplication has no steady state there, which is why the cardinality run has it off | **that the rows with deduplication off are the safe configuration**: deduplication off removes exactly-once storage on retry. If you need that guarantee, size against the row that has it on |
+| Throughput is a function of what you switch on: the highest number in the table was measured with leases, explicit acks and deduplication on; the lowest is a two-core shared cell behind a rate limiter | **that the 2-core figure is a clean throughput number**: it is a multi-tenant isolation result, its rate limiter and the proxy-side errors in its raw output are part of the result, not noise to discard |
 
-- A single PostgreSQL instance on commodity hardware is not the bottleneck people
-  assume it is, and the broker's memory is stable over a day at high rate.
-- Total order per partition survives at scale: the pipeline run verified 88.5
-  million messages with zero ordering violations at a thousand partitions.
-- Cardinality is not a structural ceiling: a million lanes cost 641 MB of rows and
-  about 5 KB of broker memory each. It is not purely a sizing problem either. The
-  retention parallelism has to be raised to match the count, and deduplication does
-  not reach a steady state at this cardinality at any cache size, which is why the
-  cardinality run has it off.
-- Throughput is a function of what you switch on. The highest number in the table
-  is also the one with deduplication off and at-most-once delivery, and it dropped
-  half a million messages. The lowest is a two-core shared cell with a rate
-  limiter in front.
-
-What they do not imply:
-
-- **These are throughput and correctness runs, not a latency SLO.**
-  Percentile latency depends on your commit durability setting, your disk and your
-  batch size.
-- **Each figure carries the storage it was measured on.** Commit rate is a
-  storage property first, and a run on NVMe tells you very little about a
-  network volume.
-- **The high-throughput rows are not the safe configuration.** Deduplication off
-  removes exactly-once storage on retry; `autoAck` removes redelivery. If your
-  deployment needs either guarantee, size against the explicit-ack row.
-- **The 2-core cell figure includes a rate limiter and its errors.** It is a
-  multi-tenant isolation result that happens to carry a throughput number, and the
-  proxy-side errors in its raw output are part of the result, not noise to discard.
-
-Full artifacts, methodology and the raw output for each run are in
+Full artifacts, methodology and raw output for each run are in
 [Benchmarks](/benchmarks).
 
 ## A sizing procedure that works
 
 <Steps>
 
-1. Measure your own message. Payload size and compressibility decide storage, and
-   zstd level 3 on your actual JSON is the only honest estimate.
+1. Measure your own message. Payload size and compressibility decide storage,
+   and zstd level 3 on your actual JSON is the only honest estimate.
 
-2. Fix the batch size first. Push in batches and consume in batches; then read
+2. Fix the batch size first. Push in batches and consume in batches, then read
    `queen_fusion_items_per_batch` under your real load. Everything else is a
    smaller lever.
 
 3. Choose partition count from the consumer parallelism you need, then price the
    background cost of that count against the three intervals above.
 
-4. Load the deployment until `pool_waiting` goes non-zero, and note the rate. That
-   is your commit ceiling on that hardware, and it moves with the disk, not with
-   the broker.
+4. Load the deployment until `pool_waiting` goes non-zero, and note the rate.
+   That is your commit ceiling on that hardware, and it moves with the disk, not
+   with the broker.
 
 5. Size retention before you go live. An unbounded queue is a full disk on a
    schedule you did not choose, and dead-letter rows are never reclaimed at all.

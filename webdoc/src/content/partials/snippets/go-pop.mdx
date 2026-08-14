@@ -1,0 +1,19 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-go/tests/docs_test.go."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-go/tests/docs_test.go by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```go title="clients/client-go/tests/docs_test.go"
+messages, err := client.Queue("orders").
+	Batch(10).
+	Wait(true).
+	Pop(ctx)
+if err != nil {
+	return err
+}
+```

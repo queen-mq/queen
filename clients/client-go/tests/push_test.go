@@ -28,12 +28,10 @@ func TestPushMessage(t *testing.T) {
 		"value":     123,
 		"timestamp": time.Now().UnixNano(),
 	}
-	// docs:start(go-push)
 	responses, err := client.Queue(queueName).Push(payload).Execute(ctx)
 	if err != nil {
 		t.Fatalf("Failed to push message: %v", err)
 	}
-	// docs:end
 
 	if len(responses) != 1 {
 		t.Fatalf("Expected 1 response, got %d", len(responses))

@@ -1,6 +1,6 @@
 ---
 title: Operating retention
-description: "Retention is opt-in and runs as bounded steps every five seconds; what it deletes, what it never deletes, and how to watch disk growth."
+description: "Retention is opt-in per queue: the /configure call that turns it on, the two deletion rules, what is never reclaimed, and how to watch disk growth."
 type: how-to
 tier: operate
 sidebar:
@@ -16,96 +16,45 @@ sourceOfTruth:
   - server/src/config.rs
 ---
 
-Retention is **opt-in per queue**. A fresh queue keeps everything forever, and no
-amount of consuming changes that. Until you set `retentionEnabled` together with a
-positive window, the only thing the maintenance loop does to your data is purge
-the deduplication hash sidecar.
+Retention is **opt-in per queue**: a fresh queue keeps everything forever, no
+amount of consuming changes that, and until you enable it the only thing the
+maintenance loop touches is the deduplication hash sidecar. The default is
+deliberate, because losing data quietly is worse than filling a disk visibly.
 
-That default is deliberate (losing data quietly is worse than filling a disk
-visibly), and it puts capacity planning in your hands from the first push.
+A seven-day hard cap with one day of consumed history:
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/configure -H 'Content-Type: application/json' -d '{"queue":"orders","options":{"retentionEnabled":true,"retentionSeconds":604800,"completedRetentionSeconds":86400}}'
+```
+
+**`/configure` is a [full replace](/reference/queue-options), so a later call
+that sets one unrelated option and omits these keys silently turns retention
+back off.** Always send the queue's complete option set; the full field list is
+in [queue options](/reference/queue-options).
 
 ## The two rules
 
-Retention is expressed as two independent windows on the queue, and a segment is
-deleted when either rule says so.
+| Rule | Deletes | Boundary |
+| --- | --- | --- |
+| `retentionSeconds` | segments older than the cutoff **regardless of consumption state**. This is the one rule that can lose messages nobody ever read | `now() - retentionSeconds` |
+| `completedRetentionSeconds` | only data that has been consumed. A partition with **no** consumer rows has consumed nothing, so this rule contributes nothing there and old-but-unread segments survive; and one stalled consumer group pins the whole partition's history for every group | capped at `MIN(committed) + 1` across every consumer group on the partition: the slowest group's next wanted offset |
+| Granularity (both rules) | **whole segment rows**, and only ones lying entirely below the boundary: a boundary mid-segment leaves the covering segment in place, consumed head included | disk is reclaimed in segment-sized steps, so heavy producer batching means lumpier steps and an on-disk footprint that lags the logical window |
 
-`retentionSeconds` deletes segments older than the cutoff **regardless of
-consumption state**. This is the explicit "drop unconsumed data after N seconds"
-knob, and it is the one that can lose messages nobody ever read.
-
-`completedRetentionSeconds` deletes only data that has been consumed. Its time
-boundary is capped at `MIN(committed) + 1` across every consumer-group cursor on
-that partition, the slowest group's next wanted offset. Two consequences worth
-memorising: a partition with **no** consumer rows has consumed nothing, so this
-rule contributes nothing and old-but-unread segments survive; and one stalled
-consumer group pins the whole partition's history for every group.
-
-Both rules require `retentionEnabled` to be true *and* the corresponding window to
-be positive. A queue with `retentionEnabled: true` and no windows set is swept by
-nothing.
-
-<Aside type="caution">
-`POST /api/v1/configure` is a **full replace**. Keys you omit are reset to their
-defaults, so a later call that sets one unrelated option silently turns retention
-back off. Always send the complete option set.
-</Aside>
-
-## Whole segments, never partial ones
-
-A segment is one row holding many length-prefixed frames. Retention deletes whole
-segment rows and nothing finer: only segments lying **entirely** below the
-computed boundary go. When `completedRetentionSeconds` puts the boundary in the
-middle of a segment (because that is where the slowest cursor happens to be),
-the covering segment survives with its consumed head still in it, and the
-partition's watermark advances only as far as the last fully deleted segment.
-
-So disk is reclaimed in steps the size of a segment, not message by message, and
-a queue whose producers batch heavily reclaims in larger, lumpier steps. Expect
-the on-disk footprint to lag the logical retention window.
+Both rules require `retentionEnabled` to be true *and* the corresponding window
+to be positive. A queue with `retentionEnabled: true` and no windows set is
+swept by nothing.
 
 ## The cadence
 
-The loop runs every `RETENTION_INTERVAL` milliseconds (default **5000**, not the
-five minutes an older generation of this system used) on one dedicated pooled
-connection. Each cycle:
+| Property | How it works |
+| --- | --- |
+| Cycle | every `RETENTION_INTERVAL` ms (default **5000**, not the five minutes an older generation of this system used) |
+| Leader | session advisory lock `737001` elects one sweeper per cycle, so replicas never double-delete; released on every exit path |
+| Transactions | **none wrapping**: every step autocommits and holds exactly one `queen.log_partitions` row lock (the push allocator's serializer) for at most `RETENTION_BATCH_SIZE` rows (default 1000), so pushes interleave with the sweep and steps cannot deadlock against multi-partition writers |
+| Rate | scales with `RETENTION_PARALLELISM` (default **1**, clamped to 16) and nothing else: workers pull partitions off a shared cursor, each holding one maintenance-lane admission slot, so raise `QUEEN_ADMISSION_SHARE_MAINT` along with it. A larger `RETENTION_BATCH_SIZE` is not an alternative: step cost is per row, so a bigger batch absorbs no more rows per second and only lengthens the row lock the push allocator waits on |
 
-<Steps>
-
-1. Takes session advisory lock `737001`. A replica that cannot get it skips the
-   cycle entirely, so exactly one instance sweeps per cycle and replicas never
-   double-delete.
-
-2. Builds the work list with one query: every partition of every log-engine queue,
-   with all four cutoffs precomputed from a single `now()` so the whole cycle uses
-   one consistent clock. A `NULL` cutoff means that rule is disabled for that
-   queue.
-
-3. Runs three phases of bounded step calls, each looped until it reports
-   `done`, then purges old metrics rows.
-
-4. Releases the lock on every exit path, including after an error.
-
-</Steps>
-
-The important structural property is that **there is no wrapping transaction**.
-Every step call autocommits, takes exactly one `queen.log_partitions` row lock
-(the same serializer the push allocator uses), and holds it only for its own batch
-of at most `RETENTION_BATCH_SIZE` rows (default 1000). A large backlog is drained
-in many short transactions with pushes interleaving between them, instead of one
-sweep-length lock hold. Because no step ever holds two partition locks, the steps
-cannot deadlock against the multi-partition writers.
-
-The deletion *rate* scales with `RETENTION_PARALLELISM` (default **1**, the
-historical serial cycle, clamped to 16) and with nothing else. Above 1, the three
-phases below fan out over that many workers, each on its own pooled connection and
-its own maintenance-lane admission slot, pulling partitions off a shared cursor so
-that one deep backlog cannot leave a single worker sweeping alone. A larger
-`RETENTION_BATCH_SIZE` is not an alternative: the step cost is per row, so a bigger
-batch absorbs no more rows per second and only lengthens the row lock the push
-allocator is waiting on. Raise `QUEEN_ADMISSION_SHARE_MAINT` along with the
-parallelism, because each worker holds one maintenance slot while it runs.
-
-The three phases are:
+The full walk through the loop is in
+[Retention internals](/internals/retention). The phases per cycle:
 
 | Phase | Applies to | Cutoff |
 | --- | --- | --- |
@@ -113,112 +62,94 @@ The three phases are:
 | Hash-sidecar purge | **every** log partition, always | `GREATEST(dedupWindowSeconds, completedRetentionSeconds, 900s)` |
 | Age eviction | queues with `maxWaitTimeSeconds > 0` | `maxWaitTimeSeconds` |
 
-The middle phase is why the loop touches every partition on every cycle even on a
-deployment with retention off everywhere: `queen.log_txns` is written for every
-push whether deduplication is on or not, because ack resolution depends on it, and
-it expires on its own clock. Its 900-second floor means a hash is never dropped
-while a plausible late ack could still need it. A hash that outlives the window
-resolves as unknown on ack, which the ack path counts as *not* acked: redelivery
-over loss, the engine's standing bias.
+The middle phase is why the loop touches every partition even with retention off
+everywhere: `queen.log_txns` is written for every push whether deduplication is
+on or not, because ack resolution depends on it, and its 900-second floor means
+a hash is never dropped while a plausible late ack could still need it. A hash
+that outlives the window resolves as unknown on ack, which counts as *not*
+acked: redelivery over loss, the engine's standing bias.
 
 ## maxWaitTimeSeconds deletes unconsumed data, for every group, including leased batches
 
-This is not a retention rule with a friendlier name. It deletes whole segments
-older than `now() - maxWaitTimeSeconds` for every consumer group on the partition,
-in-flight leases included, and it applies **regardless of `retentionEnabled`**: a
-queue configured with only this option is still swept. The stored procedure calls
-it data loss by design.
-
-It does **not** dead-letter. Nothing is written to `queen.log_dlq`, nothing is
-recorded against a consumer group, and no client is told. A cursor left below the
-new watermark resumes at the next offset that still exists; the pop scan
-tolerates the gap.
-
-Use it only where a stale message is worthless: a live price tick, a presence
-update. If you want an age limit *with* an audit trail, you do not want this
-option.
+**This option deletes whole segments older than `now() - maxWaitTimeSeconds` for
+every consumer group, in-flight leases included, regardless of
+`retentionEnabled`.** The stored procedure calls it data loss by design. It does
+not dead-letter, records nothing against a consumer group, and tells no client;
+a cursor left below the new watermark resumes at the next offset that still
+exists. Use it only where a stale message is worthless (a live price tick, a
+presence update); an age limit *with* an audit trail is not this option. Details
+in [queue options](/reference/queue-options#maxwaittimeseconds).
 
 ## The metrics purge
 
 The fourth phase of every cycle trims the observability tables on
-`METRICS_RETENTION_DAYS`, default **90**. One stored procedure ages out
+`METRICS_RETENTION_DAYS` (default **90**): one stored procedure ages out
 `queen.worker_metrics`, `queen.queue_lag_metrics`, `queen.queue_parked_replica`
-and `queen.retention_history`; a second batched delete trims
-`queen.system_metrics` in chunks of `RETENTION_BATCH_SIZE`.
-
-These run as plain autocommitting statements on the same connection, and a failure
-is logged and swallowed: it cannot poison the segment deletes, which have already
-committed statement by statement. The purge rarely finds anything, so it is not
-gated behind the "did we delete something" check that suppresses idle logging.
+and `queen.retention_history`, and a batched delete trims
+`queen.system_metrics` in `RETENTION_BATCH_SIZE` chunks. A failure here is
+logged and swallowed: it cannot poison the segment deletes, which have already
+committed statement by statement.
 
 ## Two growth surfaces nothing reclaims
 
 <Aside type="danger">
-Retention never touches `queen.log_dlq`. Dead-lettered messages accumulate
-forever, payload included, and the only way to remove one is
-`DELETE /api/v1/messages/:partitionId/:transactionId`. A queue with a steady
-failure rate and no dead-letter hygiene is an unbounded table.
+**Retention never touches `queen.log_dlq`: dead letters accumulate forever,
+payload included**, and the only removal is
+`DELETE /api/v1/messages/:partitionId/:transactionId`.
 </Aside>
 
-The second is stream state. `queen_streams.state` holds one row per (query,
-partition, key) and nothing purges it: the schema comments say so explicitly, and
-the design is that state is dropped only when an application resets its query. A
-high-cardinality key space in a streaming query is therefore permanent storage.
-The `queen_streams` tables are also granted to `PUBLIC`, so anything holding a
-broker database credential can read and write them.
+The second is stream state: `queen_streams.state` holds one row per (query,
+partition, key), nothing purges it, and it is dropped only when an application
+resets its query, so a high-cardinality key space in a streaming query is
+permanent storage. The `queen_streams` tables are also granted to `PUBLIC`, so
+anything holding a broker database credential can read and write them.
 
 Partitions are the one thing in this family that *is* reclaimed: a
-`queen.log_partitions` row created by one push at 3am is deleted once it has been
-empty and idle for `PARTITION_CLEANUP_DAYS` (30), on a phase that runs at most
-once a minute. "Empty" excludes dead-letter rows and streaming state, so the row
-above (the DLQ one) pins its partition in place too. Set
-`QUEEN_PARTITION_CLEANUP_ENABLED=false` for the older behaviour of keeping every
-partition row forever. This is also the one phase `RETENTION_PARALLELISM` does not
-fan out. It is not per-partition (one call handles a batch), so it is the one step
-that can hold more than one lock, and it stays serial on the cycle's own
-connection.
+`queen.log_partitions` row is deleted once empty and idle for
+`PARTITION_CLEANUP_DAYS` (30), on a batched phase that runs at most once a
+minute and stays serial under `RETENTION_PARALLELISM`. "Empty" excludes
+dead-letter rows and streaming state, so a DLQ row pins its partition in place
+too. `QUEEN_PARTITION_CLEANUP_ENABLED=false` restores the older keep-forever
+behaviour; mechanics in
+[Retention internals](/internals/retention#empty-partition-cleanup).
 
 ## Watching disk growth
 
-Start with what the sweep says about itself. The `retention` target logs a line
-only when a cycle actually deleted something:
+The `retention` target logs a line only when a cycle actually deleted something:
 
 ```text
 INFO retention  swept queues=12 segments_deleted=340 txns_purged=340 max_wait_evicted=0 partitions_deleted=0 metrics_purge=… elapsed_ms=47
 ```
 
-An idle cycle is DEBUG, so silence at `info` means "nothing to delete", which on a
-growing deployment is the thing to be suspicious about. A cycle that keeps
-reporting large `segments_deleted` with a growing `elapsed_ms` means the sweep is
-running behind ingest.
+An idle cycle is DEBUG, so silence at `info` means "nothing to delete", the
+thing to be suspicious about on a growing deployment; large `segments_deleted`
+with a growing `elapsed_ms` means the sweep is running behind ingest.
 
-Then measure the tables directly. `GET /api/v1/analytics/postgres-stats` returns
-per-table total, table and index sizes, but only for the **`queen`** schema, and
-only the 20 largest relations. `queen_streams` growth does not appear there at
-all; query it yourself:
+Then measure the tables. `GET /api/v1/analytics/postgres-stats` returns
+per-table total, table and index sizes, but only for the **`queen`** schema and
+only the 20 largest relations; `queen_streams` growth does not appear there, so
+query it yourself:
 
 ```sql
 SELECT pg_size_pretty(pg_total_relation_size('queen_streams.state'));
 ```
 
 The four relations that dominate a busy deployment are `queen.log_segments` (and
-its TOAST table, which holds the compressed payloads), `queen.log_txns`,
+its TOAST table, holding the compressed payloads), `queen.log_txns`,
 `queen.log_dlq`, and `queen.system_metrics` if the metrics purge has been
 disabled by a very large `METRICS_RETENTION_DAYS`.
 
-Finally, `GET /api/v1/analytics/retention` aggregates `queen.retention_history`
-(the audit row each deleting step writes) into a time series, so you can see
-eviction volume per rule over time. Note that its `messagesDeleted` figures are
-frame counts, not segment-row counts, and that the table itself ages out on the
-metrics window.
+`GET /api/v1/analytics/retention` aggregates `queen.retention_history` (the
+audit row each deleting step writes) into a time series of eviction volume per
+rule; its `messagesDeleted` figures are frame counts, not segment-row counts,
+and the table itself ages out on the metrics window.
 
 <Aside type="note">
-Autovacuum settings are applied to the hot tables by the boot-time schema, tuned
-by measurement: aggressive threshold-based triggering on the small fixed-population
-tables, and `vacuum_truncate = off` on `queen.log_partitions` and
-`queen.log_consumers` because heap truncation takes an `ACCESS EXCLUSIVE` lock that
-stalls every push and pop while reclaiming nothing. Do not override those in
-`postgresql.conf` per-table without re-reading the schema comments.
+The boot-time schema applies measured autovacuum settings to the hot tables,
+including `vacuum_truncate = off` on `queen.log_partitions` and
+`queen.log_consumers` (heap truncation takes an `ACCESS EXCLUSIVE` lock that
+stalls every push and pop while reclaiming nothing): do not override them
+per-table without re-reading the schema comments.
 </Aside>
 
 ## Related pages
@@ -230,13 +161,13 @@ stalls every push and pop while reclaiming nothing. Do not override those in
     description="What actually costs money in this engine: commits, fsyncs and partition count."
   />
   <LinkCard
+    href="/internals/retention"
+    title="Retention internals"
+    description="The loop as bounded autocommitting steps, lock order, and the eviction watermarks."
+  />
+  <LinkCard
     href="/selfhost/backup"
     title="Backup and restore"
     description="Both schemas, and what a restore means for cursors and leases."
-  />
-  <LinkCard
-    href="/reference"
-    title="Reference"
-    description="Queue options and every retention-related environment variable."
   />
 </CardGrid>

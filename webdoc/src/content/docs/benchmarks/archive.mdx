@@ -57,9 +57,9 @@ that exists in the tree.
 ## Measured on the retired segments storage engine
 
 These ran on a newer broker but against `queen.seg_*`, the segments engine that preceded the log
-engine. The log engine is a greenfield replacement with no data migration, and
-`040_log_drop_legacy.sql` drops every `seg_*` object at boot. So these numbers describe a schema
-the current broker actively removes.
+engine. The log engine is a greenfield replacement with no data migration: the shipping broker
+embeds one schema, the log engine's, and applies it to an empty database at boot. No `seg_*`
+object appears anywhere in it. So these numbers describe a schema the product no longer has.
 
 | Directory | What it was |
 | --- | --- |
@@ -81,7 +81,7 @@ for reasons that have nothing to do with the implementation.
 | Directory | Why it is not quoted |
 | --- | --- |
 | `2026-07-22-vm-ab/` | An A/B between the retired segments engine and the log engine. One arm is retired software, and the session's own record notes that hypervisor CPU steal swung single runs by about ±22%, which is larger than the effect being measured |
-| `2026-07-23-openloop/` | The session that produced this project's best headline number. Its stdout was not archived, so the configuration cannot be checked against the result. Its own configuration line records deduplication off. Superseded for publication by the archived 600-second run on [Throughput ceiling](/benchmarks/peak) |
+| `2026-07-23-openloop/` | The session that produced this project's best headline number. Its stdout was not archived, so the configuration cannot be checked against the result. Its own configuration line records deduplication off, which is not a configuration this project publishes a headline from |
 | `2026-07-24-freetier-vm/` | A free-tier capacity study measuring broker and PostgreSQL only, with no proxy in the path and no tenancy enforcement, as its own note says. Superseded by [the cell runs](/benchmarks/multitenant-cell), which cap the whole cell including the proxy |
 | `2026-07-24-tenants/` | A sizing study of many small tenants, useful for capacity planning and not a throughput or correctness result. It also predates tenancy enforcement |
 | `2026-07-25-chaos-partial/` | Explicitly incomplete. The chaos controller died after its first PostgreSQL stop and did not restart it, so PostgreSQL was down for about two hours unintentionally; log files from the earlier, clean cycle were deleted during restart attempts. The session's own note calls the run compromised and says the test must be redone. Its observations are interesting and are not evidence |
@@ -110,8 +110,7 @@ If you are chasing a figure, these are the places it probably came from:
 
 | Old question | Current answer |
 | --- | --- |
-| Long-running stability | [24-hour soak](/benchmarks/soak-24h) |
-| Peak throughput | [Throughput ceiling](/benchmarks/peak) |
+| Long-running stability, and sustained throughput | [Throughput 24h 1M](/benchmarks/soak-24h) |
 | Ordered multi-stage pipeline | [Ordered pipeline](/benchmarks/ordered-pipeline) |
 | Small-host and multi-tenant capacity | [Multi-tenant cell](/benchmarks/multitenant-cell) |
 | How to run any of it | [Reproducing these runs](/benchmarks/reproduce) |

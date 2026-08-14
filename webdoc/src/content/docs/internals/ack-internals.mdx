@@ -33,13 +33,12 @@ Both answer with a **top-level array**, one element per ack in request order, ea
 ## Resolution: transactionId to hash to offset
 
 The broker computes `xxh3_128(transactionId)`, 16 bytes, big-endian. SQL never hashes anything; it
-stores and compares `bytea`. Resolution then walks `queen.log_txns`, which holds one row per pushed
-segment with `16 × msg_count` bytes of hashes in frame order. Hash at index `k` of the row based at
-`base_offset` belongs to offset `base_offset + k`.
-
-That sidecar is written on every push whether or not deduplication is enabled, precisely so this
-resolution works on a deduplication-disabled queue. On the retired engine, `dedupWindow = 0` also
-disabled explicit acks; that landmine is gone.
+stores and compares `bytea`. Resolution then walks `queen.log_txns`, the sidecar written on every
+push, deduplication on or off, which holds one row per pushed segment with `16 × msg_count` bytes
+of hashes in frame order. Hash at index `k` of the row based at `base_offset` belongs to offset
+`base_offset + k`. The unconditional write is what makes this resolution work on a
+deduplication-disabled queue: the retired engine's landmine, where `dedupWindow = 0` also disabled
+explicit acks, is gone.
 
 Two consequences follow from the sidecar being purged on its own clock (`GREATEST(dedup window,
 completed retention, 900 s)`):

@@ -16,40 +16,33 @@ verifiedBy:
   - clients/client-js/test-v2/push.js
 ---
 
-A producer that retries after a timeout does not know whether the first attempt landed. Queen answers that with an exact, server-side duplicate check on the `transactionId`, enforced inside the same lock that allocates the message's offset, so a duplicate writes nothing at all rather than being written and later reconciled.
-
-This is the feature Kafka calls an idempotent producer and most other systems call message
-deduplication on an idempotency key. In Queen the key is the `transactionId` you supply, and
-the check runs in the broker against stored hashes rather than against a per-session sequence
-number, so it survives a producer restart and does not depend on the connection.
-
-It is on by default, with a one-hour window.
-
-## The mechanism
+A producer that retries after a timeout does not know whether the first attempt landed. Queen answers that with an exact, server-side duplicate check on the `transactionId`, on by default with a one-hour window:
 
 <Render file="snippets/js-push-dedup" />
 
-Both pushes carry the same `transactionId`. The first returns `queued`; the second returns `duplicate` and stores nothing.
+Both pushes carry the same `transactionId`; the first returns `queued`, the second returns `duplicate` and stores nothing. This is the feature Kafka calls an idempotent producer, but the check runs in the broker against stored hashes rather than a per-session sequence number, so it survives a producer restart and does not depend on the connection.
 
-What happened between the two calls is the part worth knowing. On a queue with deduplication enabled, a push:
+## The mechanism
+
+The check is enforced inside the same lock that allocates the message's offset, so a duplicate writes nothing at all rather than being written and later reconciled. On a queue with deduplication enabled, a push:
 
 <Steps>
 
-1. Takes the `SELECT ... FOR UPDATE` row lock on the target partition. That row is the per-partition write serializer, the same lock the offset allocator uses.
+1. Takes the `SELECT ... FOR UPDATE` row lock on the target partition: the per-partition write serializer, the same lock the offset allocator uses.
 
-2. Probes `queen.log_txns` for the incoming message hashes, bounded to rows whose `created_at` is inside the deduplication window. `log_txns` holds one row per pushed segment carrying a 16-byte hash per frame in frame order; the broker computes the hashes (SQL never hashes) and the table is written on **every** push, whether deduplication is on or off.
+2. Probes `queen.log_txns` for the incoming message hashes, bounded to rows whose `created_at` is inside the deduplication window. `log_txns` holds one row per pushed segment with a 16-byte hash per frame (the broker computes the hashes, SQL never does), and it is written on **every** push, whether deduplication is on or off.
 
-3. If any hash matches, returns `duplicate` immediately. **Nothing was written** (no offset allocated, no segment row, no hash row), so there is no rollback and no subtransaction, and the other partitions in a bundled push commit untouched.
+3. If any hash matches, returns `duplicate` immediately. **Nothing was written** (no offset, no segment row, no hash row), so there is no rollback, and the other partitions in a bundled push commit untouched.
 
 4. Only on a clean probe does it bump the allocator and insert the segment.
 
 </Steps>
 
-Because the probe happens under the write serializer, no concurrent producer can commit a colliding message between the probe and the allocation. The check is exact (a hash match, not a Bloom filter), and there is no false-positive path.
+Because the probe happens under the write serializer, no concurrent producer can commit a colliding message between the probe and the allocation. The check is exact (a hash match, not a Bloom filter); there is no false-positive path.
 
 ## Choosing the transaction id
 
-The `transactionId` is the idempotency key. If you leave it out, the SDK generates a fresh one per item, which makes every push unique and deduplication a no-op. To get idempotency, derive it deterministically from the thing you are publishing:
+The `transactionId` is the idempotency key. Left out, the SDK generates a fresh one per item, which makes every push unique and deduplication a no-op. To get idempotency, derive it deterministically from the thing you are publishing:
 
 ```js
 // Illustrative, not extracted from a test.
@@ -61,13 +54,13 @@ await client.queue('orders').partition(order.id).push([
 
 Two properties to design around.
 
-**The scope is one partition.** The probe is `WHERE t.partition_id = <this partition>`. The same `transactionId` pushed to two different partitions of the same queue is accepted twice: both return `queued`. That is verified behaviour, not an accident: partitions are independent lanes and the check lives inside one. Route an entity's events to that entity's partition and the key only has to be unique within it.
+**The scope is one partition.** The probe is `WHERE t.partition_id = <this partition>`, so the same `transactionId` pushed to two different partitions of the same queue is accepted twice. That is verified behaviour, not an accident: partitions are independent lanes and the check lives inside one. Route an entity's events to that entity's partition and the key only has to be unique within it.
 
-**First wins inside one request too.** Two items in the same push body sharing a `transactionId`, queue and partition produce one frame. The repeat becomes a follower of the leader and echoes the leader's final `message_id`. This layer runs in the broker, before SQL sees the batch.
+**First wins inside one request too.** Two items in the same push body sharing a `transactionId`, queue and partition produce one frame; the repeat becomes a follower of the leader and echoes the leader's final `message_id`. This layer runs in the broker, before SQL sees the batch.
 
 ## What a duplicate response looks like
 
-The push response is one item per request item, in order, at HTTP 201:
+One item per request item, in order, at HTTP 201:
 
 ```json
 [
@@ -76,17 +69,15 @@ The push response is one item per request item, in order, at HTTP 201:
 ]
 ```
 
-The `message_id` on a `duplicate` item is the **original** message's id, not a new one: the broker resolves it by fetching the covering segment of the original occurrence and unpacking that frame. When the original can no longer be read (its segment was already deleted by retention, for instance) the field degrades to the all-zero UUID `00000000-0000-0000-0000-000000000000`, which is the "original unknown" sentinel. A duplicate verdict with a zero id still means "not written"; it only means the id of the message it collided with is no longer recoverable.
+The `message_id` on a `duplicate` item is the **original** message's id, resolved from the original occurrence's segment. When the original can no longer be read (its segment already deleted by retention) the field degrades to the all-zero UUID `00000000-0000-0000-0000-000000000000`, the "original unknown" sentinel; the verdict still means "not written".
 
 <Aside type="note">
-Inside `POST /api/v1/transaction` the same collision behaves differently: it is escalated to a raised error and rolls back the whole transaction rather than returning a per-item `duplicate`. See [A transactional pipeline](/use/examples/pipeline).
+Inside `POST /api/v1/transaction` the same collision is escalated to a raised error and rolls back the whole transaction rather than returning a per-item `duplicate`. See [a transactional pipeline](/use/examples/pipeline).
 </Aside>
 
 ## The window
 
-The window is `dedup_window_seconds` on the queue, **default 3600**. It is measured from the stored creation time of the original message's segment, so the guarantee is: a repeat of a `transactionId` is rejected for that many seconds after the original was committed to that partition.
-
-Set it explicitly when you configure the queue:
+The window is `dedup_window_seconds` on the queue, **default 3600**, measured from the stored creation time of the original message's segment: a repeat of a `transactionId` is rejected for that many seconds after the original was committed to that partition. Set it explicitly when you configure the queue:
 
 ```json
 {
@@ -96,30 +87,26 @@ Set it explicitly when you configure the queue:
 ```
 
 <Aside type="caution">
-`POST /api/v1/configure` is a **full replace**. Any option you omit is reset to its default, including `dedupWindowSeconds`, which reverts to 3600. A later configure call sent as a partial patch will silently shorten a 24-hour window back to an hour. Always send the complete option set.
+**`POST /api/v1/configure` is a full replace: a partial patch silently resets `dedupWindowSeconds` back to 3600**, so always send the complete option set ([queue options](/reference/queue-options)).
 </Aside>
 
-`dedupWindowSeconds: 0` disables the check. The push then skips the probe entirely and takes a single `UPDATE ... RETURNING` allocator path. Explicit acknowledgement still works on a queue with deduplication off, because `log_txns` is written regardless and the ack path resolves transaction ids through it.
+`dedupWindowSeconds: 0` disables the check: the push skips the probe and takes a single `UPDATE ... RETURNING` allocator path. Explicit acknowledgement still works, because `log_txns` is written regardless and the ack path resolves transaction ids through it.
 
 ## After the window closes
 
-The hash sidecar is not kept forever. The retention loop purges `queen.log_txns` rows older than
+The retention loop purges `queen.log_txns` rows older than
 
 ```text
 GREATEST(dedup_window_seconds, completedRetentionSeconds, 900)
 ```
 
-seconds, per partition, in bounded autocommitting steps. The floor of 900 seconds means the sidecar is always at least 15 minutes deep even on a queue with deduplication off, because the ack path needs it.
+seconds, per partition. The 900-second floor keeps the sidecar at least 15 minutes deep even with deduplication off, because the ack path needs it.
 
-The consequence for a producer: if your invariant is "this order is only ever processed once, forever", keep that invariant in your own datastore, keyed by your own id. Deduplication is a bounded protection against retry storms and at-least-once delivery from upstream, not a permanent uniqueness constraint. **Once the window has passed, a repeat of the same `transactionId` is accepted as a new message**, with no error, no warning and no marker on the message.
-
-The same window bound applies to acknowledgement: an ack whose transaction id has aged out of the sidecar is reported as `unresolvable` rather than silently succeeding. See [Errors, backpressure and retries](/use/errors).
+For a producer this means: **once the window has passed, a repeat of the same `transactionId` is accepted as a new message**, with no error, no warning and no marker. If your invariant is "this order is only ever processed once, forever", keep it in your own datastore, keyed by your own id; deduplication is a bounded protection against retry storms and at-least-once delivery from upstream, not a permanent uniqueness constraint. The same bound applies to acknowledgement: an ack whose transaction id has aged out is reported `unresolvable` rather than silently succeeding ([errors](/use/errors)).
 
 ## The broker-side cache changes nothing you can observe
 
-The broker keeps an in-memory cache of in-window hashes per partition (`QUEEN_DEDUP_CACHE`, on by default, sized by `QUEEN_DEDUP_CACHE_MB`, default 512). Its only output is a watermark it sends with the push, telling SQL "none of these hashes occur at or below offset X", which lets the SQL probe scan a shorter span.
-
-Whenever the cache cannot vouch for a span (unknown partition, a hydration gap, memory pressure, the kill switch), it answers with the sentinel that forces a full-window probe. So a cold, evicted, degraded or disabled cache produces exactly the same verdict as a warm one. The cache is a CPU and I/O optimization; the SQL probe is the authority. Turning it off costs throughput and changes no result.
+The broker keeps an in-memory cache of in-window hashes per partition (`QUEEN_DEDUP_CACHE`, on by default; `QUEEN_DEDUP_CACHE_MB`, default 512). Its only output is a watermark telling SQL "none of these hashes occur at or below offset X", which shortens the probe's scan; whenever the cache cannot vouch for a span it answers with the sentinel that forces a full-window probe. A cold, evicted, degraded or disabled cache produces exactly the same verdict as a warm one: the SQL probe is the authority, and turning the cache off costs throughput but changes no result.
 
 ## What to expect
 

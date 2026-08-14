@@ -269,35 +269,6 @@ def fig_soak24(out: Path, theme: Theme) -> str:
     return "soak-24h"
 
 
-def fig_peak(out: Path, theme: Theme) -> str:
-    """T1: the accepted rate over the run.
-
-    Offered and accepted are plotted as one series, not two: at per-second
-    resolution they sit on top of each other, and the run's shortfall (0.086%)
-    is a cumulative total, not something visible in a rate. It is one number,
-    so it stays a number — the page's result table carries it.
-    """
-    rows = parse_progress(
-        BENCH / "2026-07-23-3test-report" / "raw" / "t1.out",
-        {"achieved": r"achieved=\s*(\d+)/s"},
-    )
-    rows = [r for r in rows if r["t"] <= 660]
-    t = [r["t"] / 60 for r in rows]
-    achieved = [r["achieved"] for r in rows]
-
-    style(theme)
-    fig, ax = plt.subplots(figsize=(7.2, 2.8))
-    ax.plot(t, achieved, color=theme.series[0])
-    finish(ax, theme, "Accepted per second")
-    ax.set_xlabel("Minutes into the run", color=theme.ink, fontsize=8.5)
-    ax.yaxis.set_major_formatter(FuncFormatter(thousands))
-    ax.set_xlim(0, max(t))
-    ax.set_ylim(0, max(achieved) * 1.1)
-
-    save(fig, out, "peak-accepted", theme)
-    return "peak-accepted"
-
-
 def fig_pipeline(out: Path, theme: Theme) -> str:
     """T3: the ordered four-stage pipeline — sustained rate and end-to-end p99."""
     rows = parse_progress(
@@ -370,7 +341,7 @@ def fig_cell(out: Path, theme: Theme) -> str:
     return "multitenant-cell"
 
 
-FIGURES = (fig_soak24, fig_peak, fig_pipeline, fig_cell)
+FIGURES = (fig_soak24, fig_pipeline, fig_cell)
 
 
 def main() -> None:

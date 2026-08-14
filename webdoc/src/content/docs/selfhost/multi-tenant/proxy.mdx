@@ -13,6 +13,8 @@ sourceOfTruth:
   - proxy/src/cache.rs
   - proxy/src/gateway.rs
   - proxy/src/registry.rs
+  - proxy/Dockerfile
+  - server/src/auth.rs
   - proxy/CONTRACTS.md
 ---
 
@@ -25,6 +27,75 @@ worth of messages per cluster and is sized for message throughput; pxdb holds th
 tenant, cluster, key, plan and usage tables for the whole fleet and is read almost
 entirely out of a 30-second in-process cache. A pxdb outage must not stop the data
 plane, and the cache is what makes that true.
+
+## The image, and the binary
+
+The published image is `ghcr.io/queen-mq/queen-proxy`, next to the broker's
+`ghcr.io/queen-mq/queen`. Its runtime stage is `debian:bookworm-slim`, its working
+directory is `/app`, its command is `./bin/queen-proxy`, and it runs as uid 10001,
+non-root. The six SQL migrations, the cluster console SPA and the Queen dashboard
+are all compiled into that one binary, so the only thing worth mounting is the
+usage spool, which the image pre-creates at `/app/spool` and points
+`QUEEN_PROXY_SPOOL_DIR` at. Tags follow the broker's scheme: versions (`1.0.2`),
+`latest`, and per-commit `sha-` tags; pin a `sha-` tag in production, the mutable
+tags move.
+
+`PXDB_PORT`, `PXDB_USER` and `PXDB_DB` default to `5432`, `postgres` and
+`queen_proxy`, so a minimal run needs the pxdb host, the password, and a session
+signing secret. Generate that secret once and reuse the same value on every deploy
+of the cell; sessions are signed with it, so changing it logs every human out:
+
+```bash
+SESSION_SECRET=$(openssl rand -hex 32)
+```
+
+```bash
+docker run -d --name queen-proxy -p 6711:6711 -e PXDB_HOST=10.0.3.20 -e PXDB_PASSWORD=change-me -e QUEEN_PROXY_JWT_SECRET="$SESSION_SECRET" -v queen-proxy-spool:/app/spool ghcr.io/queen-mq/queen-proxy:latest
+```
+
+`PXDB_HOST` is the only variable the process refuses to start without (short of
+the dev-static fallback). `QUEEN_PROXY_JWT_SECRET` is not checked at boot: without
+it or `QUEEN_PROXY_JWT_ED25519_PEM` the proxy comes up with no session signer, so
+API-key traffic flows and every console or dashboard login fails with
+`no jwt signer configured`.
+
+Verify with the health endpoint:
+
+```bash
+curl -s http://127.0.0.1:6711/healthz
+```
+
+```json
+{"enforce":false,"status":"ok","tenant_header":true}
+```
+
+Building from source needs nothing but the Rust toolchain: the two embedded
+frontends (`proxy/console/dist` and `server/webapp/dist`) are committed to the
+repository, and `rust-embed` fails the compile if either folder is missing, so a
+green build proves the assets were found. Rebuilding the frontends themselves
+(Node 22, `npm ci && npm run build` in `app/` and `proxy/console/`) is only needed
+when you change them.
+
+```bash
+cd proxy && cargo build --release
+```
+
+The binary lands at `proxy/target/release/queen-proxy` and takes the same
+environment, spelled out here with every connection variable explicit:
+
+```bash
+PXDB_HOST=127.0.0.1 PXDB_PORT=5432 PXDB_USER=postgres PXDB_PASSWORD=postgres PXDB_DB=queen_proxy QUEEN_PROXY_PORT=6711 QUEEN_PROXY_JWT_SECRET="$SESSION_SECRET" QUEEN_PROXY_SPOOL_DIR=/var/lib/queen-proxy/spool ./target/release/queen-proxy
+```
+
+The boot log ends with `queen-proxy up addr="0.0.0.0:6711" enforce=false` once the
+listener is bound; everything before it is the sequence below.
+
+The container image builds from the repo root, not from `proxy/`, because the
+crate embeds a frontend that lives outside its own directory:
+
+```bash
+DOCKER_BUILDKIT=1 docker build -f proxy/Dockerfile -t queen-proxy .
+```
 
 ## Boot, in order
 
@@ -74,8 +145,8 @@ recorded:
 
 | Migration | Contents |
 | --- | --- |
-| `001_init` | The schema: tenants, users, identities, plans, cells, clusters, cluster_roles, api_keys, queues, usage_minutes, operations, revoked_tokens, outbox (plus the four seeded plans) |
-| `002_functions` | The control-plane functions and `record_operation`, the single append-audit-and-notify primitive |
+| `001_init` | The schema: tenants, users, identities, plans, cells, clusters, cluster_roles, api_keys, queues, usage_minutes, operations, revoked_tokens, outbox |
+| `002_functions` | The control-plane functions, `record_operation` (the single append-audit-and-notify primitive), and the four seeded plans |
 | `003_limit_override` | `set_limit_override` |
 | `004_lifecycle` | Session revocation, role grants, `bootstrap_tenant`, `usage_days` and the roll-up |
 | `005_usage_prune` | `prune_usage_minutes` |
@@ -146,6 +217,68 @@ That is the whole of the broker-facing credential. Two consequences:
 The cell's `base_url` must be an `http://` URL. The data path would parse either, but
 the registry reconciler refuses anything else outright: a deliberate assertion
 that broker traffic is cell-internal plaintext, with TLS terminated at the proxy edge.
+
+### Minting one
+
+The pair is asymmetric in shape even though the crypto is symmetric: the broker
+holds an HMAC secret, and the cells row holds a **token signed with it**. The same
+string does not go in two places.
+
+Generate the broker's verification secret, one per cell, and start the cell's
+broker with it (together with the tenancy header, see
+[the checklist below](#per-cell-then)):
+
+```bash
+CELL_JWT_SECRET=$(openssl rand -hex 32)
+```
+
+```bash
+JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$CELL_JWT_SECRET" QUEEN_TENANCY_HEADER=true ./bin/queen
+```
+
+Mint the token the proxy will present. Any JWT tool works; `openssl` alone is
+enough:
+
+```bash
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
+claims=$(printf '{"sub":"queen-proxy","role":"admin"}' | b64url)
+sig=$(printf '%s.%s' "$header" "$claims" | openssl dgst -binary -sha256 -hmac "$CELL_JWT_SECRET" | b64url)
+CELL_SECRET="$header.$claims.$sig"
+```
+
+Three choices in those claims are deliberate:
+
+- `"role": "admin"` is the broker's admin role name (`JWT_ROLE_ADMIN`, default
+  `admin`). Required, because the proxy forwards queue and consumer-group
+  deletions, which the broker classifies as admin routes.
+- **No `exp`.** The broker treats `exp` as optional, and this credential lives in
+  a database column that nothing refreshes: give it an expiry and the cell dies
+  quietly when the clock passes it. Rotate by minting anew, not by expiring.
+- `"sub": "queen-proxy"` is stamped as `producerSub` on every message pushed
+  through the proxy, which makes broker-side audit unambiguous.
+
+Prove the pair before storing it, against the cell broker directly, on the same
+class of route the token must pass (admin):
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $CELL_SECRET" http://10.0.3.11:6632/api/v1/stats/refresh
+```
+
+A JSON stats body back means admin passed; `{"error":"Invalid token signature"}`
+means the secret differs, `{"error":"Insufficient permissions"}` means the role
+claim is wrong. Then store `$CELL_SECRET` in the cells row (step 4 below;
+[Tenants, clusters and cells](/selfhost/multi-tenant/tenants#cells) has the
+`psql` form).
+
+Rotation is three moves with a short upstream-401 window: restart the broker with
+the new `JWT_SECRET`, update `queen_proxy.cells.cell_secret` to the newly minted
+token, and wait out the cluster cache. A raw `UPDATE` fires no invalidation, so
+the 30-second TTL is the propagation bound; no proxy restart is involved.
+
+On a cell whose broker runs `JWT_ENABLED=false` behind pure network isolation,
+leave `cell_secret` NULL: the proxy then forwards with no `Authorization` header
+at all.
 
 ## The cache, and what happens when pxdb is down
 
@@ -232,6 +365,7 @@ strings are treated as unset for the `Option` values.
 | `QUEEN_PROXY_JWT_ISS` | `queen-proxy` | `iss` on minted session tokens |
 | `QUEEN_PROXY_JWT_SECRET` | *(unset)* | HS256 secret, for development |
 | `QUEEN_PROXY_JWT_ED25519_PEM` | *(unset)* | Ed25519 PKCS#8 PEM. Wins over the HS secret when both are set |
+| `QUEEN_PROXY_JWT_ED25519_PUB_PEM` | *(unset)* | Explicit Ed25519 public-key PEM, instead of deriving it from the private PEM. Read only when the private PEM is set |
 | `QUEEN_PROXY_JWT_TTL_S` | `86400` | Session token lifetime |
 | `QUEEN_PROXY_COOKIE_NAME` | `queen_session` | Session cookie name |
 | `QUEEN_PROXY_COOKIE_DOMAIN` | *(unset)* | Cookie `Domain`; setting it also forces `Secure` |
@@ -285,7 +419,7 @@ the proxy:
 
 | Path | Purpose |
 | --- | --- |
-| `GET /healthz` | Liveness plus the two switches that change behaviour: `{"status":"ok","enforce":…,"tenant_header":…}`. Unauthenticated |
+| `GET /healthz` | Liveness plus the two switches that change behaviour, e.g. `{"enforce":false,"status":"ok","tenant_header":true}`. Unauthenticated |
 | `GET /.well-known/jwks.json` | Public key for the session tokens this proxy mints |
 | `/auth/*` | Login, OAuth callbacks, `/auth/me`, `/auth/session-token`, logout |
 | `/api/console/*` | Cluster console API, human sessions only |
@@ -303,16 +437,29 @@ pass against a proxy that had since been replaced by a shadow-mode one.
 1. Run PostgreSQL for the broker and PostgreSQL for the proxy. They can be separate
    instances or separate databases; they must not be the same database.
 
-2. Run the broker with `QUEEN_TENANCY_HEADER=true`, `JWT_ENABLED=true`, and a network
-   policy that admits only the proxy. See
+2. Run the broker with `QUEEN_TENANCY_HEADER=true`, `JWT_ENABLED=true` and the
+   `JWT_SECRET` generated in [Minting one](#minting-one), behind a network policy
+   that admits only the proxy. See
    [Broker-native tenancy](/selfhost/multi-tenant/broker-tenancy).
 
-3. Run the proxy with `PXDB_*` pointed at pxdb, TLS material if it is the edge, and
-   `QUEEN_PROXY_ENFORCE=true` once you have watched shadow mode for a while.
+3. Run the proxy ([image or binary](#the-image-and-the-binary)) with `PXDB_*`
+   pointed at pxdb, TLS material if it is the edge, and `QUEEN_PROXY_ENFORCE=true`
+   once you have watched shadow mode for a while.
 
-4. Insert the `cells` row for this cell: `slug`, `region`, `base_url`, `class` and
-   `cell_secret`. There is no SQL function for it; cells are fleet infrastructure.
-   [Tenants, clusters and cells](/selfhost/multi-tenant/tenants) has the shape.
+4. Insert the `cells` row for this cell. There is no SQL function for it; cells are
+   fleet infrastructure. `$CELL_SECRET` is the token minted above, and the
+   `-v`/`:'cell_secret'` pair is `psql` variable interpolation, which works from
+   stdin or `-f` but not from `-c`:
+
+   ```bash
+   psql -h 10.0.3.20 -U postgres -d queen_proxy -v cell_secret="$CELL_SECRET" <<'SQL'
+   INSERT INTO queen_proxy.cells (slug, region, base_url, class, cell_secret)
+   VALUES ('eu1-shared-a', 'eu1', 'http://10.0.3.11:6632', 'shared', :'cell_secret');
+   SQL
+   ```
+
+   [Tenants, clusters and cells](/selfhost/multi-tenant/tenants#cells) has the
+   full column reference and the onboarding call that follows.
 
 5. Point a wildcard DNS record at the proxy, so every cluster slug on this cell
    resolves to it.

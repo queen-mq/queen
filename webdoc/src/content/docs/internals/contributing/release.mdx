@@ -1,6 +1,6 @@
 ---
 title: How Queen ships
-description: "The registries a release touches, which two of them CI publishes and which four a human publishes, where the version number lives, and which parts of the older release note no longer hold."
+description: "The registries a release touches, which two of them CI publishes and which four a human publishes, where the version number lives, and the one boundary a rollback cannot cross."
 type: reference
 tier: internals
 sidebar:
@@ -20,8 +20,6 @@ sourceOfTruth:
   - clients/client-laravel/composer.json
   - clients/client-go/go.mod
   - server/src/schema.rs
-  - server/sql/procedures/040_log_drop_legacy.sql
-  - developer/14-release.md
 ---
 
 A release touches the broker image, six client SDKs and the CLI, across seven package registries
@@ -166,44 +164,29 @@ workflow.
 
 ## Rollback, and the one place additivity stops
 
-Schema application is idempotent by construction. `server/src/schema.rs` applies `schema.sql`
-and all 34 stored-procedure files at every boot, in lexical order, under a session advisory lock,
-and every statement is `CREATE OR REPLACE`, `IF NOT EXISTS` or `ADD COLUMN IF NOT EXISTS`. So
-re-applying is always safe, and rolling the broker image back to a previous 1.x is safe at the
-database level.
+Schema application is idempotent by construction: `server/src/schema.rs` re-applies `schema.sql`
+and the 23 stored-procedure files at every boot (the [schema catalogue](/internals/schema) has
+the mechanism), so re-applying is always safe, and rolling the broker image back to a previous
+1.x is safe at the database level. Note that the procedures are embedded in the binary, so the
+binary and the procedures roll together: you cannot roll one back independently.
 
-There is one hard exception, and it is the boundary into 1.0.
-`server/sql/procedures/040_log_drop_legacy.sql` runs before the log-engine schema and
-**drops** the retired `seg_*` engine: every `queen.seg_*` function, discovered dynamically over
-`pg_proc` so no straggler survives, then the legacy tables, then the seg-era columns folded into
-`queen.partition_consumers`. It is written to be a no-op on a database that never had them and a
-full teardown on one that did.
+The boundary into 1.0 is the exception, and it is a wall rather than a teardown. The boot apply
+only creates: the teardown and migration files that once dropped the retired engines were
+themselves deleted from the tree (see [Retired objects](/internals/legacy)), so nothing removes,
+converts or migrates an older database's objects at boot.
 
 <Aside type="danger">
-Booting a 1.0 broker against a database that was serving the retired segments engine removes
-that engine's objects. There is no data migration: the log engine is a greenfield replacement.
-Rolling *back* to a segments-era broker after that boot is not possible at the database level.
-Take a `pg_dump` before the first 1.0 boot against an existing database.
+Do not point a 1.0 broker at a database written by a pre-1.0 broker. There is no data migration
+and no boot-time cleanup: the log engine is a greenfield replacement, and the supported move
+across that boundary is a fresh database. Take a `pg_dump` first if the old data matters.
 </Aside>
 
-## What the older release note gets wrong
+## Stale release material
 
-`developer/14-release.md` is the pre-1.0 checklist and is still in the tree. Read it for the
-publishing mechanics of npm, PyPI and Packagist, which are unchanged. Everything below it says
-no longer holds.
+The pre-1.0 release checklist, `developer/14-release.md`, is stale like the rest of `developer/`;
+for what each release actually changed, read `CHANGELOG.md` at the repository root.
 
-| It says | Actually |
-| --- | --- |
-| the version is `0.14.1.beta.1` in `server/server.json` | it is `1.0.0` |
-| the release covers "the C++ broker binary, libqueen, and five client SDKs" | there is no C++ broker and no `lib/`. The image carries the Rust broker, the dashboard and `queenctl` |
-| the pre-release checklist runs `cd lib && make test-contention` | that directory does not exist. The gate is `test/run.sh`. See [Testing](/internals/contributing/testing) |
-| user-facing docs live in `docs/*.html`, and a version bump has to edit `docs/index.html` and `docs/quickstart.html` | that site is retired. Documentation is `webdoc/`, and it is built and gated by its own workflow |
-| the version lives "in nine places" including those HTML files | the live places are `server/server.json`, `server/Cargo.toml`, `proxy/Cargo.toml`, `app/package.json`, `proxy/console/package.json`, `clients/client-js/package.json`, `clients/client-py/pyproject.toml`, `clients/client-rust/Cargo.toml`, `crates/queen-protocol/Cargo.toml`, `README.md`, and the image tag shown in these docs |
-| a rolled-back procedure can be re-applied from `lib/schema/procedures/` | procedures live in `server/sql/procedures/` and are embedded in the binary, so the binary and the procedures roll together: you cannot roll one back independently |
-| `helm/`, `helm_queen/` and `proxy/helm/` are release artifacts to update | those directories are gitignored and untracked. Nothing in CI reads them and they are not shipped |
-| the schema is "always additive between versions", so a rollback is always safe | true within 1.x, false across the 0.16-to-1.0 boundary. See the warning above |
-
-One workflow is dead in the same way. `.github/workflows/cpp-server-build.yml` triggers on the
+Two pieces of CI are stale the same way. `.github/workflows/cpp-server-build.yml` triggers on the
 `release` branch and runs `make deps` and `make build-only` in `server/`, targets that were
 removed with the C++ broker; it cannot succeed. And `.github/workflows/cli.yml` pins its
 end-to-end broker to `smartnessai/queen-mq:0.14.3`, so the CLI's end-to-end suite currently

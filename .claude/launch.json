@@ -2,34 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "docs-static",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8765", "--directory", "docs"],
-      "port": 8765
-    },
-    {
-      "name": "app-dev",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "app", "run", "dev", "--", "--port", "5174"],
-      "port": 5174
-    },
-    {
-      "name": "app-4000",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "app", "run", "dev", "--", "--port", "4000"],
-      "port": 4000
-    },
-    {
       "name": "webdoc",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "webdoc", "dev", "--port", "4322", "--host"],
-      "port": 4322
+      "runtimeArgs": ["--dir", "webdoc", "dev", "--port", "4378"],
+      "port": 4378
     },
     {
-      "name": "webdoc-4323",
+      "name": "webdoc-preview",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "webdoc", "dev", "--port", "4323", "--host"],
-      "port": 4323
+      "runtimeArgs": ["--dir", "webdoc", "preview", "--port", "4381"],
+      "port": 4381
     }
   ]
 }

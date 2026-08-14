@@ -10,7 +10,6 @@
     "/benchmarks/comparison",
     "/benchmarks/multitenant-cell",
     "/benchmarks/ordered-pipeline",
-    "/benchmarks/peak",
     "/benchmarks/reproduce",
     "/benchmarks/soak-24h",
     "/full-examples",

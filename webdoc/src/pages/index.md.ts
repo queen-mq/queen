@@ -17,21 +17,33 @@
  *
  * The right shape is one shared module that `index.astro` and this route both
  * import. That means editing `index.astro`, which is outside this change's
- * scope, so the copy below is a second transcription of the arrays at
- * `src/pages/index.astro:33-90` and the hero at `:107-117`. That is a drift
- * risk, and it is held closed by `scripts/check-markdown.mjs`: it parses
- * `index.astro` and fails the build when a headline, a differentiator, a proof
- * figure or a limit in the page is missing from `dist/index.md`. Edit the page
- * and this file together, or the check will tell you which one you forgot.
+ * scope, so the copy below is a second transcription of the arrays and the
+ * prose in `src/pages/index.astro`. That is a drift risk, and it is held closed
+ * by `scripts/check-markdown.mjs`: it parses `index.astro` and fails the build
+ * when a headline, a differentiator, a proof figure or the limits paragraph in
+ * the page is missing from `dist/index.md`. Edit the page and this file
+ * together, or the check will tell you which one you forgot.
+ *
+ * The code samples are the exception, and they cannot drift: this file lifts
+ * them out of the same generated snippet partials the page imports.
  *
  * `index.astro` stays the source of truth. Copy from it, not into it.
  */
 
 import { config } from "virtual:nimbus/config";
+import pushRaw from "../content/partials/snippets/js-push.mdx?raw";
+import consumeRaw from "../content/partials/snippets/js-consume.mdx?raw";
 
 export const prerender = true;
 
 const url = (path: string) => (config.site ? new URL(path, config.site).href : path);
+
+/** Same extraction as the page's, so both show the code that the suite runs. */
+function snippet(raw: string, id: string): string {
+  const fenced = raw.match(/```[a-z]*[^\n]*\n([\s\S]*?)```/);
+  if (!fenced) throw new Error(`snippet ${id} has no fenced block`);
+  return fenced[1].trimEnd();
+}
 
 /** The page's `<h1>`, verbatim. */
 export const HOME_HEADLINE =
@@ -54,56 +66,84 @@ const HOME_EYEBROW = "Queen MQ 1.0 · Apache 2.0";
  * and its JSX line wrapping collapsed.
  */
 const HOME_LEAD =
-  "Every entity gets its own FIFO lane, created on first push, so a slow consumer on one " +
-  "never stalls another. That design has two ends, and one broker holds both: " +
-  "**1,000,000 messages a second** sustained for 24 hours, and **1,000,000 ordered " +
-  "partitions** created during a run at a thousand a second and drained with zero errors. " +
-  "Leases, explicit acks, deduplication and retention are on in both. Consumer groups, " +
-  "replay and a dead-letter queue at both ends. Windowed aggregation that commits its " +
-  "state, its output and its acks in one transaction. One stateless binary next to the " +
-  "Postgres you already run, with the operations dashboard compiled into it: queue health, " +
-  "per-group lag and message inspection, with nothing extra to deploy. No cluster, no " +
-  "rebalancing, no JVM.";
+  "Every entity gets its own ordered FIFO lane, created on first push, so a slow consumer " +
+  "on one never stalls another. One stateless binary on the PostgreSQL you already run, " +
+  "measured at **1,000,000 messages a second** for 24 hours and at **1,000,000 ordered " +
+  "partitions** in one database.";
+
+/** The line of capabilities under the calls to action. */
+const HOME_FEATURES = [
+  "Consumer groups",
+  "Replay",
+  "Dead-letter queue",
+  "Exact deduplication",
+  "Transactional handoff",
+  "Windowed aggregation",
+  "A dashboard in the binary",
+];
 
 /**
- * The alt text of the architecture diagram. It is written for a reader who
- * cannot see the figure, which is exactly the reader this file is for.
+ * The positioning figure's own description. The map is an inlined SVG, so its
+ * `<desc>` is the only form of it that reaches a reader who cannot see it,
+ * which is exactly the reader this file is for.
  */
-const HOME_DIAGRAM =
-  "Producers push to one queue, agent-tasks, split into ordered partitions, one per agent " +
-  "session. Two consumer groups, an agent runner and a tracer, each receive every message. " +
-  "One slow session stalls only its own partition.";
+const HOME_MAP =
+  "A map of sustained message rate against ordered entities. Both axes are logarithmic, " +
+  "unnumbered, and carry the same range and the same scale, so a system that reaches the " +
+  "same figure on both draws a square. Kafka holds a low lane ceiling, because entities " +
+  "hash onto a partition set sized in advance, and its region runs off the right of the " +
+  "map. RabbitMQ closes a small corner, one live queue per entity. pgmq reaches higher in " +
+  "entities at modest rate, its reads rescanning the standing backlog. SQS FIFO closes a " +
+  "dashed corner at its published rate quota and its in-flight cap. Queen's region is the " +
+  "largest, and it is a square: a million messages a second sustained for 24 hours, and a " +
+  "million ordered lanes in one database, from two separate runs.";
+
+const HOME_MAP_CAPTION =
+  "Each frontier is where a system stops keeping one ordered lane per entity: measured on " +
+  "matched hardware for Kafka, RabbitMQ and pgmq, taken from the published quotas for SQS, " +
+  "and dashed wherever the edge is one we did not measure.";
 
 const differentiators = [
   {
     title: "One ordered lane per entity",
-    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. One broker has held a million of them, and a consumer stuck on one never blocks another.",
+    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. A consumer stuck on one lane never blocks another.",
   },
   {
     title: "No rebalancing, because there is nothing to rebalance",
-    body: "The broker holds no cluster membership and no partition assignments; clients hold no coordination state. You scale by starting another copy against the same database, and a restarting worker costs nobody a pause.",
+    body: "Broker and clients hold no coordination state, so scaling is starting another copy against the same database.",
   },
   {
     title: "PostgreSQL is the storage engine",
-    body: "Durability, replication, backup, point-in-time recovery and SQL introspection are the ones you already operate. There is no second data system to learn, size, or lose.",
+    body: "Durability, replication, backup and SQL introspection are the ones you already operate, not a second data system.",
   },
   {
     title: "Acknowledgement is an offset commit",
-    body: "Consumption state is one cursor per partition and consumer group. There is no per-message delivery record to store, scan or clean up, which is why a million partitions and their cursors weigh 641 MB.",
+    body: "One cursor per partition and consumer group, with no per-message delivery record to store, scan or clean up.",
   },
   {
     title: "Windowed aggregation, in the same transaction",
-    body: "Tumbling, sliding, session and cron windows over a queue, where the window state, the messages you emit and the acknowledgement of the source all commit together or not at all. Exactly-once aggregation with no changelog topic and no state store to operate.",
+    body: "Tumbling, sliding, session and cron windows whose state, output and acks commit together or not at all: exactly-once, with no changelog topic and no state store.",
   },
   {
     title: "Exactly the semantics you already know",
-    body: "Offsets, consumer groups and replay from Kafka; leases, nacks and a dead-letter queue from RabbitMQ. Deliberately both, because real pipelines need both.",
+    body: "Offsets, consumer groups and replay from Kafka; leases, retries and a dead-letter queue from RabbitMQ. Real pipelines need both.",
   },
   {
     title: "Plain HTTP, six SDKs, one binary",
-    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client, and the dashboard ships inside the same executable.",
+    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client.",
   },
 ];
+
+/** The dashboard section, and the screenshot's alt text with it. */
+const HOME_DASHBOARD =
+  "Queue health, per-group lag, message inspection and dead-letter replay. Nothing was " +
+  "installed to get this: it is the same binary, on the port you already opened, and it " +
+  "grows logins and roles when it runs behind the proxy.";
+
+const HOME_DASHBOARD_IMAGE =
+  "The bundled dashboard's overview: stored messages, queues, partitions, consumer groups, " +
+  "pending and completed counts above a table of throughput, lag and error series with " +
+  "sparklines.";
 
 const proof = [
   {
@@ -126,12 +166,15 @@ const proof = [
   },
 ];
 
-const notFor = [
-  "Global total ordering. Order is per partition, in commit order, never across a queue.",
-  "Priority or deadline scheduling. Nothing overtakes anything inside a partition.",
-  "Unbounded parallelism inside one consumer group. One in-flight leased batch per partition, so the partition count is the ceiling.",
-  "Surviving a long database outage. The disk spool covers a brief interruption, not a sustained one. PostgreSQL is one failure domain.",
-];
+/**
+ * The limits paragraph. It used to be a list on the page and is a paragraph
+ * now; `scripts/check-markdown.mjs` reads it out of the page's Limits section
+ * rather than out of an array, and looks for it here.
+ */
+const HOME_LIMITS =
+  "Queen has real limits: ordering is per partition and never global, nothing overtakes " +
+  "anything inside a lane, in-group parallelism is capped by partition count, and one " +
+  "PostgreSQL is both the ceiling and the failure domain.";
 
 /**
  * The landing page as markdown, from the eyebrow down. The `# ` headline is
@@ -141,10 +184,28 @@ const notFor = [
 export function homepageBody(): string {
   const lines: string[] = [HOME_EYEBROW, "", HOME_LEAD, ""];
 
-  lines.push("## How it is shaped", "", HOME_DIAGRAM, "");
+  lines.push(HOME_FEATURES.join(" · "), "");
+
+  lines.push("## It looks like this", "");
   lines.push(
-    "One queue, one ordered lane per session, two consumer groups reading independently. " +
-      "The slow lane stalls by itself.",
+    "Queues and partitions are created on first use, so there is nothing to provision " +
+      "before the first line runs.",
+    "",
+  );
+  lines.push("Produce:", "", "```js", snippet(pushRaw, "js-push"), "```", "");
+  lines.push("Consume:", "", "```js", snippet(consumeRaw, "js-consume"), "```", "");
+  lines.push(
+    `There are [SDKs for JavaScript, Python, Go, Rust, PHP and C++](${url("/use/clients/")}), ` +
+      `[an operator CLI](${url("/reference/queenctl/")}), and a ` +
+      `[plain HTTP API](${url("/reference/http")}) for everything else.`,
+    "",
+  );
+
+  lines.push("## Where it sits", "", HOME_MAP, "");
+  lines.push(
+    `${HOME_MAP_CAPTION} The conditions behind every figure are in ` +
+      `[the comparison](${url("/start/compare/")}) and in ` +
+      `[the measured runs](${url("/benchmarks/comparison")}).`,
     "",
   );
 
@@ -152,6 +213,9 @@ export function homepageBody(): string {
   for (const item of differentiators) {
     lines.push(`### ${item.title}`, "", item.body, "");
   }
+
+  lines.push("## The dashboard is already in there", "", HOME_DASHBOARD, "");
+  lines.push(HOME_DASHBOARD_IMAGE, "");
 
   lines.push("## Measured, with the conditions attached", "");
   lines.push(
@@ -164,21 +228,15 @@ export function homepageBody(): string {
   }
 
   lines.push("## The limits worth knowing first", "");
-  lines.push(
-    "These are the load-bearing ones, worth checking against your requirements before " +
-      "you build on them.",
-    "",
-  );
-  for (const item of notFor) lines.push(`- ${item}`);
-  lines.push("", `[The full list of limits and non-goals](${url("/start/limits")})`, "");
+  lines.push(HOME_LIMITS, "");
+  lines.push(`[Read the full list before you design around it](${url("/start/limits")})`, "");
 
   lines.push("## Start", "");
   lines.push(
-    `- [Push your first message](${url("/start/quickstart")}): the model in one page, the SDKs, and worked examples.`,
+    `- [Use it](${url("/start/quickstart")}): the model in one page, the SDKs, and worked examples.`,
+    `- [Pick your SDK](${url("/use/clients/")}): JavaScript, Python, Go, Rust, PHP and C++, plus queenctl and plain HTTP.`,
     `- [Host it](${url("/selfhost")}): deployment, PostgreSQL, high availability, security, operations.`,
     `- [Understand it](${url("/internals")}): segments, offsets, the push and pop paths, the schema underneath.`,
-    `- [Why it exists](${url("/start/why")})`,
-    `- [Plain HTTP API](${url("/reference/http")}): there are SDKs for JavaScript, Python, Go, Rust, PHP and C++, an operator CLI, and HTTP for everything else.`,
     "- [Source on GitHub](https://github.com/queen-mq/queen)",
     "",
   );

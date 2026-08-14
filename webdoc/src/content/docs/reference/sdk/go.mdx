@@ -87,17 +87,10 @@ connections is never taken out of rotation, so the load balancer keeps handing i
 
 ### `Retry429Config`
 
-Separate from `RetryAttempts`, which covers 5xx and network faults. A zero field means "use the
-kind-based default".
-
-| Field | Default | Effect |
-| --- | --- | --- |
-| `MaxAttempts` | `10` for ordinary requests; unbounded for a long-poll pop | Total attempts including the first. Setting it applies the same bound to both kinds. |
-| `BaseMs` | `500` | First delay absent a `Retry-After` header. Doubles per attempt. |
-| `CapMs` | `30000` | Ceiling for the exponential delay. |
-
-A `Retry-After` header (seconds) wins over the computed delay, with ±20% jitter either way. A 429
-is retried against the same backend and never triggers failover.
+`Retry429Config` (`MaxAttempts`, `BaseMs`, `CapMs`) covers HTTP 429 separately from
+`RetryAttempts`, and a zero field means "use the kind-based default"; the defaults, the
+`Retry-After` contract and the jitter are in
+[What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 
 ## `*Queen`
 
@@ -173,29 +166,19 @@ carries `LeaseID`, `Success`, `NewExpiresAt time.Time` and `Error`.
 validates the queue name first and adds `"configured": true` to the returned map for parity with
 the other clients.
 
-`QueueConfig` holds the fields `Create` can send, with the value in `QueueDefaults`:
-
-| Field | Wire key | `QueueDefaults` | Unit |
-| --- | --- | --- | --- |
-| `LeaseTime` | `leaseTime` | `300` | seconds |
-| `RetryLimit` | `retryLimit` | `3` | attempts |
-| `DelayedProcessing` | `delayedProcessing` | `0` | seconds |
-| `WindowBuffer` | `windowBuffer` | `0` | seconds |
-| `RetentionSeconds` | `retentionSeconds` | `0` | seconds |
-| `CompletedRetentionSeconds` | `completedRetentionSeconds` | `0` | seconds |
-| `RetentionEnabled` | `retentionEnabled` | `false` | none |
-| `DeadLetterQueue` | `deadLetterQueue` | `false` | none |
-| `DlqAfterMaxRetries` | `dlqAfterMaxRetries` | `false` | none |
-| `EncryptionEnabled` | `encryptionEnabled` | `false` | none |
+`QueueConfig` holds the fields `Create` can send, each mapped onto its camelCase wire key:
+`LeaseTime`, `RetryLimit`, `DelayedProcessing`, `WindowBuffer`, `RetentionSeconds`,
+`CompletedRetentionSeconds` and `EncryptionEnabled`, whose `QueueDefaults` values are the
+shared client-side defaults listed under
+[Queue option defaults](/reference/defaults#queue-option-defaults), plus three booleans the
+other clients' defaults dicts do not carry: `RetentionEnabled`, `DeadLetterQueue` and
+`DlqAfterMaxRetries`, all `false`, which by the rule below means they are not sent at all.
 
 <Aside type="caution">
 `Create` builds the options map by **omitting every zero-valued field**: an `int` at `0` and a
-`bool` at `false` are not sent at all. So `Config(QueueConfig{RetentionEnabled: false})` does not
-send `retentionEnabled: false`. It sends nothing for that key, and the broker applies its own
-`/configure` default. Since `/configure` is a full replace, the effective configuration of a queue
-is "what you sent, plus the broker's default for everything you did not". To be sure of a value,
-set it to something non-zero, or send the body yourself. The option list and the broker's defaults
-are in [Queue options](/reference/queue-options/).
+`bool` at `false` are not sent at all, and the broker applies its own default for the missing
+key. `/configure` being [a full replace](/reference/queue-options/), the effective configuration
+is what you sent plus the broker's default for everything you did not.
 </Aside>
 
 ### Producing
@@ -236,11 +219,10 @@ are in [Queue options](/reference/queue-options/).
 | `Each()` | n/a | batch mode | `Consume` only. One message per handler call. |
 
 <Aside type="danger">
-`AutoAck` means two different things. On `Pop` it is sent to the broker as `autoAck=`, which
-commits the cursor inside the pop transaction: at-most-once, the message is gone whether or not
-you process it. On `Consume` it is never sent: the client acks after the handler returns nil and
-nacks when it returns an error. Note also that `Pop` sends the parameter **only when you called
-`AutoAck` at all**. Leaving it unset omits the parameter rather than sending `false`.
+`AutoAck` on `Pop` is the broker's at-most-once parameter, sent **only when you called
+`AutoAck` at all** (unset omits it rather than sending `false`); on `Consume` it is never sent
+and means client-side ack/nack around the handler. See
+[`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs).
 </Aside>
 
 #### `Pop`
@@ -259,12 +241,16 @@ Go's `Pop` returns the error. An empty slice with `err == nil` means the queue h
 return.
 </Aside>
 
+<Render file="snippets/go-pop" />
+
 #### `Consume` and `ConsumeBatch`
 
 ```go
 func (qb *QueueBuilder) Consume(ctx, handler MessageHandler) *ConsumeBuilder
 func (qb *QueueBuilder) ConsumeBatch(ctx, handler BatchMessageHandler) *ConsumeBuilder
 ```
+
+<Render file="snippets/go-consume" />
 
 `MessageHandler` is `func(ctx context.Context, msg *Message) error`; `BatchMessageHandler` is
 `func(ctx context.Context, msgs []*Message) error`. `*ConsumeBuilder` exposes
@@ -324,17 +310,13 @@ from Go means reading the row and pushing the payload again, or calling
 | `Queue(name string) *TransactionQueueBuilder` | Sub-builder with `Partition(name)` and `Push(payload) *TransactionBuilder`. Pass a `PushItem` to control that item's `TransactionID`, `TraceID` and `Partition`; pass anything else and it is treated as a bare payload with a minted id. |
 | `Commit(ctx) (*TransactionResponse, error)` | `POST /api/v1/transaction`. Check `resp.Success` as well as `err`. |
 
-```go
-resp, err := client.Transaction().
-    Ack(msg, queen.AckStatusCompleted, queen.AckOptions{ConsumerGroup: "workers"}).
-    Queue("orders.enriched").Push(payload).
-    Commit(ctx)
-```
+<Render file="snippets/go-transaction" />
 
-<Aside type="note">
-Atomic is not exactly-once end to end. A lost response plus a retry still duplicates unless the
-`transactionId` is deterministic and inside the dedup window.
-</Aside>
+The two operations can be given in either order: the builder collects them and `Commit` sends
+one request.
+
+A transaction is atomic, not exactly-once end to end; see
+[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
 
 ## `*Admin`
 
@@ -429,13 +411,14 @@ if errors.As(err, &he) && he.StatusCode == 429 { /* ... */ }
 | --- | --- |
 | `StatusCode int` | HTTP status. |
 | `Body string` | Raw body. |
-| `Code string` | The body's `code` field. Proxy contract: `rate_limited`, `quota_exceeded` on 429; `cluster_suspended`, `storage_quota_exceeded`, `feature_gated`, `forbidden` on 403. Empty when the body has none. |
+| `Code string` | The body's `code` field, empty when the body has none; the proxy's stable values are listed under [Behind the proxy](/reference/errors#behind-the-proxy). |
 | `RetryAfterSeconds *float64` | Parsed from the `Retry-After` header on a 429; nil when absent or non-numeric. |
 
 `IsClusterSuspended()` reports the terminal 403 that no amount of retrying resolves. `Error()`
 renders as `HTTP <status> [<code>]: <body>`.
 
-A `204` response yields a nil map, because the broker sends no body at all on `204`.
+A `204` response yields a nil map:
+[a 204 carries no body at all](/use/errors#the-envelope).
 
 ## `*HttpClient`
 

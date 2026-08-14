@@ -91,18 +91,9 @@ Three consequences worth knowing before you tune anything:
 
 ### `retry429`
 
-Separate from `retryAttempts`, which covers 5xx and network faults. This policy covers only
-HTTP 429 from a proxy.
-
-| Field | Default | Effect |
-| --- | --- | --- |
-| `maxAttempts` | `10` for ordinary requests; unbounded for a long-poll pop | Total attempts including the first. Setting it explicitly applies the same bound to both kinds. |
-| `baseMs` | `500` | First delay when the response carries no `Retry-After`. Doubles per attempt. |
-| `capMs` | `30000` | Ceiling for the exponential delay. |
-
-A `Retry-After` header (seconds) always wins over the computed delay. Every delay gets ±20%
-jitter. A 429 is retried against the *same* backend and never triggers failover, because rate
-limiting is not a health signal.
+`retry429: { maxAttempts, baseMs, capMs }` overrides the HTTP 429 backoff policy, which is
+separate from `retryAttempts`; the defaults, the `Retry-After` contract and the jitter are in
+[What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 
 ### `hostHeader`
 
@@ -188,24 +179,17 @@ terminal methods are `push()`, `pop()`, `consume()`, `create()`, `delete()`, `dl
 | `create()` | `POST /api/v1/configure` | `OperationBuilder` |
 | `delete()` | `DELETE /api/v1/resources/queues/:queue` | `OperationBuilder`. Throws immediately if the builder has no queue name. |
 
-`QUEUE_DEFAULTS`, the object `config()` merges into:
-
-| Key | Default | Unit |
-| --- | --- | --- |
-| `leaseTime` | `300` | seconds |
-| `retryLimit` | `3` | attempts |
-| `delayedProcessing` | `0` | seconds |
-| `windowBuffer` | `0` | seconds |
-| `retentionSeconds` | `0` | seconds |
-| `completedRetentionSeconds` | `0` | seconds |
-| `encryptionEnabled` | `false` | n/a |
+`QUEUE_DEFAULTS`, the object `config()` merges into, carries `leaseTime`, `retryLimit`,
+`delayedProcessing`, `windowBuffer`, `retentionSeconds`, `completedRetentionSeconds` and
+`encryptionEnabled`, with the values listed under
+[Queue option defaults](/reference/defaults#queue-option-defaults).
 
 Keys you add to `config()` are sent verbatim, so any option `/configure` accepts can be set
 even though it is not in the defaults object. Two things follow:
 
-- **`/configure` is a full replace.** Keys absent from the body reset to the broker's own
-  defaults, not to whatever the queue had before. Send the complete intended configuration every
-  time. The full option list lives in [Queue options](/reference/queue-options/).
+- **`/configure` is a full replace**, not a patch: send the complete intended configuration
+  every time. The mechanics and the full option list are in
+  [Queue options](/reference/queue-options/).
 - Calling `create()` without `config()` sends `QUEUE_DEFAULTS` as-is, which means
   `leaseTime: 300`, whereas a queue created implicitly by a first push gets a 60-second lease.
 
@@ -222,7 +206,7 @@ only when it is a valid UUID. The wire field is always `payload`; `data` is a cl
 
 The broker's push path stores no trace id, so it is dropped and the message pops back
 with `traceId: null`. Push inside a transaction when a trace id has to survive. See
-[Pick your SDK](/use/clients#verified-gaps).
+[Pick your SDK](/use/clients#verified-against-the-source).
 
 <Render file="snippets/js-push" />
 
@@ -269,11 +253,9 @@ Both `pop()` and `consume()` read these; the defaults differ between the two.
 | `each()` | n/a | batch mode | `consume()` only. Deliver one message per handler call. |
 
 <Aside type="danger">
-`autoAck` means two different things depending on the method. On `pop()` it is sent to the
-broker as `autoAck=true`, which commits the cursor inside the pop transaction: at-most-once
-delivery, the message is gone whether or not you process it. On `consume()` it is never sent to
-the broker: the client acks after the handler resolves and nacks when it throws. The
-`ConsumerManager` explicitly does not forward the parameter.
+`autoAck` on `pop()` is the broker's at-most-once parameter; on `consume()` it is never sent
+and means client-side ack/nack around the handler. See
+[`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs).
 </Aside>
 
 #### `pop()`
@@ -395,10 +377,8 @@ Lease ids are deduplicated before `requiredLeases` is sent. Item payloads follow
 on the item is sent, and one you omit is minted client side. That id is the deduplication key of
 the pushed message, so setting it deterministically is what makes a retried transaction safe.
 
-<Aside type="note">
-A transaction is atomic, not exactly-once end to end. A lost response plus a client retry still
-duplicates unless the `transactionId` is deterministic and inside the dedup window.
-</Aside>
+A transaction is atomic, not exactly-once end to end; see
+[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
 
 ## `Admin`
 
@@ -550,13 +530,14 @@ object.
 
 Failures throw an `Error` with `.status` (HTTP status) and, when the body carried one, `.code`.
 The message is the body's `error` string when present. A 429 also carries
-`.retryAfterSeconds`. Proxy codes: `rate_limited`, `quota_exceeded` on 429;
-`cluster_suspended`, `storage_quota_exceeded`, `feature_gated`, `forbidden` on 403. A timeout
+`.retryAfterSeconds`. The `code` values are the proxy's stable contract, listed under
+[Behind the proxy](/reference/errors#behind-the-proxy). A timeout
 throws with `name === 'AbortError'` and a `.timeout` field. Network faults from undici arrive as
 `fetch failed (ECONNREFUSED)`. The underlying cause is unwrapped into the message rather than
 left in `error.cause`.
 
-A `204` response resolves to `null`; the broker sends no body at all on `204`.
+A `204` response resolves to `null`:
+[a 204 carries no body at all](/use/errors#the-envelope).
 
 ## Same surface, other languages
 

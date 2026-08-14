@@ -1,0 +1,21 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-py/tests/test_docs.py."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-py/tests/test_docs.py by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```python title="clients/client-py/tests/test_docs.py"
+first = await client.queue("payments").partition("customer-42").push([
+    {"transactionId": "order-9137-paid", "data": {"orderId": 9137, "amount": 99.5}}
+])
+
+retry = await client.queue("payments").partition("customer-42").push([
+    {"transactionId": "order-9137-paid", "data": {"orderId": 9137, "amount": 99.5}}
+])
+# retry[0]["status"] == "duplicate": the second push wrote nothing
+# and answers with the first message's id.
+```

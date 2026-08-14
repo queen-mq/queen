@@ -3,19 +3,19 @@ title: PostgreSQL TLS
 description: "Encrypt the broker's connection to PostgreSQL, and understand exactly what the encrypt-only mode does not protect against."
 type: how-to
 tier: operate
-sidebar:
-  order: 17
-  label: PostgreSQL TLS
 sourceOfTruth:
   - server/src/pgtls.rs
   - server/src/config.rs
   - server/src/db.rs
+sidebar:
+  order: 17
+  label: PostgreSQL TLS
 ---
 
 Every message Queen stores travels over the connection between the broker and
-PostgreSQL. That connection is plaintext by default. Two variables control it, and
-the difference between them is the difference between encryption and authenticated
-encryption.
+PostgreSQL, and that connection is plaintext by default. Two variables control it,
+and the difference between them is the difference between encryption and
+authenticated encryption.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -32,16 +32,16 @@ mode: it is off, or it is on with one of the two verification behaviours below.
 PG_USE_SSL=true
 ```
 
-The broker builds a rustls client on the `ring` provider and trusts the Mozilla root
-set bundled into the binary at compile time (`webpki-roots`). The server's chain must
-validate against those roots and its name must match.
+The broker builds a rustls client on the `ring` provider and trusts the Mozilla
+root set bundled into the binary at compile time (`webpki-roots`). The server's
+chain must validate against those roots and its name must match.
 
 This is the mode to want. It is also the mode that fails against most managed
-PostgreSQL offerings, because they present a chain rooted in their own private CA
-rather than a public one. The broker has no variable for adding a custom root
-certificate: the trust store is the compiled-in Mozilla set and nothing else. If
-your provider's chain is private, your options are the system trust of a sidecar or
-tunnel in front of PostgreSQL, or the encrypt-only mode below.
+PostgreSQL offerings, because they present a chain rooted in their own private CA.
+The broker has no variable for adding a custom root certificate: the trust store
+is the compiled-in Mozilla set and nothing else. If your provider's chain is
+private, your options are the system trust of a sidecar or tunnel in front of
+PostgreSQL, or the encrypt-only mode below.
 
 ## Encrypt-only: what managed PostgreSQL usually needs
 
@@ -70,8 +70,8 @@ What you do not get:
   as your database.
 - **Protection against an active man in the middle.** An attacker who can
   redirect the broker's TCP connection (a poisoned DNS answer, a hijacked service
-  record, an ARP-level redirect, a compromised sidecar) terminates TLS with its own
-  self-signed certificate, and the broker connects happily. It then holds the
+  record, an ARP-level redirect, a compromised sidecar) terminates TLS with its
+  own self-signed certificate, and the broker connects happily. It then holds the
   database password from the startup message and every message the broker writes.
 - **Detection of a certificate swap.** With nothing to compare against, a
   substituted certificate produces no error and no log line.
@@ -83,8 +83,8 @@ against someone becoming the other end of it.
 `PG_SSL_REJECT_UNAUTHORIZED=false` is a deliberate mode, never a default, and the
 code says so. Use it when the network path between broker and database is itself
 trusted (a private VPC subnet, a service mesh, a host-local socket path), and the
-only thing you actually need TLS for is the provider's requirement that connections
-be encrypted. Do not use it across the public internet.
+only thing you actually need TLS for is the provider's requirement that
+connections be encrypted. Do not use it across the public internet.
 </Aside>
 
 ## Choosing
@@ -92,35 +92,33 @@ be encrypted. Do not use it across the public internet.
 <Steps>
 
 1. **Same host or private socket, nothing else on the segment.** Leave
-   `PG_USE_SSL=false`. TLS to localhost buys ciphertext on a loopback nobody else can
-   read, at the cost of a handshake per pooled connection.
+   `PG_USE_SSL=false`. TLS to localhost buys ciphertext on a loopback nobody else
+   can read, at the cost of a handshake per pooled connection.
 
 2. **Managed PostgreSQL with a public CA chain.** `PG_USE_SSL=true` and leave
    `PG_SSL_REJECT_UNAUTHORIZED` at its default. Verify by breaking it on purpose
-   once: point the host at something with a wrong name and confirm the broker fails
-   to connect.
+   once: point the host at something with a wrong name and confirm the broker
+   fails to connect.
 
 3. **Managed PostgreSQL with a private CA chain.** `PG_USE_SSL=true` plus
    `PG_SSL_REJECT_UNAUTHORIZED=false`, and treat the network path as part of your
    trust boundary. Document that it is, because the certificate no longer proves
    anything about it.
 
-4. **Across an untrusted network.** Do not rely on either mode. Terminate the trust
-   decision somewhere that can validate a private root: a TLS-terminating proxy
-   next to the broker, or a VPN.
+4. **Across an untrusted network.** Do not rely on either mode. Terminate the
+   trust decision somewhere that can validate a private root: a TLS-terminating
+   proxy next to the broker, or a VPN.
 
 </Steps>
 
 ## How it applies
 
-The setting affects the broker's whole PostgreSQL surface, not just the request path:
-the deadpool connection pool, the boot-time connection that applies the embedded
-schema, and the maintenance connections all go through the same connector. There is
-no separate knob for the migration connection.
-
-The flags are read once at boot, like every other broker variable. A failure to
-establish TLS surfaces as a connection error at boot or as pool checkout failures at
-runtime. The broker does not silently fall back to plaintext.
+The setting affects the broker's whole PostgreSQL surface: the deadpool connection
+pool, the boot-time connection that applies the embedded schema, and the
+maintenance connections all go through the same connector, with no separate knob
+for the migration connection. The flags are read once at boot. A failure to
+establish TLS surfaces as a connection error at boot or as pool checkout failures
+at runtime; the broker does not silently fall back to plaintext.
 
 ## Related
 

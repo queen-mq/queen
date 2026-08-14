@@ -17,36 +17,11 @@ sourceOfTruth:
   - test/compose/docker-compose.ha.yml
 ---
 
-What follows is a complete reference manifest you can apply as-is, written
-against this broker's actual behaviour rather than adapted from a generic
-message-queue template; there is no official Helm chart for Queen today. Every
-non-obvious field is explained below the YAML, and two of them (the liveness
-probe and the mesh port) are explained at length, because a wrong value in
-either produces failures that look like something else.
-
-Assumptions: PostgreSQL already exists and is reachable at `queen-pg` in the same
-namespace, and you have a namespace called `queen`.
-
-## Why a StatefulSet
-
-A single-replica broker works perfectly well as a `Deployment`. Once you want
-more than one, a `StatefulSet` earns its keep for two reasons that are specific
-to this broker:
-
-- **The mesh peer list is static hostnames.** `QUEEN_MESH_PEERS` is parsed once at
-  boot into `(host, port)` pairs. A `StatefulSet` with a headless Service gives
-  every pod a stable DNS name (`queen-0.queen-mesh`, `queen-1.queen-mesh`) that
-  you can write into that variable. Pods behind a `Deployment` have neither
-  stable names nor stable addresses, so there is nothing to put there.
-- **The disk spool wants to follow the pod.** `FILE_BUFFER_DIR` holds pushes the
-  broker accepted while PostgreSQL was unreachable, and they are only replayed by
-  a broker that starts against the same directory. A `volumeClaimTemplate` binds
-  one PersistentVolumeClaim per ordinal, so a rescheduled pod finds its own spool
-  again. An `emptyDir` survives a container restart but not a pod replacement.
-
-If you run one replica and accept that an unreplayed spool dies with the pod, drop
-the `volumeClaimTemplate`, mount an `emptyDir` at the spool path, remove
-`QUEEN_MESH_PEERS`, and a `Deployment` is equivalent. Nothing else changes.
+Apply the manifest below as-is. It is written against this broker's actual
+behaviour, not adapted from a generic message-queue template; there is no
+official Helm chart today. It assumes PostgreSQL is reachable at `queen-pg` in
+the same namespace and that the namespace `queen` exists. Every non-obvious
+field is explained after the YAML.
 
 ## The manifest
 
@@ -70,8 +45,8 @@ stringData:
 
 ### Services
 
-Two Services, with different jobs. The client-facing one carries **only** the HTTP
-port; the headless one exists so the pods can resolve each other for the mesh.
+Two Services: the client-facing one carries **only** the HTTP port; the
+headless one lets pods resolve each other for the mesh.
 
 ```yaml
 apiVersion: v1
@@ -256,8 +231,9 @@ spec:
 
 ### NetworkPolicy
 
-The mesh port must not be reachable from anywhere except the other brokers. This
-is a requirement, not hardening. See [High availability](/selfhost/ha) for why.
+The mesh port must be reachable from the other brokers and
+[from nowhere else](/selfhost/ha#the-mesh-port-must-be-firewalled); a
+requirement, not hardening.
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -290,88 +266,8 @@ spec:
 ```
 
 Add a `PodDisruptionBudget` with `minAvailable: 2` if you run three replicas and
-your nodes get drained; brokers are interchangeable, so the only thing a
-disruption budget protects is your request capacity.
-
-## Do not couple liveness to the database
-
-This is the single most consequential choice in the manifest.
-
-`GET /health` is not a static answer. The handler takes a connection from the
-pool, issues a real query, and returns **503** with
-`{"status":"unhealthy","database":"disconnected",…}` when that fails. That makes
-it a correct *readiness* signal: a broker that cannot reach PostgreSQL cannot
-serve a push or a pop, and should be pulled out of the Service.
-
-It makes it a destructive *liveness* signal. Wire `/health` to `livenessProbe`
-and a PostgreSQL blip becomes a restart of every broker in the cluster,
-simultaneously, which costs more than leaving them running, for three reasons:
-
-1. **It destroys the mechanism built for exactly this failure.** While PostgreSQL
-   is unreachable, pushes are appended to the on-disk spool and replayed when it
-   comes back. Killing the process mid-outage interrupts that; the spool survives
-   only because it is on disk, and the pod has to come back to the same volume to
-   drain it.
-2. **Restarting does not fix an unreachable database.** The new process fails the
-   same probe. You get a `CrashLoopBackOff` across the fleet whose actual cause is
-   one line in the PostgreSQL log.
-3. **It makes recovery slower.** When PostgreSQL returns, a broker that stayed up
-   resumes immediately. A broker in backoff waits for its next attempt, then
-   re-applies the schema, then drains its spool before it binds the port.
-
-Use `tcpSocket` on the HTTP port for liveness, or omit `livenessProbe` entirely.
-Either is safe, because the broker's release profile sets `panic = "abort"`: a
-panic in any of its background loops aborts the whole process after logging a
-structured error on the `panic` target, so the kubelet restarts the container on
-its own. There is no half-alive state for a liveness probe to detect.
-
-<Aside type="note">
-Probes keep working with authentication enabled. `JWT_SKIP_PATHS` defaults to
-`/health,/metrics/prometheus,/metrics,/`, so `/health` is unauthenticated even
-with `JWT_ENABLED=true`. If you override `JWT_SKIP_PATHS`, keep `/health` in it or
-your probes will start collecting 401s.
-</Aside>
-
-## Notes on the rest of the manifest
-
-**The uniform peer list includes the pod itself.** A `StatefulSet` template cannot
-give each ordinal a different value, so the simplest correct configuration lists
-all three names everywhere. This is safe: an inbound frame's effect is applied to
-local state and **never re-broadcast**, so a self-connection cannot amplify
-anything. The cost is one extra connection pair per pod. The alternative, an
-init script that removes the pod's own name from the list, buys you two TCP
-connections.
-
-**The mesh port is TCP.** It looks like it should be UDP because the environment
-variables `QUEEN_UDP_PEERS` and `QUEEN_UDP_NOTIFY_PORT` still work as aliases.
-They are the only survivors of the retired UDP transport; the wire is
-length-prefixed frames over TCP. A Service or NetworkPolicy declaring
-`protocol: UDP` for 6633 silently blocks all mesh traffic, and the failure mode is
-subtle: brokers keep serving correctly, only with pop wakes arriving one backoff
-interval late.
-
-**`podManagementPolicy: Parallel`** is safe here and much faster to roll. Brokers
-have no startup ordering requirement: the schema apply is serialised cluster-wide
-by a PostgreSQL advisory lock, so three pods booting simultaneously queue behind
-that lock rather than racing through the DDL.
-
-**`QUEEN_APPLY_SCHEMA` is left at its default** so each broker applies the schema
-at boot. If your policy forbids DDL from an application role, set it to `"0"` and
-pre-apply the DDL (see [PostgreSQL](/selfhost/postgres)), and read the
-mixed-version note in [Upgrades](/selfhost/upgrade) before you roll a version
-change that way.
-
-**No CPU limit is set, deliberately.** The broker's async runtime sizes its worker
-thread pool from the core count it can see, and it does **not** read the cgroup
-`cpu.max` quota. A `limits.cpu` of `2` on a 16-core node is a quota, not a
-narrower CPU set, so the broker still spawns 16 worker threads and oversubscribes
-its quota 8×, which shows up as scheduler contention, not as a clean throttle. If
-your platform requires a CPU limit, set it close to the node's core count, or
-schedule brokers onto nodes sized for them. A memory limit has no such caveat and
-is set above.
-
-**The client Service does not expose 6633.** Keep it that way. There is no reason
-for a client to reach the mesh port, and every reason for it not to.
+your nodes get drained; brokers are interchangeable, so the budget protects only
+your request capacity.
 
 ## Verify the deployment
 
@@ -383,28 +279,90 @@ kubectl -n queen rollout status statefulset/queen
 kubectl -n queen logs queen-0 | grep -E 'schema|config:|listening|mesh'
 ```
 
-The mesh started when the log carries a `mesh` line reporting `peers` and `auth`.
-`auth=hmac` means `QUEEN_SYNC_SECRET` arrived; `auth=off` means it did not, and the
-mesh is in open mode. Then run the push-and-pop check from
-[Deploy a broker](/selfhost/deploy) through a port-forward:
+The mesh is up when the log carries a `mesh` line reporting `peers` and `auth`:
+`auth=hmac` means `QUEEN_SYNC_SECRET` arrived, `auth=off` means open mode. Then
+run the push-and-pop check from [Deploy a broker](/selfhost/deploy) through a
+port-forward:
 
 ```bash
 kubectl -n queen port-forward svc/queen 6632:6632
 ```
 
+## Why a StatefulSet
+
+A single replica works fine as a `Deployment`. More than one wants a
+`StatefulSet` for two broker-specific reasons:
+
+- **The mesh peer list is static hostnames.** `QUEEN_MESH_PEERS` is parsed once
+  at boot, and a `StatefulSet` with a headless Service gives every pod a stable
+  DNS name (`queen-0.queen-mesh`) to put there. Pods behind a `Deployment` have
+  neither stable names nor stable addresses.
+- **The disk spool wants to follow the pod.** The
+  [spool is node-local](/selfhost/durability) and only replayed by a broker that
+  starts against the same directory. A `volumeClaimTemplate` binds one
+  PersistentVolumeClaim per ordinal, so a rescheduled pod finds its own spool
+  again; an `emptyDir` survives a container restart but not a pod replacement.
+
+For one replica that accepts losing an unreplayed spool with the pod: drop the
+`volumeClaimTemplate`, mount an `emptyDir` at the spool path, remove
+`QUEEN_MESH_PEERS`, and a `Deployment` is equivalent.
+
+## Do not couple liveness to the database
+
+**`/health` answers 503 while PostgreSQL is unreachable, so a liveness probe
+wired to it kills every broker for the whole outage and destroys the spool built
+for exactly that failure:**
+[the liveness-probe trap](/selfhost/probes-restarts#the-liveness-probe-trap).
+Use `tcpSocket` on the HTTP port, or omit `livenessProbe` entirely:
+`panic = "abort"` leaves no half-alive state to detect.
+
+## Notes on the rest of the manifest
+
+**The uniform peer list includes the pod itself.** A `StatefulSet` template
+cannot give each ordinal a different value, so the simplest correct
+configuration lists all three names everywhere. This is safe: an inbound frame's
+effect is applied to local state and **never re-broadcast**, so a
+self-connection cannot amplify anything. The cost is one extra connection pair
+per pod.
+
+**The mesh port is TCP**, despite the legacy `QUEEN_UDP_*`
+[alias names](/selfhost/configuration#names-with-a-history). A Service or
+NetworkPolicy declaring `protocol: UDP` for 6633 silently blocks all mesh
+traffic, and the failure mode is subtle: brokers keep serving correctly, only
+with pop wakes arriving one backoff interval late.
+
+**`podManagementPolicy: Parallel`** is safe and much faster to roll. The
+[schema apply is serialised cluster-wide](/selfhost/upgrade#what-happens-at-boot)
+by a PostgreSQL advisory lock, so simultaneous boots queue behind that lock
+rather than racing through the DDL.
+
+**`QUEEN_APPLY_SCHEMA` is left at its default**, so each broker applies the
+schema at boot. If policy forbids DDL from an application role, set `"0"` and
+pre-apply the DDL ([PostgreSQL](/selfhost/postgres)); read
+[Upgrades](/selfhost/upgrade) before rolling a version change that way.
+
+**No CPU limit is set, deliberately.** The async runtime sizes its worker
+thread pool from the core count it can see and does **not** read the cgroup
+`cpu.max` quota: a `limits.cpu` of `2` on a 16-core node still spawns 16 worker
+threads, oversubscribing the quota 8x as scheduler contention rather than a
+clean throttle. If your platform requires one, set it close to the node's core
+count. A memory limit has no such caveat.
+
+**The client Service does not expose 6633.** Keep it that way. No client has any
+business on the mesh port.
+
 ## What a chart would need to add
 
-Stated so you can judge the gap if you write your own, and so nothing here reads
-as a claim that a chart exists:
+The gap, if you write your own chart:
 
-- Rendering `QUEEN_MESH_PEERS` from the replica count instead of hard-coding it.
+- `QUEEN_MESH_PEERS` rendered from the replica count instead of hard-coded.
 - A checksum annotation on the pod template so a Secret change triggers a roll.
-- Optional Prometheus scrape configuration for `/metrics/prometheus`, which must
-  never be exposed to a tenant on a multi-tenant deployment: its per-queue series
-  sum across tenants.
-- The JWT variables, and the PostgreSQL TLS variables, as values.
-- The ingress or gateway resource that terminates TLS, since the broker has no
-  HTTPS listener of its own.
+- Optional Prometheus scrape config for `/metrics/prometheus`, never exposed to
+  a tenant on a multi-tenant deployment: its per-queue series sum across
+  tenants.
+- The JWT and PostgreSQL TLS variables as values.
+- The ingress or gateway that terminates TLS, since the broker has no HTTPS
+  listener of its own.
 
 ## Related
 

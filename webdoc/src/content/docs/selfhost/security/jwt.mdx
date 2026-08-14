@@ -1,6 +1,6 @@
 ---
 title: Broker authentication
-description: "Enable JWT on the broker: algorithms, a static key or a JWKS endpoint, claim validation, and the five access levels."
+description: "Enable JWT on the broker in two commands, then wire the algorithms, JWKS rotation, and the five access levels."
 type: how-to
 tier: operate
 sidebar:
@@ -13,46 +13,41 @@ sourceOfTruth:
   - server/src/main.rs
 ---
 
-The broker ships with authentication off. `JWT_ENABLED` defaults to `false`, and
-with it off the middleware stamps an empty identity into every request and calls the
-handler: no header is read, nothing is rejected. Turning it on installs a real
-per-request validator that verifies a signature, checks the temporal claims, and
-compares the token's roles against the level the route requires.
-
-Everything on this page is one middleware and one route table. There is no per-queue
-authorization, no tenant binding, and no session state.
+`JWT_ENABLED` defaults to `false`: off, the middleware stamps an empty identity
+into every request. On, it verifies the signature, checks the temporal claims, and
+compares the token's roles against the level the route requires. One middleware,
+one route table: no per-queue authorization, no tenant binding, no session state.
 
 ## Turn it on
 
-<Steps>
-
-1. Decide the algorithm family. Symmetric (`HS256`/`HS384`/`HS512`) needs one shared
-   secret and is the default. Asymmetric (`RS256`/`RS384`/`RS512`/`EdDSA`) lets an
-   identity provider hold the private key.
-
-2. Provide the matching key material: `JWT_SECRET` for HS, or `JWT_PUBLIC_KEY` (a
-   PEM) or `JWT_JWKS_URL` for RS/EdDSA.
-
-3. Set `JWT_ENABLED=true` and restart. Configuration is read once at boot; there is
-   no reload.
-
-4. Read the boot log. `JWT auth ENABLED` carries the resolved algorithm and the skip
-   list. With a JWKS URL you also get `JWKS pre-fetch OK` and a key count.
-
-</Steps>
+Generate the secret and keep it, because minting a token needs the same bytes.
+Paths per [Deploy a broker](/selfhost/deploy):
 
 ```bash
-JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET=<32+ random bytes> queen
+JWT_SECRET="$(openssl rand -hex 32)"; echo "$JWT_SECRET"
 ```
 
-If the algorithm and the key material disagree, the broker does not start. See
-[boot-time validation](#boot-time-validation-is-fatal) below.
+```bash
+JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$JWT_SECRET" server/target/release/queen
+```
+
+Then read the boot log: `JWT auth ENABLED` carries the resolved algorithm and the
+skip list, and a JWKS URL adds `JWKS pre-fetch OK` with a key count. In the
+published container the binary is `/app/bin/queen` (the image's default command),
+so the same variables travel as `docker run -e` flags. Configuration is read once
+at boot; there is no reload.
+
+Key material matches the algorithm family: `JWT_SECRET` for symmetric
+`HS256`/`HS384`/`HS512` (the default), `JWT_PUBLIC_KEY` (a PEM) or `JWT_JWKS_URL`
+for `RS256`/`RS384`/`RS512`/`EdDSA`, which let an identity provider hold the
+private key. If they disagree, the broker does not start:
+[boot-time validation](#boot-time-validation-is-fatal).
 
 ## Algorithms and auto-detection
 
 `JWT_ALGORITHM` (default `HS256`) does not name the algorithm the broker uses. It
-names the set of algorithms an incoming token is *allowed* to declare in its header.
-The broker then dispatches on the token's own `alg`.
+names the set a token may declare in its header; the broker dispatches on the
+token's own `alg`.
 
 | `JWT_ALGORITHM` | Token `alg` values accepted |
 | --- | --- |
@@ -65,35 +60,29 @@ The broker then dispatches on the token's own `alg`.
 | `RS512` | `RS512` |
 | `EdDSA` | `EdDSA` |
 
-Two rows are worth reading twice. `RS256` is the widest of the RSA settings (it
-accepts `RS384` and `RS512` too), while `RS384` and `RS512` are exact. And `auto`
-accepts *both* families at once, so with `auto` a deployment holding both an HS
-secret and an RSA public key will verify a token signed with either. Pin the
-algorithm explicitly unless you actually need the token to choose.
-
-Anything outside the accepted set is rejected with `401 Unsupported token algorithm`
-before any key lookup happens.
+`RS256` is the widest RSA setting (`RS384` and `RS512` are exact), and `auto`
+accepts both families at once, so a deployment holding both an HS secret and an
+RSA public key verifies a token signed with either. Pin the algorithm unless the
+token really must choose. Anything outside the set is a
+`401 Unsupported token algorithm` before any key lookup.
 
 ## Where the verification key comes from
 
 The key is chosen per token, from the token's `alg`:
 
-- **HS256/384/512**: `JWT_SECRET`, used as raw bytes. An empty secret is a
-  `500 HS secret not configured`, not a `401`: the request was well-formed, the
-  server is not.
-- **RS256/384/512**: `JWT_PUBLIC_KEY` if it is set, parsed as an RSA PEM. A PEM
-  that will not parse is a `500 invalid RSA public key PEM`. If `JWT_PUBLIC_KEY` is
-  empty, the JWKS cache is consulted by `kid`.
-- **EdDSA**: the same, with `JWT_PUBLIC_KEY` parsed as an Ed25519 PEM
-  (`500 invalid Ed public key PEM` on failure), otherwise the JWKS cache.
+| Token `alg` | Key used | Server-side failure |
+| --- | --- | --- |
+| `HS256/384/512` | `JWT_SECRET`, as raw bytes | Empty secret: `500 HS secret not configured`, not a `401` |
+| `RS256/384/512` | `JWT_PUBLIC_KEY` parsed as an RSA PEM; if empty, the JWKS cache by `kid` | Unparseable PEM: `500 invalid RSA public key PEM` |
+| `EdDSA` | `JWT_PUBLIC_KEY` parsed as an Ed25519 PEM; if empty, the JWKS cache by `kid` | `500 invalid Ed public key PEM` |
 
-A static PEM always wins over JWKS. There is no fallback from a bad PEM to the JWKS
-endpoint. Fix the PEM or unset it.
+A static PEM always wins over JWKS, and there is no fallback from a bad PEM to the
+JWKS endpoint: fix the PEM or unset it.
 
 ## A JWKS endpoint
 
-Set `JWT_JWKS_URL` and leave `JWT_PUBLIC_KEY` empty. The broker pre-fetches the
-document at boot and keeps the keys in a cache keyed by `kid`.
+Set `JWT_JWKS_URL` and leave `JWT_PUBLIC_KEY` empty: the broker pre-fetches the
+document at boot and caches the keys by `kid`.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -103,32 +92,20 @@ document at boot and keeps the keys in a cache keyed by `kid`.
 
 Behaviour that matters in production:
 
-- **Refresh on an unknown `kid`.** A token whose `kid` is not cached triggers one
-  re-fetch, throttled to at most once every 5 seconds, then a second lookup. A key
-  rotation is therefore picked up without a restart and without a fetch stampede
-  under load. If the `kid` is still unknown afterwards, the answer is
-  `401 Unknown key ID`.
-- **An empty `kid` matches any cached key.** A token with no `kid`, or a JWK set
-  with unnamed keys, falls back to the first key in the cache. That is convenient
-  for a single-key set and imprecise for a rotating one. Publish `kid` on both
-  sides.
-- **A failed pre-fetch is not fatal.** Boot logs `JWKS pre-fetch failed (will retry
-  on demand)` and carries on, so the broker starts even if the identity provider is
-  briefly down. The first token then pays the fetch.
-- **Only two key types are read.** `RSA` (from the `n`/`e` components) and `OKP`
-  with `crv: Ed25519` (from the raw 32-byte `x`). Every other entry in the JWK set
-  is skipped silently, so a document that looks populated can yield zero usable
-  keys. Check the key count in the boot log.
-- **The body is capped at 1 MiB** and the response may be `Content-Length`d or
-  chunked. HTTPS chains are verified against the root set bundled into the binary.
-- **`http://` is accepted and warned about.** Boot logs that signing keys fetched
-  over cleartext are MITM-forgeable. It is a warning, not a refusal; treat it as an
-  error in your own review.
+| Behaviour | Detail |
+| --- | --- |
+| Unknown `kid` | One re-fetch, throttled to at most once every 5 seconds, then a second lookup; still unknown is `401 Unknown key ID`. A key rotation is picked up without a restart and without a fetch stampede |
+| Empty `kid` | Matches the first key in the cache. Convenient for a single-key set, imprecise for a rotating one: publish `kid` on both sides |
+| Failed pre-fetch | Not fatal. Boot logs `JWKS pre-fetch failed (will retry on demand)` and carries on; the first token pays the fetch |
+| Key types read | Only `RSA` (from `n`/`e`) and `OKP` with `crv: Ed25519` (from the raw 32-byte `x`). Every other entry is skipped silently, so a populated-looking document can yield zero usable keys: check the key count in the boot log |
+| Transport | Body capped at 1 MiB, `Content-Length`d or chunked. HTTPS chains are verified against the root set bundled into the binary |
+| `http://` URLs | Accepted, with a boot warning that cleartext-fetched signing keys are MITM-forgeable. Treat that warning as an error in your own review |
 
 ## Claim validation
 
-Signature verification is delegated to the JWT library; every other check is the
-broker's own, because the semantics have to match the older implementation exactly.
+Signature verification is the JWT library's; every other check is the broker's
+own, matching the older implementation exactly. The skew is `JWT_CLOCK_SKEW`,
+default `30` seconds, applied to all three temporal checks.
 
 | Claim | Rule |
 | --- | --- |
@@ -137,9 +114,7 @@ broker's own, because the semantics have to match the older implementation exact
 | `iat` | If present, rejected when `iat > now + skew` |
 | `iss` | Checked only when `JWT_ISSUER` is non-empty; must match exactly |
 | `aud` | Checked only when `JWT_AUDIENCE` is non-empty; accepts a string or an array, and one match is enough |
-| `sub` | Optional. When present it is stamped as the message's `producerSub` |
-
-`JWT_CLOCK_SKEW` defaults to `30` seconds and applies to all three temporal checks.
+| `sub` | Optional. When present it is stamped as the message's `producerSub`, and it is the only source of that field: a `producerSub` in a push body is not honoured |
 
 <Aside type="caution">
 A token with no `exp` never expires. The library's own "exp is required" rule is
@@ -148,14 +123,10 @@ a permanent credential and nothing in the broker will complain. Require `exp` at
 issuer.
 </Aside>
 
-`sub` is the only source of `producerSub` on a stored message. A client that puts
-`producerSub` in a push body does not get it honoured.
-
 ## Access levels are a role set, not a ladder
 
-Five levels exist: `public`, `read-only`, `write-only`, `read-write`, `admin`. They
-are *not* ordered. The checks are role-set membership tests, which is why the
-write-only case behaves the way it does.
+Five levels exist and they are *not* ordered: the checks are role-set membership
+tests.
 
 | Level | Passed by |
 | --- | --- |
@@ -165,49 +136,46 @@ write-only case behaves the way it does.
 | `read-write` | `read-write`, `admin` |
 | `admin` | `admin` |
 
-So a producer holding only `write-only` passes `POST /api/v1/push` and is rejected
-with `403 Insufficient permissions` on every read and every consume route: pop, ack,
-transaction, listings, all of it. That is the intended shape for a pure producer;
-it is also the first thing to check when a client starts collecting 403s after
-authentication goes on.
+So a producer holding only `write-only` passes `POST /api/v1/push` and collects
+`403 Insufficient permissions` on every read and consume route: pop, ack,
+transaction, listings, all of it. That is the intended shape for a pure producer,
+and the first thing to check when a client starts seeing 403s.
 
 The route classification is prefix-based:
 
-- `public`: `/health`, `/metrics`, `/metrics/prometheus`, `/`, `/assets/*`,
-  `/favicon*`, plus the three dashboard-identity routes `/auth/me`,
-  `/auth/login` and `/auth/logout`, public so they can *answer* the auth
-  question rather than be blocked by it (with JWT on, `/auth/me` returns `401`
-  from its own handler)
-- `admin`: everything under `/api/v1/system/` and `/internal/`, every
-  `DELETE /api/v1/consumer-groups/*`, every `DELETE /api/v1/resources/queues/*`,
-  and `/api/v1/stats/refresh`
-- `read-only`: `GET` on `/status`, `/api/v1/status*`, `/api/v1/analytics*`,
-  `/api/v1/resources/*`, `/api/v1/messages*`, `/api/v1/consumer-groups*`,
-  `/api/v1/dlq*`, `/api/v1/traces*`, plus `/streams/v1/state/get`
-- `write-only`: `POST /api/v1/push`, and only that
-- `read-write`: everything else, including pop, ack, transaction, lease extension,
-  `/configure`, seeks, subscription changes, `POST /api/v1/traces`, message deletes,
-  and any route not listed above
+| Level | Routes |
+| --- | --- |
+| `public` | `/health`, `/metrics`, `/metrics/prometheus`, `/`, `/assets/*`, `/favicon*`, plus `/auth/me`, `/auth/login`, `/auth/logout`, public so they can answer the auth question rather than be blocked by it (with JWT on, `/auth/me` returns `401` from its own handler) |
+| `admin` | Everything under `/api/v1/system/` and `/internal/`, every `DELETE /api/v1/consumer-groups/*`, every `DELETE /api/v1/resources/queues/*`, and `/api/v1/stats/refresh` |
+| `read-only` | `GET` on `/status`, `/api/v1/status*`, `/api/v1/analytics*`, `/api/v1/resources/*`, `/api/v1/messages*`, `/api/v1/consumer-groups*`, `/api/v1/dlq*`, `/api/v1/traces*`, plus `/streams/v1/state/get` |
+| `write-only` | `POST /api/v1/push`, and only that |
+| `read-write` | Everything else: pop, ack, transaction, lease extension, `/configure`, seeks, subscription changes, `POST /api/v1/traces`, message deletes, and any route not listed above |
 
-The last line is the important one: an unrecognised path defaults to `read-write`,
-not to `public`. The per-route table with the level for every registered route is the
-[route table](/reference/http/routes/).
+The last row is the important one: an unrecognised path defaults to `read-write`,
+not to `public`. The per-route table is the [route table](/reference/http/routes/).
 
 <Aside type="note">
-Turning JWT on turns the broker-served dashboard off, deliberately. The app
-sends no bearer token, and the broker holds no accounts to mint one for a
-browser: `/auth/me` answers `401`, and the app's login redirect lands on
-`/auth/login`, where the broker serves a static page saying to use the proxy.
-`JWT_SKIP_PATHS` cannot rescue this: it would let the shell load, only for
-every `/api/v1/*` call behind it to answer `401`. A dashboard with sessions
-belongs behind `queen_proxy`; with auth off, the broker serves the open
-[standalone dashboard](/selfhost/dashboard) instead.
+Turning JWT on turns the broker-served dashboard off, deliberately: the app sends
+no bearer token and the broker holds no accounts, so `/auth/me` answers `401` and
+`/auth/login` serves a static page pointing at the proxy. `JWT_SKIP_PATHS` cannot
+rescue it (the shell would load, then every `/api/v1/*` call behind it answers
+`401`). A dashboard with sessions belongs behind `queen_proxy`; with auth off, the
+broker serves the open [standalone dashboard](/selfhost/dashboard).
 </Aside>
 
 ## Remapping claims for an external identity provider
 
-The role names and the claims they live in are all configurable, so a token minted
-by an existing IdP usually needs no custom claims at all, only a mapping.
+The role names and the claims they live in are configurable, so a token minted by
+an existing IdP usually needs a mapping, not custom claims. An IdP that emits
+`{"scope":"queen.write"}` needs two variables and no custom mint:
+
+```bash
+JWT_ROLES_CLAIM=scope
+```
+
+```bash
+JWT_ROLE_WRITE_ONLY=queen.write
+```
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -219,36 +187,24 @@ by an existing IdP usually needs no custom claims at all, only a mapping.
 | `JWT_ROLE_WRITE_ONLY` | `write-only` | The value that means write-only |
 
 Both claims are read on every token, and a role counts as held if it matches the
-single-value claim **or** appears in the array claim. An IdP that emits
-`{"scope":"queen.write"}` needs two variables and no custom mint:
-
-```bash
-JWT_ROLES_CLAIM=scope
-```
-
-```bash
-JWT_ROLE_WRITE_ONLY=queen.write
-```
-
-Both claim names are looked up as literal top-level keys, not as JSON paths. A role
-buried in a nested object (the `realm_access.roles` shape, for instance) is
-invisible to the broker; the issuer has to lift it into a top-level claim.
+single-value claim **or** appears in the array claim. Both claim names are literal
+top-level keys, not JSON paths: a role buried in a nested object (the
+`realm_access.roles` shape, for instance) is invisible, and the issuer has to lift
+it into a top-level claim.
 
 ## Skipping paths
 
-`JWT_SKIP_PATHS` defaults to `/health,/metrics/prometheus,/metrics,/`. A skip entry
+`JWT_SKIP_PATHS` defaults to `/health,/metrics/prometheus,/metrics,/`. An entry
 matches a request path exactly; an entry longer than one character that ends in `/`
-also matches as a prefix. So `/assets/` skips everything below it, while `/` skips
-only the root document.
-
-Skips are evaluated before the route's access level, so an entry here overrides the
-table above.
+also matches as a prefix, so `/assets/` skips everything below it while `/` skips
+only the root document. Skips are evaluated before the route's access level, so an
+entry here overrides the table above.
 
 ## The token on the wire
 
-The credential is read from `Authorization`. A `Bearer ` prefix is stripped
-case-insensitively, and a bare token with no prefix is also accepted. Errors are the
-broker's standard shape, `{"error":"…"}` with `content-type: application/json`:
+The credential is read from `Authorization`: a `Bearer ` prefix is stripped
+case-insensitively, and a bare token with no prefix is also accepted. Errors are
+the broker's standard `{"error":"…"}` JSON shape:
 
 | Status | Message | Cause |
 | --- | --- | --- |
@@ -265,17 +221,17 @@ broker's standard shape, `{"error":"…"}` with `content-type: application/json`
 ## Boot-time validation is fatal
 
 When `JWT_ENABLED=true`, the configuration is validated before the listener binds
-and a failure exits the process with a message naming what is missing:
+and a failure exits the process, naming what is missing:
 
 - `HS256` or `auto` with none of `JWT_SECRET`, `JWT_PUBLIC_KEY`, `JWT_JWKS_URL` set.
 - `RS256`, `RS384`, `RS512` or `EdDSA` with neither `JWT_PUBLIC_KEY` nor
   `JWT_JWKS_URL` set.
 - Any `JWT_ALGORITHM` value outside the supported list.
 
-This is the one authentication mistake the broker refuses to start with. Everything
-else (a wrong secret, an unreachable JWKS endpoint, a role mapping that matches
-nothing) starts cleanly and fails per request, so verify with a real token against
-a real route before you cut traffic over.
+This is the one authentication mistake the broker refuses to start with.
+Everything else (a wrong secret, an unreachable JWKS endpoint, a role mapping that
+matches nothing) starts cleanly and fails per request, so verify with a real token
+against a real route before you cut traffic over.
 
 ## What sits outside JWT
 
@@ -286,8 +242,7 @@ come from elsewhere:
   Separation is the tenancy header plus a gateway:
   [multi-tenant hosting](/selfhost/multi-tenant).
 - **Per-queue permissions.** The access level is per route, not per resource.
-- **Revocation.** There is no deny-list; a token is valid until `exp`. Keep
-  lifetimes short, and remember `exp` is optional to the validator.
-- **Transport security.** The token travels in a header over whatever the
-  listener speaks, which is plaintext HTTP. See
-  [Trust boundaries](/selfhost/security).
+- **Revocation.** No deny-list; a token is valid until `exp`. Keep lifetimes
+  short, and remember `exp` is optional to the validator.
+- **Transport security.** The token travels over the listener's plaintext HTTP.
+  See [Trust boundaries](/selfhost/security).

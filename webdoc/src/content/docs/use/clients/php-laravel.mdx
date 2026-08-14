@@ -30,12 +30,9 @@ verifiedBy:
 ---
 
 The PHP client is a plain PSR-4 library (`Queen\` mapped onto `src/`) with an optional
-Laravel layer on top. It is synchronous: every builder chain ends in an explicit `execute()`,
-`pop()`, `get()` or `commit()`. It requires PHP 8.3 and depends on `guzzlehttp/guzzle` and
+Laravel layer on top. It is synchronous (every builder chain ends in an explicit `execute()`,
+`pop()`, `get()` or `commit()`), requires PHP 8.3, and depends on `guzzlehttp/guzzle` and
 `ramsey/uuid`.
-
-The SDKs ship at the broker's version, and the HTTP API is the stable compatibility surface.
-[Versions and compatibility](/reference/compatibility) states what that covers.
 
 ```bash
 composer require smartpricing/queen-mq
@@ -50,8 +47,8 @@ $client = new Queen('http://localhost:6632');
 ```
 
 The constructor takes a URL string, a list of URLs (a sequentially keyed array), or an
-associative config array. One URL is a direct client; several build a load balancer with
-failover. Passing neither `url` nor `urls` throws `InvalidArgumentException`.
+associative config array. One URL is a direct client, several a load balancer with failover;
+neither `url` nor `urls` throws `InvalidArgumentException`.
 
 ```php
 $client = new Queen([
@@ -89,18 +86,15 @@ $results = $client->queue('orders')
     ->execute();
 ```
 
-`push()` takes one associative array or a list of them, and returns a `PushBuilder` that does
-nothing until `execute()`. The body is `data`, or `payload`, or the array itself; a missing
+`push()` takes one associative array or a list, and returns a `PushBuilder` that does
+nothing until `execute()`. The body is `data`, `payload`, or the array itself; a missing
 `transactionId` is minted as a UUIDv7. `execute()` returns the broker's per-item array with
-`status` set to `queued`, `duplicate`, `buffered` or `failed`.
-
-`onSuccess`, `onDuplicate` and `onError` can be chained before `execute()` to bucket the
-response by status. Without an `onError` handler, a `failed` item makes `execute()` throw.
+`status` `queued`, `duplicate`, `buffered` or `failed`. `onSuccess`, `onDuplicate` and
+`onError` chain before `execute()` to bucket the response; without `onError`, a `failed` item
+makes `execute()` throw.
 
 <Aside type="note">
-Unlike the JavaScript and Python builders, nothing here auto-executes. Forgetting `execute()`
-silently sends no request. The same applies to `create()`, `delete()` and `consume()`, which
-all return builders with an `execute()` method.
+Nothing here auto-executes, unlike the JavaScript and Python builders: forgetting `execute()` silently sends no request. The same applies to `create()`, `delete()` and `consume()`.
 </Aside>
 
 ### Pop
@@ -109,19 +103,18 @@ all return builders with an `execute()` method.
 $messages = $client->queue('orders')->group('billing')->batch(10)->pop();
 ```
 
-`pop()` returns an array of message arrays. `wait` starts at `true` (it is initialised from
-the consume defaults), so a bare `pop()` is a 30-second long poll; use `->wait(false)` for an
-immediate return and `->timeoutMillis($ms)` to change the window. `->batch($n)` caps the
-messages returned, `->partitions($n)` claims up to `n` partitions in one call with `batch` as
-the global cap, and `->autoAck(true)` makes the server commit the cursor inside the pop
-transaction (at-most-once).
+`pop()` returns an array of message arrays.
+
+| Builder method | Effect |
+| --- | --- |
+| `wait($bool)` | Starts at `true` (initialised from the consume defaults), so a bare `pop()` is a 30-second long poll; `->wait(false)` returns immediately. |
+| `timeoutMillis($ms)` | Changes the long-poll window. |
+| `batch($n)` | Caps the messages returned. |
+| `partitions($n)` | Claims up to `n` partitions in one call, with `batch` as the global cap. |
+| `autoAck(true)` | The server commits the cursor inside the pop transaction: [at-most-once delivery](/use/concepts/consuming#autoack-and-what-it-costs). |
 
 <Aside type="note">
-`pop()` **propagates** exceptions. It does not swallow them into an empty array the way the
-JavaScript, Python and C++ clients do. A `429` whose budget is exhausted, a terminal `403` and
-a network failure all surface as `Queen\Exceptions\HttpException`. Also note that `pop()`
-returns the result of `array_filter`, which preserves the original keys: use `array_values()`
-if you need a list.
+`pop()` **propagates** exceptions instead of swallowing them into an empty array the way the JavaScript, Python and C++ clients do: an exhausted `429` budget, a terminal `403` and a network failure all surface as `Queen\Exceptions\HttpException`. It also returns the result of `array_filter`, which preserves the original keys: use `array_values()` if you need a list.
 </Aside>
 
 ### Consume with a closure
@@ -140,29 +133,23 @@ $client->queue('jobs')
 `consume()` returns a `ConsumeBuilder`; `execute()` runs the worker loop and blocks. The
 builder methods are `group`, `concurrency`, `batch`, `partitions`, `each`, `limit`,
 `idleMillis`, `autoAck`, `wait`, `timeoutMillis`, `renewLease`, `subscriptionMode` and
-`subscriptionFrom` (the same set as the other SDKs, in `camelCase`).
+`subscriptionFrom`, the other SDKs' set in `camelCase`.
 
-With `concurrency(1)` a single loop runs synchronously. Above 1, the client uses Guzzle's
-async pool so the long polls overlap on one cURL multi-handle; message *processing* stays
-sequential per worker. A `429` in the concurrent path backs off once for the whole round
-rather than once per worker, because all the workers share the same tenant bucket.
+With `concurrency(1)` a single loop runs synchronously; above 1, Guzzle's async pool overlaps
+the long polls on one cURL multi-handle while message *processing* stays sequential per
+worker. A `429` backs off once for the whole round: all the workers share one tenant bucket.
 
-Without `each()`, the closure receives the **array** of popped messages, even with `batch(1)`.
-Only `each()` makes it receive one message at a time. `autoAck` is client-side: the loop calls
-`POST /api/v1/ack` after your closure returns (status `completed`) or throws (status `failed`).
+Without `each()`, the closure receives the **array** of popped messages, even with
+`batch(1)`; only `each()` delivers one at a time. `autoAck` is client-side: the loop calls
+`POST /api/v1/ack` after your closure returns (`completed`) or throws (`failed`).
 
 <Aside type="caution">
-Because an ack is an offset commit, a nack clamps the group's cursor at the failed message, so
-every later message in that popped batch will be redelivered. Under `each()` the PHP loop does
-**not** notice. Unlike the JavaScript, Python and Go consumers, it keeps processing and acking
-the rest of the batch, producing duplicate work and rejected acks. Make an `each()` handler
-idempotent, or throw out of a batch handler instead.
+An ack is an offset commit, so a nack clamps the group's cursor at the failed message and the rest of the popped batch will be redelivered. Under `each()` the PHP loop does **not** notice: unlike the JavaScript, Python and Go consumers it keeps processing and acking the rest, producing duplicate work and rejected acks. Make an `each()` handler idempotent, or throw out of a batch handler instead.
 </Aside>
 
-`ConsumerManager::start()` installs `SIGINT` and `SIGTERM` handlers that stop the loop, and
-**restores the previous handlers** in a `finally` block, so it is safe inside a larger
-application. Signal handling needs the `pcntl` extension; without it the loop has no signal
-handling at all and only `limit` or `idleMillis` will stop it.
+`ConsumerManager::start()` installs `SIGINT`/`SIGTERM` handlers that stop the loop and
+restores the previous handlers in a `finally` block, safe inside a larger application. Signal
+handling needs the `pcntl` extension; without it only `limit` or `idleMillis` stops the loop.
 
 ### The high-level consumer
 
@@ -184,16 +171,15 @@ while (!$consumer->isClosed()) {
 $consumer->close();
 ```
 
-`subscribe()` builds the pop path and installs the signal handlers. `consume($timeoutMs)`
-returns one message or `null`; `consumeBatch($timeoutMs, $max)` returns an array. Both force
-`wait=true` and override the batch size and timeout on every call, so the long-poll window is
-whatever you pass, not what the builder held. `ack`, `nack` and `renewLease` delegate to the
-client; `isClosed()` dispatches pending signals each time it is called, which is what makes
-the `while` loop interruptible. `close()` only flips the flag. It does not flush push buffers,
-so call `$client->close()` too if you buffered.
+`subscribe()` builds the pop path and installs the signal handlers.
 
-`consume()` and `consumeBatch()` return `null` / `[]` on a timeout or a connection error but
-rethrow everything else, including a terminal `403`.
+| Method | Behaviour |
+| --- | --- |
+| `consume($timeoutMs)` | One message or `null`. Forces `wait=true` and overrides batch size and timeout on every call, so the long-poll window is whatever you pass. |
+| `consumeBatch($timeoutMs, $max)` | Same, returning an array. Both return `null` / `[]` on a timeout or a connection error and rethrow everything else, including a terminal `403`. |
+| `ack` / `nack` / `renewLease` | Delegate to the client. |
+| `isClosed()` | Dispatches pending signals on each call, which is what makes the `while` loop interruptible. |
+| `close()` | Only flips the flag. It does not flush push buffers: call `$client->close()` too if you buffered. |
 
 ### Acknowledge manually
 
@@ -201,20 +187,16 @@ rethrow everything else, including a terminal `403`.
 $client->ack($messages, true, ['group' => 'billing']);
 ```
 
-`ack()` takes one message array, a list of them, or a bare `transactionId` string. `$status`
-is `true` (`completed`), `false` (`failed`), or the string `completed`, `failed`, `retry` or
-`dlq`. `$context['group']` names the consumer group; `$context['error']` records the failure
-reason that lands on the DLQ row if the nack exhausts the retry budget. Set `_status` and
-`_error` on individual messages to give them different outcomes in one batch call.
-
-`partitionId` is mandatory: a batch ack without it throws `InvalidArgumentException`, a single
-ack returns `['success' => false, 'error' => …]`.
+`ack()` takes one message array, a list, or a bare `transactionId` string. `$status` is
+`true` (`completed`), `false` (`failed`), or the string `completed`, `failed`, `retry` or
+`dlq`. `$context['group']` names the consumer group; `$context['error']` is the failure
+reason on the DLQ row if the nack exhausts the retry budget; `_status` and `_error` per
+message give different outcomes in one batch call. `partitionId` is mandatory: a batch ack
+without it throws `InvalidArgumentException`, a single ack returns
+`['success' => false, 'error' => …]`.
 
 <Aside type="note">
-A rejected ack arrives as HTTP 200 with `success: false` on the item. `ack()` merges the
-broker's array under `['success' => true]` without scanning per-item results, so `success` here
-means "the request was accepted", not "every ack landed". Inspect the returned array when that
-distinction matters.
+A rejected ack arrives as HTTP 200 with `success: false` on the item, and `ack()` merges the broker's array under `['success' => true]` without scanning per-item results: `success` here means "the request was accepted", not "every ack landed". Inspect the returned array when that distinction matters.
 </Aside>
 
 ### Transactions
@@ -226,14 +208,12 @@ $client->transaction()
     ->commit();
 ```
 
-`commit()` sends every collected push and ack as one PostgreSQL transaction, all or nothing,
+`commit()` sends the collected pushes and acks as one PostgreSQL transaction, all or nothing,
 together with the acked messages' `leaseId`s as `requiredLeases`, so the commit fails if a
-lease expired. Committing with no operations throws.
-
-<Aside type="note">
-A transaction is not exactly-once end to end. A lost response plus a retry duplicates the
-pushes unless their `transactionId`s are deterministic and still inside the dedup window.
-</Aside>
+lease expired; committing with no operations throws. A transaction is
+[not exactly-once end to end](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once):
+a lost response plus a retry duplicates the pushes unless their `transactionId`s are
+deterministic and still inside the dedup window.
 
 ### Buffering, admin, DLQ
 
@@ -245,38 +225,37 @@ $client->queue('events')
 ```
 
 Buffered pushes return `['buffered' => true, 'count' => N]` and flush on a count or time
-trigger (defaults `100` and `1000` ms), keyed per `queue/partition`. The buffer is in process
-memory: `$client->flushAllBuffers()` or `$client->close()` before exiting, or lose it.
-`$client->getBufferStats()` reports the counters.
+trigger (defaults `100` and `1000` ms), keyed per `queue/partition`. The buffer is process
+memory: `$client->flushAllBuffers()` or `$client->close()` before exiting, or lose it;
+`getBufferStats()` reports the counters.
 
 `$client->admin()` mirrors the JavaScript admin surface in `camelCase`: resources, messages,
-traces, status and analytics, consumer groups, health, metrics and the maintenance switches.
-The route list with access levels is in [Reference](/reference).
+traces, status and analytics, consumer groups, health, metrics and the maintenance switches;
+the route list with access levels is in [Reference](/reference).
 
 ```php
 $dlq = $client->queue('orders')->dlq('billing')->limit(50)->get();
 ```
 
-<Aside type="caution">
-Three verified behaviours carry over to PHP. `admin()->clearQueue()` and
-`admin()->moveMessageToDLQ()` call paths the broker does not register and return 404. The DLQ
-query's `from`, `to` and partition filters are sent but never read by the broker, which
-collects only `queue`, `consumerGroup`, `limit` and `offset`. The response's `total` is the
-size of the page rather than of the result set, so it cannot be used to page.
-And `renew()` always reports `newExpiresAt` as `null`, because the broker answers
-`{"renewed":N,"expiresAt":"…"}` under different key names. The renewal itself works.
-</Aside>
+Three broker-side behaviours carry over. `admin()->clearQueue()` and
+`admin()->moveMessageToDLQ()` call
+[routes the broker does not register](/use/concepts/leases-retries-dlq#getting-a-message-out-of-the-dead-letter-queue)
+and return 404. The DLQ query's `from`, `to` and partition filters are
+[never read by the broker](/use/concepts/leases-retries-dlq#reading-the-dead-letter-queue)
+and its `total` is the size of the page: page with `limit`/`offset` until a short page.
+`renew()` fills `newExpiresAt` from the broker's
+[three equivalent expiry keys](/use/concepts/leases-retries-dlq#extending-a-lease); `null`
+there means the lease had already expired.
 
 ### 429 and 403
 
-`Retry429Policy` implements the same policy as the other SDKs: a `429` is retried in place
-against the same backend, honouring `Retry-After` (seconds) when present and otherwise backing
-off `baseMs * 2^attempt` capped at `capMs`, both jittered. Ordinary requests get ten attempts;
-a long-poll pop retries unboundedly unless `maxAttempts` is set, in which case it applies to
-both.
+`Retry429Policy` matches the other SDKs: a `429` is retried in place
+against the same backend, honouring `Retry-After` (seconds) and otherwise backing off
+`baseMs * 2^attempt` capped at `capMs`, jittered. Ordinary requests get ten attempts; a
+long-poll pop retries unboundedly unless `maxAttempts` is set, which then applies to both.
 
-`HttpException` carries `$statusCode`, `$errorCode` and `$retryAfterSeconds`. Branch on the
-constants in `Queen\Exceptions\ErrorCode` rather than on message text:
+`HttpException` carries `$statusCode`, `$errorCode` and `$retryAfterSeconds`; branch on the
+constants in `Queen\Exceptions\ErrorCode`, not on message text:
 
 ```php
 use Queen\Exceptions\ErrorCode;
@@ -291,20 +270,16 @@ try {
 }
 ```
 
-`429` maps to `rate_limited` or `quota_exceeded` and is retryable. `403` maps to
-`cluster_suspended`, `storage_quota_exceeded`, `feature_gated` or `forbidden` and is terminal.
-`$errorCode` stays `null` when the response body carries no `code`.
+`429` maps to `rate_limited` or `quota_exceeded` and is retryable; `403` maps to
+`cluster_suspended`, `storage_quota_exceeded`, `feature_gated` or `forbidden` and is
+terminal. `$errorCode` stays `null` when the body carries no `code`.
 
 ## Laravel
 
 The package declares the provider and the facade alias in `composer.json` under
-`extra.laravel`, so Laravel auto-discovery wires them without any manual registration:
-
-- `Queen\Laravel\QueenServiceProvider` binds `Queen\Queen` as a **singleton** and aliases it as
-  `queen`.
-- `Queen\Laravel\QueenFacade` is aliased as `Queen`.
-
-Publish the config to override it:
+`extra.laravel`, so auto-discovery wires them:
+`Queen\Laravel\QueenServiceProvider` binds `Queen\Queen` as a **singleton** aliased `queen`;
+`Queen\Laravel\QueenFacade` is aliased `Queen`. Publish the config to override it:
 
 ```bash
 php artisan vendor:publish --tag=queen-config
@@ -330,10 +305,9 @@ php artisan vendor:publish --tag=queen-config
 | `QUEEN_RETRY_429_BASE_MS` | unset | `retry429.baseMs` |
 | `QUEEN_RETRY_429_CAP_MS` | unset | `retry429.capMs` |
 
-Unset `retry_429` variables arrive as `null` and are filtered out by the provider, so the
-per-request-kind defaults apply. Note that the Laravel defaults for the affinity ring (150)
-and the unhealthy-backend cooldown (30000 ms) differ from the library's own defaults (128 and
-5000 ms).
+Unset `retry_429` variables arrive as `null` and are filtered out, so the per-request-kind
+defaults apply. The Laravel defaults for the affinity ring (150) and the
+unhealthy-backend cooldown (30000 ms) differ from the library's own (128 and 5000 ms).
 
 ### Injecting the client
 
@@ -362,9 +336,9 @@ Or through the facade: `Queen::queue('orders')->push(...)->execute();`.
 php artisan queen:consume orders "App\\Queen\\OrderHandler" --group=processors --batch=10 --auto-ack
 ```
 
-The handler argument is a fully qualified class name resolved out of the container; it must
-have a `handle()` method. The command builds a `HighLevelConsumer`, subscribes, and loops until
-a signal closes it.
+The handler argument is a fully qualified class name resolved from the container, with a
+`handle()` method. The command builds a `HighLevelConsumer`, subscribes, and loops until a
+signal closes it. `handle()` receives one message array when `--batch` is 1, an array above.
 
 | Option | Effect |
 | --- | --- |
@@ -377,17 +351,10 @@ a signal closes it.
 | `--idle-timeout=` | Stop after N ms of inactivity |
 | `--limit=` | Stop after N messages |
 
-`handle()` receives one message array when `--batch` is 1, and an array of messages when it is
-greater than 1.
-
 <Aside type="caution">
-Without `--auto-ack` the command **never acknowledges anything**: it calls your handler and
-moves on, so the lease expires and every message is redelivered. Pass `--auto-ack`, or ack
-inside `handle()` yourself.
+Without `--auto-ack` the command **never acknowledges anything**: it calls your handler and moves on, so the lease expires and every message is redelivered. Pass `--auto-ack`, or ack inside `handle()` yourself.
 </Aside>
 
 <Aside type="note">
-`--idle-timeout` is passed to the builder, but the command's own loop is what decides when to
-stop, and it only breaks on `--limit` or a signal. Long-poll timeouts return `null` and
-`continue`. Treat `--limit` and signals as the reliable exits.
+`--idle-timeout` reaches the builder, but the command's own loop only breaks on `--limit` or a signal; long-poll timeouts return `null` and continue. Treat `--limit` and signals as the reliable exits.
 </Aside>

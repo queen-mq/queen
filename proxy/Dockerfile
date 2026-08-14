@@ -2,7 +2,7 @@
 #
 # IMPORTANT: the build context is the REPO ROOT, not proxy/.
 #   Build: DOCKER_BUILDKIT=1 docker build -f proxy/Dockerfile -t queen-proxy .
-#   Run:   docker run -p 6711:6711 -e QUEEN_PROXY_PG_URL=... queen-proxy
+#   Run:   docker run -p 6711:6711 -e PXDB_HOST=... -e PXDB_PASSWORD=... queen-proxy
 #
 # The context cannot be proxy/ because the crate embeds TWO Vite builds,
 # one of which lives outside its own directory:

@@ -110,10 +110,13 @@ the plan column names one-to-one. The merge has exactly three cases:
 
 ```sql
 SELECT queen_proxy.set_limit_override(
-  '…cluster-uuid…',
+  (SELECT id FROM queen_proxy.clusters WHERE slug = 'acme-prod'),
   '{"max_queues": 500, "max_retained_bytes": null}'::jsonb
 );
 ```
+
+(`acme-prod` is the cluster provisioned in the next section; the function takes
+the cluster uuid, fetched here by slug.)
 
 Passing `NULL` or `'{}'` clears every override. Support raising one limit for one
 customer is therefore a row update, not a forked plan.
@@ -128,13 +131,22 @@ cached entries immediately.
 
 ### One call to onboard
 
+The cell id is the one argument you cannot type from memory. Fetch it from the
+slug of the [cells row](#cells) you inserted:
+
+```sql
+SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a';
+```
+
+or inline the lookup, which makes the whole call copy-paste runnable:
+
 ```sql
 SELECT queen_proxy.bootstrap_tenant(
   'acme',                    -- tenant slug
   'Acme Inc',                -- tenant name
   'acme-prod',               -- cluster slug (becomes the subdomain)
   'free',                    -- plan code
-  '…cell-uuid…',             -- cell
+  (SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a'),
   'ops@acme.example',        -- admin email
   'initial-password',        -- NULL for an OAuth-only admin
   'default'                  -- API key name
@@ -205,17 +217,46 @@ for API keys outright.
 
 ## Cells
 
-Cells are fleet infrastructure, so no SQL function creates one. Insert the row:
+Cells are fleet infrastructure, so no SQL function creates one. `cell_secret` is
+the bearer token the proxy presents upstream: a JWT carrying the broker's admin
+role, in the stock setup HS256-signed with that cell broker's `JWT_SECRET`. Mint
+it with the recipe in
+[Deploying queen_proxy](/selfhost/multi-tenant/proxy#minting-one), which leaves
+it in `$CELL_SECRET`, then hand it to `psql` as a variable. The `-v` plus
+`:'cell_secret'` pair is `psql` interpolation; it works from stdin or `-f`, not
+from `-c`:
+
+```bash
+psql -h 10.0.3.20 -U postgres -d queen_proxy -v cell_secret="$CELL_SECRET" <<'SQL'
+INSERT INTO queen_proxy.cells (slug, region, base_url, class, cell_secret)
+VALUES ('eu1-shared-a', 'eu1', 'http://10.0.3.11:6632', 'shared', :'cell_secret');
+SQL
+```
+
+A minted value looks like this (an example signed with a throwaway secret; its
+claims decode to `{"sub":"queen-proxy","role":"admin"}`, no `exp`):
+
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJxdWVlbi1wcm94eSIsInJvbGUiOiJhZG1pbiJ9.CECMnGKvXYLGZtvQuCcCCKwG2M0xYeq4vlatq1l5gDM
+```
+
+Every other column has a working default: `id` and `created_at` generate
+themselves, `status` starts `active`, and `capacity_slots`, `used_slots` and
+`broker_version` are cosmetic today (see below). On a cell whose broker runs
+`JWT_ENABLED=false` behind pure network isolation, insert `NULL` as the secret and
+the proxy forwards no `Authorization` header at all.
+
+The new row's `id` is the value `create_cluster` and `bootstrap_tenant` take as
+their cell argument:
 
 ```sql
-INSERT INTO queen_proxy.cells (slug, region, base_url, class, cell_secret)
-VALUES ('eu1-shared-a', 'eu1', 'http://10.0.3.11:6632', 'shared', '…');
+SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a';
 ```
 
 `base_url` must be `http://`: the registry reconciler refuses anything else, as an
-assertion that broker traffic is cell-internal. `cell_secret` is the bearer token the
-proxy presents upstream, stored in plaintext; see
-[Deploying queen_proxy](/selfhost/multi-tenant/proxy).
+assertion that broker traffic is cell-internal. The secret is stored in plaintext;
+[Deploying queen_proxy](/selfhost/multi-tenant/proxy#the-cell-secret) covers what
+it must satisfy and why pxdb has to be treated as a secret store.
 
 ### Placement is manual, and draining does not exist
 

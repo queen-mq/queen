@@ -84,16 +84,16 @@ There is no `storage` engine-selector column. One engine, nothing to select; the
 One row per partition. This row is the write serializer for the partition, and its columns are
 three watermarks plus bookkeeping.
 
-| Column | Meaning |
-| --- | --- |
-| `id` | primary key; every other log table keys on it |
-| `queue_id` | owning queue; references `queen.queues(id)` with `ON DELETE CASCADE` |
-| `name` | partition name; defaults to `Default` |
-| `last_offset` | **the allocator.** Highest allocated offset; starts at `-1`, so the next base offset is `last_offset + 1` |
-| `log_start` | segment retention watermark: every offset below it has been deleted |
-| `txns_start` | hash-sidecar purge watermark: every `log_txns` row below it has been purged |
-| `last_write_at` | last write time, **quantized to at most one real change per second** |
-| `created_at` | creation time |
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `UUID` | primary key; every other log table keys on it |
+| `queue_id` | `UUID` | owning queue; references `queen.queues(id)` with `ON DELETE CASCADE` |
+| `name` | `TEXT` | partition name; defaults to `Default` |
+| `last_offset` | `BIGINT` | **the allocator.** Highest allocated offset; starts at `-1`, so the next base offset is `last_offset + 1` |
+| `log_start` | `BIGINT` | segment retention watermark, starts at 0: every offset below it has been deleted |
+| `txns_start` | `BIGINT` | hash-sidecar purge watermark, starts at 0: every `log_txns` row below it has been purged |
+| `last_write_at` | `TIMESTAMPTZ` | last write time, indexed, **quantized to at most one real change per second** |
+| `created_at` | `TIMESTAMPTZ` | creation time |
 
 `UNIQUE (queue_id, name)` makes partition names unique inside a queue. `last_write_at` is
 indexed by `idx_log_partitions_queue_write (queue_id, last_write_at)`, which is what lets a
@@ -115,12 +115,12 @@ for seconds. Turning it off removed the whole periodic-spike class.
 
 The messages.
 
-| Column | Meaning |
-| --- | --- |
-| `partition_id`, `base_offset` | composite primary key |
-| `end_offset` | inclusive; `msg_count = end_offset - base_offset + 1` |
-| `created_at` | commit-order timestamp, stamped under the partition row lock |
-| `blob` | the packed, zstd-compressed frames |
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `partition_id`, `base_offset` | `UUID`, `BIGINT` | composite primary key; `partition_id` references `log_partitions(id)`, cascading |
+| `end_offset` | `BIGINT` | inclusive; `msg_count = end_offset - base_offset + 1` |
+| `created_at` | `TIMESTAMPTZ` | commit-order timestamp, stamped under the partition row lock |
+| `blob` | `BYTEA` | the packed, zstd-compressed frames |
 
 `blob` is `SET STORAGE EXTERNAL`, so TOAST does not spend CPU trying to re-compress bytes the
 broker already compressed. The table has **zero secondary indexes**: the primary key is also
@@ -130,12 +130,12 @@ the pop path, and every read is a range scan or a backward step on it.
 
 The hash sidecar. One row per segment, mirroring its offset range, holding 16 bytes per frame.
 
-| Column | Meaning |
-| --- | --- |
-| `partition_id`, `base_offset` | composite primary key |
-| `end_offset` | inclusive, same range as the segment |
-| `created_at` | same timestamp as the segment |
-| `hashes` | `16 × msg_count` bytes: `xxh3_128` of each frame's `transactionId`, big-endian, in frame order |
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `partition_id`, `base_offset` | `UUID`, `BIGINT` | composite primary key; `partition_id` carries **no foreign key**, deliberately |
+| `end_offset` | `BIGINT` | inclusive, same range as the segment |
+| `created_at` | `TIMESTAMPTZ` | same timestamp as the segment |
+| `hashes` | `BYTEA` | `16 × msg_count` bytes: `xxh3_128` of each frame's `transactionId`, big-endian, in frame order |
 
 <Aside type="caution">
 This table is written on **every** push, whether deduplication is on or off. It is not a
@@ -148,7 +148,11 @@ in this table. Disabling deduplication (`dedupWindowSeconds: 0`) skips the *prob
 The broker computes the hashes; SQL never hashes anything, it only stores and compares `bytea`.
 The 128-bit width is what makes collisions a non-issue. There is deliberately **no foreign key**
 on `partition_id`: the purge path must never pay foreign-key trigger cost, and the rows are only
-ever reached through a live `log_partitions` row.
+ever reached through a live `log_partitions` row. The missing key leaves one obligation: whatever
+deletes a partition must delete these rows itself, because the purge phase walks live partitions,
+so a row orphaned by a partition delete would be unreachable forever. Exactly two things delete
+partitions, `log_partition_cleanup_step_v1` and `delete_queue_v1`, and both delete the sidecar
+explicitly first.
 
 The sidecar's size is `O(rate × window)`, independent of retention or backlog, because it is
 purged on its own clock. The retention loop purges rows older than
@@ -161,17 +165,17 @@ path treats as *not acked*: redelivery rather than loss.
 Coordination state, one row per `(partition, consumer_group)`. This is the entire consumption
 model.
 
-| Column | Meaning |
-| --- | --- |
-| `partition_id`, `consumer_group` | composite primary key; queue-mode consumers use the group name `__QUEUE_MODE__` |
-| `committed` | **the cursor.** Last acked offset; everything at or below it is done. Starts at `-1`, so the next wanted offset is `committed + 1` |
-| `batch_end` | inclusive end of the currently leased batch; `NULL` means no lease |
-| `worker_id` | the lease holder, the same value the client receives as `leaseId` |
-| `lease_expires_at`, `lease_acquired_at` | lease window |
-| `batch_retry_count` | the retry budget, charged only by an explicit `failed` ack |
-| `attempt_offset`, `attempt_count` | redelivery telemetry: the batch's first delivered offset and how many times that same start has been delivered |
-| `total_consumed` | lifetime counter |
-| `created_at` | first contact |
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `partition_id`, `consumer_group` | `UUID`, `TEXT` | composite primary key; `partition_id` references `log_partitions(id)`, cascading. Queue-mode consumers use the group name `__QUEUE_MODE__` |
+| `committed` | `BIGINT` | **the cursor.** Last acked offset; everything at or below it is done. Starts at `-1`, so the next wanted offset is `committed + 1` |
+| `batch_end` | `BIGINT` | inclusive end of the currently leased batch; `NULL` means no lease |
+| `worker_id` | `TEXT` | the lease holder, the same value the client receives as `leaseId` |
+| `lease_expires_at`, `lease_acquired_at` | `TIMESTAMPTZ` | lease window; `lease_acquired_at` is also the queue detail's `lastActivity` source |
+| `batch_retry_count` | `INTEGER` | the retry budget, charged only by an explicit `failed` ack |
+| `attempt_offset`, `attempt_count` | `BIGINT`, `INTEGER` | redelivery telemetry: the batch's first delivered offset and how many times that same start has been delivered |
+| `total_consumed` | `BIGINT` | lifetime counter |
+| `created_at` | `TIMESTAMPTZ` | first contact |
 
 A leased batch is the span `(committed, batch_end]`. One row can hold at most one lease, which
 is why exactly one in-flight leased batch exists per `(partition, group)` and a single-partition

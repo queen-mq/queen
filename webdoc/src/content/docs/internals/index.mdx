@@ -81,20 +81,9 @@ lane; a message's position is a single monotone `BIGINT` offset; a segment is on
 messages packed together and zstd-compressed. [The storage model](/internals/storage-model) has the
 row-by-row detail.
 
-`server/sql/schema.sql` and 23 files under `server/sql/procedures/` (001–023) are embedded in the
-binary with `include_str!` and applied at every boot, in lexical order, under session advisory lock
-`778120010`. Every statement is idempotent, so re-apply is a no-op. `QUEEN_APPLY_SCHEMA=0`
-skips the whole step so a privileged role can pre-apply the DDL and the broker can then run as
-a low-privilege user.
-
-The boot apply only **creates**: nothing is dropped, migrated or folded at boot, because the
-deployment model is always-virgin. A deployment starts from an empty database, each table and
-function is defined exactly once by exactly one file, and there is no upgrade path: pointing this
-build at a database written by an earlier schema generation is unsupported. Lexical order is still
-load-bearing where SQL function bodies resolve tables at creation time: the table files (001, 002)
-come first, the engine procedures next, the management plane after, and the partition-counter
-trigger attachment (020_log_partition_counters) after both the table it attaches to and the
-functions it binds.
+All of that DDL is `include_str!`-embedded in the binary and re-applied idempotently at every
+boot, under an advisory lock and with no migrations, because the deployment model is
+always-virgin; the [schema catalogue](/internals/schema) has the apply order and its rules.
 
 ## Background jobs
 

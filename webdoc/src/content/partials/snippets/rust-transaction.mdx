@@ -1,18 +1,31 @@
 ---
 params: []
-description: "Verified snippet extracted from clients/client-rust/tests/admin.rs."
+description: "Verified snippet extracted from clients/client-rust/tests/docs.rs."
 ---
 
 {/* GENERATED FILE. Do not edit by hand.
-    Extracted from clients/client-rust/tests/admin.rs by webdoc/scripts/gen-snippets.mjs
+    Extracted from clients/client-rust/tests/docs.rs by webdoc/scripts/gen-snippets.mjs
     Regenerate with: pnpm --dir webdoc gen
 */}
 
-```rust title="clients/client-rust/tests/admin.rs"
+```rust title="clients/client-rust/tests/docs.rs"
+let messages = q
+    .queue("orders")
+    .group("invoicing")
+    .subscription_mode(SubscriptionMode::All)
+    .batch(1)
+    .wait(true)
+    .pop()
+    .await
+    .unwrap();
+
 let resp = q
     .transaction()
-    .ack(&msgs[0])
-    .push(dst.clone(), serde_json::json!({ "stage": 2 }))
+    .ack(&messages[0])
+    .push(
+        "invoices".to_string(),
+        serde_json::json!({ "orderId": messages[0].data["orderId"], "invoiced": true }),
+    )
     .unwrap()
     .commit()
     .await

@@ -22,7 +22,7 @@ So it was measured at both ends, on the same binary, with leases, explicit ackno
 deduplication and retention on in both:
 
 - **1 000 000 messages a second**, sustained for 24 hours. 86,369,975,300 messages, zero
-  restarts, broker memory flat at 4.1 GB. [The soak](/benchmarks/soak-24h).
+  restarts, broker memory flat at 4.1 GB. [Throughput 24h 1M](/benchmarks/soak-24h).
 - **1 000 000 ordered partitions** in one PostgreSQL, none of them preallocated, created
   during the run at a thousand a second and drained with zero push, pop or ack errors. The
   million lanes and their consumer-group cursors weigh 641 MB of rows.
@@ -31,15 +31,11 @@ deduplication and retention on in both:
 Nothing about the architecture changes between those two. What changes is the value of two
 sizing knobs, and the cardinality page names both.
 
-That range is the whole bet, because most systems are built for one end of it. A design that
-gives each entity a physical object (a log with its own files, a queue with its own process)
-pays for cardinality in structure, and a design that re-derives ordering from a scan on every
-read pays for throughput in standing rows. Queen was measured against three of them on one
-machine with matched resources, and the honest summary of that campaign is that **the cost
-curves cross**: the closest PostgreSQL-based alternative is faster than Queen on sparse lanes
-and stops serving the offered rate at roughly a twentieth of Queen's sustained throughput,
-while Kafka is cheaper per message than anything on PostgreSQL and refuses topic creation
-somewhere between 2 000 and 5 000 partitions on default settings.
+That range is the whole bet, because most systems are built for one end of it: a design
+that gives each entity a physical object pays for cardinality in structure, and one that
+re-derives ordering from a scan on every read pays for throughput in standing rows. Queen
+was measured against Kafka, RabbitMQ and pgmq on one machine with matched resources, and
+the cost curves cross where those designs predict.
 [Every cell, with its conditions and its caveats](/benchmarks/comparison).
 
 Everything else follows from that choice. The broker is one stateless Rust binary that
@@ -102,9 +98,7 @@ The rest of the site is organised by what you are trying to do.
 
 ## What this documentation promises
 
-Queen's published documentation used to describe an earlier C++ broker; version 1.0 is a
-Rust rewrite on a new storage engine, and this site was written from the current source.
-Three rules hold everywhere on it:
+This site is written from the current source, and three rules hold everywhere on it:
 
 - **Route tables, configuration references and metric lists are generated from the code**
   at build time, so they cannot drift into describing endpoints that do not exist.

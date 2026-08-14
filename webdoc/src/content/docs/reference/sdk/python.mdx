@@ -87,17 +87,10 @@ the main thread, or on the loop that owns the process.
 
 ### `retry_429`
 
-A plain dict; see `queen.types.Retry429Config`. Separate from `retry_attempts`, which covers 5xx
-and network faults.
-
-| Key | Default | Effect |
-| --- | --- | --- |
-| `max_attempts` | `10` for ordinary requests; unbounded for a long-poll pop | Total attempts including the first. Setting it applies the same bound to both kinds. |
-| `base_ms` | `500` | First delay absent a `Retry-After` header. Doubles per attempt. |
-| `cap_ms` | `30000` | Ceiling for the exponential delay. |
-
-A `Retry-After` header (seconds) wins over the computed delay. Every delay gets ±20% jitter. A
-429 is retried against the same backend and never triggers failover.
+`retry_429` is a plain dict (see `queen.types.Retry429Config`) with `max_attempts`, `base_ms`
+and `cap_ms`, separate from `retry_attempts`; the defaults, the `Retry-After` contract and the
+jitter are in
+[What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 
 ## `Queen`
 
@@ -171,23 +164,15 @@ methods are `push()`, `pop()`, `consume()`, `create()`, `delete()`, `dlq()` and 
 | `create()` | `POST /api/v1/configure` | `OperationBuilder` |
 | `delete()` | `DELETE /api/v1/resources/queues/:queue` | `OperationBuilder`; raises `ValueError` with no queue name |
 
-`QUEUE_DEFAULTS` uses snake_case keys and the builder converts them to the wire's camelCase
-before sending:
-
-| Key | Default | Sent as | Unit |
-| --- | --- | --- | --- |
-| `lease_time` | `300` | `leaseTime` | seconds |
-| `retry_limit` | `3` | `retryLimit` | attempts |
-| `delayed_processing` | `0` | `delayedProcessing` | seconds |
-| `window_buffer` | `0` | `windowBuffer` | seconds |
-| `retention_seconds` | `0` | `retentionSeconds` | seconds |
-| `completed_retention_seconds` | `0` | `completedRetentionSeconds` | seconds |
-| `encryption_enabled` | `False` | `encryptionEnabled` | none |
+`QUEUE_DEFAULTS` carries the same seven options as the other clients, with the values listed
+under [Queue option defaults](/reference/defaults#queue-option-defaults), as snake_case keys
+(`lease_time`, `retry_limit`, `delayed_processing`, `window_buffer`, `retention_seconds`,
+`completed_retention_seconds`, `encryption_enabled`) that the builder converts to the wire's
+camelCase before sending.
 
 Any extra key you pass to `config()` is converted the same way and sent, so options absent from
-the defaults dict are still reachable. **`/configure` is a full replace**: keys absent from the
-body reset to the broker's defaults, so send the complete intended configuration every time. The
-full option list is in [Queue options](/reference/queue-options/).
+the defaults dict are still reachable. **`/configure` is a full replace**, not a patch: send the
+complete intended configuration every time ([Queue options](/reference/queue-options/)).
 
 ### Producing
 
@@ -202,7 +187,7 @@ a valid UUID.
 
 The broker's push path stores no trace id, so it is dropped and the message pops back
 with `traceId: null`. Push inside a transaction when a trace id has to survive. See
-[Pick your SDK](/use/clients#verified-gaps).
+[Pick your SDK](/use/clients#verified-against-the-source).
 
 <Render file="snippets/py-push" />
 
@@ -231,10 +216,9 @@ anything.
 | `each()` | n/a | batch mode | `consume()` only. One message per handler call. |
 
 <Aside type="danger">
-`auto_ack` means two different things. On `pop()` it is sent to the broker as `autoAck=true`,
-which commits the cursor inside the pop transaction. That is at-most-once: the message is gone
-whether or not you process it. On `consume()` it is never sent: the client acks after the
-handler returns and nacks when it raises.
+`auto_ack` on `pop()` is the broker's at-most-once parameter; on `consume()` it is never sent
+and means client-side ack/nack around the handler. See
+[`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs).
 </Aside>
 
 #### `pop()`
@@ -334,10 +318,8 @@ await (client.transaction()
        .commit())
 ```
 
-<Aside type="note">
-Atomic is not exactly-once end to end. A lost response plus a client retry still duplicates
-unless the `transactionId` is deterministic and inside the dedup window.
-</Aside>
+A transaction is atomic, not exactly-once end to end; see
+[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
 
 ## `Admin`
 
@@ -458,9 +440,9 @@ module logger in `queen.utils.logger`.
 ## Errors
 
 HTTP failures raise `httpx` exceptions; the client attaches the parsed body's `code` to the
-exception when present. The proxy codes are `rate_limited` and `quota_exceeded` on 429, and
-`cluster_suspended`, `storage_quota_exceeded`, `feature_gated`, `forbidden` on 403. A `204`
-response yields `None`: the broker sends no body at all on `204`.
+exception when present, with the proxy's stable values listed under
+[Behind the proxy](/reference/errors#behind-the-proxy). A `204` response yields `None`:
+[a 204 carries no body at all](/use/errors#the-envelope).
 
 ## Same surface, other languages
 

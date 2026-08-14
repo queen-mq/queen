@@ -41,7 +41,7 @@ Select with `-mode`; each mode has its own flag set, and `goload -mode <name> -h
 
 | Mode | Shape | Used for |
 | --- | --- | --- |
-| `openloop` | Paced open-loop producers against one queue; closed-loop drainers as consumers | [24-hour soak](/benchmarks/soak-24h), [Throughput ceiling](/benchmarks/peak) |
+| `openloop` | Paced open-loop producers against one queue; closed-loop drainers as consumers | [Throughput 24h 1M](/benchmarks/soak-24h) |
 | `cm` | Four-stage pipeline over N entities with per-entity work sleeps and a built-in order verifier | [Ordered pipeline](/benchmarks/ordered-pipeline) |
 | `cloud` | Multi-tenant: every simulated tenant is a real tenant with its own cluster, API key and Host, with per-message delivery accounting | [Multi-tenant cell](/benchmarks/multitenant-cell) |
 | `provision` | Creates N real tenants through the proxy's bootstrap function and caches their API keys to a file, so re-runs never re-provision | prerequisite for `cloud` against the proxy |

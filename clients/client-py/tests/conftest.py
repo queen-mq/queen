@@ -49,7 +49,10 @@ async def cleanup_test_data(db_pool):
     """Cleanup test data before and after test run"""
     
     async def cleanup():
-        patterns = ["test-%", "edge-%", "pattern-%", "workflow-%"]
+        # The three exact names are the documentation queues (test_docs.py):
+        # purging them lets the published dedup snippet keep a fixed
+        # transactionId across runs.
+        patterns = ["test-%", "edge-%", "pattern-%", "workflow-%", "orders", "payments", "invoices"]
         try:
             # Queue identity is now the queen.queues id (log_queues merged
             # away, mirrors the JS suite's cleanupTestData): log_partitions,

@@ -1,6 +1,6 @@
 ---
 title: PostgreSQL
-description: "What the broker needs from PostgreSQL: version, privileges, no extensions, why a direct connection is required, pool sizing, and the server settings that matter for this workload."
+description: "What the broker needs from PostgreSQL: version 15+, a role that owns its database, no extensions, a direct connection, pool sizing, and the server settings that matter for this workload."
 type: how-to
 tier: operate
 sidebar:
@@ -18,49 +18,15 @@ sourceOfTruth:
 ---
 
 PostgreSQL is not a dependency of Queen; it is Queen's storage engine. Messages,
-consumer offsets, the deduplication index, queue configuration and the dead-letter
-table are all ordinary tables, and every queue semantic (offset allocation,
-leasing, acknowledgement, deduplication) is implemented in stored procedures that
-run inside the database. The broker is the network layer in front of that.
+offsets, the dedup index, queue configuration and the DLQ are ordinary tables,
+and every queue semantic runs in stored procedures inside the database. Sizing
+PostgreSQL *is* sizing Queen, and the broker's connection must behave like a
+real session, not a pooled statement channel.
 
-Two consequences follow immediately. Sizing PostgreSQL *is* sizing Queen. And the
-broker's connection to PostgreSQL has to behave like a real session, not a pooled
-statement channel.
+## Set it up
 
-## Version
-
-**PostgreSQL 15 or newer.** The hard floor is a unique index declared `NULLS NOT
-DISTINCT` (on `queen.consumer_groups_metadata`, where namespace/task discovery
-rows legitimately carry NULLs that must still collide), and that clause exists
-from PostgreSQL 15. The rest of the DDL asks for less: `gen_random_uuid()` as a
-column default (13), per-table storage parameters including
-`autovacuum_vacuum_insert_scale_factor` (13) and `vacuum_truncate` (12). The
-repository's test harness and the benchmark rigs both run `postgres:16`; the
-published broker image ships the PostgreSQL 18 client tools. Anything from 15 up
-satisfies the DDL; 14 fails at the index.
-
-## No extensions
-
-The broker installs no extensions and requires none. There is not a single
-`CREATE EXTENSION` in `server/sql/`. If your PostgreSQL provider restricts
-extensions, that restriction is irrelevant here.
-
-## Privileges
-
-By default the broker applies its own schema at every boot and therefore needs to
-be able to create it:
-
-- **`CREATE` on the database**, enough to run `CREATE SCHEMA IF NOT EXISTS queen`
-  and `CREATE SCHEMA IF NOT EXISTS queen_streams`.
-- **Ownership of the objects it creates**, because the DDL does more than create
-  tables: it runs `ALTER TABLE … SET (fillfactor = …)` and a set of per-table
-  autovacuum parameters, and `ALTER TABLE … ALTER COLUMN blob SET STORAGE
-  EXTERNAL`. Those require table ownership.
-- **`GRANT` capability**, because `002_streams_schema.sql` issues grants (see
-  below).
-
-Simplest correct setup: give the broker its own database and its own role that
-owns it.
+**PostgreSQL 15 or newer, no extensions.** The simplest correct setup is a
+dedicated database owned by a dedicated role:
 
 ```sql
 CREATE ROLE queen LOGIN PASSWORD 'change-me';
@@ -70,37 +36,37 @@ CREATE ROLE queen LOGIN PASSWORD 'change-me';
 CREATE DATABASE queen OWNER queen;
 ```
 
+Point the `PG_*` variables at it; the broker applies its schema at boot. The 15
+floor is one unique index declared `NULLS NOT DISTINCT` (on
+`queen.consumer_groups_metadata`, whose discovery rows carry NULLs that must
+still collide); 14 fails there, the rest of the DDL needs only 13. Harness and
+rigs run `postgres:16`; there is no `CREATE EXTENSION` anywhere in
+`server/sql/`.
+
+## Privileges
+
+To apply its schema the broker needs `CREATE` on the database (two
+`CREATE SCHEMA IF NOT EXISTS`), ownership of what it creates (the DDL sets
+`fillfactor`, per-table autovacuum, `ALTER COLUMN blob SET STORAGE EXTERNAL`),
+and `GRANT` capability (`002_streams_schema.sql` issues grants, below). The
+owner-role setup above provides all three.
+
 ### Running as a low-privilege role
 
-If your policy forbids DDL from an application role, set `QUEEN_APPLY_SCHEMA=0`
-and let a privileged role apply the DDL out of band. With that variable off the
+If policy forbids DDL from an application role, set `QUEEN_APPLY_SCHEMA=0`: the
 broker logs `apply skipped (QUEEN_APPLY_SCHEMA=0)` and connects straight to
-serving.
-
-The schema is not shipped as a `.sql` file, though. It is compiled into the
-binary with `include_str!`. To pre-apply it, take the exact text the binary
-carries from the source tree: `server/sql/schema.sql` first, then every file in
-`server/sql/procedures/` in lexical order. Each function and table is defined
-exactly once, by exactly one file, but the order is still not cosmetic: tables
-come first (`001_log_schema`, `002_streams_schema`) because SQL-language function
-bodies resolve the tables they reference at creation time, and the
-partition-counter trigger attachment (`020_log_partition_counters`) must run
-after both the table it attaches to and the functions it binds.
-`server/src/schema.rs` holds the authoritative list of 23 procedure files in the
-order they must be applied.
-
-Once the schema exists, the broker's role needs `USAGE` on both schemas, DML
-(`SELECT, INSERT, UPDATE, DELETE`) on their tables, and the ability to take
-advisory locks, which any role has. Function execution needs no explicit grant:
-PostgreSQL grants `EXECUTE` on a new function to `PUBLIC` by default.
+serving. The schema is compiled into the binary, so pre-apply the exact source
+text: `server/sql/schema.sql`, then `server/sql/procedures/` in lexical order,
+which is [load-bearing](/selfhost/upgrade#what-happens-at-boot);
+`server/src/schema.rs` holds the authoritative ordered list of 23 files. The
+serving role needs `USAGE` on both schemas, DML on their tables, and advisory
+locks (any role has them); new functions are `EXECUTE`-granted to `PUBLIC` by
+default.
 
 <Aside type="caution">
-`QUEEN_APPLY_SCHEMA=0` means **you** own matching the schema to the binary. The
-broker's normal contract is that a version's own DDL is in place before that
-version serves a request; with the flag off, a binary whose SQL expects an
-object you have not created will fail at runtime rather than at boot. And the
-deployment model is always-virgin: the DDL only creates, on the assumption of
-an empty database. See [Upgrades](/selfhost/upgrade).
+With `QUEEN_APPLY_SCHEMA=0` **you own matching the schema to the binary**: SQL
+that expects a missing object fails at runtime, not at boot; the DDL is
+always-virgin, it only creates. See [Upgrades](/selfhost/upgrade).
 </Aside>
 
 ### `queen_streams` is granted to PUBLIC
@@ -119,95 +85,60 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON queen_streams.queries TO PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON queen_streams.state TO PUBLIC;
 ```
 
-Every role that can log into that database can read and write registered stream
-queries and all stream state. Nothing purges `queen_streams.state` either: the
-maintenance cycle does not touch it, and rows are only removed when a query is
-re-registered with a reset or dropped. If you share the database with anything
-else, that is the fact to plan around.
+Every role that can log into the database can read and write stream queries and
+all stream state; nothing purges `queen_streams.state`, rows go away only on
+re-register with reset, or drop. Plan around that if the database is shared.
 
 ## A direct connection is required
 
-The broker must talk to a PostgreSQL backend it keeps for the life of the pooled
-connection. It will not work correctly behind a pooler in transaction or
-statement mode. Two reasons, both structural:
+The broker must keep the same PostgreSQL backend for the life of a pooled
+connection; a pooler in transaction or statement mode breaks it:
 
-**Session-scoped advisory locks.** The boot-time schema apply takes
-`pg_advisory_lock(778120010)` on one pooled connection, runs the entire DDL
-(`schema.sql` plus 23 procedure files, as 24 separate batches) and unlocks. The
-maintenance cycle takes `pg_advisory_lock(737001)` on one pooled connection, runs
-many autocommitting step calls across the cycle, and unlocks at the end; that is
-how exactly one replica sweeps per cycle. Both locks
-live on a *session*. A pooler that hands the next statement to a different backend
-breaks the schema serialisation and breaks the retention leader election.
+| Mechanism | What breaks behind a transaction- or statement-mode pooler |
+| --- | --- |
+| **Session-scoped advisory locks** | The boot-time schema apply holds `pg_advisory_lock(778120010)` across the whole DDL (`schema.sql` plus 23 procedure files, as 24 batches); the maintenance cycle holds `pg_advisory_lock(737001)` across many autocommitting step calls, which is how exactly one replica sweeps per cycle. Both locks live on a *session*: a pooler that hands the next statement to a different backend breaks the schema serialisation and the retention leader election. |
+| **Server-side prepared statements** | The hot paths use `prepare_cached` (33 distinct statements), parsed and planned once per connection. Transaction-mode pooling invalidates the cache on every checkout, and every push, pop and ack pays a parse and plan. |
 
-**Server-side prepared statements.** The hot paths use `prepare_cached` (33
-distinct prepared statements across the data and admin paths), so a statement is
-parsed and planned once per connection and reused. Transaction-mode pooling
-invalidates the cache on every checkout, at which point the broker pays a parse
-and plan for every push, pop and ack.
-
-Session-mode pooling is transparent, because a session-mode pooler is a
-connection multiplexer and not a statement multiplexer. If you use one, size it so
-each broker gets its own set of backends.
+Session-mode pooling, a connection multiplexer rather than a statement
+multiplexer, is transparent; give each broker its own backends.
 
 ## Connection pool sizing
 
-`DB_POOL_SIZE` (default **160**) is the pool's maximum size and the ceiling on
-concurrent PostgreSQL work for one broker. It is the number that has to fit inside
-the server's `max_connections`.
-
-The arithmetic is per cluster, not per broker:
+`DB_POOL_SIZE` (default **160**) is the ceiling on concurrent PostgreSQL work
+for one broker; the arithmetic is per cluster:
 
 ```text
 replicas × DB_POOL_SIZE + superuser_reserved_connections + your own tooling ≤ max_connections
 ```
 
-Three brokers at the default 160 want 480 connections; a stock PostgreSQL allows
-100. That mismatch shows up as requests answering `500` with
-`{"error":"pool"}` (the broker could not get a connection at all), long before
-anything looks like a query problem. The benchmark rig in
-`server/setup-broker.sh` runs `max_connections=600` for one broker at
-`DB_POOL_SIZE=300`; the test harness runs `DB_POOL_SIZE=32` against a small
-PostgreSQL for the same reason in the other direction.
+Three brokers at the default want 480 connections; a stock PostgreSQL allows
+100. The mismatch answers `500` with `{"error":"pool"}` long before anything
+looks like a query problem. The rig runs `max_connections=600` with
+`DB_POOL_SIZE=300`; the harness `DB_POOL_SIZE=32`.
 
-Two connection consumers sit outside the pool's count and are worth knowing
-about:
-
-- The retention cycle and the stats reconciler each hold **one pooled connection**
-  for the duration of a cycle. On a small pool those are two connections that are
-  not available to requests while a cycle runs.
-- A broker-side statement timeout fires a server-side cancellation, and
-  `cancel_query` opens its **own short-lived connection** to deliver it. Under a
-  timeout storm the process can briefly exceed `DB_POOL_SIZE` connections.
+Also count: the retention cycle and the stats reconciler each hold one pooled
+connection for a whole cycle, and a statement-timeout cancellation travels on
+its own short-lived connection, briefly exceeding `DB_POOL_SIZE` under a
+timeout storm.
 
 ## Statement timeout
 
-`QUEEN_STMT_TIMEOUT_MS` (default 30000) is a **broker-side** timeout, not
-PostgreSQL's `statement_timeout`. The broker never sets `statement_timeout` on the
-session. What it does instead is three things, and the third is the one that
-matters:
+`QUEEN_STMT_TIMEOUT_MS` (default 30000) is **broker-side**; the broker never
+sets PostgreSQL's `statement_timeout`. On elapse it drops the broker-side
+future, fires a best-effort cancellation on a fresh connection (the backend
+otherwise keeps running and holding its locks), and **quarantines the pooled
+connection**: closed and removed, never handed to the next caller.
 
-1. Wrap the query in a `tokio` timeout. On elapse the broker-side future is
-   dropped.
-2. Fire a best-effort server-side cancellation on a fresh connection, because
-   dropping the future does not stop the backend: it keeps running and keeps
-   holding its locks.
-3. **Quarantine the pooled connection.** The connection whose in-flight statement
-   was abandoned and cancelled is removed from the pool permanently and closed,
-   rather than handed to the next caller.
-
-If you also want a hard server-side ceiling, set `statement_timeout` on the
-broker's role. Set it *above* `QUEEN_STMT_TIMEOUT_MS`, so the broker's own
-cancel-and-quarantine path runs first; a PostgreSQL-side cancellation arrives as
-an ordinary statement error, which the broker counts as a DB error and returns as
-a 500.
+For a hard server-side ceiling too, set `statement_timeout` on the broker's role
+*above* `QUEEN_STMT_TIMEOUT_MS` so the broker's path runs first; a
+PostgreSQL-side cancellation arrives as an ordinary statement error and returns
+as a 500.
 
 ## Server settings that matter for this workload
 
-The workload is append-heavy: a segment insert plus one allocator row update per
-push, one consumer-row update per pop and per ack, and, when retention is on,
-a steady delete rate matching the insert rate. Everything below follows from that
-shape.
+The workload is append-heavy: a segment insert plus an allocator-row update per
+push, a consumer-row update per pop and ack, and, with retention on, a matching
+delete rate.
 
 | Setting | Why it matters here |
 | --- | --- |
@@ -221,18 +152,15 @@ shape.
 | `effective_io_concurrency`, `random_page_cost` | Relevant on NVMe: the pop path reads segments by primary key, and a pessimistic `random_page_cost` pushes the planner off it. |
 
 <Aside type="note">
-Command-line settings outrank `ALTER SYSTEM`. A container started with
-`-c synchronous_commit=on` cannot be changed by `ALTER SYSTEM SET
-synchronous_commit = off` plus a reload. The command line wins. Check
-`pg_settings.source` when a setting refuses to change.
+Command-line settings outrank `ALTER SYSTEM`: a container started with
+`-c synchronous_commit=on` cannot be changed by `ALTER SYSTEM` plus a reload;
+check `pg_settings.source` when a setting refuses to change.
 </Aside>
 
 ### The broker sets its own per-table parameters
 
-You do not need to tune these; the DDL applies them, and re-applies them on every
-boot. They are listed because they explain what you will see in
-`pg_stat_user_tables`, and because they are the reason the tables look
-over-vacuumed relative to their size.
+The DDL re-applies these at every boot; they are why the tables look
+over-vacuumed in `pg_stat_user_tables`.
 
 | Table | Parameters | Reason |
 | --- | --- | --- |
@@ -241,25 +169,21 @@ over-vacuumed relative to their size.
 | `queen.log_segments` | `blob` set to `STORAGE EXTERNAL`, insert-scale-factor autovacuum on both the heap and its TOAST table | The blob is already zstd-compressed, so TOAST compression would burn CPU for nothing. There are no secondary indexes: the primary key *is* the pop path. |
 | `queen.log_txns` | insert-scale-factor autovacuum | Append-heavy at segment rate. |
 
-`vacuum_truncate=off` on the two small tables is deliberate and was diagnosed
-from a live run. Heap truncation takes an `ACCESS EXCLUSIVE` lock; on tables whose
-population is fixed at roughly one row per partition and per consumer group, it
-reclaims nothing while freezing every push and pop behind the lock. Do not
-re-enable it.
+**Do not re-enable `vacuum_truncate`** on the two small tables: heap truncation
+takes an `ACCESS EXCLUSIVE` lock, freezing every push and pop to reclaim nothing
+on tables holding roughly one row per partition and consumer group; diagnosed
+off from a live run.
 
 ## What lives in the database
 
-Two schemas. `queen` holds the broker's own tables, of which five carry the log
-engine (`log_partitions`, `log_segments`, `log_txns`, `log_consumers`,
-`log_dlq`), alongside `queen.queues`, the single table that is both queue
-identity and queue configuration (`log_partitions.queue_id` is a foreign key to
-it), plus traces, statistics and metrics tables. `queen_streams` holds the two
-stream tables described above.
+| Schema | Contents |
+| --- | --- |
+| `queen` | The five log-engine tables (`log_partitions`, `log_segments`, `log_txns`, `log_consumers`, `log_dlq`); `queen.queues`, the single table that is both queue identity and queue configuration (`log_partitions.queue_id` is a foreign key to it); traces, statistics and metrics tables. |
+| `queen_streams` | The two stream tables above. |
 
-Because that is the entire state, backup is `pg_dump` and restore is
-`pg_restore`. There is no broker-side artefact to capture, with one exception:
-the disk spool at `FILE_BUFFER_DIR` holds pushes accepted while PostgreSQL was
-unreachable and not yet replayed. Those are not in any dump until they drain.
+That is the entire state: backup is `pg_dump`, restore `pg_restore`. The one
+artefact outside a dump is the [node-local disk spool](/selfhost/durability);
+its pending pushes are in no dump until they drain.
 
 ## Related
 

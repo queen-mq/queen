@@ -1,6 +1,6 @@
 ---
 title: The built-in dashboard
-description: "The Vue dashboard is compiled into the binary: what each view shows, how the fallback route serves it, and how to rebuild it from app/."
+description: "The Vue dashboard is compiled into the binary: open it on the broker port, know who it thinks you are, and rebuild it from app/ when needed."
 type: how-to
 tier: operate
 sidebar:
@@ -18,13 +18,19 @@ sourceOfTruth:
   - proxy/src/webapp.rs
 ---
 
-Every broker serves a dashboard on its own port. There is nothing to deploy: the
+Every broker serves a dashboard on its own port, with nothing to deploy: the
 built single-page application is compiled into the binary with `rust_embed` from
-`server/webapp/dist`, and the bytes are read out of the executable at request time.
+`server/webapp/dist` and read out of the executable at request time.
 
-The bundle is fixed at build time: there is no `QUEEN_STATIC_DIR` and no runtime
-static-directory override, so a volume mounted at the container does not change
-what is served. If you need a different dashboard, you rebuild the binary.
+```bash
+open http://localhost:6632/
+```
+
+The bundle is fixed at build time: no `QUEEN_STATIC_DIR`, no runtime
+static-directory override, a volume mounted at the container changes nothing,
+and a different dashboard means rebuilding the binary. `queen_proxy` embeds the
+same `server/webapp/dist`, so a proxy and the broker behind it serve the
+identical bundle.
 
 <Screenshot
   src="dashboard-overview"
@@ -34,65 +40,40 @@ what is served. If you need a different dashboard, you rebuild the binary.
 
 ## How it is served
 
-The dashboard is the router's **fallback**, registered after every real route, so
-it can never shadow an API path. The fallback resolves in three steps:
+The dashboard is the router's **fallback**, registered after every real route,
+so it can never shadow an API path. It resolves in three steps:
 
-1. If the path is under `/api/` or `/auth/` (or is exactly `/api` or `/auth`),
-   or the method is anything other than `GET` or `HEAD`, it answers a JSON 404:
-   `{"error":"Not Found","code":"no_such_route"}`. The three `/auth` paths the
-   broker really serves are registered routes, so they never reach the fallback.
-2. Otherwise, if the path matches an embedded asset, that asset is returned with a
-   content type guessed from its extension.
-3. Otherwise `index.html` is returned, so client-side routes like `/queues/orders`
-   work on a hard reload. If the dashboard was not bundled at build time, this is a
-   plain `404 Not Found`.
-
-Step 1 exists because the fallback matches any method. Without it, a call to an
-endpoint that does not exist came back `200 text/html`, which every JSON client,
-including the dashboard's own HTTP layer, read as success. A phantom endpoint now
-fails loudly.
+1. A path under `/api/` or `/auth/` (or exactly `/api` or `/auth`), or any
+   method other than `GET` or `HEAD`, gets a JSON 404:
+   `{"error":"Not Found","code":"no_such_route"}`. Without this step a call to a
+   nonexistent endpoint came back `200 text/html`, which every JSON client read
+   as success; a phantom endpoint now fails loudly.
+2. A path matching an embedded asset returns that asset, content type guessed
+   from its extension.
+3. Anything else returns `index.html`, so client-side routes like
+   `/queues/orders` survive a hard reload. A binary built without the bundle
+   returns a plain `404 Not Found` here.
 
 Assets are served with a content type and nothing else: no `Cache-Control`, no
-`ETag`, no compression negotiation. If the
-dashboard is on a hot path, put a reverse proxy or CDN in front and let it add
-caching.
-
-The same `server/webapp/dist` directory is embedded by `queen_proxy` as well, so a
-proxy and the broker behind it serve the identical bundle.
+`ETag`, no compression negotiation. If the dashboard is on a hot path, put a
+reverse proxy or CDN in front and let it add caching.
 
 ## Who the dashboard thinks you are
 
 The dashboard boots by calling `GET /auth/me` and derives every permission from
-that one payload: it never guesses a role from a response code, and it never
-sniffs which binary is serving it. `/auth/me` is answered by whoever serves the
-bundle, and that is the whole difference between the two deployments:
+that one payload: it never guesses a role from a response code and never sniffs
+which binary is serving it. Whoever serves the bundle answers `/auth/me`, and
+that is the whole difference between the deployments:
 
-**Behind `queen_proxy`**, `/auth/me` is the proxy's cookie-authenticated session
-endpoint: real users, per-cluster roles, an operator flag, and a login page. The
-broker never sees these paths.
-
-**Broker-direct with auth off** (`JWT_ENABLED=false`, the default), the broker
-answers `/auth/me` itself with a fixed *standalone* identity: a single synthetic
-cluster named `local`, the `admin` role on it, and the operator capability live.
-Whoever runs the broker is the operator of that cell, so every view including
-System works. The payload also says `standalone: true`, which is the one thing
-the shell reads to hide the session controls: no cluster selector, because there
-is nothing to switch to, and no sign-out, because there is no session to end.
-Nothing here grants anything: with auth off the API was already open to anyone
-who can reach the port, and the broker's boot log says so. The dashboard adds
-visibility, not privilege.
-
-**Broker-direct with auth on** (`JWT_ENABLED=true`), the dashboard is
-`queen_proxy`'s: the app's HTTP layer sends no bearer token, and the broker holds
-no user accounts and no browser sessions to authenticate one. The broker answers `/auth/me` with
-`401 {"code":"auth_required"}`, the app's login redirect lands on `/auth/login`,
-and the broker serves a static page there saying exactly that: use the proxy,
-or run with auth off. The page is terminal, so there is no redirect loop.
+| Deployment | `/auth/me` answers with | What that means |
+| --- | --- | --- |
+| Behind `queen_proxy` | the proxy's cookie-authenticated session | real users, per-cluster roles, an operator flag and a login page; the broker never sees these paths |
+| Broker-direct, auth off (`JWT_ENABLED=false`, the default) | a fixed *standalone* identity: one synthetic cluster `local`, the `admin` role on it, the operator capability live, `standalone: true` | every view including System works. The `standalone` flag is the one thing the shell reads to hide the session controls: no cluster selector (nothing to switch to), no sign-out (no session to end). Nothing is granted: with auth off the API was already open to anyone reaching the port, and the boot log says so. The dashboard adds visibility, not privilege |
+| Broker-direct, auth on (`JWT_ENABLED=true`) | `401 {"code":"auth_required"}`: the app sends no bearer token, and the broker holds no user accounts or browser sessions | the login redirect lands on `/auth/login`, where the broker serves a static page saying exactly that: use the proxy, or run with auth off. The page is terminal, so there is no redirect loop |
 
 `POST /auth/logout` exists as a no-op (`{"ok":true}`) so a hand-typed call gets
 an answer instead of a JSON 404. All three routes are `public` in the
-authorization table; `/auth/me` enforces the auth state itself, which is why the
-explanation above works without a token.
+authorization table; `/auth/me` enforces the auth state itself.
 
 Every view is tenant-scoped except one, and the exception is labelled on screen.
 
@@ -115,13 +96,13 @@ Every view is tenant-scoped except one, and the exception is labelled on screen.
   caption="Five groups keeping pace and two that stopped, separated by the broker's own offsets rather than by inference. The two slow readers here are deliberate."
 />
 
-Three properties of this UI are worth knowing before you read a number off it.
+Three properties to know before reading a number off this UI:
 
-**The System view is not about your tenant.** Host resources, PostgreSQL internals
-and the file-buffer state cover the whole cell: every tenant on it. The view says
-so on screen, and behind a proxy it answers only for an operator principal. Reading
-a cell figure as a tenant figure is the specific mistake the shell is built to
-prevent.
+**The System view is not about your tenant.** Host resources, PostgreSQL
+internals and the file-buffer state cover the whole cell, every tenant on it;
+the view says so on screen, and behind a proxy it answers only for an operator
+principal. Reading a cell figure as a tenant figure is the specific mistake the
+shell is built to prevent.
 
 <Screenshot
   src="dashboard-system"
@@ -129,10 +110,10 @@ prevent.
   caption="The banner and the cell-level tags are the whole point: nothing below them is scoped to your tenant."
 />
 
-**The dead-letter view inspects and purges. It has no replay control.** An earlier
-version of this UI had a retry button that posted to a path the broker did not
-route; the request fell through to the static fallback and reported success while
-doing nothing. The control was removed rather than left lying.
+**The dead-letter view inspects and purges, with no replay control.** An earlier
+version had a retry button posting to a path the broker did not route; the
+request fell through to the static fallback and reported success while doing
+nothing, so the control was removed rather than left lying.
 
 <Screenshot
   src="dashboard-dlq"
@@ -141,16 +122,14 @@ doing nothing. The control was removed rather than left lying.
 />
 
 **An unknown is not a zero.** Panels carry explicit loading, error and
-last-updated state, and a failed call renders as a failure instead of a confident
-`0`. Refresh is a single shared ticker rather than per-panel timers, so what you
-see across a page is one moment.
+last-updated state, a failed call renders as a failure instead of a confident
+`0`, and refresh is one shared ticker, so what you see across a page is one
+moment.
 
 ## Rebuilding it
 
-The dashboard source is `app/`: Vue 3, Vite, Tailwind, Chart.js. It needs Node 22
-or newer.
-
-Run the first two steps from `app/` and the last from `server/`.
+The source is `app/`: Vue 3, Vite, Tailwind, Chart.js, Node 22 or newer. Run the
+first two steps from `app/` and the last from `server/`.
 
 <Steps>
 
@@ -160,8 +139,8 @@ Run the first two steps from `app/` and the last from `server/`.
    npm install
    ```
 
-2. Build. The output goes straight to `server/webapp/dist`, which is the one
-   artifact both Rust binaries embed.
+2. Build. The output goes straight to `server/webapp/dist`, the one artifact
+   both Rust binaries embed.
 
    ```bash
    npm run build
@@ -176,21 +155,20 @@ Run the first two steps from `app/` and the last from `server/`.
 </Steps>
 
 <Aside type="caution">
-A source change ships only after **both** the `npm run build` and the `cargo
-build`. Debug builds of `rust_embed` read from disk, so locally the npm build alone
-usually appears to be enough. Release builds are not, and that difference is a
-reliable way to ship a stale dashboard.
+**A source change ships only after both the `npm run build` and the `cargo
+build`.** Debug builds of `rust_embed` read from disk, so locally the npm build
+alone usually appears to be enough; release builds are not, and that difference
+is a reliable way to ship a stale dashboard.
 </Aside>
 
-For iterating on the UI, `npm run dev` serves it on port 4000 and proxies `/api`,
-`/auth`, `/health` and `/metrics` to a `queen_proxy` development cell on port
-6711. Setting `QUEEN_DEV_UPSTREAM=http://localhost:6632` points it straight at a
-broker instead: that is the standalone mode, with its fixed operator identity
-(no sessions, no tenancy, no role checks, no rate limiting). Default to the
-proxy upstream unless standalone behaviour is the thing being worked on, because
-the proxy side is where a permission or a 429 can prove the UI wrong.
-`QUEEN_APP_BASE` sets the router and asset base if the bundle is mounted under a
-path prefix.
+For iterating on the UI, `npm run dev` serves it on port 4000 and proxies
+`/api`, `/auth`, `/health` and `/metrics` to a `queen_proxy` development cell on
+port 6711. `QUEEN_DEV_UPSTREAM=http://localhost:6632` points it straight at a
+broker instead: standalone mode, with its fixed operator identity (no sessions,
+no tenancy, no role checks, no rate limiting). Default to the proxy upstream
+unless standalone behaviour is what is being worked on, because the proxy side
+is where a permission or a 429 can prove the UI wrong. `QUEEN_APP_BASE` sets the
+router and asset base if the bundle is mounted under a path prefix.
 
 ## Related pages
 

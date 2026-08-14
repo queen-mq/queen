@@ -123,7 +123,6 @@ async fn a_transaction_acks_and_pushes_atomically() {
     let msgs = pop_retry(&q, &src, Some("g-txn"), 1, 25).await;
     assert_eq!(msgs.len(), 1);
 
-    // docs:start(rust-transaction)
     let resp = q
         .transaction()
         .ack(&msgs[0])
@@ -132,7 +131,6 @@ async fn a_transaction_acks_and_pushes_atomically() {
         .commit()
         .await
         .unwrap();
-    // docs:end
 
     assert!(resp.success);
     assert_eq!(resp.results.len(), 2, "one result per operation");

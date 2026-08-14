@@ -54,3 +54,8 @@
 /use-case-aggregations.html /use/streams/                  301
 /use-case-rate-limiter    /use/streams/                    301
 /use-case-rate-limiter.html /use/streams/                  301
+# Withdrawn: the 600-second auto-ack ceiling run. The rates this site stands
+# behind are measured with leases, explicit acks and deduplication on, so the
+# page was removed rather than kept with a warning on it.
+/benchmarks/peak          /benchmarks/                     301
+/benchmarks/peak/         /benchmarks/                     301

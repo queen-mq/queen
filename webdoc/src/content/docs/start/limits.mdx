@@ -1,6 +1,6 @@
 ---
 title: Limits and non-goals
-description: "What Queen does not do, what it deliberately refuses to do, and the sharp edges that will surprise you if nobody tells you first."
+description: "Queen's design decisions stated plainly, how to work with each one, and the operational boundaries to check before you build."
 type: concept
 tier: use
 sidebar:
@@ -22,9 +22,11 @@ sourceOfTruth:
   - server/sql/schema.sql
 ---
 
-This page collects the boundaries of the model in one place. Everything below is
-a property of the build you can run today, not a roadmap item. If one of them is
-a requirement for you, this is the page to find that out on.
+This page states Queen's opinions in one place: the design decisions, how to
+work with each one, and the operational boundaries. Everything below is a
+property of the build you can run today, not a roadmap item. Most of these are
+how we believe a queue should behave; the point of collecting them here is that
+you can check them against your requirements in one read.
 
 ## Ordering is per partition, never global
 
@@ -236,7 +238,7 @@ states what that means.
   operator CLI. There is no Java or .NET client. Those languages use the
   HTTP API directly.
 
-## Choose something else when
+## Where another tool fits better
 
 | If you need | Where Queen stands |
 | --- | --- |
@@ -248,19 +250,10 @@ states what that means.
 | Opaque binary or very large payloads | Payloads are JSON, inside a request-body cap |
 | A broker you can expose directly to untrusted clients | No TLS listener, no CORS, authentication off by default, and a mesh port that must be firewalled |
 | A Java or .NET SDK today | Only six language SDKs exist; everything else is plain HTTP |
-| Nothing but per-key ordering at very high cardinality, at a modest rate | pgmq does that with no per-lane state at all, and measured better than Queen on every percentile at three times the cardinality. Queen's per-lane cursor is what buys consumer groups, replay, per-group lag and a retry budget; a workload that needs none of those does not need the cursor |
+| Nothing but per-key ordering at very high cardinality, at a modest rate | Queen's per-lane cursor is what buys consumer groups, replay, per-group lag and a retry budget; a workload that needs none of those does not need the cursor, and pgmq serves it with no per-lane state at all |
 
-The last row is the one to read closely, because the cost curves cross there.
-Measured side by side on one machine, pgmq is faster than Queen on sparse lanes
-and flat in cardinality where Queen's tail grows on that pipeline. What it does not
-do is hold the rate: its ordered-consume path tops out between 20 000 and 40 000
-messages per second and collapses above that, against 1 000 000 per side sustained
-for 24 hours by Queen, and it has no consumer groups, no replay, no deduplication
-and no dead-letter queue. Choose by which of those two limits your workload runs
-into, not by the headline. The full tables are in
-[Cross-broker comparison](/benchmarks/comparison), and Queen's own cardinality
-ceiling, a million ordered partitions, is on
-[A million ordered partitions](/benchmarks/cardinality-1m).
+The measured crossover behind that last row, in both directions, is in
+[Cross-broker comparison](/benchmarks/comparison).
 
 If none of those is disqualifying, the design reasoning behind the trade-offs is
 in [Why Queen exists](/start/why), the architectural comparison is in

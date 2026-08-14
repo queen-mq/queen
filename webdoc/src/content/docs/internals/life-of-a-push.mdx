@@ -223,8 +223,8 @@ RETURNING last_offset;
 `base_offset = last_offset - msg_count + 1`. The `CASE` is the quantization that keeps the update
 HOT despite `last_write_at` being indexed.
 
-Finally two inserts: the segment, and the `log_txns` row (the latter unconditionally, because
-ack-by-`transactionId` resolves through it whether or not deduplication is on).
+Finally two inserts: the segment, and the `log_txns` row (unconditional even with deduplication
+off; [the storage model](/internals/storage-model) has why).
 
 <Aside type="note">
 Because the timestamp is stamped while the partition row lock is held, `created_at` is monotone

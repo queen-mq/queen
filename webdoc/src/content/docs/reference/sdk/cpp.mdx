@@ -57,10 +57,9 @@ struct ClientConfig {
 };
 ```
 
-`Retry429Options` covers HTTP 429 only, separately from `retry_attempts`, which covers 5xx and
-network faults. A zero field means "use the kind-based default": `max_attempts` is 10 for ordinary
-requests and unbounded for a long-poll pop; `base_millis` is 500; `cap_millis` is 30000. A
-`Retry-After` header (seconds) wins over the computed delay, and every delay is jittered ±20%.
+`Retry429Options` covers HTTP 429 only, separately from `retry_attempts`, and a zero field
+means "use the kind-based default"; the defaults, the `Retry-After` contract and the jitter are
+in [What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 
 <Aside type="caution">
 The C++ `ClientConfig` is smaller than the other clients'. There is no custom-headers map, no
@@ -162,24 +161,16 @@ passing the whole message array issues one HTTP call. Returns an array of
 | `create()` | `POST /api/v1/configure` | `json` |
 | `del()` | `DELETE /api/v1/resources/queues/:queue` | `json` (named `del` because `delete` is a keyword) |
 
-`QueueConfig` and its `to_json()` output:
-
-| Field | Wire key | Default | Unit |
-| --- | --- | --- | --- |
-| `lease_time` | `leaseTime` | `300` | seconds |
-| `retry_limit` | `retryLimit` | `3` | attempts |
-| `delayed_processing` | `delayedProcessing` | `0` | seconds |
-| `window_buffer` | `windowBuffer` | `0` | seconds |
-| `retention_seconds` | `retentionSeconds` | `0` | seconds |
-| `completed_retention_seconds` | `completedRetentionSeconds` | `0` | seconds |
-| `encryption_enabled` | `encryptionEnabled` | `false` | n/a |
+`QueueConfig`'s snake_case fields (`lease_time`, `retry_limit`, `delayed_processing`,
+`window_buffer`, `retention_seconds`, `completed_retention_seconds`, `encryption_enabled`) map
+onto the camelCase wire options via `to_json()`, with the values listed under
+[Queue option defaults](/reference/defaults#queue-option-defaults).
 
 `create()` always sends the complete set, so calling it without `config()` applies the struct's
 defaults, including `leaseTime: 300`, whereas a queue created implicitly by a first push gets a
 60-second lease. `to_json()` emits a fixed key set, so options outside that struct cannot be set
-through `config()`; post to `/api/v1/configure` yourself when you need one. And remember
-**`/configure` is a full replace**: keys absent from the body reset to the broker's defaults. The
-option list is in [Queue options](/reference/queue-options/).
+through `config()`; post to `/api/v1/configure` yourself when you need one, remembering that
+**`/configure` is a full replace** ([Queue options](/reference/queue-options/)).
 
 ### Producing
 
@@ -319,10 +310,8 @@ payload again, or calling `POST /api/v1/messages/{partitionId}/{transactionId}/r
 | `queue(const std::string& queue_name)` | Returns a `QueuePushBuilder` with `partition(...)` and `push(...)`. |
 | `commit()` | `json`. Posts `POST /api/v1/transaction`. |
 
-<Aside type="note">
-Atomic is not exactly-once end to end. A lost response plus a retry still duplicates unless the
-`transactionId` is deterministic and inside the dedup window.
-</Aside>
+A transaction is atomic, not exactly-once end to end; see
+[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
 
 ## `HttpClient`
 
@@ -342,8 +331,9 @@ queen::json overview = http->get("/api/v1/resources/overview");
 | `del` | `del(path, request_timeout_millis = 0, retry_kind = RetryKind::Default)` |
 | `get_load_balancer` | `get_load_balancer() const` |
 
-All four return `json`, with `nullptr` for an empty body or a `204` (the broker sends no body at
-all on `204`), and throw `HttpError` on any status `>= 400`. `request_timeout_millis` of `0` uses the
+All four return `json`, with `nullptr` for an empty body or a `204`
+([a 204 carries no body at all](/use/errors#the-envelope)), and throw `HttpError` on any status
+`>= 400`. `request_timeout_millis` of `0` uses the
 client default. Pass `RetryKind::Pop` for a long-poll request so a 429 backs off indefinitely
 instead of using the bounded budget.
 
@@ -358,7 +348,7 @@ Derives from `std::runtime_error`, with `what()` set to the broker's `error` str
 | --- | --- |
 | `int status_code() const` | HTTP status. |
 | `const std::string& body() const` | Raw body. |
-| `const std::string& code() const` | The body's `code` field; empty when absent. Proxy contract: `rate_limited`, `quota_exceeded` on 429; `cluster_suspended`, `storage_quota_exceeded`, `feature_gated`, `forbidden` on 403. |
+| `const std::string& code() const` | The body's `code` field; empty when absent. The proxy's stable values are listed under [Behind the proxy](/reference/errors#behind-the-proxy). |
 | `std::optional<double> retry_after_seconds() const` | From the `Retry-After` header on a 429. |
 | `bool is_cluster_suspended() const` | The terminal 403 no retry resolves. |
 

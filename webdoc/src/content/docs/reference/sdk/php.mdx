@@ -69,17 +69,10 @@ The load-balancing keys are inert with a single URL: the `LoadBalancer` is only 
 
 ### `retry429`
 
-Separate from `retryAttempts`, which covers 5xx and network faults. Constants live on
-`Queen\Http\Retry429Policy`.
-
-| Key | Default | Effect |
-| --- | --- | --- |
-| `maxAttempts` | `10` (`DEFAULT_MAX_ATTEMPTS`) for ordinary requests; `UNBOUNDED` (`0`) for a long-poll pop | Total attempts including the first. Setting it applies the same bound to both kinds. |
-| `baseMs` | `500` (`DEFAULT_BASE_MILLIS`) | First delay absent a `Retry-After` header. Doubles per attempt. |
-| `capMs` | `30000` (`DEFAULT_CAP_MILLIS`) | Ceiling for the exponential delay. |
-
-A `Retry-After` header (seconds) wins over the computed delay. A 429 is retried against the same
-backend and never triggers failover.
+`retry429` takes `maxAttempts`, `baseMs` and `capMs`, with the constants on
+`Queen\Http\Retry429Policy` (`UNBOUNDED` is `0`), separate from `retryAttempts`; the defaults,
+the `Retry-After` contract and the jitter are in
+[What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
 
 ## `Queen`
 
@@ -149,22 +142,13 @@ Accepts a lease-id string, a message array, or an array of either. Posts to
 
 `OperationBuilder` exposes `onSuccess(Closure)`, `onError(Closure)` and `execute(): mixed`.
 
-`Defaults::QUEUE_DEFAULTS`:
-
-| Key | Default | Unit |
-| --- | --- | --- |
-| `leaseTime` | `300` | seconds |
-| `retryLimit` | `3` | attempts |
-| `delayedProcessing` | `0` | seconds |
-| `windowBuffer` | `0` | seconds |
-| `retentionSeconds` | `0` | seconds |
-| `completedRetentionSeconds` | `0` | seconds |
-| `encryptionEnabled` | `false` | none |
+`Defaults::QUEUE_DEFAULTS` carries `leaseTime`, `retryLimit`, `delayedProcessing`,
+`windowBuffer`, `retentionSeconds`, `completedRetentionSeconds` and `encryptionEnabled`, with
+the values listed under [Queue option defaults](/reference/defaults#queue-option-defaults).
 
 Extra keys you pass to `config()` are sent verbatim, so any option `/configure` accepts is
-reachable. **`/configure` is a full replace**: keys absent from the body reset to the broker's
-defaults, so send the complete intended configuration every time. The option list is in
-[Queue options](/reference/queue-options/).
+reachable. **`/configure` is a full replace**, not a patch: send the complete intended
+configuration every time ([Queue options](/reference/queue-options/)).
 
 ### Producing
 
@@ -210,10 +194,9 @@ $queen->queue('orders')
 | `each()` | n/a | batch mode | `consume()` only. One message per handler call. |
 
 <Aside type="danger">
-`autoAck` means two different things. On `pop()` it is sent to the broker as `autoAck=true`, which
-commits the cursor inside the pop transaction: at-most-once, the message is gone whether or not
-you process it. On `consume()` it is never sent: the consumer manager acks after the handler
-returns and nacks when it throws.
+`autoAck` on `pop()` is the broker's at-most-once parameter; on `consume()` it is never sent
+and means client-side ack/nack around the handler. See
+[`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs).
 </Aside>
 
 #### `pop(): array`
@@ -307,10 +290,8 @@ $queen->transaction()
     ->commit();
 ```
 
-<Aside type="note">
-Atomic is not exactly-once end to end. A lost response plus a retry still duplicates unless the
-`transactionId` is deterministic and inside the dedup window.
-</Aside>
+A transaction is atomic, not exactly-once end to end; see
+[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
 
 ## `Admin`
 
@@ -379,18 +360,11 @@ turn it into a query string.
 
 Non-2xx responses throw `Queen\Exceptions\HttpException`, with `isClusterSuspended()` and
 `isRateLimited()` helpers. The machine-readable codes are constants on
-`Queen\Exceptions\ErrorCode`:
+`Queen\Exceptions\ErrorCode`, one per proxy code listed under
+[Behind the proxy](/reference/errors#behind-the-proxy).
 
-| Constant | Value | Status |
-| --- | --- | --- |
-| `RATE_LIMITED` | `rate_limited` | 429 |
-| `QUOTA_EXCEEDED` | `quota_exceeded` | 429 |
-| `CLUSTER_SUSPENDED` | `cluster_suspended` | 403 |
-| `STORAGE_QUOTA_EXCEEDED` | `storage_quota_exceeded` | 403 |
-| `FEATURE_GATED` | `feature_gated` | 403 |
-| `FORBIDDEN` | `forbidden` | 403 |
-
-A `204` response yields `null`, because the broker sends no body at all on `204`.
+A `204` response yields `null`:
+[a 204 carries no body at all](/use/errors#the-envelope).
 
 ## Laravel integration
 

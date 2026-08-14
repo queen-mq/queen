@@ -3,8 +3,6 @@ title: Probes and restarts
 description: "What /health really tests, why it is the wrong liveness probe, how SIGTERM drains, and what happens to leased batches when an instance goes away."
 type: how-to
 tier: operate
-sidebar:
-  order: 9
 sourceOfTruth:
   - server/src/handlers/status.rs
   - server/src/main.rs
@@ -14,174 +12,137 @@ sourceOfTruth:
   - server/src/file_buffer.rs
   - server/sql/procedures/004_log_pop.sql
   - server/sql/procedures/005_log_ack.sql
+sidebar:
+  order: 9
 ---
 
-The broker is one stateless process. Every piece of durable state is in
-PostgreSQL, with one exception: the on-disk push spool, which is node-local.
-That single exception is what makes probe configuration matter more than it
-usually does.
+The broker is one stateless process; all durable state is in PostgreSQL except
+the node-local push spool, the exception that makes probe configuration matter.
 
 ## What /health tests
 
-`GET /health` takes a connection from the pool and runs a trivial query against
-PostgreSQL. It returns 200 with
+```bash
+curl -s http://localhost:6632/health
+```
 
 ```json
 {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.0"}
 ```
 
-and 503 with `"status":"unhealthy","database":"disconnected"` when either the pool
-cannot hand out a connection or the query fails.
-
-So `/health` is a **dependency** check, not a process check. It answers "can this
-instance reach the database right now", which is exactly the question a readiness
-probe asks and exactly the wrong question for a liveness probe.
-
-The endpoint resolves to access level `public` in the route table, and the
-authentication middleware short-circuits on `public` before it looks for a token.
-Turning on `JWT_ENABLED` does not close it.
+`GET /health` takes a pooled connection and runs a trivial query; it answers
+503 with `"status":"unhealthy","database":"disconnected"` when the pool cannot
+hand out a connection or the query fails. A **dependency** check, not a process
+check: the readiness question, and the wrong liveness question. The route is
+`public` and the auth middleware short-circuits before token lookup:
+`JWT_ENABLED` does not close it.
 
 ## The liveness-probe trap
 
 <Aside type="danger">
-Wiring `/health` to a Kubernetes liveness probe defeats the disk spool it exists
-to complement. During a PostgreSQL outage the broker is *working as designed*: it
-returns 503 on `/health` while it accepts pushes and writes them to the spool.
-A liveness probe reads that 503 as a dead container and kills the pod, in a loop,
-for the whole outage.
+Wiring `/health` to a Kubernetes liveness probe defeats the disk spool it
+exists to complement: during a PostgreSQL outage the broker is *working as
+designed*, returning 503 while accepting pushes into the spool, and the probe
+reads that 503 as a dead container and kills the pod, in a loop, for the whole
+outage.
 </Aside>
 
-The damage is concrete, and it compounds:
+The damage compounds: each kill discards in-flight requests, so pushes that
+would have spooled are refused at the socket, and nothing drains while the
+container restarts. A spool on the container filesystem
+[is destroyed outright](/selfhost/durability#the-limits): a survivable outage
+becomes data loss.
 
-- Each kill discards in-flight requests, so pushes that would have been spooled
-  are refused at the socket instead.
-- Nothing drains while the container is restarting, so the spool only grows.
-- If the spool directory is on the container filesystem rather than a volume that
-  survives the restart, every kill destroys the buffered messages outright. This
-  is the case that turns a survivable outage into data loss.
-
-Use `/health` for **readiness**: an instance that cannot reach PostgreSQL should
-leave the load balancer, because it can serve nothing but spooled pushes.
-
-For **liveness**, probe the process, not its dependency. A TCP connect on `PORT`
-is enough, and it is the honest test: the listener exists only while the process
-is alive, and the process aborts on a panic instead of limping. `GET /status`
-answers `{"status":"ok","engine":"segments-rust"}` with no database access at
-all, but it resolves to read-only access rather than public, so with
-`JWT_ENABLED=true` it needs a token, which makes it awkward as a probe target.
+Use `/health` for **readiness**: an instance that cannot reach PostgreSQL
+should leave the load balancer. For **liveness**, probe the process: a TCP
+connect on `PORT` is the honest test (the listener exists only while the
+process lives; a panic aborts instead of limping), and the
+[Kubernetes manifest](/selfhost/kubernetes) has both stanzas.
+[`GET /status`](/reference/http/status-metrics) skips the database but is
+read-only access, not public: under JWT it needs a token, awkward for a probe.
 
 ## SIGTERM drains, background loops do not
 
-The HTTP server is wrapped in a graceful shutdown driven by SIGTERM or Ctrl-C.
-On the signal the broker logs
+On SIGTERM (or Ctrl-C) the broker logs
 
 ```text
 INFO shutdown  signal received, draining in-flight requests
 ```
 
-stops accepting new connections, and waits for in-flight requests to finish.
-Then it reports the spool depth and exits:
+then stops accepting, waits for in-flight requests, reports the spool depth
+and exits:
 
 ```text
 WARN  shutdown  spool has undrained events at shutdown pending=<n>
 INFO  shutdown  shutdown complete
 ```
 
-Two consequences follow from *what* is being drained.
+A parked long-poll pop is an in-flight request, open until its own deadline
+(`POP_DEFAULT_TIMEOUT_MS`, default 30000 ms; `DEFAULT_TIMEOUT` takes
+precedence), so shutdown can take that long even idle: size the termination
+grace period above your largest pop timeout, or the orchestrator SIGKILLs a
+correct shutdown. Parked pops release their pooled connection *before*
+parking, holding a slot only while querying.
 
-First, a parked long-poll pop is an in-flight request. A consumer waiting on an
-empty queue holds its request open until its own deadline
-(`POP_DEFAULT_TIMEOUT_MS` is 30000 ms by default, and `DEFAULT_TIMEOUT` takes
-precedence over it), so shutdown can take that long even on an idle broker. Size
-the orchestrator's termination grace period above your largest pop timeout, or
-the orchestrator will SIGKILL a process that was shutting down correctly. Parked
-pops release their pooled database connection *before* parking, so they cost a
-connection slot only while actually querying.
-
-Second, the background loops (retention, the stats reconciler, the metrics
-collector, the spool drain) are detached tasks. They are not drained; they stop
-with the runtime. In particular **the spool is not flushed on the way out**. The
-`pending=<n>` warning is telling you that those events are still on disk and will
-only be replayed by a process that starts with the same `FILE_BUFFER_DIR`. If you
-are draining a node permanently, that warning is the signal to stop and get the
-spool drained before the volume goes away.
+The background loops (retention, stats, metrics, spool drain) are detached
+tasks and stop with the runtime: **the spool is not flushed on the way out**.
+`pending=<n>` means events on disk, replayed only by a process starting with
+the same `FILE_BUFFER_DIR`: drain the spool before permanently retiring the
+volume.
 
 ## What happens to in-flight leases
 
-Nothing is handed back. This is the single most important thing to understand
-about restarting a broker.
-
-Consumption state is one cursor per (partition, consumer group):
-`queen.log_consumers.committed`. A pop takes a lease on the span
+Nothing is handed back: consumption state is one cursor per (partition,
+consumer group), `queen.log_consumers.committed`. A pop leases
 `(committed, batch_end]` by writing `worker_id`, `batch_end`,
-`lease_acquired_at` and `lease_expires_at` onto that row. The lease is a row in
-PostgreSQL, not a session, so it does not notice that the broker holding it
-disappeared, and there is no release-on-disconnect path anywhere in the engine.
-
-The sequence after a restart is therefore:
+`lease_acquired_at`, `lease_expires_at` onto that row. A lease is a row, not a
+session: no release-on-disconnect path exists anywhere in the engine.
 
 <Steps>
 
-1. The instance dies. The consumer's HTTP request fails; the leased batch was
-   never acked, so `committed` is unchanged.
+1. The instance dies; the request fails; nothing was acked, so `committed` is
+   unchanged.
 
-2. Until `lease_expires_at` passes, every pop for that (partition, group) is
-   filtered out by the lease predicate. The batch is invisible, and the partition
-   looks idle to that group. Lag grows.
+2. Until `lease_expires_at` passes, the lease predicate filters that
+   (partition, group) out of every pop: the batch is invisible, lag grows.
 
-3. Once the lease expires, the next pop re-leases from the same `committed`, so
-   the whole span is redelivered, to whichever consumer asks first, on any
-   instance.
+3. On expiry, the next pop re-leases from the same `committed`: the whole span
+   redelivers, to whoever asks first, on any instance.
 
 </Steps>
 
-The practical consequence is that the *lease time* is your restart recovery
-window for already-leased work: a queue with a 300-second lease can stall for up
-to 300 seconds on the partitions that had leases open. A short lease redelivers
-faster; too short a lease redelivers work that is still being processed. That
-trade-off, not the restart itself, is what to tune.
+Lease time is your restart recovery window: a 300-second lease stalls its
+partitions up to 300 seconds; shorter redelivers faster, too short redelivers
+work still in progress. Tune that, not the restart.
 
-Redelivery after a lease expiry does not consume the retry budget. The engine
-tracks two different counters on the consumer row: `attempt_count`, which
-increments when a batch is re-leased from the same start offset (redelivery
-telemetry), and `batch_retry_count`, which is the retry budget and is charged
-**only** by an explicit `failed` ack. A restart therefore cannot push a message
-toward the dead-letter queue, no matter how many times it happens.
+Expiry redelivery does not consume the retry budget: `attempt_count`
+increments on a re-lease from the same start offset (redelivery telemetry);
+`batch_retry_count` is charged **only** by an explicit `failed` ack, so a
+restart cannot push a message toward the DLQ.
 
-`autoAck=true` pops behave differently, because they commit the cursor inside the
-pop transaction and take no lease. A restart cannot redeliver them: anything
-delivered and not yet processed by the client is gone. That is the
-at-most-once trade you accepted by asking for it.
+`autoAck=true` pops commit inside the pop transaction, no lease: a restart
+cannot redeliver them, and anything the client had not processed is gone, the
+at-most-once trade you asked for.
 
 ## Rolling restarts
 
-Every boot re-applies the embedded schema (`schema.sql` plus every stored
-procedure file, in lexical order) under a session advisory lock, so concurrent
-boots serialize instead of racing. Every statement is idempotent, so re-applying
-is a no-op on an already-current database. A DDL error fails the boot: the process
-logs `FATAL: schema apply failed` and exits 1 rather than serving against a
-half-applied schema.
+Every boot re-applies the embedded schema
+[under a session advisory lock](/selfhost/upgrade#what-happens-at-boot):
+concurrent boots serialise, re-application is idempotent, a DDL error fails the
+boot (`FATAL: schema apply failed`, exit 1) rather than serving a half-applied
+schema. Three things to get right:
 
-That makes a rolling restart safe by construction, with three things to get right:
+- **Drain before terminating**: readiness out of the balancer, SIGTERM, the
+  grace period. A SIGKILL mid-request is survivable (unacked batches
+  redeliver) but strands the spool.
+- **Restart one instance at a time when spools may be non-empty**:
+  [startup recovery](/selfhost/durability#startup-recovery) replays the spool
+  *before* the listener binds, so start time grows with the spool.
+- **Keep `FILE_BUFFER_DIR` on storage that outlives the container**: the spool
+  only counts if the next process on the node can see it.
 
-- **Drain before terminating.** Remove the instance from the load balancer first
-  (readiness), then SIGTERM, then wait for the grace period discussed above.
-  A SIGKILL mid-request is survivable (an unacked batch redelivers), but it
-  strands the spool.
-- **Restart one instance at a time when the spool may be non-empty.** Startup
-  recovery replays the spool *before* the listener binds, oldest file first, with
-  a one-hour cap; anything left over is handed to the background drain loop. An
-  instance therefore has a slow start proportional to its spool, and taking two
-  down together makes that worse.
-- **Keep `FILE_BUFFER_DIR` on storage that outlives the container.** A
-  node-local spool is only a durability mechanism if the next process on that
-  node can see it.
-
-If you pre-apply the DDL with a privileged role and run the broker as a
-low-privilege user, set `QUEEN_APPLY_SCHEMA=0`. The boot then logs
-`apply skipped` and touches no catalog, which also means the schema in the
-database is entirely yours: the definitions serving requests are the ones you
-applied, not the ones the binary carries.
+Pre-applying the DDL with a privileged role? Set `QUEEN_APPLY_SCHEMA=0`: boot
+logs `apply skipped`, touches no catalog, and the definitions serving requests
+are the ones you applied.
 
 ## Related pages
 

@@ -13,44 +13,15 @@ verifiedBy:
   - clients/client-js/test-v2/transaction.js
 ---
 
-One route bundles pushes and acks into a single PostgreSQL transaction:
-
-```http
-POST /api/v1/transaction
-```
-
-Everything in the call commits together or nothing does. That is the whole feature, and it is
-enough to build a pipeline whose stages cannot drop or duplicate work at the handoff.
-
-## The shape of a call
-
-```json
-{
-  "operations": [
-    { "type": "ack", "transactionId": "in-42", "partitionId": "8f1c…", "status": "completed" },
-    { "type": "push", "queue": "orders.shipped", "partition": "eu", "payload": { "id": 42 } }
-  ],
-  "requiredLeases": ["0191…"]
-}
-```
-
-Only `push` and `ack` operations exist. Anything else fails the request with `400` and
-`segments transaction supports only push and ack operations`, before any work is attempted.
-
-A `push` operation may carry a single message inline (as above) or an `items` array of them.
-Each item takes `queue`, an optional `partition` (default `Default`), `payload` (or `data`),
-an optional `transactionId` and an optional `traceId`. An `ack` operation takes
-`transactionId`, `partitionId`, an optional `status` (default `completed`), an optional
-`consumerGroup` and an optional `leaseId`, with exactly the meanings described in
-[Acknowledgement is an offset commit](/use/concepts/ack).
-
-## The pipeline handoff
+One route, `POST /api/v1/transaction`, bundles pushes and acks into a single PostgreSQL
+transaction: everything in the call commits together or nothing does. The pattern it exists
+for is the pipeline handoff, an ack of the input and a push of the output that cannot come
+apart:
 
 <Render file="snippets/js-transaction" />
 
-This is the pattern the route exists for. The consumer acks the message it just processed and
-pushes its result in the same transaction, so there is no window in which the output exists
-without the input being consumed, or the input is consumed without the output existing.
+There is no window in which the output exists without the input being consumed, or the
+reverse. No ordering of two separate calls gives you that property.
 
 <pre class="mermaid">{`
 flowchart LR
@@ -67,39 +38,53 @@ flowchart LR
   TX -->|"any raise"| RB["nothing written<br/>in-42 redelivers"]
 `}</pre>
 
-The boundary is drawn around both operations at once, which is the only thing that makes the
-handoff safe: there is no ordering of two separate calls that gives you the same property.
+Chained across stages, no hop can lose work or emit an orphan: the commit that records the
+consumption is the commit that records the production, and a failed attempt rolls back both
+halves. The duplicate risk that remains is a client retry after a lost response. See
+[the limit](#the-limit-this-is-not-end-to-end-exactly-once).
 
-Chain that across stages and no hop can lose work or emit an orphan: a stage's output exists
-exactly when its input was consumed, because the commit that records the consumption is the
-commit that records the production. A failed attempt rolls back both halves, so the input
-redelivers and the output is produced by whichever attempt succeeds. The duplicate risk that
-remains is a client retry after a lost response. See [the limit](#the-limit-this-is-not-end-to-end-exactly-once).
+## The shape of a call
+
+```http
+POST /api/v1/transaction
+```
+
+```json
+{
+  "operations": [
+    { "type": "ack", "transactionId": "in-42", "partitionId": "8f1c…", "status": "completed" },
+    { "type": "push", "queue": "orders.shipped", "partition": "eu", "payload": { "id": 42 } }
+  ],
+  "requiredLeases": ["0191…"]
+}
+```
+
+Only `push` and `ack` operations exist. Anything else fails the request with `400` and
+`segments transaction supports only push and ack operations`, before any work is attempted.
+A `push` carries one message inline or an `items` array (`queue`, optional `partition`
+defaulting to `Default`, `payload` or `data`, optional `transactionId` and `traceId`); an
+`ack` takes `transactionId`, `partitionId`, optional `status` defaulting to `completed`,
+`consumerGroup` and `leaseId`, with exactly the meanings on
+[Acknowledgement is an offset commit](/use/concepts/ack).
 
 ## What rolls a transaction back
 
 The stored procedure raises on every failure path, and a raise takes down every other
-operation in the call, including pushes that already ran earlier in the same procedure.
+operation in the call, pushes that already ran included:
 
-- **A duplicate push.** On a queue with deduplication enabled, a `transactionId` that already
-  exists inside the deduplication window makes the whole transaction fail with a `QDUP`
-  error. This is the one place where a duplicate is *harder* than elsewhere: a plain push
-  reports `status: "duplicate"` and carries on, but inside a transaction all-or-nothing leaves
-  no other option. On a queue with deduplication disabled there is no probe, so the message is
-  stored again.
+- **A duplicate push.** On a deduplication-enabled queue, a `transactionId` already inside
+  the window raises `QDUP`. A plain push reports `status: "duplicate"` and carries on;
+  all-or-nothing leaves no such option. With deduplication off there is no probe, and the
+  message stores again.
 - **A rejected ack.** An invalid or expired lease, a position beyond the leased batch, or a
-  missing consumer row. Any of these aborts the transaction.
-- **An ack for a transaction id the broker cannot find.** This one is checked *before* the
-  procedure runs: the broker probes each acked hash against the partition's hash sidecar and,
-  if any of them resolves nowhere, returns
-  `QTXN ack references unknown transactionId; transaction rolled back` without touching the
-  database. Without that pre-check the pushes would commit while the bogus ack quietly moved
-  nothing.
-- **An unresolvable partition or queue name.** An ack naming an unknown partition, or a push
-  whose queue and partition cannot be resolved, fails the call.
+  missing consumer row.
+- **An ack for an unknown transaction id**, checked *before* the procedure runs against the
+  partition's hash sidecar:
+  `QTXN ack references unknown transactionId; transaction rolled back`, database untouched.
+  Otherwise the pushes would commit while the bogus ack quietly moved nothing.
+- **An unresolvable partition or queue name**, on either kind of operation.
 
-A rolled-back transaction leaves cursors, offsets and segments exactly as they were. Nothing
-partially applied, nothing to clean up.
+A rolled-back transaction leaves cursors, offsets and segments exactly as they were.
 
 ## Reading the response
 
@@ -114,9 +99,9 @@ The route answers HTTP `200` **even when the transaction failed**:
 }
 ```
 
-On success, `results` is one entry per operation, in request order: push entries carry
-`transactionId`, `messageId` and `queueName` (plus `duplicate: true` when the item repeated an
-earlier item of the same call), ack entries carry `transactionId` and `dlq`.
+On success, `results` is one entry per operation, in request order: pushes carry
+`transactionId`, `messageId`, `queueName` and `duplicate: true` when an item repeated an
+earlier one; acks carry `transactionId` and `dlq`.
 
 <Aside type="caution">
 `success` is in the body, not the status line. The JavaScript transaction builder raises on
@@ -124,70 +109,51 @@ earlier item of the same call), ack entries carry `transactionId` and `dlq`.
 level is a per-call identifier minted by the broker. It is not one of your message ids.
 </Aside>
 
-Two details of the ack entries are worth knowing before you rely on them:
-
-- They are always reported as successful when the transaction commits. The per-item honesty
-  reporting of the plain ack routes (`noop`, `already committed`, `unresolvable`) is not
-  surfaced here. An ack for a position already below the cursor therefore commits the
-  transaction and moves nothing. If you need that signal, ack outside a transaction.
-- A repeated `transactionId` among the *pushes* of one call is first-wins within the call: the
-  later item echoes the first item's `messageId` with `duplicate: true`, and no error is
-  raised. This is separate from the duplicate-against-history case above, which does raise.
+Two facts about the ack entries: they always read as successful when the transaction
+commits, because the per-item honesty of the plain ack routes (`noop`, `already committed`,
+`unresolvable`) is not surfaced here, so an ack below the cursor commits and moves nothing;
+if you need that signal, ack outside a transaction. And a `transactionId` repeated among the
+*pushes* of one call is first-wins within the call, the later item echoing the first item's
+`messageId` with `duplicate: true`, no raise; only the duplicate-against-history case above
+raises.
 
 ## Leases inside a transaction
 
-An ack still needs to prove it owns the lease. The broker resolves the lease for each
-`(partition, consumer group)` in this order: a `leaseId` on the operation itself, then the
-current lease holder read from the consumer row, then the single unambiguous entry in
-`requiredLeases`.
-
-If the request carries no lease information anywhere, every ack in it is treated as
-lease-less: the ownership check is skipped and the cursor still advances. That mirrors the
-plain ack route. Sending a lease id that has since expired is *not* the same thing: it is
-validated, rejected, and rolls the transaction back.
+An ack still proves it owns the lease, resolved per `(partition, consumer group)` in this
+order: a `leaseId` on the operation, then the current holder read from the consumer row,
+then the single unambiguous entry in `requiredLeases`. A request with no lease information
+anywhere skips the ownership check and still advances the cursor, mirroring the plain ack
+route. A lease id that has since expired is different: validated, rejected, rolled back.
 
 ## Ordering and locks inside the call
 
-Pushes execute in request order. Acks execute in ascending `(partition, consumer group)`
-order, regardless of the order you listed them. Every multi-partition writer in Queen takes
-partition locks in ascending partition id and only then takes consumer-row locks, so
-concurrent transactions over overlapping sets of partitions cannot deadlock against each
-other, against a plain push, or against retention.
-
-The practical consequence: you can bundle acks and pushes across many partitions and queues
-in one call without thinking about lock order. What you cannot do is assume the `results`
-array reflects execution order for acks: it is stamped back to your operation indices.
+Pushes execute in request order; acks in ascending `(partition, consumer group)` order,
+regardless of how you listed them. Every multi-partition writer takes partition locks in
+ascending partition id before consumer-row locks, so concurrent transactions cannot
+deadlock against each other, a plain push, or retention. Bundle freely across partitions
+and queues; the `results` array is stamped back to your operation indices, not execution
+order.
 
 ## The limit: this is not end-to-end exactly-once
 
-Atomicity covers the broker's state. It does not cover the network.
-
-If the response to a transaction is lost (a timeout, a dropped connection, a client crash
-after the commit), the client does not know whether the transaction committed. Retrying it
-blindly can duplicate the pushed messages, because the retry is a new set of messages as far
-as the broker is concerned.
+Atomicity covers the broker's state, not the network. A lost response (timeout, dropped
+connection, client crash after the commit) leaves the client not knowing whether the
+transaction committed, and a blind retry can duplicate the pushed messages.
 
 The fix is a deterministic `transactionId` on each pushed item, derived from the input (for
-example the input message's own transaction id plus a stage name), and a deduplication window
-long enough to cover your retry horizon. Then the retry behaves predictably:
+example its transaction id plus a stage name), and a deduplication window longer than your
+retry horizon. Then a retry either commits normally, because the first attempt never did, or
+is rejected with `QDUP` and **nothing is written twice**: the error means "already applied",
+provided your ids really are deterministic and the window really covered the gap. Both
+conditions are yours to guarantee; outside the window a repeat is accepted as a new message.
+The JavaScript transaction builder sends only `queue`, `partition` and `payload` per item,
+so to set a deterministic id inside a transaction, call the HTTP route directly.
 
-- If the first attempt never committed, the retry commits normally.
-- If the first attempt did commit, the retried push is a duplicate inside the window, so the
-  transaction is rejected with a `QDUP` error and **nothing is written twice**. The error means
-  "already applied", but only if your ids really are deterministic and the window really did
-  cover the gap.
-
-Both conditions are yours to guarantee. Outside the deduplication window, a repeat is
-accepted as a new message. And note that the JavaScript transaction builder sends only
-`queue`, `partition` and `payload` per item. To set a deterministic id inside a transaction,
-call the HTTP route directly.
-
-The deduplication mechanism, and what "exact" means for it, is on
-[Guarantees](/use/concepts/guarantees).
+What "exact" means for deduplication is on [Guarantees](/use/concepts/guarantees).
 
 ## When not to use it
 
-A transaction is one database transaction, so it holds locks for its duration and commits
-once. For a stage that only pushes, a plain batched push is cheaper and has the same
-durability. Reach for `/api/v1/transaction` when the *coupling* matters: when a push must not
-survive a failed ack, or an ack must not survive a failed push.
+A transaction is one database transaction: it holds locks for its duration and commits
+once. A stage that only pushes gets the same durability from a plain batched push, cheaper.
+Reach for `/api/v1/transaction` when the coupling matters: a push that must not survive a
+failed ack, or the reverse.

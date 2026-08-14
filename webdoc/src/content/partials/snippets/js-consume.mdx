@@ -1,20 +1,21 @@
 ---
 params: []
-description: "Verified snippet extracted from clients/client-js/test-v2/consume.js."
+description: "Verified snippet extracted from clients/client-js/test-v2/docs.js."
 ---
 
 {/* GENERATED FILE. Do not edit by hand.
-    Extracted from clients/client-js/test-v2/consume.js by webdoc/scripts/gen-snippets.mjs
+    Extracted from clients/client-js/test-v2/docs.js by webdoc/scripts/gen-snippets.mjs
     Regenerate with: pnpm --dir webdoc gen
 */}
 
-```js title="clients/client-js/test-v2/consume.js"
+```js title="clients/client-js/test-v2/docs.js"
 await client
-.queue('test-queue-v2-consume')
-.batch(1)
-.limit(1)
-.each()
-.consume(async msg => {
-    msgToReturn = msg
-})
+  .queue('orders')
+  .group('billing')
+  .subscriptionMode('all')
+  .limit(1)
+  .each()
+  .consume(async (message) => {
+    console.log(message.data)
+  })
 ```

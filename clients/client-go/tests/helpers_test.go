@@ -93,7 +93,8 @@ func cleanupTestData(ctx context.Context) error {
 	// TestGateTokenBucketBasic "expected 60 drained, got 20"). Match only the
 	// prefixes THIS package creates: test-go-*, test-auth-go-*,
 	// test-ackwindow-* (plus the legacy edge/pattern/workflow leftovers).
-	patterns := []string{"test-go-%", "test-auth-go-%", "test-ackwindow-%", "edge-%", "pattern-%", "workflow-%"}
+	// The three exact names are the documentation queues (docs_test.go).
+	patterns := []string{"test-go-%", "test-auth-go-%", "test-ackwindow-%", "edge-%", "pattern-%", "workflow-%", "orders", "payments", "invoices"}
 
 	// FK-less log tables first, best-effort: a rows-only server without the
 	// log schema errors here, so we ignore it and fall through to the queues

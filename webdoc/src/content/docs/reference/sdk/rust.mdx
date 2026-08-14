@@ -145,8 +145,17 @@ The partition defaults to `Default`, which the broker treats as the absence of a
 | `push_items(Vec<PushItem>)` | `Result<Vec<PushResult>>` |
 | `flush_buffer()` | `Result<Vec<PushResult>>` |
 
+Push a JSON payload:
+
+<Render file="snippets/rust-push" />
+
 With a buffer configured, `push` returns an empty vector: the messages are queued locally and
 the per-item verdict arrives with the flush.
+
+Deduplication is keyed on the transaction id; a `PushItem` carrying a deterministic id makes a
+retried push write nothing:
+
+<Render file="snippets/rust-push-dedup" />
 
 ### Popping
 
@@ -157,6 +166,10 @@ the per-item verdict arrives with the flush.
 
 `pop` returns `Err` on failure rather than an empty vector. An empty claim and a claim refused
 because pop maintenance is on both return `Ok` with nothing in it.
+
+A batched pop claiming several partitions in one call:
+
+<Render file="snippets/rust-pop" />
 
 ### The consume loop
 
@@ -170,6 +183,10 @@ consume_batch<F, Fut, E>(handler: F) -> Result<ConsumeSummary>
 
 `ConsumeSummary` carries `processed`, `acked`, `nacked` and `stopped_by`, which is
 `StopReason::Limit`, `Idle`, `Cancelled` or `Ended`.
+
+A bounded consume loop, stopping at a message limit or when the source goes idle:
+
+<Render file="snippets/rust-consume" />
 
 ### Lifecycle and DLQ
 
@@ -202,6 +219,10 @@ The DLQ builder takes only `limit` and `offset` because those, plus `queue` and
 Consecutive pushes to the same queue and partition merge into one operation, matching how the
 broker groups frames. A rolled-back transaction is HTTP 200 with `success: false`, which
 `commit` surfaces as an `Err`.
+
+Ack the input message and push the next stage in one commit:
+
+<Render file="snippets/rust-transaction" />
 
 ## `Admin`
 
@@ -271,8 +292,8 @@ dead-letter a message with `AckStatus::Dlq`.
 | `is_terminal_refusal()` | 403: suspended, gated, out of storage quota. |
 | `is_retryable()` | 429, `5xx`, timeout or transport fault. Any other 4xx is not. |
 
-`ErrorCode` covers `rate_limited`, `quota_exceeded`, `cluster_suspended`,
-`storage_quota_exceeded`, `feature_gated` and `forbidden`; an unrecognized code parses into
+`ErrorCode` mirrors the proxy's stable codes, listed under
+[Behind the proxy](/reference/errors#behind-the-proxy); an unrecognized code parses into
 `Other` and is treated as not retryable, which is the safe direction.
 
 ## `Message`
@@ -315,6 +336,10 @@ one. A message pushed inside a transaction can carry it.
 Chain rules are checked at `run`: a terminal must be last, `reduce` needs a window in front of
 it, at most one window, reducer, `key_by` and `gate` each, and `gate` cannot share a stream
 with windowing.
+
+A windowed aggregation from a source queue into a sink queue:
+
+<Render file="snippets/rust-stream" />
 
 ### `RunOptions`
 

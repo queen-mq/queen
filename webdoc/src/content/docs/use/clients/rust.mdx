@@ -25,16 +25,10 @@ verifiedBy:
 ---
 
 The Rust client is `async` on tokio, with a builder chain that executes when you `await` it.
-It requires Rust 1.75 and reaches the broker over `reqwest` with rustls, so it needs neither
-OpenSSL on the host nor cmake in the build.
-
-It is the only SDK that shares its wire types with the broker. Both depend on
-`crates/queen-protocol`, and the broker's test suite round-trips its own request parsers and
-rendered responses through those types, so a field that drifts on either side fails a test
-instead of reaching a client.
-
-The SDKs ship at the broker's version, and the HTTP API is the stable compatibility surface.
-[Versions and compatibility](/reference/compatibility) states what that covers.
+It requires Rust 1.75 and speaks `reqwest` with rustls: no OpenSSL on the host, no cmake in
+the build. It is the only SDK sharing its wire types with the broker, through
+`crates/queen-protocol`: a field that drifts on either side fails the broker's own round-trip
+tests instead of reaching a client.
 
 ## Install
 
@@ -53,12 +47,10 @@ use queen_mq::{Config, Queen};
 let queen = Queen::connect(Config::new("http://localhost:6632"))?;
 ```
 
-`Queen` is cheap to clone. Every clone shares one connection pool, one load balancer and one
-set of push buffers, so build it once and pass clones around.
-
-`connect` validates the configuration and the TLS setup but opens no socket. The first request
-does that. A bad URL, an unusable bearer token or a `Host` smuggled through `headers` all fail
-here rather than on the first call.
+`Queen` is cheap to clone: every clone shares one connection pool, one load balancer and one
+set of push buffers, so build it once and pass clones around. `connect` validates the
+configuration and the TLS setup but opens no socket; a bad URL, an unusable bearer token or a
+`Host` smuggled through `headers` fails here rather than on the first call.
 
 Several brokers, with failover and consistent-hash affinity:
 
@@ -72,22 +64,18 @@ let queen = Queen::connect(
 
 <Render file="snippets/rust-push" />
 
-`push` takes anything that implements `serde::Serialize`. `push_many` takes an iterator of
-them, and `push_items` takes fully-formed `PushItem` values for when the transaction id
-matters. The result is the broker's array, one entry per item in request order, each carrying
-`status`: `Queued`, `Duplicate`, `Error`, `Buffered` or `Failed`.
+`push` takes anything `serde::Serialize`; `push_many` an iterator of them; `push_items`
+fully-formed `PushItem` values for when the transaction id matters.
+The result is the broker's array in request order, each entry carrying `status`: `Queued`,
+`Duplicate`, `Error`, `Buffered` or `Failed`.
 
-A `transaction_id` you do not supply is minted client-side as a UUIDv7, which makes it unique
-per call and therefore not idempotent. Supply your own when you want the dedup window to
-protect a retry:
+A `transaction_id` you do not supply is minted client-side as a UUIDv7, unique per call and
+thus not idempotent. Supply your own when you want the dedup window to protect a retry:
 
 <Render file="snippets/rust-push-dedup" />
 
 <Aside type="note">
-`PushItem` has no `traceId` field. The broker's push path has nowhere to store one, so a trace
-id sent with a push is silently discarded and the message pops back with `traceId: null`. It
-does work inside a transaction, where `TxnPushItem::trace_id` exposes it. Rather than offer an
-option that does nothing, this client omits it on the push path.
+`PushItem` has no `traceId`: the broker's push path has nowhere to store one, so a trace id sent with a push pops back as `null`, and this client omits the option rather than offer one that does nothing. Inside a transaction it does work, through `TxnPushItem::trace_id`.
 </Aside>
 
 ### Buffering
@@ -103,38 +91,37 @@ let orders = queen.queue("orders").buffer(BufferOptions {
 orders.push(serde_json::json!({ "id": 1 })).await?;
 ```
 
-A buffered `push` returns an empty result: the per-item verdict does not exist yet, because
-nothing has been sent. The buffer lives in process memory, so a crash between the call and the
-flush loses those messages. `Queen::close` flushes before returning, so run it.
+A buffered `push` returns an empty result: nothing has been sent yet, so no per-item verdict
+exists. The buffer lives in process memory: a crash before the flush loses those messages,
+and `Queen::close` flushes before returning, so run it.
 
 ## Pop
 
 <Render file="snippets/rust-pop" />
 
-`pop` returns `Err` when the call fails. This is the one place the Rust client deliberately
-diverges from JavaScript, Python and C++, which catch every exception inside `pop` and return
-an empty list: an exhausted `429` budget and a terminal `403` then look exactly like an empty
-queue. An empty claim still returns `Ok` with nothing in it, and so does a claim refused
-because pop maintenance is on.
+`pop` returns `Err` when the call fails, the one place this client deliberately diverges from
+JavaScript, Python and C++: those catch everything inside `pop` and return an empty list, so
+an exhausted `429` budget or a terminal `403` looks like an empty queue there. An empty claim
+is still `Ok` with nothing in it, and so is a claim refused because pop maintenance is on.
 
-`pop_auto_ack` takes the broker-side flag instead, committing the cursor at delivery and taking
-no lease. A crash mid-handler loses that batch.
+`pop_auto_ack` takes the broker-side flag instead, committing the cursor at delivery with no
+lease: [at-most-once delivery](/use/concepts/consuming#autoack-and-what-it-costs), where a
+crash mid-handler loses that batch.
 
 ## Consume
 
 <Render file="snippets/rust-consume" />
 
-The handler's return value settles the message. `Ok` acks it; `Err` nacks it, and the error's
-`Display` becomes the reason recorded on the DLQ row if that nack exhausts the retry budget.
-The error type only has to be printable.
+The handler's return settles the message: `Ok` acks, `Err` nacks, and the error's `Display`
+becomes the DLQ reason if the nack exhausts the retry budget; the error type only has to be
+printable.
 
-`consume` hands the handler one message at a time. `consume_batch` hands it the whole claimed
-batch and settles it with a single ack, which is a round-trip cheaper when the work is
-naturally vectorised.
+`consume` hands the handler one message at a time; `consume_batch` hands it the whole claimed
+batch and settles it with a single ack, one round-trip cheaper for vectorised work.
 
 Because an ack is an offset commit, a nack clamps the group's cursor at the failed message and
-every later message in that popped batch is coming back. The per-message loop therefore
-abandons the rest of the batch after a nack rather than acking messages the broker will reject.
+the rest of that batch is coming back; the per-message loop therefore abandons it rather than
+acking messages the broker will reject.
 
 Stop a consumer with a `Cancel`:
 
@@ -153,12 +140,10 @@ queen.queue("orders").group("billing").cancel(cancel)
     .await?;
 ```
 
-A cancel takes effect between messages, never mid-handler, so a claim is never left in limbo.
+A cancel takes effect between messages, never mid-handler: no claim is left in limbo.
 
 <Aside type="note">
-`limit` counts across all workers, not per worker. With `concurrency(4).limit(10)` this client
-stops after ten messages in total. The JavaScript and Python consumers apply the limit per
-worker, so the same configuration processes up to forty.
+`limit` counts across all workers: with `concurrency(4).limit(10)` this client stops after ten messages in total, where the JavaScript and Python consumers apply the limit per worker and process up to forty.
 </Aside>
 
 ## Ack
@@ -170,26 +155,25 @@ queen.ack_with(&msg, queen_mq::AckStatus::Dlq, Some("poison".into())).await?;
 queen.ack_all(&msgs).await?;
 ```
 
-The consumer group and the lease are read from the message rather than passed separately, so a
-forgotten group cannot ack the wrong cursor. `ack_all` sends one request; because the batch
-endpoint carries a single consumer group, mixing groups in one call is refused client-side
-rather than half-applied.
+The consumer group and the lease come from the message itself, so a forgotten group cannot
+ack the wrong cursor. `ack_all` sends one request; the batch endpoint
+carries a single consumer group, so mixing groups in one call is refused client-side rather
+than half-applied.
 
-A rejected ack arrives as HTTP 200 with `success: false` on the item, so check the returned
-`AckResult` rather than the absence of an error. `noop: true` means the cursor was already
-past that message, which is a harmless duplicate commit rather than a failure.
+A rejected ack arrives as HTTP 200 with `success: false` on the item: check the returned
+`AckResult`, not the absence of an error. `noop: true` means the cursor was already past that
+message, a harmless duplicate commit.
 
 ## Transactions
 
 <Render file="snippets/rust-transaction" />
 
 Acking through the transaction builder also collects the messages' lease ids into
-`requiredLeases`, so a lease that expired while the handler was running rolls the whole thing
-back instead of pushing stage two for work somebody else has already re-claimed.
+`requiredLeases`, so a lease that expired mid-handler rolls everything back instead of
+pushing stage two for work somebody else has re-claimed.
 
 A rolled-back transaction comes back as HTTP 200 with `success: false`. This client surfaces
-that as an `Err`, because a caller who ignored it would believe a handoff happened that did
-not.
+that as an `Err`: a caller who ignored it would believe in a handoff that did not happen.
 
 ## Streams
 
@@ -201,13 +185,12 @@ See [Streams](/use/streams) for the model, and
 [the Rust reference](/reference/sdk/rust) for every method.
 
 The chain's `config_hash` is computed byte-identically to the JavaScript, Go and Python SDKs,
-so the same query can be redeployed in a different language without tripping the changed-chain
-guard.
+so the same query redeploys in a different language without tripping the changed-chain guard.
 
 ## Errors
 
 `queen_mq::Error` carries the HTTP status and the proxy's machine-readable `code` when there
-was one. Branch on those rather than on the message, which is prose:
+was one; branch on those, not on the prose message:
 
 ```rust
 match queen.queue("orders").push(payload).await {
@@ -232,9 +215,9 @@ let config = Config::new("http://localhost:6632")
     .bearer_token(std::env::var("QUEEN_TOKEN")?);
 ```
 
-Defaults match the other SDKs: a 30 second timeout, three attempts against `5xx` and transport
-faults with exponential backoff, affinity load balancing with 128 virtual nodes per backend,
-failover on, and a backend held out of the pool for five seconds after it fails.
+Defaults match the other SDKs: 30 s timeout, three attempts on `5xx` and transport faults
+with exponential backoff, affinity with 128 virtual nodes per backend, failover on, failed
+backends held out of the pool for five seconds.
 
 Behind a `queen_proxy` deployment, `host_header` advertises one Host while dialling another
 address, the way `curl --resolve` does:
@@ -245,9 +228,8 @@ let config = Config::new("http://cell.eu1.queenmq.cloud")
     .host_header("acme.eu1.queenmq.cloud")?;
 ```
 
-Setting a `Host` through `headers` is rejected at construction instead of being silently
-overridden, because a wrong Host at a proxy does not fail loudly: on a cell with a default
-cluster it lands the traffic in another tenant's data.
+**A `Host` set through `headers` is rejected at construction: a wrong Host at a proxy with a
+default cluster lands traffic in another tenant's data.**
 
 ## Shutdown
 
@@ -255,22 +237,18 @@ cluster it lands the traffic in another tenant's data.
 queen.close().await?;
 ```
 
-`close` flushes every buffer. Signal handling is opt-in behind the `signals` feature, and even
-then it installs nothing on its own: `shutdown_on_signal` resolves when `SIGINT` or `SIGTERM`
-arrives, so the caller decides where it belongs in its own shutdown sequence. Every other SDK
-except Go registers process-wide handlers by default, which is right for a script and wrong for
-a service.
+`close` flushes every buffer. Signal handling is opt-in behind the `signals` feature and
+installs nothing on its own: `shutdown_on_signal` resolves when `SIGINT` or `SIGTERM`
+arrives, and the caller decides where it belongs in the shutdown sequence. Every other SDK
+except Go registers process-wide handlers by default, right for a script and wrong for a
+service.
 
 ## Not offered
 
-Two admin methods the other SDKs expose call routes the broker does not register, so this
-client does not have them:
-
-- `clearQueue()`, which is `DELETE /api/v1/queues/:queue/clear`. Use
-  `queen.queue(name).delete()` to drop the queue, or seek the consumer group forward to skip
-  its backlog.
-- `moveMessageToDLQ()`, which is `POST /api/v1/messages/:partitionId/:transactionId/dlq`.
-  Dead-letter a message by acking it with `AckStatus::Dlq`, which does work.
+`clearQueue()` and `moveMessageToDLQ()`, which other SDKs expose, call
+[routes the broker does not register](/use/concepts/leases-retries-dlq#getting-a-message-out-of-the-dead-letter-queue),
+so this client omits them: drop a queue with `queen.queue(name).delete()` or seek the group
+past its backlog; dead-letter by acking with `AckStatus::Dlq`.
 
 `retry_message` is a dead-letter replay rather than a generic retry: it re-pushes the DLQ
-snapshot and drops the DLQ row, and errors on a message that is not in the DLQ.
+snapshot, drops the DLQ row, and errors on a message not in the DLQ.

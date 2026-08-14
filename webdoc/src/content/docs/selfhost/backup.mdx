@@ -1,6 +1,6 @@
 ---
 title: Backup and restore
-description: "Dump both schemas with pg_dump, restore with pg_restore, and know what a restore does to consumer cursors and in-flight leases."
+description: "The pg_dump and pg_restore commands for both schemas, and what a restore does to consumer cursors, leases, dedup state and the maintenance flag."
 type: how-to
 tier: operate
 sidebar:
@@ -15,136 +15,89 @@ sourceOfTruth:
   - server/Dockerfile
 ---
 
-Queen has no backup feature. The broker's built-in migration surface was removed,
-and the `migrate` subcommand that remains only reports that offline migration is
-unsupported and exits non-zero. Backup is therefore a PostgreSQL operation, done
-with the standard tools, and there is nothing broker-specific to install.
-
-What makes it simple is that the broker is stateless. Everything it persists lives
-in **two schemas** (`queen` and `queen_streams`) plus the node-local push spool,
-which no database backup can capture. No table lives in `public`, and no extension
-is required: the schema needs `CREATE SCHEMA` and nothing else.
-
-<Aside type="caution">
-The broker image is a slim Debian base holding only the binary. It does **not**
-ship `pg_dump`, `psql` or `pg_restore`. Run these commands from a client image, a
-PostgreSQL image, or the database host, and match the client's major version to
-the server's or newer.
-</Aside>
-
-## Dumping both schemas
-
-One command, two `-n` flags, custom format so the restore can be parallel and
+Backing up Queen is a PostgreSQL operation. The broker is stateless: everything
+it persists lives in the two schemas `queen` and `queen_streams`, plus the
+[node-local push spool](/selfhost/durability), which no database backup can
+capture. Dump both schemas in custom format, so the restore can be parallel and
 selective:
 
 ```bash
 pg_dump -Fc -n queen -n queen_streams -f queen-2026-07-30.dump "postgresql://user@host:5432/queen"
 ```
 
-Omitting `queen_streams` is the most common mistake. It holds every registered
-streaming query and all per-key operator state; without it a restored deployment
-loses its stream definitions and every aggregate they had accumulated, and the
-loss is silent: the broker boots happily and recreates an empty schema.
-
-To check what you captured before you trust it:
+Check what you captured before you trust it:
 
 ```bash
 pg_restore -l queen-2026-07-30.dump
 ```
 
-A dump can be taken against a running broker. `pg_dump` works from a single
-transaction snapshot, so the result is internally consistent: a consistent
-picture of a moving system, which is what the next section is about.
-
-Schema-only and data-only dumps are both viable, but note that the broker
-re-applies its full DDL at every boot under an advisory lock, and every statement
-is idempotent. A schema-only dump is therefore redundant for recovery: the binary
-carries the schema. Dump the data and let the broker own the shape.
-
-## Restoring
-
-Restore into an empty database, with the broker stopped.
+Restore into an empty database, with every broker instance stopped:
 
 ```bash
 createdb -h host -U postgres queen_restored
-```
-
-```bash
 pg_restore --no-owner --no-privileges -d "postgresql://postgres@host:5432/queen_restored" queen-2026-07-30.dump
 ```
 
-`--no-owner` and `--no-privileges` are deliberate: the boot-time schema applier
-re-issues the `GRANT` statements the broker needs, so you do not have to reproduce
-the source cluster's roles. Start a broker against the restored database with
-`QUEEN_APPLY_SCHEMA` at its default of true and its idempotent re-apply verifies
-the restored schema and re-asserts the per-table parameters.
-
-Restore into the **same broker version** that produced the dump. The deployment
-model is always-virgin: the boot DDL only creates, it never reshapes existing
-tables, so a restored older-version schema is exactly the "database built by a
-different version" case that is unsupported. Moving data across versions is a
-cutover, not a restore; see [Upgrades](/selfhost/upgrade).
-
 <Aside type="danger">
-Do not restore into a database a broker is still connected to. A restore while
-instances are pushing and acking rewrites cursor rows underneath them; the result
-is not a rolled-back deployment, it is an incoherent one. Stop every instance
-first, including ones you forgot were behind the load balancer.
+**Do not restore into a database a broker is still connected to: stop every
+instance first, including ones you forgot were behind the load balancer.** A
+restore under live pushes and acks rewrites cursor rows underneath them and
+leaves the deployment incoherent, not rolled back.
+</Aside>
+
+## Why the commands look like that
+
+**Both `-n` flags matter.** Omitting `queen_streams` is the most common mistake:
+it holds every registered streaming query and all per-key operator state, and the
+loss is silent, because the broker boots happily and recreates an empty schema.
+
+**A dump can be taken against a running broker.** `pg_dump` works from a single
+transaction snapshot, so the result is internally consistent.
+
+**Dump the data, not the shape.** The broker re-applies its full DDL at every
+boot under an advisory lock, every statement idempotent, so a schema-only dump is
+redundant for recovery. No table lives in `public` and no extension is required:
+the schema needs `CREATE SCHEMA` and nothing else.
+
+**`--no-owner --no-privileges` are deliberate.** The boot-time schema applier
+re-issues the `GRANT` statements the broker needs, so you do not reproduce the
+source cluster's roles; start a broker against the restored database with
+`QUEEN_APPLY_SCHEMA` at its default of true and the idempotent re-apply verifies
+the schema and re-asserts the per-table parameters.
+
+**Restore into the same broker version that produced the dump.** The deployment
+model is always-virgin: boot DDL only creates, never reshapes, so an
+older-version schema is the unsupported "database built by a different version"
+case. Moving data across versions is a cutover, not a restore; see
+[Upgrades](/selfhost/upgrade).
+
+<Aside type="note">
+The published image ships the PostgreSQL 18 client tools, so every command here
+runs from inside the broker container; the slim broker-only image built from
+`server/Dockerfile` does not carry them, so with that build run them from a
+client image or the database host, matching the client's major version to the
+server's or newer. The remaining `migrate` subcommand only reports that offline
+migration is unsupported and exits non-zero.
 </Aside>
 
 ## What a restore does to consumers
 
-A restore rolls the *entire* consumption state back to the dump instant, and the
-consequences are mechanical rather than mysterious.
+A restore rolls the entire consumption state back to the dump instant. The
+consequences are mechanical:
 
-**Cursors go backwards, so messages are redelivered.** Consumption state is one
-`committed` offset per (partition, consumer group). Restoring sets it back to its
-dump-time value, so every message acked between the dump and the restore is
-delivered again. The volume of duplicate delivery is proportional to the age of
-the dump: an hour-old dump means an hour of reprocessing. Consumers must be
-idempotent for this to be a recovery rather than an incident.
-
-**Leases come back expired, and nothing is handed back.** A lease is a set of
-columns on the consumer row (`worker_id`, `batch_end`, `lease_expires_at`), not a
-session. A dump captures whichever leases were open at that instant. After the
-restore, those timestamps are in the past, the lease predicate treats the row as
-free, and the next pop re-leases the span from `committed`. Nothing is stuck.
-
-The one edge to know: if you restore *quickly*, a captured `lease_expires_at` may
-still be in the future, and that (partition, group) is invisible to pops until it
-passes. Wait it out; the wait is bounded by the queue's lease time.
-
-**Deduplication is restored, partially.** `queen.log_txns`, the hash sidecar the
-push path probes, is in the dump, so producers replaying messages that were
-already stored before the dump are still deduplicated inside the window. Hashes
-written *after* the dump are gone, so a producer retrying one of those pushes will
-be accepted as new. Combined with the cursor rollback, plan for both duplicate
-delivery and, for post-dump traffic, duplicate storage.
-
-**Retry budgets and dead letters roll back too.** `batch_retry_count` returns to
-its dump value, so a batch that had exhausted its retries gets its budget back.
-`queen.log_dlq` rows written after the dump are gone.
-
-**The maintenance flag is in the dump.** Both flags live in
-`queen.system_state`, and the broker reads them at boot. A dump taken during a
-maintenance window restores with push maintenance **on**, which means every push
-goes straight to the spool and nothing reaches PostgreSQL. Check
-`GET /api/v1/system/maintenance` immediately after any restore.
-
-**The spool is not in the dump.** Buffered pushes are files under
-`FILE_BUFFER_DIR` on whichever node accepted them. A database restore neither
-captures nor replays them. If you are rebuilding a deployment, drain the spools
-first. See [Surviving a PostgreSQL outage](/selfhost/durability).
-
-**Metrics and stats recover on their own.** `queen.stats` is recomputed by the
-reconciler within one interval, and the metrics tables refill from the collectors.
-Restoring them is harmless but not required, so a data-only restore that skips
-`queen.system_metrics`, `queen.worker_metrics` and `queen.queue_lag_metrics` is a
-legitimate way to make a large dump smaller.
+| State | After the restore |
+| --- | --- |
+| Cursors | Back to their dump-time `committed` offsets, so every message acked since the dump is redelivered. Duplicate volume is proportional to the dump's age: an hour-old dump means an hour of reprocessing. Consumers must be idempotent for this to be a recovery rather than an incident. |
+| Leases | A lease is columns on the consumer row (`worker_id`, `batch_end`, `lease_expires_at`), not a session. Restored timestamps are in the past, the lease predicate treats the row as free, and the next pop re-leases from `committed`. One edge: a fast restore can capture a still-future `lease_expires_at`, and that (partition, group) is invisible to pops until it passes; the wait is bounded by the queue's lease time. |
+| Deduplication | `queen.log_txns`, the hash sidecar the push path probes, is in the dump, so producers replaying pre-dump messages are still deduplicated inside the window. Hashes written after the dump are gone, so a retry of one of those pushes is accepted as new. Plan for duplicate delivery and, for post-dump traffic, duplicate storage. |
+| Retry budgets and dead letters | `batch_retry_count` returns to its dump value, so an exhausted batch gets its budget back. `queen.log_dlq` rows written after the dump are gone. |
+| Maintenance flags | Both live in `queen.system_state` and are read at boot. A dump taken during a maintenance window restores with push maintenance **on**, so every push goes to the spool and nothing reaches PostgreSQL: check `GET /api/v1/system/maintenance` immediately after any restore. |
+| The push spool | Not in the dump: buffered pushes are [node-local files](/selfhost/durability) under `FILE_BUFFER_DIR`, so drain the spools before rebuilding a deployment. |
+| Metrics and stats | Recover on their own: `queen.stats` is recomputed within one reconciler interval and the metrics tables refill from the collectors. A data-only restore that skips `queen.system_metrics`, `queen.worker_metrics` and `queen.queue_lag_metrics` is a legitimate way to shrink a large dump. |
 
 ## Cloning a deployment
 
-The same two-schema dump is how you build a staging copy from production.
+The same two-schema dump builds a staging copy from production.
 
 <Steps>
 
@@ -154,36 +107,31 @@ The same two-schema dump is how you build a staging copy from production.
    --no-privileges`.
 
 3. Start one broker against it and read the `config: postgres` boot line to
-   confirm it is talking to the clone and not to production.
+   confirm it is talking to the clone, not to production.
 
-4. Review the clone's mesh configuration before it serves anything.
-   **Do not leave `QUEEN_MESH_PEERS` pointing at the source deployment's
-   instances**: mesh frames wake parked pops and include a maintenance-mode set, so
-   a clone that joins the original mesh can affect production. The mesh port must be
-   firewalled in both deployments regardless.
+4. **Do not leave `QUEEN_MESH_PEERS` pointing at the source deployment**: a clone
+   that joins the original mesh can affect production, up to
+   [flipping its maintenance mode](/selfhost/ha#the-mesh-port-must-be-firewalled).
 
-5. Decide what the clone's consumers should see. The restored cursors are
-   production's cursors. To replay history in the clone, seek the consumer groups
-   back with `POST /api/v1/consumer-groups/:group/queues/:queue/seek` rather than
-   editing rows by hand.
+5. The restored cursors are production's cursors. To replay history in the
+   clone, seek the groups back with
+   `POST /api/v1/consumer-groups/:group/queues/:queue/seek` rather than editing
+   rows by hand.
 
 </Steps>
 
-A clone is a separate database, so the advisory locks that gate retention and the
-stats reconciler are separate too; the clone sweeps its own data and cannot
+A clone is a separate database, so the advisory locks gating retention and the
+stats reconciler are separate too: the clone sweeps its own data and cannot
 interfere with the source's maintenance.
 
 ## Physical backups
 
-Nothing about the broker argues against a physical backup: a base backup plus WAL
-archiving, or your provider's snapshot and point-in-time recovery. It covers both
-schemas by construction, which removes the "forgot `queen_streams`" failure mode
-entirely, and it is the right choice once a logical dump stops finishing in a
-sensible window.
-
-The restore semantics above are unchanged: recovering to a point in time rolls
-consumer cursors back to that point, with exactly the same redelivery
-consequences. The spool remains outside the picture either way.
+A base backup plus WAL archiving, or your provider's snapshot and point-in-time
+recovery, works without caveats: it covers both schemas by construction, which
+removes the "forgot `queen_streams`" failure mode, and it is the right choice
+once a logical dump stops finishing in a sensible window. Recovering to a point
+in time rolls cursors back to that point with exactly the redelivery
+consequences above, and the spool stays outside the picture either way.
 
 ## Related pages
 

@@ -24,8 +24,10 @@ sourceOfTruth:
 Everything here lives in the PostgreSQL schema `queen`, created by `server/sql/schema.sql`. That
 file plus exactly 23 files under `server/sql/procedures/` (`001`–`023`) are embedded in the binary
 with `include_str!` and applied at every boot in lexical order under session advisory lock
-`778120010`. All of it is idempotent, so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the
-step entirely.
+`778120010`. All of it is idempotent (`CREATE OR REPLACE`, `IF NOT EXISTS`,
+`ADD COLUMN IF NOT EXISTS`), so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the
+step entirely, which lets a privileged role pre-apply the DDL so the broker can run as a
+low-privilege user.
 
 The apply **only creates**. There are no teardown files, no migration blocks and no upgrade
 `ALTER`s: a deployment starts from an empty database, and `schema.sql`'s `CREATE TABLE`s declare
@@ -41,7 +43,9 @@ The file map: `001_log_schema` and `002_streams_schema` are the DDL, `003_log_pu
 admin and stats surface, and `012`–`023` (minus `020`) are the shared management plane: configure,
 queue deletion, consumer groups, status, messages, traces, stats readers, metrics, Prometheus.
 `020_log_partition_counters` is a special case: it only attaches triggers, and its position after
-both `001` (the table) and `019` (the trigger functions) is the point of it.
+both `001` (the table) and `019` (the trigger functions) is the point of it. The ordering is not
+cosmetic anywhere: SQL-language function bodies resolve tables at creation time, so the DDL files
+must land before every procedure body that names them.
 
 <Aside type="note">
 The SQL is `include_str!`-embedded at compile time. Editing a `.sql` file and restarting is not
@@ -74,16 +78,9 @@ flags, `delayed_processing`, `window_buffer`, the retention policy columns, encr
 `max_wait_time_seconds`, `max_queue_size`, `min_pop_wait_time`. See
 [Queue options](/reference/queue-options).
 
-Two things about this table are worth being precise about:
-
-- **The `lease_time` default of 60 is a truth fix, not a behaviour change.** An implicitly
-  push-created queue has *always* leased at 60 (the pop path read that default) while the config
-  display used to show 300 from a column the pop path never read. The display lied; now the one
-  column both paths share tells the one truth. `/configure` still writes an explicit 300 when
-  `leaseTime` is omitted, so configured queues are unchanged.
-- **There is no `storage` column.** One engine, nothing to select. The wire still echoes
-  `storage: "segments"` as a hard-coded literal (`012_configure`, `010_log_admin`,
-  `011_log_stats`) for compatibility.
+Why `lease_time` defaults to 60 and why there is no `storage` column are both explained in
+[the storage model](/internals/storage-model); the `storage: "segments"` wire literal is
+hard-coded in `012_configure`, `010_log_admin` and `011_log_stats`.
 
 A queue row is created by the first push (`003_log_push` provisioning), by `/configure`
 (`012_configure`), by the transaction wire (`005_log_ack`), by a streams sink (`007_log_streams`),
@@ -104,22 +101,15 @@ non-atomic steps (the SQL delete plus a broker-side log-table teardown).
 
 ### queen.log_partitions (`001_log_schema`)
 
-One row per partition, and the per-partition write serializer.
+One row per partition, and the per-partition write serializer; the columns (the `last_offset`
+allocator and the two retention watermarks) are documented in
+[the storage model](/internals/storage-model).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `UUID` | PK; every other log table keys on it |
-| `queue_id` | `UUID` | FK to `queen.queues(id)`, cascading |
-| `name` | `TEXT` | default `Default`; `UNIQUE (queue_id, name)` |
-| `last_offset` | `BIGINT` | allocator, default `-1`; next base is `last_offset + 1` |
-| `log_start` | `BIGINT` | segment retention watermark, default 0 |
-| `txns_start` | `BIGINT` | `log_txns` purge watermark, default 0 |
-| `last_write_at` | `TIMESTAMPTZ` | indexed; quantized to at most one change per second |
-| `created_at` | `TIMESTAMPTZ` | |
-
-Index: `idx_log_partitions_queue_write (queue_id, last_write_at)`, the wildcard candidate scan's
-hot filter. Storage parameters: `fillfactor = 70`, `autovacuum_vacuum_scale_factor = 0`,
-`autovacuum_vacuum_threshold = 500`, `autovacuum_vacuum_cost_delay = 0`, `vacuum_truncate = off`.
+`PRIMARY KEY (id)` and `UNIQUE (queue_id, name)`; `queue_id` references `queen.queues(id)`,
+cascading. Index: `idx_log_partitions_queue_write (queue_id, last_write_at)`, the wildcard
+candidate scan's hot filter. Storage parameters: `fillfactor = 70`,
+`autovacuum_vacuum_scale_factor = 0`, `autovacuum_vacuum_threshold = 500`,
+`autovacuum_vacuum_cost_delay = 0`, `vacuum_truncate = off`.
 
 The row is deleted only by the cleanup phase, and only once the partition is empty and both its
 timestamps are older than `PARTITION_CLEANUP_DAYS`. Deleting it cascades to `log_segments` (none, by
@@ -129,15 +119,8 @@ partition under a new `id`, allocating from `last_offset = -1` again. See
 
 ### queen.log_segments (`001_log_schema`)
 
-The messages.
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `partition_id` | `UUID` | FK to `log_partitions`, cascading; part of PK |
-| `base_offset` | `BIGINT` | part of PK |
-| `end_offset` | `BIGINT` | inclusive; `msg_count = end_offset - base_offset + 1` |
-| `created_at` | `TIMESTAMPTZ` | stamped under the partition row lock |
-| `blob` | `BYTEA` | packed length-prefixed frames, zstd-compressed |
+The messages, packed as length-prefixed zstd-compressed frame blobs; the columns are documented in
+[the storage model](/internals/storage-model).
 
 `PRIMARY KEY (partition_id, base_offset)` and **no secondary indexes**: the PK is also the pop path.
 `blob` is `SET STORAGE EXTERNAL`. Autovacuum: scale factor 0.1, insert scale factor 0.3, cost limit
@@ -145,43 +128,20 @@ The messages.
 
 ### queen.log_txns (`001_log_schema`)
 
-The hash sidecar. Written on **every** push, whether deduplication is enabled or not, because
-ack-by-`transactionId` resolves through it.
+The hash sidecar, written on every push whether deduplication is on or off; the columns, and the
+obligation the missing foreign key puts on the two partition deleters, are documented in
+[the storage model](/internals/storage-model).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `partition_id` | `UUID` | part of PK; **no foreign key**, deliberately |
-| `base_offset` | `BIGINT` | part of PK |
-| `end_offset` | `BIGINT` | inclusive, same range as the segment |
-| `created_at` | `TIMESTAMPTZ` | same timestamp as the segment |
-| `hashes` | `BYTEA` | `16 × msg_count` bytes: `xxh3_128` big-endian, frame order |
-
-The missing foreign key keeps FK-trigger cost off the purge path, at the price of one obligation:
-whatever deletes a partition must delete these rows itself. The purge phase walks live partitions,
-so a row orphaned by a partition delete would be unreachable forever. Exactly two things delete
-partitions, `log_partition_cleanup_step_v1` and `delete_queue_v1`, and both delete the sidecar
-explicitly first.
+`PRIMARY KEY (partition_id, base_offset)`, no secondary indexes, and deliberately no foreign key
+on `partition_id`. Autovacuum: scale factor 0.1, insert scale factor 0.3, cost delay 0.
 
 ### queen.log_consumers (`001_log_schema`)
 
-Coordination state per `(partition, consumer_group)`.
+Coordination state per `(partition, consumer_group)`: the cursor, the lease and the retry budget.
+The columns are documented in [the storage model](/internals/storage-model).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `partition_id` | `UUID` | FK to `log_partitions`, cascading; part of PK |
-| `consumer_group` | `TEXT` | part of PK; default `__QUEUE_MODE__` |
-| `committed` | `BIGINT` | the cursor (last acked offset); default `-1` |
-| `batch_end` | `BIGINT` | inclusive end of the leased batch; `NULL` = no lease |
-| `worker_id` | `TEXT` | the lease holder, echoed to clients as `leaseId` |
-| `lease_expires_at` | `TIMESTAMPTZ` | |
-| `lease_acquired_at` | `TIMESTAMPTZ` | also the queue-detail `lastActivity` source |
-| `batch_retry_count` | `INTEGER` | the retry budget; charged only by an explicit `failed` ack |
-| `attempt_offset` | `BIGINT` | the batch's first delivered offset |
-| `attempt_count` | `INTEGER` | redelivery telemetry; never spends budget |
-| `total_consumed` | `BIGINT` | lifetime counter |
-| `created_at` | `TIMESTAMPTZ` | |
-
-Storage parameters: `fillfactor = 50`, `autovacuum_vacuum_scale_factor = 0`,
+`PRIMARY KEY (partition_id, consumer_group)`; `partition_id` references `log_partitions(id)`,
+cascading. Storage parameters: `fillfactor = 50`, `autovacuum_vacuum_scale_factor = 0`,
 `autovacuum_vacuum_threshold = 500`, `autovacuum_vacuum_cost_delay = 0`, `vacuum_truncate = off`.
 
 ### queen.log_dlq (`005_log_ack`)

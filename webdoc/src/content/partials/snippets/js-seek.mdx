@@ -1,0 +1,17 @@
+---
+params: []
+description: "Verified snippet extracted from clients/client-js/test-v2/docs.js."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from clients/client-js/test-v2/docs.js by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```js title="clients/client-js/test-v2/docs.js"
+// Move the audit group's cursor back one hour. The seek also releases
+// any live lease, so an in-flight batch is abandoned, not acked.
+await client.admin.seekConsumerGroup('audit', 'orders', {
+  timestamp: new Date(Date.now() - 3600 * 1000).toISOString(),
+})
+```

@@ -174,16 +174,9 @@ so a hand-applied `psql` fix is silently reverted by the next restart. Always
 `cargo build` after a SQL edit, then restart.
 </Aside>
 
-The applier runs at every boot, in the lexical order of the list above, under a session
-advisory lock so replicas serialise rather than race. Every statement is idempotent
-(`CREATE OR REPLACE`, `IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), which is what makes
-re-applying on every boot safe. It only ever **creates**: the deployment model is always-virgin
-(a deployment starts from an empty database, and there are no migration files), so each table
-and function is defined exactly once, by exactly one file. Lexical order is still not cosmetic:
-the table files (`001_log_schema`, `002_streams_schema`) must land before the SQL-language
-function bodies that resolve those tables at creation time, and the partition-counter trigger
-attachment (`020_log_partition_counters`) must land after both the table it attaches to and the
-functions it binds (`019_worker_metrics`). Setting `QUEEN_APPLY_SCHEMA=0` skips the whole step.
+The applier re-applies this list idempotently at every boot, in lexical order, under an advisory
+lock; the [schema catalogue](/internals/schema) covers the apply rules, the always-virgin
+deployment model, why the order is load-bearing, and `QUEEN_APPLY_SCHEMA=0`.
 
 The dashboard has the opposite failure mode and it is worth knowing the difference: a `debug`
 `rust_embed` build reads assets from disk, so a dashboard change *appears* to take effect

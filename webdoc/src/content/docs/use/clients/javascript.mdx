@@ -1,6 +1,6 @@
 ---
 title: JavaScript quickstart
-description: "Install queen-mq for Node, construct a client, and use the fluent grammar end to end: push, pop, consume, transactions, buffering and shutdown."
+description: "Install queen-mq for Node, push and consume in the first minute, then the rest of the fluent grammar: pop, transactions, buffering and shutdown."
 type: how-to
 tier: use
 sidebar:
@@ -26,34 +26,20 @@ verifiedBy:
 ---
 
 The JavaScript client is the reference implementation: every other SDK is a transliteration
-of it. It is ESM-only, requires Node 22 or newer (`engines.node: ">=22.0.0"`), and ships the
-broker client and the streaming SDK in one package.
-
-The SDKs ship at the broker's version, and the HTTP API is the stable compatibility surface.
-[Versions and compatibility](/reference/compatibility) states what that covers.
+of it. ESM-only, Node 22 or newer, broker client and streaming SDK in one package.
 
 <PackageManagers pkg="queen-mq" />
 
 ```js
 import { Queen } from 'queen-mq'
-```
 
-The package also exports `Admin`, the five defaults objects (`CLIENT_DEFAULTS`,
-`QUEUE_DEFAULTS`, `CONSUME_DEFAULTS`, `POP_DEFAULTS`, `BUFFER_DEFAULTS`), and the streaming
-entry points `Stream`, `tokenBucketGate` and `slidingWindowGate`. Named ESM exports mean a
-bundler can drop the streaming code if you only import `Queen`.
-
-## Construct a client
-
-The constructor accepts three shapes: a URL string, an array of URLs, or a config object.
-
-```js
 const client = new Queen('http://localhost:6632')
 ```
 
-```js
-const client = new Queen(['http://broker-a:6632', 'http://broker-b:6632'])
-```
+It also exports `Admin`, the defaults objects and the streaming entry points as named ESM
+exports; the full list is in [Reference](/reference/sdk/javascript).
+
+## Construct a client
 
 ```js
 const client = new Queen({
@@ -65,13 +51,10 @@ const client = new Queen({
 })
 ```
 
-With one URL the client talks to it directly. With more than one it builds a load balancer
-and enables failover, so a `5xx` or a network error marks that backend unhealthy and the
-request is retried against the next one. A `4xx` is never retried across backends, and a
-`429` is retried in place against the same backend (see [429 and 403](#429-and-403)).
-
-Every URL is validated at construction. Passing neither `url` nor `urls` throws
-`Must provide urls or url in configuration`.
+The constructor accepts a URL string, an array, or a config object; no `url`/`urls` throws.
+One URL is a direct client; more build a load balancer with failover: `5xx` and network
+errors move to the next backend, `4xx` never retries across backends, `429` retries in place
+(see [429 and 403](#429-and-403)).
 
 ### Client options
 
@@ -96,41 +79,38 @@ Defaults come from `CLIENT_DEFAULTS` in `utils/defaults.js`.
 | `retry429` | n/a | `{ maxAttempts, baseMs, capMs }`. See below. |
 
 <Aside type="note">
-`headers: { Host: '...' }` cannot work: `Host` is on the WHATWG forbidden-header list and
-`fetch` drops it silently. The client detects it, maps it onto `hostHeader`, and warns
-loudly on `console.warn` (not gated by the log env var), because a wrong `Host` at a
-multi-tenant proxy either 421s or lands your traffic on another tenant's cluster.
-`hostHeader` must be a bare authority (`acme.example:6711`), never a URL, and it needs
-`undici`. In a browser the client refuses to send rather than advertise the wrong host.
+**`headers: { Host }` cannot work**: `fetch` drops it silently, so the client maps it onto `hostHeader` (a bare authority, needs `undici`, refused in a browser) and warns loudly, because a wrong `Host` at a multi-tenant proxy either 421s or lands your traffic on another tenant's cluster; the full contract is under [`hostHeader`](/reference/sdk/javascript#hostheader).
 </Aside>
 
 ## Push
 
 <Render file="snippets/js-push" />
 
-`push()` takes one item or an array. Each item's body is `data`, or `payload`, or, if
-neither key is present, the item itself. A `transactionId` you do not set is minted as a
-UUIDv7 client-side. A `traceId` is put on the wire only if it is a valid UUID, but The broker's push path stores no trace id, so the value is dropped and the message pops back with `traceId: null`; it is honoured only on the transaction path.
+`push()` takes one item or an array; body unwrapping (`data` / `payload` / the item itself)
+and the client-minted UUIDv7 `transactionId` follow
+[the shared grammar](/use/clients#same-grammar-six-spellings). A `traceId` (sent only when a
+valid UUID) survives
+[only the transaction path](/use/clients#verified-against-the-source): a plain push pops
+back `traceId: null`.
 
-The call returns a thenable builder, so `await` executes it. The resolved value is the
-broker's array, one entry per item in request order:
+`await` executes the builder; the result is the broker's array, one entry per item in
+request order:
 
 ```js
 const res = await client.queue('orders').push([{ data: { id: 1 } }])
 // res[0] === { index: 0, message_id: '...', transaction_id: '...', queueName: 'orders', status: 'queued' }
 ```
 
-`status` is `queued`, `duplicate`, `buffered` or `failed`. `buffered` means the broker's
-database write failed and the message went to the broker's disk spool for replay. The HTTP
-status is still `201`, so checking the code alone hides it. The push callbacks below only
-bucket `queued`, `duplicate` and `failed`, so a `buffered` item fires none of them: read
-`status` off the returned array if you need to see it.
+`status` is `queued`, `duplicate`, `buffered` or `failed`. **A `buffered` item is on the
+broker's disk spool, not stored, and the HTTP status is still `201`**: read `status` off the
+array, the callbacks below never fire for it
+([the status values](/use/concepts/producing#the-status-values)).
 
-Supply your own `transactionId` to make a push idempotent inside the queue's dedup window:
+Your own `transactionId` makes a push idempotent inside the dedup window:
 
 <Render file="snippets/js-push-dedup" />
 
-Before awaiting, you can attach callbacks that split the response by status:
+Callbacks attached before the await split the response by status:
 
 ```js
 await client
@@ -141,40 +121,14 @@ await client
   .onError((failed, err) => log.error(err))
 ```
 
-Without an `onError` callback, a `failed` item makes the await throw. With one, it does not.
-
-## Pop
-
-<Render file="snippets/js-pop" />
-
-`pop()` resolves to an array of messages, or `[]`. Each message carries `id`,
-`transactionId`, `traceId`, `data`, `producerSub`, `createdAt`, `partitionId`, `partition`,
-`leaseId` and `consumerGroup`.
-
-`wait` defaults to `true` on the builder, so a bare `pop()` is a 30-second long poll. Set
-`.wait(false)` for an immediate return and `.timeoutMillis(n)` to change the poll window.
-
-<Aside type="caution">
-`pop()` catches everything and returns `[]`: a network failure, an exhausted `429` budget
-and a terminal `403` all look like an empty queue. The error is logged with its status and
-`code`, but the caller cannot see it. Use `consume()` when you need failures to surface.
-</Aside>
-
-Two knobs matter for throughput. `.batch(n)` caps how many messages come back;
-`.partitions(n)` claims up to `n` partitions in one call, with `batch` acting as a global cap
-across all of them and one `leaseId` covering the lot, so renewing once extends them all.
-`.group('name')` selects a consumer group; without one the pop uses queue mode.
-
-`.autoAck(true)` on a pop commits the cursor inside the pop transaction. That is at-most-once
-delivery: a crash after the response is a lost message.
+A `failed` item makes the await throw unless an `onError` callback is attached.
 
 ## Consume
 
 <Render file="snippets/js-consume" />
 
-`consume(handler)` starts `concurrency` workers, each in its own poll loop, and resolves when
-every worker stops. It never returns on its own unless you set `limit`, `idleMillis` or an
-`AbortSignal`.
+`consume(handler)` starts `concurrency` workers and resolves only when every worker stops:
+set `limit`, `idleMillis` or an `AbortSignal` to make it finish.
 
 | Method | Default | Effect |
 | --- | --- | --- |
@@ -194,27 +148,37 @@ every worker stops. It never returns on its own unless you set `limit`, `idleMil
 | `consume(fn, { signal })` | n/a | An `AbortSignal` that stops every worker. |
 
 Without `.each()` the handler receives the **array** of popped messages, even when `batch` is
-`1`. That differs from Python, Go and PHP, which pass a single message in that case.
+`1`; [Python, Go and PHP differ](/use/clients#where-the-sdks-diverge).
 
-Each delivered message also gets a `trace()` method that posts a trace event and never
-throws:
+`autoAck` is client-side: the worker acks `completed` on return, `failed` on throw. An ack
+is an [offset commit](/use/concepts/ack), so a nack clamps the cursor at the failed message
+and **everything after it in the popped batch is redelivered**: `.each()` abandons the rest,
+otherwise the handler owns the whole batch. `.onSuccess()` or `.onError()` force `autoAck`
+off; if the callback does not ack, the lease expires.
+
+Delivered messages also carry a `trace()` method that never throws:
 
 ```js
 await msg.trace({ traceName: ['tenant-acme'], eventType: 'step', data: { stage: 'charged' } })
 ```
 
-### What autoAck actually does
+## Pop
 
-`autoAck` in `consume()` is client-side. The consumer never sends `autoAck` to the server;
-it calls `POST /api/v1/ack` itself after your handler returns, with status `completed` on
-return and `failed` on throw. Because an ack is an offset commit, a nack clamps the group's
-cursor at the failed message, so **everything after it in the popped batch will be
-redelivered**. With `.each()` the consumer detects this and abandons the rest of the batch
-rather than producing duplicates and rejected acks. Without `.each()` your handler owns the
-whole batch, so it should either succeed for all of it or throw.
+<Render file="snippets/js-pop" />
 
-Attaching `.onSuccess()` or `.onError()` to a consume forces `autoAck` off, on the assumption
-that the callback acks. If it does not, nothing is acked and the lease expires.
+`pop()` resolves to an array of messages, or `[]`; message shape:
+[What comes back](/use/concepts/consuming#what-comes-back).
+
+`wait` defaults to `true`, so a bare `pop()` long-polls for 30 seconds; `.wait(false)`
+returns immediately, `.timeoutMillis(n)` changes the window. `.batch(n)` caps the batch;
+`.partitions(n)` claims up to `n` partitions under one shared `leaseId` with `batch` as the
+global cap. `.group('name')` selects a group, queue mode without. `.autoAck(true)` commits
+the cursor inside the pop:
+[at-most-once delivery](/use/concepts/consuming#autoack-and-what-it-costs).
+
+<Aside type="caution">
+`pop()` swallows every failure into `[]`, including an exhausted `429` budget and a terminal `403`: an empty array does not mean an empty queue, so use `consume()` when failures must surface.
+</Aside>
 
 ## Acknowledge manually
 
@@ -224,21 +188,16 @@ for (const msg of messages) { await handle(msg) }
 await client.ack(messages, true, { group: 'billing' })
 ```
 
-`ack(message, status, context)` takes one message or an array. `status` is `true`
-(`completed`), `false` (`failed`), or one of the strings `completed`, `failed`, `retry`,
-`dlq`. `context.group` names the consumer group; `context.error` records a failure reason
-that lands on the DLQ row if this nack exhausts the retry budget.
+`ack(message, status, context)` takes one message or an array; `status` is `true`/`false` or
+`completed`, `failed`, `retry`, `dlq`; `context.group` names the group, `context.error` the
+failure reason stored on the DLQ row if the retry budget is exhausted.
 
-`partitionId` is mandatory on every ack: the client throws (batch) or returns
-`{ success: false }` (single) without it, because a `transactionId` alone is not unique across
-partitions. Pass the message objects you got from the pop and it is already there.
+`partitionId` is mandatory (a `transactionId` alone is not unique across partitions): a
+batch ack throws without it, a single one returns `{ success: false }`, messages from a pop
+carry it. **A rejected ack is still HTTP 200**: check `success` per item; a
+length mismatch between request and response throws.
 
-A rejected ack still arrives as HTTP 200 with `success: false` on the item, so the per-item
-flag is the only signal that the broker accepted it. The client checks the response length
-against the number of acks sent and throws if they disagree, rather than misattributing a
-result to the wrong message.
-
-Per-message statuses in one batch call:
+Per-message outcomes in one batch call:
 
 ```js
 messages[0]._status = 'dlq'
@@ -250,20 +209,14 @@ await client.ack(messages, true, { group: 'billing' })
 
 <Render file="snippets/js-transaction" />
 
-`transaction()` bundles pushes and acks into one PostgreSQL transaction, all or nothing. The
-builder collects `.queue(name).partition(p).push(items)` and `.ack(messages, status)`
-operations and sends them on `.commit()`, together with the `leaseId`s of every acked message
-as `requiredLeases`, so the commit fails if a lease expired in the meantime. Committing with
-no operations throws.
-
-This is the primitive for a pipeline stage: ack the input and push the output atomically, so
-a crash cannot produce a stage that consumed without emitting.
-
-<Aside type="note">
-A transaction is not exactly-once end to end. If the response is lost and you retry, you
-duplicate the pushes unless their `transactionId`s are deterministic and still inside the
-dedup window.
-</Aside>
+`transaction()` bundles pushes and acks into one PostgreSQL transaction, all or nothing:
+`.commit()` sends the collected `.queue(name).partition(p).push(items)` and
+`.ack(messages, status)` operations plus the acked `leaseId`s as `requiredLeases`, so the
+commit fails if a lease expired; committing with nothing throws. Ack input and push output
+atomically; it is
+[not exactly-once end to end](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once):
+a retry after a lost response duplicates the pushes unless the `transactionId`s are
+deterministic and inside the dedup window.
 
 ## Lease renewal
 
@@ -271,16 +224,10 @@ dedup window.
 await client.renew(messages)
 ```
 
-`renew()` accepts a lease ID, a message, or an array, and de-duplicates the lease IDs. A
-multi-partition pop shares one lease across every claimed partition, so passing the whole
-array issues one HTTP call, not N.
-
-<Aside type="caution">
-The returned `newExpiresAt` is always `null`. The broker answers
-`{"renewed":N,"expiresAt":"..."}` and the client reads `newExpiresAt` / `lease_expires_at`.
-The renewal happens; the reported expiry does not exist. Schedule the next renewal from your
-own interval, which is what `.renewLease(true, ms)` does.
-</Aside>
+`renew()` takes a lease ID, a message, or an array, and de-duplicates: a multi-partition pop
+shares one lease, so one call covers the array. A `null` `newExpiresAt` means the lease
+already expired
+([extending a lease](/use/concepts/leases-retries-dlq#extending-a-lease)).
 
 ## Client-side buffering
 
@@ -291,19 +238,16 @@ await client
   .push([{ data: { seen: Date.now() } }])
 ```
 
-With `buffer()`, `push()` returns `{ buffered: true, count: N }` immediately and the messages
-are flushed when the buffer reaches `messageCount` (default `100`) or `timeMillis` (default
-`1000`) elapses since the first message, whichever comes first. Buffers are keyed per
+With `buffer()`, `push()` returns `{ buffered: true, count: N }` immediately; the messages
+flush at `messageCount` (default `100`) or `timeMillis` (default `1000`), keyed per
 `queue/partition`.
 
 <Aside type="caution">
-A buffered push gives up two things. You never see the per-item `queued` / `duplicate`
-verdict, because the response arrives after your call returned. And the buffer is in process
-memory: an unflushed buffer is lost if the process dies without running `close()`.
+**A buffered push trades away the per-item `queued` / `duplicate` verdict and lives in process memory**: an unflushed buffer is lost if the process dies without `close()` ([buffering across the SDKs](/use/clients#where-the-sdks-diverge)).
 </Aside>
 
-Flush explicitly with `await client.queue('events').flushBuffer()` for one queue/partition or
-`await client.flushAllBuffers()` for all of them. `client.getBufferStats()` returns
+Flush explicitly with `await client.queue('events').flushBuffer()` (one queue/partition) or
+`await client.flushAllBuffers()`; `client.getBufferStats()` returns
 `{ activeBuffers, totalBufferedMessages, oldestBufferAge, flushesPerformed }`.
 
 ## Admin
@@ -314,18 +258,11 @@ const queues = await client.admin.listQueues({ limit: 50 })
 const lagging = await client.admin.getLaggingConsumers(120)
 ```
 
-`client.admin` is a lazily created singleton over the observability and management routes:
-resources (overview, namespaces, tasks, queues, partitions), messages, traces, status and
-analytics, consumer groups (list, get, lagging, delete-for-queue, seek), health, metrics and
-the two maintenance-mode switches. The full route list, with the access level each one
-requires, is in [Reference](/reference).
-
-<Aside type="caution">
-`admin.clearQueue()` and `admin.moveMessageToDLQ()` call paths the broker does not register
-(`DELETE /api/v1/queues/:queue/clear` and
-`POST /api/v1/messages/:partitionId/:transactionId/dlq`). Both return 404.
-`admin.retryMessage()` and `admin.deleteMessage()` are real.
-</Aside>
+`client.admin` covers the observability and management routes; the route list with access
+levels is in [Reference](/reference). `admin.clearQueue()` and
+`admin.moveMessageToDLQ()` call
+[unregistered routes](/use/concepts/leases-retries-dlq#getting-a-message-out-of-the-dead-letter-queue)
+and 404; `admin.retryMessage()` and `admin.deleteMessage()` are real.
 
 ## Dead-letter queue
 
@@ -333,24 +270,14 @@ requires, is in [Reference](/reference).
 const { messages } = await client.queue('orders').dlq('billing').limit(50).offset(0).get()
 ```
 
-`dlq()` reads `GET /api/v1/dlq` and swallows errors to `{ messages: [], total: 0 }`. Each row
-carries `queue`, `partition`, `consumerGroup`, `errorMessage`, `retryCount`, `data`,
-`createdAt` and `failedAt`.
-
-<Aside type="note">
-`total` is the size of the page, not of the result set. The handler sets it to the length of
-the array it just returned, so it can never exceed `limit` and it does not tell you how much
-is left. And `.from()`, `.to()` and the builder's partition are sent as query parameters the
-broker's DLQ handler never reads (it collects only `queue`, `consumerGroup`, `limit` and
-`offset`), so they are silently ignored. Page with `limit`/`offset` until you get a short page,
-and filter the rest client-side.
-</Aside>
-
-To reprocess one dead letter, `admin.retryMessage(partitionId, transactionId)` calls the
-broker's replay route, which re-pushes the stored payload and then drops the DLQ row. The
-replayed message is a new message: it gets a fresh identity and lands at the tail of its
-partition, so ordering relative to the original is not preserved. There is no bulk redrive:
-to replay many rows, read them and push them yourself.
+`dlq()` reads `GET /api/v1/dlq` and swallows errors to `{ messages: [], total: 0 }`. `total`
+is the page size, not the result set, and the broker reads only `queue`, `consumerGroup`,
+`limit` and `offset`: page until a short page, filter the rest client-side
+([reading the DLQ](/use/concepts/leases-retries-dlq#reading-the-dead-letter-queue)).
+`admin.retryMessage(partitionId, transactionId)`
+[replays one dead letter](/use/concepts/leases-retries-dlq#getting-a-message-out-of-the-dead-letter-queue)
+as a new message at the tail of its partition; no bulk redrive, so replay many rows by
+reading and pushing them yourself.
 
 ## 429 and 403
 
@@ -362,31 +289,22 @@ const client = new Queen({
 })
 ```
 
-A `429` is retried in place against the same backend. The delay honours `Retry-After`
-(seconds) when present, otherwise `baseMs * 2^attempt` capped at `capMs`, and both get ±20 %
-jitter to avoid a synchronised herd. `maxAttempts` defaults to `10` for push and admin calls;
-a long-poll pop (`wait: true`) retries unboundedly unless you set `maxAttempts`, in which case
-it applies to both. A `429` never marks the backend unhealthy.
-
-A `403` is terminal. The consume worker logs it with its `code` and throws out of the worker
-rather than retrying, because `cluster_suspended`, `storage_quota_exceeded`, `feature_gated`
-and `forbidden` never resolve on their own. Errors carry `.status` and, when the body has
-one, `.code`, so you can branch without matching on message text.
+A `429` retries in place with `Retry-After` or jittered exponential backoff; `maxAttempts`
+defaults to 10, and a long-poll pop retries unboundedly unless you set it
+([the contract](/reference/errors#the-429-contract)). A `403` (`cluster_suspended`,
+`storage_quota_exceeded`, `feature_gated`, `forbidden`) is terminal: the consume worker
+throws out of the loop. Errors carry `.status` and `.code`.
 
 ## Logging
-
-Console logging is off unless `QUEEN_CLIENT_LOG=true` (Node) or
-`window.QUEEN_CLIENT_LOG === true` (browser). Passing a `logger` overrides the env gate
-entirely, so the logger is then always active. It must implement `info`, `warn` and `error`;
-`debug` falls back to `info`.
 
 ```js
 const client = new Queen({ url, logger: pino(), structuredLogs: true })
 ```
 
-By default the logger receives one formatted string, `[operation] {json}`. With
-`structuredLogs: true` the detail keys become top-level fields and the operation becomes the
-message, pino/bunyan style. Use it only with a logger that accepts a leading merge object.
+Console logging is off unless `QUEEN_CLIENT_LOG=true` (Node) or
+`window.QUEEN_CLIENT_LOG === true` (browser); a passed `logger` overrides the gate, needs
+`info`/`warn`/`error` (`debug` falls back to `info`), and `structuredLogs: true` calls it
+pino style, `info(fields, message)`.
 
 ## Graceful shutdown
 
@@ -394,16 +312,12 @@ message, pino/bunyan style. Use it only with a logger that accepts a leading mer
 await client.close()
 ```
 
-`close()` flushes every buffer, tears down the buffer manager, removes the signal handlers
-and destroys the HTTP agent. That last step matters: the client owns its own `undici` Agent
-so `close()` can release the keep-alive sockets. Without it, Node's event loop stays pinned
-by open sockets and the process never exits on its own.
-
-Unless you pass `handleSignals: false`, the constructor registers `SIGINT` and `SIGTERM`
-handlers that call `close()` and `process.exit(0)`. A second signal exits immediately with
-code 1. When Queen is embedded in an application with its own lifecycle, either construct
-with `handleSignals: false` or call `client.disableGracefulShutdown()`;
-`client.enableGracefulShutdown()` puts them back.
+`close()` flushes and tears down every buffer, removes the signal handlers and destroys the
+HTTP agent; without it the `undici` keep-alive sockets pin the event loop and the process
+never exits. By default the constructor hooks `SIGINT`/`SIGTERM` to `close()` and exit (a
+second signal exits with code 1); embedded in an app with its own lifecycle, pass
+`handleSignals: false` or call `client.disableGracefulShutdown()`
+(`enableGracefulShutdown()` reverses it).
 
 ## Streaming
 
@@ -413,6 +327,5 @@ import { Stream } from 'queen-mq'
 const stream = Stream.from(client.queue('events').group('agg'))
 ```
 
-The windowed streaming SDK ships in the same package and builds on the same client. It has
-its own concepts (windows, watermarks, gates, state) and is documented separately in
-[Use Queen](/use).
+The windowed streaming SDK ships in the same package and builds on the same client; its
+concepts are documented in [Use Queen](/use).

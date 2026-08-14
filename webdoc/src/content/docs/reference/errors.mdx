@@ -203,8 +203,9 @@ tenant credentials at all. See
 
 ### What the clients do with a 429
 
-The JavaScript SDK retries `429` in place, against the same backend, and treats
-no other status as retryable at that layer:
+Every SDK retries `429` in place, against the same backend and never via
+failover (a 429 is a quota signal, not a health signal), and treats no other
+status as retryable at that layer:
 
 - ordinary requests: up to **10 attempts**;
 - long-poll pops: **unbounded** by default, because the loop is meant to keep
@@ -213,8 +214,9 @@ no other status as retryable at that layer:
   capped at 30 s;
 - either way jittered ±20 % so a fleet does not resynchronise into a herd.
 
-`retry429: { maxAttempts, baseMs, capMs }` overrides all of it, and setting
-`maxAttempts` explicitly applies it to pops too. Setting `maxAttempts: 1`
+Each SDK exposes a `retry429` option carrying `maxAttempts`, `baseMs` and
+`capMs` (spelled per language convention) that overrides all of it, and setting
+`maxAttempts` explicitly applies it to pops too. Setting `maxAttempts` to `1`
 disables retrying and surfaces the 429 to your code, which is what a load
 generator wants and an application usually does not.
 

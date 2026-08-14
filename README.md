@@ -23,7 +23,7 @@ PostgreSQL you already run. No cluster, no JVM.
 
 <div align="center">
 
-<img src="assets/queen-features.svg" alt="A queue split into one ordered lane per session, one of them stalled behind a slow consumer and holding up nobody, and that same lane magnified to single messages: four complete behind the committed cursor, three leased, three waiting, one arriving from a push. Three panels show consumer groups replaying from a segment edge, a lease resolving to a retry or to the dead-letter table, and window state, output and the acknowledgement of the source committing together. Underneath, three identical broker processes with nothing between them, over one PostgreSQL boundary holding the partition, segment, consumer and dead-letter tables." width="880" />
+<img src="assets/queen-map.svg" alt="A map of sustained message rate against ordered entities. Both axes are logarithmic, unnumbered, and carry the same range and the same scale, so a system that reaches the same figure on both draws a square. Each system is drawn as the region where it keeps one ordered lane per entity: Kafka holds a low lane ceiling, because entities hash onto a partition set sized in advance, and its region runs off the right of the map with its closing edge dashed, because that rate is not an edge we measured; RabbitMQ closes a small corner, one live queue per entity; pgmq reaches higher in entities at modest rate; SQS FIFO closes a dashed corner at its published rate quota and its in-flight cap. Queen's region is the largest, and it is a square: a million messages a second sustained for 24 hours, and a million ordered lanes in one database, from two separate runs. The corner beyond it, more of both, belongs to nobody on the map." width="880" />
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-2021-000000.svg)](https://www.rust-lang.org/)
@@ -49,6 +49,10 @@ membership and no partition assignments, so you scale it by starting another cop
 same database. Clients speak plain HTTP and hold no coordination state either, so there is no
 rebalancing protocol to wait out when a worker restarts. Durability, backup and replication are
 whatever your PostgreSQL already does.
+
+<div align="center">
+<img src="assets/queen-features.svg" alt="A queue split into one ordered lane per session, one of them stalled behind a slow consumer and holding up nobody, and that same lane magnified to single messages: four complete behind the committed cursor, three leased, three waiting, one arriving from a push. Three panels show consumer groups replaying from a segment edge, a lease resolving to a retry or to the dead-letter table, and window state, output and the acknowledgement of the source committing together. Underneath, three identical broker processes with nothing between them, over one PostgreSQL boundary holding the partition, segment, consumer and dead-letter tables." width="880" />
+</div>
 
 ## What you get
 
@@ -95,9 +99,12 @@ await queen
   .partition('customer-42')
   .push([{ data: { hello: 'world' } }])
 
+// A group created after the push starts at the tail by default;
+// subscriptionMode('all') points its new cursor at the beginning.
 await queen
   .queue('orders')
   .group('billing')
+  .subscriptionMode('all')
   .each()
   .consume(async (message) => {
     console.log(message.data)
@@ -233,16 +240,16 @@ broker.push(vec![qp::PushItem::new("jobs", serde_json::json!({"n": 1}))]).await?
 let popped = broker.pop("jobs", &qp::PopParams::default()).await?;
 ```
 
-Facts to know before you build on it. One `Broker` per process lifetime is the supported
-shape; the admission arbiter is process-global, so a second concurrent instance or a
-start-shutdown-start cycle degrades maintenance metering. A push answered `status:"buffered"`
-sits in a per-instance temp spool by default and does not survive a restart — configure
-`spool_dir` if you want the outage spool to be durable. N embedded instances over one
-PostgreSQL coordinate through the database exactly like N binaries do, minus the mesh:
-cross-instance wake-ups ride the periodic floors instead of peer frames. And the v1 surface
-is the data plane plus the DLQ; consumer-group administration, listings, traces and streams
-still need the HTTP surface. The engine is not a lighter Queen — it is the same engine, minus
-the HTTP layer, at the same PostgreSQL cost.
+Boundaries to know before you build on it:
+
+- One `Broker` per process lifetime: the admission arbiter is process-global.
+- The outage spool defaults to a per-instance temp directory: set `spool_dir` if
+  `status: "buffered"` pushes must survive a restart.
+- The v1 surface is the data plane plus the DLQ; consumer-group administration, listings,
+  traces and streams still need the HTTP surface.
+
+The full list, and what N embedded instances over one PostgreSQL do, is at
+[queenmq.com/use/embed](https://queenmq.com/use/embed).
 
 Guide: **[queenmq.com/use/embed](https://queenmq.com/use/embed)** · API reference:
 **[queenmq.com/reference/engine](https://queenmq.com/reference/engine)**.

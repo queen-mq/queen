@@ -1,6 +1,6 @@
 ---
 title: Use Queen
-description: "The model, the SDKs and the worked examples you need to build an application on Queen."
+description: "Push, consume, ack: the model, the SDKs and the worked examples you need to build an application on Queen."
 type: overview
 tier: use
 sidebar:
@@ -11,13 +11,17 @@ sourceOfTruth:
 ---
 
 This section is for the person writing code against Queen. The surface is small (push, pop,
-ack, and a transaction that bundles pushes and acks into one PostgreSQL commit), but the
-semantics are specific, and two of them follow from the model rather than being options you
-can turn off: **an acknowledgement is an offset commit**, and
-**a consumer group holds at most one leased batch per partition**.
+ack, and a transaction that bundles pushes and acks into one PostgreSQL commit), and this is
+most of it, extracted from the JavaScript test suite:
 
-Read the concept chain in order. Everything after it (the SDK pages, the examples, the error
-handling) assumes you know what a partition, a cursor and a lease are.
+<Render file="snippets/js-push" />
+
+<Render file="snippets/js-consume" />
+
+Two of the semantics follow from the model rather than being options you can turn off:
+**an acknowledgement is an offset commit**, and **a consumer group holds at most one leased
+batch per partition**. Read the concept chain in order; everything after it (the SDK pages,
+the examples, the error handling) assumes you know what a partition, a cursor and a lease are.
 
 <CardGrid>
   <LinkCard
@@ -42,20 +46,6 @@ handling) assumes you know what a partition, a cursor and a lease are.
   />
 </CardGrid>
 
-## The rest of this section
-
-The four pages above are the first half of the concept chain. The sidebar continues with the
-rest of it, then with the language-specific material.
-
-| Group | What it covers |
-| --- | --- |
-| [Concepts, continued](/use/concepts/ack) | [Acknowledgement as an offset commit](/use/concepts/ack), [leases and retries and the dead-letter queue](/use/concepts/leases-retries-dlq), [transactions](/use/concepts/transactions), [replay and repositioning a group](/use/concepts/replay), [retention](/use/concepts/retention), and a summary of the [delivery guarantees](/use/concepts/guarantees) |
-| [Clients](/use/clients) | One page per SDK ([JavaScript](/use/clients/javascript), [Python](/use/clients/python), [Go](/use/clients/go), [Rust](/use/clients/rust), [PHP/Laravel](/use/clients/php-laravel), [C++](/use/clients/cpp)), plus [using Queen from any language over plain HTTP](/use/clients/http) |
-| [Examples](/use/examples) | [Producer and consumer](/use/examples/producer-consumer), [fan-out with consumer groups](/use/examples/fanout), a [transactional multi-stage pipeline](/use/examples/pipeline), [message deduplication](/use/examples/dedup), [replay](/use/examples/replay), and [handling failures through the DLQ](/use/examples/dlq) |
-| [Errors](/use/errors) | HTTP status codes, `429` backpressure through the proxy, and what a client should retry |
-| [Streams](/use/streams) | Windowed aggregation over a queue, with tumbling, sliding, session and cron windows |
-| [Embed the engine](/use/embed) | Running the broker inside your own Rust process: what `Broker::start` boots, the data-plane surface, and the multi-instance floors (beta) |
-
 ## Before you write code
 
 Four things are worth knowing before the first request.
@@ -68,15 +58,13 @@ Four things are worth knowing before the first request.
 - **TLS terminates in front of the broker.** The broker has no TLS listener and no CORS layer,
   so terminate TLS at the proxy or at a reverse proxy in front of it. See
   [self-hosting](/selfhost).
-- **`POST /api/v1/configure` is a full replace.** Any option you omit is reset to its default,
-  including `dedupWindowSeconds`, which goes back to 3600. Send the whole configuration every
-  time.
+- **`POST /api/v1/configure` is a [full replace](/reference/queue-options).** Any option you
+  omit is reset to its default, so send the whole configuration every time.
 
 ## What "verified" means here
 
-Code samples on these pages are extracted from files the test suite executes, and each one is
-labelled with the file it came from. Where a page shows a flow that has no extracted snippet,
-the sample is hand-written and is not labelled as verified. Route tables,
-environment-variable tables and metric lists are generated from the source at build time.
-Throughput figures live in [benchmarks](/benchmarks), each with the configuration and the
-archived output that produced it.
+Code samples on these pages, including the two above, are extracted from files the test suite
+executes and labelled with the file they came from; a sample without that label is
+hand-written. The [worked examples](/use/examples) are built the same way, route and
+environment tables are generated from the source at build time, and throughput figures live
+in [benchmarks](/benchmarks) with the archived output that produced them.

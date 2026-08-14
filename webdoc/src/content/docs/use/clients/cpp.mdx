@@ -1,6 +1,6 @@
 ---
 title: C++ quickstart
-description: "Build and use the single-header C++ client: what it covers, what it leaves to you, and how to satisfy its three vendored headers."
+description: "Build and use the single-header C++ client: satisfy its three vendored headers, then push, pop, consume and transact over synchronous JSON."
 type: how-to
 tier: use
 sidebar:
@@ -19,26 +19,20 @@ verifiedBy:
   - test/runners/cpp/Dockerfile
 ---
 
-`clients/client-cpp/queen_client.hpp` is a single header, about 2,150 lines, that implements
-the message plane, transactions, the DLQ query, client-side buffering, round-robin and session
-load balancing, and a thread-pool consumer. It needs C++17 and three third-party headers.
-Admin calls and lease renewal inside the consume loop are not part of it; the full scope list
-is below.
-
-The SDKs ship at the broker's version, and the HTTP API is the stable compatibility surface.
-[Versions and compatibility](/reference/compatibility) states what that covers.
+`clients/client-cpp/queen_client.hpp` is a single header, about 2,150 lines: message plane,
+transactions, the DLQ query, client-side buffering, round-robin and session load balancing,
+and a thread-pool consumer. It needs C++17 and three third-party headers; admin calls and
+lease renewal inside the consume loop are outside its scope; the full list is below.
 
 ## Building it
 
-The header opens with `#include <json.hpp>`, `#include <httplib.h>` and
-`#include "../server/include/threadpool.hpp"`, and the `Makefile` adds
-`-I../server/vendor -I../server/include`. Relative to `clients/client-cpp/`, those resolve to
+The header includes `<json.hpp>`, `<httplib.h>` and `"../server/include/threadpool.hpp"`;
+the `Makefile`'s `-I../server/vendor -I../server/include` resolve to
 `clients/server/vendor/` and `clients/server/include/`, directories the repository does not
-carry and step 1 below creates. Two of the three headers are third-party and gitignored; the third,
-`threadpool.hpp` (the MIT-licensed `astp::ThreadPool`), was recovered from git history and is
-vendored at `test/vendor/cpp/threadpool.hpp`.
-
-The test runner's Dockerfile is the authoritative recipe. From the repository root:
+carry and step 1 creates. The first two headers are third-party and gitignored;
+`threadpool.hpp` (the MIT-licensed `astp::ThreadPool`) is vendored at
+`test/vendor/cpp/threadpool.hpp`. The test runner's Dockerfile is the authoritative recipe;
+from the repository root:
 
 <Steps>
 
@@ -74,23 +68,20 @@ The test runner's Dockerfile is the authoritative recipe. From the repository ro
 
 </Steps>
 
-Step 3 only needs a directory already on the compiler's include path. The `Makefile` probes
-`/opt/homebrew/include`, `/usr/local/include` and `/usr/include` for `httplib.h` and adds
-whichever it finds first, and on macOS `brew install cpp-httplib` puts it in the Homebrew
-prefix. OpenSSL is on by default: `USE_SSL=1` defines `CPPHTTPLIB_OPENSSL_SUPPORT` and links
-`-lssl -lcrypto`. Setting `USE_SSL=0` drops only the flags: `queen_client.hpp` defines
-`CPPHTTPLIB_OPENSSL_SUPPORT` itself if it is not already defined, so cpp-httplib still compiles
-its TLS paths and expects the OpenSSL symbols. Keep `USE_SSL=1`.
+Step 3 only needs a directory on the compiler's include path: the `Makefile` probes
+`/opt/homebrew/include`, `/usr/local/include` and `/usr/include` (on macOS
+`brew install cpp-httplib` lands in the Homebrew prefix). Keep `USE_SSL=1`, the default:
+`USE_SSL=0` drops only the `-lssl -lcrypto` flags, while `queen_client.hpp` still defines
+`CPPHTTPLIB_OPENSSL_SUPPORT` itself, so cpp-httplib compiles its TLS paths and expects the
+OpenSSL symbols anyway.
 
-`make test` builds `bin/test_client`, which takes the broker URL as `argv[1]` (there is no
-environment override, and the default is `http://localhost:6632`). `make retry429` builds
-`bin/test_retry429`, the proxy-contract suite (bearer auth, `429` backoff, terminal `403`), which
-serves its own responses from an in-process `httplib::Server` and therefore needs neither a
-broker nor PostgreSQL.
+`make test` builds `bin/test_client`, which takes the broker URL as `argv[1]` (default
+`http://localhost:6632`, no environment override). `make retry429` builds `bin/test_retry429`,
+the proxy-contract suite (bearer auth, `429` backoff, terminal `403`): it serves its own
+responses from an in-process `httplib::Server`, so it needs neither broker nor PostgreSQL.
 
-In your own project, put `queen_client.hpp` wherever you like and satisfy the three includes
-however your build system prefers; the `../server/...` path in the header is the only thing
-that forces the directory layout above.
+In your own project, satisfy the three includes however your build system prefers; only the
+`../server/...` path in the header forces the layout above.
 
 ## Constructing a client
 
@@ -140,9 +131,9 @@ auto res = client.queue("orders")
 ```
 
 `push()` takes a `std::vector<json>`. The body is `data`, or `payload`, or the item itself; a
-missing `transactionId` is minted as a UUIDv7 and a `traceId` is sent only if it is a
-valid UUID. The response is the broker's per-item array with `status` set to `queued`,
-`duplicate`, `buffered` or `failed`.
+missing `transactionId` is minted as a UUIDv7, and a `traceId` is sent only if it is a valid
+UUID. The response is the broker's per-item array with `status` `queued`, `duplicate`,
+`buffered` or `failed`.
 
 ```cpp
 json messages = client.queue("orders").group("billing").batch(10).pop();
@@ -151,11 +142,7 @@ json messages = client.queue("orders").group("billing").batch(10).pop();
 `pop()` returns the messages array, or an empty array.
 
 <Aside type="caution">
-Two things about `pop()`. It catches every exception (including an exhausted `429` budget and
-a terminal `403`), logs it, and returns an empty array, so an empty result does not mean an
-empty queue. And `wait_` defaults to `true` with a **fixed 30-second** window: `QueueBuilder`
-has no `timeout_millis()` setter, so the only way to shorten the long poll on a pop or a
-consume is `.wait(false)`.
+Two things about `pop()`: it catches every exception (an exhausted `429` budget and a terminal `403` included), logs it and returns an empty array, so an empty result does not mean an empty queue; and `wait_` defaults to `true` with a **fixed 30-second** window, because `QueueBuilder` has no `timeout_millis()` setter, so `.wait(false)` is the only way to shorten the long poll.
 </Aside>
 
 ```cpp
@@ -170,11 +157,9 @@ client.queue("jobs")
       .consume([](const json& msg) { process(msg); }, &stop);
 ```
 
-`consume()` blocks until every worker stops. Workers stop on the `stop_signal` you pass, on
-`client.close()` having been called (the worker checks `is_shutdown_requested()`), on `limit`,
-on `idle_millis`, or on a terminal `403`, which is recorded and rethrown to the caller once
-all workers have finished, because the workers run inside `packaged_task`s whose futures are
-only waited on.
+`consume()` blocks until every worker stops: on the `stop_signal` you pass, on
+`client.close()`, on `limit`, on `idle_millis`, or on a terminal `403`, which is recorded and
+rethrown to the caller once all workers have finished.
 
 The builder methods are `group`, `concurrency`, `batch`, `partitions`, `limit`, `idle_millis`,
 `auto_ack`, `wait`, `renew_lease`, `subscription_mode`, `subscription_from`, `each` and
@@ -182,12 +167,7 @@ The builder methods are `group`, `concurrency`, `batch`, `partitions`, `limit`, 
 itself after your handler returns (`completed`) or throws (`failed`).
 
 <Aside type="caution">
-Unlike the JavaScript, Python and Go consumers, the C++ worker does **not** abandon the rest of
-the batch after a nack under `.each()`. Because an ack is an offset commit, a nack clamps the
-group's cursor at the failed message, so every later message in that batch will be redelivered,
-and the C++ worker processes and acks them anyway, producing duplicate work and rejected
-acks. If you use `.each()` with `auto_ack`, make your handler idempotent, or throw out of the
-whole batch instead.
+Unlike the JavaScript, Python and Go consumers, the C++ worker does **not** abandon the rest of the batch after a nack under `.each()`. The nack clamps the group's cursor at the failed message, so the rest of the batch will be redelivered, and the worker processes and acks it anyway, producing duplicate work and rejected acks. Make an `.each()` handler with `auto_ack` idempotent, or throw out of the whole batch instead.
 </Aside>
 
 ## Acknowledge, renew, transact
@@ -196,14 +176,14 @@ whole batch instead.
 json result = client.ack(messages, true, {{"group", "billing"}});
 ```
 
-`ack()` takes a single message object or an array, a boolean status (`true` → `completed`,
-`false` → `failed`) and a context object carrying `group` and `error`. There is no way to send
-`retry` or `dlq` from this SDK: the boolean maps only to `completed` or `failed`. A missing
-`partitionId` throws for an array and returns `{"success": false, …}` for a single message.
+`ack()` takes a message object or an array, a boolean status (`true` is `completed`, `false`
+is `failed`) and a context carrying `group` and `error`; the boolean maps only to those two,
+so this SDK cannot send `retry` or `dlq`. A missing `partitionId` throws for an array and
+returns `{"success": false, …}` for a single message.
 
-The return value is `{"success": true, "result": <broker array>}`, where `success` reflects
-whether the *request* was accepted, not whether each ack landed. A rejected ack arrives as HTTP 200
-with `success: false` on its item, so read `result["result"][i]["success"]`.
+The return value is `{"success": true, "result": <broker array>}`, where `success` means the
+*request* was accepted. A rejected ack arrives as HTTP 200 with `success: false` on its item,
+so read `result["result"][i]["success"]`.
 
 ```cpp
 client.transaction()
@@ -212,25 +192,22 @@ client.transaction()
       .commit();
 ```
 
-`commit()` sends the collected pushes and acks as one PostgreSQL transaction, together with the
-acked messages' lease IDs as `requiredLeases`. It throws if the broker reports failure or if
-there are no operations. Note that the C++ transaction push sub-builder has no `partition()`
-method, so transactional pushes always land in the `Default` partition.
+`commit()` sends the collected pushes and acks as one PostgreSQL transaction, together with
+the acked messages' lease IDs as `requiredLeases`, and throws if the broker reports failure or
+there are no operations. The transaction push sub-builder has no `partition()` method, so
+transactional pushes always land in the `Default` partition.
 
 ```cpp
 client.renew(messages);
 ```
 
 <Aside type="caution">
-`renew_lease(true, ms)` on the consume builder does nothing. The flag reaches `ConsumeOptions`
-and the worker's renewal site is a bare `// TODO: Set up lease renewal if enabled`. A C++
-handler that runs longer than the lease must call `client.renew(messages)` from its own timer,
-or the lease expires and the batch is redelivered.
-
-`renew()` itself works, but the `newExpiresAt` it reports is always `null`: the broker answers
-`{"renewed":N,"expiresAt":"…"}` and the client looks for `newExpiresAt` /
-`lease_expires_at`. Drive the interval from your own clock.
+`renew_lease(true, ms)` on the consume builder does nothing: the flag reaches `ConsumeOptions` and the worker's renewal site is a bare TODO. A handler that runs longer than the lease must call `client.renew(messages)` from its own timer, or the lease expires and the batch is redelivered.
 </Aside>
+
+`renew()` itself works and fills `newExpiresAt` from the broker's
+[three equivalent expiry keys](/use/concepts/leases-retries-dlq#extending-a-lease); `null`
+there means the lease had already expired.
 
 ## Buffering and the DLQ
 
@@ -242,49 +219,41 @@ buf.time_millis = 200;
 client.queue("events").buffer(buf).push(items);   // {"buffered": true, "count": N}
 ```
 
-Buffered pushes flush on a count or time trigger, keyed per `queue/partition`.
-`client.queue("events").flush_buffer()` flushes one address,
-`client.flush_all_buffers()` flushes all, `client.get_buffer_stats()` reports the counters. The
-buffer is in process memory: an unflushed buffer dies with the process.
+Buffered pushes flush on a count or time trigger, keyed per `queue/partition`;
+`flush_buffer()` flushes one address, `flush_all_buffers()` all, `get_buffer_stats()` reports
+the counters. The buffer is process memory: an unflushed buffer dies with the process.
 
 ```cpp
 json dlq = client.queue("orders").dlq("billing").limit(50).get();
 ```
 
-`get()` returns `{"messages": […], "total": 0}` on any error.
-
-<Aside type="note">
-The DLQ builder's `from()`, `to()` and partition are sent as query parameters the broker's DLQ
-handler does not read (it collects only `queue`, `consumerGroup`, `limit` and `offset`), so
-they are silently ignored. The response does carry `total`, but it is the size of the page and
-not of the result set: the handler sets it to the length of the array it just returned. Page
-with `limit()` and `offset()` until you get a short page, and filter client-side. This client
-has no admin surface, so the broker's dead-letter replay route is reachable only by calling it
-over HTTP yourself.
-</Aside>
+`get()` returns `{"messages": […], "total": 0}` on any error. The DLQ builder's `from()`,
+`to()` and partition are query parameters the
+[broker's DLQ handler does not read](/use/concepts/leases-retries-dlq#reading-the-dead-letter-queue),
+and `total` is the size of the page, not of the result set: page with `limit()`/`offset()`
+until a short page, and filter client-side. This client has no admin surface, so
+the broker's dead-letter replay route is reachable only by calling it over HTTP yourself.
 
 ## Outside its scope
 
-- **No admin or observability surface.** `queen_client.hpp` defines no `Admin` class. Resource
-  listings, queue and partition stats, `/api/v1/status`, analytics, traces-by-name, consumer
-  group management, seek, health, `/metrics` and the maintenance-mode switches are all
-  unreachable from this SDK. Use `curl` or another client for those, or call them yourself
-  through `client.get_http_client()`.
-- **No lease renewal during consume** (see above).
-- **No affinity load balancing.** Round-robin and session only, so pops for one
-  `queue:partition:group` lane do not pin to one broker the way they do in the other SDKs.
-- **No per-builder long-poll timeout.**
-- **No `retry` or `dlq` ack status.**
-- **No streaming SDK.**
-- **No `partition()` on a transactional push.**
+| Not offered | Work with it |
+| --- | --- |
+| Admin or observability surface | Resource listings, queue and partition stats, `/api/v1/status`, analytics, traces, consumer group management, seek, health, `/metrics`, maintenance switches: use `curl` or another client, or call them through `client.get_http_client()`. |
+| Lease renewal during consume | `renew_lease` on the builder is inert; call `client.renew(messages)` from your own timer (see above). |
+| Affinity load balancing | Round-robin and session only, so a `queue:partition:group` lane does not pin to one broker the way it does in the other SDKs. |
+| Per-builder long-poll timeout | `.wait(false)` is the only way to shorten the long poll. |
+| `retry` / `dlq` ack status | The boolean ack maps to `completed` / `failed` only. |
+| Streaming SDK | Use another SDK for stream queries. |
+| `partition()` on a transactional push | Transactional pushes land in the `Default` partition. |
 
 ## 429 and 403
 
-The `429`/`403` contract is fully implemented and covered by `test_retry429.cpp`, which runs
-without a broker. A `429` is retried in place against the same backend, honouring `Retry-After`
+The `429`/`403` contract is fully implemented and covered by `test_retry429.cpp`,
+broker-free. A `429` is retried in place against the same backend, honouring `Retry-After`
 (seconds) when present and otherwise backing off `base_millis * 2^attempt` capped at
-`cap_millis`, jittered. Ordinary requests get ten attempts; a long-poll pop (`RetryKind::Pop`)
-retries unboundedly unless `max_attempts` is set, in which case it applies to both.
+`cap_millis`, jittered. Ordinary requests get ten attempts; a long-poll pop
+(`RetryKind::Pop`) retries unboundedly unless `max_attempts` is set, which then applies to
+both.
 
 Non-2xx responses throw `queen::HttpError`, which derives from `std::runtime_error` and keeps
 `what()` equal to the broker's `error` message, so existing `catch (const std::exception&)`
@@ -301,9 +270,9 @@ try {
 }
 ```
 
-`status_code()`, `code()`, `body()` and `retry_after_seconds()` are all available. `code()` is
-empty when the response body has no `code` field. A transport failure with no response at all
-still surfaces as a plain `std::runtime_error`, not an `HttpError`.
+`status_code()`, `code()`, `body()` and `retry_after_seconds()` are all available; `code()` is
+empty when the response body has no `code` field. A transport failure with no response
+surfaces as a plain `std::runtime_error`, not an `HttpError`.
 
 ## Shutdown
 
@@ -311,13 +280,9 @@ still surfaces as a plain `std::runtime_error`, not an `HttpError`.
 client.close();
 ```
 
-`close()` sets the shutdown flag that consume workers poll, flushes every buffer, and cleans up
-the buffer manager.
+`close()` sets the shutdown flag that consume workers poll, flushes every buffer, and cleans
+up the buffer manager.
 
 <Aside type="danger">
-Do not rely on the built-in signal handlers. `QueenClient`'s constructor installs a `SIGINT`
-handler that calls `exit(0)` **without flushing buffers** (so buffered messages are lost on
-Ctrl-C) and a `SIGTERM` handler that only prints a line and returns, leaving the process
-running. Install your own handlers that set a flag, pass that flag as the consume
-`stop_signal`, and call `close()` on the way out.
+Do not rely on the built-in signal handlers: the constructor installs a `SIGINT` handler that calls `exit(0)` **without flushing buffers**, so buffered messages are lost on Ctrl-C, and a `SIGTERM` handler that only prints a line and leaves the process running. Install your own handlers that set a flag, pass it as the consume `stop_signal`, and call `close()` on the way out.
 </Aside>

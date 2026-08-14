@@ -4,8 +4,8 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 import Header from "../components/Header.astro";
 import { config } from "virtual:nimbus/config";
 import pushRaw from "../content/partials/snippets/js-push.mdx?raw";
-import popRaw from "../content/partials/snippets/js-pop.mdx?raw";
-import featureDiagramRaw from "../../../assets/queen-features.svg?raw";
+import consumeRaw from "../content/partials/snippets/js-consume.mdx?raw";
+import positionMapRaw from "../../../assets/queen-map.svg?raw";
 
 /**
  * The landing page.
@@ -39,7 +39,7 @@ const SHIKI = { light: "github-light", dark: "github-dark" } as const;
 const HOME_TITLE = "Postgres message queue with per-entity ordering";
 
 const produce = snippet(pushRaw, "js-push");
-const consume = snippet(popRaw, "js-pop");
+const consume = snippet(consumeRaw, "js-consume");
 
 /**
  * The figure is inlined rather than served through an `img`, and the same file
@@ -49,7 +49,7 @@ const consume = snippet(popRaw, "js-pop");
  * this page and the toggle drives it. The XML prolog has to go: it is legal in
  * a standalone SVG and a stray processing instruction inside HTML.
  */
-const featureDiagram = featureDiagramRaw
+const positionMap = positionMapRaw
   .replace(/^<\?xml[^>]*\?>\s*/, "")
   .replace(/<svg /, '<svg class="w-full h-auto" ');
 
@@ -58,32 +58,32 @@ const featureDiagram = featureDiagramRaw
 const differentiators: { title: string; body: string; href?: string }[] = [
   {
     title: "One ordered lane per entity",
-    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. One broker has held a million of them, and a consumer stuck on one never blocks another.",
+    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. A consumer stuck on one lane never blocks another.",
   },
   {
     title: "No rebalancing, because there is nothing to rebalance",
-    body: "The broker holds no cluster membership and no partition assignments; clients hold no coordination state. You scale by starting another copy against the same database, and a restarting worker costs nobody a pause.",
+    body: "Broker and clients hold no coordination state, so scaling is starting another copy against the same database.",
   },
   {
     title: "PostgreSQL is the storage engine",
-    body: "Durability, replication, backup, point-in-time recovery and SQL introspection are the ones you already operate. There is no second data system to learn, size, or lose.",
+    body: "Durability, replication, backup and SQL introspection are the ones you already operate, not a second data system.",
   },
   {
     title: "Acknowledgement is an offset commit",
-    body: "Consumption state is one cursor per partition and consumer group. There is no per-message delivery record to store, scan or clean up, which is why a million partitions and their cursors weigh 641 MB.",
+    body: "One cursor per partition and consumer group, with no per-message delivery record to store, scan or clean up.",
   },
   {
     title: "Windowed aggregation, in the same transaction",
-    body: "Tumbling, sliding, session and cron windows over a queue, where the window state, the messages you emit and the acknowledgement of the source all commit together or not at all. Exactly-once aggregation with no changelog topic and no state store to operate.",
+    body: "Tumbling, sliding, session and cron windows whose state, output and acks commit together or not at all: exactly-once, with no changelog topic and no state store.",
     href: "/use/streams/",
   },
   {
     title: "Exactly the semantics you already know",
-    body: "Offsets, consumer groups and replay from Kafka; leases, nacks and a dead-letter queue from RabbitMQ. Deliberately both, because real pipelines need both.",
+    body: "Offsets, consumer groups and replay from Kafka; leases, retries and a dead-letter queue from RabbitMQ. Real pipelines need both.",
   },
   {
     title: "Plain HTTP, six SDKs, one binary",
-    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client, and the dashboard ships inside the same executable.",
+    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client.",
   },
 ];
 
@@ -108,11 +108,14 @@ const proof = [
   },
 ];
 
-const notFor = [
-  "Global total ordering. Order is per partition, in commit order, never across a queue.",
-  "Priority or deadline scheduling. Nothing overtakes anything inside a partition.",
-  "Unbounded parallelism inside one consumer group. One in-flight leased batch per partition, so the partition count is the ceiling.",
-  "Surviving a long database outage. The disk spool covers a brief interruption, not a sustained one. PostgreSQL is one failure domain.",
+const featureLine = [
+  "Consumer groups",
+  "Replay",
+  "Dead-letter queue",
+  "Exact deduplication",
+  "Transactional handoff",
+  "Windowed aggregation",
+  "A dashboard in the binary",
 ];
 ---
 
@@ -133,16 +136,10 @@ const notFor = [
           The queue that doesn't fall apart at the other end of your workload.
         </h1>
         <p class="mt-6 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-          Every entity gets its own FIFO lane, created on first push, so a slow consumer on one
-          never stalls another. That design has two ends, and one broker holds both: <strong>1,000,000
-          messages a second</strong> sustained for 24 hours, and <strong>1,000,000 ordered
-          partitions</strong> created during a run at a thousand a second and drained with zero
-          errors. Leases, explicit acks, deduplication and retention are on in both. Consumer
-          groups, replay and a dead-letter queue at both ends. Windowed aggregation that commits
-          its state, its output and its acks in one transaction. One stateless binary next to the
-          Postgres you already run, with the operations dashboard compiled into it: queue health,
-          per-group lag and message inspection, with nothing extra to deploy. No cluster, no
-          rebalancing, no JVM.
+          Every entity gets its own ordered FIFO lane, created on first push, so a slow consumer
+          on one never stalls another. One stateless binary on the PostgreSQL you already run,
+          measured at <strong>1,000,000 messages a second</strong> for 24 hours
+          and at <strong>1,000,000 ordered partitions</strong> in one database.
         </p>
 
         <div class="mt-9 flex flex-wrap items-center gap-3">
@@ -171,21 +168,28 @@ const notFor = [
             Source on GitHub →
           </a>
         </div>
+
+        <p class="mt-8 text-sm text-muted-foreground">
+          {featureLine.join(" · ")}
+        </p>
       </section>
 
-      {/* The shape of the thing */}
+      {/* Where it sits */}
       <section class="mx-auto max-w-5xl w-full px-6 pb-16">
         <div class="rounded-xl border border-border bg-card p-4 sm:p-6 overflow-x-auto">
           {/* Below roughly 720px the figure would set its 12px labels at four
               or five CSS pixels, so it scrolls instead of shrinking. */}
           <div class="min-w-[720px]">
-            <Fragment set:html={featureDiagram} />
+            <Fragment set:html={positionMap} />
           </div>
         </div>
         <p class="mt-3 text-sm text-muted-foreground">
-          A lane per session, one of them stalled and holding up nobody, and that same lane
-          magnified to single messages: the cursor that acknowledgement moves, the leased batch,
-          replay, the dead-letter path, and the tables all of it lives in.
+          Each frontier is where a system stops keeping one ordered lane per entity: measured
+          on matched hardware for Kafka, RabbitMQ and pgmq, taken from the published quotas
+          for SQS, and dashed wherever the edge is one we did not measure. Queen's region is a
+          square because the axes share a scale and it reaches a million on both, in two
+          separate runs. The conditions behind every figure are in
+          <a href="/start/compare/">the comparison</a> and in <a href="/benchmarks/comparison">the measured runs</a>.
         </p>
       </section>
 
@@ -217,11 +221,7 @@ const notFor = [
         </div>
 
         <p class="mt-3 text-sm text-muted-foreground">
-          Both blocks are extracted from files the test suite executes, not retyped.
-          <a href="/use/examples">Here is how that works</a>. There are
-          <a href="/use/clients/">SDKs for JavaScript, Python, Go, Rust, PHP and C++</a>,
-          <a href="/reference/queenctl/">an operator CLI</a>, and a
-          <a href="/reference/http">plain HTTP API</a> for everything else.
+          There are <a href="/use/clients/">SDKs for JavaScript, Python, Go, Rust, PHP and C++</a>, <a href="/reference/queenctl/">an operator CLI</a>, and a <a href="/reference/http">plain HTTP API</a> for everything else.
         </p>
       </section>
 
@@ -241,6 +241,28 @@ const notFor = [
               ))
             }
           </div>
+        </div>
+      </section>
+
+      {/* Dashboard */}
+      <section class="border-t border-border">
+        <div class="mx-auto max-w-5xl w-full px-6 py-16">
+          <h2 class="text-xl font-semibold text-foreground">
+            <a href="/selfhost/dashboard/" class="no-underline text-foreground">The dashboard is already in there</a>
+          </h2>
+          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
+            Queue health, per-group lag, message inspection and dead-letter replay. Nothing was
+            installed to get this: it is the same binary, on the port you already opened, and it
+            grows logins and roles when it runs <a href="/selfhost/multi-tenant/proxy/">behind the proxy</a>.
+          </p>
+          <img
+            src="/screenshots/dashboard-overview.png"
+            alt="The bundled dashboard's overview: stored messages, queues, partitions, consumer groups, pending and completed counts above a table of throughput, lag and error series with sparklines."
+            width="2880"
+            height="1800"
+            loading="lazy"
+            class="mt-6 w-full h-auto rounded-xl border border-border"
+          />
         </div>
       </section>
 
@@ -274,24 +296,12 @@ const notFor = [
 
       {/* Limits */}
       <section class="border-t border-border">
-        <div class="mx-auto max-w-5xl w-full px-6 py-16">
-          <h2 class="text-xl font-semibold text-foreground">The limits worth knowing first</h2>
-          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
-            These are the load-bearing ones, worth checking against your requirements before
-            you build on them.
-          </p>
-          <ul class="mt-6 max-w-3xl space-y-3">
-            {
-              notFor.map((n) => (
-                <li class="flex gap-3 text-sm text-muted-foreground leading-relaxed">
-                  <span class="mt-2 h-1 w-1 shrink-0 rounded-full bg-muted-foreground" />
-                  <span>{n}</span>
-                </li>
-              ))
-            }
-          </ul>
-          <p class="mt-6 text-sm">
-            <a href="/start/limits">The full list of limits and non-goals →</a>
+        <div class="mx-auto max-w-5xl w-full px-6 py-10">
+          <p class="max-w-3xl text-sm text-muted-foreground leading-relaxed">
+            Queen has real limits: ordering is per partition and never global, nothing overtakes
+            anything inside a lane, in-group parallelism is capped by partition count, and one
+            PostgreSQL is both the ceiling and the failure domain.
+            <a href="/start/limits"> Read the full list before you design around it →</a>
           </p>
         </div>
       </section>
@@ -300,7 +310,7 @@ const notFor = [
       <section class="border-t border-border">
         <div class="mx-auto max-w-5xl w-full px-6 py-16">
           <h2 class="text-xl font-semibold text-foreground">Start</h2>
-          <div class="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div class="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <a
               href="/start/quickstart"
               class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
@@ -308,6 +318,15 @@ const notFor = [
               <div class="font-medium text-foreground">Use it</div>
               <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
                 The model in one page, the SDKs, and worked examples.
+              </p>
+            </a>
+            <a
+              href="/use/clients/"
+              class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
+            >
+              <div class="font-medium text-foreground">Pick your SDK</div>
+              <p class="mt-1 text-sm text-muted-foreground leading-relaxed">
+                JavaScript, Python, Go, Rust, PHP and C++, plus queenctl and plain HTTP.
               </p>
             </a>
             <a

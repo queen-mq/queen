@@ -206,14 +206,6 @@ it is not. Queen amortises over the partition visit, so more messages per lane
 make it cheaper per message. RabbitMQ needs a queue per key and 12 000 live
 queues is where that stops working.
 
-<Aside type="caution">
-Queen's dense figure is a **median of eight repetitions, not a best run**: the
-same cell and build produced 340 to 3 234 ms. That dispersion is a known defect,
-it appears only on dense shapes, and the published figure is the median rather
-than the 340. The other three systems' dense figures are single runs and their
-dispersion is unknown.
-</Aside>
-
 **Cardinality.** pgmq is flat: 12 000 and 240 000 ordered lanes give identical
 percentiles, because its group is a value in a header rather than an object. Kafka
 refuses topic creation somewhere between 2 000 and 5 000 partitions per topic on
@@ -228,11 +220,6 @@ leases, explicit acks, deduplication and retention all active: 86 369 975 300
 messages, zero restarts. pgmq's ordered-consume path tops out between 20 000 and
 40 000 msg/s on the same machine, with deduplication and retention absent because it
 has neither.
-
-Those last two paragraphs are the argument this whole page exists to make, and they
-are about the same binary. A million ordered lanes, and a million messages a second.
-The systems above each own one end of that and pay for it at the other, which is not
-a criticism of any of them: it is what their designs are for.
 
 ## What comes with each bet
 
@@ -281,19 +268,13 @@ which is a second runtime with its own state backend. The full surface is in
 ## Choosing something else
 
 Each of these systems is the right answer to a question of its own, and at any
-single point on the map a specialist may well beat Queen. pgmq owns sparse and wide
-and stops at roughly a twentieth of Queen's sustained rate; Kafka owns throughput and
-cost per message and cannot express the cardinality; RabbitMQ needs a live object per
-lane. What the measured runs support is not that Queen wins a point, but that it
-covers the span: **a million ordered partitions** at one end,
+single point on the map a specialist may well beat Queen. What the measured runs
+support is not that Queen wins a point, but that it covers the span:
+**a million ordered partitions** at one end,
 **a million messages a second for 24 hours** at the other, same binary, same
-semantics, two sizing knobs between them.
-
-That is worth something specific. It means you do not have to know which point you
-are on before you choose, and you do not have to migrate when the workload moves,
-which in practice it does: the queue that was ten thousand chat sessions at a trickle
-becomes a million of them, or the pipeline that was wide and idle turns into a
-firehose after one product launch.
+semantics, two sizing knobs between them. You do not have to know which point
+you are on before you choose, and you do not have to migrate when the workload
+moves, which in practice it does.
 
 | Choose | When |
 | --- | --- |

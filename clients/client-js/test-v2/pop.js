@@ -25,13 +25,11 @@ export async function popNonEmptyQueue(client) {
     // wait(false) wildcard pop can race past the not-yet-committed lookup
     // row. Long-poll re-runs the candidate scan and picks up the row
     // once it commits (typically within ms).
-    // docs:start(js-pop)
     const res = await client
     .queue('test-queue-v2-pop-non-empty')
     .batch(1)
     .wait(true)
     .pop()
-    // docs:end
     return { success: res.length === 1 }
 }
 

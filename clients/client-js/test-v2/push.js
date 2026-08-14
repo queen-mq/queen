@@ -5,11 +5,9 @@ export async function pushMessage(client) {
     if (!queue.configured) {
         return { success: false, message: 'Queue not created' }
     }
-    // docs:start(js-push)
     const res = await client
     .queue('test-queue-v2')
     .push([{ data: { message: 'Hello, world!' } }])
-    // docs:end
 
     return { success: res[0].status === 'queued' }
 }
@@ -19,7 +17,6 @@ export async function pushDuplicateMessage(client) {
     if (!queue.configured) {
         return { success: false, message: 'Queue not created' }
     }
-    // docs:start(js-push-dedup)
     const res1 = await client
     .queue('test-queue-v2')
     .push([{ transactionId: 'test-transaction-id', data: { message: 'Hello, world!' } }])
@@ -28,7 +25,6 @@ export async function pushDuplicateMessage(client) {
     .queue('test-queue-v2')
     .push([{ transactionId: 'test-transaction-id', data: { message: 'Hello, world!' } }])
     // res1[0].status === 'queued', res2[0].status === 'duplicate'
-    // docs:end
 
     return { success: res1[0].status === 'queued' && res2[0].status === 'duplicate' }
 }

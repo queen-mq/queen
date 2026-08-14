@@ -1,15 +1,16 @@
 ---
 params: []
-description: "Verified snippet extracted from clients/client-js/test-v2/push.js."
+description: "Verified snippet extracted from clients/client-js/test-v2/docs.js."
 ---
 
 {/* GENERATED FILE. Do not edit by hand.
-    Extracted from clients/client-js/test-v2/push.js by webdoc/scripts/gen-snippets.mjs
+    Extracted from clients/client-js/test-v2/docs.js by webdoc/scripts/gen-snippets.mjs
     Regenerate with: pnpm --dir webdoc gen
 */}
 
-```js title="clients/client-js/test-v2/push.js"
+```js title="clients/client-js/test-v2/docs.js"
 const res = await client
-.queue('test-queue-v2')
-.push([{ data: { message: 'Hello, world!' } }])
+  .queue('orders')
+  .partition('customer-42')
+  .push([{ data: { orderId: 9137, amount: 99.5 } }])
 ```

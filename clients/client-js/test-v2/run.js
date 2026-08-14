@@ -18,6 +18,7 @@ import * as authTests from './auth.js'
 import * as semanticsTests from './semantics.js'
 import * as ackWindowTests from './ackwindow.js'
 import * as streamTests from './stream/index.js'
+import * as docsTests from './docs.js'
 import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
 
 
@@ -90,8 +91,10 @@ function printResults() {
 }
 
 export const cleanupTestData = async () => {
-    // All the LIKE patterns test queues use.
-    const patterns = ['test-%', 'edge-%', 'pattern-%', 'workflow-%'];
+    // All the LIKE patterns test queues use. The three exact names are the
+    // documentation queues (test-v2/docs.js): purging them here is what lets
+    // the published dedup snippet keep a fixed transactionId across runs.
+    const patterns = ['test-%', 'edge-%', 'pattern-%', 'workflow-%', 'orders', 'payments', 'invoices'];
     try {
       // Drop streaming queries first (CASCADE removes their state rows).
       // Safe even when queen_streams isn't installed yet — we swallow the
@@ -156,7 +159,8 @@ async function main() {
         watermarkTests,
         authTests,
         semanticsTests,
-        ackWindowTests
+        ackWindowTests,
+        docsTests
     ]
     
     const aiTests = [
