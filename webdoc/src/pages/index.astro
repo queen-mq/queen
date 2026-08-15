@@ -150,7 +150,7 @@ const featureLine = [
             Push your first message
           </a>
           <a
-            href="/start/why"
+            href="/start/history"
             class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
           >
             Why it exists
@@ -221,7 +221,7 @@ const featureLine = [
         </div>
 
         <p class="mt-3 text-sm text-muted-foreground">
-          There are <a href="/use/clients/">SDKs for JavaScript, Python, Go, Rust, PHP and C++</a>, <a href="/reference/queenctl/">an operator CLI</a>, and a <a href="/reference/http">plain HTTP API</a> for everything else.
+          There are <a href="/use/js-client">SDKs for JavaScript, Python, Go, Rust, PHP and C++</a>, <a href="/reference/queenctl/">an operator CLI</a>, and a <a href="/reference/http">plain HTTP API</a> for everything else.
         </p>
       </section>
 
@@ -248,12 +248,12 @@ const featureLine = [
       <section class="border-t border-border">
         <div class="mx-auto max-w-5xl w-full px-6 py-16">
           <h2 class="text-xl font-semibold text-foreground">
-            <a href="/selfhost/dashboard/" class="no-underline text-foreground">The dashboard is already in there</a>
+            <a href="/deploy/dashboard/" class="no-underline text-foreground">The dashboard is already in there</a>
           </h2>
           <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
             Queue health, per-group lag, message inspection and dead-letter replay. Nothing was
             installed to get this: it is the same binary, on the port you already opened, and it
-            grows logins and roles when it runs <a href="/selfhost/multi-tenant/proxy/">behind the proxy</a>.
+            grows logins and roles when it runs <a href="/deploy/multi-tenant/">behind the proxy</a>.
           </p>
           <img
             src="/screenshots/dashboard-overview.png"
@@ -301,7 +301,7 @@ const featureLine = [
             Queen has real limits: ordering is per partition and never global, nothing overtakes
             anything inside a lane, in-group parallelism is capped by partition count, and one
             PostgreSQL is both the ceiling and the failure domain.
-            <a href="/start/limits"> Read the full list before you design around it →</a>
+            <a href="/reference/limits"> Read the full list before you design around it →</a>
           </p>
         </div>
       </section>
@@ -321,7 +321,7 @@ const featureLine = [
               </p>
             </a>
             <a
-              href="/use/clients/"
+              href="/use/js-client"
               class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
             >
               <div class="font-medium text-foreground">Pick your SDK</div>
@@ -330,7 +330,7 @@ const featureLine = [
               </p>
             </a>
             <a
-              href="/selfhost"
+              href="/deploy"
               class="block rounded-lg border border-border p-5 no-underline transition-colors hover:border-border-strong"
             >
               <div class="font-medium text-foreground">Host it</div>

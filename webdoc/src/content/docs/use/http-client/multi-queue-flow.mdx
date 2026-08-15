@@ -1,0 +1,41 @@
+---
+title: Multi-queue flow
+description: "One queue partitioned per customer, two consumer groups reading it independently, and a second queue downstream, as a loop around the pop route."
+type: tutorial
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/tutorials/http/02-multi-queue-flow.sh
+---
+
+This is the shape most applications end up with: a partition per customer keeps one entity's
+events in order, two consumer groups read the same stored messages through their own cursors, and
+the second queue is created by the first push that names it.
+
+There is no consume loop on the wire. An SDK's `consume()` is a loop around the pop route, and
+that is what the script writes out by hand: pop a leased batch, do the work, acknowledge, come
+back. A pop claims one partition unless `partitions` says otherwise, so the loop is also how a
+reader gets through three customers.
+
+`subscriptionMode=all` is what lets a group read messages older than itself. A cursor is created
+on first contact and seeded at the tail, and the parameter only ever seeds a cursor that does not
+exist yet. Moving one that already exists is [the fourth tutorial](/use/http-client/replay).
+
+The handoff to the second queue is two requests, a push and then an ack, and a crash between them
+does the work twice. [The next tutorial](/use/http-client/transaction-ack-push) closes that window.
+
+<Render file="snippets/tut-http-multi-queue-flow" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with `curl` and `jq` on the path:
+
+```bash
+QUEEN_URL=http://localhost:6632 bash examples/tutorials/http/02-multi-queue-flow.sh
+```
+
+The script checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh http`.
+
+Next: [Transactional ack and push](/use/http-client/transaction-ack-push).

@@ -1,0 +1,196 @@
+---
+title: Proxy
+description: "Deploy queen_proxy with Docker or Kubernetes, in front of one broker as a single-tenant front door or as the multi-tenant edge, and why it runs one replica."
+type: how-to
+tier: operate
+sidebar:
+  order: 6
+sourceOfTruth:
+  - proxy/src/main.rs
+  - proxy/src/config.rs
+  - proxy/src/cache.rs
+  - proxy/src/oauth.rs
+---
+
+`queen_proxy` is a second Rust binary that stands in front of a broker. It does two jobs, and
+most deployments want only one of them.
+
+As a **front door**, it terminates human identity: the dashboard, Google or GitHub logins, and
+per-cluster roles. The broker has no concept of a user, so this is where one lives.
+
+As a **multi-tenant edge**, it also spends API keys, injects the tenant, enforces plan quotas and
+meters usage. That is [multi-tenant](/deploy/multi-tenant); this page is how to run the process
+either way.
+
+## What it needs
+
+One PostgreSQL of its own, *pxdb*, which can be a separate database or just a separate schema on
+the broker's. The proxy owns the `queen_proxy` schema there and applies its six migrations at
+boot, so nothing has to be created first.
+
+Point it **directly at PostgreSQL, not through a pooler**. It holds a permanent dedicated
+`LISTEN` connection outside its pool, which is exactly the kind of long-lived session a
+transaction-mode pooler recycles underneath.
+
+## Docker
+
+```bash
+docker run -d --name queen-proxy -p 6711:6711 \
+  -e PXDB_HOST=10.0.3.20 \
+  -e PXDB_PASSWORD=change-me \
+  -e QUEEN_PROXY_JWT_SECRET="$(openssl rand -hex 32)" \
+  -v queen-proxy-spool:/app/spool \
+  ghcr.io/queen-mq/queen-proxy:latest
+```
+
+`PXDB_HOST` is the only variable it refuses to start without. Keep `QUEEN_PROXY_JWT_SECRET`
+stable: sessions are signed with it, so changing it logs every human out. The spool volume is
+where metering that could not be written yet is parked, so losing it loses usage rather than
+traffic.
+
+```bash
+curl -s http://127.0.0.1:6711/healthz
+```
+
+```json
+{"enforce":false,"status":"ok","tenant_header":true}
+```
+
+## Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: queen-proxy
+spec:
+  # One. See "Why one replica" below before changing this.
+  replicas: 1
+  selector:
+    matchLabels: { app: queen-proxy }
+  template:
+    metadata:
+      labels: { app: queen-proxy }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: queen-proxy
+          image: ghcr.io/queen-mq/queen-proxy:1.0.0
+          command: ["/app/bin/queen-proxy"]
+          ports:
+            - containerPort: 6711
+          env:
+            - name: PXDB_HOST
+              value: postgres.internal
+            - name: PXDB_PORT           # direct, not the pooler
+              value: "5432"
+            - name: PXDB_DB
+              value: queen
+            - name: PXDB_USER
+              value: queen_owner
+            - name: PXDB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: queen-postgres, key: PG_PASSWORD }
+            - name: QUEEN_PROXY_JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: queen-proxy, key: JWT_SECRET }
+            - name: QUEEN_PROXY_PUBLIC_URL
+              value: https://queen.example.com
+            - name: QUEEN_PROXY_COOKIE_DOMAIN
+              value: queen.example.com
+          startupProbe:
+            httpGet: { path: /healthz, port: 6711 }
+            periodSeconds: 5
+          readinessProbe:
+            httpGet: { path: /healthz, port: 6711 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 6711 }
+            periodSeconds: 20
+```
+
+Routing is the **first DNS label of the `Host` header**, matched against a cluster slug, so
+`queen-prod.example.com` acts on the cluster `queen-prod` and one wildcard record covers the rest.
+A port-forward therefore needs the header spelled out, or the request has no cluster:
+
+```bash
+curl -H "Host: queen-prod.example.com" http://127.0.0.1:6711/api/v1/queues
+```
+
+## Why one replica
+
+The broker scales by starting more copies, and the proxy does not. Rate limits, the parked
+long-poll gauges and the admission registry are **per-process, with no shared store**, so three
+replicas admit three times the configured caps.
+
+That is a deliberate trade: exact counters with nothing to coordinate, on the assumption of one
+proxy per cell. Run one replica and let Kubernetes restart it; a rolling update briefly runs two,
+which is a short overshoot of the limits rather than a correctness problem, since the proxy holds
+no session state that a restart could lose.
+
+## The single-tenant front door
+
+The way this is deployed at Smartness is worth describing, because it is the common case and it is
+not the multi-tenant one.
+
+**The proxy is not on the data path.** Every workload dials the broker's own Service directly,
+carries no credential, and never meets the proxy. The proxy exists for the dashboard and the
+humans who log into it, which is why it can be deployed, upgraded and broken independently of the
+brokers moving messages.
+
+With one tenant there is one cluster row, and the broker's tenancy is the fixed default tenant
+`00000000-0000-0000-0000-000000000001`, which the proxy injects and the broker recognises. Nothing
+else changes: the same binary, the same pxdb, one `bootstrap_tenant` call instead of many.
+
+<Aside type="caution">
+**`QUEEN_PROXY_DEFAULT_CLUSTER` is not the way to do this.** It answers every unresolvable `Host`
+with that cluster, so an in-cluster caller using the Service DNS, a raw pod-IP request or a
+spoofed header all silently act on it. It is harmless while exactly one cluster row exists and a
+cross-cluster misroute the moment there are two. Leave it unset and let the `Host` resolve, even
+with a single tenant.
+</Aside>
+
+For a laptop or a demo, where there is no pxdb at all, the static form is the honest one:
+`QUEEN_PROXY_DEV_CELL_URL` points at a broker, `QUEEN_PROXY_DEV_CELL_TOKEN` carries its cell
+token, and `QUEEN_PROXY_DEV_TENANT` defaults to the same fixed tenant.
+
+## Bringing one up in order
+
+<Steps>
+
+1. **Create the database or schema** and the role the proxy will use.
+
+2. **Boot the proxy once.** It applies its migrations and starts answering `/healthz`. Until the
+   control plane has rows, the dashboard's own API calls answer `421` and the site looks dead
+   rather than empty, so do not announce it yet.
+
+3. **Bootstrap the control plane**: the cell row, then `bootstrap_tenant`
+   ([multi-tenant](/deploy/multi-tenant)).
+
+4. **Register the OAuth redirect** as `<public url>/auth/google/callback`. The path matters: `/api`
+   is the proxy's own prefix, so a redirect under it is rejected before it reaches the OAuth
+   handler rather than logging anyone in.
+
+5. **Point DNS at it**, wildcard if there will be more than one cluster.
+
+</Steps>
+
+<CardGrid>
+  <LinkCard
+    href="/deploy/multi-tenant"
+    title="Multi-tenant"
+    description="Cells, tenants, clusters, API keys, quotas and the Google login policy."
+  />
+  <LinkCard
+    href="/deploy/dashboard"
+    title="Dashboard"
+    description="The same bundle the broker serves, with real users and per-cluster roles once the proxy is in front."
+  />
+  <LinkCard
+    href="/reference/multi-tenant/endpoints"
+    title="Route classes"
+    description="What the proxy forwards, what it serves itself, and what it refuses to name."
+  />
+</CardGrid>

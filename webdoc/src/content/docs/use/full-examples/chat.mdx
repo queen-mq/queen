@@ -1,0 +1,65 @@
+---
+title: Chat messaging system
+description: "The application Queen was written for: one ordered lane per conversation, so a conversation that needs a translation delays itself and nothing else."
+type: example
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/apps/js/chat.mjs
+  - examples/apps/py/chat.py
+  - examples/apps/go/chat/main.go
+  - examples/apps/rust/src/bin/chat.rs
+  - examples/apps/php/chat.php
+  - examples/apps/cpp/chat.cpp
+  - examples/apps/http/chat.sh
+---
+
+A hotel messaging product ran on Kafka and kept stalling. Some conversations need a translation
+or an agent reply before the next message can be handled, and on a hashed topic one slow
+conversation holds up every conversation that shares its partition.
+
+The fix is structural rather than operational. Each conversation gets its own lane, created by the
+first message sent to it, so the slow work is contained to the conversation that caused it.
+
+The program builds the whole thing: sending with an idempotency key, a fast delivery group, a slow
+enrichment group that translates one conversation, and a sentiment consumer added after the fact
+that reads the entire history. It ends by measuring the property the design exists for: the
+conversations needing no translation finish while the slow one is still working, in the same
+worker pool.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/app-js-chat" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/app-py-chat" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/app-go-chat" />
+  </TabItem>
+  <TabItem label="Rust">
+    <Render file="snippets/app-rust-chat" />
+  </TabItem>
+  <TabItem label="PHP">
+    <Render file="snippets/app-php-chat" />
+  </TabItem>
+  <TabItem label="C++">
+    <Render file="snippets/app-cpp-chat" />
+  </TabItem>
+  <TabItem label="HTTP">
+    <Render file="snippets/app-http-chat" />
+  </TabItem>
+</Tabs>
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart):
+
+```bash
+QUEEN_URL=http://localhost:6632 examples/apps/run.sh
+```
+
+Every program on this page asserts the property it exists to demonstrate and exits
+non-zero if it does not hold. The runner takes a language name to run one of them on its
+own, for example `examples/apps/run.sh js`.

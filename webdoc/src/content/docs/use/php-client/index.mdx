@@ -1,0 +1,117 @@
+---
+title: PHP Client
+description: "Install the PHP SDK with Composer, then push, consume and ack with synchronous builders, plus what the Laravel layer wires for you."
+type: quickstart
+tier: use
+sidebar:
+  order: 7
+sourceOfTruth:
+  - clients/client-laravel/composer.json
+  - clients/client-laravel/src/Queen.php
+  - clients/client-laravel/src/Builders/QueueBuilder.php
+  - clients/client-laravel/src/Builders/PushBuilder.php
+  - clients/client-laravel/src/Consumer/ConsumerManager.php
+  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
+  - clients/client-laravel/src/Laravel/Commands/ConsumeCommand.php
+verifiedBy:
+  - clients/client-laravel/tests/QueueBuilderTest.php
+  - clients/client-laravel/tests/HighLevelConsumerTest.php
+  - clients/client-laravel/tests/HttpClientTest.php
+---
+
+The PHP client is a plain PSR-4 library, `Queen\` mapped onto `src/`, with an optional Laravel
+layer on top. It needs PHP 8.3 and it is synchronous: every builder chain ends in an explicit
+`execute()`, `pop()`, `get()` or `commit()`.
+
+```bash
+composer require smartpricing/queen-mq
+```
+
+```php
+use Queen\Queen;
+
+$client = new Queen([
+    'urls' => ['http://broker-a:6632', 'http://broker-b:6632'],
+    'bearerToken' => getenv('QUEEN_TOKEN'),
+    'timeoutMillis' => 30000,
+    'loadBalancingStrategy' => 'affinity',
+]);
+```
+
+The constructor also takes a bare URL string or a list of URLs. One URL is a direct client, more
+than one builds a load balancer that fails over on `5xx` and network errors. The whole option
+table is in [Reference](/reference/sdk/php#constructor).
+
+## Push
+
+```php
+$results = $client->queue('orders')
+    ->partition('acct-42')
+    ->push([['transactionId' => 'order-1-created', 'data' => ['id' => 1]]])
+    ->execute();
+```
+
+The queue and the partition are created by that call. `execute()` returns the broker's array,
+one entry per item, each carrying a `status` of `queued`, `duplicate`, `buffered` or `failed`.
+Pass your own `transactionId` and a retry inside the dedup window writes nothing a second time.
+
+## Consume
+
+```php
+$client->queue('jobs')
+    ->group('workers')
+    ->batch(10)
+    ->each()
+    ->consume(function (array $message) {
+        process($message['data']);
+    })
+    ->execute();
+```
+
+`consume()` returns a builder and `execute()` runs the worker loop, blocking until a signal, a
+`limit` or an idle timeout stops it. With `concurrency(1)` it is one synchronous loop; above 1,
+Guzzle's async pool overlaps the long polls. A bare `pop()` makes the same claim without the
+loop, long-polling for 30 seconds unless you pass `->wait(false)`.
+
+## Acknowledge
+
+`autoAck` is client-side: the loop acks `completed` when your closure returns, `failed` when it
+throws. Turn it off and settle the batch yourself.
+
+```php
+$messages = $client->queue('orders')->group('billing')->batch(10)->pop();
+$client->ack($messages, true, ['group' => 'billing']);
+```
+
+`ack()` takes one message array, a list, or a bare `transactionId`, and `partitionId` is
+mandatory. An ack is an offset commit, so a nack clamps the group's cursor at the failed message
+and everything after it in that batch comes back. A rejected ack still arrives as HTTP 200: read
+`success` off each item.
+
+## Laravel
+
+- Auto-discovery binds `Queen\Queen` as a singleton and aliases the `Queen` facade, so inject
+  the class or call `Queen::queue('orders')->push(...)->execute();`.
+- `php artisan vendor:publish --tag=queen-config` publishes `config/queen.php`, which reads
+  `QUEEN_URL`, `QUEEN_BEARER_TOKEN` and the retry and load-balancing variables.
+- `php artisan queen:consume orders "App\\Queen\\OrderHandler" --group=processors --auto-ack`
+  runs a handler class as a worker; without `--auto-ack` it acknowledges nothing and every
+  message is redelivered.
+
+## What differs here
+
+- A chain that never reaches `execute()` sends no request at all, and says nothing about it.
+- Without `each()` the closure receives the array of popped messages, even when `batch` is `1`.
+- `pop()` propagates exceptions instead of swallowing them into an empty array, and returns the
+  result of `array_filter`, which keeps the original keys: use `array_values()` for a list.
+- An `each()` handler keeps running after a nack, so make it idempotent or throw out of a batch
+  handler instead.
+- Signal handling needs the `pcntl` extension; without it only `limit` or `idleMillis` stops the
+  consume loop.
+
+Client options with their defaults, the rdkafka-shaped high-level consumer, transactions,
+buffering, the admin surface and the `429`/`403` error codes are in
+[the PHP reference](/reference/sdk/php).
+
+Four tutorials follow, each one a program that runs and checks its own result, from a first push
+to a replay of everything already consumed. Start at [Hello world](/use/php-client/hello-world).

@@ -1,0 +1,81 @@
+---
+title: JS Client
+description: "Install queen-mq for Node, then push, consume and ack, plus the handful of traps that belong to JavaScript alone."
+type: quickstart
+tier: use
+sidebar:
+  order: 3
+sourceOfTruth:
+  - clients/client-js/client-v2/Queen.js
+  - clients/client-js/client-v2/builders/QueueBuilder.js
+  - clients/client-js/client-v2/consumer/ConsumerManager.js
+  - clients/client-js/client-v2/utils/defaults.js
+  - clients/client-js/package.json
+verifiedBy:
+  - clients/client-js/test-v2/push.js
+  - clients/client-js/test-v2/pop.js
+  - clients/client-js/test-v2/consume.js
+---
+
+The JavaScript client is the reference implementation, the one every other SDK is a
+transliteration of: ESM only, Node 22 or newer, broker client and streaming SDK in one package.
+
+<PackageManagers pkg="queen-mq" />
+
+```js
+import { Queen } from 'queen-mq'
+
+const client = new Queen({
+  urls: ['http://broker-a:6632', 'http://broker-b:6632'],
+  bearerToken: process.env.QUEEN_TOKEN,
+  loadBalancingStrategy: 'affinity',
+})
+```
+
+The constructor also takes a bare URL string or an array of them. One URL is a direct client;
+more than one builds a load balancer that fails over on `5xx` and network errors. The whole
+option table is in [Reference](/reference/sdk/javascript#constructor).
+
+## Push
+
+<Render file="snippets/js-push" />
+
+The await returns the broker's array, one entry per item, each carrying a `status` of `queued`,
+`duplicate`, `buffered` or `failed`. Pass your own `transactionId` and the push becomes
+idempotent inside the dedup window.
+
+## Consume
+
+<Render file="snippets/js-consume" />
+
+`consume()` starts `concurrency` workers and resolves only when every worker stops, so give it a
+`limit`, an `idleMillis` or an `AbortSignal` if it is ever meant to return. `autoAck` is on by
+default: the worker acks `completed` when the handler returns, `failed` when it throws.
+
+The builder is where a consumer is shaped: `.group()` for the consumer group, `.partitions()`
+for how many lanes one pop claims, `.batch()` for how many messages come back, `.renewLease()`
+for a handler that runs long.
+
+## Acknowledge
+
+```js
+const messages = await client.queue('orders').group('billing').batch(10).pop()
+for (const msg of messages) { await handle(msg) }
+await client.ack(messages, true, { group: 'billing' })
+```
+
+`ack()` takes one message or an array, and a status that is `true`/`false` or one of
+`completed`, `failed`, `retry`, `dlq`. A rejected ack still arrives as HTTP 200, so read
+`success` off each item. To ack the input and push the output in one PostgreSQL commit, use
+[`client.transaction()`](/use/model#transactions).
+
+## What differs here
+
+- Without `.each()` the handler receives the array of popped messages, even when `batch` is `1`.
+- `.onSuccess()` or `.onError()` turn `autoAck` off: if your callback never acks, the lease expires.
+- `pop()` swallows every failure into `[]`, so an empty array is not an empty queue: use `consume()` when failures must surface.
+- `close()` is not optional, because the `undici` keep-alive sockets pin the event loop and the process never exits.
+- `headers: { Host }` is dropped silently by `fetch`, so the client maps it onto `hostHeader` and warns.
+
+Buffering, lease renewal, admin, the dead-letter reader, logging and every option table are in
+the [JavaScript client reference](/reference/sdk/javascript).

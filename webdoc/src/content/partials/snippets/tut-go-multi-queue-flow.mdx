@@ -1,0 +1,255 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/go/multi-queue-flow/main.go."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/go/multi-queue-flow/main.go by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```go title="examples/tutorials/go/multi-queue-flow/main.go"
+//
+// Tutorial 2 of 5: a multi-queue flow.
+//
+// One queue partitioned per customer, two consumer groups reading it
+// independently, and a second queue downstream. This is the shape most
+// applications end up with, and it shows the three things that make it work:
+// a partition keeps one entity's events in order, a consumer group is a cursor
+// so every group sees everything, and a queue is created by the push.
+//
+//	orders (partition = customer)
+//	  |-- group "billing"    -> charges, and pushes to the shipping queue
+//	  |-- group "analytics"  -> counts, and pushes nothing
+//	shipping
+//	  |-- group "warehouse"  -> ships
+//
+// Run it:
+//
+//	QUEEN_URL=http://localhost:6632 GOWORK=off go run ./multi-queue-flow
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"slices"
+	"strconv"
+	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
+)
+
+var runID = strconv.FormatInt(time.Now().UnixMilli(), 36)
+
+var (
+	ordersQueue   = "tut-go-orders-" + runID
+	shippingQueue = "tut-go-shipping-" + runID
+)
+
+// Consumer group names are scoped to a queue, and the queue names above are
+// already unique per run, so the groups can be plain constants.
+const (
+	billingGroup   = "tut-go-billing"
+	analyticsGroup = "tut-go-analytics"
+	warehouseGroup = "tut-go-warehouse"
+)
+
+type order struct {
+	OrderID  string
+	Customer string
+	Total    float64
+}
+
+var input = []order{
+	{OrderID: "A-1", Customer: "acme", Total: 120.5},
+	{OrderID: "A-2", Customer: "acme", Total: 12.0},
+	{OrderID: "B-1", Customer: "globex", Total: 88.75},
+	{OrderID: "C-1", Customer: "initech", Total: 310.0},
+	{OrderID: "A-3", Customer: "acme", Total: 9.99},
+}
+
+var checks int
+
+func assert(condition bool, description string) error {
+	if !condition {
+		return fmt.Errorf("%s", description)
+	}
+	checks++
+	fmt.Printf("  ok: %s\n", description)
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nFAIL: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\nPASS: %d checks\n", checks)
+}
+
+func run() error {
+	brokerURL := os.Getenv("QUEEN_URL")
+	if brokerURL == "" {
+		brokerURL = "http://localhost:6632"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	client, err := queen.New(brokerURL)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	defer client.Close(context.Background())
+
+	fmt.Printf("broker %s\n", brokerURL)
+
+	// Push each order into the partition named after its customer. Everything
+	// about one customer stays in order; different customers never wait for
+	// each other. The partition key is the only ordering decision you make.
+	fmt.Println("\npushing")
+	for _, o := range input {
+		_, err := client.Queue(ordersQueue).
+			Partition(o.Customer).
+			Push(map[string]interface{}{
+				"orderId":  o.OrderID,
+				"customer": o.Customer,
+				"total":    o.Total,
+			}).
+			Execute(ctx)
+		if err != nil {
+			return fmt.Errorf("push %s: %w", o.OrderID, err)
+		}
+		fmt.Printf("  %s -> partition %s\n", o.OrderID, o.Customer)
+	}
+
+	// Group one. It reads every order, charges it, and hands the paid ones to
+	// the shipping queue. SubscriptionMode("all") matters: a group created
+	// after the messages were pushed starts at the tail by default, so without
+	// it this group would see nothing.
+	fmt.Println("\nbilling")
+	var billed []string
+	err = client.Queue(ordersQueue).
+		Group(billingGroup).
+		SubscriptionMode(queen.SubscriptionModeAll).
+		Each().
+		Limit(len(input)).
+		// Stop after 5s of silence, so a lost message fails the run instead of
+		// hanging it. The Go consumer checks that deadline between polls, so
+		// the poll itself is capped at a second: left at the 30s default, an
+		// idle consumer would sit inside one long poll well past its deadline.
+		IdleMillis(5000).
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			orderID, _ := msg.Data["orderId"].(string)
+			customer, _ := msg.Data["customer"].(string)
+			total, _ := msg.Data["total"].(float64)
+
+			billed = append(billed, orderID)
+			fmt.Printf("  charged %s (%v)\n", orderID, total)
+
+			// The push to the next queue creates it on first use, exactly like
+			// the first queue. Partitioning it by customer as well keeps a
+			// customer's shipments in the order their orders were charged.
+			//
+			// Returning an error here would make the consumer negatively
+			// acknowledge the order, which leaves it for a later delivery
+			// rather than silently losing it.
+			_, err := client.Queue(shippingQueue).
+				Partition(customer).
+				Push(map[string]interface{}{"orderId": orderID, "customer": customer}).
+				Execute(ctx)
+			return err
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("billing: %w", err)
+	}
+
+	if err := assert(len(billed) == len(input), fmt.Sprintf("billing saw all %d orders", len(input))); err != nil {
+		return err
+	}
+
+	// Group two reads the same stored messages through its own cursor. It was
+	// not affected by billing acking them: that is what fan-out means here, and
+	// it costs no extra copy of the data.
+	fmt.Println("\nanalytics")
+	var total float64
+	err = client.Queue(ordersQueue).
+		Group(analyticsGroup).
+		SubscriptionMode(queen.SubscriptionModeAll).
+		Each().
+		Limit(len(input)).
+		IdleMillis(5000).
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			// JSON numbers decode to float64, whatever they looked like when
+			// they were pushed.
+			amount, ok := msg.Data["total"].(float64)
+			if !ok {
+				return fmt.Errorf("order %s has no numeric total", msg.TransactionID)
+			}
+			total += amount
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("analytics: %w", err)
+	}
+
+	var expected float64
+	for _, o := range input {
+		expected += o.Total
+	}
+	if err := assert(abs(total-expected) < 0.001, "analytics summed every order, independently of billing"); err != nil {
+		return err
+	}
+
+	// The order inside one partition is the order it was pushed in. Check the
+	// customer with more than one order.
+	fmt.Println("\nwarehouse")
+	var acmeShipments []string
+	err = client.Queue(shippingQueue).
+		Partition("acme").
+		Group(warehouseGroup).
+		SubscriptionMode(queen.SubscriptionModeAll).
+		Each().
+		Limit(3).
+		IdleMillis(5000).
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			orderID, _ := msg.Data["orderId"].(string)
+			acmeShipments = append(acmeShipments, orderID)
+			fmt.Printf("  shipping %s\n", orderID)
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("warehouse: %w", err)
+	}
+
+	if err := assert(
+		slices.Equal(acmeShipments, []string{"A-1", "A-2", "A-3"}),
+		"one customer's shipments arrived in the order they were pushed",
+	); err != nil {
+		return err
+	}
+
+	if _, err := client.Queue(ordersQueue).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete %s: %w", ordersQueue, err)
+	}
+	if _, err := client.Queue(shippingQueue).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete %s: %w", shippingQueue, err)
+	}
+
+	return nil
+}
+
+func abs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+```

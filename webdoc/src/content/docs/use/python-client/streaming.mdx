@@ -1,0 +1,40 @@
+---
+title: Streaming
+description: "A tumbling window per entity, whose state, output and acknowledgements commit together."
+type: tutorial
+tier: use
+sidebar:
+  order: 5
+verifiedBy:
+  - examples/tutorials/py/05_streaming.py
+---
+
+The four tutorials before this one move messages. This one aggregates them.
+
+A streaming query reads a queue, keeps window state per partition, and pushes each closed window
+to an output queue. The state, the output and the acknowledgement of the inputs commit in the same
+PostgreSQL transaction, which is exactly-once aggregation with no changelog topic and no state
+store to size and operate: the state and the queue are already in the same database.
+
+The entry point is `Stream.from_()`, carrying the underscore that `from` being a keyword forces.
+The aggregate extractors are plain callables over the message payload itself, not the envelope, so
+it is `s["amount"]` and not `s["data"]["amount"]`: get it wrong and the missing key raises inside
+the aggregation cycle, which is at least louder than summing zeroes.
+
+A stream is a running process, so it has to exist before the events do: pointing it at an existing
+backlog emits nothing. `run()` returns as soon as the query is registered, before the polling task
+it spawned has had a turn on the event loop, which is why the program yields before it pushes.
+
+<Render file="snippets/tut-py-streaming" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from the root of the repository, with
+the in-tree client on `PYTHONPATH`:
+
+```bash
+PYTHONPATH=clients/client-py python3 examples/tutorials/py/05_streaming.py
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh py`.

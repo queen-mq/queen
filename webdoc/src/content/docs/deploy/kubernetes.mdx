@@ -1,0 +1,203 @@
+---
+title: Kubernetes
+description: "A StatefulSet, two Services and the probe wiring, written against this broker: /health is the readiness question and never the liveness one."
+type: how-to
+tier: operate
+sidebar:
+  order: 3
+sourceOfTruth:
+  - Dockerfile
+  - server/src/main.rs
+  - server/src/config.rs
+  - server/src/mesh.rs
+  - server/src/file_buffer.rs
+  - server/src/schema.rs
+  - server/src/handlers/status.rs
+---
+
+Three replicas, a headless Service so they can find each other, and a client Service carrying only
+the HTTP port. There is no official Helm chart, so this is the manifest: apply it with `-n queen`,
+against a PostgreSQL at `queen-pg`.
+
+```bash
+kubectl -n queen create secret generic queen-secrets \
+  --from-literal=pg-password=change-me \
+  --from-literal=sync-secret=change-me-too
+```
+
+`sync-secret` is the HMAC secret for the mesh handshake and must be byte-identical on every
+replica. Empty means open mode: any well-formed handshake from anyone reaching the port is
+accepted.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: queen
+spec:
+  selector:
+    app.kubernetes.io/name: queen
+  ports:
+    - name: http
+      port: 6632
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: queen-mesh
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: queen
+  ports:
+    - name: mesh
+      port: 6633
+      targetPort: mesh
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: queen
+spec:
+  serviceName: queen-mesh
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: queen
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: queen
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: queen
+          image: ghcr.io/queen-mq/queen:latest
+          command: ["/app/bin/queen"]
+          ports:
+            - name: http
+              containerPort: 6632
+            - name: mesh
+              containerPort: 6633
+          env:
+            - name: PG_HOST
+              value: queen-pg
+            - name: PG_PORT
+              value: "5432"
+            - name: PG_USER
+              value: queen
+            - name: PG_DATABASE
+              value: queen
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: queen-secrets, key: pg-password }
+            - name: DB_POOL_SIZE
+              value: "60"
+            - name: PORT
+              value: "6632"
+            - name: QUEEN_MESH_PORT
+              value: "6633"
+            - name: QUEEN_MESH_PEERS
+              value: "queen-0.queen-mesh:6633,queen-1.queen-mesh:6633,queen-2.queen-mesh:6633"
+            - name: QUEEN_SYNC_SECRET
+              valueFrom:
+                secretKeyRef: { name: queen-secrets, key: sync-secret }
+            - name: QUEEN_SERVER_ID
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: FILE_BUFFER_DIR
+              value: /var/lib/queen/buffers
+            - name: QUEEN_LOG_JSON
+              value: "true"
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: "1", memory: 512Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: spool
+              mountPath: /var/lib/queen/buffers
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: spool
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 5Gi }
+```
+
+## The probes
+
+`/health` takes a pooled connection and runs a real query, which makes it the readiness answer: a
+broker that cannot reach PostgreSQL should leave the Service endpoints. Wire it to `livenessProbe`
+and a PostgreSQL outage becomes a kill loop on every replica: the pushes the disk spool exists to
+absorb are refused at the socket instead, and the spool goes with the container if it sits on the
+container filesystem. Liveness is a TCP connect on the HTTP port, or nothing: a panic aborts the
+process, so there is no half-alive state to detect.
+
+The startup probe gives the first boot five minutes: the broker applies its embedded schema
+before it serves.
+
+## Why a StatefulSet
+
+- `QUEEN_MESH_PEERS` is a list of hostnames parsed once at boot, and only a StatefulSet behind a
+  headless Service hands out stable names to put in it.
+- The spool is node-local and replayed only by a broker starting against the same
+  `FILE_BUFFER_DIR`, which is what one claim per ordinal buys.
+
+For one replica that accepts losing an unreplayed spool: drop the claim template, mount an
+`emptyDir` there, remove `QUEEN_MESH_PEERS`, and a Deployment is equivalent.
+
+## The fields that are not obvious
+
+- `replicas` times `DB_POOL_SIZE` must fit PostgreSQL's `max_connections`: 180 here.
+- `terminationGracePeriodSeconds` must exceed your longest pop timeout, 30 seconds by default,
+  because a parked long-poll pop is an in-flight request that SIGTERM drains.
+- Port 6633 is TCP despite the legacy `QUEEN_UDP_*` alias names, and a Service or NetworkPolicy
+  declaring UDP blocks the mesh silently: brokers keep serving, with pop wakes arriving late.
+- The peer list is uniform and names the pod itself, which is safe because a frame is applied to
+  local state and never re-broadcast.
+- No CPU limit: the runtime sizes its worker threads from the core count it sees rather than the
+  cgroup quota, so a low limit on a large node buys contention instead of a throttle.
+- `podManagementPolicy: Parallel` is safe: the schema apply serialises cluster-wide on a
+  PostgreSQL advisory lock.
+- Nothing but the other brokers belongs on 6633: keep it off the client Service and close it with
+  a NetworkPolicy ([the mesh port](/deploy/security#the-mesh-port)).
+
+## Verify
+
+```bash
+kubectl -n queen rollout status statefulset/queen
+kubectl -n queen logs queen-0 | grep -E 'schema|config:|listening|mesh'
+```
+
+The `mesh` line reports `peers` and `auth`: `auth=hmac` means the secret arrived, `auth=off` is
+open mode. Every variable above, and the ones left at their defaults, is in
+[configuration](/reference/config).

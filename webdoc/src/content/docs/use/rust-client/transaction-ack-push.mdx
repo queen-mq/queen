@@ -1,0 +1,44 @@
+---
+title: Transactional ack and push
+description: "The acknowledgement of one stage and the push of the next, in one PostgreSQL transaction."
+type: tutorial
+tier: use
+sidebar:
+  order: 3
+verifiedBy:
+  - examples/tutorials/rust/src/bin/03_transaction_ack_push.rs
+---
+
+The previous tutorial handed work between queues in two steps. In that order a crash between them
+duplicates work; in the other order it loses it. There is no arrangement of two calls that avoids
+both.
+
+A transaction removes the choice: the ack of the input and the push of the output commit together
+or not at all. The lease of every message you ack travels with the request, so a lease that
+expired while the handler was running rolls the whole thing back instead of invoicing an order
+the broker has already handed to somebody else.
+
+Two things make the handler read the way it does. `auto_ack(false)` stops the loop settling
+messages behind your back, since the ack now belongs to the transaction, and the handler's `Ok`
+means only "keep going". And `transaction().push_to(...).ack(&msg).commit()` returns an `Err` when
+the broker rolls the transaction back, so the `?` on the commit is the check rather than a result
+somebody has to remember to inspect.
+
+What commits together is the handoff, not the delivery. A response lost on the wire and then
+retried pushes the invoice a second time unless its transaction id is deterministic. What you buy
+is that the two queues can never disagree about what happened.
+
+<Render file="snippets/tut-rust-transaction-ack-push" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/rust`:
+
+```bash
+QUEEN_URL=http://localhost:6632 cargo run --bin 03_transaction_ack_push
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh rust`.
+
+Next: [Replay](/use/rust-client/replay).

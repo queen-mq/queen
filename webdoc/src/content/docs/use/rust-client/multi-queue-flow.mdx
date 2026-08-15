@@ -1,0 +1,44 @@
+---
+title: Multi-queue flow
+description: "One queue partitioned per customer, two consumer groups reading it independently, and a second queue downstream."
+type: tutorial
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/tutorials/rust/src/bin/02_multi_queue_flow.rs
+---
+
+This is the shape most applications end up with. A **partition** keeps one entity's events in
+order: everything about one customer stays in sequence, and different customers never wait for
+each other. The partition key is the only ordering decision you make.
+
+A **consumer group** is a cursor, not a copy. The two groups below read the same stored messages
+and neither sees the other's acknowledgements. A group created after the messages were pushed
+starts at the tail, which is why both ask for `SubscriptionMode::All`.
+
+`consume` takes an async closure, so everything the handler touches has to be owned by it: the
+billing handler holds its own clone of the client, which is cheap because every clone shares one
+connection pool and one set of buffers. What the closure returns settles the message, `Ok` acks
+and `Err` nacks with the error as the reason. `limit` and `idle` are what let each loop return,
+and `idle` is measured between polls, so `poll_timeout` decides how promptly it fires.
+
+The **second queue** is created by the first push that names it, exactly like the first one. The
+handoff is still two steps, the push inside the handler and then the loop's ack: a crash between
+them does the work twice. [The next tutorial](/use/rust-client/transaction-ack-push) closes that
+window.
+
+<Render file="snippets/tut-rust-multi-queue-flow" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/rust`:
+
+```bash
+QUEEN_URL=http://localhost:6632 cargo run --bin 02_multi_queue_flow
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh rust`.
+
+Next: [Transactional ack and push](/use/rust-client/transaction-ack-push).

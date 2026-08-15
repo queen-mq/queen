@@ -1,43 +1,28 @@
 ---
 title: Multi-tenant cell
-description: "A two-core cell (PostgreSQL, broker and proxy in one CPU cap) holding above 2400 msg/s with zero loss, and a one-hour twelve-tenant soak with zero cross-tenant delivery."
+description: "A two-core cell above 2400 msg/s, and twelve tenants with zero cross-tenant delivery."
 type: reference
 sidebar:
   order: 6
 sourceOfTruth:
   - benchmark-queen/2026-07-29-vm-campaign/results.md
-  - benchmark-queen/2026-07-29-vm-campaign/b2-freetier.sh
-  - benchmark-queen/vm-cell.sh
-  - benchmark-queen/2026-07-30-1h-soak/README.md
   - benchmark-queen/2026-07-30-1h-soak/soak1h.json
-  - benchmark-queen/2026-07-30-1h-soak/vm-sampler.csv
-  - benchmark-queen/2026-07-30-1h-soak/loader-interval.csv
   - benchmark-queen/2026-07-30-1h-soak/broker-rates-sizes.log
+  - benchmark-queen/2026-07-30-1h-soak/loader-interval.csv
+  - benchmark-queen/2026-07-30-1h-soak/vm-sampler.csv
 ---
 
-Two results here, both about a **cell**: PostgreSQL, the proxy's own state database, the broker
-and the proxy sharing one CPU-capped control group, which is how a small hosted tenant is
-actually served. A free-tier shape is two cores covering all four processes. The load generator
-runs on the same machine but outside the cap, and is billed separately, because a loader that
-borrows the cell's cores flatters the result.
+A **cell** is PostgreSQL, the proxy's state database, the broker and the proxy in one CPU-capped
+control group: a free-tier shape is two cores covering all four, loader outside the cap.
 
-**A 2-core cell held above 2400 msg/s through the proxy with zero loss and no stall. Separately,
-twelve tenants sharing one queue and one consumer group ran for an hour with zero cross-tenant
-deliveries.** Both were measured with **deduplication off** and with **429 retry disabled** in
-the loader, and the hour-long run's aggregate verdict from the loader's own checker is FAIL. All
-of that is unpacked below.
-
-The host was 8 vCPU / 15 GiB with NVMe, `fdatasync` averaging 95.5 µs with a p99 near 396 µs.
-The broker carried the hot-list re-arm cap and the ownership-gate cache; the proxy carried
-tokio-pool sizing to the cgroup quota (commits `ccfb844`, `1ad3d5e`, `301c9bc`).
+**A 2-core cell held above 2400 msg/s through the proxy with zero loss, and twelve tenants
+sharing one queue and one consumer group ran an hour with zero cross-tenant deliveries.** Both
+had **deduplication off** and **429 retry disabled**; the hour's verdict is FAIL.
 
 ## The throughput ladder
 
-Four tenants sharing queue `orders` and consumer group `workers`, 8 partitions, explicit
-acknowledgement, 40 seconds of load and 15 seconds of drain per point, the database dropped and
-the broker restarted before every point. Cell CPU is the `queencell.slice` `usage_usec` delta, so
-it counts the cell and nothing else. Per-message delivery was verified on every point: a point
-without a passing delivery check was not reported as a throughput number at all.
+Four tenants on queue `orders` and group `workers`, 8 partitions, explicit acks, 40 s per point,
+database dropped between points. Points failing their delivery check went unreported.
 
 | Offered | Achieved push / pop | Cell CPU | Commits per delivered message | End-to-end p99 | Loss |
 | --- | --- | --- | --- | --- | --- |
@@ -50,93 +35,37 @@ without a passing delivery check was not reported as a throughput number at all.
 | 2000 | 2000 / 1996 | 2.02 cores | n/a | 461 ms | 0 |
 | 2400 | 2400 / 2395 | 2.02 cores | n/a | 741 ms | 0 |
 
-The 210 ms at the 500-point is a first-run warm-up outlier, from a cold ring and cold cursors;
-the 700-point's 25 ms is the same configuration warm.
+Achieved tracks offered to 2400 with the cell pinned at 2.0 of its 2 cores: commits per delivered
+message fall from 3.03 to 1.73 as backlog builds, and past the knee the failure mode is latency,
+not loss. The 210 ms at the 500-point is a cold-start outlier, and 700 is the same configuration
+warm.
 
-Two direct-to-broker control points at the same cap, with the proxy out of the path: 900 offered
-at 1.81 cores and 43 ms p99, 1100 offered at 2.02 cores and 61 ms p99. The proxy's cost over
-direct is +0.16 cores at 500 and +0.20 cores at 900, roughly 100 to 160 µs per request, which
-`perf` attributes to no single hotspot but to terminating and re-originating HTTP: four socket
-syscalls per request, tokio scheduling, and hyper on both sides.
+With the proxy out of the path the same cell served 900 at 1.81 cores and 43 ms: the proxy costs
+about 0.2 cores, roughly 100 to 160 µs per request.
 
-What the ladder shows about the *shape* of saturation is more useful than the ceiling number. The
-cell pins at 2.0 of its 2 cores from about 900 msg/s upward, and yet achieved throughput keeps
-tracking offered all the way to 2400. That is not free capacity appearing; it is **commits per
-delivered message falling from 3.03 to 1.73 as backlog builds**, because a pop under backlog
-returns a full batch and a batch amortises its transaction. Latency is the pressure valve: p99
-grows from 25 ms to 741 ms across the same range. Loss stays zero and nothing stalls. That is
-honest backpressure: the failure mode past the knee is bounded latency growth, not loss.
+The results table and the scripts are archived; the per-point raw stdout is not.
 
-<Aside type="caution">
-This ladder is archived less completely than the other runs in this section. The repository
-keeps the session's results table and the scripts that produced it (`b2-freetier.sh`,
-`runpt.sh`, `vm-cell.sh`); each point's own JSON run record was written to `/root/campaign/` on
-the bench VM and is not in the tree. The configuration, the shape and the per-point results are
-recorded; the raw stdout is not.
-</Aside>
-
-For context on the size of the change: the same free-tier shape measured in July, broker-only with
-no proxy in the path, ceilinged near 500 msg/s. That earlier figure is not published as a Queen
-number because it measured a different thing. See the closing section of
-[Benchmarks](/benchmarks).
-
-## The one-hour twelve-tenant soak
+## The twelve-tenant hour
 
 <Chart
   src="multitenant-cell"
   alt="Two stacked charts over one hour: messages per second offered by the loader against those accepted by the cell, with a persistent gap between them, and below it the rate of requests answered with HTTP 429."
-  caption="This is the soak, not the throughput ladder above: the loader offers a plan-limited 840 msg/s for an hour, which is why the numbers here are far below the ladder's 2400. The gap in the upper panel is the shedding in the lower one: the loader offers more than the plan allows, the proxy refuses the excess, and what the cell does accept stays level for the hour. Load phase only; the trailing drain is the harness stopping."
+  caption="The soak, not the ladder: the loader offers a plan-limited 840 msg/s for an hour. The gap in the upper panel is the shedding in the lower one. Load phase only; the trailing drain is the harness stopping."
   source="benchmark-queen/2026-07-30-1h-soak/loader-interval.csv"
 />
 
-This run answers a different question: does a shared cell keep tenants apart, for an hour, while
-all three enforcement mechanisms are actively firing?
+Twelve tenants on one queue name and one consumer group name. From `soak1h.json`: 840 msg/s
+offered, 70 per tenant, push batch 1, 3 consumers each, pop batch 50, explicit acks, 30 s lease,
+8 partitions, 256-byte payloads, `retry429Attempts: 1`, 3600 s through the proxy with enforcement
+on. Two tenants were pinned to the free plan's 5 requests and 20 messages a second, one to a
+768 KiB quota tripping ten times an hour.
 
-Twelve tenants, **all on the same queue name and the same consumer group name**, which is the
-shape that stresses every in-process structure keyed by queue: the hot-list ring, the parked-pop
-wake gates, the queue-configuration caches. 3600 seconds of load through the proxy. The
-configuration is recorded verbatim in `soak1h.json`:
+**0 cross-tenant deliveries.** 3,024,001 offered, 2,376,180 accepted, 2,400,397 delivered,
+2,350,538 acked, 0 shed. The proxy metered 2,376,180 push messages, exactly the accepted count.
 
-| Parameter | Value |
-| --- | --- |
-| Tenants | 12, shared queue `orders`, shared group `workers` |
-| Offered | 840 msg/s total, 70 per tenant, push batch 1 |
-| Consumers | 3 per tenant, pop batch 50, long poll with a 5000 ms timeout |
-| Acknowledgement | explicit (`autoAck: false`), lease 30 s |
-| Partitions | 8 |
-| Payload | 256 bytes |
-| Deduplication | **off** (`dedupWindowSeconds: 0`) |
-| 429 handling | **retry disabled** (`retry429Attempts: 1`) |
-| Client retries | **0** |
-| Retention | completed after 300 s, pending after 3600 s |
-| Target | the proxy, with enforcement on |
+### The FAIL
 
-Three tenants were deliberately abused so enforcement would fire continuously. `soak-0000` and
-`soak-0001` were forced onto the free plan's limits (5 requests and 20 messages per second) and
-spent the hour being rate-limited. `soak-0002` was given a 768 KiB retained-bytes quota, which
-trips, then releases as retention frees bytes 300 seconds later, then trips again: about ten
-cycles over the hour.
-
-### The isolation result
-
-| Metric | Value |
-| --- | --- |
-| Cross-tenant deliveries | **0** |
-| Messages offered | 3,024,001 |
-| Messages accepted | 2,376,180 |
-| Messages delivered | 2,400,397 |
-| Messages acked | 2,350,538 |
-| Shed by the loader | 0 |
-
-Nine tenants were never touched by the three being throttled and blocked. Each of the nine had
-between 251,564 and 251,575 messages accepted, received between 251,567 and 251,582, and recorded
-**0 missing** with between 3 and 8 duplicates, about 0.002%, which is ordinary at-least-once
-redelivery. Noisy-neighbour containment is what that row means.
-
-### Where the aggregate verdict comes from
-
-The loader's own checker reports `verdict: FAIL` for the run: 25,157 missing and 49,374 duplicates
-across 2,400,397 deliveries. Decomposed by tenant:
+25,157 missing and 49,374 duplicates across 2,400,397 deliveries:
 
 | Class | Tenants | Accepted, of 252,000 offered each | Missing | Duplicates |
 | --- | --- | --- | --- | --- |
@@ -144,44 +73,11 @@ across 2,400,397 deliveries. Decomposed by tenant:
 | rate-limited | `soak-0000`, `soak-0001` | 13,778 and 14,610 | 12,612 and 12,545 | 24,433 and 24,886 |
 | quota-blocked | `soak-0002` | 83,695 | **0** | 3 |
 
-All of the missing and 99.9% of the duplicates belong to the two tenants throttled to about one
-fourteenth of their offered rate. With `retry429Attempts: 1` the loader does not retry a
-rate-limited request at all, so a throttled tenant *must* end the hour with undrained backlog:
-those messages were never accepted, and the checker counts an assigned sequence that never
-arrived as missing. Its duplicates come from the same place: when a rate-limited consumer's
-*acks* are refused, the lease expires and the span is redelivered, correctly.
+All of the missing and 99.9% of the duplicates belong to the two throttled tenants: with
+`retry429Attempts: 1` the loader never retries a refused request, so their backlog was never
+re-offered and the checker counts it missing.
 
-So the broker and the proxy behaved as specified, and the checker does not model
-enforcement-induced backlog or enforcement-induced redelivery. That is the reading the artifact
-supports, and it is why the publishable claim from this run is the isolation result and the
-nine-tenant zero-loss result rather than a delivery ratio.
-
-The quota-blocked tenant is the clean case, and worth stating separately: every message the quota
-*admitted* was delivered, with zero missing.
-
-### Errors the sampler recorded
-
-| Error | Count | What it means |
-| --- | --- | --- |
-| HTTP 429 `rate_limited` | 527,472 (474,861 push, 50,968 pop, 1,643 ack) | The limiter working, on the abused tenants |
-| HTTP 403 `storage_quota_exceeded` | 167,873 | The quota working, on `soak-0002` |
-| HTTP 502 `bad_gateway` | **818** (713 push, 78 pop, 27 ack) | The proxy could not reach the broker |
-| connection refused | **4,392** (4,374 push, 18 ack) | The proxy itself was not accepting connections |
-| pop timeout | 6,620 | A long poll reaching its 5000 ms deadline with nothing to serve |
-
-The 429s and the 403s are the point of the run. The 818 gateway errors and 4,392 refused
-connections are not, and they have to be stated rather than netted out: for part of this hour the
-proxy, or the broker behind it, was unavailable.
-
-The interval series locates it precisely. **Every one of those 5,210 errors landed in a single
-15-second interval, at t=3510 s**, 90 seconds before the end of the load phase. In that interval
-the push rate fell from about 638 to 417 msg/s, the pop rate from about 640 to 196 msg/s, and push
-p99 jumped from 56 ms to 1,368 ms. Thirty seconds later the pop rate had surged to 1,254 msg/s,
-cleared the backlog, and the run finished normally. So it was one brief interruption with full
-recovery rather than a degraded hour, but the archive does not record its cause, and this page
-will not invent one.
-
-### Resources and broker-side latency
+### Resources
 
 | Quantity | Value |
 | --- | --- |
@@ -194,71 +90,15 @@ will not invent one.
 | Ack round trip | p50 1.35 ms, p99 6.24 ms |
 | End to end, whole run | p50 6.30 ms, p95 59.6 ms, **p99 133,693 ms** |
 
-That last row is the clearest example on this site of why broker-side and end-to-end p99 must
-never be quoted interchangeably. The broker spent a median of 2.86 ms on the pushes it accepted;
-the end-to-end p99 is over two minutes, because the two rate-limited tenants' delivered messages
-sit in the same histogram and had been waiting since they were scheduled. The interval series
-reports that same coarse latency bucket in nearly every interval for exactly this reason. Neither
-number is wrong. A page quoting only one of them would mislead in one direction or the other.
-
-### Metering
-
-The proxy meters what it bills. At the end of the hour its metered push-message total was
-**2,376,180** (exactly the loader's count of accepted pushes) and its metered delivery total
-was 2,399,280 against the loader's 2,400,397 delivered, the difference being the sampler stopping
-one interval before the loader did. Read requests carry zero messages, correctly.
-
-<Aside type="note">
-The accurate statement is the one above: each metered counter matches the loader's corresponding
-counter. The two metered totals differ from each other, 2,376,180 against 2,399,280, by the
-redelivery volume, which is the next section; the session note records them as equal.
-</Aside>
-
-### The push-to-delivery gap
-
-2,400,397 messages were delivered against 2,376,180 accepted: **1.02% more deliveries than
-pushes.** That is redelivery, not duplicated stored data. Every one of those extra deliveries is a
-leased span whose ack failed or whose lease expired, coming back exactly as at-least-once delivery
-specifies. The nine healthy tenants contribute 52 of them; the rest belong to the two tenants
-whose acks were being refused.
-
-## What these runs establish
-
-- **Tenant isolation holds under the worst shared-name shape**, for an hour, with the hot-list
-  ring, the wake gates and the caches all keyed by tenant: zero cross-tenant deliveries across
-  twelve tenants on one queue and one consumer group.
-- **Noisy neighbours are contained.** Three tenants pinned against their limits for an hour cost
-  the other nine nothing measurable: zero missing messages each.
-- **Enforcement is real and observable.** Over half a million rate-limit refusals and 167,873
-  quota refusals, with the quota oscillating as retention frees bytes.
-- **A two-core cell has a usable ceiling above 2400 msg/s through the proxy**, degrading
-  gracefully past the knee: bounded latency growth, zero loss, no stall.
-- **Metering is exact against the loader's own counters.**
+Broker-side and end-to-end p99 are not interchangeable: the end-to-end figure carries the
+throttled tenants' backlog.
 
 ## What they do not establish
 
-- **Nothing about high availability.** Single broker. The mesh frames carry a tenant now, but
-  multi-broker shared-cell throughput under these fixes is unmeasured.
-- **Not a delivery-ratio result.** The aggregate verdict is FAIL for the reasons above, and the
-  publishable delivery claim is scoped to the nine unthrottled tenants.
-- **Not a long soak.** One hour. The 24-hour evidence on this site is
-  [the single-tenant soak](/benchmarks/soak-24h), which had no proxy in the path.
-- **Deduplication off.** Nothing here measures the cost of exact deduplication on a shared cell.
-- **A client that handles 429 properly was not measured.** Retry was disabled deliberately so
-  enforcement would be visible in the accounting. A client backing off on `Retry-After` would
-  show a very different delivery profile.
-- **One workload shape.** Push batch 1, pop batch 50, 256-byte payloads, 8 partitions.
-
-## Files
-
-| File | Contents |
-| --- | --- |
-| `2026-07-30-1h-soak/soak1h.json` | The loader's final run record: full configuration, per-tenant delivery verdict, errors by kind and by HTTP code, latency histograms |
-| `2026-07-30-1h-soak/loader-interval.csv` | 15-second interval series: throughput, latency, errors |
-| `2026-07-30-1h-soak/vm-sampler.csv` | Cell sampler: CPU, PostgreSQL commits, connections, metered usage, broker resident memory |
-| `2026-07-30-1h-soak/broker-rates-sizes.log` | The broker's own `rates` and `sizes` blocks: server-side latency, pool, hot-list |
-| `2026-07-29-vm-campaign/results.md` | The campaign record, including the ladder above. Written in Italian |
-| `2026-07-29-vm-campaign/*.sh` | The rig and per-point scripts |
-| `benchmark-queen/vm-cell.sh` | Builds the cell in either shape: `--cell-cpus 2 --cell-mem 8` for free-tier, `--cell-cpus 0` for uncapped |
-
-To build a cell like this yourself, see [Reproducing these runs](/benchmarks/reproduce).
+- **Nothing about high availability.** Single broker.
+- **Not a delivery-ratio result.** The claim covers the nine unthrottled tenants.
+- **Not a long soak.** One hour; [Throughput 24h 1M](/benchmarks/soak-24h) had no proxy.
+- **One 15-second interruption** at t=3510 s: 818 gateway errors and 4,392 refused connections,
+  cause unrecorded.
+- **429 retry disabled**, so enforcement would show: 527,472 rate-limit 429s, 167,873 quota 403s.
+- **One shape.** Push batch 1, pop batch 50, 256-byte payloads, 8 partitions.

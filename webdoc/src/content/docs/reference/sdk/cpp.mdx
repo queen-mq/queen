@@ -311,7 +311,7 @@ payload again, or calling `POST /api/v1/messages/{partitionId}/{transactionId}/r
 | `commit()` | `json`. Posts `POST /api/v1/transaction`. |
 
 A transaction is atomic, not exactly-once end to end; see
-[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
+[the limit](/use/model/).
 
 ## `HttpClient`
 
@@ -332,7 +332,7 @@ queen::json overview = http->get("/api/v1/resources/overview");
 | `get_load_balancer` | `get_load_balancer() const` |
 
 All four return `json`, with `nullptr` for an empty body or a `204`
-([a 204 carries no body at all](/use/errors#the-envelope)), and throw `HttpError` on any status
+([a 204 carries no body at all](/reference/errors/)), and throw `HttpError` on any status
 `>= 400`. `request_timeout_millis` of `0` uses the
 client default. Pass `RetryKind::Pop` for a long-poll request so a 429 backs off indefinitely
 instead of using the bounded budget.

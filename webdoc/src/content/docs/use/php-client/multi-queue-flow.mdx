@@ -1,0 +1,43 @@
+---
+title: Multi-queue flow
+description: "One queue partitioned per customer, two consumer groups reading it independently, and a second queue downstream."
+type: tutorial
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/tutorials/php/02-multi-queue-flow.php
+---
+
+A **partition** is the ordering unit: one customer's orders come back in the sequence they were
+pushed, and a slow customer never holds up the others. The partition key is the only ordering
+decision the program makes.
+
+A **consumer group** is a cursor over the same stored messages, not a copy of them. Billing and
+analytics both read every order and neither sees the other's acknowledgements, so the second
+reader costs a string rather than a second copy of the data. Both ask for `subscriptionMode('all')`
+because a group created after the push starts at the tail.
+
+The loop is a builder as well. `consume()` only describes it, `execute()` runs it, and the call
+blocks until `limit` or `idleMillis` stops it. `each()` is what hands the closure one message at a
+time; without it the closure receives the whole popped batch.
+
+The second queue is created by the first push that names it, exactly as the first one was. The
+handoff into it is two steps here, a push and then the loop's ack, so a crash between them does
+the work twice. [The next tutorial](/use/php-client/transaction-ack-push) closes that window.
+
+<Render file="snippets/tut-php-multi-queue-flow" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/php` with the
+PHP client installed:
+
+```bash
+QUEEN_URL=http://localhost:6632 php 02-multi-queue-flow.php
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh php`.
+
+Next: [Transactional ack and push](/use/php-client/transaction-ack-push).

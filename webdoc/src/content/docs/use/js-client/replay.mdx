@@ -1,0 +1,36 @@
+---
+title: Replay
+description: "Reading history again: a new group backfilled from the beginning, and an existing group rewound."
+type: tutorial
+tier: use
+sidebar:
+  order: 4
+verifiedBy:
+  - examples/tutorials/js/04-replay.mjs
+---
+
+Acknowledging a message does not delete it. Consumption is a cursor per consumer group, and the
+messages stay until retention removes them, so history is still there to be read.
+
+Two different operations use that. A **new group** can start at the beginning instead of the tail,
+which is how you backfill a consumer that did not exist when the events happened. An **existing
+group** can be moved back to a timestamp with a seek, which is how you reprocess after a bug.
+
+The distinction matters: the subscription mode applies once, when the cursor is created, and never
+again. It cannot rewind a group that already exists. A seek can, and it releases any live lease,
+so an in-flight batch is abandoned rather than acknowledged.
+
+<Render file="snippets/tut-js-replay" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with the JavaScript client installed:
+
+```bash
+QUEEN_URL=http://localhost:6632 node 04-replay.mjs
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh js`.
+
+Next: [Streaming](/use/js-client/streaming).

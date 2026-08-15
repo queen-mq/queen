@@ -1,0 +1,55 @@
+---
+title: Rate limiter in streaming
+description: "Windowed request counting per API key, where the counter is a row in the same database as the queue."
+type: example
+tier: use
+sidebar:
+  order: 4
+verifiedBy:
+  - examples/apps/js/rate-limiter.mjs
+  - examples/apps/py/rate_limiter.py
+  - examples/apps/go/rate-limiter/main.go
+  - examples/apps/rust/src/bin/rate_limiter.rs
+---
+
+The textbook rate limiter counts requests per key in a fixed window, and the usual implementation
+is a counter in Redis: a second data system to run, to size, and to lose on restart.
+
+Here the counter is a windowed aggregation over the request stream itself. The window state, the
+decisions it emits and the acknowledgement of the requests it counted commit in one PostgreSQL
+transaction, so the counter cannot drift from the stream it was computed from.
+
+Counting and enforcing are deliberately separate: the counting is exact and belongs to the broker,
+the policy is yours and changes on a different schedule. Note also how the test is made
+deterministic, since a burst can land on either side of a window boundary: twenty requests split
+any way at all leave at least ten on one side, which is over a quota of five.
+
+This one exists only where the client has a streaming SDK. PHP, C++ and plain HTTP carry the other
+two applications.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/app-js-rate-limiter" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/app-py-rate-limiter" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/app-go-rate-limiter" />
+  </TabItem>
+  <TabItem label="Rust">
+    <Render file="snippets/app-rust-rate-limiter" />
+  </TabItem>
+</Tabs>
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart):
+
+```bash
+QUEEN_URL=http://localhost:6632 examples/apps/run.sh
+```
+
+Every program on this page asserts the property it exists to demonstrate and exits
+non-zero if it does not hold. The runner takes a language name to run one of them on its
+own, for example `examples/apps/run.sh js`.

@@ -1,0 +1,54 @@
+---
+title: Full examples
+description: "Three complete applications, each a whole program that measures the property it exists to demonstrate, and each one run before it ships."
+type: overview
+tier: use
+sidebar:
+  order: 12
+verifiedBy:
+  - examples/apps/run.sh
+---
+
+The tutorials in each client section show one mechanism at a time. These are applications: the
+whole program, with the parts a real one has and an example usually leaves out.
+
+Each is built around a property that is hard to get and easy to claim, and each measures that
+property instead of asserting it in prose.
+
+<CardGrid>
+  <LinkCard
+    href="/use/full-examples/chat"
+    title="Chat messaging system"
+    description="One lane per conversation. Measures that a conversation needing translation delays itself and nothing else."
+  />
+  <LinkCard
+    href="/use/full-examples/webhooks"
+    title="Webhook delivery system"
+    description="One lane per subscriber, a bounded retry budget, and a dead-letter queue carrying the error that killed each delivery."
+  />
+  <LinkCard
+    href="/use/full-examples/rate-limiter"
+    title="Rate limiter in streaming"
+    description="Windowed counting per API key, where the counter commits in the same transaction as the requests it counted."
+  />
+</CardGrid>
+
+## What "run before it ships" means here
+
+The programs live in `examples/apps/` in the repository. The build extracts each file between its
+first and last line and includes it verbatim, so what you read is the file that ran. Every program
+asserts its own outcome and exits non-zero when an assertion fails:
+
+```bash
+QUEEN_URL=http://localhost:6632 examples/apps/run.sh
+```
+
+Each program uses a queue name with a unique suffix per run, because delete-then-recreate under
+the same name currently leaves stale partition state for up to 30 seconds in which deduplication
+does not deduplicate. Fresh names are the reliable pattern.
+
+If you want one mechanism rather than one application, start from a client's tutorials:
+[JavaScript](/use/js-client/hello-world), [Python](/use/python-client/hello-world),
+[Go](/use/go-client/hello-world), [Rust](/use/rust-client/hello-world),
+[PHP](/use/php-client/hello-world), [C++](/use/cpp-client/hello-world) or
+[HTTP](/use/http-client/hello-world).

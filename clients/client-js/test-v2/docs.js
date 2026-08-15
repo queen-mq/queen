@@ -151,31 +151,51 @@ export async function docsTransactionalHandoff(client) {
     }
 
     // docs:start(js-transaction)
-    const [message] = await client
+    await client
       .queue('orders')
       .group('invoicing')
       .subscriptionMode('all')
-      .batch(1)
-      .wait(true)
-      .pop()
-
-    await client
-      .transaction()
-      .queue('invoices')
-      .push([{ data: { orderId: message.data.orderId, invoiced: true } }])
-      .ack(message, 'completed', { consumerGroup: 'invoicing' })
-      .commit()
+      .each()
+      .autoAck(false) // the acknowledgement belongs to the transaction, not to the loop
+      .limit(1)
+      .idleMillis(5000)
+      .consume(async (message) => {
+        // commit() throws when the broker rejects the bundle, so reaching the
+        // line after it means the ack and the push are both durable.
+        await client
+          .transaction()
+          .queue('invoices')
+          .push([{ data: { orderId: message.data.orderId, invoiced: true } }])
+          .ack(message, 'completed', { consumerGroup: 'invoicing' })
+          .commit()
+      })
     // docs:end
 
-    // The pop above may hand back an order another docs test pushed to this
-    // queue: assert on identity, not on a hardcoded value.
+    // The loop takes whichever order is oldest for this group, and other docs
+    // tests push to the same queue, so identity is checked against the orders
+    // that actually exist rather than against a hardcoded id. A throwaway group
+    // reads them without disturbing the invoicing cursor.
+    const everyOrder = await client
+        .queue('orders')
+        .group(`docs-audit-${Date.now()}`)
+        .subscriptionMode('all')
+        .batch(50)
+        .partitions(20)
+        .wait(false)
+        .pop()
+    const orderIds = everyOrder.map(m => m.data.orderId)
+
     const invoiced = await client
         .queue('invoices')
         .batch(1)
+        .partitions(10)
         .wait(true)
         .pop()
-    if (invoiced.length !== 1 || invoiced[0].data.orderId !== message.data.orderId) {
-        return { success: false, message: `Invoice not committed: ${JSON.stringify(invoiced)}` }
+    if (invoiced.length !== 1 || !orderIds.includes(invoiced[0].data.orderId)) {
+        return {
+            success: false,
+            message: `Invoice not committed for a real order: ${JSON.stringify(invoiced)} against ${JSON.stringify(orderIds)}`,
+        }
     }
     if (invoiced[0].data.invoiced !== true) {
         return { success: false, message: 'Invoice payload corrupted' }

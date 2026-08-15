@@ -1,0 +1,40 @@
+---
+title: Multi-queue flow
+description: "One queue partitioned per customer, two consumer groups reading it independently, and a second queue downstream."
+type: tutorial
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/tutorials/js/02-multi-queue-flow.mjs
+---
+
+This is the shape most applications end up with, and it rests on three things.
+
+A **partition** keeps one entity's events in order: everything about one customer stays in
+sequence, and different customers never wait for each other. The partition key is the only
+ordering decision you make.
+
+A **consumer group** is a cursor, not a copy. Two groups read the same stored messages and neither
+sees the other's acknowledgements, so adding a reader costs a string, not a second copy of the
+data. A group created after the messages were pushed starts at the tail, which is why the groups
+below ask for `subscriptionMode('all')`.
+
+The **second queue** is created by the first push that names it, exactly like the first one. The
+handoff here is two steps, a push and then an ack: a crash between them does the work twice.
+[The next tutorial](/use/js-client/transaction-ack-push) closes that window.
+
+<Render file="snippets/tut-js-multi-queue-flow" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with the JavaScript client installed:
+
+```bash
+QUEEN_URL=http://localhost:6632 node 02-multi-queue-flow.mjs
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh js`.
+
+Next: [Transactional ack and push](/use/js-client/transaction-ack-push).

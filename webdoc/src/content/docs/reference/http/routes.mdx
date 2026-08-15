@@ -27,12 +27,12 @@ How to read the columns:
   queue resolution. With native tenant scoping off (the default) every request resolves to
   one default tenant, and this column tells you which handlers would participate if it were
   on. Routes marked `no` are cell-wide reads or operator surfaces; that matters for
-  multi-tenant deployments, covered in [Self-hosting](/selfhost).
+  multi-tenant deployments, covered in [Self-hosting](/deploy/).
 - **Internal (broker-to-broker)** routes are not a client API. They exist so brokers sharing a
   database can notify each other, and they require `admin`.
 - **Dashboard identity (broker-direct)** is the small `/auth` surface the broker answers when
   it serves the dashboard itself. The routes are `public` by design; `/auth/me` enforces the
-  auth state in its own handler. [The dashboard page](/selfhost/dashboard) explains the
+  auth state in its own handler. [The dashboard page](/deploy/dashboard/) explains the
   standalone identity it returns.
 
 The five message-plane routes have a page each documenting their request and response

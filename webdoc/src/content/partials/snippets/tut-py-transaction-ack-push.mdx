@@ -1,0 +1,165 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/py/03_transaction_ack_push.py."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/py/03_transaction_ack_push.py by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```python title="examples/tutorials/py/03_transaction_ack_push.py"
+#
+# Tutorial 3 of 5: acknowledge and push in one transaction.
+#
+# Tutorial 2 handed work from one queue to the next in two steps: push the
+# derived message, then let the loop acknowledge the source. Between those two
+# steps a crash duplicates work, and in the other order it loses work.
+#
+# A Queen transaction closes that window: the acknowledgement of the input and
+# the push of the output are one PostgreSQL transaction. Both land or neither
+# does.
+#
+# Run it:
+#   QUEEN_URL=http://localhost:6632 python3 03_transaction_ack_push.py
+
+import asyncio
+import os
+import sys
+import time
+
+from queen import Queen
+
+QUEEN_URL = os.environ.get("QUEEN_URL", "http://localhost:6632")
+RUN = f"{int(time.time() * 1000):x}"
+ORDERS = f"tut-py-tx-orders-{RUN}"
+INVOICES = f"tut-py-tx-invoices-{RUN}"
+GROUP = "tut-py-invoicing"
+
+INPUT = [
+    {"orderId": "A-1", "customer": "acme", "total": 120.5},
+    {"orderId": "B-1", "customer": "globex", "total": 88.75},
+    {"orderId": "C-1", "customer": "initech", "total": 310.0},
+]
+
+CHECKS = 0
+
+
+def check(condition: bool, description: str) -> None:
+    """Record one verified fact, or abort the run."""
+    global CHECKS
+    if not condition:
+        raise AssertionError(description)
+    CHECKS += 1
+    print(f"  ok: {description}")
+
+
+async def main() -> int:
+    queen = Queen(url=QUEEN_URL)
+    verdict, failed = "", False
+
+    try:
+        print(f"broker {QUEEN_URL}")
+
+        for order in INPUT:
+            await queen.queue(ORDERS).partition(order["customer"]).push({"data": order})
+        print(f"pushed {len(INPUT)} orders")
+
+        print("\ninvoicing")
+        invoiced = []
+
+        async def invoice(msg):
+            # One commit carries both operations. The ack names the consumer
+            # group explicitly: the transaction builder does not read it off the
+            # message, and an ack sent without it commits the wrong cursor. The
+            # Python builder spells that context key `consumer_group`, unlike
+            # the camelCase the wire uses.
+            result = await (
+                queen.transaction()
+                .queue(INVOICES)
+                .partition(msg["data"]["customer"])
+                .push(
+                    [
+                        {
+                            "data": {
+                                "invoiceId": f"INV-{msg['data']['orderId']}",
+                                "orderId": msg["data"]["orderId"],
+                                "amount": msg["data"]["total"],
+                            }
+                        }
+                    ]
+                )
+                .ack(msg, "completed", {"consumer_group": GROUP})
+                .commit()
+            )
+
+            # Check the transaction, not just the absence of an exception.
+            # commit() does raise on a rejected transaction, so this is belt and
+            # braces against a success flag that says otherwise.
+            if not result.get("success"):
+                raise RuntimeError(f"transaction rejected: {result.get('error')}")
+
+            invoiced.append(msg["data"]["orderId"])
+            print(f"  {msg['data']['orderId']} -> INV-{msg['data']['orderId']}")
+
+        # auto_ack(False) is what makes this tutorial possible: the loop must not
+        # acknowledge behind your back, because the acknowledgement is part of
+        # the transaction above.
+        await (
+            queen.queue(ORDERS)
+            .group(GROUP)
+            .subscription_mode("all")
+            .each()
+            .auto_ack(False)
+            .limit(len(INPUT))
+            .idle_millis(5000)
+            .consume(invoice)
+        )
+
+        check(len(invoiced) == len(INPUT), "every order was invoiced once")
+
+        # The commit fails if the lease has expired, which is what stops a slow
+        # consumer from acking work the broker has already handed to someone
+        # else. Nothing to assert here: the check above is that assertion, since
+        # a failed commit would have raised.
+
+        print("\nchecking the output queue")
+
+        # The invoices went to one partition per customer, and a pop claims a
+        # single partition unless you say otherwise: partitions(10) lets this one
+        # call claim up to ten of them, with batch as the total budget across all
+        # of them.
+        invoices = await queen.queue(INVOICES).batch(10).partitions(10).wait(True).pop()
+
+        check(len(invoices) == len(INPUT), f"{len(INPUT)} invoices exist")
+        ids = sorted(m["data"]["orderId"] for m in invoices)
+        check(
+            ids == sorted(o["orderId"] for o in INPUT),
+            "each invoice matches an order, none duplicated",
+        )
+
+        # And the input queue is committed for this group: the acks were part of
+        # the same transactions that produced those invoices, so the two states
+        # cannot disagree.
+        leftovers = await queen.queue(ORDERS).group(GROUP).batch(10).wait(False).pop()
+        check(len(leftovers) == 0, "the source queue is committed for this group")
+
+        await queen.queue(ORDERS).delete()
+        await queen.queue(INVOICES).delete()
+
+        verdict = f"\nPASS: {CHECKS} checks"
+    except Exception as err:
+        verdict, failed = f"\nFAIL: {err}", True
+    finally:
+        await queen.close()
+
+    # A failure goes to stderr, like the rest of the set. Flush stdout first so
+    # the verdict still lands last when the two are piped into one file.
+    sys.stdout.flush()
+    print(verdict, file=sys.stderr if failed else sys.stdout)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+```

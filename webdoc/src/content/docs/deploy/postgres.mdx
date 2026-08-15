@@ -1,0 +1,136 @@
+---
+title: PostgreSQL
+description: "The database Queen runs on: version 15 or newer, no extensions, a direct connection, a pool that fits max_connections, and a cost model counted in commits."
+type: how-to
+tier: operate
+sidebar:
+  order: 2
+sourceOfTruth:
+  - server/src/schema.rs
+  - server/sql/schema.sql
+  - server/sql/procedures/002_streams_schema.sql
+  - server/src/db.rs
+  - server/src/config.rs
+  - server/src/fusion.rs
+---
+
+PostgreSQL is not a dependency of Queen, it is Queen's storage engine. Messages, offsets, the
+dedup index, queue configuration and the dead-letter table are ordinary tables, and every queue
+semantic runs in stored procedures inside the database. Sizing PostgreSQL is sizing Queen.
+
+## Set it up
+
+PostgreSQL 15 or newer, no extensions. The floor is one unique index declared
+`NULLS NOT DISTINCT`, which 14 does not have. The simplest correct setup is a dedicated database
+owned by a dedicated role:
+
+```sql
+CREATE ROLE queen LOGIN PASSWORD 'change-me';
+CREATE DATABASE queen OWNER queen;
+```
+
+Point the `PG_*` variables at it. The broker applies `schema.sql` and 23 procedure files at every
+boot, from text compiled into the binary, under an advisory lock that serialises replicas. That
+needs `CREATE` on the database, ownership of what it creates and the right to issue grants, which
+the owner role above has.
+
+Where policy forbids DDL from an application role, `QUEEN_APPLY_SCHEMA=0` starts the broker
+straight into serving against a schema you applied yourself, in the same file order, and matching
+it to the binary becomes your job.
+
+One grant is worth knowing about on a shared database: the `queen_streams` schema and its two
+tables are granted to `PUBLIC`, so every role that can log in can read and write stream state.
+
+## Give it a direct connection
+
+The broker must keep the same backend for the life of a pooled connection, and a pooler in
+transaction or statement mode takes that away. Two mechanisms break:
+
+- **Session advisory locks.** The boot-time schema apply holds one across the whole DDL, and the
+  maintenance cycle holds another across many autocommitting calls: that lock is how exactly one
+  replica sweeps per cycle.
+- **Prepared statements.** The hot paths prepare once per connection, and transaction-mode pooling
+  invalidates that cache on every checkout, so every push, pop and ack pays a parse and a plan.
+
+Session-mode pooling, which multiplexes connections rather than statements, is transparent. Give
+each broker its own backends.
+
+## Size the pool before you scale out
+
+`DB_POOL_SIZE`, default 160, is the ceiling on concurrent database work for one broker, and the
+arithmetic is per cluster:
+
+```text
+replicas × DB_POOL_SIZE + superuser_reserved_connections + your own tooling ≤ max_connections
+```
+
+Three brokers at the default want 480 connections and a stock PostgreSQL allows 100. That mismatch
+answers `500` with `{"error":"pool"}` long before anything looks like a query problem.
+
+`QUEEN_STMT_TIMEOUT_MS`, default 30000, is broker-side. The broker never sets PostgreSQL's own
+`statement_timeout`, so if you want a server-side ceiling as well, set it on the broker's role
+above the broker's value.
+
+## The server settings that matter
+
+The workload is append-heavy: a segment insert and an allocator-row update per push, a consumer-row
+update per pop and ack, and a matching delete rate once retention is on.
+
+- `max_connections`, the setting most likely to be wrong: see the arithmetic above.
+- `shared_buffers`, because the hot set is the allocator and consumer rows plus the newest
+  segments, tiny and updated constantly.
+- `synchronous_commit`, where `on` is the durable choice and the one the published runs used.
+- `commit_delay` and `commit_siblings`, so one fsync carries more of the concurrent pushes.
+- `max_wal_size` and the checkpoint settings, because a high sustained write rate checkpoints
+  constantly at stock values.
+- the autovacuum cadence, because the tables updated in place churn far faster than their row
+  counts suggest.
+
+The broker sets its own per-table `fillfactor` and autovacuum parameters at every boot, which is
+why those tables look over-vacuumed. Leave them alone.
+
+## Size it in commits, not messages
+
+A push becomes one compressed segment row per partition touched, and that row is one transaction,
+which is one WAL flush. So the question that decides the hardware is how many messages ride each
+commit, and a saturated Queen is almost always commit-bound rather than CPU-bound.
+
+```bash
+curl -s http://localhost:6632/metrics/prometheus | grep -E 'queen_fusion_items_per_batch|queen_batch_rtt_milliseconds'
+```
+
+The first gauge is messages per commit, the second is how long a commit takes. Client batch size is
+the dominant lever on the first one, ahead of every server-side knob, and it is free. The broker
+also coalesces concurrent pushes, and concurrent acks, into shared transactions on its own.
+
+Partition count is the other axis, and it drives background work whether or not traffic exists:
+retention, the stats reconciler and the metrics collector all iterate partitions on a fixed
+cadence. An idle deployment with 100 partitions and one with 100,000 differ in steady-state
+database CPU while both move zero messages.
+
+<Steps>
+
+1. Measure your own message. Payload size and compressibility decide storage.
+
+2. Fix the batch size first, then read `queen_fusion_items_per_batch` under real load.
+
+3. Choose the partition count from the consumer parallelism you need, then price its background
+   cost.
+
+4. Load the deployment until `pool_waiting` goes non-zero. That rate is your commit ceiling on that
+   disk, and it moves with the disk.
+
+5. Turn retention on before you go live. An unbounded queue is a full disk on a schedule you did
+   not choose.
+
+</Steps>
+
+The measured runs behind all of this, each with the conditions it was taken under, are in
+[Benchmarks](/benchmarks).
+
+The database being the whole state also makes backup a `pg_dump` of both schemas, with the
+commands and the one artefact no dump captures in
+[Operations](/deploy/operations#backup-and-restore).
+
+PostgreSQL 15, a direct connection, a pool that fits `max_connections`, and a commit rate you have
+measured rather than assumed.

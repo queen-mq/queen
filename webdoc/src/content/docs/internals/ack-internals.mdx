@@ -114,7 +114,7 @@ All three are arrays of 32-character lowercase hex tokens. The broker maps them 
 The retry limit comes from `queen.queues.retry_limit` (default 3), and the DLQ is enabled when
 either `dead_letter_queue` or `dlq_after_max_retries` is true. Both default true, so an unconfigured
 queue dead-letters. The client-facing shape of that budget is
-[leases, retries and the DLQ](/use/concepts/leases-retries-dlq/).
+[leases, retries and the DLQ](/use/model/).
 
 `batch_retry_count` is charged **only** by an explicit `failed`. A lease expiry never spends it. The
 redelivery counter `attempt_count` is separate telemetry, incremented by

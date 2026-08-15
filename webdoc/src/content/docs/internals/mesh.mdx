@@ -139,14 +139,14 @@ State this plainly, because the mechanism above reads as stronger than it is.
   number. Once a connection is accepted, everything on it is trusted.
 - **The frame set includes `MAINTENANCE_MODE_SET`.** So an attacker who can reach the port and replay
   one captured handshake can put every replica into maintenance mode, which diverts all pushes to
-  [the disk spool](/selfhost/durability/). `POP_MAINTENANCE_MODE_SET` will likewise pause
+  [the disk spool](/deploy/ha/). `POP_MAINTENANCE_MODE_SET` will likewise pause
   consumption cluster-wide.
 - **With no secret configured, not even the replay is needed.**
 
 <Aside type="danger">
 **Firewalling the mesh port is a requirement, not advice.** `QUEEN_MESH_PORT` must be reachable only
 from the other brokers in the cluster: a private network, a security group, or a
-[Kubernetes network policy](/selfhost/kubernetes/). Do not treat `QUEEN_SYNC_SECRET` as a substitute
+[Kubernetes network policy](/deploy/kubernetes/). Do not treat `QUEEN_SYNC_SECRET` as a substitute
 for that. Set it as well, but the network boundary is what actually protects the cluster.
 </Aside>
 

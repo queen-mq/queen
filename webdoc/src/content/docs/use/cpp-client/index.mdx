@@ -1,0 +1,122 @@
+---
+title: C++ Client
+description: "Build the single-header C++ client against its three vendored headers, then push, consume and ack over synchronous JSON."
+type: quickstart
+tier: use
+sidebar:
+  order: 8
+sourceOfTruth:
+  - clients/client-cpp/queen_client.hpp
+  - clients/client-cpp/Makefile
+  - test/runners/cpp/Dockerfile
+verifiedBy:
+  - clients/client-cpp/test_client.cpp
+  - clients/client-cpp/test_retry429.cpp
+---
+
+The C++ client is one header, `clients/client-cpp/queen_client.hpp`: message plane,
+transactions, the dead-letter query, client-side buffering, load balancing and a thread-pool
+consumer. It needs C++17, and everything is synchronous and returns `nlohmann::json`.
+
+Three headers have to be on the include path first: `json.hpp` and `httplib.h`, both
+third-party and gitignored, and the vendored `threadpool.hpp`. The test runner's Dockerfile is
+the authoritative recipe; from the repository root:
+
+```bash
+mkdir -p clients/server/vendor clients/server/include
+curl -fsSL https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp -o clients/server/vendor/json.hpp
+curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.27.0/httplib.h -o /usr/local/include/httplib.h
+cp test/vendor/cpp/threadpool.hpp clients/server/include/threadpool.hpp
+make -C clients/client-cpp test retry429
+```
+
+That builds `bin/test_client`, which takes the broker URL as `argv[1]`, and `bin/test_retry429`,
+the proxy-contract suite, which serves its own responses and needs no broker. In your own
+project, satisfy the three includes however your build system prefers.
+
+```cpp
+#include "queen_client.hpp"
+
+using namespace queen;
+
+ClientConfig config;
+config.bearer_token = std::getenv("QUEEN_TOKEN");
+config.timeout_millis = 30000;
+
+QueenClient client({"http://localhost:6632"}, config);
+```
+
+The single-URL constructor, `QueenClient client("http://localhost:6632")`, ignores
+`ClientConfig` entirely: it hardcodes the defaults and passes no bearer token, so authenticated
+use goes through the vector form above. The option table is in
+[Reference](/reference/sdk/cpp#configuration).
+
+## Push
+
+```cpp
+auto res = client.queue("orders")
+                 .partition("acct-42")
+                 .push({{{"transactionId", "order-1"}, {"data", {{"id", 1}}}}});
+// res[0]["status"] == "queued"
+
+json messages = client.queue("orders").group("billing").batch(10).pop();
+```
+
+The queue and the partition are created by the push. It takes a `std::vector<json>` and returns
+the broker's array, one entry per item, each carrying a `status` of `queued`, `duplicate`,
+`buffered` or `failed`; supply your own `transactionId` and a retry inside the dedup window
+writes nothing a second time. `pop()` leases a batch back.
+
+## Consume
+
+```cpp
+std::atomic<bool> stop{false};
+
+client.queue("jobs")
+      .group("workers")
+      .concurrency(4)
+      .batch(1)
+      .each()
+      .auto_ack(true)
+      .consume([](const json& msg) { process(msg); }, &stop);
+```
+
+`consume()` spreads the handler over a thread pool and blocks until every worker stops: on the
+`stop_signal` you pass, on `client.close()`, on `limit`, on `idle_millis`, or on a terminal
+`403`, which is rethrown once the workers have finished.
+
+## Acknowledge
+
+`auto_ack` is client-side: the worker acks `completed` when your handler returns, `failed` when
+it throws. Settle a batch yourself with `client.ack`.
+
+```cpp
+json result = client.ack(messages, true, {{"group", "billing"}});
+```
+
+An ack is an offset commit, so a nack clamps the group's cursor at the failed message and
+everything after it in that batch comes back. A missing `partitionId` throws for an array. The
+return value's `success` means the request was accepted, not that every ack landed: read
+`result["result"][i]["success"]`.
+
+Call `client.close()` on the way out. It stops the consume workers and flushes the push buffers.
+
+## What differs here
+
+- `pop()` catches every failure, logs it and returns an empty array, so an empty result is not
+  an empty queue.
+- The long poll is a fixed 30 seconds, and `.wait(false)` is the only way to shorten it.
+- `renew_lease()` on the consume builder is inert: a handler slower than the lease has to call
+  `client.renew(messages)` from its own timer.
+- The boolean ack maps to `completed` and `failed` only, so `retry` and `dlq` are out of reach.
+- The constructor's own `SIGINT` handler calls `exit(0)` without flushing buffers: install your
+  own, pass it as the consume `stop_signal`, and call `close()` on the way out.
+
+Every builder method, transactions, buffering, the dead-letter query, the `429`/`403` contract
+and what this client does not cover are in [the C++ reference](/reference/sdk/cpp).
+
+## Tutorials
+
+Four programs build up from one message to replay: a single file each, compiled against this
+header, each checking its own outcome. Start with
+[Hello world](/use/cpp-client/hello-world).

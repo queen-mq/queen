@@ -1,0 +1,35 @@
+---
+title: Hello world
+description: "One message in, one message out, against a broker you started five minutes ago."
+type: tutorial
+tier: use
+sidebar:
+  order: 1
+verifiedBy:
+  - examples/tutorials/js/01-hello-world.mjs
+---
+
+Nothing is created before it is used. The queue in the program below comes into existence with
+the push that names it, inside the same transaction that stores the message, so there is no
+declare step and nothing to provision.
+
+The read takes the message under a **lease**: it is claimed until it is acknowledged or the lease
+expires, and the acknowledgement is what commits consumption. No consumer group is named here, so
+the read goes through the queue's own cursor, which starts at the beginning. Named groups are
+[the next tutorial](/use/js-client/multi-queue-flow): a group created after a message was pushed
+starts at the tail and would find nothing.
+
+<Render file="snippets/tut-js-hello-world" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with the JavaScript client installed:
+
+```bash
+QUEEN_URL=http://localhost:6632 node 01-hello-world.mjs
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh js`.
+
+Next: [Multi-queue flow](/use/js-client/multi-queue-flow).

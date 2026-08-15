@@ -1,0 +1,34 @@
+---
+title: History
+description: "Why Queen was written: head-of-line blocking in Smartchat, a workaround around Kafka, and the road from a C++ prototype to the Rust broker."
+type: concept
+tier: use
+sidebar:
+  order: 2
+---
+
+Queen was born in October 2025, to solve head-of-line blocking in Smartchat. That product used
+Kafka as the backbone between its microservices, and kept hitting the same wall: the queues whose
+processing time is long and uneven, translations and agent replies, block everything queued
+behind them. The first fix was a workaround. Consume from Kafka, write the task to PostgreSQL,
+run a loop that does the work, publish back to Kafka.
+
+That is where the idea came from: generalise the workaround into a small C++ broker with
+PostgreSQL procedures of its own. It worked, it was traceable, and it removed the problem, so the
+next step was to give it Kafka's semantics as well: consumer groups and replay.
+
+By November 2025 the first prototype had replaced Kafka across Smartchat. From there the work was
+speed and scale, from the 30,000 messages a second of the early versions to the million of the
+current one, which arrived with a new Rust broker and a new PostgreSQL schema.
+
+## Where it runs today
+
+Queen is the engine of at least three products at Smartness, including both of the ones that have
+to be real time. Between them they run about **60 queues, 100,000 partitions and 60 consumer
+groups**, and that load sits at around **20% of a two-core PostgreSQL on GCP**: the cardinality
+that this design makes cheap is exactly the cardinality that makes other brokers expensive.
+
+The broker runs highly available, three replicas. It holds no coordination state, so the replicas
+need nothing from one another and a rolling restart is a rolling restart, not a rebalance.
+
+Queen today is complete, observable, fast, and simple to run and to keep running.

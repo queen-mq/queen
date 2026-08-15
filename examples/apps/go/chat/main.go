@@ -1,0 +1,351 @@
+// docs:start(app-go-chat)
+//
+// A chat messaging system.
+//
+// This is the application Queen was written for. A hotel messaging product ran
+// on Kafka and kept stalling: some conversations need a translation or an agent
+// reply before the next message can be handled, and on a shared partition one
+// slow conversation holds up every conversation behind it.
+//
+// The fix is structural rather than operational: one ordered lane per
+// conversation, created by the first message sent to it. A conversation that
+// takes ten seconds delays itself and nothing else.
+//
+// What this program builds:
+//
+//	chat-messages (one partition per conversation)
+//	  |-- group "delivery"    fast, marks each message as delivered
+//	  |-- group "enrichment"  slow on conversations that need translation
+//
+// And what it proves: every message reaches both groups exactly once, in the
+// order it was sent inside its own conversation, and the conversations that
+// need no translation finish while the slow one is still working.
+//
+// Run it:
+//
+//	QUEEN_URL=http://localhost:6632 GOWORK=off go run ./chat
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"slices"
+	"strconv"
+	"sync"
+	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
+)
+
+var runID = strconv.FormatInt(time.Now().UnixMilli(), 36)
+
+var messagesQueue = "app-go-chat-" + runID
+
+// Three conversations. The one in Japanese needs a translation pass, which is
+// the slow work: 400 ms a message against 10 ms for the rest. The list is a
+// slice rather than a map because Go randomises map iteration and the send
+// order below has to be the same on every run.
+type conversation struct {
+	id               string
+	locale           string
+	needsTranslation bool
+}
+
+var conversations = []conversation{
+	{id: "conv-en-1", locale: "en", needsTranslation: false},
+	{id: "conv-en-2", locale: "en", needsTranslation: false},
+	{id: "conv-jp-1", locale: "jp", needsTranslation: true},
+}
+
+const messagesPerConversation = 6
+
+func conversationByID(id string) (conversation, bool) {
+	for _, c := range conversations {
+		if c.id == id {
+			return c, true
+		}
+	}
+	return conversation{}, false
+}
+
+var checks int
+
+// assert is the whole test framework here. Go has no exceptions, so a failed
+// check is an error that unwinds run() and is printed once, at the bottom.
+func assert(condition bool, description string) error {
+	if !condition {
+		return fmt.Errorf("%s", description)
+	}
+	checks++
+	fmt.Printf("  ok: %s\n", description)
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nFAIL: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\nPASS: %d checks\n", checks)
+}
+
+func run() error {
+	brokerURL := os.Getenv("QUEEN_URL")
+	if brokerURL == "" {
+		brokerURL = "http://localhost:6632"
+	}
+
+	// Every call in the Go client takes a context, and it is the only deadline
+	// there is. This one bounds the whole program, so a broker that stops
+	// answering ends the run instead of wedging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// queen.New installs no signal handlers: this program owns its shutdown
+	// through the Close below.
+	client, err := queen.New(brokerURL)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	// Close gets a fresh context, because the one above may already be done by
+	// the time the deferred call runs.
+	defer client.Close(context.Background())
+
+	fmt.Printf("broker %s\n", brokerURL)
+
+	// Leases are what make a crashed worker safe: a message whose handler dies
+	// is redelivered once the lease expires. RetryLimit bounds how many times
+	// that can happen before the message is dead-lettered instead.
+	if _, err := client.Queue(messagesQueue).
+		Config(queen.QueueConfig{LeaseTime: 60, RetryLimit: 3}).
+		Create().Execute(ctx); err != nil {
+		return fmt.Errorf("create %s: %w", messagesQueue, err)
+	}
+
+	// ---------------------------------------------------------------- producing
+	//
+	// A chat client sends a message: one push, into the partition named after
+	// the conversation. Nothing was declared for this conversation in advance,
+	// and nothing has to be cleaned up when it goes quiet.
+	fmt.Println("\nsending")
+	sent := 0
+	for seq := 1; seq <= messagesPerConversation; seq++ {
+		for _, c := range conversations {
+			message := map[string]interface{}{
+				"conversationId": c.id,
+				"seq":            seq,
+				"locale":         c.locale,
+				"body":           fmt.Sprintf("message %d in %s", seq, c.id),
+				"sentAt":         time.Now().UnixMilli(),
+			}
+			// The transaction id is the client's own idempotency key: a retry
+			// of this send, from a phone on a flaky network, writes nothing the
+			// second time and answers with the first message's id. In this
+			// client it rides on the push builder rather than on the payload.
+			if _, err := client.Queue(messagesQueue).
+				Partition(c.id).
+				Push(message).
+				TransactionID(fmt.Sprintf("%s-%d", c.id, seq)).
+				Execute(ctx); err != nil {
+				return fmt.Errorf("push %s/%d: %w", c.id, seq, err)
+			}
+			sent++
+		}
+	}
+	fmt.Printf("  %d messages across %d conversations\n", sent, len(conversations))
+
+	// A resend of the same message: the client retried because it never saw the
+	// first answer. The broker recognises the transaction id and stores nothing.
+	duplicate, err := client.Queue(messagesQueue).
+		Partition("conv-en-1").
+		Push(map[string]interface{}{
+			"conversationId": "conv-en-1",
+			"seq":            1,
+			"body":           "resent by the phone",
+		}).
+		TransactionID("conv-en-1-1").
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("resend: %w", err)
+	}
+	if err := assert(duplicate[0].Status == "duplicate", "a resent message was deduplicated, not stored twice"); err != nil {
+		return err
+	}
+
+	// --------------------------------------------------------------- delivering
+	//
+	// The delivery worker is what marks a message as delivered to the
+	// recipients. It is fast and must never fall behind, which is why it is its
+	// own consumer group: it shares no cursor with the slow work below.
+	//
+	// Concurrency(3) runs three poll loops, and each pop claims a partition, so
+	// the three conversations are drained in parallel by three goroutines. The
+	// handler therefore runs concurrently and everything it touches is behind a
+	// mutex; the JavaScript version needs no lock because it has no threads.
+	fmt.Println("\ndelivering")
+	var mu sync.Mutex
+	delivered := map[string][]int{}
+
+	err = client.Queue(messagesQueue).
+		Group("delivery").
+		SubscriptionMode(queen.SubscriptionModeAll).
+		Concurrency(3).
+		Each().
+		// Limit is per worker, not a budget shared by the pool, so it is a
+		// ceiling on a runaway goroutine rather than the way the
+		// pool ends: what ends it is the idle bound below. Four seconds of
+		// silence is hundreds of times the 10 ms a message costs here, and a
+		// message that never arrives fails the count check instead of hanging
+		// the run. TimeoutMillis caps each poll at a second so that deadline is
+		// noticed promptly rather than inside a 30 s long poll.
+		Limit(sent).
+		IdleMillis(4000).
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			time.Sleep(10 * time.Millisecond)
+			conversationID, _ := msg.Data["conversationId"].(string)
+			// JSON numbers decode to float64 whatever they looked like when
+			// they were pushed.
+			seq, ok := msg.Data["seq"].(float64)
+			if !ok {
+				return fmt.Errorf("message %s has no numeric seq", msg.TransactionID)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			delivered[conversationID] = append(delivered[conversationID], int(seq))
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("delivery: %w", err)
+	}
+
+	total := 0
+	for _, seqs := range delivered {
+		total += len(seqs)
+	}
+	if err := assert(total == sent, "delivery saw every message exactly once"); err != nil {
+		return err
+	}
+	for _, c := range conversations {
+		if err := assert(
+			slices.IsSorted(delivered[c.id]),
+			fmt.Sprintf("%s was delivered in order", c.id),
+		); err != nil {
+			return err
+		}
+	}
+
+	// -------------------------------------------------------------- enrichment
+	//
+	// The slow group. It reads the same messages through its own cursor, and
+	// the Japanese conversation costs 400 ms a message because it has to be
+	// translated before it can be answered.
+	//
+	// This is where a shared partition would hurt: on a hashed topic these
+	// messages would sit in the same lane as the English ones and hold them up.
+	// Here each conversation has its own lane, so the English conversations
+	// finish while the Japanese one is still being translated. The timings
+	// below are the proof.
+	fmt.Println("\nenriching")
+	finishedAt := map[string]time.Duration{}
+	started := time.Now()
+
+	err = client.Queue(messagesQueue).
+		Group("enrichment").
+		SubscriptionMode(queen.SubscriptionModeAll).
+		Concurrency(3).
+		Each().
+		Limit(sent).
+		// Longer than the delivery bound because the Japanese lane occupies one
+		// worker for about 2.4 s, and a worker that has drained its own lane
+		// must not leave before the run is over.
+		IdleMillis(6000).
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			conversationID, _ := msg.Data["conversationId"].(string)
+			meta, ok := conversationByID(conversationID)
+			if !ok {
+				return fmt.Errorf("unknown conversation %q", conversationID)
+			}
+			if meta.needsTranslation {
+				time.Sleep(400 * time.Millisecond)
+			} else {
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			// One lane is handled by one worker at a time, so the last write
+			// for a conversation is when that conversation finished.
+			mu.Lock()
+			defer mu.Unlock()
+			finishedAt[conversationID] = time.Since(started)
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("enrichment: %w", err)
+	}
+
+	slow := finishedAt["conv-jp-1"]
+	fast := max(finishedAt["conv-en-1"], finishedAt["conv-en-2"])
+	fmt.Printf("  english done after %d ms, japanese after %d ms\n",
+		fast.Milliseconds(), slow.Milliseconds())
+
+	if err := assert(
+		fast < slow,
+		"the conversations needing no translation finished first, in the same worker pool",
+	); err != nil {
+		return err
+	}
+	if err := assert(
+		slow > messagesPerConversation*300*time.Millisecond,
+		"the slow conversation really was slow, so the comparison means something",
+	); err != nil {
+		return err
+	}
+
+	// ------------------------------------------------------------------- replay
+	//
+	// A new feature needs the history: sentiment scoring over everything ever
+	// said. It is a new consumer group reading from the beginning, and it costs
+	// no producer change and no second copy of the data. SubscriptionMode("all")
+	// is what points the new cursor at the start: a group created today would
+	// otherwise begin at the tail and score nothing.
+	fmt.Println("\nbackfilling a new consumer")
+	scored := 0
+
+	err = client.Queue(messagesQueue).
+		Group("sentiment").
+		SubscriptionMode(queen.SubscriptionModeAll).
+		Concurrency(3).
+		Each().
+		Limit(sent).
+		IdleMillis(4000).
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			mu.Lock()
+			defer mu.Unlock()
+			scored++
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("sentiment: %w", err)
+	}
+
+	if err := assert(scored == sent, "a group added today read the whole history"); err != nil {
+		return err
+	}
+
+	// Clean up on success only: a failed run returns before this and leaves the
+	// queue on the broker to be looked at.
+	if _, err := client.Queue(messagesQueue).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete %s: %w", messagesQueue, err)
+	}
+
+	return nil
+}
+
+// docs:end

@@ -1,0 +1,161 @@
+// docs:start(tut-go-hello-world)
+//
+// Tutorial 1 of 5: hello world.
+//
+// One message in, one message out. Nothing is created in advance: the queue and
+// the partition come into existence with the push that names them.
+//
+// Run it:
+//
+//	QUEEN_URL=http://localhost:6632 GOWORK=off go run ./hello-world
+//
+// The program checks its own outcome and exits non-zero if a check fails.
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
+)
+
+// The name is prefixed per language and suffixed per run, so every tutorial in
+// every language can share one broker and no run inherits state from another.
+var queueName = "tut-go-hello-" + strconv.FormatInt(time.Now().UnixMilli(), 36)
+
+var checks int
+
+// assert is the whole test framework of these tutorials. Go has no exceptions,
+// so a failed check is an error that unwinds run() and is printed once, at the
+// bottom, instead of a panic.
+func assert(condition bool, description string) error {
+	if !condition {
+		return fmt.Errorf("%s", description)
+	}
+	checks++
+	fmt.Printf("  ok: %s\n", description)
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nFAIL: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\nPASS: %d checks\n", checks)
+}
+
+func run() error {
+	brokerURL := os.Getenv("QUEEN_URL")
+	if brokerURL == "" {
+		brokerURL = "http://localhost:6632"
+	}
+
+	// Every call in the Go client takes a context. It is the only deadline and
+	// the only cancellation there is: this one bounds the whole program, so a
+	// broker that stops answering ends the run instead of wedging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// queen.New accepts a single URL, a slice of URLs for failover, or a
+	// ClientConfig. It installs no signal handlers, so this program owns its
+	// own shutdown through the Close below.
+	client, err := queen.New(brokerURL)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	// Close flushes any client-side push buffer and shuts the HTTP transport
+	// down. It gets a fresh context, because the one above may already be done
+	// by the time the deferred call runs.
+	defer client.Close(context.Background())
+
+	fmt.Printf("broker %s\n", brokerURL)
+
+	// A push names a queue and, optionally, a partition. Both are created by
+	// this call if they do not exist, inside the transaction that stores the
+	// message. There is no declare step and nothing to provision first.
+	//
+	// The Go client takes the payload itself, not an envelope around it: what
+	// you pass to Push is what comes back as Message.Data.
+	pushed, err := client.Queue(queueName).
+		Push(map[string]interface{}{"greeting": "Hello World!"}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+
+	fmt.Printf("pushed %s -> %s\n", pushed[0].TransactionID, pushed[0].Status)
+	if err := assert(pushed[0].Status == "queued", "the broker stored the message"); err != nil {
+		return err
+	}
+
+	// Pop takes messages under a lease: they are claimed until they are
+	// acknowledged or the lease expires. Wait(true) turns on long polling, so
+	// the call parks until a message arrives instead of coming back empty.
+	//
+	// No consumer group is named here, so the read goes through the queue's own
+	// cursor, which starts at the beginning. Named groups are tutorial 2: a
+	// group created after a message was pushed starts at the tail and would see
+	// nothing here.
+	messages, err := client.Queue(queueName).
+		Batch(1).
+		Wait(true).
+		Pop(ctx)
+	if err != nil {
+		return fmt.Errorf("pop: %w", err)
+	}
+
+	if err := assert(len(messages) == 1, "one message came back"); err != nil {
+		return err
+	}
+	message := messages[0]
+
+	// Data is a map[string]interface{}: the payload arrives as decoded JSON, so
+	// strings come back as string and every number as float64.
+	greeting, _ := message.Data["greeting"].(string)
+	fmt.Printf("received %q from partition %s\n", greeting, message.Partition)
+	if err := assert(greeting == "Hello World!", "the payload survived the round trip"); err != nil {
+		return err
+	}
+
+	// No partition was named on the push, so the broker put the message in the
+	// queue's default lane.
+	if err := assert(message.Partition == queen.DefaultPartition, "it landed in the default partition"); err != nil {
+		return err
+	}
+
+	// The acknowledgement is what commits consumption. It moves the cursor past
+	// the message and releases the lease. A rejected ack still arrives as HTTP
+	// 200 with Success false on the item, so the per-item flag is the only
+	// proof the broker took it: err being nil is not.
+	acks, err := client.Ack(ctx, message, true, queen.AckOptions{})
+	if err != nil {
+		return fmt.Errorf("ack: %w", err)
+	}
+	if err := assert(acks[0].Success, "the acknowledgement was accepted"); err != nil {
+		return err
+	}
+
+	// The cursor is now past the only message, so a further read finds nothing.
+	// Wait(false) returns immediately instead of long polling.
+	leftovers, err := client.Queue(queueName).Wait(false).Pop(ctx)
+	if err != nil {
+		return fmt.Errorf("drain check: %w", err)
+	}
+	if err := assert(len(leftovers) == 0, "the queue is drained"); err != nil {
+		return err
+	}
+
+	// Clean up on success only: a failed run returns before this and leaves the
+	// queue on the broker to be looked at.
+	if _, err := client.Queue(queueName).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete queue: %w", err)
+	}
+
+	return nil
+}
+
+// docs:end

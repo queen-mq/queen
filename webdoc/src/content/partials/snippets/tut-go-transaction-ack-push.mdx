@@ -1,0 +1,236 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/go/transaction-ack-push/main.go."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/go/transaction-ack-push/main.go by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```go title="examples/tutorials/go/transaction-ack-push/main.go"
+//
+// Tutorial 3 of 5: acknowledge and push in one transaction.
+//
+// Tutorial 2 handed work from one queue to the next in two steps: push the
+// derived message, then let the loop acknowledge the source. Between those two
+// steps a crash duplicates work, and in the other order it loses work.
+//
+// A Queen transaction closes that window: the acknowledgement of the input and
+// the push of the output are one PostgreSQL transaction. Both land or neither
+// does.
+//
+// Run it:
+//
+//	QUEEN_URL=http://localhost:6632 GOWORK=off go run ./transaction-ack-push
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"slices"
+	"strconv"
+	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
+)
+
+var runID = strconv.FormatInt(time.Now().UnixMilli(), 36)
+
+var (
+	ordersQueue   = "tut-go-tx-orders-" + runID
+	invoicesQueue = "tut-go-tx-invoices-" + runID
+)
+
+const group = "tut-go-invoicing"
+
+type order struct {
+	OrderID  string
+	Customer string
+	Total    float64
+}
+
+var input = []order{
+	{OrderID: "A-1", Customer: "acme", Total: 120.5},
+	{OrderID: "B-1", Customer: "globex", Total: 88.75},
+	{OrderID: "C-1", Customer: "initech", Total: 310.0},
+}
+
+var checks int
+
+func assert(condition bool, description string) error {
+	if !condition {
+		return fmt.Errorf("%s", description)
+	}
+	checks++
+	fmt.Printf("  ok: %s\n", description)
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nFAIL: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\nPASS: %d checks\n", checks)
+}
+
+func run() error {
+	brokerURL := os.Getenv("QUEEN_URL")
+	if brokerURL == "" {
+		brokerURL = "http://localhost:6632"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	client, err := queen.New(brokerURL)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	defer client.Close(context.Background())
+
+	fmt.Printf("broker %s\n", brokerURL)
+
+	for _, o := range input {
+		_, err := client.Queue(ordersQueue).
+			Partition(o.Customer).
+			Push(map[string]interface{}{
+				"orderId":  o.OrderID,
+				"customer": o.Customer,
+				"total":    o.Total,
+			}).
+			Execute(ctx)
+		if err != nil {
+			return fmt.Errorf("push %s: %w", o.OrderID, err)
+		}
+	}
+	fmt.Printf("pushed %d orders\n", len(input))
+
+	fmt.Println("\ninvoicing")
+	var invoiced []string
+
+	// AutoAck(false) is what makes this tutorial possible: the loop must not
+	// acknowledge behind your back, because the acknowledgement is part of the
+	// transaction below. With auto-ack off, an error returned by the handler is
+	// not turned into a negative acknowledgement either: it stops the consumer
+	// and comes back out of Execute.
+	err = client.Queue(ordersQueue).
+		Group(group).
+		SubscriptionMode(queen.SubscriptionModeAll).
+		Each().
+		AutoAck(false).
+		Limit(len(input)).
+		IdleMillis(5000).
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			orderID, _ := msg.Data["orderId"].(string)
+			customer, _ := msg.Data["customer"].(string)
+			total, _ := msg.Data["total"].(float64)
+
+			// One commit carries both operations. The ack names the consumer
+			// group explicitly: the transaction builder does not read it off
+			// the message, and an ack sent without it commits the wrong cursor.
+			//
+			// The message's leaseId rides along as a required lease, so the
+			// commit is refused outright if the lease expired while this
+			// handler was working.
+			result, err := client.Transaction().
+				Queue(invoicesQueue).
+				Partition(customer).
+				Push(map[string]interface{}{
+					"invoiceId": "INV-" + orderID,
+					"orderId":   orderID,
+					"amount":    total,
+				}).
+				Ack(msg, queen.AckStatusCompleted, queen.AckOptions{ConsumerGroup: group}).
+				Commit(ctx)
+			if err != nil {
+				return fmt.Errorf("transaction failed: %w", err)
+			}
+			// Check the transaction, not just the absence of an error: a rolled
+			// back commit is reported in the body, with HTTP 200.
+			if !result.Success {
+				return fmt.Errorf("transaction rejected: %s", result.Error)
+			}
+
+			invoiced = append(invoiced, orderID)
+			fmt.Printf("  %s -> INV-%s\n", orderID, orderID)
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("invoicing: %w", err)
+	}
+
+	if err := assert(len(invoiced) == len(input), "every order was invoiced once"); err != nil {
+		return err
+	}
+
+	// The commit fails if the lease has expired, which is what stops a slow
+	// consumer from acking work the broker has already handed to someone else.
+	// Nothing to assert here: the check above is that assertion, since a failed
+	// commit would have come back out of Execute as an error.
+
+	fmt.Println("\nchecking the output queue")
+
+	// The invoices went to one partition per customer, and a pop claims a
+	// single partition unless you say otherwise: Partitions(10) lets this one
+	// call claim up to ten of them, with Batch as the total budget across all
+	// of them.
+	invoices, err := client.Queue(invoicesQueue).
+		Batch(10).
+		Partitions(10).
+		Wait(true).
+		Pop(ctx)
+	if err != nil {
+		return fmt.Errorf("pop invoices: %w", err)
+	}
+
+	if err := assert(len(invoices) == len(input), fmt.Sprintf("%d invoices exist", len(input))); err != nil {
+		return err
+	}
+
+	ids := make([]string, 0, len(invoices))
+	for _, m := range invoices {
+		orderID, _ := m.Data["orderId"].(string)
+		ids = append(ids, orderID)
+	}
+	slices.Sort(ids)
+
+	want := make([]string, 0, len(input))
+	for _, o := range input {
+		want = append(want, o.OrderID)
+	}
+	slices.Sort(want)
+
+	if err := assert(slices.Equal(ids, want), "each invoice matches an order, none duplicated"); err != nil {
+		return err
+	}
+
+	// And the input queue is committed for this group: the acks were part of
+	// the same transactions that produced those invoices, so the two states
+	// cannot disagree.
+	leftovers, err := client.Queue(ordersQueue).
+		Group(group).
+		Batch(10).
+		Wait(false).
+		Pop(ctx)
+	if err != nil {
+		return fmt.Errorf("source drain check: %w", err)
+	}
+	if err := assert(len(leftovers) == 0, "the source queue is committed for this group"); err != nil {
+		return err
+	}
+
+	if _, err := client.Queue(ordersQueue).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete %s: %w", ordersQueue, err)
+	}
+	if _, err := client.Queue(invoicesQueue).Delete().Execute(ctx); err != nil {
+		return fmt.Errorf("delete %s: %w", invoicesQueue, err)
+	}
+
+	return nil
+}
+```

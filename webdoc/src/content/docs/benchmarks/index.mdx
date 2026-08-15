@@ -1,137 +1,47 @@
 ---
 title: Benchmarks
-description: "The publication rule first, then the method, the hardware, and a table routing to each archived run with the conditions that make its headline true."
+description: "Every published figure with its conditions, and the hardware behind it."
 type: overview
 sidebar:
   order: 1
 sourceOfTruth:
-  - benchmark-queen/2026-07-25-soak24/results.md
-  - benchmark-queen/2026-07-25-soak24/raw/soak24b.out
   - benchmark-queen/2026-07-23-3test-report/results.md
-  - benchmark-queen/2026-07-23-3test-report/raw/t1.out
-  - benchmark-queen/2026-07-23-3test-report/raw/t3.out
   - benchmark-queen/2026-07-29-vm-campaign/results.md
   - benchmark-queen/2026-07-30-1h-soak/soak1h.json
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
 ---
 
-A number appears on this site only when an archived artifact records the configuration that
-produced it. That is the rule, and it is the reason this section is short.
-
-Concretely, four things have to exist before a figure is publishable here: the loader's own
-stdout or run record, in the repository under `benchmark-queen/`; the configuration line that
-loader printed, so the semantics under test are not a matter of recollection; the host shape;
-and the identity of the broker build. A headline whose conditions were only remembered is not a
-result. Several strong numbers from this project's own history are excluded on exactly that
-basis, and they are listed at the end of this page.
-
-The second rule follows from the first: **every headline carries its conditions in the same
-sentence.** "One million messages per second" and "one million messages per second with
-server-side auto-ack and deduplication off" are different claims about different systems, and
-the difference is not a footnote.
+A number appears here only when an archived artifact under `benchmark-queen/` records what
+produced it: the loader's stdout, the configuration line it printed, the host shape, the broker
+build.
 
 ## The runs
 
 | Run | Headline | The conditions that make it true |
 | --- | --- | --- |
-| [Throughput 24h 1M](/benchmarks/soak-24h) | 86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per side, 0 restarts, broker resident memory flat at ~4.1 GB | **Explicit acks** (leased pops, `manualAck=true`, `ackAsync=true`), **deduplication on** (60 s window), 200 partitions, 600 consumers, push batch 100, 256-byte payloads, 32 vCPU / 62 GiB, Queen 1.0.0 |
-| [A million ordered partitions](/benchmarks/cardinality-1m) | 1,000,000 ordered partitions in one queue, created during the run at 1,000/s, serving 200,000 msg/s with 0 push, pop or ack errors; p50 27.5 ms and p99 115 ms on the completed space; the lanes and their cursors cost 641 MB | **Explicit acks** (leased pops), retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space, 300 consumers, 32 vCPU / 62 GiB, Queen 1.0.0. One hour, of which 43 minutes on the completed space |
+| [Throughput 24h 1M](/benchmarks/soak-24h) | 86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per side, 0 restarts, broker resident memory flat at ~4.1 GB | **Explicit acks** (leased pops), **deduplication on** (60 s window), 200 partitions, 600 consumers, push batch 100, 256-byte payloads, 32 vCPU / 62 GiB, Queen 1.0.0 |
+| [A million ordered partitions](/benchmarks/cardinality-1m) | 1,000,000 ordered partitions in one queue, created during the run at 1,000/s, serving 200,000 msg/s with 0 push, pop or ack errors | **Explicit acks** (leased pops), retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space, 300 consumers, 32 vCPU / 62 GiB, Queen 1.0.0. One hour, of which 43 minutes on the completed space |
 | [Ordered pipeline](/benchmarks/ordered-pipeline) | 88,503,408 messages verified across 4 stages and 1000 partitions with 0 duplicates, 0 gaps and 0 order violations | 25,000 events/s for 600 s, deduplication window 300 s, explicit bulk acks, per-stage verifier over per-property logs |
 | [Multi-tenant cell](/benchmarks/multitenant-cell) | A 2-core cell behind the proxy holding above 2400 msg/s with zero loss; 12 tenants for 1 hour with zero cross-tenant deliveries | **Deduplication off**, **429 retry disabled**, enforcement on, all tenants sharing one queue and one consumer group |
 
-Two more pages complete the section: [Reproducing these runs](/benchmarks/reproduce) for the
-loader and the rig, and [Archived results](/benchmarks/archive) for the pre-1.0 measurements
-that are traceable but not comparable.
+Also: [cross-broker comparison](/benchmarks/comparison) and
+[method, rig and archive](/benchmarks/method/).
 
-## Method
+## How to read a figure
 
-### Open loop and closed loop
+Producers are open-loop: each push leaves at its scheduled instant and is shed over the in-flight
+cap rather than queued behind it, so a pacer that falls behind shows up as latency. Every
+archived run reports `shed=0`. Consumers are closed-loop drainers: their throughput is a result,
+not an offered load.
 
-Both loaders in these runs are the same Go program, `goload`, built on the official Go client.
-Which side of it is open-loop matters for how the numbers should be read.
-
-**Producers are open-loop.** The pacer holds a fixed *schedule* of pushes and launches each one
-at its scheduled instant in its own goroutine, whatever the broker is doing. It is not a worker
-pool, so it cannot silently degenerate into closed-loop behaviour when the broker slows down.
-In-flight push requests are capped by `-max-inflight`; over the cap, a request's messages are
-**shed** (counted as offered and never sent) rather than queued behind the cap. Every run whose
-stdout or run record is archived here reports `shed=0`, which is the statement that the offered
-rate was genuinely offered.
-
-Producer latency is **coordinated-omission-corrected**: it is measured from each request's
-scheduled instant, not from when it was actually sent. A pacer that fell behind because of a
-garbage-collection pause or CPU saturation shows up as latency instead of disappearing from the
-histogram.
-
-**Consumers are closed-loop.** They are drainers: pop, optionally ack, pop again. So consumer
-throughput is a *result*, not an offered load, and consumer count is a configuration parameter
-that changes the answer. Where a run is consumption-limited rather than commit-limited, the
-consumer count and pop batch are part of the headline's conditions.
-
-### Which side each figure is measured on
-
-| Quantity | Measured by | Where it lands |
-| --- | --- | --- |
-| offered, achieved, shed | the loader's own pacer | loader stdout, per interval and as a final line |
-| end-to-end latency | the loader, from the producer's scheduled instant to the consumer receiving the message | loader stdout and its run record |
-| push, pop and ack round-trip | the loader, per HTTP call | loader run record |
-| errors by kind and by HTTP code | the loader's client | loader stdout or run record |
-| broker-side p99 for push, pop and ack | the broker, in its own `rates` log block | broker log |
-| broker resident memory, hot-list depth, pool saturation | the broker, in its own `sizes` log block | broker log |
-| CPU, memory, commits, WAL fsyncs, database size | a 1 Hz host sampler outside both processes | sampler CSV |
-
-### Broker-side p99 and end-to-end p99 are different quantities
-
-They are not interchangeable, they differ by orders of magnitude, and quoting one as the other
-is the most available way to mislead with these artifacts.
-
-Broker-side p99 is the time the broker spent on a request it accepted. End-to-end p99 spans the
-producer's scheduled instant, the network, the push commit, however long the message waited in
-its partition for a consumer to come and get it, and the pop. Queue time dominates it, and queue
-time is a property of the *workload* (consumer count, pop batch, backlog), not of the broker.
-
-The multi-tenant soak makes the gap concrete, because both were recorded for the same hour of
-the same run. The broker's own `rates` blocks put p99 for push and pop at a median of about
-2.9 ms across the 360 ten-second samples taken under load, with excursions to about 60 ms. The
-loader's end-to-end p99 for the same run is **133,693 ms**, because two of the twelve tenants
-were deliberately rate-limited to a fraction of their offered rate, and their undrained backlog
-is in the same histogram. Neither figure is wrong. They answer different questions.
-
-The consequence for reading these pages: a latency number is only meaningful with its
-measurement point and its workload attached, so every latency figure below names both.
+Broker-side p99 is the time the broker spent on a request it accepted. End-to-end p99 also spans
+the network, the commit and the wait in the partition, so it belongs to the workload. The
+multi-tenant hour recorded both: a broker-side median p99 of about 2.9 ms against an end-to-end
+p99 of 133,693 ms, the rate-limited tenants' backlog in the same histogram.
 
 ## Hardware
 
 | Rig | Used by | Shape |
 | --- | --- | --- |
-| Single-node bench | Throughput 24h 1M, the ordered pipeline | Broker and PostgreSQL 18 co-located on 32 vCPU / 62 GiB; loaders on separate machines, three of 16 vCPU for the soak. `fdatasync` measured at about 70 µs on the soak host and about 68 µs on the host used for the pipeline run |
-| Cell rig | the multi-tenant runs | 8 vCPU / 15 GiB with NVMe; `fdatasync` average 95.5 µs, p99 about 396 µs. PostgreSQL, the proxy's state database, the broker and the proxy all share **one CPU-capped systemd slice**, so a free-tier shape is 2 cores covering all four. The loader runs on the same box but outside the slice, and is billed separately |
-
-Two properties of these rigs are worth naming because they bound what the numbers mean. The
-loader is always on separate CPU budget from the thing being measured (on the single-node rig a
-separate machine, on the cell rig a separate cgroup), because a loader that borrows the
-broker's cores flatters the result. And the storage is fast: at roughly 95 µs per `fdatasync`,
-these figures are not disk-latency-bound, so a deployment on slower storage should expect a
-lower commit ceiling.
-
-## What is deliberately absent
-
-- **No pre-1.0 comparison figures.** Every performance comparison this project published before
-  1.0 was measured against the retired C++ implementation. The current cross-broker numbers,
-  measured on the shipping build with matched resources, are on
-  [Cross-broker comparison](/benchmarks/comparison).
-- **No storage-engine ratios.** The segment-engine spike figures circulating internally were
-  measured against a storage engine that is no longer in the tree.
-- **No "2M msg/s combined" headline.** A 300-second run reached one million per side in both
-  directions, but its stdout was not archived, and its own configuration line records
-  deduplication off, so it is quotable as neither a combined figure nor a durable one.
-- **No ceiling run.** Rates measured with server-side auto-acknowledgement and deduplication off
-  describe the cheapest possible per-message path, not a configuration anyone should run, and a
-  headline taken from one travels badly. The sustained figure this project stands behind is
-  [Throughput 24h 1M](/benchmarks/soak-24h), measured with leases, explicit acks, deduplication
-  and retention all on.
-- **No free-tier "roughly 480 msg/s" ceiling.** It was a real measurement of a broker-only,
-  proxy-less shape and has been superseded by the cell runs, which measure the whole cell.
-- **No figures from the retired implementations.** Those sessions are enumerated on
-  [Archived results](/benchmarks/archive) so old links and old claims can be traced back to
-  what actually produced them.
+| Single-node bench | Throughput 24h 1M, the ordered pipeline | Broker and PostgreSQL 18 co-located on 32 vCPU / 62 GiB, loaders on separate machines, three of 16 vCPU for the soak. `fdatasync` about 70 µs on the soak host, 68 µs on the pipeline host |
+| Cell rig | the multi-tenant runs | 8 vCPU / 15 GiB with NVMe, `fdatasync` average 95.5 µs and p99 about 396 µs. PostgreSQL, the proxy's state database, the broker and the proxy share **one CPU-capped systemd slice**: a free-tier shape is 2 cores for all four, loader outside it |

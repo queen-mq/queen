@@ -1,6 +1,6 @@
 ---
-title: Use Queen
-description: "Push, consume, ack: the model, the SDKs and the worked examples you need to build an application on Queen."
+title: Overview
+description: "What you build on Queen: producer and consumer, fan-out, deduplicated ingest, transactional pipelines, replay and windowed aggregation."
 type: overview
 tier: use
 sidebar:
@@ -10,61 +10,60 @@ sourceOfTruth:
   - server/src/handlers/data.rs
 ---
 
-This section is for the person writing code against Queen. The surface is small (push, pop,
-ack, and a transaction that bundles pushes and acks into one PostgreSQL commit), and this is
-most of it, extracted from the JavaScript test suite:
+The surface you write against is small: push a message, pop it, acknowledge it, and a transaction
+that bundles pushes and acks into one PostgreSQL commit. Every application in this section is
+those four in a different arrangement.
 
 <Render file="snippets/js-push" />
 
-<Render file="snippets/js-consume" />
+The queue and the partition are created by the push that names them, so there is nothing to
+provision first. [The model](/use/model) is one page: queue, partition, offset, consumer group,
+cursor, lease, ack.
 
-Two of the semantics follow from the model rather than being options you can turn off:
-**an acknowledgement is an offset commit**, and **a consumer group holds at most one leased
-batch per partition**. Read the concept chain in order; everything after it (the SDK pages,
-the examples, the error handling) assumes you know what a partition, a cursor and a lease are.
+Two rules shape everything built on top. An acknowledgement is a commit of a position, not a
+receipt for one message, so acking the last message of a batch completes the batch. And a
+consumer group holds at most one leased batch per partition, so parallelism comes from partitions,
+not from more consumers on one.
+
+Everything is HTTP over a small JSON API, so curl is a client and the SDKs are convenience over
+it. Clients hold no coordination state: a worker that restarts does not stall its peers.
+
+What people build with it:
+
+- **Producer and consumer.** One queue, one group, an ack when the work is done:
+  [the loop](/use/examples/#producer-and-consumer).
+- **Fan-out.** Two groups over one queue, each reading every message, at one copy of the data:
+  [fan-out](/use/examples/#fan-out-to-two-groups).
+- **Deduplicated ingest.** A deterministic `transactionId`, and the repeat refused by the broker:
+  [deduplication](/use/examples/#deduplicated-ingest).
+- **Transactional pipeline.** Ack the input and push the next stage in one commit:
+  [the pipeline](/use/examples/#transactional-pipeline).
+- **Replay.** Move a group's cursor back to a timestamp, or point a new group at history:
+  [replay](/use/examples/#replay).
+- **Windowed aggregation.** Tumbling, sliding, session and cron windows, with the accumulator in
+  the same PostgreSQL: [streams](/use/streams).
+
+Pick a client, write the loop, read [errors](/reference/errors/) before it meets traffic.
 
 <CardGrid>
   <LinkCard
-    href="/use/concepts"
-    title="The model in one page"
-    description="Queue, partition, offset, consumer group, cursor, lease, ack: the whole vocabulary and how the pieces relate."
+    href="/use/model"
+    title="The model"
+    description="Queue, partition, offset, consumer group, cursor, lease, ack: the whole vocabulary in one page."
   />
   <LinkCard
-    href="/use/concepts/queues-partitions"
-    title="Queues, partitions, namespaces and tasks"
-    description="What gets created when, what a partition costs, and how discovery finds a queue."
+    href="/use/js-client"
+    title="JavaScript client"
+    description="Install it, connect it, push and consume: the shortest path from nothing to a running loop."
   />
   <LinkCard
-    href="/use/concepts/producing"
-    title="Producing"
-    description="The push request and its per-item verdicts, transactionId as an idempotency key, and what happens when the database is unreachable."
+    href="/use/examples/"
+    title="Examples"
+    description="Six recipes with the code that makes each one work and the rule that decides how it fails."
   />
   <LinkCard
-    href="/use/concepts/consuming"
-    title="Consuming"
-    description="Consumer groups, subscription modes, batch sizes, long-poll, and the one-leased-batch limit that bounds your parallelism."
+    href="/use/http-client"
+    title="HTTP client"
+    description="Push, pop, acknowledge and long-poll as runnable curl, for a language with no SDK."
   />
 </CardGrid>
-
-## Before you write code
-
-Four things are worth knowing before the first request.
-
-- **Everything is HTTP.** The SDKs are convenience layers over a small JSON API; there is no
-  custom wire protocol and no persistent connection to manage. The full route table, with the
-  access level each route requires, is in the [reference](/reference).
-- **Clients hold no coordination state.** The broker hands out no partition assignments and
-  runs no rebalancing protocol, so a worker that restarts does not stall its peers.
-- **TLS terminates in front of the broker.** The broker has no TLS listener and no CORS layer,
-  so terminate TLS at the proxy or at a reverse proxy in front of it. See
-  [self-hosting](/selfhost).
-- **`POST /api/v1/configure` is a [full replace](/reference/queue-options).** Any option you
-  omit is reset to its default, so send the whole configuration every time.
-
-## What "verified" means here
-
-Code samples on these pages, including the two above, are extracted from files the test suite
-executes and labelled with the file they came from; a sample without that label is
-hand-written. The [worked examples](/use/examples) are built the same way, route and
-environment tables are generated from the source at build time, and throughput figures live
-in [benchmarks](/benchmarks) with the archived output that produced them.

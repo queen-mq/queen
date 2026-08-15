@@ -1,0 +1,231 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/rust/src/bin/04_replay.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/rust/src/bin/04_replay.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="examples/tutorials/rust/src/bin/04_replay.rs"
+//
+// Tutorial 4 of 5: replay.
+//
+// Acknowledging a message does not delete it. Consumption is a cursor per
+// consumer group, and the messages stay until retention removes them, so a new
+// group can read the whole history and an existing group can be moved back.
+//
+// This is the tutorial that shows what a cursor buys you: reprocessing after a
+// bug, backfilling a new consumer, and auditing what was delivered, all without
+// asking the producer to send anything twice.
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 cargo run --bin 04_replay
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use queen_mq::{Config, Message, Queen, SeekRequest, SubscriptionMode};
+use serde_json::json;
+
+// (seq, type)
+const EVENTS_IN: [(i64, &str); 4] = [
+    (1, "created"),
+    (2, "updated"),
+    (3, "shipped"),
+    (4, "delivered"),
+];
+
+struct Checks(usize);
+
+impl Checks {
+    fn assert(&mut self, condition: bool, description: &str) -> Result<(), String> {
+        if !condition {
+            return Err(description.to_string());
+        }
+        self.0 += 1;
+        println!("  ok: {description}");
+        Ok(())
+    }
+}
+
+/// Read one lane with one group and report the sequence numbers it saw.
+///
+/// `mode` seeds the cursor only when the group is new — passing None is how the
+/// rewind below reads a group that already exists.
+async fn drain(
+    queen: &Queen,
+    queue: &str,
+    group: &str,
+    expected: u64,
+    mode: Option<SubscriptionMode>,
+) -> Result<Vec<i64>, String> {
+    let seen: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+
+    let mut builder = queen
+        .queue(queue)
+        .partition("order-1")
+        .group(group)
+        .limit(expected)
+        // The idle timeout is checked between polls, so the poll window bounds
+        // how promptly it fires. One second of long polling makes a four-second
+        // silence stop the loop at about four seconds — a group that sees
+        // nothing fails the run rather than hanging it.
+        .poll_timeout(Duration::from_secs(1))
+        .idle(Duration::from_secs(4));
+    if let Some(mode) = mode {
+        builder = builder.subscription_mode(mode);
+    }
+
+    builder
+        .consume(move |msg: Message| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock()
+                    .unwrap()
+                    .push(msg.data["seq"].as_i64().unwrap_or(0));
+                Ok::<_, String>(())
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let out = seen.lock().unwrap().clone();
+    Ok(out)
+}
+
+fn joined(seq: &[i64]) -> String {
+    seq.iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[tokio::main]
+async fn main() {
+    match run().await {
+        Ok(checks) => println!("\nPASS: {checks} checks"),
+        Err(e) => {
+            eprintln!("\nFAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run() -> Result<usize, String> {
+    let url = std::env::var("QUEEN_URL").unwrap_or_else(|_| "http://localhost:6632".into());
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let events = format!("tut-rust-replay-{run_id}");
+
+    let mut checks = Checks(0);
+    println!("broker {url}");
+
+    let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
+
+    for (seq, kind) in EVENTS_IN {
+        queen
+            .queue(&events)
+            .partition("order-1")
+            .push(json!({ "seq": seq, "type": kind }))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    println!("pushed {} events", EVENTS_IN.len());
+
+    // The live consumer. It drains the lane and commits as it goes.
+    println!("\nthe live consumer");
+    let live = drain(
+        &queen,
+        &events,
+        "tut-rust-live",
+        4,
+        Some(SubscriptionMode::All),
+    )
+    .await?;
+    println!("  saw {}", joined(&live));
+    checks.assert(live == [1, 2, 3, 4], "the live group read the lane in order")?;
+
+    // A second group, created now, after every message was already stored and
+    // acknowledged by someone else. SubscriptionMode::All is what points its
+    // new cursor at the beginning: the default for a new group is the tail, so
+    // without it this group would sit idle waiting for the next event.
+    //
+    // The mode applies when the cursor is created and never again, so it cannot
+    // rewind a group that already exists. That is what seek below is for, and
+    // this client's own docs on subscription_mode say so in as many words.
+    println!("\na new group, backfilled from the beginning");
+    let audit = drain(
+        &queen,
+        &events,
+        "tut-rust-audit",
+        4,
+        Some(SubscriptionMode::All),
+    )
+    .await?;
+    println!("  saw {}", joined(&audit));
+    checks.assert(audit == [1, 2, 3, 4], "a new group replayed the whole history")?;
+
+    // Nothing was re-pushed and nothing was copied: both groups read the same
+    // stored messages through their own cursors.
+    println!("\nrewinding an existing group");
+
+    // Move the live group's cursor back to an instant before anything in this
+    // run was pushed. The epoch is the blunt version of that, and it keeps this
+    // program free of a date library: the client takes the destination as an
+    // ISO-8601 string, and `position` is not a wire key — the broker reads
+    // `timestamp` (or `toEnd`) and refuses anything else.
+    //
+    // The seek also releases any live lease, so an in-flight batch is abandoned
+    // rather than acknowledged.
+    queen
+        .admin()
+        .seek_consumer_group(
+            "tut-rust-live",
+            &events,
+            &SeekRequest {
+                timestamp: Some("1970-01-01T00:00:00Z".into()),
+                position: None,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let replayed = drain(&queen, &events, "tut-rust-live", 4, None).await?;
+    println!("  saw {}", joined(&replayed));
+    checks.assert(
+        replayed == [1, 2, 3, 4],
+        "the rewound group read the same events again, in the same order",
+    )?;
+
+    // Replay is per group. The audit group was not moved, so it stays where it
+    // was and sees nothing new.
+    let audit_again = queen
+        .queue(&events)
+        .partition("order-1")
+        .group("tut-rust-audit")
+        .batch(10)
+        .wait(false)
+        .pop()
+        .await
+        .map_err(|e| e.to_string())?;
+    checks.assert(
+        audit_again.is_empty(),
+        "rewinding one group left the other where it was",
+    )?;
+
+    queen
+        .queue(&events)
+        .delete()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    queen.close().await.map_err(|e| e.to_string())?;
+
+    Ok(checks.0)
+}
+```

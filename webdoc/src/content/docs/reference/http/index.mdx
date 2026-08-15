@@ -39,7 +39,7 @@ no version query parameter.
 <Aside type="caution">
 The broker has **no TLS listener and no CORS layer**. It expects to sit behind something that
 terminates TLS: the multi-tenant gateway in `proxy/`, or your own reverse proxy. Do not
-expose port 6632 to a browser or to the internet directly. See [Self-hosting](/selfhost).
+expose port 6632 to a browser or to the internet directly. See [Self-hosting](/deploy/).
 </Aside>
 
 Anything the router does not match falls through to the dashboard. That fallback answers a
@@ -61,7 +61,7 @@ A bare token with no `Bearer ` prefix is also accepted. Supported algorithms are
 RS256/384/512 and EdDSA, selected by `JWT_ALGORITHM` (or `auto`); the verification key comes
 from a static PEM or from a JWKS endpoint cached per `kid`. Role claim names are remappable.
 The [configuration page](/reference/config/) lists every `JWT_*` variable, and
-[Self-hosting](/selfhost) covers key distribution.
+[Self-hosting](/deploy/) covers key distribution.
 
 Two failure codes, and they mean different things:
 
@@ -100,7 +100,7 @@ dashboard-identity routes `/auth/me`, `/auth/login` and `/auth/logout`. The last
 public so they can answer the auth question themselves: with JWT on, `/auth/me` returns `401`
 from its own handler and `/auth/login` serves the page that says the dashboard needs the proxy.
 `/metrics/prometheus` being public is deliberate for scraping and is a hazard in a multi-tenant
-deployment, where per-queue series sum across tenants; see [Self-hosting](/selfhost).
+deployment, where per-queue series sum across tenants; see [Self-hosting](/deploy/).
 
 A second, independent exemption list is `JWT_SKIP_PATHS`, which defaults to
 `/health,/metrics/prometheus,/metrics,/`. Entries match a path exactly, or as a prefix when the
@@ -229,7 +229,7 @@ resolves a tenant identity for the request and threads it into the SQL that reso
 name. Native tenant scoping is **off by default**; with it off, every request resolves to a
 single default tenant and the column tells you which handlers would participate if it
 were on. It is an operator-level feature of multi-tenant deployments, not a client-facing one.
-[Self-hosting](/selfhost) and [Internals](/internals) cover it, including which routes are
+[Self-hosting](/deploy/) and [Internals](/internals) cover it, including which routes are
 *not* scoped and what that implies.
 
 ## Every route

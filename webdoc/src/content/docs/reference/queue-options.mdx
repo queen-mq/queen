@@ -358,9 +358,15 @@ Two things this option also controls, both easy to be surprised by:
   silently succeeding. If the batch is still leased, the message
   redelivers.
 - **Broker memory.** The dedup cache holds roughly 16 bytes per in-window message
-  hash across active partitions, so the working set scales with rate × window. The
-  cache degrades gracefully under `QUEEN_DEDUP_CACHE_MB`: partitions that do not
-  fit fall back to a full SQL probe rather than thrashing.
+  hash across active partitions, so the working set scales with rate × window,
+  which sizes it directly:
+
+  ```text
+  needed_mb ≈ 16 × msg_rate × dedupWindowSeconds / 1e6
+  ```
+
+  The cache degrades gracefully under `QUEEN_DEDUP_CACHE_MB`: partitions that do
+  not fit fall back to a full SQL probe rather than thrashing.
 
 Changing the value is picked up by SQL at once and by the broker's per-partition
 cache within 30 s. Widening the window forces that cache to rebuild, because

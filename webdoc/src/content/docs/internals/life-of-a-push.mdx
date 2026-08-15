@@ -261,7 +261,7 @@ consumers). Peers still get an immediate batched `MESSAGE_AVAILABLE`. With `QUEE
 push instead wakes parked pops directly with partition hints.
 
 **Error spooling.** Items that came back `error` (meaning the transaction that would have stored
-them failed) are written to [the disk spool](/selfhost/durability/) and relabelled `buffered`, so a
+them failed) are written to [the disk spool](/deploy/ha/) and relabelled `buffered`, so a
 client that only checks the HTTP status code does not silently lose them. The background drain
 replays them, and
 deduplication on the preserved `transactionId` makes the replay idempotent. A spool write failure

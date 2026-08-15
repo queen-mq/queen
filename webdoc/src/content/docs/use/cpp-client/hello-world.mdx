@@ -1,0 +1,48 @@
+---
+title: Hello world
+description: "One message in, one message out, against a broker you started five minutes ago."
+type: tutorial
+tier: use
+sidebar:
+  order: 1
+verifiedBy:
+  - examples/tutorials/cpp/01-hello-world.cpp
+---
+
+Nothing is created before it is used. The queue in the program below comes into existence with
+the push that names it, inside the same transaction that stores the message, so there is no
+declare step and nothing to provision.
+
+The read takes the message under a **lease**: it is claimed until it is acknowledged or the lease
+expires, and the acknowledgement is what commits consumption. No consumer group is named here, so
+the read goes through the queue's own cursor, which starts at the beginning. Named groups are
+[the next tutorial](/use/cpp-client/multi-queue-flow): a group created after a message was pushed
+starts at the tail and would find nothing.
+
+Everything in this client is synchronous, so the program reads top to bottom with no callbacks:
+every call blocks and hands back an `nlohmann::json`. Read that reply rather than trusting the
+absence of an exception. `ack()` wraps the broker's, and its outer `success` says only that the
+call did not throw: the per-item verdict is inside `result`.
+
+<Render file="snippets/tut-cpp-hello-world" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/cpp` with the
+three headers on the include path ([the client page](/use/cpp-client) has that recipe):
+
+```bash
+mkdir -p build
+g++ -std=c++17 -O2 -pthread \
+    -I../../../clients/client-cpp -I../../../clients/server/vendor \
+    -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
+    01-hello-world.cpp -o build/01-hello-world \
+    -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
+
+QUEEN_URL=http://localhost:6632 ./build/01-hello-world
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh cpp`.
+
+Next: [Multi-queue flow](/use/cpp-client/multi-queue-flow).

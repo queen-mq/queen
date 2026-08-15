@@ -1,0 +1,196 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/js/rate-limiter.mjs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/js/rate-limiter.mjs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```js title="examples/apps/js/rate-limiter.mjs"
+//
+// A rate limiter, built out of a streaming query.
+//
+// Counting requests per API key in a fixed window is the textbook rate limiter,
+// and the usual implementation is a counter in Redis: a second data system to
+// run, to size, and to lose when it restarts.
+//
+// Here the counter is a windowed aggregation over the request stream itself.
+// The window state, the decisions it emits and the acknowledgement of the
+// requests it counted all commit in one PostgreSQL transaction, so the counter
+// cannot drift from the stream it was computed from, and it survives a restart
+// because it is a row rather than a process's memory.
+//
+//   api-requests (one partition per API key)
+//     └── streaming query: tumbling window, count per key
+//           └── api-usage  -> the gate: over quota becomes a throttle decision
+//                 └── api-throttled
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 node rate-limiter.mjs
+
+import { Queen, Stream } from 'queen-mq'
+
+const QUEEN_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+const RUN = Date.now().toString(36)
+const REQUESTS = `app-js-api-requests-${RUN}`
+const USAGE = `app-js-api-usage-${RUN}`
+const THROTTLED = `app-js-api-throttled-${RUN}`
+const QUERY_ID = `app-js-rate-limiter-${RUN}`
+
+const WINDOW_SECONDS = 2
+const QUOTA_PER_WINDOW = 5
+
+// Two tenants. One is a well behaved integration, the other is a runaway script
+// someone left in a loop.
+const QUIET_KEY = 'key-quiet'
+const NOISY_KEY = 'key-noisy'
+const QUIET_REQUESTS = 3
+const NOISY_REQUESTS = 20
+
+// Why those numbers make the check deterministic: a window is a slice of time,
+// so a burst can land on either side of a boundary. Twenty requests split in
+// any way at all leave at least ten on one side, which is over a quota of five,
+// so the noisy key is always caught. Three requests cannot reach five however
+// they are split, so the quiet key is never caught by accident.
+
+let checks = 0
+const assert = (condition, description) => {
+  if (!condition) throw new Error(description)
+  checks++
+  console.log(`  ok: ${description}`)
+}
+
+const queen = new Queen({ url: QUEEN_URL, handleSignals: false })
+let stream = null
+
+try {
+  console.log(`broker ${QUEEN_URL}`)
+
+  for (const q of [REQUESTS, USAGE, THROTTLED]) {
+    await queen.queue(q).config({ leaseTime: 30, retryLimit: 3 }).create()
+  }
+
+  // ------------------------------------------------------------- the counter
+  //
+  // A stream is a running process: it has to be listening before the requests
+  // arrive. Starting one over an existing backlog counts nothing.
+  //
+  // The partition is the aggregation key, so the window state is per API key
+  // without anything being said about keys here: whoever pushes decides.
+  console.log('\nstarting the counter')
+  stream = await Stream
+    .from(queen.queue(REQUESTS))
+    .windowTumbling({ seconds: WINDOW_SECONDS, idleFlushMs: 800 })
+    .aggregate({
+      // The extractors receive the payload itself, not the envelope.
+      requests: () => 1,
+      cost: (r) => r.cost ?? 1,
+    })
+    .to(queen.queue(USAGE))
+    .run({
+      queryId: QUERY_ID,
+      url: QUEEN_URL,
+      batchSize: 200,
+      maxPartitions: 8,
+      maxWaitMillis: 200,
+    })
+
+  // ------------------------------------------------------------- the traffic
+  console.log('\ntaking traffic')
+  const send = async (key, n) => {
+    for (let i = 1; i <= n; i++) {
+      await queen.queue(REQUESTS).partition(key).push({
+        data: { key, path: '/v1/things', cost: 1, at: Date.now() },
+      })
+    }
+    console.log(`  ${key}: ${n} requests`)
+  }
+  await send(QUIET_KEY, QUIET_REQUESTS)
+  await send(NOISY_KEY, NOISY_REQUESTS)
+
+  // ---------------------------------------------------------------- the gate
+  //
+  // The enforcement point. It reads each closed window and turns the ones over
+  // quota into throttle decisions. Splitting it from the counter is deliberate:
+  // the counting is exact and belongs to the broker, the policy is yours and
+  // changes on a different schedule.
+  console.log('\nenforcing')
+  const counted = {}
+  const decisions = []
+  const complete = () =>
+    (counted[QUIET_KEY] ?? 0) === QUIET_REQUESTS && (counted[NOISY_KEY] ?? 0) === NOISY_REQUESTS
+  const deadline = Date.now() + 30000
+
+  while (!complete() && Date.now() < deadline) {
+    const windows = await queen
+      .queue(USAGE)
+      .group('rate-limiter-gate')
+      .subscriptionMode('all')
+      .batch(50)
+      .partitions(10)
+      .wait(true)
+      .timeoutMillis(2000)
+      .pop()
+
+    for (const w of windows) {
+      const key = w.partition
+      counted[key] = (counted[key] ?? 0) + w.data.requests
+      const overBy = w.data.requests - QUOTA_PER_WINDOW
+
+      if (overBy > 0) {
+        // The decision is a message, not a log line: whatever enforces it (an
+        // edge worker, a gateway, the API itself) subscribes to this queue and
+        // gets the decisions in order, per key.
+        await queen.queue(THROTTLED).partition(key).push({
+          data: { key, window: w.data.requests, quota: QUOTA_PER_WINDOW, overBy },
+        })
+        decisions.push({ key, overBy })
+        console.log(`  ${key}: ${w.data.requests} in a window, over by ${overBy}`)
+      } else {
+        console.log(`  ${key}: ${w.data.requests} in a window, within quota`)
+      }
+
+      await queen.ack(w, true, { group: 'rate-limiter-gate' })
+    }
+  }
+
+  // --------------------------------------------------------------- checking
+  console.log('\nchecking')
+  assert(complete(), 'every request reached a closed window before the deadline')
+  assert(counted[QUIET_KEY] === QUIET_REQUESTS, 'the quiet key was counted exactly')
+  assert(counted[NOISY_KEY] === NOISY_REQUESTS, 'the noisy key was counted exactly')
+
+  assert(decisions.length > 0, 'the noisy key was throttled')
+  assert(
+    decisions.every(d => d.key === NOISY_KEY),
+    'the quiet key was never throttled, so the limiter is not just firing at everything'
+  )
+
+  // The decisions are readable by whatever enforces them, in order, per key.
+  const throttled = await queen
+    .queue(THROTTLED)
+    .batch(50)
+    .partitions(10)
+    .wait(true)
+    .pop()
+  assert(throttled.length === decisions.length, 'every decision is on the queue the gateway reads')
+  assert(
+    throttled.every(m => m.data.window > m.data.quota),
+    'each decision carries the count and the quota that produced it'
+  )
+
+  await stream.stop()
+  stream = null
+  for (const q of [REQUESTS, USAGE, THROTTLED]) await queen.queue(q).delete()
+
+  console.log(`\nPASS: ${checks} checks`)
+} catch (err) {
+  console.error(`\nFAIL: ${err.message}`)
+  process.exitCode = 1
+} finally {
+  if (stream) await stream.stop()
+  await queen.close()
+}
+```

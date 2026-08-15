@@ -1,0 +1,66 @@
+---
+title: Webhook delivery system
+description: "Ordered delivery per subscriber, a bounded retry budget, and a dead-letter queue a support engineer can read."
+type: example
+tier: use
+sidebar:
+  order: 3
+verifiedBy:
+  - examples/apps/js/webhooks.mjs
+  - examples/apps/py/webhooks.py
+  - examples/apps/go/webhooks/main.go
+  - examples/apps/rust/src/bin/webhooks.rs
+  - examples/apps/php/webhooks.php
+  - examples/apps/cpp/webhooks.cpp
+  - examples/apps/http/webhooks.sh
+---
+
+Every SaaS product writes this one, and it is harder than it looks. Deliveries to one customer's
+endpoint must arrive in order. A customer whose endpoint is down must not slow anybody else down.
+Failures must be retried a bounded number of times, and what never succeeds has to end up
+somewhere a human can look at.
+
+One ordered lane per destination gives the first two properties for free: a dead endpoint backs up
+its own lane and no other. The last two are the broker's retry budget and its dead-letter table,
+which means they survive the sender process dying mid-flight, and a loop inside your handler would
+not.
+
+The program queues deliveries for three subscribers, one of which answers 500 to everything, and
+checks that the healthy two receive every event in order while the dead one exhausts its budget
+and lands in the dead-letter queue with its error attached.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/app-js-webhooks" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/app-py-webhooks" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/app-go-webhooks" />
+  </TabItem>
+  <TabItem label="Rust">
+    <Render file="snippets/app-rust-webhooks" />
+  </TabItem>
+  <TabItem label="PHP">
+    <Render file="snippets/app-php-webhooks" />
+  </TabItem>
+  <TabItem label="C++">
+    <Render file="snippets/app-cpp-webhooks" />
+  </TabItem>
+  <TabItem label="HTTP">
+    <Render file="snippets/app-http-webhooks" />
+  </TabItem>
+</Tabs>
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart):
+
+```bash
+QUEEN_URL=http://localhost:6632 examples/apps/run.sh
+```
+
+Every program on this page asserts the property it exists to demonstrate and exits
+non-zero if it does not hold. The runner takes a language name to run one of them on its
+own, for example `examples/apps/run.sh js`.

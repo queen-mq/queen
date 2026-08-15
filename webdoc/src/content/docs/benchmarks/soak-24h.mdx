@@ -1,33 +1,26 @@
 ---
 title: Throughput 24h 1M
-description: "86,369,975,300 messages in 24 hours at about 1,000,000 per second per side with explicit acknowledgement, zero restarts and flat broker memory, and what a run of this shape does not establish."
+description: "86 billion messages in 24 hours at about 1,000,000 per second per side, with explicit acknowledgement."
 type: reference
 sidebar:
   order: 2
 sourceOfTruth:
   - benchmark-queen/2026-08-11-soak24-1M/results.md
   - benchmark-queen/2026-08-11-soak24-1M/raw/loader-01/g.out
-  - benchmark-queen/2026-08-11-soak24-1M/raw/loader-02/g.out
-  - benchmark-queen/2026-08-11-soak24-1M/raw/loader-03/g.out
   - benchmark-queen/2026-08-11-soak24-1M/raw/bench/bench.csv
-  - benchmark-queen/2026-08-11-soak24-1M/raw/bench/metrics.csv
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
 ---
 
-**In 24 hours, one broker against one PostgreSQL moved 86,369,975,300 messages (about 1,000,000
-per second in each direction) with leased pops, explicit acknowledgement, deduplication and
-retention all on, zero restarts, and resident memory flat at roughly 4.1 GB.** The broker host was a
-32 vCPU / 62 GiB machine and the broker was Queen **1.0.0**. Artifacts are in
-`benchmark-queen/2026-08-11-soak24-1M/`, and each loader's own stdout is under `raw/loader-0*/g.out`.
-
-This is the reference run for production semantics, and the only one long enough to distinguish
-"fast" from "stays fast".
+**In 24 hours one broker against one PostgreSQL moved 86,369,975,300 messages, about 1,000,000
+per second in each direction, with leased pops, explicit acknowledgement, deduplication and
+retention all on, zero restarts, and resident memory flat at roughly 4.1 GB.** Queen 1.0.0 on a
+32 vCPU / 62 GiB machine, artifacts in `benchmark-queen/2026-08-11-soak24-1M/`.
 
 ## Configuration
 
-The load was offered by three loader hosts against one broker, 333,334 and 333,333 and 333,333
-messages per second, so that the generator could never be the limit. Each loader printed its own
-configuration, which is what makes this quotable:
+Three loader hosts offered 333,334 and 333,333 and 333,333 messages a second: one 48-core loader
+tops out near 950,000 on the pop side and becomes the measurement. Each printed its
+configuration.
 
 ```text
 goload -mode openloop -> queue=segbench partitions=200 consumers=200 manualAck=true ackAsync=true ackInflight=256
@@ -35,36 +28,18 @@ goload -mode openloop -> queue=segbench partitions=200 consumers=200 manualAck=t
 [configure] queue=segbench completedRetentionSeconds=300
 ```
 
-| Parameter | Value | Why it matters |
-| --- | --- | --- |
-| Delivery semantics | leased pops with explicit acks (`manualAck=true`) | The cursor moves only on an ack, which is the at-least-once path real work uses. Server-side auto-ack would remove one round trip and one transaction per batch |
-| Ack dispatch | asynchronous, 256 in flight (`ackAsync=true`) | Each batch's ack is dispatched on its own task so a consumer does not hold a partition's lease blocked on its own ack round trip. An ack is never shed; when the semaphore is full the consumer blocks |
-| Offered rate | 1,000,000 msg/s, open loop | Fixed schedule across three loader hosts, 10,000 push requests per second in total |
-| Push batch | 100 messages | Amortises per-transaction cost. Batch 1 is a different measurement |
-| Pop batch | 1,000 messages | The serve size a consumer asks for |
-| Payload | 256 bytes | One size, one shape |
-| Partitions | 200 | Consumption parallelism per group is bounded by partition count |
-| Consumers | 600 closed-loop drainers, 200 per loader | Consumers pull; consumer count changes the answer |
-| Deduplication | on, 60-second window | Every push probes the transaction-id sidecar under the partition lock before offsets are allocated. This is part of the measured path |
-| Retention | on, completed messages after 300 s, pending after 3,600 s | The reason the database plateaus instead of growing |
-| Duration | 86,400 s after a 60 s ramp, reported every 30 s | 2,880 interval lines per loader in the archived stdout |
-
-<Aside type="note">
-Three loader hosts rather than one is a property of the rig, not of the broker. Generating and
-consuming this shape costs about 20 microcores per message operation, so a million per second in
-each direction needs roughly 40 cores of load generator before the broker is even reached. A
-single 48-core loader tops out near 950,000 on the pop side and becomes the measurement.
-</Aside>
+Beyond that line: pop batch 1,000, deduplication on with a 60-second window, pending retention
+3,600 s, 86,400 s of load after a 60 s ramp.
 
 ## Result
 
 <Screenshot
   src="soak-24h-1m-throughput"
-  alt="The dashboard throughput row over a 24-hour window. A single flat line sits on the one million per second gridline for the whole range, with a tooltip reading Push 1000.5k per second, Pop 1000.5k per second and Ack 1000.5k per second."
-  caption="Push, pop and ack over the 24-hour range, read from the broker's own counters. The line is the result: not the height it reaches, but that it does not move."
+  alt="The dashboard throughput row over the 24-hour window: one flat line on the one million per second gridline, tooltip reading push, pop and ack at 1000.5k per second."
+  caption="Push, pop and ack from the broker's own counters: the result is that the line does not move."
 />
 
-Straight from the final lines of `raw/loader-0*/g.out`, summed across the three loaders:
+From the final lines of `raw/loader-0*/g.out`, summed:
 
 | Metric | Value |
 | --- | --- |
@@ -80,16 +55,14 @@ Straight from the final lines of `raw/loader-0*/g.out`, summed across the three 
 | Average ack round trip | 84.0 to 95.4 ms |
 | Restarts, incidents | **0, 0** |
 
-Average accepted throughput is 86,369,975,300 over 86,400 s, or 999,652 msg/s including the ramp.
+That is 999,652 msg/s including the ramp. Popped trails pushed by 442,600 messages, 0.0005%:
+residue in flight when the loaders stopped, not loss. Push and pop errors count requests of 100
+messages, ack errors count messages: 1,000 messages met an error of any kind, and 41,800 offered
+were never accepted, 0.000048%.
 
-Popped falls short of pushed by 442,600 messages, or 0.0005%. That is the residue still in flight
-when the clock ran out, not loss: the loaders stop offering at 86,400 s and their in-flight leases
-are cut with them.
+### Hour after hour
 
-### It held the rate, hour after hour
-
-From the broker's own counters, throughput per hour never leaves a band of **0.02%** across
-twenty-three consecutive hours:
+Per hour, from the broker's own counters, throughput never leaves a band of **0.02%**:
 
 | Hour | Push/s | Hour | Push/s | Hour | Push/s |
 | --- | --- | --- | --- | --- | --- |
@@ -102,12 +75,11 @@ twenty-three consecutive hours:
 | 7 | 1,000,194 | 15 | 1,000,006 | 23 | 1,000,015 |
 | 8 | 999,925 | 16 | 999,968 | | |
 
-Of 1,401 one-minute windows, exactly one falls outside plus or minus five percent, and it is the
-ramp.
+One of 1,401 one-minute windows falls outside plus or minus five percent: the ramp.
 
-### Latency, across the whole run
+### Latency
 
-Each loader reports its percentiles every 30 seconds. Over 8,643 such reports:
+Over 8,643 thirty-second reports:
 
 | Reported percentile | Median | p90 | p99 | Worst single interval |
 | --- | --- | --- | --- | --- |
@@ -115,11 +87,11 @@ Each loader reports its percentiles every 30 seconds. Over 8,643 such reports:
 | p99 | 288.8 ms | 325.6 ms | 358.4 ms | **593.9 ms** |
 | p99.9 | 383.0 ms | 432.1 ms | 489.5 ms | **856.1 ms** |
 
-No 30-second interval, on any of the three loaders, reported a p99 above one second in 24 hours.
+No 30-second interval reported a p99 above one second.
 
 ### Resources
 
-From the 1 Hz host sampler, 86,417 samples across the whole run:
+1 Hz host sampler, 86,417 samples:
 
 | Resource | Value |
 | --- | --- |
@@ -139,94 +111,17 @@ From the 1 Hz host sampler, 86,417 samples across the whole run:
   source="benchmark-queen/2026-08-11-soak24-1M/raw/bench/bench.csv"
 />
 
-Broker memory is the number this run exists to produce. A leak at this rate would be obvious: at a
-million messages per second, a per-message overhead of even tens of bytes is gigabytes per hour.
-Across 24 hours the samples span a 4.10 GB mean and a 4.37 GB maximum, with no trend.
-
-The database plateau is retention working. Completed messages leave after 300 s, so steady-state
-size is set by the retention window and the rate rather than by the run length. Sampled every
-three hours the size reads 29.8, 29.6, 30.2, 30.0, 29.9, 31.4, 30.4 and 31.2 GB.
-
-### The broker's own accounting agrees
-
-<Screenshot
-  src="soak-24h-1m-analytics"
-  alt="The analytics view over the 24-hour range. Totals read 85B ingested, 85B delivered, 85B acked, zero ack failures, 781M empty polls and a peak lag of 3.3 seconds. Below them a message flow chart holds a flat line just above 900 million messages per bucket."
-  caption="The same run from the broker's side rather than the loaders'. Ack failures at zero, and a worst pop-to-publish delay of 3.3 seconds across the whole day."
-/>
-
-<Screenshot
-  src="soak-24h-1m-overview"
-  alt="The dashboard overview after 24 hours. The header reads 86B stored, one queue, 200 partitions, one consumer group, 89,300 pending and 86B completed. Rows below give throughput at 1,000,647 per second, pending delta, parked consumers at zero, fill ratio at 99.1 percent and time lag at zero seconds."
-  caption="86 billion stored and 86 billion completed, with 89,300 pending: the standing depth of a queue moving a million messages a second is about a tenth of a second of traffic."
-/>
-
-<Screenshot
-  src="soak-24h-1m-postgres"
-  alt="The system view showing PostgreSQL internals. Database hit ratio 98.87 percent, table hit ratio 98.71 percent, index hit ratio 99.78 percent, shared buffers 16 GB. A table lists per-table cache statistics, with log_txns at 340M disk reads against 4.8B cache hits."
-  caption="PostgreSQL internals at the end of the run. The file buffer never engaged: pushes went straight to the database for 24 hours, with nothing pending or failed on disk."
-/>
-
-## Errors
-
-Every error counter over the whole run, on 86,369,975,300 accepted messages:
-
-| Counter | Value | Unit |
-| --- | --- | --- |
-| Failed push requests | 4 | requests, each carrying 100 messages |
-| Failed pop requests | 0 | requests |
-| Failed acks | 600 | messages |
-| Shed | 0 | messages |
-
-Push and pop errors count failed **requests**; ack errors count **messages**. The message-level
-statement is therefore that 1,000 messages were touched by an error of any kind, and that 41,800
-of 86,370,017,100 offered messages were never accepted, which is 0.000048%, with nothing shed.
-
-## What this run establishes
-
-- **No memory leak on the hot path at scale.** 24 hours at a million messages per second per side
-  with resident memory flat at 4.1 GB. Short runs cannot show this.
-- **Retention reaches a steady state.** The database plateaued at about 30 GB instead of growing,
-  and the plateau is set by the retention window rather than by the run length.
-- **Explicit acknowledgement is affordable at this rate.** Leases plus an offset commit per batch
-  sustained a million per second per side at about 11 cores of broker CPU and 12 of PostgreSQL, on
-  a 32-core host.
-- **The rate is steady, not an average.** Twenty-three consecutive hours inside a 0.02% band, and
-  no 30-second interval above a one-second p99.
+Memory is the number this run exists to produce: at this rate, tens of bytes per message would
+be gigabytes an hour. The database plateau is retention working.
 
 ## What it does not establish
 
-- **Not a per-message completeness proof.** The open-loop loader counts aggregates: offered,
-  accepted, popped, acked. It does not assign a sequence number per message and check the set on
-  arrival, so "zero loss" is not one of this run's findings. The run that does per-message
-  accounting is [the ordered pipeline](/benchmarks/ordered-pipeline), and the run that does
-  per-tenant bitmaps is [the multi-tenant cell](/benchmarks/multitenant-cell).
-- **Not an ordering proof.** No verifier ran. Ordering was verified separately.
-- **Nothing about high availability.** One broker, no mesh, no peer.
-- **Nothing about failure.** No PostgreSQL restart, no failover, no broker kill, no consumer
-  churn. The disk spool was never exercised.
-- **Nothing about the proxy, tenancy, quotas or rate limits.** The loaders spoke to the broker
-  directly.
-- **One workload shape.** 256-byte payloads, push batch 100, 200 partitions, one queue, one
-  consumer group. Batch 1, large payloads and wildcard consumption are all materially different
+- **Not a completeness or ordering proof.** The loader counts aggregates, not sequence numbers,
+  and no verifier ran: that is [the ordered pipeline](/benchmarks/ordered-pipeline).
+- **Nothing about failure, high availability or the proxy.** One broker, no peer, no failover, no
+  consumer churn, no tenancy, and the disk spool was never exercised.
+- **One workload shape.** Batch 1, large payloads and wildcard consumption are different
   measurements.
-- **A compressible payload.** The loader's body is a repeated character, which the write path
-  compresses to almost nothing: 83 MB/s of WAL at a million messages per second is 83 bytes per
-  message, envelope included. A payload of real, high-entropy data would write several times that,
-  and this run does not measure it.
-- **Fast storage.** About 70 µs per `fdatasync` on the broker host. This figure is not disk-bound.
-
-## Files
-
-| File | Contents |
-| --- | --- |
-| `raw/loader-0*/g.out` | Each loader's stdout: 2,880 thirty-second interval lines and the final aggregate |
-| `raw/loader-0*/loader.csv` | 1 Hz sampler on each loader host, including network throughput |
-| `raw/bench/bench.csv` | 1 Hz sampler on the broker host: broker and PostgreSQL CPU and memory, commits, WAL, database size, wait events |
-| `raw/bench/metrics.csv` | The broker's own cumulative counters every 10 s, with per-operation round-trip quantiles |
-| `raw/bench/broker.log` | Broker boot lines, rate lines and maintenance cycles |
-| `raw/bench/restarts.count` | The watchdog's restart counter |
-| `results.md` | The session note. Written in Italian |
-
-To run something of this shape yourself, see
-[Reproducing these runs](/benchmarks/reproduce).
+- **A compressible payload.** 83 MB/s of WAL is 83 bytes per message, envelope included;
+  high-entropy data writes several times that.
+- **Fast storage.** About 70 µs per `fdatasync`: this figure is not disk-bound.

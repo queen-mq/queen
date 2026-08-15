@@ -1,0 +1,250 @@
+// docs:start(tut-rust-streaming)
+//
+// Tutorial 5 of 5: streaming.
+//
+// The four tutorials before this one move messages. This one aggregates them:
+// a tumbling window per entity, whose state, output and acknowledgements commit
+// in the same PostgreSQL transaction. That is exactly-once aggregation with no
+// changelog topic and no state store to operate, because the state and the
+// queue are already in the same database.
+//
+// A stream is a running process, so the order here is the order you would use
+// in production: start it, then let events arrive.
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 cargo run --bin 05_streaming
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use queen_mq::streams::{RunOptions, Stream};
+use queen_mq::{Config, Queen, QueueOptions, SubscriptionMode};
+use serde_json::json;
+
+// (customer, amount)
+const SALES: [(&str, f64); 5] = [
+    ("acme", 10.0),
+    ("acme", 32.5),
+    ("globex", 7.25),
+    ("acme", 0.25),
+    ("globex", 100.0),
+];
+
+struct Checks(usize);
+
+impl Checks {
+    fn assert(&mut self, condition: bool, description: &str) -> Result<(), String> {
+        if !condition {
+            return Err(description.to_string());
+        }
+        self.0 += 1;
+        println!("  ok: {description}");
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    match run().await {
+        Ok(checks) => println!("\nPASS: {checks} checks"),
+        Err(e) => {
+            eprintln!("\nFAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run() -> Result<usize, String> {
+    let url = std::env::var("QUEEN_URL").unwrap_or_else(|_| "http://localhost:6632".into());
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let events = format!("tut-rust-stream-events-{run_id}");
+    let totals = format!("tut-rust-stream-totals-{run_id}");
+
+    // The query id is this streaming query's identity in the database. Its
+    // window state is keyed by it, so restarting the program with the same id
+    // resumes the same windows instead of starting new ones. The runner also
+    // derives its consumer group from it, as `streams.{query_id}`.
+    let query_id = format!("tut-rust-totals-{run_id}");
+
+    let mut checks = Checks(0);
+    println!("broker {url}");
+
+    let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
+
+    // Both queues are created up front here, rather than by the first push, so
+    // the stream has something to attach to before any event exists.
+    // configure() is a full replace: keys left out go back to the broker's
+    // defaults rather than keeping a previous value.
+    queen
+        .queue(&events)
+        .configure(QueueOptions {
+            lease_time: Some(30),
+            retry_limit: Some(3),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    queen
+        .queue(&totals)
+        .configure(QueueOptions {
+            lease_time: Some(30),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    println!("\nstarting the stream");
+    let handle = Stream::from(queen.queue(&events))
+        // Tumbling: fixed, non-overlapping windows, one set per partition. A
+        // window closes when its time is up; idle_flush_ms also closes one whose
+        // partition has gone quiet, which is what lets a short program finish.
+        // Where the JavaScript client takes one options object, this client
+        // spells the window and its knobs as separate steps in the chain.
+        .window_tumbling(2)
+        .idle_flush_ms(800)
+        // The extractors receive a Record over the message payload, not the
+        // envelope: it is r.number("amount"), not the message's `data` field.
+        // A missing or non-numeric field yields None and is simply not
+        // accumulated.
+        .aggregate_count("count")
+        .aggregate_sum("sum", |r| r.number("amount"))
+        .aggregate_max("max", |r| r.number("amount"))
+        // Every closed window is pushed here, in the same transaction that
+        // commits the window state and acknowledges the inputs it was computed
+        // from. The sink keeps the source partition, so a window lands in the
+        // lane it was computed for.
+        .to(queen.queue(&totals))
+        // The chain's shape is hashed and stored with the query. Redeploying a
+        // changed chain against the same id is refused rather than silently
+        // reusing state computed under other semantics; reset(true) is the way
+        // to say you meant it.
+        .run(
+            &queen,
+            RunOptions::new(&query_id)
+                .batch_size(100)
+                .max_partitions(8)
+                .max_wait(Duration::from_millis(200)),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // run() registers the query and spawns the poll loop, but does not wait for
+    // its first poll — and it is that first poll which creates the runner's
+    // cursor. A new cursor starts at the tail, so events pushed into the gap
+    // would be skipped. Waiting one poll window closes it.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    println!("\npushing sales");
+    for (customer, amount) in SALES {
+        // The partition is the aggregation key: window state is per partition,
+        // so one customer's totals are computed from that customer's lane
+        // alone.
+        queen
+            .queue(&events)
+            .partition(customer)
+            .push(json!({ "customer": customer, "amount": amount }))
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("  {customer} {amount}");
+    }
+
+    println!("\ncollecting closed windows");
+
+    // A window is a slice of time, so a customer's sales can fall on either
+    // side of a boundary and arrive as two windows instead of one. That is what
+    // windowing is, and it is why this adds the windows up per customer instead
+    // of expecting exactly one each.
+    //
+    // The loop waits for the totals it expects, with a deadline. Waiting for a
+    // quiet period instead would be a race: the last window closes when its
+    // timer says so, not when the reader is tired of waiting. That is also why
+    // this is a pop loop rather than consume(): a consumer stopped by limit() or
+    // idle() decides for itself when it has seen enough, and here the program is
+    // the one that knows.
+    #[derive(Default, Clone, Copy)]
+    struct Totals {
+        count: f64,
+        sum: f64,
+        max: f64,
+    }
+
+    let mut totals_seen: HashMap<String, Totals> = HashMap::new();
+    let complete = |seen: &HashMap<String, Totals>| {
+        seen.get("acme").map(|t| t.count) == Some(3.0)
+            && seen.get("globex").map(|t| t.count) == Some(2.0)
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+
+    while !complete(&totals_seen) && Instant::now() < deadline {
+        let closed = queen
+            .queue(&totals)
+            .group("tut-rust-stream-collector")
+            .subscription_mode(SubscriptionMode::All)
+            .batch(20)
+            .partitions(10)
+            .wait(true)
+            .poll_timeout(Duration::from_secs(2))
+            .pop()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        for msg in &closed {
+            // The window's key is the partition it was computed for.
+            println!("  {}: {}", msg.partition, msg.data);
+            let t = totals_seen.entry(msg.partition.clone()).or_default();
+            t.count += msg.data["count"].as_f64().unwrap_or(0.0);
+            t.sum += msg.data["sum"].as_f64().unwrap_or(0.0);
+            t.max = t.max.max(msg.data["max"].as_f64().unwrap_or(0.0));
+
+            // pop() takes a lease and leaves it to you; only consume() settles
+            // on your behalf. Acking here commits the collector's cursor, so a
+            // window is counted once even though the loop polls repeatedly.
+            queen.ack(msg).await.map_err(|e| e.to_string())?;
+        }
+    }
+
+    // Stop the runner before checking, so nothing is still writing to the
+    // queues the assertions read. stop() waits for the in-flight cycle and its
+    // flush, and it consumes the handle: a stopped stream cannot be restarted
+    // by mistake.
+    handle.stop().await.map_err(|e| e.to_string())?;
+
+    checks.assert(
+        complete(&totals_seen),
+        "every sale reached a closed window before the deadline",
+    )?;
+    let acme = totals_seen["acme"];
+    let globex = totals_seen["globex"];
+
+    checks.assert(
+        (acme.sum - 42.75).abs() < 0.001,
+        "acme summed to 42.75 across its windows",
+    )?;
+    checks.assert(
+        (globex.sum - 107.25).abs() < 0.001,
+        "globex summed to 107.25",
+    )?;
+    checks.assert(
+        globex.max == 100.0,
+        "globex kept its largest single sale",
+    )?;
+
+    queen
+        .queue(&events)
+        .delete()
+        .await
+        .map_err(|e| e.to_string())?;
+    queen
+        .queue(&totals)
+        .delete()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    queen.close().await.map_err(|e| e.to_string())?;
+
+    Ok(checks.0)
+}
+// docs:end

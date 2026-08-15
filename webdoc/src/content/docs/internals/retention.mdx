@@ -363,7 +363,7 @@ Retention is **opt-in**: `retentionEnabled` plus a positive window. With `retent
 both windows zero, phase 1 skips the partition entirely and data is kept forever. The sidecar purge still
 runs (it has to) and `maxWaitTimeSeconds` still evicts if set. Every one of those keys, with the
 value the code applies when you omit it, is on [Queue options](/reference/queue-options/), and the
-operator's view of the same cycle is [Retention](/selfhost/retention/).
+operator's view of the same cycle is [Retention](/deploy/operations/).
 
 Remember that `/configure` is a full replace: omitting `retentionEnabled` resets it to its default.
 

@@ -1,0 +1,35 @@
+---
+title: Streaming
+description: "A tumbling window per entity, whose state, output and acknowledgements commit together."
+type: tutorial
+tier: use
+sidebar:
+  order: 5
+verifiedBy:
+  - examples/tutorials/js/05-streaming.mjs
+---
+
+The four tutorials before this one move messages. This one aggregates them.
+
+A streaming query reads a queue, keeps window state per partition, and pushes each closed window
+to an output queue. The state, the output and the acknowledgement of the inputs commit in the same
+PostgreSQL transaction, which is exactly-once aggregation with no changelog topic and no state
+store to size and operate: the state and the queue are already in the same database.
+
+Two things in the program are worth knowing before you write your own. A stream is a running
+process, so it must be started before the events arrive: pointing it at an existing backlog emits
+nothing. And the aggregate extractors receive the message payload itself, not the envelope, which
+is silent when you get it wrong because a missing field aggregates to zero.
+
+<Render file="snippets/tut-js-streaming" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with the JavaScript client installed:
+
+```bash
+QUEEN_URL=http://localhost:6632 node 05-streaming.mjs
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh js`.

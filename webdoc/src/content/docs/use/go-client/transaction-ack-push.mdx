@@ -1,0 +1,43 @@
+---
+title: Transactional ack and push
+description: "The acknowledgement of one stage and the push of the next, in one PostgreSQL transaction."
+type: tutorial
+tier: use
+sidebar:
+  order: 3
+verifiedBy:
+  - examples/tutorials/go/transaction-ack-push/main.go
+---
+
+The previous tutorial handed work between queues in two steps. In that order a crash between
+them duplicates work; in the other order it loses it. There is no arrangement of two calls that
+avoids both.
+
+A transaction removes the choice: the ack of the input and the push of the output commit together
+or not at all. The message's lease rides along as a condition of the commit, which is what stops a
+slow consumer from acknowledging work the broker has already handed to somebody else.
+
+`AutoAck(false)` is what makes this possible, since the acknowledgement now belongs to the
+transaction. It changes the handler's contract at the same time: with auto-ack off, an error is no
+longer turned into a negative acknowledgement, it stops the consumer and comes back out of
+`Execute`. The transaction's `Ack` also needs the consumer group spelled out, because the builder
+does not read it off the message.
+
+This is atomic handoff, not end-to-end exactly-once delivery: a lost response plus a retry still
+duplicates the pushes unless their transaction ids are deterministic. What it buys is that your
+pipeline's state can never disagree with itself.
+
+<Render file="snippets/tut-go-transaction-ack-push" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/go`:
+
+```bash
+GOWORK=off go run ./transaction-ack-push
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh go`.
+
+Next: [Replay](/use/go-client/replay).

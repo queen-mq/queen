@@ -1,0 +1,43 @@
+---
+title: Transactional ack and push
+description: "The acknowledgement of one stage and the push of the next, in one PostgreSQL transaction."
+type: tutorial
+tier: use
+sidebar:
+  order: 3
+verifiedBy:
+  - examples/tutorials/php/03-transaction-ack-push.php
+---
+
+Ordering two calls does not make them safe. Push then ack duplicates the work when the process
+dies in between, ack then push loses it, and the previous tutorial left that window open.
+
+A transaction closes it: the ack of the input and the push of the output are one PostgreSQL
+commit, and both land or neither does. The commit also carries the lease of the message being
+acknowledged, so it fails once that lease has expired, which is what stops a slow consumer from
+committing work the broker has already handed to somebody else.
+
+Two details in the code belong to this client. `autoAck(false)` is required, because otherwise the
+loop acknowledges the message the moment the closure returns, outside the transaction. And the
+transaction's `ack()` does not read the consumer group off the message: pass it as
+`['consumerGroup' => ...]` or a different cursor is the one that moves.
+
+This is atomic handoff, not exactly-once delivery end to end. A lost response and a retry still
+push twice unless the transaction ids are deterministic. What it buys is that the two queues can
+never disagree about what happened.
+
+<Render file="snippets/tut-php-transaction-ack-push" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/php` with the
+PHP client installed:
+
+```bash
+QUEEN_URL=http://localhost:6632 php 03-transaction-ack-push.php
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh php`.
+
+Next: [Replay](/use/php-client/replay).

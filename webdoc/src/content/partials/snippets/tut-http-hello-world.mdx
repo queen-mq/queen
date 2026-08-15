@@ -1,0 +1,233 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/http/01-hello-world.sh."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/http/01-hello-world.sh by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```bash title="examples/tutorials/http/01-hello-world.sh"
+#!/usr/bin/env bash
+#
+# Tutorial 1 of 4: hello world, with nothing but curl.
+#
+# One message in, one message out. Nothing is created in advance: the queue and
+# the partition come into existence with the push that names them.
+#
+# There is no client library here and none is needed. The broker speaks plain
+# HTTP/1.1 with JSON bodies, so curl is a Queen client: every SDK is a wrapper
+# over the same routes this script calls by hand. That is why this set prints
+# the requests and the responses verbatim. What you read here is the wire.
+#
+# Run it:
+#   QUEEN_URL=http://localhost:6632 bash 01-hello-world.sh
+#
+# The script checks its own outcome and exits non-zero if a check fails.
+
+set -euo pipefail
+
+QUEEN_URL="${QUEEN_URL:-http://localhost:6632}"
+
+# The name is prefixed per language and suffixed per run, so every tutorial in
+# every language can share one broker and no run inherits state from another.
+# $$ is the process id, which keeps two runs in the same second apart.
+QUEUE="tut-http-hello-$(date +%s)-$$"
+
+# jq is doing two jobs below: building request bodies (so a payload with a
+# quote or a newline in it cannot break the JSON) and reading responses. Check
+# for it up front rather than failing halfway through with a parse error.
+command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is not installed"; exit 1; }
+
+CHECKS=0
+TMP="$(mktemp -d)"
+
+# One exit path for everything. A failed check calls fail(), which records the
+# reason and exits 1; any other command that fails under `set -e` arrives here
+# too, with its own status. FAIL is printed exactly once, and only on failure.
+cleanup() {
+  local status=$?
+  rm -rf "$TMP"
+  if [ "$status" -ne 0 ]; then
+    echo
+    echo "FAIL: ${FAILURE:-a command exited with status $status}"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+fail() { FAILURE="$*"; exit 1; }
+
+# check <actual> <expected> <description>
+check() {
+  [ "$1" = "$2" ] || fail "$3 (expected [$2], got [$1])"
+  CHECKS=$((CHECKS + 1))
+  echo "  ok: $3"
+}
+
+# request <method> <path> [json-body]
+#
+# Sets $STATUS to the HTTP status code and writes the response body to
+# $TMP/body. Note what this helper does NOT do: it does not treat a non-2xx as
+# a transport error (no --fail), because Queen reports outcomes in the body and
+# several of the interesting ones arrive as 200. Read the status, then read the
+# body. -sS is "quiet, but still print a connection error".
+request() {
+  local method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    STATUS="$(curl -sS -o "$TMP/body" -w '%{http_code}' \
+      -X "$method" "$QUEEN_URL$path" \
+      -H 'content-type: application/json' \
+      -d "$body")"
+  else
+    STATUS="$(curl -sS -o "$TMP/body" -w '%{http_code}' -X "$method" "$QUEEN_URL$path")"
+  fi
+}
+
+echo "broker $QUEEN_URL"
+
+# ---------------------------------------------------------------------------
+# Push
+#
+# A push names a queue and, optionally, a partition. Both are created by this
+# call if they do not exist, inside the transaction that stores the message.
+# There is no declare step and nothing to provision first.
+#
+# The wire field is "payload". The JavaScript and Python clients let you write
+# "data" on an item and rename it before sending; raw HTTP does not. An item
+# with "data" and no "payload" is a 400.
+# ---------------------------------------------------------------------------
+push_body="$(jq -n --arg queue "$QUEUE" \
+  '{items: [{queue: $queue, payload: {greeting: "Hello World!"}}]}')"
+
+echo
+echo "POST $QUEEN_URL/api/v1/push"
+echo "$push_body" | jq .
+request POST /api/v1/push "$push_body"
+echo "-> HTTP $STATUS"
+jq . "$TMP/body"
+
+[ "$STATUS" = 201 ] || fail "push returned HTTP $STATUS"
+
+# The response is a top-level array with one element per item, in request order.
+# There is no envelope object around it. The mixed casing is the wire contract:
+# message_id and transaction_id are snake_case, queueName is camelCase.
+#
+# HTTP 201 is not proof the message was stored: "buffered" (the broker spooled
+# it to disk) and "failed" (it exists nowhere) also come back 201. The per-item
+# status is the only answer.
+push_status="$(jq -r '.[0].status' "$TMP/body")"
+echo "pushed $(jq -r '.[0].transaction_id' "$TMP/body") -> $push_status"
+check "$push_status" queued 'the broker stored the message'
+
+# ---------------------------------------------------------------------------
+# Pop
+#
+# A pop claims a leased batch: the messages are held for the lease duration so
+# no other consumer in the same group can take them. It never removes anything.
+# Parameters go in the query string, and this route is a GET.
+#
+# wait=true turns on long polling, so the call parks until a message arrives
+# instead of coming back empty; timeout is that wait in milliseconds. Every pop
+# in this set has a bounded timeout on purpose: a lost message then fails the
+# run with a 204 instead of hanging it forever.
+#
+# No consumerGroup is named here, so the read goes through the reserved group
+# __QUEUE_MODE__, the queue's own cursor, which starts at the beginning. Named
+# groups are tutorial 2: a new group is created at the tail and would see
+# nothing here.
+# ---------------------------------------------------------------------------
+echo
+echo "GET $QUEEN_URL/api/v1/pop/queue/$QUEUE?batch=1&wait=true&timeout=5000"
+request GET "/api/v1/pop/queue/$QUEUE?batch=1&wait=true&timeout=5000"
+echo "-> HTTP $STATUS"
+
+# An empty pop is 204 with no body at all: nothing to parse, so check the status
+# before you reach for jq. Here it would mean the message never arrived.
+[ "$STATUS" != 204 ] || fail 'the pop came back empty'
+[ "$STATUS" = 200 ] || fail "pop returned HTTP $STATUS"
+jq . "$TMP/body"
+
+# Keep the pop response: the next request overwrites $TMP/body, and the ack
+# needs three fields out of this one.
+cp "$TMP/body" "$TMP/pop"
+
+check "$(jq '.messages | length' "$TMP/pop")" 1 'one message came back'
+
+greeting="$(jq -r '.messages[0].data.greeting' "$TMP/pop")"
+partition="$(jq -r '.messages[0].partition' "$TMP/pop")"
+echo "received \"$greeting\" from partition $partition"
+
+# The payload comes back under "data", spliced in verbatim: what you pushed as
+# "payload" is what you read as "data".
+check "$greeting" 'Hello World!' 'the payload survived the round trip'
+
+# No partition was named on the push, so the broker put the message in the
+# queue's default lane.
+check "$partition" Default 'it landed in the default partition'
+
+# ---------------------------------------------------------------------------
+# Ack
+#
+# The acknowledgement is what commits consumption. It is not a delete: it moves
+# the cursor for this (partition, consumer group) past the message and releases
+# the lease.
+#
+# A message is addressed by its transactionId plus its own partitionId, never
+# by an offset: positions are internal to the storage engine. Use the
+# partitionId from the message rather than the top-level one, which describes
+# only the first claimed partition.
+#
+# leaseId is optional and sending it has teeth in both directions: with it, the
+# broker refuses an ack whose lease has expired; without it, the cursor moves
+# anyway, even if another worker now holds the batch. Send the lease you popped
+# with.
+#
+# consumerGroup is omitted here for the same reason it was omitted on the pop:
+# it defaults to __QUEUE_MODE__, which is the cursor this read used.
+# ---------------------------------------------------------------------------
+ack_body="$(jq -c '{
+  transactionId: .messages[0].transactionId,
+  partitionId:   .messages[0].partitionId,
+  leaseId:       .leaseId,
+  status:        "completed"
+}' "$TMP/pop")"
+
+echo
+echo "POST $QUEEN_URL/api/v1/ack"
+echo "$ack_body" | jq .
+request POST /api/v1/ack "$ack_body"
+echo "-> HTTP $STATUS"
+jq . "$TMP/body"
+
+[ "$STATUS" = 200 ] || fail "ack returned HTTP $STATUS"
+
+# A refused ack still arrives as HTTP 200 with success:false on the item, so the
+# per-item flag is the only proof the broker took it. There is no 404 for an
+# unknown transactionId and no 409 for a stale lease.
+check "$(jq -r '.[0].success' "$TMP/body")" true 'the acknowledgement was accepted'
+
+# ---------------------------------------------------------------------------
+# The cursor is now past the only message, so a further read finds nothing.
+# wait is left off (it defaults to false), so this returns immediately instead
+# of long polling: 204, no body.
+# ---------------------------------------------------------------------------
+echo
+echo "GET $QUEEN_URL/api/v1/pop/queue/$QUEUE"
+request GET "/api/v1/pop/queue/$QUEUE"
+echo "-> HTTP $STATUS (no body)"
+check "$STATUS" 204 'the queue is drained'
+
+# Clean up on success only: a failed run leaves the queue on the broker to be
+# looked at. Deleting a queue that does not exist is also a 200, so the SDKs can
+# use delete-before-create as a cleanup idiom; check "deleted", not the status.
+echo
+echo "DELETE $QUEEN_URL/api/v1/resources/queues/$QUEUE"
+request DELETE "/api/v1/resources/queues/$QUEUE"
+echo "-> HTTP $STATUS"
+jq . "$TMP/body"
+
+echo
+echo "PASS: $CHECKS checks"
+```

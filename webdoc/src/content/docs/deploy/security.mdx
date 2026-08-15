@@ -1,0 +1,108 @@
+---
+title: Security
+description: "One plaintext listener and five trust boundaries: what the broker enforces, what you put around it, and where the detail for each mechanism lives."
+type: how-to
+tier: operate
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/auth.rs
+  - server/src/config.rs
+  - server/src/mesh.rs
+  - server/src/tenant.rs
+  - server/src/encryption.rs
+  - server/src/pgtls.rs
+  - server/sql/procedures/002_streams_schema.sql
+---
+
+The broker is one process with one plaintext listener. It binds `0.0.0.0:PORT`, serves the HTTP API
+and the dashboard from that single port, and authenticates nobody until you turn JWT on. There is
+no TLS listener and no CORS layer in the binary, so most of a deployment's security is what you put
+around it.
+
+Generate the two secrets, keep them, and boot with everything the broker does implement turned on:
+
+```bash
+JWT_SECRET="$(openssl rand -hex 32)"
+QUEEN_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+echo "$JWT_SECRET" "$QUEEN_ENCRYPTION_KEY"   # both are needed again later
+```
+
+```bash
+JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$JWT_SECRET" \
+  PG_USE_SSL=true \
+  QUEEN_ENCRYPTION_KEY="$QUEEN_ENCRYPTION_KEY" \
+  ./bin/queen
+```
+
+The boundaries, and who defends each one:
+
+- HTTP API and dashboard, on `PORT`: optional JWT per route, with TLS termination and network policy yours.
+- Broker to PostgreSQL: optional TLS, off by default.
+- The mesh between brokers, on `QUEEN_MESH_PORT`: an HMAC handshake and then nothing, so the firewall is yours and not optional.
+- Payloads at rest: optional AES-256-GCM on flagged queues, with key management yours.
+- `x-queen-tenant`, where native tenancy is on: checked for shape and never for authority, so the gateway that sets it is yours.
+
+One more surface has no switch at all: `/metrics/prometheus` is public, broker authentication
+cannot protect it, and its per-queue series carry no tenant label, so keep it off any network a
+customer can reach ([Prometheus metrics](/reference/prometheus)).
+
+## Authentication
+
+`JWT_ENABLED` is `false` by default, and off means open: every route answers anything that can open
+a TCP connection, `DELETE /api/v1/resources/queues/:queue` and `POST /api/v1/system/maintenance`
+included, and the dashboard boots as a full admin. The boot log states the mode in one line, so
+read it instead of assuming.
+
+Turned on, each route carries an access level and each token carries roles. `/health`, the metrics
+endpoints, the dashboard shell and the identity routes stay public whatever you do. The algorithms,
+JWKS rotation, boot-time validation and the five access levels, which are a set and not a ladder,
+are in [broker authentication](/reference/security/jwt).
+
+## Payload encryption at rest
+
+Encryption needs two things true at once: `QUEEN_ENCRYPTION_KEY` on the process and
+`encryptionEnabled` on the queue. With only one of them the broker stores plaintext and raises no
+error, so confirm the `encryption service initialized (AES-256-GCM)` line at boot before trusting
+the flag. It covers the payload on every write path, the disk spool included, and it is the one
+control that still holds when someone walks off with a database dump
+([payload encryption at rest](/reference/security/encryption)).
+
+## PostgreSQL TLS
+
+`PG_USE_SSL` is `false` by default, which means every message you store crosses a plaintext
+connection. Turn it on whenever the database is not on localhost. With it on, the broker validates
+the server's chain against the Mozilla roots compiled into the binary, and most managed PostgreSQL
+fails that check because its chain is rooted in a private CA; `PG_SSL_REJECT_UNAUTHORIZED=false`
+then encrypts the connection without proving whose key answered
+([PostgreSQL TLS](/reference/security/postgres-tls)).
+
+Inside the database, `002_streams_schema.sql` grants `queen_streams.queries` and
+`queen_streams.state` to `PUBLIC`, so any role that can connect reads and rewrites stream
+definitions and stream state whatever the HTTP layer allows ([the schema](/internals/schema)).
+
+## The mesh port
+
+Notifications between brokers travel over framed TCP on `QUEEN_MESH_PORT`. The `HELLO` handshake is
+HMAC'd but replayable, and every frame after it is unauthenticated JSON, maintenance-mode flips
+included: whoever can connect can divert a replica's pushes to its disk spool, or make its pops
+answer empty. Bind the port to a private network and allow it only from the other brokers'
+addresses. `QUEEN_SYNC_SECRET` raises the bar from connecting to capturing one handshake, and does
+not replace the firewall ([the mesh](/internals/mesh)).
+
+TLS in front, JWT on, `PG_USE_SSL` true, a key on the queues that need one, and a mesh port only
+the brokers can reach.
+
+<CardGrid>
+  <LinkCard
+    href="/deploy/ha"
+    title="High availability"
+    description="More than one broker on one database, and what the mesh between them is for."
+  />
+  <LinkCard
+    href="/reference/multi-tenant/broker-tenancy"
+    title="Broker-native tenancy"
+    description="What the x-queen-tenant header scopes, and why it is an operator feature."
+  />
+</CardGrid>

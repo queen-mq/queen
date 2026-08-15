@@ -1,0 +1,239 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/cpp/04-replay.cpp."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/cpp/04-replay.cpp by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```cpp title="examples/tutorials/cpp/04-replay.cpp"
+//
+// Tutorial 4 of 4: replay.
+//
+// Acknowledging a message does not delete it. Consumption is a cursor per
+// consumer group, and the messages stay until retention removes them, so a new
+// group can read the whole history and an existing group can be moved back.
+//
+// This is the tutorial that shows what a cursor buys you: reprocessing after a
+// bug, backfilling a new consumer, and auditing what was delivered, all without
+// asking the producer to send anything twice.
+//
+// Build it (see 01-hello-world.cpp for the two headers queen_client.hpp
+// expects but this repository does not vendor):
+//   mkdir -p build
+//   g++ -std=c++17 -O2 -pthread \
+//       -I../../../clients/client-cpp -I../../../clients/server/vendor \
+//       -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
+//       04-replay.cpp -o build/04-replay \
+//       -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 ./build/04-replay
+
+#include "queen_client.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <ctime>
+#include <exception>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using queen::QueenClient;
+using queen::QueueBuilder;
+using json = nlohmann::json;
+
+static std::string run_id() {
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count();
+    std::string out;
+    const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    while (millis > 0) {
+        out.insert(out.begin(), digits[millis % 36]);
+        millis /= 36;
+    }
+    return out;
+}
+
+struct Event {
+    int seq;
+    std::string type;
+};
+
+static const std::vector<Event> EVENTS_IN = {
+    {1, "created"},
+    {2, "updated"},
+    {3, "shipped"},
+    {4, "delivered"},
+};
+
+static int checks = 0;
+
+static void check(bool condition, const std::string& description) {
+    if (!condition) throw std::runtime_error(description);
+    ++checks;
+    std::cout << "  ok: " << description << std::endl;
+}
+
+static std::string join(const std::vector<int>& values) {
+    std::ostringstream out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) out << ", ";
+        out << values[i];
+    }
+    return out.str();
+}
+
+// An RFC 3339 timestamp in UTC, which is the format the seek endpoint wants.
+static std::string iso_utc(std::chrono::system_clock::time_point at) {
+    std::time_t seconds = std::chrono::system_clock::to_time_t(at);
+    std::tm parts{};
+    gmtime_r(&seconds, &parts);
+    char buffer[32];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S.000Z", &parts);
+    return buffer;
+}
+
+int main() {
+    const char* env_url = std::getenv("QUEEN_URL");
+    const std::string QUEEN_URL = env_url ? env_url : "http://localhost:6632";
+    const std::string RUN = run_id();
+    const std::string EVENTS = "tut-cpp-replay-" + RUN;
+
+    QueenClient client(QUEEN_URL);
+
+    std::string verdict;
+    bool failed = false;
+
+    try {
+        std::cout << "broker " << QUEEN_URL << std::endl;
+
+        // Read one lane to the end and report the sequence numbers it gave up.
+        // An empty mode means "say nothing about where to start", which is what
+        // the rewound group below needs: its cursor already exists.
+        auto drain = [&](const std::string& group, int expected,
+                         const std::string& mode) -> std::vector<int> {
+            std::vector<int> seen;
+            std::exception_ptr handler_error;
+            std::atomic<bool> stop{false};
+
+            // The C++ builder is mutated in place rather than chained into a
+            // temporary, because the optional subscription_mode() below has to
+            // be applied to the same object that consume() is called on.
+            QueueBuilder builder = client.queue(EVENTS);
+            builder.partition("order-1")
+                .group(group)
+                .each()
+                .limit(expected)
+                // wait(false) keeps idle_millis meaningful: the idle clock is
+                // only consulted between polls, so a long-polling pop would
+                // stretch a 4 second budget to the length of one server-side
+                // park. A lost event has to fail this run, not block it.
+                .wait(false)
+                .idle_millis(4000);
+            if (!mode.empty()) builder.subscription_mode(mode);
+
+            builder.consume([&](const json& msg) {
+                try {
+                    seen.push_back(msg["data"]["seq"].get<int>());
+                } catch (...) {
+                    // The consumer turns a thrown handler into a negative
+                    // acknowledgement and carries on, so the error has to be
+                    // carried out by hand.
+                    if (!handler_error) handler_error = std::current_exception();
+                    stop = true;
+                }
+            }, &stop);
+
+            if (handler_error) std::rethrow_exception(handler_error);
+            return seen;
+        };
+
+        for (const Event& event : EVENTS_IN) {
+            client.queue(EVENTS).partition("order-1").push({
+                json{{"data", {{"seq", event.seq}, {"type", event.type}}}}
+            });
+        }
+        std::cout << "pushed " << EVENTS_IN.size() << " events" << std::endl;
+
+        // The live consumer. It drains the lane and commits as it goes.
+        std::cout << "\nthe live consumer" << std::endl;
+        std::vector<int> live = drain("tut-cpp-live", 4, "all");
+        std::cout << "  saw " << join(live) << std::endl;
+        check(live == std::vector<int>({1, 2, 3, 4}),
+              "the live group read the lane in order");
+
+        // A second group, created now, after every message was already stored
+        // and acknowledged by someone else. subscription_mode("all") is what
+        // points its new cursor at the beginning: the default for a new group is
+        // the tail, so without it this group would sit idle waiting for the next
+        // event.
+        //
+        // The mode applies when the cursor is created and never again, so it
+        // cannot rewind a group that already exists. That is what seek below is
+        // for.
+        std::cout << "\na new group, backfilled from the beginning" << std::endl;
+        std::vector<int> audit = drain("tut-cpp-audit", 4, "all");
+        std::cout << "  saw " << join(audit) << std::endl;
+        check(audit == std::vector<int>({1, 2, 3, 4}),
+              "a new group replayed the whole history");
+
+        // Nothing was re-pushed and nothing was copied: both groups read the
+        // same stored messages through their own cursors.
+        std::cout << "\nrewinding an existing group" << std::endl;
+
+        // Move the live group's cursor back an hour, which is before anything in
+        // this run was pushed. The seek also releases any live lease, so an
+        // in-flight batch is abandoned rather than acknowledged.
+        //
+        // The C++ client has no admin surface -- there is no equivalent of the
+        // JavaScript queen.admin.seekConsumerGroup -- so the call goes through
+        // the client's own HTTP transport, which keeps the base URL, the retry
+        // and the 429 backoff policy that every other call in this file uses.
+        std::string seek_path = "/api/v1/consumer-groups/" +
+                                queen::util::url_encode("tut-cpp-live") + "/queues/" +
+                                queen::util::url_encode(EVENTS) + "/seek";
+        json seek = client.get_http_client()->post(
+            seek_path,
+            json{{"timestamp", iso_utc(std::chrono::system_clock::now() -
+                                       std::chrono::hours(1))}});
+        if (!seek.value("success", false)) {
+            throw std::runtime_error("seek rejected: " +
+                                     seek.value("error", std::string("unknown")));
+        }
+
+        std::vector<int> replayed = drain("tut-cpp-live", 4, "");
+        std::cout << "  saw " << join(replayed) << std::endl;
+        check(replayed == std::vector<int>({1, 2, 3, 4}),
+              "the rewound group read the same events again, in the same order");
+
+        // Replay is per group. The audit group was not moved, so it stays where
+        // it was and sees nothing new.
+        json audit_again = client.queue(EVENTS)
+                               .partition("order-1")
+                               .group("tut-cpp-audit")
+                               .batch(10)
+                               .wait(false)
+                               .pop();
+        check(audit_again.empty(), "rewinding one group left the other where it was");
+
+        client.queue(EVENTS).del();
+
+        verdict = "\nPASS: " + std::to_string(checks) + " checks";
+    } catch (const std::exception& err) {
+        verdict = std::string("\nFAIL: ") + err.what();
+        failed = true;
+    }
+
+    client.close();
+
+    (failed ? std::cerr : std::cout) << verdict << std::endl;
+    return failed ? 1 : 0;
+}
+```

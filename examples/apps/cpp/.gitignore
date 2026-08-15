@@ -1,0 +1,2 @@
+# Compiled applications. examples/apps/run.sh builds into this directory too.
+build/

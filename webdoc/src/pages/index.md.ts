@@ -195,7 +195,7 @@ export function homepageBody(): string {
   lines.push("Produce:", "", "```js", snippet(pushRaw, "js-push"), "```", "");
   lines.push("Consume:", "", "```js", snippet(consumeRaw, "js-consume"), "```", "");
   lines.push(
-    `There are [SDKs for JavaScript, Python, Go, Rust, PHP and C++](${url("/use/clients/")}), ` +
+    `There are [SDKs for JavaScript, Python, Go, Rust, PHP and C++](${url("/use/js-client")}), ` +
       `[an operator CLI](${url("/reference/queenctl/")}), and a ` +
       `[plain HTTP API](${url("/reference/http")}) for everything else.`,
     "",
@@ -229,13 +229,13 @@ export function homepageBody(): string {
 
   lines.push("## The limits worth knowing first", "");
   lines.push(HOME_LIMITS, "");
-  lines.push(`[Read the full list before you design around it](${url("/start/limits")})`, "");
+  lines.push(`[Read the full list before you design around it](${url("/reference/limits")})`, "");
 
   lines.push("## Start", "");
   lines.push(
     `- [Use it](${url("/start/quickstart")}): the model in one page, the SDKs, and worked examples.`,
-    `- [Pick your SDK](${url("/use/clients/")}): JavaScript, Python, Go, Rust, PHP and C++, plus queenctl and plain HTTP.`,
-    `- [Host it](${url("/selfhost")}): deployment, PostgreSQL, high availability, security, operations.`,
+    `- [Pick your SDK](${url("/use/js-client")}): JavaScript, Python, Go, Rust, PHP and C++, plus queenctl and plain HTTP.`,
+    `- [Host it](${url("/deploy")}): deployment, PostgreSQL, high availability, security, operations.`,
     `- [Understand it](${url("/internals")}): segments, offsets, the push and pop paths, the schema underneath.`,
     "- [Source on GitHub](https://github.com/queen-mq/queen)",
     "",

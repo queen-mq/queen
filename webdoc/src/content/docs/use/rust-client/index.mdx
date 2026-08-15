@@ -1,0 +1,91 @@
+---
+title: Rust Client
+description: "Install the queen-mq crate, construct a client, and push, consume and acknowledge on tokio, with a builder chain that runs when you await it."
+type: quickstart
+tier: use
+sidebar:
+  order: 6
+sourceOfTruth:
+  - clients/client-rust/src/lib.rs
+  - clients/client-rust/src/queue.rs
+  - clients/client-rust/src/consumer.rs
+  - clients/client-rust/src/config.rs
+  - clients/client-rust/Cargo.toml
+  - crates/queen-protocol/src/lib.rs
+verifiedBy:
+  - clients/client-rust/tests/docs.rs
+---
+
+The Rust client is `async` on tokio, with a builder chain that runs when you `await` it. It needs
+Rust 1.86 and speaks `reqwest` with rustls: no OpenSSL on the host, no cmake in the build.
+
+It is the only SDK that shares its wire types with the broker, through `crates/queen-protocol`. A
+field that drifts on either side fails the broker's own round-trip tests instead of reaching a
+client.
+
+```toml
+[dependencies]
+queen-mq = "1.0.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+```
+
+```rust
+use queen_mq::{Config, Queen};
+
+let queen = Queen::connect(Config::new("http://localhost:6632"))?;
+```
+
+`Queen` is cheap to clone: every clone shares one connection pool, one load balancer and one set
+of push buffers, so build it once and pass clones around. `connect` validates the configuration
+and the TLS setup but opens no socket, so a bad URL or an unusable bearer token fails here rather
+than on the first call. `Config::urls(["http://broker-a:6632", "http://broker-b:6632"])` takes
+several brokers, with failover and consistent-hash affinity already on.
+
+## Push
+
+<Render file="snippets/rust-push" />
+
+`push` takes anything `serde::Serialize`, `push_many` an iterator of them, and `push_items`
+fully-formed `PushItem` values for when the transaction id matters. Each entry of the result
+carries a `status`: `Queued`, `Duplicate`, `Error`, `Buffered` or `Failed`. A `transaction_id` you
+do not supply is minted client-side as a UUIDv7, unique per call and therefore not idempotent.
+
+## Consume
+
+<Render file="snippets/rust-consume" />
+
+The handler's return settles the message: `Ok` acks, `Err` nacks, and the error's `Display`
+becomes the DLQ reason when the nack exhausts the retry budget. `consume_batch` hands the handler
+the whole claimed batch and settles it with one ack, a round-trip cheaper for vectorised work.
+A `Cancel` stops a consumer between messages, never mid-handler.
+
+## Acknowledge
+
+```rust
+queen.ack(&msg).await?;
+queen.nack(&msg, "could not reach the payment provider").await?;
+queen.ack_all(&msgs).await?;
+```
+
+The consumer group and the lease come from the message itself, so a forgotten group cannot ack the
+wrong cursor. `ack_all` sends one request, and mixing groups in it is refused client-side rather
+than half-applied. A rejected ack arrives as HTTP 200 with `success: false` on the item: check the
+returned `AckResult`, not the absence of an error.
+
+## What differs here
+
+- `pop` returns `Err` when the call fails, where JavaScript, Python and C++ return an empty list.
+- `limit` counts across all workers, not per worker as in JavaScript and Python.
+- `PushItem` carries no trace id; inside a transaction, `TxnPushItem::trace_id` does work.
+- Signal handling is opt-in behind the `signals` feature: call `queen.close().await?` to flush the buffers.
+- A `Host` set through `headers` is rejected at construction; use `host_header` behind a proxy.
+
+`Config` and its defaults, every builder method, transactions, the admin surface, the error type
+and the streams DSL are in [the Rust reference](/reference/sdk/rust).
+
+## Tutorials
+
+Five programs under `examples/tutorials/rust` build up from a single push to a streaming
+aggregation, each one asserting its own outcome. Start at
+[Hello world](/use/rust-client/hello-world).

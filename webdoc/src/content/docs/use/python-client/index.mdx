@@ -1,0 +1,95 @@
+---
+title: Python Client
+description: "Install queen-mq for Python, then push, consume and ack with the async client, and the places where it does not behave like JavaScript."
+type: quickstart
+tier: use
+sidebar:
+  order: 4
+sourceOfTruth:
+  - clients/client-py/queen/client.py
+  - clients/client-py/queen/builders/queue_builder.py
+  - clients/client-py/queen/consumer/consumer_manager.py
+  - clients/client-py/queen/utils/defaults.py
+  - clients/client-py/pyproject.toml
+verifiedBy:
+  - clients/client-py/tests/test_push.py
+  - clients/client-py/tests/test_pop.py
+  - clients/client-py/tests/test_consume.py
+---
+
+The Python client is async throughout and built on `httpx`: the builders are synchronous, and
+every terminal call is a coroutine. It needs Python 3.9 or newer.
+
+```bash
+pip install queen-mq
+```
+
+```python
+from queen import Queen
+
+client = Queen(
+    urls=["http://broker-a:6632", "http://broker-b:6632"],
+    bearer_token=os.environ["QUEEN_TOKEN"],
+    load_balancing_strategy="affinity",
+)
+```
+
+The first argument also takes a bare URL string or a list of them, and every option is a keyword
+argument too; keyword arguments win. One URL is a direct client, more than one builds a load
+balancer that fails over on `5xx` and network errors. `Queen` is an async context manager, so
+`async with Queen(url) as client` is the tidiest way to be sure the buffers flush. The whole
+option table is in [Reference](/reference/sdk/python#constructor).
+
+## Push
+
+<Render file="snippets/py-push" />
+
+The await returns the broker's list, one entry per item, each carrying a `status` of `queued`,
+`duplicate`, `buffered` or `failed`. Pass your own `transactionId` and the push becomes
+idempotent inside the dedup window.
+
+## Consume
+
+<Render file="snippets/py-consume" />
+
+`consume()` starts `concurrency` workers with `asyncio.gather` and returns when they all stop, so
+give it a `limit`, an `idle_millis` or an `asyncio.Event` if it is ever meant to return.
+`auto_ack` is on by default: the worker acks `completed` when the handler returns, `failed` when
+it raises.
+
+The builder is where a consumer is shaped: `.group()` for the consumer group, `.partitions()`
+for how many lanes one pop claims, `.batch()` for how many messages come back, `.renew_lease()`
+for a handler that runs long.
+
+## Acknowledge
+
+```python
+messages = await client.queue("orders").group("billing").batch(10).pop()
+for msg in messages:
+    await handle(msg)
+await client.ack(messages, True, {"group": "billing"})
+```
+
+`ack()` takes one message or a list, and a status that is `True`/`False` or one of `completed`,
+`failed`, `retry`, `dlq`. `partitionId` is mandatory and every popped message carries it. To ack
+the input and push the output in one PostgreSQL commit, use
+[`client.transaction()`](/use/model#transactions).
+
+## What differs here
+
+- With `batch(1)` the handler gets one message, not a list; `batch(n)` passes the list, and `.each()` is always one at a time.
+- `SIGINT` and `SIGTERM` handlers are always installed, with no way to opt out, and constructing a client off the main thread raises.
+- `pop()` catches every exception, prints `Pop failed: …` and returns `[]`, so an empty list is not an empty queue.
+- A rejected ack arrives as HTTP 200 with `success: false` on the item, and this client does not scan the batch for you.
+- Inside `transaction()` the ack context key is `consumer_group`, not `group`.
+
+The streaming SDK is reached through `Stream.from_(queue_builder)`. Buffering, lease renewal,
+admin, the dead-letter reader and every option table are in the
+[Python client reference](/reference/sdk/python).
+
+## Tutorials
+
+Five programs, each one running against a live broker and asserting its own outcome. They start
+at one message in and one message out, and end at a streaming aggregation.
+
+Start with [Hello world](/use/python-client/hello-world).

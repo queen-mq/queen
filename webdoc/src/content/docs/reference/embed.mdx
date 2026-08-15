@@ -1,0 +1,114 @@
+---
+title: Embed the engine
+description: "Run the Queen broker inside your Rust process: one binary to ship, the same engine, the same PostgreSQL semantics."
+type: how-to
+tier: use
+status: beta
+sidebar:
+  order: 28
+  label: Embed the engine
+sourceOfTruth:
+  - server/src/lib.rs
+  - server/src/embedded/mod.rs
+  - server/src/embedded/boot.rs
+  - server/Cargo.toml
+verifiedBy:
+  - server/tests/embedded_smoke.rs
+---
+
+The broker crate has a library target: `Broker::start` boots the same engine the standalone binary runs, inside your Rust process, against the PostgreSQL you point it at. Every operation on the handle invokes the same handler functions the HTTP router dispatches to, so behaviour, defaults and edge cases are the broker's by construction, at the same PostgreSQL cost, minus one network hop and one deployment unit.
+
+<Aside type="note">
+The embedded API is published as **beta**: the HTTP API remains the stable compatibility surface, and [versions and compatibility](/reference/compatibility) states both contracts.
+</Aside>
+
+## Install
+
+```toml
+[dependencies]
+queen-engine = { version = "1.0.0", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+```
+
+The package is named `queen-engine` (the bare crates.io name `queen` belongs to an unrelated crate) and imports as `queen`; it needs Rust 1.88. `default-features = false` skips the `server` feature, which exists for the repository's own binary: the axum serve stack, the embedded dashboard and the tracing subscriber stay out of your build. Built with default features, the broker serves the API but not a working dashboard: that bundle is a build product of the repository and the Docker image. `queen-mq` is the HTTP client; this crate is the broker itself.
+
+## Start
+
+The code on this page runs inside an async function and assumes:
+
+```rust
+use queen::{Broker, BrokerConfig};
+use queen::protocol as qp;
+```
+
+<Render file="snippets/embedded-start" />
+
+`start` connects to PostgreSQL, fails fast if it is unreachable, applies the schema under an advisory lock (disable with `apply_schema(false)` when the schema is managed externally and the role has no DDL rights), recovers the on-disk spool, and spawns the background machinery on your tokio runtime. It returns once the broker is ready.
+
+`Broker` is cheap to clone and every clone shares the same engine. Call `shutdown()` on the way out: it stops the loops the handle owns, closes the connection pool and reports any undrained spool events.
+
+## Produce and consume
+
+<Render file="snippets/embedded-push" />
+
+Requests and responses are the [queen-protocol](/use/rust-client/) types, re-exported as `queen::protocol` (the `qp` alias above). Push results carry per-item outcomes (queued, duplicate, buffered) in request order. Popping through the same handle claims a lease exactly as over HTTP:
+
+```rust
+// Illustrative, not extracted from a test.
+let params = qp::PopParams {
+    batch: Some(10),
+    consumer_group: Some("workers".into()),
+    subscription_mode: Some(qp::SubscriptionMode::All),
+    ..Default::default()
+};
+let popped = broker.pop("orders", &params).await?;
+for m in &popped.messages {
+    broker.ack(&qp::AckRequest {
+        transaction_id: m.transaction_id.clone(),
+        partition_id: m.partition_id.clone(),
+        status: qp::AckStatus::Completed,
+        consumer_group: Some(m.consumer_group.clone()),
+        lease_id: Some(m.lease_id.clone()),
+        error: None,
+    }).await?;
+}
+```
+
+With `wait: Some(true)` a pop parks directly on the broker's in-process waker and is woken by a concurrent push, replacing the HTTP long-poll choreography. An empty claim returns an empty response, never an error.
+
+## Transactions
+
+The broker's atomic handoff works unchanged: ack the input and push the next stage in one database transaction, guarded by the input's lease.
+
+<Render file="snippets/embedded-transaction" />
+
+A rollback (an expired required lease, a duplicate push) comes back as `success: false` with the reason in `error`, exactly as over HTTP.
+
+## What it puts in your process
+
+The engine spawns its background work on your tokio runtime: the commit fusion shards, the retention and stats loops, the spool drain, the hotlist ticks. The library never installs a tracing subscriber or touches the panic hook, so install your own subscriber to see the broker's logs. The standalone broker runs with `panic = "abort"` and a supervisor; embedded under unwind, a panicking background loop dies silently and its subsystem stops, so treat a broker panic in your logs as a restart signal.
+
+<Aside type="caution">
+One `Broker` per process lifetime is the supported shape: the admission arbiter is a process-wide singleton, so a second concurrent instance, or a start, shutdown, start cycle, still routes maintenance writers through the first instance's arbiter. For a full teardown, restart the process.
+</Aside>
+
+## What it does to your PostgreSQL
+
+The same things the binary does: schema apply at boot under an advisory lock, a connection pool sized by `pool_size` (default 160, size it down for an application fleet), and the retention and stats loops, advisory-locked so exactly one instance per cycle does the work no matter how many brokers share the database. Defaults and env equivalents are in the [Engine API reference](/reference/engine).
+
+Multiple embedded instances over one PostgreSQL are the already-supported multi-broker topology, minus the mesh: leases, acks, deduplication and maintenance coordinate through the database, and every cross-instance notice a broker fleet would send as a peer frame is a periodic read of the database instead. A parked pop re-polls within a second; configuration changes land within `QUEEN_CACHE_REFRESH_INTERVAL_MS` (60 s); another instance's push enters this instance's wildcard candidate ring on the windowed reseed, one `QUEEN_HOTLIST_RESEED_MS` (30 s) plus that ring's de-phasing offset.
+
+<Aside type="caution">
+One case is genuinely worse embedded than with two brokers. A backward seek or a consumer-group delete makes old partitions pending without writing messages; a broker peer hears about it over the mesh in milliseconds, while an embedded instance picks it up from the durable marker row the operation writes, polled on the reconcile interval (60 s, and 5 s after start before the first poll). Seek and group delete are not exposed embedded, so an embedded instance only ever *reads* those markers; the publisher is an HTTP broker sharing the database, via its API or [queenctl](/reference/queenctl). Lower `QUEEN_CACHE_REFRESH_INTERVAL_MS` if that latency matters. What the markers do not announce (a ring entry cleared in error, a claim stranded by a dropped pop) waits for the full reseed at `QUEEN_HOTLIST_RESEED_FULL_MS` (300 s).
+</Aside>
+
+<Aside type="caution">
+**A push answered `status: "buffered"` sits in an on-disk spool that defaults to a per-instance temp directory and does not survive a restart**: set `spool_dir` to a stable path for outage durability, never shared between two instances ([Engine API reference](/reference/engine)).
+</Aside>
+
+## Not offered
+
+Consumer-group administration (list, seek, delete), queue listings, traces and the streams runner endpoints are not exposed in the beta surface: run the HTTP broker alongside, or drive them through [queenctl](/reference/queenctl) against a broker that serves HTTP. Tenancy and JWT auth do not apply in-process: the embedded broker is single-tenant, trusts its caller, and logs a warning if their env knobs are set.
+
+The full surface, argument by argument: [Engine API reference](/reference/engine).

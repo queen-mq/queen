@@ -77,6 +77,24 @@ const SOURCES = [
     suite: "Full examples",
     command: "examples/full/run.sh",
   },
+  // The per-client tutorials. Same shape as the full examples: one marked
+  // region per file, from the first line to the last, so the page shows the
+  // program that ran and nothing else. The language of each file comes from its
+  // extension, which is why one entry covers every client.
+  {
+    dir: "examples/tutorials",
+    lang: "js",
+    suite: "Client tutorials",
+    command: "examples/tutorials/run.sh",
+  },
+  // The complete applications behind the Full examples section: whole programs
+  // that assert the property they exist to demonstrate.
+  {
+    dir: "examples/apps",
+    lang: "js",
+    suite: "Complete applications",
+    command: "examples/apps/run.sh",
+  },
 ];
 
 const EXT_LANG = {
@@ -94,7 +112,16 @@ const EXT_LANG = {
 
 function walk(abs, out = []) {
   for (const name of readdirSync(abs)) {
-    if (name === "node_modules" || name === "__pycache__" || name.startsWith(".")) continue;
+    // Dependency trees, never sources: node_modules for JS, vendor for PHP
+    // (the tutorials symlink it), __pycache__ for Python.
+    if (
+      name === "node_modules" ||
+      name === "vendor" ||
+      name === "__pycache__" ||
+      name.startsWith(".")
+    ) {
+      continue;
+    }
     const p = join(abs, name);
     const st = statSync(p);
     if (st.isDirectory()) walk(p, out);

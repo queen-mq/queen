@@ -1,0 +1,117 @@
+---
+title: High availability
+description: "More than one broker against one PostgreSQL: what the mesh between them carries, what a push does while the database is unreachable, and why the disk spool is not replication."
+type: how-to
+tier: operate
+sidebar:
+  order: 4
+sourceOfTruth:
+  - server/src/mesh.rs
+  - server/src/main.rs
+  - server/src/file_buffer.rs
+  - server/src/retention.rs
+  - server/src/stats.rs
+  - server/src/config.rs
+  - test/compose/docker-compose.ha.yml
+verifiedBy:
+  - server/mesh-verify.sh
+---
+
+Brokers hold no authoritative state, so a second broker is another copy of the same binary pointed
+at the same PostgreSQL. Messages, offsets, leases, deduplication, queue configuration and the
+dead-letter queue are all rows: nothing to replicate between brokers, no quorum, no serving leader,
+no split-brain.
+
+That also says what replicas cover. A broker process dying, a rolling restart, one node's network:
+yes. Losing PostgreSQL: no. The database is the failure domain, and keeping it alive is
+PostgreSQL's own tooling.
+
+Two brokers, condensed from `test/compose/docker-compose.ha.yml`:
+
+```yaml
+services:
+  queen-a:
+    image: ghcr.io/queen-mq/queen:latest
+    environment:
+      PG_HOST: pg                       # the same database for every broker
+      QUEEN_SERVER_ID: queen-a          # distinct per broker
+      QUEEN_MESH_PORT: "6633"
+      QUEEN_MESH_PEERS: "queen-b:6633"  # the other broker
+      QUEEN_SYNC_SECRET: "change-me"    # byte-identical on every broker
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    volumes: ["spool-a:/var/lib/queen/buffers"]   # never shared
+```
+
+`queen-b` is the mirror image: its own server id, its own volume, its peer list pointing back. The
+rest of the environment is what a single broker already takes
+([configuration](/reference/config)).
+
+Three brokers is the designed ceiling. Full-mesh connections grow quadratically,
+`replicas × DB_POOL_SIZE` has to fit PostgreSQL's `max_connections`, and past three the bottleneck
+is the database rather than the number of brokers.
+
+Put a load balancer in front and stop thinking about it. Every replica serves every route, with no
+session affinity and no partition ownership, so a pop taken from one broker is acked to another.
+
+## The mesh
+
+Brokers talk to each other over framed TCP on `QUEEN_MESH_PORT`, and everything on that wire is a
+hint:
+
+- pop wakes, so a push committed on A releases a long poll parked on B immediately
+- hot-list marks, telling a peer that a partition went from empty to pending
+- maintenance-mode flips
+- queue-config invalidations, the instruction to forget a cached value and never the value itself
+
+Messages, offsets, acks, leases and deduplication state never cross it. They belong to PostgreSQL,
+which is why deduplication stays exact across replicas with no coordination at all, and why leader
+election is an advisory lock rather than a protocol: the retention sweep and the statistics
+reconciler each run on exactly one replica per cycle.
+
+Frames are dropped, not queued, when a peer is slow or down, and a dropped frame costs latency and
+nothing else, because every accelerated path has a periodic floor that re-reads the database. A
+broker with no peers configured binds nothing and keeps its in-process waker. The frame set and the
+cadences are in [the mesh](/internals/mesh).
+
+The mesh port is a control surface, not a data port, and it must be firewalled to the brokers
+themselves: [Security](/deploy/security).
+
+## While PostgreSQL is unreachable
+
+A push does not have to fail. An item whose transaction cannot commit is appended to an on-disk
+spool under `FILE_BUFFER_DIR`, and the answer is still `201` with `status: "buffered"` on that
+item, which is why the per-item status is the contract and the status line is not. When the
+database returns, a drain replays each event under its original `transactionId`, so anything that
+had already committed comes back `duplicate` and writes nothing.
+
+Reads need the database. Pops and acks error, safely, since an unacked lease redelivers, and
+`POST /api/v1/transaction` is all-or-nothing so it fails with them. `GET /api/v1/status/buffers`
+and the `queen_file_buffer_pending` gauge watch the backlog, and maintenance mode is the same
+diversion on purpose, for a planned failover ([system routes](/reference/http/system)).
+
+## The spool is not replication
+
+It is node-local and unreplicated, and a broker drains only the files it wrote itself. Behind a
+load balancer, buffered messages scatter across whichever brokers accepted them, and losing a node
+loses its spool: give every broker storage that outlives its container, and never point two brokers
+at one directory.
+
+It has no size cap and no maximum age either, so a long outage grows it until the filesystem fills
+and pushes start reporting `failed`. Replay is idempotent exactly as far as the deduplication
+window reaches, and no further.
+
+More brokers buy availability. Throughput comes from partitions, and durability comes from
+PostgreSQL.
+
+<CardGrid>
+  <LinkCard
+    href="/deploy/security"
+    title="Security"
+    description="The trust boundaries around the broker, and the mesh port that has to be closed."
+  />
+  <LinkCard
+    href="/internals/mesh"
+    title="The mesh"
+    description="The framing, the frame set, and what heals a hint that never arrived."
+  />
+</CardGrid>

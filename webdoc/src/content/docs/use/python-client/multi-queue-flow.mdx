@@ -1,0 +1,43 @@
+---
+title: Multi-queue flow
+description: "One queue partitioned per customer, two consumer groups reading it independently, and a second queue downstream."
+type: tutorial
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/tutorials/py/02_multi_queue_flow.py
+---
+
+This is the shape most applications end up with, and it rests on three things.
+
+A **partition** keeps one entity's events in order: everything about one customer stays in
+sequence, and different customers never wait for each other. The partition key is the only
+ordering decision you make.
+
+A **consumer group** is a cursor, not a copy. Two groups read the same stored messages and neither
+sees the other's acknowledgements, so adding a reader costs a string, not a second copy of the
+data. A group created after the messages were pushed starts at the tail, which is why the groups
+below ask for `subscription_mode("all")`.
+
+The **second queue** is created by the first push that names it, exactly like the first, and here
+that push happens inside the handler. The handler is an `async def` over one message, because
+`.each()` is set, and `consume()` acknowledges it when it returns or nacks it when it raises. So
+the handoff is two steps, a push and then an ack, and a crash between them does the work twice.
+[The next tutorial](/use/python-client/transaction-ack-push) closes that window.
+
+<Render file="snippets/tut-py-multi-queue-flow" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from the root of the repository, with
+the in-tree client on `PYTHONPATH`:
+
+```bash
+PYTHONPATH=clients/client-py python3 examples/tutorials/py/02_multi_queue_flow.py
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh py`.
+
+Next: [Transactional ack and push](/use/python-client/transaction-ack-push).

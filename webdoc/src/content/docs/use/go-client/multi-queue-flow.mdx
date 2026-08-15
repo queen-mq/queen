@@ -1,0 +1,41 @@
+---
+title: Multi-queue flow
+description: "One queue partitioned per customer, two consumer groups reading it independently, and a second queue downstream."
+type: tutorial
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/tutorials/go/multi-queue-flow/main.go
+---
+
+This is the shape most applications end up with. A **partition** keeps one entity's events in
+order: everything about one customer stays in sequence, and different customers never wait for
+each other. A **consumer group** is a cursor over the same stored messages and not a copy of them,
+so the second reader below costs a string. Both groups ask for
+`SubscriptionMode(queen.SubscriptionModeAll)`, because a group created after the messages were
+pushed starts at the tail.
+
+`Consume(ctx, handler)` builds a consumer and does not start it: the loop runs inside
+`Execute(ctx)` and returns when the limit or the idle deadline is reached. That deadline is
+checked between polls, which is why every loop here pairs `IdleMillis` with a `TimeoutMillis`
+short enough to notice it.
+
+The **second queue** is created by the first push that names it, exactly like the first one. The
+handoff is two steps, a push and then the loop's acknowledgement: a crash between them does the
+work twice. [The next tutorial](/use/go-client/transaction-ack-push) closes that window.
+
+<Render file="snippets/tut-go-multi-queue-flow" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/go`:
+
+```bash
+GOWORK=off go run ./multi-queue-flow
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh go`.
+
+Next: [Transactional ack and push](/use/go-client/transaction-ack-push).

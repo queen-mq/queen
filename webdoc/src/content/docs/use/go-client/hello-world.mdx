@@ -1,0 +1,42 @@
+---
+title: Hello world
+description: "One message in, one message out, against a broker you started five minutes ago."
+type: tutorial
+tier: use
+sidebar:
+  order: 1
+verifiedBy:
+  - examples/tutorials/go/hello-world/main.go
+---
+
+Nothing is created before it is used. The queue in the program below comes into existence with
+the push that names it, inside the same transaction that stores the message, so there is no
+declare step and nothing to provision.
+
+Every call takes a `context.Context`, and building is separate from executing: the push is an
+inert chain until `Execute(ctx)`, the read is the same chain ended by `Pop(ctx)`. That context is
+the only deadline and the only cancellation there is, which is why the deferred `Close` gets a
+fresh one.
+
+The read takes the message under a **lease**: it is claimed until it is acknowledged or the lease
+expires, and the acknowledgement is what commits consumption. `Wait(true)` is what makes the pop
+park until a message arrives, because a bare `Pop` comes back immediately. No consumer group is
+named here, so the read goes through the queue's own cursor, which starts at the beginning. Named
+groups are [the next tutorial](/use/go-client/multi-queue-flow): a group created after a message
+was pushed starts at the tail and would find nothing.
+
+<Render file="snippets/tut-go-hello-world" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/go`:
+
+```bash
+GOWORK=off go run ./hello-world
+```
+
+`GOWORK=off` is what makes the module resolve the client through its own `go.mod` instead of the
+repository's workspace. The program checks its own outcome and exits non-zero if a check fails.
+Every tutorial in this section runs in the repository's own suite: `examples/tutorials/run.sh go`.
+
+Next: [Multi-queue flow](/use/go-client/multi-queue-flow).

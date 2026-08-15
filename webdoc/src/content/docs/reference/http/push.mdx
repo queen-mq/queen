@@ -208,5 +208,5 @@ curl -sS -X POST http://localhost:6632/api/v1/push -H 'content-type: application
 If the queue has `encryptionEnabled` and the broker has a valid `QUEEN_ENCRYPTION_KEY`, payloads
 are encrypted before they are packed into a segment, and pops decrypt them transparently. A
 malformed or wrong-length key **disables encryption and stores plaintext** with only a warning
-in the log. It is not a boot failure and not a push failure. [Self-hosting](/selfhost) covers
+in the log. It is not a boot failure and not a push failure. [Self-hosting](/deploy/) covers
 key handling.

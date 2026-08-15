@@ -1,0 +1,109 @@
+---
+title: Dashboard
+description: "The dashboard is compiled into the broker binary and served on the broker port: what each view shows, and what changes with authentication on or a proxy in front."
+type: how-to
+tier: operate
+sidebar:
+  order: 8
+sourceOfTruth:
+  - server/src/handlers/static_files.rs
+  - server/src/handlers/standalone.rs
+  - app/src/router/index.js
+  - app/src/stores/identity.js
+  - proxy/src/webapp.rs
+---
+
+Every broker serves a dashboard on its own port, with nothing to deploy: the built single-page
+application is compiled into the binary and read out of the executable at request time.
+
+```bash
+open http://localhost:6632/
+```
+
+The bundle is fixed at build time. There is no static-directory override, mounting a volume
+changes nothing, and `queen_proxy` embeds the same build, so a proxy and the broker behind it
+serve the identical dashboard. It is the router's fallback, registered after every real route,
+so a missing path under `/api/` or `/auth/` still answers a JSON 404 instead of the HTML shell.
+
+<Screenshot
+  src="dashboard-overview"
+  alt="The dashboard overview. A header counts stored messages, queues, partitions, consumer groups, pending and completed. Below it a table gives throughput, pending delta, parked consumers, fill ratio, time lag, errors, partitions and retention, each with its current value, a sentence of context and a sparkline over the selected window."
+  caption="The overview, on a local broker under a seeded workload. The rates are whatever that workload produced; the measured figures live under Benchmarks."
+/>
+
+## The views
+
+Every view is tenant-scoped except System, and the exception is labelled on screen.
+
+- **Dashboard**, `/`: the resource overview, namespaces and tasks
+- **Queue Operations**, `/operations`: per-queue throughput, lag and consumer health
+- **Queues**, `/queues` and `/queues/:queueName`: the list, one queue's configuration, delete
+- **Consumer Groups**, `/consumers`: lag, the lagging list, subscription changes, seek, delete
+- **Messages**, `/messages`: listing, single-message inspection, delete
+- **Traces**, `/traces`: the trace names that exist, and the timeline for one
+- **Analytics**, `/analytics`: status over time, lag and ops series, retention volume
+- **Dead Letter**, `/dlq`: the dead-letter listing, with purge
+- **System**, `/system`: cell-level host CPU and memory, worker metrics, PostgreSQL internals,
+  the disk spool, the maintenance switch
+
+<Screenshot
+  src="dashboard-consumer-groups"
+  alt="The consumer groups view. Seven group and queue pairs are listed, sorted worst first, each with a partition count. Two are flagged red with every partition behind and a time lag around sixteen minutes; the other five are green and show a dash in both lag columns."
+  caption="Five groups keeping pace and two that stopped, separated by the broker's own offsets rather than by inference. The two slow readers here are deliberate."
+/>
+
+Three things to know before reading a number off this UI. System covers the whole cell and
+every tenant on it, so a cell figure is not a tenant figure. The dead-letter view inspects and
+purges, with no replay control. And an unknown is not a zero: a failed call renders as a
+failure, and one shared ticker refreshes the page, so what you see is one moment.
+
+<Screenshot
+  src="dashboard-system"
+  alt="The System view. A banner across the top reads cell operator: host resources, the disk spool and Postgres internals for this cell, shared by every tenant on it, not scoped to the current one. Under it are the file buffer state, CPU and memory charts, the database pool and the broker worker list, each tagged cell-level."
+  caption="The banner and the cell-level tags are the whole point: nothing below them is scoped to your tenant."
+/>
+
+<Screenshot
+  src="dashboard-dlq"
+  alt="The dead letter view. Three tiles summarise the messages on the page, the partitions they came from and the most frequent error. A table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and a single Purge action."
+  caption="Purge is the only action on a row. The tiles also say they are computed from the page, not from a broker-side total."
+/>
+
+## Who it thinks you are
+
+The dashboard boots by calling `GET /auth/me` and derives every permission from that one
+payload. It never guesses a role from a status code and never sniffs which binary is serving
+it, so whoever answers that route is the whole difference between three deployments.
+
+- **Broker-direct, auth off,** the default: a fixed standalone identity, one synthetic cluster
+  `local`, the `admin` role on it, and every view including System.
+- **Broker-direct, auth on** (`JWT_ENABLED=true`): `401 {"code":"auth_required"}`, and the login
+  redirect lands on a terminal static page saying so.
+- **Behind `queen_proxy`**: the proxy's cookie-authenticated session, with real users,
+  per-cluster roles, an operator flag and a login page the broker never sees.
+
+The `standalone` flag hides the cluster selector and the sign-out, because there is nothing to
+switch to and no session to end. Nothing is granted with it: the API was already open to anyone
+reaching the port.
+
+Assets are served with a content type and nothing else: no `Cache-Control`, no `ETag`, no
+compression. Put a reverse proxy or a CDN in front if the dashboard sits on a hot path, and
+scrape [Prometheus](/reference/prometheus) rather than this UI for anything you alert on.
+
+The source is `app/`, and the bytes are baked in: a change ships only after `npm run build`
+there and a rebuild of whichever binary serves it. Debug builds of `rust_embed` read from disk,
+so locally the npm build alone looks like enough, which is a reliable way to ship a stale
+dashboard from a release build.
+
+<CardGrid>
+  <LinkCard
+    href="/deploy/multi-tenant"
+    title="Multi-tenant"
+    description="The proxy that turns this dashboard into a login, real users and per-cluster roles."
+  />
+  <LinkCard
+    href="/reference/prometheus"
+    title="Prometheus metrics"
+    description="Every series the broker exports, for the alerting the dashboard does not do."
+  />
+</CardGrid>

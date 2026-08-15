@@ -4,82 +4,56 @@ description: "From nothing to one message pushed and consumed, with Docker, the 
 type: quickstart
 tier: use
 sidebar:
-  order: 4
+  order: 3
 sourceOfTruth:
   - server/src/config.rs
   - server/src/main.rs
-  - server/src/handlers/data.rs
-  - server/src/handlers/status.rs
-  - server/src/handlers/mod.rs
   - test/compose/docker-compose.single.yml
 verifiedBy:
-  - clients/client-js/test-v2/push.js
-  - clients/client-js/test-v2/pop.js
-  - clients/client-js/test-v2/consume.js
+  - clients/client-js/test-v2/docs.js
 ---
 
-You need Docker and about five minutes. At the end you will have a PostgreSQL, a
-broker, and one message that went in and came out: first through the JavaScript
-SDK, then through `curl`, so you can see the wire.
-
-The broker creates its own schema at boot: it embeds the DDL and the stored
-procedures in the binary and applies them under an advisory lock. There is no
-migration step to run, and no extensions to install into PostgreSQL.
+Docker and five minutes. At the end you have a PostgreSQL, a broker, and one message that went
+in and came out. There is no schema to migrate and no extension to install: the broker embeds its
+DDL and its stored procedures, and applies them at boot.
 
 ## Start a broker
 
 <Steps>
 
-1. **Create a Docker network** so the broker can reach PostgreSQL by name.
+1. **A network, so the broker can reach PostgreSQL by name.**
 
    ```bash
    docker network create queen
    ```
 
-2. **Start PostgreSQL.** Any PostgreSQL the broker can reach works; the test
-   harness runs `postgres:16`. The password here has to match the one you give the
-   broker in the next step.
+2. **PostgreSQL.** Any one the broker can reach works. The password has to match the next step.
 
    ```bash
    docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16
    ```
 
-3. **Start the broker.** `PG_HOST` is the container name from the previous step.
-   `PG_USER` and `PG_DATABASE` both default to `postgres`, so you only need the
-   host, the port and the password. The broker listens on `PORT`, which defaults
-   to `6632`.
+3. **The broker.** `PG_USER` and `PG_DATABASE` both default to `postgres`, so host, port and
+   password are enough. It listens on `PORT`, default `6632`.
 
    ```bash
    docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
    ```
 
-4. **Check that it is up.** `/health` is not a static answer: it takes a
-   connection from the pool and does a real database round-trip, so a healthy
-   response means the broker and PostgreSQL are both working.
+4. **Check it.** `/health` takes a connection from the pool and does a real round-trip, so a
+   healthy answer means both processes work.
 
    ```bash
    curl -s http://localhost:6632/health
    ```
 
    ```json
-   {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.0"}
+   {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.2"}
    ```
-
-   If PostgreSQL is unreachable you get HTTP 503 and
-   `{"status":"unhealthy","database":"disconnected",…}` instead. Check the
-   broker's logs with `docker logs queen`. It prints the configuration it
-   actually resolved at boot, including the PostgreSQL host it is dialling.
 
 </Steps>
 
-<Aside type="note">
-The broker also serves its dashboard: open `http://localhost:6632` in a
-browser. With auth off (the default, and this deployment) it boots straight
-into a standalone operator identity: no login, every view live, because the
-API underneath is already open. What each view shows, and what changes when
-JWT auth or the proxy enter the picture, is on
-[the dashboard page](/selfhost/dashboard).
-</Aside>
+The same binary serves its dashboard on the same port: open `http://localhost:6632`.
 
 <Screenshot
   src="dashboard-overview"
@@ -89,18 +63,13 @@ JWT auth or the proxy enter the picture, is on
 
 ## Push and consume
 
-There is nothing to create first. A queue and a partition are provisioned by the
-first push that names them, so the only decision you make here is the partition
-key, the thing whose events must stay in order relative to each other.
+Nothing to create first: the queue and the partition are provisioned by the first push that names
+them. The only decision is the partition key, the thing whose events must stay in order.
 
 <Tabs>
 <TabItem label="JavaScript">
 
-Install the client:
-
 <PackageManagers pkg="queen-mq" />
-
-Point it at the broker. The constructor accepts a single URL string:
 
 ```js
 import { Queen } from 'queen-mq'
@@ -108,197 +77,74 @@ import { Queen } from 'queen-mq'
 const client = new Queen('http://localhost:6632')
 ```
 
-Push a message. `data` is your payload, and it must be JSON; `partition` is the
-ordering key, so everything about `customer-42` stays in order while other
-customers move independently:
-
 <Render file="snippets/js-push" />
 
-The result is one entry per item, and `status` is `queued` when the message was
-stored. Now consume it. `.group('billing')` names the cursor that remembers what
-this consumer has seen, and since a group created after the push starts at the
-tail by default, `.subscriptionMode('all')` points the new cursor at the
-beginning. `.consume()` polls, hands each message to your callback, and
-acknowledges it when the callback resolves; `.limit(1)` makes it stop after one
-message instead of running forever:
+`.group('billing')` names the cursor that remembers what this consumer has seen.
+`.subscriptionMode('all')` points a new cursor at the beginning instead of the tail, and
+`.limit(1)` stops the loop after one message.
 
 <Render file="snippets/js-consume" />
 
-If you want the raw pop instead of the managed consumer loop, `.pop()` returns an
-array of messages and leaves acknowledgement to you. `.wait(true)` turns on
-long-polling, so the call parks until a message arrives or the timeout expires
-rather than returning empty immediately:
+For the raw pop, without the managed loop:
 
 <Render file="snippets/js-pop" />
 
 </TabItem>
-<TabItem label="Rust">
-
-Add the client:
-
-```toml
-[dependencies]
-queen-mq = "1.0.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-serde_json = "1"
-```
-
-Point it at the broker:
-
-```rust
-use queen_mq::{Config, Queen, SubscriptionMode};
-
-let q = Queen::connect(Config::new("http://localhost:6632"))?;
-```
-
-Push a message. The payload is anything that implements `serde::Serialize`, and
-it must be JSON; the partition is the ordering key, so everything about
-`customer-42` stays in order while other customers move independently:
-
-<Render file="snippets/rust-push" />
-
-The result is one entry per item, and `status` is `Queued` when the message was
-stored. Now consume it. `group("billing")` names the cursor that remembers what
-this consumer has seen, and since a group created after the push starts at the
-tail by default, `SubscriptionMode::All` points the new cursor at the beginning.
-`consume()` polls, hands each message to your closure, and acknowledges it when
-the closure returns `Ok`; `limit(...)` makes it stop after that many messages
-instead of running forever:
-
-<Render file="snippets/rust-consume" />
-
-If you want the raw pop instead of the managed consumer loop, `pop()` returns the
-messages and leaves acknowledgement to you:
-
-<Render file="snippets/rust-pop" />
-
-Unlike the JavaScript and Python clients, a failed `pop()` here returns an error
-rather than an empty list, so an outage cannot look like an idle queue.
-
-</TabItem>
-
 <TabItem label="curl">
-
-Push one message. `items` is an array; `queue` and `payload` are required, and
-`partition` defaults to `Default` if you omit it:
 
 ```bash
 curl -i -X POST http://localhost:6632/api/v1/push -H 'Content-Type: application/json' -d '{"items":[{"queue":"orders","partition":"customer-42","payload":{"hello":"world"}}]}'
 ```
 
-The response is HTTP 201 and a top-level array, one entry per item, in request
-order:
-
 ```json
 [{"index":0,"message_id":"019842f1-...","transaction_id":"019842f1-...","queueName":"orders","status":"queued"}]
 ```
-
-You did not supply a `transactionId`, so the broker minted one from the message
-id. Supplying your own is what makes a retry of this call idempotent.
-
-Now pop. `wait=true` long-polls instead of returning immediately, and
-`consumerGroup` names the cursor that will remember what you consumed. A group
-created after the push starts at the tail by default, so `subscriptionMode=all`
-points this new cursor at the beginning:
 
 ```bash
 curl -i "http://localhost:6632/api/v1/pop/queue/orders?batch=1&wait=true&consumerGroup=demo&subscriptionMode=all"
 ```
 
-```json
-{"success":true,"queue":"orders","partition":"customer-42","partitionId":"6b1c...","leaseId":"019842f1-...","consumerGroup":"demo","messages":[{"id":"019842f1-...","transactionId":"019842f1-...","traceId":null,"data":{"hello":"world"},"producerSub":null,"createdAt":"2026-07-30T09:14:02.117364Z","partitionId":"6b1c...","partition":"customer-42","leaseId":"019842f1-...","consumerGroup":"demo"}]}
-```
-
-That pop took a **lease**: the span is claimed for this consumer group until you
-acknowledge it or the lease expires. Acknowledge it with the `transactionId` and
-`partitionId` from the message, plus the `leaseId`:
+That pop took a **lease**: the span belongs to this group until you acknowledge it or the lease
+expires. Acknowledge with the `transactionId` and `partitionId` from the message, plus the
+`leaseId`:
 
 ```bash
 curl -i -X POST http://localhost:6632/api/v1/ack -H 'Content-Type: application/json' -d '{"transactionId":"019842f1-...","partitionId":"6b1c...","status":"completed","consumerGroup":"demo","leaseId":"019842f1-..."}'
 ```
 
-```json
-[{"index":0,"transactionId":"019842f1-...","success":true,"error":null,"leaseReleased":true,"dlq":false,"noop":false}]
-```
-
-The ack response is HTTP 200 even when an individual ack was rejected (a stale
-lease, an offset already committed), so the per-item `success` flag is the signal
-to check, not the status code.
+An empty pop answers `204` with no body at all, so branch on the status code before parsing.
+The wire format is in [the HTTP reference](/reference/http).
 
 </TabItem>
 </Tabs>
 
-## What success looks like
+## Two things worth doing before you move on
 
-Pop a queue you have already drained, with the same consumer group. There is
-nothing left, and this is what that looks like:
-
-```bash
-curl -i "http://localhost:6632/api/v1/pop/queue/orders?batch=1&consumerGroup=demo"
-```
-
-```http
-HTTP/1.1 204 No Content
-```
-
-<Aside type="caution">
-**An empty pop is a bodiless 204.** Not an empty array, not `{"messages":[]}`.
-No body at all. This is deliberate: announcing a content-length on a body the
-server then elides made strict HTTP/1.1 clients treat the connection as poisoned
-and drop it, which under empty-poll load turned into connection-reset storms.
-Every `204` the broker returns is bodiless, so a client must branch on the status
-code before it tries to parse.
-</Aside>
-
-Two more things worth doing before you move on, both of which show the model
-rather than the API:
-
-- **Push twice with the same `transactionId`.** The second push returns
-  `status: "duplicate"` and the *first* message's id, having written nothing.
-  Deduplication is exact, per partition, and bounded by a window that defaults to
-  3600 seconds.
-- **Pop with a second consumer group.** `consumerGroup=audit` gets the same
-  message again, from its own cursor. Groups are fan-out: each one sees
-  everything, independently.
+- **Push twice with the same `transactionId`.** The second returns `status: "duplicate"` and the
+  first message's id, having written nothing.
+- **Pop with a second consumer group.** It gets the same message again, from its own cursor.
+  Groups are fan-out.
 
 ## Clean up
 
 ```bash
-docker rm -f queen queen-pg
+docker rm -f queen queen-pg && docker network rm queen
 ```
-
-```bash
-docker network rm queen
-```
-
-## Where to go next
 
 <CardGrid>
   <LinkCard
-    href="/use"
-    title="Use Queen"
-    description="The model in depth: partitions, consumer groups, acks as offset commits, leases, retries, transactions and replay."
+    href="/use/model"
+    title="The model"
+    description="Partitions, groups, acks, leases, transactions and replay, in one page."
   />
   <LinkCard
-    href="/reference"
-    title="Reference"
-    description="Every route, every environment variable, every metric, generated from the source."
+    href="/use/js-client"
+    title="JS Client"
+    description="The same thing from JavaScript, with the options that matter."
   />
   <LinkCard
-    href="/selfhost"
-    title="Self-hosting"
-    description="What this quickstart skipped: TLS, authentication, PostgreSQL sizing, retention, probes and high availability."
-  />
-  <LinkCard
-    href="/start/limits"
-    title="Limits and non-goals"
-    description="Read this before you design around Queen, not after."
+    href="/deploy"
+    title="Deploy Queen"
+    description="What this skipped: TLS, authentication, PostgreSQL sizing, retention, high availability."
   />
 </CardGrid>
-
-If you would rather read working code than a page about it, the
-[complete runnable programs](/full-examples/) cover the same ground as whole files: a
-[produce and consume loop](/full-examples/produce-consume/),
-[ordering and deduplication](/full-examples/ordering-and-dedup/), and a
-[transactional pipeline](/full-examples/pipeline/). Each one is written in JavaScript,
-Python, Go and Rust, and each one is executed before it ships.

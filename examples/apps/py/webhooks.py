@@ -1,0 +1,239 @@
+# docs:start(app-py-webhooks)
+#
+# A webhook delivery system.
+#
+# Every SaaS product ends up writing this one, and it is harder than it looks:
+# deliveries to one customer's endpoint must arrive in order, a customer whose
+# endpoint is down must not slow down anybody else's, failures must be retried
+# a bounded number of times, and what never succeeds has to end up somewhere a
+# human can look at.
+#
+# The shape here is one ordered lane per destination, created by the first
+# delivery to it. A dead endpoint backs up its own lane and no other; retries
+# are the broker's retry budget rather than a loop in your code; and what
+# exhausts the budget lands in the dead-letter queue with the error attached.
+#
+#   webhook-deliveries (one partition per destination)
+#     `-- group "sender"  posts each delivery, fails on a dead endpoint
+#           `-- retry_limit exhausted -> dead-letter queue
+#
+# Run it:
+#   QUEEN_URL=http://localhost:6632 python3 webhooks.py
+
+import asyncio
+import os
+import sys
+import time
+
+from queen import Queen
+
+QUEEN_URL = os.environ.get("QUEEN_URL", "http://localhost:6632")
+
+# The name is prefixed per language and suffixed per run, so every application
+# in every language can share one broker and no run inherits state from another.
+RUN = f"{int(time.time() * 1000):x}"
+DELIVERIES = f"app-py-webhooks-{RUN}"
+GROUP = "sender"
+
+# Three subscribers. One of them has let its certificate expire, which is the
+# most common way a webhook endpoint dies: it answers, but it answers 500.
+ENDPOINTS = {
+    "acme.example": {"healthy": True},
+    "globex.example": {"healthy": True},
+    "initech.example": {"healthy": False},
+}
+EVENTS_PER_ENDPOINT = 3
+RETRY_LIMIT = 2
+
+CHECKS = 0
+
+
+def check(condition: bool, description: str) -> None:
+    """Record one verified fact, or abort the run.
+
+    This raises instead of using the `assert` statement, because `python3 -O`
+    removes `assert` and the checks are the whole point of the program.
+    """
+    global CHECKS
+    if not condition:
+        raise AssertionError(description)
+    CHECKS += 1
+    print(f"  ok: {description}")
+
+
+async def post_to_endpoint(endpoint: str, event: dict) -> dict:
+    """Stand in for the HTTP POST to the subscriber.
+
+    A real sender would use httpx and treat any non-2xx as a failure, which is
+    exactly what raising does here.
+    """
+    if not ENDPOINTS[endpoint]["healthy"]:
+        raise RuntimeError(f"{endpoint} answered 500")
+    return {"status": 200}
+
+
+async def main() -> int:
+    # The whole client is async: every call below is awaited, and this is the
+    # one event loop they all run on. Unlike the JavaScript client there is no
+    # handleSignals switch, so SIGINT and SIGTERM are always handled for you.
+    queen = Queen(url=QUEEN_URL)
+    verdict, failed = "", False
+
+    try:
+        print(f"broker {QUEEN_URL}")
+
+        # retry_limit is the delivery budget, and dlq_after_max_retries is what
+        # happens when it runs out. Without the second flag an exhausted message
+        # is simply marked failed and stays put; with it, the broker moves it to
+        # the dead-letter table with the last error on the row.
+        #
+        # lease_time is the other half of the contract: it is how long the
+        # broker waits for a sender that took a delivery and never came back
+        # before handing that delivery to someone else. The config keys are
+        # snake_case in Python and the client converts them to the camelCase the
+        # broker expects.
+        await queen.queue(DELIVERIES).config(
+            {"lease_time": 30, "retry_limit": RETRY_LIMIT, "dlq_after_max_retries": True}
+        ).create()
+
+        # ------------------------------------------------------------ queuing
+        #
+        # The application emits events. Each one goes into the partition of the
+        # endpoint it is destined for, which is what makes "in order per
+        # subscriber" a property of the storage rather than of the sender.
+        print("\nqueuing deliveries")
+        for seq in range(1, EVENTS_PER_ENDPOINT + 1):
+            for endpoint in ENDPOINTS:
+                # The event id makes the enqueue idempotent: an application that
+                # retries its own emit does not create a second delivery. The
+                # item key stays camelCase here, because it is the wire name
+                # rather than a client option.
+                await queen.queue(DELIVERIES).partition(endpoint).push(
+                    {
+                        "transactionId": f"{endpoint}-evt-{seq}",
+                        "data": {
+                            "endpoint": endpoint,
+                            "seq": seq,
+                            "type": "invoice.paid",
+                            "invoiceId": f"INV-{seq}",
+                        },
+                    }
+                )
+        print(f"  {EVENTS_PER_ENDPOINT * len(ENDPOINTS)} deliveries queued")
+
+        # ------------------------------------------------------------ sending
+        #
+        # The sender pool. auto_ack is on by default, so a handler that returns
+        # acknowledges the delivery and a handler that raises nacks it: the
+        # broker then redelivers it until the retry budget is gone. That is the
+        # whole retry mechanism, and it survives the sender process dying
+        # mid-flight, which a loop inside the handler would not.
+        print("\nsending")
+        delivered_to: dict = {}
+        attempts: dict = {}
+
+        async def send(msg) -> None:
+            endpoint = msg["data"]["endpoint"]
+            seq = msg["data"]["seq"]
+            attempts[endpoint] = attempts.get(endpoint, 0) + 1
+
+            # There is no attempt counter to read here: the broker's pop
+            # response carries none, so the message dict has none either. The
+            # budget is the broker's, and raising is how one attempt of it is
+            # spent. A sender that recognises a permanent error can skip the
+            # attempts it has left by dead-lettering the message itself --
+            # auto_ack(False), then
+            # `await queen.ack(msg, "dlq", {"group": GROUP, "error": reason})`
+            # -- which writes the same dead-letter row the checks below read.
+            await post_to_endpoint(endpoint, msg["data"])
+
+            delivered_to.setdefault(endpoint, []).append(seq)
+            print(f"  {endpoint} <- event {seq}")
+
+        await (
+            queen.queue(DELIVERIES)
+            .group(GROUP)
+            # A group created after the messages were pushed starts at the tail,
+            # so without this it would see nothing.
+            .subscription_mode("all")
+            .concurrency(3)
+            .each()
+            # Enough turns for every good delivery plus every attempt at the bad
+            # ones.
+            .limit(EVENTS_PER_ENDPOINT * 2 + EVENTS_PER_ENDPOINT * (RETRY_LIMIT + 1))
+            # Stop after 6s of silence, so a stuck delivery fails the run instead
+            # of hanging it.
+            .idle_millis(6000)
+            .consume(send)
+        )
+
+        # ----------------------------------------------------------- checking
+        print("\nchecking")
+
+        for endpoint, meta in ENDPOINTS.items():
+            if not meta["healthy"]:
+                continue
+            seqs = delivered_to.get(endpoint, [])
+            check(
+                len(seqs) == EVENTS_PER_ENDPOINT,
+                f"{endpoint} received all {EVENTS_PER_ENDPOINT} events",
+            )
+            check(seqs == [1, 2, 3], f"{endpoint} received them in the order they happened")
+
+        check(
+            len(delivered_to.get("initech.example", [])) == 0,
+            "the dead endpoint received nothing, as it should",
+        )
+        check(
+            attempts.get("initech.example", 0) > EVENTS_PER_ENDPOINT,
+            "the dead endpoint was retried rather than dropped on the first failure",
+        )
+
+        # The dead-letter queue is a table you can read, not a log line. Each row
+        # carries the payload, the endpoint it was for, and the last error, which
+        # is what a support engineer needs to answer "why did this customer not
+        # get it". The rows come back as plain dicts, with the payload under
+        # "data" and the error under the broker's own wire name, "errorMessage".
+        dlq = await queen.queue(DELIVERIES).dlq().limit(50).get()
+        dead = [m for m in dlq["messages"] if m["data"]["endpoint"] == "initech.example"]
+
+        check(
+            len(dead) == EVENTS_PER_ENDPOINT,
+            f"all {EVENTS_PER_ENDPOINT} dead deliveries are in the dead-letter queue",
+        )
+        check(
+            all("answered 500" in (m.get("errorMessage") or "") for m in dead),
+            "each dead-letter row carries the error that killed it",
+        )
+        check(
+            all(m["data"]["endpoint"] == "initech.example" for m in dlq["messages"]),
+            "no healthy endpoint put anything in the dead-letter queue",
+        )
+
+        listing = ", ".join(f"{m['data']['endpoint']}/{m['data']['invoiceId']}" for m in dead)
+        print(f"\n  dead letters: {listing}")
+
+        # Clean up on success only: a failed run leaves the queue on the broker
+        # to be looked at.
+        await queen.queue(DELIVERIES).delete()
+
+        verdict = f"\nPASS: {CHECKS} checks"
+    except Exception as err:
+        verdict, failed = f"\nFAIL: {err}", True
+    finally:
+        # close() flushes the client-side buffers and closes the HTTP pool. It
+        # narrates its own shutdown on stdout, which is why the verdict is
+        # printed after it rather than before: PASS or FAIL stays the last line
+        # of a run.
+        await queen.close()
+
+    # A failure goes to stderr, like the rest of the set. Flush stdout first so
+    # the verdict still lands last when the two are piped into one file.
+    sys.stdout.flush()
+    print(verdict, file=sys.stderr if failed else sys.stdout)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+# docs:end

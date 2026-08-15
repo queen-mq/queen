@@ -1,9 +1,9 @@
 ---
 title: Cross-broker comparison
-description: "Queen, Kafka, RabbitMQ and pgmq on one machine with matched resources: the same workload at four shapes, with CPU, memory, disk and the conditions that make each row true."
+description: "Queen, Kafka, RabbitMQ and pgmq on one machine with matched resources: the same pipeline at four shapes, with CPU, memory, disk and the conditions that make each row true."
 type: reference
 sidebar:
-  order: 7
+  order: 4
 sourceOfTruth:
   - benchmark-queen/crossbench/results/2026-08-04-scale-campaign/FULL-TABLE.md
   - benchmark-queen/crossbench/results/2026-08-04-scale-campaign/NIGHT-REPORT.md
@@ -11,64 +11,40 @@ sourceOfTruth:
   - benchmark-queen/crossbench/SPEC.md
 ---
 
-## What this is, and what it is not
-
-Each of these systems would go faster in the hands of someone who runs it every day, and for
-three of the four that is not us. So the method carries the weight: we tuned each one as far
-as we could, we documented every knob we touched, and we archived the raw artifacts, so a
-maintainer who reads a cell differently can point at the exact run and we will correct it.
-
-**The purpose is not to crown a winner.** It is to show the shapes: what each design is
-built for, where its cost curve bends, and what it stops being able to express. The clearest
-result on this page is not a latency figure at all, it is that **the curves cross**. pgmq
-wins one shape decisively and loses another by a factor of thirty. Kafka is by far the
-cheapest on CPU and cannot express the cardinality the other two handle without noticing.
-RabbitMQ is not designed to hold thousands of ordered queues, and the numbers say so plainly
-rather than subtly.
-
-If you are choosing between these systems, the design comparison in
-[Compared to Kafka, RabbitMQ, SQS and pgmq](/start/compare) will serve you better than this
-page. Come here for the cost curves.
+Queen, Kafka, RabbitMQ and pgmq ran the same twelve-stage ordered pipeline on one machine, under
+the same CPU and memory limits, at four shapes. The design differences behind these numbers are on
+[Comparison](/start/compare). Three of the four are not systems we run every day, so every knob we
+touched is recorded with the run.
 
 ## The rig
 
-Two machines, both **32 vCPU / 62 GB**, Intel Xeon Platinum 8358 at 2.60 GHz, NVMe, KVM,
-kernel 6.8.0-136, Docker 29.7.1. One runs the system under test, the other runs only the
-load generator.
+Two machines, both **32 vCPU / 62 GB**, Intel Xeon Platinum 8358 at 2.60 GHz, NVMe, KVM, kernel
+6.8.0-136, Docker 29.7.1. One runs the system under test, the other only the load generator, which
+never exceeded about 13% of its 32 cores.
 
-**Resource parity was a fix, not a given.** The compose files for pgmq, Kafka and RabbitMQ
-carried `cpus: 8` and `memory: 16g`; Queen's carried no limits at all. On the old 8-core box
-that was a no-op. On 32 cores it would have handed Queen four times the machine of every
-competitor. Every system in the tables below runs with `CM_CPUS=32 CM_MEM=56g`, and Kafka's
-heap is scaled to 16 GB in proportion.
+**Resource parity was a fix, not a given.** The compose files for pgmq, Kafka and RabbitMQ carried
+`cpus: 8` and `memory: 16g` while Queen's carried no limits at all. Every system below runs
+`CM_CPUS=32 CM_MEM=56g`, with Kafka's heap scaled to 16 GB in proportion.
 
 PostgreSQL was resized for the box (`shared_buffers` 16 GB, `effective_cache_size` 45 GB,
-`max_wal_size` 32 GB, `max_connections` 600) with **`synchronous_commit = on` and
-`fsync = on` left untouched**, because the durability tier is the anchor of the comparison.
-Queen and pgmq therefore both pay a real fsync per commit. Kafka does not, at its default
-settings; that is called out where it matters.
+`max_wal_size` 32 GB, `max_connections` 600) with **`synchronous_commit = on` and `fsync = on` left
+untouched**, so Queen and pgmq both pay a real fsync per commit and Kafka, at its defaults, does
+not.
 
-The loader was sampled throughout and never exceeded about 13% of its 32 cores, so no cell
-here is invalidated by a saturated generator.
-
-CPU is the mean over the active window from 1 Hz cgroup samples; memory is peak RSS summed
-across the system's containers; disk is mean host write throughput.
+CPU is the mean over the active window from 1 Hz cgroup samples, memory is peak RSS across the
+system's containers, disk is mean host write throughput.
 
 ## The workload
 
-A twelve-stage channel-manager pipeline: an ingress event fans out to six deliveries across
-two chained consumer hops, with simulated per-message work of 10 to 20 ms on the first hop
-and 10 to 30 ms downstream. Ordering is per property, and correctness is checked on every
-run: gaps, order violations and duplicates.
+A twelve-stage channel-manager pipeline: an ingress event fans out to six deliveries across two
+chained consumer hops, with simulated per-message work of 10 to 20 ms on the first hop and 10 to
+30 ms downstream. Ordering is per property, checked on every run.
 
-Two axes matter. **Cardinality** is the number of ordered lanes. **Density** is messages per
-second per lane. Every disagreement between these systems is a disagreement about one of
-those two.
+**Cardinality** is the number of ordered lanes. **Density** is messages per second per lane.
 
 ## Sparse: 2 000 ev/s over 1 000 lanes
 
-12 000 deliveries per second demanded, 2 messages per second per lane. Every system served
-the full rate.
+12 000 deliveries per second demanded, 2 per second per lane. Every system served the full rate.
 
 | system | p50 ms | p95 ms | deliveries/s | cores | RAM | disk MB/s | physical queues | consumers |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -79,16 +55,14 @@ the full rate.
 
 All PASS: zero gaps, zero order violations, zero duplicates. Single run each.
 
-**pgmq wins this shape, and it is not close on latency.** At one message per lane per second
-there is nothing to amortise, and its stateless re-derivation costs less than Queen's ring.
-Kafka is a third of everyone's CPU and the slowest here, carrying a 12 GB JVM heap against
-Queen's 1.8 GB. RabbitMQ needs 12 000 queues and 12 000 consumers to express what Queen
-expresses with 4 queues and 48 consumers, and on this box it keeps up.
+pgmq wins this shape and not narrowly: at this density there is nothing to amortise, and its
+stateless re-derivation costs less than Queen's ring. Kafka is a third of everyone's CPU and the
+slowest here, on 11.6 GB against Queen's 1.8 GB. RabbitMQ needs 12 000 queues and 12 000 consumers
+to express what Queen expresses with 4 and 48.
 
 ## Dense: 12 000 ev/s over 1 000 lanes
 
-72 000 deliveries per second demanded, 12 messages per second per lane. Only two systems kept
-up.
+72 000 deliveries per second demanded, 12 per second per lane. Only two systems kept up.
 
 | system | p50 ms | p95 ms | deliveries/s | % of rate | cores | RAM | disk MB/s | shed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -97,33 +71,29 @@ up.
 | **pgmq** | 11 863 | 16 777 | 45 622 | 63% | 19.3 | 5.1 GB | 111 | 104 780 |
 | **RabbitMQ** | 19 952 | 39 903 | 19 666 | **27%** | 9.7 | 2.7 GB | 162 | 363 942 |
 
-All PASS on correctness. **Read this table with two caveats.**
+All PASS on correctness.
 
 <Aside type="caution">
 **Queen's figure is a median of eight runs, not a best.** The same cell, same build, same
-configuration, produced 340, 441, 624, 680, 742, 1 049, 2 966 and 3 234 ms. That is 7x of
-dispersion, and it is a known defect under investigation rather than measurement noise: it
-appears only where the admission and lane controllers become binding, and not at all on sparse
-shapes, on the tenant scenarios or on the three-hour soak. The table publishes the median; all
-eight values are above. **Kafka, pgmq and RabbitMQ here are single runs and have not been
-repeated**, so their dispersion is unknown and could be comparable.
+configuration, produced 340, 441, 624, 680, 742, 1 049, 2 966 and 3 234 ms. That 7x of dispersion is
+a known defect under investigation, not measurement noise: it appears only where the admission and
+lane controllers become binding, and not on sparse shapes, on the tenant scenarios or on the
+three-hour soak. **Kafka, pgmq and RabbitMQ here are single runs**, so their dispersion is unknown.
 </Aside>
 
-The ranking survives the caveat: even Queen's worst observed run beats pgmq and RabbitMQ,
-which do not merely go slower but stop serving the offered rate and shed messages. Against
-Kafka the accurate statement is that Queen's median is about 3x better while its range
-overlaps Kafka's single observation.
+The ranking survives that: Queen's worst run still beats pgmq and RabbitMQ, which stop serving the
+offered rate and shed. Against Kafka, Queen's median is about 3x better and its range overlaps
+Kafka's single observation.
 
-**Why the reversal.** pgmq's grouped read is `GROUP BY headers->>'x-pgmq-group'` over the
-whole queue table on every read, so its cost is proportional to standing rows, not to group
-count. When arrival exceeds service the table grows and every read re-scans the backlog:
-slower service, bigger backlog, positive feedback. Queen amortises over the partition visit
-instead, so more messages per visit make it cheaper per message.
+**Why the reversal.** pgmq's grouped read is `GROUP BY headers->>'x-pgmq-group'` over the whole
+queue table, so its cost tracks standing rows rather than group count and a backlog re-scans itself
+on every read. Queen amortises over the partition visit, so more messages per visit make it cheaper
+per message.
 
 ## Cardinality: 20 000 ordering keys
 
-The same workload with 20 000 properties at 6 000 ev/s, each system running at the
-cardinality it can actually express.
+The same workload with 20 000 properties at 6 000 ev/s, each system running at the cardinality it
+can actually express.
 
 | system | ordered lanes | p50 ms | p95 ms | p99 ms | cores | RAM |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -134,28 +104,21 @@ cardinality it can actually express.
 | Kafka | 800 | 142.9 | 4 194 | 8 389 | **4.6** | **1.6 GB** |
 | RabbitMQ | 12 000 | 23 727 | 43 515 | 43 515 | 12.0 | 3.5 GB |
 
-**pgmq is completely insensitive to cardinality**, and the two rows prove it: p50 and p99
-identical to four significant figures across a twentyfold change in lane count. Its group is
-a value in a JSONB header, so there is no per-lane object to scale. It beats Queen on every
-percentile at three times the cardinality.
+**pgmq is insensitive to cardinality**, and the two rows prove it: identical percentiles across a
+twentyfold change in lane count. Its group is a value in a JSONB header, so there is no per-lane
+object to scale.
 
-**Queen's median improves with more lanes and its tail worsens.** Going from 4 000 to 80 000
-ordered lanes takes p50 from 110 to 101 (fewer properties contend for one lane, so less
-head-of-line blocking) while p95 goes 1 923 to 2 494 and p99 7 054 to 15 385 (the ring lap
-grows with lane count). Both effects are real and they pull in opposite directions.
+**Queen's median improves with more lanes and its tail worsens**, because fewer properties contend
+for one lane while the ring lap grows with lane count. **RabbitMQ at 12 000 queues** serves 57% of
+the offered rate, and no tuning we applied changed that.
 
 <Aside type="note">
-The tail figures above are this pipeline's, and this pipeline puts 10 to 30 ms of simulated work
-on every message across twelve stages. A later run measured the cardinality axis on its own, with
-no synthetic work in the consumers, and reached **1 000 000 ordered partitions** at p99 115 ms.
-The two are not in conflict and neither supersedes the other: they are the same lane count
-question asked of two different workloads, and the topology, not the lane count, is what produces
-the seconds. See [A million ordered partitions](/benchmarks/cardinality-1m).
+These tails are this pipeline's, and it puts 10 to 30 ms of simulated work on every message across
+twelve stages. A later run measured the cardinality axis on its own, with no synthetic work in the
+consumers, and reached **1 000 000 ordered partitions** at p50 27.5 ms and p99 115 ms. The topology,
+not the lane count, is what produces the seconds. See
+[A million ordered partitions](/benchmarks/cardinality-1m).
 </Aside>
-
-**RabbitMQ at 12 000 queues does not keep up on this shape**, serving 57% of the offered
-rate. This is the shape it is not built for, and no tuning we applied changed that: ordering
-per key means a queue per key, and the queue is a live server-side object.
 
 ### Where Kafka stops
 
@@ -169,21 +132,17 @@ per key means a queue per key, and the queue is a live server-side object.
 | 5 000 and above | 5 000+ | **topic creation refused** |
 
 At 5 000 partitions per topic the broker returns `POLICY_VIOLATION: Request parameters do not
-satisfy the configured policy`. **This is a configuration refusal on default settings, not a
-proven physical limit**: our compose sets no `create.topic.policy`, so this is KRaft's own
-validation, and a differently configured Kafka may go higher. We are stating it that way
-deliberately.
-
-What is not a configuration artifact is the tail below the wall: p95 grows roughly linearly
-with partition count, 4 988 to 12 937 to 23 727 as partitions go 800 to 4 000 to 8 000. Even
-if the limit were raised, that operating point is not usable. For reference, Queen at 80 000
-ordered lanes has a p95 of 2 494.
+satisfy the configured policy`. **This is a configuration refusal on default settings, not a proven
+physical limit**: our compose sets no `create.topic.policy`, so a differently configured Kafka may
+go higher. The tail below that wall is not a configuration artifact: p95 grows roughly linearly with
+partition count, 4 988 to 12 937 to 23 727 as partitions go 800 to 4 000 to 8 000, against 2 494 for
+Queen at 80 000 ordered lanes.
 
 ## Ordered-consume ceiling, raw
 
-The pipeline above measures a topology. This measures raw throughput of ordered consumption,
-with a purpose-built loader driving pgmq's own API directly
-(`send_batch` / `read_grouped_head` / `delete`), 1 000 groups, 256-byte payloads.
+The tables above measure a topology. This measures raw ordered consumption, with a purpose-built
+loader driving pgmq's own API directly (`send_batch` / `read_grouped_head` / `delete`), 1 000
+groups, 256-byte payloads.
 
 | target msg/s | readers | pop/s across the run | final queue depth | verdict |
 | ---: | ---: | --- | ---: | --- |
@@ -193,78 +152,42 @@ with a purpose-built loader driving pgmq's own API directly
 | 40 000 | 16 | 14 406 · 2 358 · 1 250 | 3 054 066 | ✗ |
 | 80 000 | 16, 24, 32 | about 4 500 · 700 · 400 | about 7 000 000 | ✗ |
 
-**pgmq's ordered-consume ceiling is between 20 000 and 40 000 msg/s on this machine.** Two
-things are worth separating. The reader count has a narrow optimum: 16 sustains the rate with
-an empty queue, 4 is too few and 64 collapses, because each reader is a full table scan and N
-readers are N scans of the same table. Above the ceiling no reader count rescues it.
+**pgmq's ordered-consume ceiling is between 20 000 and 40 000 msg/s on this machine.** The reader
+count has a narrow optimum, because each reader is a full table scan and N readers are N scans of
+the same table. With one group per queue, pgmq served 6% of a 12 000 deliveries/s target.
 
-And the push side is fine: pgmq accepted 80 000 msg/s of writes without errors. What caps is
-the **ordered read**, not the write. pgmq's plain `read()` does not do the `GROUP BY` and
-would go considerably faster; the ceiling above is specifically the per-key-ordered path,
-which is the function being compared.
+The push side is fine: pgmq accepted 80 000 msg/s of writes without errors. What caps is the
+**ordered read**, and the failing runs show the mechanism: 767 000 standing rows gave 14 406 pop/s,
+1.90 million gave 2 358, 3.06 million gave 1 250. Its plain `read()` skips the `GROUP BY` and would
+go considerably faster, so the ceiling is specifically the per-key-ordered path.
 
-The mechanism is visible directly in the failing runs: 767 000 standing rows gave 14 406
-pop/s, 1.90 million gave 2 358, 3.06 million gave 1 250. Service rate falls roughly as the
-inverse of queue depth, which is what "one full table scan per read" predicts.
-
-**Queen's comparable figure** is this campaign's own three-hour soak, recorded in
-`NIGHT-REPORT.md`, because it ran on this machine: 600 000 msg/s sustained with leases, explicit
-asynchronous acks, a 60-second deduplication window and retention active, 6.82 billion messages,
-zero push, pop or ack errors, flat lag, p50 120 ms. That is 15 to 30 times pgmq's ordered-consume
-ceiling, and Queen is doing more work per message: pgmq has neither deduplication nor retention as
+**Queen's comparable figure** is this campaign's own three-hour soak, on the same machine: 600 000
+msg/s sustained with leases, explicit asynchronous acks, a 60-second deduplication window and
+retention active, 6.82 billion messages, zero push, pop or ack errors, flat lag, p50 120 ms. That is
+15 to 30 times pgmq's ordered-consume ceiling, and pgmq has neither deduplication nor retention as
 concepts. On the dedicated bench rig, at the same semantics, the figure is
 [1 000 000 msg/s per side for 24 hours](/benchmarks/soak-24h).
 
-## What each shape is telling you
-
-The two cost functions are close to inverses of one another, which is why no single ranking
-holds:
-
-- **pgmq** gains per group and pays per standing row. Its throughput is reads per second
-  times the number of groups with a visible head, and the cost of a read is a scan of the
-  whole table. With few groups it has no depth; with a full table it has no speed. At one
-  group per queue it served **6%** of a 12 000 deliveries/s target.
-- **Queen** pays per partition and gains per message in a partition. Its latency is a lap of
-  the ready ring, and each visit yields rate divided by partitions. Dense is its best case, and
-  sparse and wide is the one it has to be sized for rather than the one it fails at: the
-  dedicated cardinality run holds a million lanes at p50 27.5 ms and p99 115 ms, and what it
-  costs is a retention parallelism scaled to the count and deduplication switched off.
-- **Kafka** pays per physical partition, in files, memory and tail latency, and buys a much
-  lower CPU cost per message than anything on PostgreSQL.
-- **RabbitMQ** pays per queue object, and per-key ordering means a queue per key.
-
 ## Correctness
 
-**Zero gaps, zero order violations and zero duplicates in every run of the campaign**, on all
-four systems, in every configuration, including the collapsed cells at 25 000 ev/s carrying
-1.3 million messages in flight and the runs that shed hundreds of thousands of messages. No
-system on this page trades ordering for throughput when overloaded. They degrade by latency
-and by shedding, which is the correct failure mode.
+**Zero gaps, zero order violations and zero duplicates in every run of the campaign**, on all four
+systems, including the collapsed cells at 25 000 ev/s carrying 1.3 million messages in flight and
+the runs that shed hundreds of thousands.
 
-One correctness finding is not about Queen. pgmq ships two grouped reads, and its default
-`read_grouped_rr` has a demonstrated exclusivity race under concurrent readers: an adversarial
-reproduction recorded 4 096 breaches in 90 seconds, against zero for `read_grouped_head` under
-identical load. Every pgmq figure on this page uses `read_grouped_head`, which is the correct
-variant, because publishing the default's failures as "pgmq cannot pass" would have been
-misleading. The reproduction is archived with the campaign.
+One correctness finding is not about Queen. pgmq's default grouped read, `read_grouped_rr`, has a
+demonstrated exclusivity race under concurrent readers: an adversarial reproduction recorded 4 096
+breaches in 90 seconds, against zero for `read_grouped_head` under identical load. Every pgmq figure
+here uses `read_grouped_head`.
 
-## Reproducing
+## What qualifies these numbers
 
-Every cell has its `invocation.txt` with the exact command, the resource-parity environment,
-the resized `postgres.conf`, image digests, machine fingerprint and 1 Hz resource samples,
-under `benchmark-queen/crossbench/results/2026-08-04-scale-campaign/`. The method and the gate
-conditions are in `benchmark-queen/crossbench/SPEC.md`, and the harness itself is in
-`benchmark-queen/crossbench/`.
+Cells are 60 to 120 seconds, and Queen's instantaneous p50 drifts upward inside one because
+completed-message retention outlives the run, while pgmq deletes on ack and does not drift. Relative
+comparisons hold, absolute values on the longer tail do not. High-cardinality cells need longer
+rated windows: at 100 000 properties the warmup delivers more messages than a 60-second window does,
+so those percentiles are majority warmup.
 
-Three known limits of this campaign:
-
-1. **Cells are 60 to 120 seconds.** Queen's instantaneous p50 drifts upward inside a run
-   because completed-message retention outlives the run and nothing is pruned; pgmq, which
-   deletes on ack, does not drift. Relative comparisons hold; absolute values on the longer
-   tail do not.
-2. **High-cardinality cells need long rated windows.** At 100 000 properties the harness
-   warmup delivers more messages than a 60-second rated window does, so the summary
-   percentiles are majority warmup. The diagnostic is a p50 that falls monotonically through
-   the run while lag stays flat.
-3. **Only Queen's dense cell was repeated.** The other three systems' dense figures are
-   single runs.
+Every cell has its `invocation.txt` with the exact command, the resource-parity environment, the
+resized `postgres.conf`, image digests, machine fingerprint and 1 Hz resource samples, under
+`benchmark-queen/crossbench/results/2026-08-04-scale-campaign/`. The loader is on
+[Method and archive](/benchmarks/method).

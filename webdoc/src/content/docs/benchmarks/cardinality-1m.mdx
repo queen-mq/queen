@@ -1,33 +1,29 @@
 ---
 title: A million ordered partitions
-description: "1,000,000 FIFO lanes in one PostgreSQL, created during the run at a thousand a second while the broker serves 200,000 messages a second, and what an hour at that cardinality does not establish."
+description: "1,000,000 FIFO lanes in one PostgreSQL, created during the run under load."
 type: reference
 sidebar:
   order: 3
 sourceOfTruth:
   - benchmark-queen/2026-08-11-1m-partitions/results.md
   - benchmark-queen/2026-08-11-1m-partitions/raw-final-dedupoff/g.out
-  - benchmark-queen/2026-08-11-1m-partitions/raw-final-dedupoff/bench.csv
   - benchmark-queen/2026-08-11-1m-partitions/raw-final-dedupoff/partitions.csv
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
 ---
 
-**One broker against one PostgreSQL held 1,000,000 ordered partitions in a single queue, none of
-them preallocated, created during the run at a thousand a second while it served 200,000 messages
-a second with leased pops and explicit acknowledgement. 722,265,600 messages, zero push, pop or
-ack errors, and a database that stopped growing.** The broker was Queen 1.0.0 on a 32 vCPU / 62 GiB
-machine. Artifacts are in `benchmark-queen/2026-08-11-1m-partitions/`.
+**One broker against one PostgreSQL held 1,000,000 ordered partitions in a single queue, none
+preallocated, created during the run at a thousand a second while it served 200,000 messages a
+second with leased pops and explicit acknowledgement. 722,265,600 messages, zero push, pop or ack
+errors, and a database that stopped growing.** Queen 1.0.0, 32 vCPU / 62 GiB, artifacts in
+`benchmark-queen/2026-08-11-1m-partitions/`.
 
-This run exists to test one property: that a partition costs a row and an index range rather than
-a file, a process or a replicated log, so the serve path should not care how many of them there
-are. It also found three places where something else does care, which are listed at the end.
+A partition costs a row and an index range, not a file or a process. The serve path does not care
+how many there are.
 
 ## Configuration
 
-The partition space is a million; the *working set* is a thousand. The loader keeps 1,000
-partitions receiving pushes in any given second and rotates the window, so it covers the space in
-1,000 seconds and every partition in the space sees 0.2 messages a second while every active one
-sees 200.
+The space is a million, the working set a thousand: the loader rotates which 1,000 partitions
+take pushes, so each sees 0.2 messages a second and each active one 200.
 
 ```text
 goload -mode openloop -> queue=partbench partitions=1000000 consumers=300 manualAck=true ackAsync=true
@@ -35,16 +31,8 @@ goload -mode openloop -> queue=partbench partitions=1000000 consumers=300 manual
   partitions: space=1000000 | active=1000/s (rotate) | 200 msg/s per active partition | space covered in 1000 s
 ```
 
-| Parameter | Value | Why it matters |
-| --- | --- | --- |
-| Partition space | 1,000,000 in one queue | Created by the first push that names one. Nothing is preallocated, so partition creation is part of the measured path |
-| Active partitions | 1,000 per second, rotating | A million entities of which a thousand are busy is the shape high cardinality actually takes. Writing to all million every cycle is a different workload |
-| Delivery semantics | leased pops with explicit acks | The cursor moves only on an ack |
-| Deduplication | **off** | See [what this run does not establish](#what-it-does-not-establish). At this cardinality the cache does not hold, and that defect is documented below |
-| Retention | on, completed after 300 s | `RETENTION_PARALLELISM=16`, which is what a million partitions needs |
-| Offered rate | 200,000 msg/s, open loop | Push batch 100, pop batch 1,000, 256-byte payload |
-| Consumers | 300 closed-loop drainers, wildcard pop | Consumers pull; the broker decides which of the million lanes to serve |
-| Duration | 1 hour, of which 43 minutes on the completed space | Reported every 30 s |
+Pop batch 1,000, wildcard pops, retention on with `RETENTION_PARALLELISM=16`, **deduplication
+off**, one hour of load of which 43 minutes on the completed space.
 
 ## Result
 
@@ -62,11 +50,9 @@ From the final line of `raw-final-dedupoff/g.out`:
 | Average ack round trip | 25.54 ms |
 | Restarts, incidents | **0, 0** |
 
-### Latency reads in two phases
+### Latency in two phases
 
-Being born costs a partition a row and a lock, and doing that a thousand times a second
-underneath 200,000 messages a second is the most expensive moment in this system's life.
-Averaging the two phases together hides the better number and flatters the worse one.
+Creating a lane costs a row and a lock, so a thousand a second is expensive.
 
 | Phase | 30 s reports | p50 | p99 | Worst p99 | p99.9 |
 | --- | --: | --: | --: | --: | --: |
@@ -75,8 +61,7 @@ Averaging the two phases together hides the better number and flatters the worse
 
 ### The database stopped growing
 
-The claim that matters at this cardinality is not the rate, it is that retention reaches a steady
-state while a million partitions stand. Over the last nine minutes of the run:
+Over the last nine minutes:
 
 | | 11:56 | 11:59 | 12:01 | 12:04 |
 | --- | --: | --: | --: | --: |
@@ -84,11 +69,10 @@ state while a million partitions stand. Over the last nine minutes of the run:
 | `log_txns` | 5,301 MB | 5,302 MB | 5,302 MB | 5,302 MB |
 | Database | 9.37 GB | 9.40 GB | 9.43 GB | 9.47 GB |
 
-The physical cause is in the retention log: **4,002 rows deleted per second averaged over the last
-eight sweeps, against the 4,000 per second the offered rate creates**. Deletion equal to
-insertion is what a flat table looks like from the inside.
+The cause is in the retention log: **4,002 rows deleted per second over the last eight sweeps,
+against the 4,000 the offered rate creates.**
 
-### What a million partitions weighs
+### What it weighs
 
 | Object | Size |
 | --- | --: |
@@ -100,13 +84,10 @@ insertion is what a flat table looks like from the inside.
 | Database total | 9.47 GB |
 | **Broker resident memory** | **5.03 GB** |
 
-The lanes cost 641 MB of rows. Everything else scales with the rate rather than with the
-cardinality. The broker figure is the sizing rule worth carrying away: **about 5 KB of resident
-memory per partition**, flat for the whole run.
+Only the first two rows scale with cardinality. The sizing rule is the last: **about 5 KB of
+resident memory per partition**.
 
-### Resources
-
-1 Hz sampler on the broker host:
+### Resources, 1 Hz host sampler
 
 | Resource | Value |
 | --- | --- |
@@ -118,69 +99,30 @@ memory per partition**, flat for the whole run.
 | WAL fsync | 247 µs |
 | Connection pool | never above 208 of 300 |
 
-The hot list, which is how the broker decides which lane to serve next, held a few thousand
-entries for the whole run: it contains only the partitions that **have data**, so its cost follows
-the work rather than the space. That is why the serve path is indifferent to the partition count,
-and it is the property this run exists to demonstrate.
+The [hot list](/internals/hotlist) holds only partitions with data, so its cost follows the work:
+a few thousand entries all run.
 
-## Three places where cost follows the space
+## Three costs that follow the space
 
-At two hundred partitions none of these is visible. At a million each one decides the outcome, and
-all three have the same shape: the cost tracks the size of the partition space rather than the
-work inside the window.
+Invisible at two hundred partitions, decisive at a million.
 
-**Deduplication holds every hash, not the ones in the window.** Measured after the space was
-complete, so no new structure was being allocated, the cache grew by 235 MB a minute, which at
-200,000 messages a second is 19.6 bytes per message: the size of one hash. The sizing model
-documented in the broker's own configuration asks for 192 MB at this rate and window; the cache
-filled 6 GB and then 16 GB. Reclamation is block-granular, and a block seals only when it fills:
-at 0.2 messages a second per partition a 4,096-hash block takes nearly six hours to fill, so it
-never seals and never expires. When the cache saturates, pushes to suppressed partitions fall back
-to a full-window SQL probe, which **remains authoritative, so no duplicate is ever admitted**, but
-moves the cost onto PostgreSQL until the pool saturates.
+**[Deduplication](/internals/dedup) holds every hash, not the ones in the window.** The cache
+grew 235 MB a minute, 19.6 bytes per message against a model asking 192 MB, and filled 6 GB then
+16 GB: a block seals only when it fills, nearly six hours at 0.2 messages a second per partition.
+Saturated, pushes fall back to a full-window SQL probe, **still authoritative, no duplicate
+admitted**, but the cost lands on PostgreSQL.
 
-**The retention work list is one row per partition per cycle**, with no eligibility filter, and the
-transaction-sidecar phase calls its stored procedure on every partition unconditionally. At
-`RETENTION_PARALLELISM=4` the sweep grew from 108 s at 400,000 partitions to 402 s at a million and
-kept losing ground. At 16 it settles at about 195 s and covers the offered rate, which is what this
-run used. That is a constant factor against a linear term.
+**[Retention](/internals/retention) walks one row per partition per cycle.** At
+`RETENTION_PARALLELISM=4` the sweep grew from 108 s at 400,000 partitions to 402 s at a million;
+at 16 it settles near 195 s, which is what this run used.
 
-**The statistics refresh took 6.8 seconds** at 825,706 partitions. It did no harm here and belongs
-on the same list.
-
-## What this run establishes
-
-- **A million ordered lanes in one queue on one PostgreSQL**, created under load at a thousand a
-  second, none preallocated.
-- **200,000 messages a second with leases and explicit acknowledgement**, 722 million messages,
-  zero errors of any kind.
-- **The serve path does not care about the partition count.** p50 27.5 ms on the completed space,
-  with the broker and PostgreSQL together under half the machine.
-- **Retention reaches a steady state at this cardinality**, given a parallelism that matches it.
+**The [statistics refresh](/internals/stats) took 6.8 seconds** at 825,706 partitions, harmlessly.
 
 ## What it does not establish
 
-- **Not a 24-hour run.** One hour, of which 43 minutes on the completed space. The plateau is
-  measured over that window: tables flat and deletion equal to insertion. The
-  [Throughput 24h 1M](/benchmarks/soak-24h) is a separate measurement, on 200 partitions with
-  deduplication on, and the two do not add up.
-- **Deduplication was off.** That is what made the run possible and it is stated in the
-  configuration rather than buried. It puts this run level with what other brokers offer by
-  default, not below it, but it does mean this run and Throughput 24h 1M are not the same
-  configuration.
-- **One shape.** 200,000 messages a second, a thousand active partitions per second, and a
-  contiguous rotating window, which is the friendly case for index locality. The scattered variant
-  exists in the loader and was not run.
-- **A compressible payload**, as in every run in this family.
+- **Not a 24-hour run.** One hour, 43 minutes of it on the completed space.
+- **Deduplication was off**, which is what made the run possible: this run and
+  [Throughput 24h 1M](/benchmarks/soak-24h) do not add up.
+- **One shape.** A contiguous rotating window is the friendly case for index locality.
+- **A compressible payload.**
 - **Nothing about high availability, failure or the proxy.**
-
-## Files
-
-| File | Contents |
-| --- | --- |
-| `raw-final-dedupoff/g.out` | The loader's stdout for the run that passed: configuration, 30 s reports, final aggregate |
-| `raw-final-dedupoff/partitions.csv` | Partition count and per-table bytes every 60 s, which is the x-axis of this campaign |
-| `raw-final-dedupoff/bench.csv` | 1 Hz host sampler |
-| `raw-final-dedupoff/broker.log` | Boot configuration, rate and size blocks, retention sweeps |
-| `raw-baseline-p4/`, `raw-p16-dedup6g/`, `raw-p16-dedup16g/` | The three earlier cells, including the two that failed and the measurements that diagnosed them |
-| `results.md` | The session note. Written in Italian |

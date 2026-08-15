@@ -1,0 +1,50 @@
+---
+title: Replay
+description: "Reading history again: a new group backfilled from the beginning, and an existing group rewound."
+type: tutorial
+tier: use
+sidebar:
+  order: 4
+verifiedBy:
+  - examples/tutorials/cpp/04-replay.cpp
+---
+
+Acknowledging a message does not delete it. Consumption is a cursor per consumer group, and the
+messages stay until retention removes them, so history is still there to be read.
+
+Two different operations use that. A **new group** can start at the beginning instead of the tail,
+which is how you backfill a consumer that did not exist when the events happened. An **existing
+group** can be moved back to a timestamp with a seek, which is how you reprocess after a bug. The
+subscription mode applies once, when the cursor is created, and cannot rewind a group that already
+exists. A seek can, and it releases any live lease, so an in-flight batch is abandoned rather than
+acknowledged.
+
+The C++ client has no admin surface, so the seek has no method: the program posts an RFC 3339
+timestamp to the consumer-group seek route through `client.get_http_client()`, keeping the base
+URL, the retry and the `429` backoff the rest of the file already uses.
+
+One thing to read carefully in the code: the queue builder is kept in a named `QueueBuilder` and
+mutated in place rather than chained into a temporary, because the optional `subscription_mode()`
+has to land on the same object that `consume()` is called on. The rewound group leaves it off
+entirely, since its cursor already exists.
+
+<Render file="snippets/tut-cpp-replay" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/cpp` with the
+three headers on the include path ([the client page](/use/cpp-client) has that recipe):
+
+```bash
+mkdir -p build
+g++ -std=c++17 -O2 -pthread \
+    -I../../../clients/client-cpp -I../../../clients/server/vendor \
+    -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
+    04-replay.cpp -o build/04-replay \
+    -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
+
+QUEEN_URL=http://localhost:6632 ./build/04-replay
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh cpp`.

@@ -1,0 +1,41 @@
+---
+title: Transactional ack and push
+description: "One body, two operations, one PostgreSQL commit: the acknowledgement of the input and the push of the output."
+type: tutorial
+tier: use
+sidebar:
+  order: 3
+verifiedBy:
+  - examples/tutorials/http/03-transaction-ack-push.sh
+---
+
+The previous tutorial handed work between queues in two requests. In that order a crash between
+them duplicates work, in the other order it loses it, and two HTTP calls can never be one commit.
+`POST /api/v1/transaction` takes an `operations` array instead, so the ack of the input and the
+push of the output become one PostgreSQL transaction.
+
+Two fields on the ack operation carry it. `consumerGroup` has to be explicit, because it defaults
+to `__QUEUE_MODE__` and the transaction would then commit a cursor this consumer never read from,
+leaving the message to be redelivered forever. `leaseId` is what the broker checks, and an expired
+lease rolls the whole transaction back. The SDK builders send the lease in a top-level
+`requiredLeases` array; this route accepts that only as a fallback hint, so from curl put it on
+the operation.
+
+The commit is atomic and the round trip is not, which is why the pushed `transactionId` is derived
+from the order rather than minted: a retry after a lost response either commits once or comes back
+a duplicate. A rollback arrives as `200` with `success: false` and the reason at the top level.
+
+<Render file="snippets/tut-http-transaction-ack-push" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with `curl` and `jq` on the path:
+
+```bash
+QUEEN_URL=http://localhost:6632 bash examples/tutorials/http/03-transaction-ack-push.sh
+```
+
+The script checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh http`.
+
+Next: [Replay](/use/http-client/replay).

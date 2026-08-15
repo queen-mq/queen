@@ -81,18 +81,25 @@ const nimbusConfig = defineNimbusConfig({
     defaultCollapsed: true,
     overviewLabel: "Overview",
     indexDisplay: "overview-leaf",
+    // Five sections, in the order a reader meets them: what it is, how to build
+    // on it, how to run it, the exhaustive material, the evidence. The first
+    // four are written user-first and short; Documentation is the one place
+    // where completeness beats brevity, which is why Reference and Internal sit
+    // inside it as one group rather than as two top-level sections competing
+    // with the guides.
     items: [
-      { label: "Start here", icon: "ph:rocket-launch", autogenerate: { directory: "start" } },
+      { label: "Start Here", icon: "ph:rocket-launch", autogenerate: { directory: "start" } },
       { label: "Use Queen", icon: "ph:code", autogenerate: { directory: "use" } },
+      { label: "Deploy Queen", icon: "ph:hard-drives", autogenerate: { directory: "deploy" } },
       {
-        label: "Full examples",
-        icon: "ph:file-code",
-        autogenerate: { directory: "full-examples" },
+        label: "Documentation",
+        icon: "ph:book-open-text",
+        items: [
+          { label: "Reference", autogenerate: { directory: "reference" } },
+          { label: "Internal", autogenerate: { directory: "internals" } },
+        ],
       },
-      { label: "Reference", icon: "ph:book-open-text", autogenerate: { directory: "reference" } },
-      { label: "Self-hosting", icon: "ph:hard-drives", autogenerate: { directory: "selfhost" } },
-      { label: "Internals", icon: "ph:cpu", autogenerate: { directory: "internals" } },
-      { label: "Benchmarks", icon: "ph:chart-line-up", autogenerate: { directory: "benchmarks" } },
+      { label: "Benchmark", icon: "ph:chart-line-up", autogenerate: { directory: "benchmarks" } },
     ],
   },
 });

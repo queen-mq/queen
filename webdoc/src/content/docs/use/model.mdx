@@ -1,0 +1,213 @@
+---
+title: Model
+description: "The whole model in one page: partitions created by the push that names them, one cursor per consumer group, leases, transactions, replay and retention."
+type: concept
+tier: use
+sidebar:
+  order: 2
+sourceOfTruth:
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/003_log_push.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/005_log_ack.sql
+  - server/sql/procedures/006_log_maintenance.sql
+  - server/src/handlers/data.rs
+verifiedBy:
+  - clients/client-js/test-v2/docs.js
+  - clients/client-js/test-v2/semantics.js
+---
+
+Queen stores a queue as a set of ordered partitions, and a consumer group as one cursor per
+partition. What a push creates, what an ack means and how far back you can replay all follow
+from those two sentences.
+
+## Queues and partitions
+
+A queue is a named container with a configuration. A partition is an ordered lane inside it.
+Neither is declared before use: a push to a queue and a partition that do not exist creates
+both, in the transaction that stores the message.
+
+<Render file="snippets/js-push" />
+
+That call created the queue, the lane and the message; a push that names no partition lands in
+`Default`. Partition by the entity whose order you care about, a customer or a device or a
+document: one entity, one lane, and a slow lane holds up nothing outside it.
+
+A partition costs one row, plus one row per group that reads it. Tens of thousands of lanes are
+ordinary and [a million](/benchmarks/cardinality-1m) has been served at 200,000 messages a
+second; a partition per message is not. A dotted queue name fills the `namespace` and `task`
+labels a [discovery pop](/reference/http/pop) matches on.
+
+## Producing and deduplication
+
+Producing is one route, `POST /api/v1/push`, taking a list of items. Every item names its own
+queue and partition, so one request can write to several of both.
+
+<Render file="snippets/js-push-dedup" />
+
+Deduplication is on by default with a window of 3600 seconds, and it is exact, not
+probabilistic: the probe runs inside PostgreSQL under the row lock that allocates offsets, so a
+duplicate writes nothing. It is scoped to one partition, `dedupWindowSeconds: 0` turns it off,
+and the key only works if you derive it from the work: an upstream event id, a primary key plus
+a version. A fresh UUID per attempt deduplicates nothing.
+
+The response is `201` with one verdict per item, and `201` does not mean stored: `queued` is
+committed, `duplicate` wrote nothing and returns the original id, `buffered` means PostgreSQL
+was unreachable and the item waits on the broker's disk spool, `failed` means neither. Read
+every item's `status`.
+
+## Consuming, groups and subscription modes
+
+Consuming is a `GET` that claims a batch under a lease. No subscribe call, no broker-assigned
+partitions, no membership protocol, so a restarting worker stalls nobody.
+
+<Render file="snippets/js-consume" />
+
+A consumer group is a name with one cursor per partition, so two groups read the same messages
+at their own pace. Omitting the group puts you in the implicit `__QUEUE_MODE__`, the
+competing-consumers shape: one message, one consumer, and the backlog is never skipped.
+
+Where a named group starts is decided on its first contact with the queue and stored: `new`, the
+default, skips the backlog; `all` delivers everything retained. Passing the mode later changes
+nothing; moving a group that has read is seek's job.
+
+`wait=true` parks the pop instead of returning empty; a push wakes it in milliseconds. An empty
+pop answers `204` with no body, so never parse it. Batches, timeouts and delayed visibility are
+in [defaults](/reference/defaults) and [queue options](/reference/queue-options).
+
+One rule shapes every deployment: one leased batch per (partition, group). Parallelism inside a
+group is bounded by partitions, not workers: twenty workers on a single-partition queue is one
+worker's throughput and nineteen idle pollers. Add lanes, not workers.
+
+## Acknowledgement is an offset commit
+
+Consumption state is one number per (partition, group): `committed`, the last offset that group
+acknowledged; the next message it wants is `committed + 1`. Nothing per message exists anywhere,
+so acking message N states that everything up to N is done, mentioned or not.
+
+Acks are addressed by `transactionId` plus `partitionId`, and always answer `200`: the per-item
+`success` is the result, not the status line.
+
+```json
+[
+  { "transactionId": "m1", "status": "completed" },
+  { "transactionId": "m2", "status": "failed" },
+  { "transactionId": "m3", "status": "completed" }
+]
+```
+
+That call commits past `m1` only. The lowest explicit `failed`, `retry` or `dlq` clamps the
+cursor below itself and a completed ack above it does not survive; offsets you never mention are
+completed silently. A duplicate delivery is recoverable, a swallowed failure is not.
+
+Acking implicitly is two things. The SDK consume loops ack after your handler returns and nack
+when it throws, still a leased at-least-once pop; the server-side `autoAck=true` commits the
+cursor in the transaction that reads the messages, which is at-most-once.
+
+## Leases, retries and the dead-letter queue
+
+A leased pop removes nothing. It writes a holder, an expiry and the last delivered offset onto
+the (partition, group) row; until an ack releases the claim or it expires, no other consumer in
+the group takes that partition.
+
+```http
+POST /api/v1/ack                     # completed, retry, failed or dlq
+POST /api/v1/lease/:leaseId/extend
+GET  /api/v1/dlq
+```
+
+Lease time comes from `leaseSeconds` on the pop, then the queue's `leaseTime`, then 60 seconds.
+Nothing sweeps: the next pop finds the dead lease and redelivers the whole un-acked span from
+`committed + 1`, messages your handler finished but never acked included. Expiry charges no
+retry budget, so a crash-looping consumer redelivers forever without ever dead-lettering.
+
+The budget is one counter per (partition, group) against `retryLimit`, default 3: a `failed` ack
+spends one and redelivers, `retry` redelivers without spending, `dlq` files the message at once.
+When it runs out the head message is copied into a real dead-letter table with its payload and
+the reason, or dropped if you turned dead-lettering off.
+
+Dead-letter rows survive retention and leave one address at a time, by delete or by replay under
+a fresh transaction id, so an unattended one grows without bound
+([messages and DLQ](/reference/http/messages-dlq)).
+
+## Transactions
+
+`POST /api/v1/transaction` bundles pushes and acks into one PostgreSQL transaction: everything
+in the call commits together or nothing does. It exists for the pipeline handoff, an ack of the
+input and a push of the output that cannot come apart.
+
+<Render file="snippets/js-transaction" />
+
+There is no window in which the output exists without the input being consumed, or the reverse,
+and no ordering of two calls buys that. Any failure in the call, a duplicate push included,
+rolls back every operation and the input redelivers; the route answers `200` even then, so read
+`success` in the body.
+
+Atomicity covers the broker's state, not the network: a blind retry after a lost response
+duplicates the pushes unless their transaction ids are deterministic and the deduplication
+window covers your retry horizon.
+
+## Replay
+
+Consuming does not remove a message, so replay is arithmetic on a cursor. Seek moves one
+group's cursor, per queue or per partition, backwards or forwards, to a timestamp or to the
+end.
+
+<Render file="snippets/js-seek" />
+
+A seek releases any live lease, abandoning an in-flight batch instead of acking it, and resets
+the retry budget. It touches exactly one group: everyone else keeps their position.
+
+A timestamp lands on a segment boundary rather than an exact message, so you also get messages
+committed slightly before the instant you asked for: seek a little early and filter in the
+handler. Retention is the floor, and deleted data cannot be replayed by any means.
+
+## Retention
+
+A queue has no retention until you configure it. Consuming does not delete and by default
+nothing else does either: the retained log is the replay window, so an unattended queue grows
+until you decide otherwise.
+
+```json
+{
+  "queue": "orders",
+  "options": {
+    "retentionEnabled": true,
+    "retentionSeconds": 604800,
+    "completedRetentionSeconds": 3600,
+    "maxWaitTimeSeconds": 0,
+    "dedupWindowSeconds": 3600,
+    "leaseTime": 300,
+    "retryLimit": 3
+  }
+}
+```
+
+`retentionSeconds` deletes on age alone, consumed or not, so a consumer down longer than the
+window comes back to a shorter log. `completedRetentionSeconds` never passes the slowest group's
+cursor, so one abandoned group holds data for every other. Deletion is whole-segment: a window
+is a floor on what is kept, not a ceiling on what is deleted.
+
+One option deletes data out from under a running worker: `maxWaitTimeSeconds` drops segments on
+age alone, leased or not. Use it where staleness makes a message worthless, never as a backstop
+for slow consumers.
+
+`POST /api/v1/configure` is a full replace: every omitted key returns to its default, the
+deduplication window included. Send the whole set ([option table](/reference/queue-options)).
+
+## Delivery guarantees
+
+Delivery on a leased pop is at-least-once: the cursor moves only on ack, so nothing is lost and
+some things arrive twice, on lease expiry, on any nack, after a broker restart, and on a
+dead-letter replay. Ordering is total per partition in commit order and nothing more: no global
+order, no priority. Durability is PostgreSQL's, which is why `buffered` deserves an alert. Make
+handlers idempotent on `transactionId` and the duplicates stop mattering.
+
+Two failures change the code you write. A `429` is backpressure and carries `Retry-After` in
+seconds: the SDKs honour it and retry in place, unbounded on a long-poll pop and bounded
+elsewhere, while 5xx and network failures get `retryAttempts` tries with backoff and any other
+4xx stops the loop. A `403` or a `413` is terminal: fix the credential or reshape the request
+([errors](/reference/errors)).
+
+One lane per entity, one cursor per group, one integer of state for each pair. The rest is
+arithmetic.

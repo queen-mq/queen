@@ -1,0 +1,40 @@
+---
+title: Replay
+description: "Reading history again: a new group backfilled from the beginning, and an existing group rewound with a seek."
+type: tutorial
+tier: use
+sidebar:
+  order: 4
+verifiedBy:
+  - examples/tutorials/rust/src/bin/04_replay.rs
+---
+
+Acknowledging a message does not delete it. Consumption is a cursor per consumer group, and the
+messages stay until retention removes them, so history is still there to be read.
+
+Two different operations use that. A **new group** can start at the beginning instead of the tail,
+which is how you backfill a consumer that did not exist when the events happened. An **existing
+group** can be moved back to a timestamp, which is how you reprocess after a bug.
+
+The two are not interchangeable. `subscription_mode` seeds a cursor when the group is created and
+never applies again, so it cannot rewind a group that already exists: that is why the helper below
+takes it as an `Option` and passes `None` for the replay, where the group is already there.
+
+The rewind itself is `queen.admin().seek_consumer_group`, with the destination as an ISO-8601
+timestamp on a `SeekRequest`. A seek releases any live lease, so an in-flight batch is abandoned
+rather than acknowledged, and it moves one group: the other one in the program stays where it was.
+
+<Render file="snippets/tut-rust-replay" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/rust`:
+
+```bash
+QUEEN_URL=http://localhost:6632 cargo run --bin 04_replay
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh rust`.
+
+Next: [Streaming](/use/rust-client/streaming).

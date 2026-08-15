@@ -187,7 +187,7 @@ a valid UUID.
 
 The broker's push path stores no trace id, so it is dropped and the message pops back
 with `traceId: null`. Push inside a transaction when a trace id has to survive. See
-[Pick your SDK](/use/clients#verified-against-the-source).
+[Pick your SDK](/use/).
 
 <Render file="snippets/py-push" />
 
@@ -218,7 +218,7 @@ anything.
 <Aside type="danger">
 `auto_ack` on `pop()` is the broker's at-most-once parameter; on `consume()` it is never sent
 and means client-side ack/nack around the handler. See
-[`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs).
+[`autoAck`, and what it costs](/use/model/).
 </Aside>
 
 #### `pop()`
@@ -319,7 +319,7 @@ await (client.transaction()
 ```
 
 A transaction is atomic, not exactly-once end to end; see
-[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
+[the limit](/use/model/).
 
 ## `Admin`
 
@@ -442,7 +442,7 @@ module logger in `queen.utils.logger`.
 HTTP failures raise `httpx` exceptions; the client attaches the parsed body's `code` to the
 exception when present, with the proxy's stable values listed under
 [Behind the proxy](/reference/errors#behind-the-proxy). A `204` response yields `None`:
-[a 204 carries no body at all](/use/errors#the-envelope).
+[a 204 carries no body at all](/reference/errors/).
 
 ## Same surface, other languages
 

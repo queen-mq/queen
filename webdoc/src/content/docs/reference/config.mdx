@@ -112,7 +112,7 @@ practice a deployment sets variables from these groups only.
 | Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY` |
 | Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS` |
 | Let a privileged role own the DDL | `QUEEN_APPLY_SCHEMA` |
-| Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER`. See [Self-hosting](/selfhost) |
+| Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER`. See [Self-hosting](/deploy/) |
 
 Two conventions in that list are worth stating explicitly.
 
@@ -155,7 +155,7 @@ makes a peer list readable in the `config: sync` boot block.
     description="What the metrics endpoint exposes, and why it is not a per-tenant surface."
   />
   <LinkCard
-    href="/selfhost"
+    href="/deploy/"
     title="Self-hosting"
     description="Deploying the broker, securing it, and running it multi-tenant."
   />

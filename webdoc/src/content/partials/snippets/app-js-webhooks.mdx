@@ -1,0 +1,190 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/js/webhooks.mjs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/js/webhooks.mjs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```js title="examples/apps/js/webhooks.mjs"
+//
+// A webhook delivery system.
+//
+// Every SaaS product ends up writing this one, and it is harder than it looks:
+// deliveries to one customer's endpoint must arrive in order, a customer whose
+// endpoint is down must not slow down anybody else's, failures must be retried
+// a bounded number of times, and what never succeeds has to end up somewhere a
+// human can look at.
+//
+// The shape here is one ordered lane per destination, created by the first
+// delivery to it. A dead endpoint backs up its own lane and no other; retries
+// are the broker's retry budget rather than a loop in your code; and what
+// exhausts the budget lands in the dead-letter queue with the error attached.
+//
+//   webhook-deliveries (one partition per destination)
+//     └── group "sender"  posts each delivery, fails on a dead endpoint
+//           └── retryLimit exhausted -> dead-letter queue
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 node webhooks.mjs
+
+import { Queen } from 'queen-mq'
+
+const QUEEN_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+const RUN = Date.now().toString(36)
+const DELIVERIES = `app-js-webhooks-${RUN}`
+const GROUP = 'sender'
+
+// Three subscribers. One of them has let its certificate expire, which is the
+// most common way a webhook endpoint dies: it answers, but it answers 500.
+const ENDPOINTS = {
+  'acme.example': { healthy: true },
+  'globex.example': { healthy: true },
+  'initech.example': { healthy: false },
+}
+const EVENTS_PER_ENDPOINT = 3
+const RETRY_LIMIT = 2
+
+let checks = 0
+const assert = (condition, description) => {
+  if (!condition) throw new Error(description)
+  checks++
+  console.log(`  ok: ${description}`)
+}
+
+// Stands in for the HTTP POST to the subscriber. A real sender would use fetch
+// and treat any non-2xx as a failure, which is exactly what throwing does here.
+const postToEndpoint = async (endpoint, event) => {
+  if (!ENDPOINTS[endpoint].healthy) {
+    throw new Error(`${endpoint} answered 500`)
+  }
+  return { status: 200 }
+}
+
+const queen = new Queen({ url: QUEEN_URL, handleSignals: false })
+
+try {
+  console.log(`broker ${QUEEN_URL}`)
+
+  // retryLimit is the delivery budget, and dlqAfterMaxRetries is what happens
+  // when it runs out. Without the second flag an exhausted message is simply
+  // marked failed and stays put; with it, the broker moves it to the
+  // dead-letter table with the last error on the row.
+  //
+  // leaseTime is the other half of the contract: it is how long the broker
+  // waits for a sender that took a delivery and never came back before handing
+  // that delivery to someone else.
+  await queen.queue(DELIVERIES).config({
+    leaseTime: 30,
+    retryLimit: RETRY_LIMIT,
+    dlqAfterMaxRetries: true,
+  }).create()
+
+  // ------------------------------------------------------------------ queuing
+  //
+  // The application emits events. Each one goes into the partition of the
+  // endpoint it is destined for, which is what makes "in order per subscriber"
+  // a property of the storage rather than of the sender.
+  console.log('\nqueuing deliveries')
+  for (let seq = 1; seq <= EVENTS_PER_ENDPOINT; seq++) {
+    for (const endpoint of Object.keys(ENDPOINTS)) {
+      await queen.queue(DELIVERIES).partition(endpoint).push({
+        // The event id makes the enqueue idempotent: an application that
+        // retries its own emit does not create a second delivery.
+        transactionId: `${endpoint}-evt-${seq}`,
+        data: { endpoint, seq, type: 'invoice.paid', invoiceId: `INV-${seq}` },
+      })
+    }
+  }
+  console.log(`  ${EVENTS_PER_ENDPOINT * Object.keys(ENDPOINTS).length} deliveries queued`)
+
+  // ------------------------------------------------------------------ sending
+  //
+  // The sender pool. autoAck is on, so a handler that returns acknowledges the
+  // delivery and a handler that throws nacks it: the broker then redelivers it
+  // until the retry budget is gone. That is the whole retry mechanism, and it
+  // survives the sender process dying mid-flight, which a loop inside the
+  // handler would not.
+  console.log('\nsending')
+  const deliveredTo = new Map()
+  const attempts = new Map()
+
+  await queen
+    .queue(DELIVERIES)
+    .group(GROUP)
+    .subscriptionMode('all')
+    .concurrency(3)
+    .each()
+    // Enough turns for every good delivery plus every attempt at the bad ones.
+    .limit(EVENTS_PER_ENDPOINT * 2 + EVENTS_PER_ENDPOINT * (RETRY_LIMIT + 1))
+    .idleMillis(6000)
+    .consume(async (msg) => {
+      const { endpoint, seq } = msg.data
+      attempts.set(endpoint, (attempts.get(endpoint) ?? 0) + 1)
+
+      // There is no attempt counter to read here: the broker's pop response
+      // carries none, so the message does not either. The budget is the
+      // broker's, and throwing is how one attempt of it is spent. A sender that
+      // recognises a permanent error can skip the attempts it has left by
+      // dead-lettering the message itself: autoAck(false), then
+      // `await queen.ack(msg, 'dlq', { group: GROUP, error: reason })`, which
+      // writes the same dead-letter row the checks below read.
+      await postToEndpoint(endpoint, msg.data)
+
+      const seen = deliveredTo.get(endpoint) ?? []
+      seen.push(seq)
+      deliveredTo.set(endpoint, seen)
+      console.log(`  ${endpoint} <- event ${seq}`)
+    })
+
+  // ------------------------------------------------------------------ checking
+  console.log('\nchecking')
+
+  for (const [endpoint, meta] of Object.entries(ENDPOINTS)) {
+    if (!meta.healthy) continue
+    const seqs = deliveredTo.get(endpoint) ?? []
+    assert(seqs.length === EVENTS_PER_ENDPOINT, `${endpoint} received all ${EVENTS_PER_ENDPOINT} events`)
+    assert(
+      JSON.stringify(seqs) === JSON.stringify([1, 2, 3]),
+      `${endpoint} received them in the order they happened`
+    )
+  }
+
+  assert(
+    (deliveredTo.get('initech.example') ?? []).length === 0,
+    'the dead endpoint received nothing, as it should'
+  )
+  assert(
+    attempts.get('initech.example') > EVENTS_PER_ENDPOINT,
+    'the dead endpoint was retried rather than dropped on the first failure'
+  )
+
+  // The dead-letter queue is a table you can read, not a log line. Each row
+  // carries the payload, the endpoint it was for, and the last error, which is
+  // what a support engineer needs to answer "why did this customer not get it".
+  const dlq = await queen.queue(DELIVERIES).dlq().limit(50).get()
+  const dead = dlq.messages.filter(m => m.data.endpoint === 'initech.example')
+
+  assert(dead.length === EVENTS_PER_ENDPOINT, `all ${EVENTS_PER_ENDPOINT} dead deliveries are in the dead-letter queue`)
+  assert(
+    dead.every(m => (m.errorMessage ?? '').includes('answered 500')),
+    'each dead-letter row carries the error that killed it'
+  )
+  assert(
+    dlq.messages.every(m => m.data.endpoint === 'initech.example'),
+    'no healthy endpoint put anything in the dead-letter queue'
+  )
+
+  console.log(`\n  dead letters: ${dead.map(m => `${m.data.endpoint}/${m.data.invoiceId}`).join(', ')}`)
+
+  await queen.queue(DELIVERIES).delete()
+  console.log(`\nPASS: ${checks} checks`)
+} catch (err) {
+  console.error(`\nFAIL: ${err.message}`)
+  process.exitCode = 1
+} finally {
+  await queen.close()
+}
+```

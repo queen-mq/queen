@@ -1,0 +1,24 @@
+[package]
+name = "queen-apps"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The client comes from this repository, not from crates.io, so the applications
+# always exercise the code in the tree they ship with.
+[dependencies]
+queen-mq = { path = "../../../clients/client-rust" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+serde_json = "1"
+
+[[bin]]
+name = "chat"
+path = "src/bin/chat.rs"
+
+[[bin]]
+name = "webhooks"
+path = "src/bin/webhooks.rs"
+
+[[bin]]
+name = "rate_limiter"
+path = "src/bin/rate_limiter.rs"

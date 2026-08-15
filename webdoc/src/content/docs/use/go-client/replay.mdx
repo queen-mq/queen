@@ -1,0 +1,41 @@
+---
+title: Replay
+description: "Reading history again: a new group backfilled from the beginning, and an existing group rewound."
+type: tutorial
+tier: use
+sidebar:
+  order: 4
+verifiedBy:
+  - examples/tutorials/go/replay/main.go
+---
+
+Acknowledging a message does not delete it. Consumption is a cursor per consumer group, and the
+messages stay until retention removes them, so history is still there to be read.
+
+Two different operations use that. A **new group** can start at the beginning instead of the tail,
+which is how you backfill a consumer that did not exist when the events happened. An **existing
+group** can be moved back to a timestamp with a seek, which is how you reprocess after a bug.
+
+The distinction matters: the subscription mode applies once, when the cursor is created, and never
+again, so it cannot rewind a group that already exists. A seek can, and it releases any live lease,
+so an in-flight batch is abandoned rather than acknowledged.
+
+The seek lives on the admin surface, as
+`client.Admin().SeekConsumerGroup(ctx, group, queue, options)`, and takes exactly one of an RFC3339
+timestamp or `ToEnd`. There is no flag for the beginning of a queue: an early enough timestamp is
+how you say it.
+
+<Render file="snippets/tut-go-replay" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/go`:
+
+```bash
+GOWORK=off go run ./replay
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh go`.
+
+Next: [Streaming](/use/go-client/streaming).

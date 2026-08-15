@@ -1,0 +1,43 @@
+---
+title: Hello world
+description: "One message in, one message out, against a broker you started five minutes ago."
+type: tutorial
+tier: use
+sidebar:
+  order: 1
+verifiedBy:
+  - examples/tutorials/py/01_hello_world.py
+---
+
+Nothing is created before it is used. The queue in the program below comes into existence with
+the push that names it, inside the same transaction that stores the message, so there is no
+declare step and nothing to provision.
+
+Reading the code takes one habit of this client: the builders are synchronous and the terminal
+call is a coroutine, so `queen.queue(name).push(...)` builds a request and the `await` sends it.
+What comes back is plain dicts under the broker's own key names, so `msg["data"]` is your payload.
+
+The read takes the message under a **lease**: it is claimed until it is acknowledged or the lease
+expires, and the acknowledgement is what commits consumption. A refused ack comes back as a dict
+with `success: False` rather than as an exception, so the program reads that flag instead of
+trusting that nothing raised.
+
+No consumer group is named here, so the read goes through the queue's own cursor, which starts at
+the beginning. Named groups are [the next tutorial](/use/python-client/multi-queue-flow): a group
+created after a message was pushed starts at the tail and would find nothing.
+
+<Render file="snippets/tut-py-hello-world" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from the root of the repository, with
+the in-tree client on `PYTHONPATH`:
+
+```bash
+PYTHONPATH=clients/client-py python3 examples/tutorials/py/01_hello_world.py
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh py`.
+
+Next: [Multi-queue flow](/use/python-client/multi-queue-flow).

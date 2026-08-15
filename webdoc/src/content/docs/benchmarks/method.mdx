@@ -1,0 +1,173 @@
+---
+title: Method and archive
+description: "The loader that produced every figure in this section, the rig it runs on, and the pre-1.0 sessions that are traceable but not quotable."
+type: reference
+sidebar:
+  order: 7
+sourceOfTruth:
+  - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
+  - benchmark-queen/2026-07-29-vm-campaign/goload/build.sh
+  - benchmark-queen/2026-07-29-vm-campaign/runpt.sh
+  - benchmark-queen/2026-07-29-vm-campaign/reset-cell-db.sh
+  - benchmark-queen/2026-07-23-openloop/RESULTS.md
+  - benchmark-queen/vm-cell.sh
+  - benchmark-queen/README.md
+  - benchmark-queen/2026-06-06-engine-scaling/README.md
+  - benchmark-queen/2026-07-17-storagev2-soak/README.md
+  - benchmark-queen/2026-07-25-chaos-partial/NOTE.md
+---
+
+One Go program and a handful of shell scripts produced every figure in this section, and all of
+them are in the repository.
+
+## The loader
+
+`benchmark-queen/2026-07-29-vm-campaign/goload/` is a load generator built on the official Go
+client, which matters: it exercises the same SDK a user would, not a bespoke HTTP path.
+
+```bash
+benchmark-queen/2026-07-29-vm-campaign/goload/build.sh
+```
+
+`build.sh linux` cross-compiles a static binary for a bench VM. The script exports `GOWORK=off`
+because the module lives inside the repository tree, so the repository's own `go.work` claims the
+directory and `go build` refuses. With the workspace off, the module's `replace` directive resolves
+the in-tree `client-go`, so the loader is built against exactly the client being measured.
+
+Select a mode with `-mode`; each has its own flag set, and `goload -mode <name> -h` prints it.
+
+| Mode | Shape | Used for |
+| --- | --- | --- |
+| `openloop` | Paced open-loop producers against one queue; closed-loop drainers as consumers | [Throughput 24h 1M](/benchmarks/soak-24h) |
+| `cm` | Four-stage pipeline over N entities with per-entity work sleeps and a built-in order verifier | [Ordered pipeline](/benchmarks/ordered-pipeline) |
+| `cloud` | Multi-tenant: every simulated tenant is a real tenant with its own cluster, API key and Host, with per-message delivery accounting | [Multi-tenant cell](/benchmarks/multitenant-cell) |
+| `provision` | Creates N real tenants through the proxy's bootstrap function and caches their API keys | prerequisite for `cloud` against the proxy |
+| `max` | Pure in-and-out throughput with server-side auto-ack | quick "max pipe" checks |
+| `app` | Closed-loop target rate with simulated processing, fan-out groups, skewed partitions, failure into retry and dead-letter | application-shaped exploration |
+
+Three properties of `openloop` and `cloud` are what make their numbers interpretable.
+
+- **The pacer never blocks.** A request arriving at the `-max-inflight` cap has its messages shed,
+  counted as offered and never sent, so a run with a non-zero shed count did not offer what it
+  claims.
+- **Latency is coordinated-omission-corrected**, measured from each request's scheduled instant.
+- **Producers do not retry.** A failed push is counted and dropped, because retrying would
+  double-offer and corrupt the offered-rate accounting.
+
+<Aside type="caution">
+The loader in the tree is the 2026-07-29 build, and its defaults are not the ones the earlier
+sessions ran with. `-mode cm` now defaults `-final-targeted` and `-intermediate-targeted` to true,
+using static partition ownership instead of the wildcard pops the archived
+[ordered pipeline](/benchmarks/ordered-pipeline) run used throughout, because the wildcard candidate
+scan was later measured at about 12 ms per pop at 1 000 partitions. Pass
+`-final-targeted=false -intermediate-targeted=false` to reproduce its shape, and read a run's
+printed header rather than assuming today's defaults.
+</Aside>
+
+## The rig
+
+One machine for the broker and PostgreSQL, a separate machine for the loader. The separation is not
+optional: at 32 cores `goload` itself was once the ceiling, pinned at 93% CPU with 4% host idle, and
+a 48-core loader is what turned a p99 of about 2 s into 358 ms.
+
+The soak's shape is explicit asynchronous acks, push batch 100, 200 partitions, 600 consumers, run
+**from three loader hosts, not one**, at 333,334 and 333,333 and 333,333 messages per second with
+200 consumers each.
+
+```bash
+./goload -mode openloop -url http://BROKER:6632 -rate 333334 -push-batch 100 -partitions 200 -consumers 200 -pop-batch 1000 -manual-ack -ack-async -ack-inflight 256 -max-inflight 20000 -idle-conns 8192 -payload 256 -duration 86400 -report 30
+```
+
+The cardinality shape is the same loader given a partition space far larger than its active set,
+which it creates as it goes. It needs `RETENTION_PARALLELISM` at 16 and a `QUEEN_DEDUP_CACHE_MB`
+sized to the host ([configuration](/reference/config)), and fails loudly without them.
+
+```bash
+./goload -mode openloop -url http://BROKER:6632 -rate 200000 -push-batch 100 -partitions 1000000 -consumers 300 -manual-ack -ack-async -ack-inflight 256 -max-inflight 20000 -payload 256 -report 30
+```
+
+Sample both hosts at 1 Hz alongside the run: broker and PostgreSQL CPU and memory,
+`pg_stat_database` commit deltas, WAL records and fsyncs, database size, active backends and the top
+wait event, and the loader's own CPU on the other side.
+
+For the capped-cell shape, `benchmark-queen/vm-cell.sh` puts the proxy's state database, the cell's
+PostgreSQL, the broker and the proxy under **one systemd slice**, so `vm-cell.sh up --cell-cpus 2
+--cell-mem 8` is a free-tier shape and `--cell-cpus 0` is the full-machine ceiling. Two companions
+are worth copying rather than reinventing: `reset-cell-db.sh`, so every measured point starts from
+cold in-memory state, and `runpt.sh`, which wraps one point with per-cgroup CPU for each component
+and for the load generator, `xact_commit` deltas and `pg_stat_activity` wait events. Its samplers
+reach PostgreSQL with `psql` over the bridge, never `docker exec`, which would bill the sampler's
+own CPU to the cell.
+
+Four knobs move the result more than the rest.
+
+- **Delivery semantics**: server-side auto-ack against leased pop with an explicit ack.
+- **Push batch size**, which amortises the per-transaction cost across the batch.
+- **`-idle-conns` at or above the concurrent worker count**: worth about +9.7% throughput and
+  +18.5% messages per commit in a controlled A/B, and `TIME_WAIT` sockets from 26,000 to zero.
+- **The PostgreSQL memory budget**: `shared_buffers` 16 GB, `work_mem` 12 MB and
+  `maintenance_work_mem` 512 MB on a 62 GiB host, sized together with the broker's deduplication
+  cache cap, because getting it wrong produced three out-of-memory failures at a million messages
+  per second, all at about t=580 s and all invisible to 300-second runs.
+
+Autovacuum on the log engine's two fixed-population tables matters as much, and its settings are on
+[Storage model](/internals/storage-model).
+
+## The archive
+
+<Aside type="danger">
+Nothing below is comparable to 1.0, and nothing on it may be quoted for 1.0. Two entire
+implementations were replaced: the C++ broker (uWebSockets, libuv, libqueen, the `queen.messages`
+row store) and, after it, the segments storage engine (`queen.seg_*`). The broker in 1.0 shares no
+code with the first and no schema with the second.
+</Aside>
+
+These sessions ran a C++ broker binary, `server/bin/queen-server`, tuned with `NUM_WORKERS` and
+`SIDECAR_POOL_SIZE`, storing messages as rows in `queen.messages`. None of that exists in the tree.
+
+| Directory | What it was |
+| --- | --- |
+| `2026-04-25/` | A 14-hour production-load run on a single host, image `0.14.0.alpha.3` |
+| `2026-04-26/` | The largest of the old campaigns: 18 short benchmarks across partition count, batch size, queue count and consumer group count, a version comparison of `0.14.0.alpha.3` against `0.12.19`, and two four-stage pipeline reports. Includes its own `HOW-TO-RUN.md` |
+| `2026-06-04/` | A throughput campaign with sustained-soak findings and a metrics and observability remediation plan |
+| `2026-06-06-engine-scaling/` | Whether one libqueen push and ack engine was enough, or the libuv event loop saturated before PostgreSQL did. The question is meaningless in 1.0: no libqueen, no event-loop engine count |
+| `2026-06-07/` | A 24-hour soak on the C++ 0.16 architecture, compared against the April results. **The session behind the figures the repository `README.md` carried before 1.0** |
+| `simd-vs-0155/` | SIMD JSON parsing against release 0.15.5, a C++ hot-path change |
+| `json-uuid-profile/` | JSON and UUID handling profiles on the C++ broker |
+| `fusion-hysteresis/` | A sweep harness for the C++ fusion and hysteresis behaviour, with a Node pacer |
+| `pgmq/` | A comparison against another PostgreSQL-backed queue, measured on the C++ broker. **Not quotable in any form**; the shipping build's figures are on [Cross-broker comparison](/benchmarks/comparison) |
+| `test-perf/` | A scenario-based harness starting `./server/bin/queen-server` under CPU and memory caps. The binary and both variables are gone |
+
+These two ran on a newer broker but against `queen.seg_*`, the segments engine that preceded the log
+engine. The log engine is a greenfield replacement with no data migration and no `seg_*` object
+anywhere in it, so these numbers describe a schema the product no longer has.
+
+| Directory | What it was |
+| --- | --- |
+| `2026-07-17-storagev2-soak/` | A hot-path spike and segments soak, with the C++ broker built from the `storage-v2-slice` branch. Carries the retired `023_storage_v2.sql` and `024_storage_v2_pop_ext.sql` alongside its outputs |
+| `2026-07-22-local-decay/` | A local investigation into what prevented the segments broker from saturating PostgreSQL, plus deduplication and retention behaviour under decay |
+
+The storage-engine ratios that circulated internally from the segment-engine spike, **6.2x storage,
+5.2x consume and 16x retention**, have no artifact in this tree to check them against, and they
+compared two engines of which one is retired and the other was itself replaced.
+
+These ran on the Rust broker with the log engine, so they are recent. They are still excluded, for
+reasons that have nothing to do with the implementation.
+
+| Directory | Why it is not quoted |
+| --- | --- |
+| `2026-07-22-vm-ab/` | An A/B between the retired segments engine and the log engine. One arm is retired software, and the session's own record notes hypervisor CPU steal swinging single runs by about ±22%, larger than the effect being measured |
+| `2026-07-23-openloop/` | The session that produced this project's best headline number. Its stdout was not archived, so the configuration cannot be checked against the result, and its own configuration line records deduplication off |
+| `2026-07-24-freetier-vm/` | A free-tier capacity study measuring broker and PostgreSQL only, with no proxy in the path and no tenancy enforcement. Superseded by [the cell runs](/benchmarks/multitenant-cell), which cap the whole cell |
+| `2026-07-24-tenants/` | A sizing study of many small tenants, useful for capacity planning and not a throughput or correctness result. It also predates tenancy enforcement |
+| `2026-07-25-chaos-partial/` | Explicitly incomplete. The chaos controller died after its first PostgreSQL stop and did not restart it, so PostgreSQL was down for about two hours unintentionally, and logs from the earlier clean cycle were deleted during restart attempts |
+
+An old figure probably came from one of four places.
+
+- The repository `README.md` up to `7d4f966^`, which embedded a 0.16-era soak chart
+  (`benchmark-queen/2026-06-07/soak-24h-overview.png`) and quoted 0.16-era throughput.
+- `benchmark-queen/README.md`, a pre-1.0 index still in the tree that summarises only the April
+  sessions.
+- The retired documentation site, removed in `7d4f966` on 2026-07-30 and readable at `7d4f966^`,
+  whose benchmark pages are all pre-1.0.
+- Any comparison with another broker published before 1.0, all measured on the C++ implementation.

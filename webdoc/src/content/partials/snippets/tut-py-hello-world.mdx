@@ -1,0 +1,136 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/py/01_hello_world.py."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/py/01_hello_world.py by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```python title="examples/tutorials/py/01_hello_world.py"
+#
+# Tutorial 1 of 5: hello world.
+#
+# One message in, one message out. Nothing is created in advance: the queue and
+# the partition come into existence with the push that names them.
+#
+# Run it:
+#   QUEEN_URL=http://localhost:6632 python3 01_hello_world.py
+#
+# The program checks its own outcome and exits non-zero if a check fails.
+
+import asyncio
+import os
+import sys
+import time
+
+from queen import Queen
+
+QUEEN_URL = os.environ.get("QUEEN_URL", "http://localhost:6632")
+
+# The name is prefixed per language and suffixed per run, so every tutorial in
+# every language can share one broker and no run inherits state from another.
+QUEUE = f"tut-py-hello-{int(time.time() * 1000):x}"
+
+CHECKS = 0
+
+
+def check(condition: bool, description: str) -> None:
+    """Record one verified fact, or abort the run.
+
+    This raises instead of using the `assert` statement, because `python3 -O`
+    removes `assert` and the checks are the whole point of the program.
+    """
+    global CHECKS
+    if not condition:
+        raise AssertionError(description)
+    CHECKS += 1
+    print(f"  ok: {description}")
+
+
+async def main() -> int:
+    # The whole client is async: every call below is awaited, and this is the
+    # one event loop they all run on. Unlike the JavaScript client there is no
+    # handleSignals switch, so SIGINT and SIGTERM are always handled for you;
+    # the orderly shutdown of a run that ends normally is close(), at the
+    # bottom.
+    queen = Queen(url=QUEEN_URL)
+    verdict, failed = "", False
+
+    try:
+        print(f"broker {QUEEN_URL}")
+
+        # A push names a queue and, optionally, a partition. Both are created by
+        # this call if they do not exist, inside the transaction that stores the
+        # message. There is no declare step and nothing to provision first.
+        #
+        # push() hands back a builder rather than a coroutine, and awaiting it
+        # is what sends the request. What comes back is the broker's own reply,
+        # one entry per item, with the broker's own key names.
+        results = await queen.queue(QUEUE).push({"data": {"greeting": "Hello World!"}})
+        pushed = results[0]
+
+        print(f"pushed {pushed['transaction_id']} -> {pushed['status']}")
+        check(pushed["status"] == "queued", "the broker stored the message")
+
+        # pop() takes messages under a lease: they are claimed until they are
+        # acknowledged or the lease expires. wait(True) turns on long polling, so
+        # the call parks until a message arrives instead of coming back empty.
+        #
+        # No consumer group is named here, so the read goes through the queue's
+        # own cursor, which starts at the beginning. Named groups are tutorial 2:
+        # a group created after a message was pushed starts at the tail and would
+        # see nothing here.
+        messages = await queen.queue(QUEUE).batch(1).wait(True).pop()
+
+        check(len(messages) == 1, "one message came back")
+
+        # A message is a plain dict, so the payload is message["data"] and the
+        # broker's own fields sit beside it under their wire names.
+        message = messages[0]
+        greeting = message["data"]["greeting"]
+        print(f'received "{greeting}" from partition {message["partition"]}')
+        check(greeting == "Hello World!", "the payload survived the round trip")
+
+        # No partition was named on the push, so the broker put the message in
+        # the queue's default lane.
+        check(message["partition"] == "Default", "it landed in the default partition")
+
+        # The acknowledgement is what commits consumption. It moves the cursor
+        # past the message and releases the lease. A rejected ack still arrives
+        # as HTTP 200 with success: false on the item, and ack() turns a refusal
+        # into a dict rather than an exception, so this flag is the only proof
+        # the broker took it.
+        ack = await queen.ack(message, True)
+        check(ack["success"] is True, "the acknowledgement was accepted")
+
+        # The cursor is now past the only message, so a further read finds
+        # nothing. wait(False) returns immediately instead of long polling.
+        leftovers = await queen.queue(QUEUE).wait(False).pop()
+        check(len(leftovers) == 0, "the queue is drained")
+
+        # Clean up on success only: a failed run leaves the queue on the broker
+        # to be looked at.
+        await queen.queue(QUEUE).delete()
+
+        verdict = f"\nPASS: {CHECKS} checks"
+    except Exception as err:
+        verdict, failed = f"\nFAIL: {err}", True
+    finally:
+        # close() flushes the client-side buffers and closes the HTTP pool. It
+        # narrates its own shutdown on stdout, which is why the verdict is
+        # printed after it rather than before: PASS or FAIL stays the last line
+        # of a run.
+        await queen.close()
+
+    # A failure goes to stderr, like the rest of the set. Flush stdout first so
+    # the verdict still lands last when the two are piped into one file.
+    sys.stdout.flush()
+    print(verdict, file=sys.stderr if failed else sys.stdout)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+```

@@ -1,0 +1,96 @@
+---
+title: Go Client
+description: "Install the Go client, construct it, and push, consume and acknowledge with context-first builders that stay inert until you execute them."
+type: quickstart
+tier: use
+sidebar:
+  order: 5
+sourceOfTruth:
+  - clients/client-go/queen.go
+  - clients/client-go/queue_builder.go
+  - clients/client-go/push_builder.go
+  - clients/client-go/consume_builder.go
+  - clients/client-go/defaults.go
+  - clients/client-go/go.mod
+verifiedBy:
+  - clients/client-go/tests/docs_test.go
+---
+
+The Go client takes a `context.Context` on every call and separates building from executing: a
+chain is inert until `Execute(ctx)`, `Pop(ctx)` or `Get(ctx)`. It needs Go 1.24, and its only
+direct dependencies are `github.com/google/uuid` and `github.com/jackc/pgx/v5`.
+
+```bash
+go get github.com/smartpricing/queen/clients/client-go
+```
+
+```go
+import queen "github.com/smartpricing/queen/clients/client-go"
+
+client, err := queen.New(queen.ClientConfig{
+    URLs:           []string{"http://broker-a:6632", "http://broker-b:6632"},
+    BearerToken:    os.Getenv("QUEEN_TOKEN"),
+    EnableFailover: true,
+})
+if err != nil {
+    return err
+}
+defer client.Close(context.Background())
+```
+
+`New` also accepts a plain URL string or a slice of them, and returns an error instead of
+panicking. Zero-valued fields fall back to `ClientDefaults`, with one exception: `EnableFailover`
+is `false` on a bare struct, so set it yourself whenever you pass more than one URL.
+
+## Push
+
+<Render file="snippets/go-push" />
+
+`Push` takes one payload, a `[]interface{}` or a `[]map[string]interface{}`, and `Execute` returns
+one `PushResponse` per item in request order, each carrying the broker's `status`. Chain
+`.TransactionID(id)` before `Execute` and a retry inside the dedup window writes nothing a second
+time.
+
+## Consume
+
+<Render file="snippets/go-consume" />
+
+`Limit(1)` is what ends that loop: without it `Execute` long-polls for the next message. A worker
+is the same chain with `Concurrency(4)` and no limit, and `ConsumeBatch` hands the handler the
+whole claimed batch instead of one message at a time.
+
+## Acknowledge
+
+`AutoAck` is on by default and is client-side: the worker acks `completed` when the handler
+returns `nil`, `failed` when it returns an error. An ack is an offset commit, so a nack clamps the
+cursor and every message after the failed one in the batch comes back, which is why `.Each()`
+abandons the rest of it.
+
+Turn `AutoAck` off and settle the batch yourself:
+
+```go
+responses, err := client.Ack(ctx, messages, true, queen.AckOptions{ConsumerGroup: "billing"})
+```
+
+`Ack` accepts `*Message`, `Message`, `[]*Message` or `[]Message`, and `success` maps to
+`completed` or `failed`. A rejected ack still arrives as HTTP 200: check `responses[i].Success`, a
+`nil` error is not enough.
+
+## What differs here
+
+- A bare `Pop(ctx)` does not long-poll: call `.Wait(true)`.
+- `RetryAttempts` counts retries after the first attempt, where the other SDKs count total tries.
+- `TransactionID` applies to the first pushed item only; the rest get fresh UUIDv7s.
+- `Message.Queue`, `RetryCount` and `ErrorMessage` stay zero after a pop, and are filled on a DLQ read.
+- No signal handlers are installed: pair `defer client.Close(ctx)` with your own `signal.NotifyContext`.
+
+Every client option, the full consume table, transactions, buffering, the dead-letter queue, the
+admin surface and the streaming SDK are in [the Go reference](/reference/sdk/go).
+
+## Tutorials
+
+Five programs that build on each other, each one asserting its own outcome against a live broker:
+one message end to end, a multi-queue flow, transactional handoff, replay, and a streaming
+aggregation.
+
+Start with [Hello world](/use/go-client/hello-world).

@@ -9,18 +9,22 @@ description: "Verified snippet extracted from clients/client-js/test-v2/docs.js.
 */}
 
 ```js title="clients/client-js/test-v2/docs.js"
-const [message] = await client
+await client
   .queue('orders')
   .group('invoicing')
   .subscriptionMode('all')
-  .batch(1)
-  .wait(true)
-  .pop()
-
-await client
-  .transaction()
-  .queue('invoices')
-  .push([{ data: { orderId: message.data.orderId, invoiced: true } }])
-  .ack(message, 'completed', { consumerGroup: 'invoicing' })
-  .commit()
+  .each()
+  .autoAck(false) // the acknowledgement belongs to the transaction, not to the loop
+  .limit(1)
+  .idleMillis(5000)
+  .consume(async (message) => {
+    // commit() throws when the broker rejects the bundle, so reaching the
+    // line after it means the ack and the push are both durable.
+    await client
+      .transaction()
+      .queue('invoices')
+      .push([{ data: { orderId: message.data.orderId, invoiced: true } }])
+      .ack(message, 'completed', { consumerGroup: 'invoicing' })
+      .commit()
+  })
 ```

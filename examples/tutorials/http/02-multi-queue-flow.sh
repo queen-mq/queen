@@ -1,0 +1,273 @@
+# docs:start(tut-http-multi-queue-flow)
+#!/usr/bin/env bash
+#
+# Tutorial 2 of 4: a multi-queue flow, over plain HTTP.
+#
+# One queue partitioned per customer, two consumer groups reading it
+# independently, and a second queue downstream. This is the shape most
+# applications end up with, and it shows the three things that make it work:
+# a partition keeps one entity's events in order, a consumer group is a cursor
+# so every group sees everything, and a queue is created by the push.
+#
+#   orders (partition = customer)
+#     ├── group "billing"    -> charges, and pushes to the shipping queue
+#     └── group "analytics"  -> counts, and pushes nothing
+#   shipping
+#     └── group "warehouse"  -> ships
+#
+# There is no consume loop on the wire. An SDK's consume() is a loop around the
+# pop route, and that is exactly what this script writes out by hand: pop a
+# leased batch, do the work, ack, come back for more.
+#
+# Run it:
+#   QUEEN_URL=http://localhost:6632 bash 02-multi-queue-flow.sh
+
+set -euo pipefail
+
+QUEEN_URL="${QUEEN_URL:-http://localhost:6632}"
+RUN="$(date +%s)-$$"
+ORDERS="tut-http-orders-$RUN"
+SHIPPING="tut-http-shipping-$RUN"
+
+# Every pop below long-polls for this many milliseconds. A 204 after that wait
+# means the lane is silent, which in a tutorial with a known message count is a
+# lost message: the run fails instead of looping forever.
+IDLE_MS=5000
+
+# orderId customer total
+INPUT='A-1 acme 120.5
+A-2 acme 12.0
+B-1 globex 88.75
+C-1 initech 310.0
+A-3 acme 9.99'
+ORDER_COUNT=5
+ORDER_SUM=541.24
+
+command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is not installed"; exit 1; }
+
+CHECKS=0
+TMP="$(mktemp -d)"
+
+cleanup() {
+  local status=$?
+  rm -rf "$TMP"
+  if [ "$status" -ne 0 ]; then
+    echo
+    echo "FAIL: ${FAILURE:-a command exited with status $status}"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+fail() { FAILURE="$*"; exit 1; }
+
+check() {
+  [ "$1" = "$2" ] || fail "$3 (expected [$2], got [$1])"
+  CHECKS=$((CHECKS + 1))
+  echo "  ok: $3"
+}
+
+# Sets $STATUS, writes the body to $TMP/body. See tutorial 1 for why there is no
+# --fail here: outcomes live in the body, not only in the status code.
+request() {
+  local method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    STATUS="$(curl -sS -o "$TMP/body" -w '%{http_code}' \
+      -X "$method" "$QUEEN_URL$path" \
+      -H 'content-type: application/json' -d "$body")"
+  else
+    STATUS="$(curl -sS -o "$TMP/body" -w '%{http_code}' -X "$method" "$QUEEN_URL$path")"
+  fi
+}
+
+# pop <route> <query>: claims one leased batch and leaves the response in
+# $TMP/pop, because the ack that follows is another request and would overwrite
+# $TMP/body. Returns 0 when messages came back, 1 on a 204.
+#
+# <route> is whatever follows /api/v1/pop/: "queue/orders" to let the broker
+# pick the partitions, "queue/orders/partition/acme" to claim one named lane.
+# The two routes take the same parameters and answer with the same shape.
+pop() {
+  request GET "/api/v1/pop/$1?$2&wait=true&timeout=$IDLE_MS"
+  if [ "$STATUS" = 204 ]; then return 1; fi
+  [ "$STATUS" = 200 ] || fail "pop on $1 returned HTTP $STATUS"
+  cp "$TMP/body" "$TMP/pop"
+  return 0
+}
+
+# ack_batch <consumer-group>: commits the batch sitting in $TMP/pop.
+#
+# An ack is a cursor commit, not a per-message delete, so acking the LAST
+# message of a batch implicitly completes every earlier unacked message in the
+# same partition for the same group. One call ends the batch. That is why the
+# SDKs can ack per message without paying per message: the cursor is the state.
+ack_batch() {
+  local ack_body
+  ack_body="$(jq -c --arg group "$1" '{
+    transactionId: .messages[-1].transactionId,
+    partitionId:   .messages[-1].partitionId,
+    consumerGroup: $group,
+    leaseId:       .leaseId,
+    status:        "completed"
+  }' "$TMP/pop")"
+  request POST /api/v1/ack "$ack_body"
+  [ "$STATUS" = 200 ] || fail "ack returned HTTP $STATUS"
+  [ "$(jq -r '.[0].success' "$TMP/body")" = true ] \
+    || fail "ack refused: $(jq -r '.[0].error' "$TMP/body")"
+}
+
+echo "broker $QUEEN_URL"
+
+# ---------------------------------------------------------------------------
+# Push each order into the partition named after its customer. Everything about
+# one customer stays in order; different customers never wait for each other.
+# The partition key is the only ordering decision you make.
+#
+# One call could carry all five items, and the items array is there for that.
+# They go one at a time here so the loop reads like the producer it stands for.
+# ---------------------------------------------------------------------------
+echo
+echo "pushing"
+while read -r id customer total; do
+  body="$(jq -n --arg queue "$ORDERS" --arg partition "$customer" \
+    --arg id "$id" --argjson total "$total" \
+    '{items: [{queue: $queue, partition: $partition,
+               payload: {orderId: $id, customer: $partition, total: $total}}]}')"
+  request POST /api/v1/push "$body"
+  [ "$STATUS" = 201 ] || fail "push of $id returned HTTP $STATUS"
+  [ "$(jq -r '.[0].status' "$TMP/body")" = queued ] \
+    || fail "push of $id came back $(jq -r '.[0].status' "$TMP/body")"
+  echo "  $id -> partition $customer"
+done <<EOF
+$INPUT
+EOF
+
+# ---------------------------------------------------------------------------
+# Group one. It reads every order, charges it, and hands the paid ones to the
+# shipping queue.
+#
+# subscriptionMode=all is the parameter that makes this work: a group is created
+# on first contact, and a new cursor is seeded at the TAIL unless you say
+# otherwise. Without it this group would sit there watching for the sixth order.
+# The mode only ever seeds a cursor that does not exist yet; it is ignored on
+# every later pop, which is why tutorial 4 needs a seek to move an existing one.
+#
+# The pop does not name a partition, and `partitions` defaults to 1, so each
+# call claims ONE partition and returns what is pending in it. Three customers
+# means three partitions, and the loop simply comes back for the next one.
+# ---------------------------------------------------------------------------
+echo
+echo "billing"
+BILLING=tut-http-billing
+BILLED=0
+FIRST=yes
+
+while [ "$BILLED" -lt "$ORDER_COUNT" ]; do
+  query="consumerGroup=$BILLING&subscriptionMode=all&batch=10"
+  echo "  GET /api/v1/pop/queue/$ORDERS?$query&wait=true&timeout=$IDLE_MS"
+  pop "queue/$ORDERS" "$query" \
+    || fail "billing went idle after $BILLED of $ORDER_COUNT orders"
+
+  # The first response in full, so the shape of a multi-message claim is on the
+  # page: one leaseId for the whole batch, messages in offset order, and a
+  # top-level partition/partitionId that describe only the FIRST claimed
+  # partition. Ack with each message's own partitionId, never that one.
+  if [ "$FIRST" = yes ]; then
+    jq . "$TMP/pop"
+    FIRST=no
+  else
+    echo "  -> HTTP $STATUS, partition $(jq -r .partition "$TMP/pop"), $(jq '.messages | length' "$TMP/pop") message(s)"
+  fi
+
+  # @tsv turns the batch into lines a shell can read. read splits on tabs here,
+  # so a payload containing spaces stays in one field.
+  jq -r '.messages[] | [.data.orderId, .data.customer, (.data.total | tostring)] | @tsv' \
+    "$TMP/pop" > "$TMP/batch"
+
+  while IFS=$'\t' read -r id customer total; do
+    echo "  charged $id ($total)"
+
+    # The push to the next queue creates it on first use, exactly like the first
+    # queue. Partitioning it by customer as well keeps a customer's shipments in
+    # the order their orders were charged.
+    body="$(jq -n --arg queue "$SHIPPING" --arg partition "$customer" --arg id "$id" \
+      '{items: [{queue: $queue, partition: $partition,
+                 payload: {orderId: $id, customer: $partition}}]}')"
+    request POST /api/v1/push "$body"
+    [ "$STATUS" = 201 ] || fail "shipping push for $id returned HTTP $STATUS"
+
+    BILLED=$((BILLED + 1))
+  done < "$TMP/batch"
+
+  # Both writes are now durable, so commit the input. Push-then-ack duplicates
+  # work if the process dies in between; ack-then-push loses it. Tutorial 3
+  # closes that window with one transaction.
+  ack_batch "$BILLING"
+done
+
+check "$BILLED" "$ORDER_COUNT" "billing saw all $ORDER_COUNT orders"
+
+# ---------------------------------------------------------------------------
+# Group two reads the same stored messages through its own cursor. It was not
+# affected by billing acking them: that is what fan-out means here, and it costs
+# no extra copy of the data. Nothing was republished, and the broker did not
+# keep a second copy: a group is a number per partition.
+# ---------------------------------------------------------------------------
+echo
+echo "analytics"
+ANALYTICS=tut-http-analytics
+COUNTED=0
+: > "$TMP/totals"
+
+while [ "$COUNTED" -lt "$ORDER_COUNT" ]; do
+  pop "queue/$ORDERS" "consumerGroup=$ANALYTICS&subscriptionMode=all&batch=10" \
+    || fail "analytics went idle after $COUNTED of $ORDER_COUNT orders"
+  jq -r '.messages[].data.total' "$TMP/pop" >> "$TMP/totals"
+  COUNTED="$(wc -l < "$TMP/totals" | tr -d ' ')"
+  echo "  read $COUNTED/$ORDER_COUNT from partition $(jq -r .partition "$TMP/pop")"
+  ack_batch "$ANALYTICS"
+done
+
+# The shell cannot add decimals, so awk does. The JavaScript tutorial compares
+# with a tolerance for the same reason: 120.5 + 12.0 + 88.75 + 310.0 + 9.99 is
+# not exact in binary floating point either.
+TOTAL="$(awk '{ sum += $1 } END { printf "%.2f", sum }' "$TMP/totals")"
+echo "  total $TOTAL"
+check "$TOTAL" "$ORDER_SUM" 'analytics summed every order, independently of billing'
+
+# ---------------------------------------------------------------------------
+# The order inside one partition is the order it was pushed in. Check the
+# customer with more than one order, on the partition-scoped pop route: that one
+# claims exactly the lane you name, which is what you want when you are testing
+# an ordering claim rather than draining a queue.
+# ---------------------------------------------------------------------------
+echo
+echo "warehouse"
+WAREHOUSE=tut-http-warehouse
+SHIPPED=0
+: > "$TMP/shipments"
+
+while [ "$SHIPPED" -lt 3 ]; do
+  pop "queue/$SHIPPING/partition/acme" "consumerGroup=$WAREHOUSE&subscriptionMode=all&batch=10" \
+    || fail "warehouse went idle after $SHIPPED of 3 acme shipments"
+
+  jq -r '.messages[].data.orderId' "$TMP/pop" > "$TMP/batch"
+  while read -r id; do
+    echo "  shipping $id"
+    echo "$id" >> "$TMP/shipments"
+  done < "$TMP/batch"
+  SHIPPED="$(wc -l < "$TMP/shipments" | tr -d ' ')"
+  ack_batch "$WAREHOUSE"
+done
+
+ARRIVED="$(paste -sd, - < "$TMP/shipments")"
+check "$ARRIVED" 'A-1,A-2,A-3' "one customer's shipments arrived in the order they were pushed"
+
+# Clean up on success only: a failed run leaves both queues on the broker to be
+# looked at.
+request DELETE "/api/v1/resources/queues/$ORDERS"
+request DELETE "/api/v1/resources/queues/$SHIPPING"
+
+echo
+echo "PASS: $CHECKS checks"
+# docs:end

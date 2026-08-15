@@ -1,0 +1,51 @@
+---
+title: Multi-queue flow
+description: "One queue partitioned per customer, two consumer groups reading it independently, and a second queue downstream."
+type: tutorial
+tier: use
+sidebar:
+  order: 2
+verifiedBy:
+  - examples/tutorials/cpp/02-multi-queue-flow.cpp
+---
+
+This is the shape most applications end up with. A **partition** keeps one entity's events in
+order: everything about one customer stays in sequence, and different customers never wait for
+each other. The partition key is the only ordering decision you make.
+
+A **consumer group** is a cursor, not a copy. The two groups below read the same stored messages
+and neither sees the other's acknowledgements, so adding a reader costs a string, not a second
+copy of the data. A group created after the messages were pushed starts at the tail, which is why
+both ask for `subscription_mode("all")`.
+
+`consume()` is synchronous here: it blocks the calling thread and runs `concurrency()` workers in
+a pool until `limit()`, `idle_millis()` or the `std::atomic<bool>` you hand it ends the loop. It
+also catches whatever the handler throws and turns it into a negative acknowledgement, so a failed
+check inside a handler never reaches `main()` on its own. The program carries one out in an
+`std::exception_ptr` and raises the stop flag itself.
+
+The handoff to the second queue is two steps, a push and then an ack: a crash between them does
+the work twice. [The next tutorial](/use/cpp-client/transaction-ack-push) closes that window.
+
+<Render file="snippets/tut-cpp-multi-queue-flow" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/cpp` with the
+three headers on the include path ([the client page](/use/cpp-client) has that recipe):
+
+```bash
+mkdir -p build
+g++ -std=c++17 -O2 -pthread \
+    -I../../../clients/client-cpp -I../../../clients/server/vendor \
+    -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
+    02-multi-queue-flow.cpp -o build/02-multi-queue-flow \
+    -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
+
+QUEEN_URL=http://localhost:6632 ./build/02-multi-queue-flow
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh cpp`.
+
+Next: [Transactional ack and push](/use/cpp-client/transaction-ack-push).

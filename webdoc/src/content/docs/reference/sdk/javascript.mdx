@@ -206,7 +206,7 @@ only when it is a valid UUID. The wire field is always `payload`; `data` is a cl
 
 The broker's push path stores no trace id, so it is dropped and the message pops back
 with `traceId: null`. Push inside a transaction when a trace id has to survive. See
-[Pick your SDK](/use/clients#verified-against-the-source).
+[Pick your SDK](/use/).
 
 <Render file="snippets/js-push" />
 
@@ -255,7 +255,7 @@ Both `pop()` and `consume()` read these; the defaults differ between the two.
 <Aside type="danger">
 `autoAck` on `pop()` is the broker's at-most-once parameter; on `consume()` it is never sent
 and means client-side ack/nack around the handler. See
-[`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs).
+[`autoAck`, and what it costs](/use/model/).
 </Aside>
 
 #### `pop()`
@@ -378,7 +378,7 @@ on the item is sent, and one you omit is minted client side. That id is the dedu
 the pushed message, so setting it deterministically is what makes a retried transaction safe.
 
 A transaction is atomic, not exactly-once end to end; see
-[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
+[the limit](/use/model/).
 
 ## `Admin`
 
@@ -537,7 +537,7 @@ throws with `name === 'AbortError'` and a `.timeout` field. Network faults from 
 left in `error.cause`.
 
 A `204` response resolves to `null`:
-[a 204 carries no body at all](/use/errors#the-envelope).
+[a 204 carries no body at all](/reference/errors/).
 
 ## Same surface, other languages
 

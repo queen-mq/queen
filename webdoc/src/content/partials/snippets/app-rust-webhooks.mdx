@@ -1,0 +1,332 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/rust/src/bin/webhooks.rs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/rust/src/bin/webhooks.rs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```rust title="examples/apps/rust/src/bin/webhooks.rs"
+//
+// A webhook delivery system.
+//
+// Every SaaS product ends up writing this one, and it is harder than it looks:
+// deliveries to one customer's endpoint must arrive in order, a customer whose
+// endpoint is down must not slow down anybody else's, failures must be retried
+// a bounded number of times, and what never succeeds has to end up somewhere a
+// human can look at.
+//
+// The shape here is one ordered lane per destination, created by the first
+// delivery to it. A dead endpoint backs up its own lane and no other; retries
+// are the broker's retry budget rather than a loop in your code; and what
+// exhausts the budget lands in the dead-letter queue with the error attached.
+//
+//   webhook-deliveries (one partition per destination)
+//     └── group "sender"  posts each delivery, fails on a dead endpoint
+//           └── retry_limit exhausted -> dead-letter queue
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 cargo run --bin webhooks
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use queen_mq::{Config, Message, PushItem, Queen, QueueOptions, SubscriptionMode};
+use serde_json::json;
+
+const GROUP: &str = "sender";
+
+// Three subscribers. One of them has let its certificate expire, which is the
+// most common way a webhook endpoint dies: it answers, but it answers 500.
+//
+// (endpoint, healthy)
+const ENDPOINTS: [(&str, bool); 3] = [
+    ("acme.example", true),
+    ("globex.example", true),
+    ("initech.example", false),
+];
+const EVENTS_PER_ENDPOINT: i64 = 3;
+const RETRY_LIMIT: i32 = 2;
+
+fn healthy(endpoint: &str) -> bool {
+    ENDPOINTS
+        .iter()
+        .find(|(name, _)| *name == endpoint)
+        .map(|(_, ok)| *ok)
+        .unwrap_or(false)
+}
+
+/// Stands in for the HTTP POST to the subscriber. A real sender would use an
+/// HTTP client and treat any non-2xx as a failure — which is exactly what
+/// returning Err does here, since this client's consume loop nacks on Err and
+/// records the reason.
+async fn post_to_endpoint(endpoint: &str) -> Result<(), String> {
+    if !healthy(endpoint) {
+        return Err(format!("{endpoint} answered 500"));
+    }
+    Ok(())
+}
+
+struct Checks(usize);
+
+impl Checks {
+    fn assert(&mut self, condition: bool, description: &str) -> Result<(), String> {
+        if !condition {
+            return Err(description.to_string());
+        }
+        self.0 += 1;
+        println!("  ok: {description}");
+        Ok(())
+    }
+}
+
+// Rust has no exceptions, so the shape the JavaScript gets from try/catch comes
+// from `run` returning a Result: every `?` on the way down is a failed check or
+// a failed call, and main turns it into FAIL and a non-zero exit.
+#[tokio::main]
+async fn main() {
+    match run().await {
+        Ok(checks) => println!("\nPASS: {checks} checks"),
+        Err(e) => {
+            eprintln!("\nFAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run() -> Result<usize, String> {
+    let url = std::env::var("QUEEN_URL").unwrap_or_else(|_| "http://localhost:6632".into());
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let deliveries = format!("app-rust-webhooks-{run_id}");
+
+    let mut checks = Checks(0);
+    println!("broker {url}");
+
+    let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
+
+    // retry_limit is the delivery budget, and dlq_after_max_retries is what
+    // happens when it runs out. Without the second flag an exhausted message is
+    // simply marked failed and stays put; with it, the broker moves it to the
+    // dead-letter table with the last error on the row.
+    //
+    // lease_time is the other half of the contract: it is how long the broker
+    // waits for a sender that took a delivery and never came back before handing
+    // that delivery to someone else.
+    queen
+        .queue(&deliveries)
+        .configure(QueueOptions {
+            lease_time: Some(30),
+            retry_limit: Some(RETRY_LIMIT),
+            dlq_after_max_retries: Some(true),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // ------------------------------------------------------------------ queuing
+    //
+    // The application emits events. Each one goes into the partition of the
+    // endpoint it is destined for, which is what makes "in order per subscriber"
+    // a property of the storage rather than of the sender.
+    println!("\nqueuing deliveries");
+    for seq in 1..=EVENTS_PER_ENDPOINT {
+        for (endpoint, _) in ENDPOINTS {
+            // push() would mint a UUIDv7 transaction id; here the event id is
+            // the idempotency key, so the item is built by hand and pushed
+            // through push_items(). An application that retries its own emit
+            // does not create a second delivery.
+            queen
+                .queue(&deliveries)
+                .partition(endpoint)
+                .push_items(vec![PushItem::new(
+                    &deliveries,
+                    json!({
+                        "endpoint": endpoint,
+                        "seq": seq,
+                        "type": "invoice.paid",
+                        "invoiceId": format!("INV-{seq}"),
+                    }),
+                )
+                .partition(endpoint)
+                .transaction_id(format!("{endpoint}-evt-{seq}"))])
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    println!(
+        "  {} deliveries queued",
+        EVENTS_PER_ENDPOINT as usize * ENDPOINTS.len()
+    );
+
+    // ------------------------------------------------------------------ sending
+    //
+    // The sender pool. auto_ack is on by default, so a handler that returns Ok
+    // acknowledges the delivery and a handler that returns Err nacks it with the
+    // error as the reason: the broker then redelivers it until the retry budget
+    // is gone. That is the whole retry mechanism, and it survives the sender
+    // process dying mid-flight, which a loop inside the handler would not.
+    println!("\nsending");
+    let delivered_to: Arc<Mutex<HashMap<String, Vec<i64>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let attempts: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    {
+        let delivered_to = Arc::clone(&delivered_to);
+        let attempts = Arc::clone(&attempts);
+        queen
+            .queue(&deliveries)
+            .group(GROUP)
+            .subscription_mode(SubscriptionMode::All)
+            .concurrency(3)
+            // Enough turns for every good delivery plus every attempt at the bad
+            // ones. `limit` counts across all three workers, not per worker.
+            .limit(
+                (EVENTS_PER_ENDPOINT * 2 + EVENTS_PER_ENDPOINT * (RETRY_LIMIT as i64 + 1)) as u64,
+            )
+            // The idle timeout is checked between polls, so the poll window
+            // bounds how promptly it fires: a redelivery that never arrives ends
+            // the run rather than hanging it.
+            .poll_timeout(Duration::from_secs(1))
+            .idle(Duration::from_secs(6))
+            .consume(move |msg: Message| {
+                let delivered_to = Arc::clone(&delivered_to);
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    let endpoint = msg.data["endpoint"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let seq = msg.data["seq"].as_i64().unwrap_or(0);
+                    *attempts
+                        .lock()
+                        .unwrap()
+                        .entry(endpoint.clone())
+                        .or_insert(0) += 1;
+
+                    // A failed POST returns Err, and the loop turns that into a
+                    // nack carrying this string — which is what ends up on the
+                    // dead-letter row when the budget runs out.
+                    //
+                    // A delivered Message carries no attempt counter to back off
+                    // on, here or in any other client: the broker's pop response
+                    // has no such field. The broker counts the attempts itself
+                    // and publishes the total only on the dead-letter row, as
+                    // `retryCount` — on a DlqMessage that lands in `rest`, the
+                    // map holding every key the struct does not name. So the
+                    // budget is the broker's, and a sender that wants to give up
+                    // early on an error it knows is permanent says so by
+                    // dead-lettering the message itself (ack_with(&msg,
+                    // AckStatus::Dlq, ...)) rather than by counting attempts.
+                    post_to_endpoint(&endpoint).await?;
+
+                    delivered_to
+                        .lock()
+                        .unwrap()
+                        .entry(endpoint.clone())
+                        .or_default()
+                        .push(seq);
+                    println!("  {endpoint} <- event {seq}");
+                    Ok::<_, String>(())
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // ------------------------------------------------------------------ checking
+    println!("\nchecking");
+
+    let delivered_to = delivered_to.lock().unwrap().clone();
+    let attempts = attempts.lock().unwrap().clone();
+
+    for (endpoint, ok) in ENDPOINTS {
+        if !ok {
+            continue;
+        }
+        let seqs = delivered_to.get(endpoint).cloned().unwrap_or_default();
+        checks.assert(
+            seqs.len() == EVENTS_PER_ENDPOINT as usize,
+            &format!("{endpoint} received all {EVENTS_PER_ENDPOINT} events"),
+        )?;
+        checks.assert(
+            seqs == [1, 2, 3],
+            &format!("{endpoint} received them in the order they happened"),
+        )?;
+    }
+
+    checks.assert(
+        delivered_to
+            .get("initech.example")
+            .map(|s| s.len())
+            .unwrap_or(0)
+            == 0,
+        "the dead endpoint received nothing, as it should",
+    )?;
+    checks.assert(
+        attempts.get("initech.example").copied().unwrap_or(0) > EVENTS_PER_ENDPOINT as usize,
+        "the dead endpoint was retried rather than dropped on the first failure",
+    )?;
+
+    // The dead-letter queue is a table you can read, not a log line. Each row
+    // carries the payload, the endpoint it was for, and the last error, which is
+    // what a support engineer needs to answer "why did this customer not get
+    // it". This client takes the page size as an argument rather than as another
+    // builder step, because those are the only two filters the broker honours
+    // besides the queue and the group.
+    let dlq = queen
+        .queue(&deliveries)
+        .dlq(Some(50), None)
+        .await
+        .map_err(|e| e.to_string())?;
+    let dead: Vec<_> = dlq
+        .messages
+        .iter()
+        .filter(|m| m.data["endpoint"] == json!("initech.example"))
+        .collect();
+
+    checks.assert(
+        dead.len() == EVENTS_PER_ENDPOINT as usize,
+        &format!("all {EVENTS_PER_ENDPOINT} dead deliveries are in the dead-letter queue"),
+    )?;
+    checks.assert(
+        dead.iter()
+            .all(|m| m.error.as_deref().unwrap_or("").contains("answered 500")),
+        "each dead-letter row carries the error that killed it",
+    )?;
+    checks.assert(
+        dlq.messages
+            .iter()
+            .all(|m| m.data["endpoint"] == json!("initech.example")),
+        "no healthy endpoint put anything in the dead-letter queue",
+    )?;
+
+    let listed: Vec<String> = dead
+        .iter()
+        .map(|m| {
+            format!(
+                "{}/{}",
+                m.data["endpoint"].as_str().unwrap_or("?"),
+                m.data["invoiceId"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    println!("\n  dead letters: {}", listed.join(", "));
+
+    // Clean up on success only: a failed run leaves the queue, and its DLQ rows,
+    // on the broker to be looked at.
+    queen
+        .queue(&deliveries)
+        .delete()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    queen.close().await.map_err(|e| e.to_string())?;
+
+    Ok(checks.0)
+}
+```

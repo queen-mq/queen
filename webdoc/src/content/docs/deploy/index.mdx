@@ -1,0 +1,113 @@
+---
+title: Overview
+description: "What a Queen deployment is made of: one stateless broker, one PostgreSQL, and the handful of environment variables that matter on the first day."
+type: overview
+tier: operate
+sidebar:
+  order: 1
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/config.rs
+  - server/src/schema.rs
+  - Dockerfile
+---
+
+A Queen deployment is one process and one database. The broker is a single stateless Rust binary
+that serves HTTP on port 6632 and keeps every byte of state in PostgreSQL: no data directory to
+back up, no coordination service, no sidecar, no message file format on disk.
+
+Four parts, of which two are required:
+
+- the `queen` broker, one process, run as one to three identical replicas
+- PostgreSQL, the only source of truth: messages, offsets, the dedup index, queue configuration,
+  dead letters
+- the disk spool, node-local, where pushes land when PostgreSQL is unreachable
+- `queen_proxy`, optional, a separate binary that fronts the broker with API keys, quotas and
+  tenants
+
+Nothing is installed into either required part. The DDL and the 23 stored-procedure files are
+compiled into the binary and re-applied idempotently at every boot under an advisory lock, so
+there is no migration step and no extension. The dashboard, `queenctl` and the PostgreSQL client
+tools travel inside the same image.
+
+A complete deployment, ready to verify:
+
+```bash
+docker network create queen
+docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16
+docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PASSWORD=postgres -v queen-spool:/var/lib/queen/buffers ghcr.io/queen-mq/queen:latest
+curl -s http://localhost:6632/health
+```
+
+The only ordering requirement is a reachable PostgreSQL. Without one the broker fails its boot
+loudly instead of starting half-working, and a broker that loses the database later answers 503 on
+`/health` until it comes back.
+
+## The variables of the first day
+
+`PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD` and `PG_DATABASE` reach the database. `PG_USER` and
+`PG_DATABASE` default to `postgres` and `PG_PORT` to 5432, so in a container the host and the
+password are usually the whole of it.
+
+`PORT` moves the HTTP listener off 6632. `DB_POOL_SIZE`, default 160, is the ceiling on concurrent
+database work for one broker and has to fit inside `max_connections` across every replica.
+`FILE_BUFFER_DIR` is where the spool lives: mount it, because it is replayed only from the same
+directory.
+
+Booleans are strict everywhere: `true/false`, `1/0`, `yes/no`, `on/off`, case-insensitive. Anything
+else is a fatal boot error rather than a guess, and every boot prints the configuration the broker
+actually resolved, secrets masked.
+
+`JWT_ENABLED` is `false` by default, which means every route is served to every caller,
+`/api/v1/system/*` included, and the broker has no HTTPS listener at all. Terminate TLS in front of
+it and turn authentication on before it reaches a routable address.
+
+Every variable the broker reads, with the default the code applies, is in
+[the configuration reference](/reference/config).
+
+## Where the rest lives
+
+<CardGrid>
+  <LinkCard
+    href="/deploy/postgres"
+    title="PostgreSQL"
+    description="Version floor, privileges, pooling, and how to size the database that is the whole system."
+  />
+  <LinkCard
+    href="/deploy/kubernetes"
+    title="Kubernetes"
+    description="A reference manifest, with probes that do not restart brokers when the database blips."
+  />
+  <LinkCard
+    href="/deploy/operations"
+    title="Operations"
+    description="Retention, backup, upgrades, logs and metrics, and surviving a database outage."
+  />
+  <LinkCard
+    href="/deploy/ha"
+    title="High availability"
+    description="Replicas against one PostgreSQL, what the mesh carries, and the port that must be firewalled."
+  />
+  <LinkCard
+    href="/deploy/security"
+    title="Security"
+    description="The trust boundaries: authentication, TLS in front, TLS to PostgreSQL, payloads at rest."
+  />
+  <LinkCard
+    href="/deploy/multi-tenant"
+    title="Multi-tenant"
+    description="queen_proxy in front: tenants, API keys, quotas, metering and isolation."
+  />
+  <LinkCard
+    href="/deploy/dashboard"
+    title="Dashboard"
+    description="The operator UI the binary already serves on the port you opened."
+  />
+</CardGrid>
+
+The per-mechanism detail is reference material: [JWT and JWKS](/reference/security/jwt), [payload
+encryption](/reference/security/encryption), [PostgreSQL TLS](/reference/security/postgres-tls),
+[tenant endpoints](/reference/multi-tenant/endpoints), the [CLI](/reference/queenctl), the
+[metrics](/reference/prometheus) and the [limits](/reference/limits).
+
+One binary, one database, one port. Everything past that is something you chose to switch on.

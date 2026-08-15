@@ -1,0 +1,132 @@
+---
+title: Operations
+description: "Running Queen day to day: the log blocks and metrics worth watching, turning retention on, dumping both schemas, and how a version change goes."
+type: how-to
+tier: operate
+sidebar:
+  order: 5
+sourceOfTruth:
+  - server/src/obs.rs
+  - server/src/retention.rs
+  - server/src/schema.rs
+  - server/src/file_buffer.rs
+  - server/src/handlers/status.rs
+  - server/sql/schema.sql
+  - server/sql/procedures/006_log_maintenance.sql
+---
+
+The broker prints its rates and cache sizes on a timer, and exposes database-backed cluster totals
+to Prometheus. Retention is off until you turn it on. A backup is a `pg_dump` of two schemas. A
+version change is a cutover, not a migration.
+
+## What to watch
+
+Nothing is logged per message. One task emits two aggregate blocks every `QUEEN_LOG_RATES_MS`,
+default 10 seconds: `rates` carries `push_s`, `pop_s`, `ack_s`, latency percentiles, the number of
+parked long-polls and `pool_waiting`, and `sizes` carries cache occupancy, `spool_pending` and
+`rss_gb`. A handful of per-queue lines follow, ranked by traffic. `QUEEN_LOG_JSON=1` turns each
+line into one JSON object for a shipper.
+
+Two lines fire on transition rather than on the timer, and they are the ones to page on:
+
+```text
+WARN spool  entering buffered mode (degraded durability)
+INFO spool  DB recovered
+```
+
+Buffered means pushes are landing on the broker's local disk instead of PostgreSQL. Alert on the
+same condition: `queen_file_buffer_db_healthy == 0`, `queen_file_buffer_pending` not returning to
+zero once the database recovers, and `queen_file_buffer_failed > 0`, which counts accepted-then-lost
+pushes and should be zero forever.
+
+The scrape target is `GET /metrics/prometheus`. `GET /metrics` is a small JSON object with several
+fields wired to zero: read it by hand, do not build a dashboard on it. Per-queue series sum across
+tenants and the endpoint sits outside broker authentication, so it is an operator surface, never a
+tenant one. The full family list is in [Prometheus](/reference/prometheus).
+
+Do not alert on `/health` answering 503 as "the broker is down": it is a database check, and
+[the probe wiring](/deploy/kubernetes#the-probes) is where that matters.
+
+## Retention
+
+A queue keeps everything forever, and consuming deletes nothing. Turning retention on is one call:
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/configure \
+  -H 'Content-Type: application/json' \
+  -d '{"queue":"orders","options":{"retentionEnabled":true,"retentionSeconds":604800,"completedRetentionSeconds":86400}}'
+```
+
+`retentionSeconds` deletes on age alone, read or not. `completedRetentionSeconds` never passes the
+slowest group's cursor, so one abandoned group pins the history for every other. Deletion is
+whole-segment, so a window is a floor on what is kept, not a ceiling. `/configure` is a full
+replace: a later call that omits these keys turns retention back off, so send the whole set from
+[queue options](/reference/queue-options).
+
+The sweep runs every `RETENTION_INTERVAL` ms, default 5000, on one replica elected by an advisory
+lock, and logs only when it actually deleted something:
+
+```text
+INFO retention  swept queues=12 segments_deleted=340 txns_purged=340 max_wait_evicted=0 partitions_deleted=0 metrics_purge=… elapsed_ms=47
+```
+
+Silence on a growing deployment means nothing is being deleted. Two things the sweep never
+touches: dead letters, which leave one at a time through
+`DELETE /api/v1/messages/:partitionId/:transactionId`, and streaming state in
+`queen_streams.state`. The loop step by step is in [retention internals](/internals/retention).
+
+## Backup and restore
+
+Everything the broker persists lives in two schemas, plus the spool on local disk that no database
+backup captures. Dump both schemas: omitting `queen_streams` loses every registered streaming query
+and its per-key state, silently, because the broker boots and recreates an empty one.
+
+```bash
+pg_dump -Fc -n queen -n queen_streams -f queen-2026-08-15.dump "postgresql://user@host:5432/queen"
+```
+
+A dump can be taken against a running broker, since `pg_dump` reads one snapshot. Restore into an
+empty database with every instance stopped, including the ones behind the load balancer.
+
+```bash
+createdb -h host -U postgres queen_restored
+pg_restore --no-owner --no-privileges -d "postgresql://postgres@host:5432/queen_restored" queen-2026-08-15.dump
+```
+
+`--no-owner --no-privileges` because the broker re-issues its own grants at boot, which is also
+why a schema-only dump is redundant. Restore into the version that produced the dump.
+
+A restore rolls consumption back to the dump instant, so every message acked since redelivers: an
+hour-old dump means an hour of reprocessing, and it is a recovery only if handlers are idempotent.
+Leases are columns on a row rather than sessions, so restored ones expire and re-lease on their
+own. One thing to check by hand: the maintenance flags live in `queen.system_state`, and a dump
+taken during a maintenance window restores with push maintenance on, sending every push straight
+to the spool. Read `GET /api/v1/system/maintenance` immediately after.
+
+## Upgrades
+
+Same-version restarts and replacements need no coordination. Start the replacement, wait for a 200
+from `/health`, take the old instance out of the load balancer, SIGTERM, repeat. Shutdown drains
+in-flight requests, and a leased batch nobody acked redelivers once its lease expires.
+
+A version change is different, because the boot-time DDL only creates: it never reshapes an
+existing schema, so pointing a new build at an old database is unsupported.
+
+<Steps>
+
+1. **Stop producing** to the old deployment.
+
+2. **Let consumers drain it** to empty.
+
+3. **Start the new version against a fresh database.** It creates its own schema at first boot.
+
+4. **Repoint the clients**, and re-apply your `/configure` options: they lived in the old database.
+
+</Steps>
+
+Rollback is the same move reversed, so keep the old database until you trust the new one. If you
+cannot drain, copy at the application level, reading the backlog through the old API and pushing
+it with a deterministic `transactionId` per message so a retried copy loop cannot duplicate.
+
+Watch the spool, turn retention on before the disk decides for you, dump both schemas, and cut
+over rather than migrate.

@@ -1,0 +1,136 @@
+---
+title: Examples
+description: "Six recipes: producer and consumer, fan-out, transactional pipeline, deduplicated ingest, replay and the dead-letter queue, each with its code and the rule that decides how it fails."
+type: example
+tier: use
+sidebar:
+  order: 11
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/sql/procedures/003_log_push.sql
+  - server/sql/procedures/004_log_pop.sql
+  - server/sql/procedures/005_log_ack.sql
+  - server/sql/procedures/010_log_admin.sql
+  - server/sql/procedures/012_configure.sql
+verifiedBy:
+  - clients/client-js/test-v2/docs.js
+---
+
+Six shapes, in the order they are worth reading, each one the smallest code that makes it work.
+
+## Producer and consumer
+
+One queue, one consumer group, an acknowledgement when the work is done. It is the loop every
+other recipe here is built out of.
+
+<Render file="snippets/js-consume" />
+
+The handler returning acks the message, the handler throwing nacks it, and the group is a cursor
+that survives restarts. A push to a queue nobody created provisions the queue, its partition and
+its configuration inside the same transaction that writes the message.
+
+The same loop as a tutorial, in seven languages: [Hello world](/use/js-client/hello-world).
+
+## Fan-out to two groups
+
+Two independent readers of the same queue: billing has to bill, analytics has to index, and
+neither should wait for the other. Name a different group on each consumer, which is the whole
+declaration: no exchange, no binding, no create-group call.
+
+```js
+// Process A
+await client.queue('orders').group('billing')
+  .consume(async messages => { await bill(messages) })
+
+// Process B, independently
+await client.queue('orders').group('analytics').batch(500)
+  .consume(async messages => { await index(messages) })
+```
+
+The message bytes are written once. A second group costs one cursor row per partition it reads
+and one in-place update per ack, so fan-out is free on the write side. Reads do scale with
+groups: each one fetches and decompresses the segments it needs.
+
+## Transactional pipeline
+
+A stage publishes its output and consumes its input. As two requests, a crash between them either
+loses a message or duplicates one; as one transaction, neither.
+
+<Render file="snippets/js-transaction" />
+
+Partition by the entity at every stage and each entity keeps one ordered lane end to end while
+different entities run in parallel. The all-or-nothing includes the failure paths: a duplicate
+push or a rejected ack raises and rolls back the whole batch instead of reporting itself per item.
+
+The tutorial version, with the failure window it closes explained: [Transactional ack and push](/use/js-client/transaction-ack-push).
+
+## Deduplicated ingest
+
+A producer that retries after a timeout does not know whether the first attempt landed. Derive
+the `transactionId` from the thing you are publishing and the broker refuses the repeat.
+
+<Render file="snippets/js-push-dedup" />
+
+The check is exact, not probabilistic, and it runs under the partition's own write lock before an
+offset is allocated, so a duplicate writes nothing at all. It is scoped to one partition, and the
+window is `dedupWindowSeconds`, 3600 by default: outside it the same id is a new message, so the
+window has to be longer than your longest retry.
+
+The tutorial version, with the ordering it buys: [Multi-queue flow](/use/js-client/multi-queue-flow).
+
+## Replay
+
+Messages are not deleted when they are consumed, so replay is moving a cursor backwards. Seek
+when the group that already processed the data has to process it again; start a fresh group when
+the replay must not disturb the one that is running.
+
+<Render file="snippets/js-seek" />
+
+A seek releases the live lease, resets the retry counters and re-seeds the group's discovery
+state, and it lands on a segment rather than on a message, because a segment is one commit of
+several fused pushes. A new group seeds at each partition's current end unless you ask for
+`subscriptionMode('all')`, which seeds it just below the oldest retained offset.
+
+## Failures and the dead-letter queue
+
+A handler that throws is a design input, not an exception. The nack clamps the cursor below the
+failed message, charges one retry and redelivers it; when `retryLimit`, 3 by default, is spent,
+the message is snapshotted into the dead-letter queue and consumption moves on to the next one.
+
+```js
+// Skip the budget entirely when retrying cannot help.
+await client.ack(msg, 'dlq', { error: 'unknown payload version' })
+```
+
+One behaviour to design around: a lease that expires charges nothing, so a handler that hangs
+rather than fails redelivers forever and never reaches the dead-letter queue. Decide it has
+failed and say so. Reading the table, replaying a row and deleting one are in
+[messages and DLQ](/reference/http/messages-dlq), and [errors](/reference/errors/) has what each
+failure returns.
+
+Five choices cover the six recipes: one partition per entity, one group per independent reader, a
+deterministic `transactionId` when the producer retries, a transaction when a stage must not lose
+work, and an explicit `failed` when the message itself is wrong.
+
+<CardGrid>
+  <LinkCard
+    href="/use/full-examples"
+    title="Full examples"
+    description="Three whole programs, run before they ship, in four languages."
+  />
+  <LinkCard
+    href="/use/model"
+    title="The model"
+    description="Queue, partition, offset, consumer group, cursor, lease, ack: the vocabulary these six recipes use."
+  />
+  <LinkCard
+    href="/use/streams"
+    title="Streams and windowing"
+    description="When a stage needs aggregation over time rather than a message-at-a-time transform."
+  />
+  <LinkCard
+    href="/reference/queue-options"
+    title="Queue options"
+    description="Every option a queue carries, its default, and what a full replace resets."
+  />
+</CardGrid>

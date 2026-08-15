@@ -1,0 +1,140 @@
+---
+params: []
+description: "Verified snippet extracted from examples/tutorials/js/03-transaction-ack-push.mjs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/tutorials/js/03-transaction-ack-push.mjs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```js title="examples/tutorials/js/03-transaction-ack-push.mjs"
+//
+// Tutorial 3 of 5: acknowledge and push in one transaction.
+//
+// Tutorial 2 handed work from one queue to the next in two steps: push the
+// derived message, then let the loop acknowledge the source. Between those two
+// steps a crash duplicates work, and in the other order it loses work.
+//
+// A Queen transaction closes that window: the acknowledgement of the input and
+// the push of the output are one PostgreSQL transaction. Both land or neither
+// does.
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 node 03-transaction-ack-push.mjs
+
+import { Queen } from 'queen-mq'
+
+const QUEEN_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+const RUN = Date.now().toString(36)
+const ORDERS = `tut-js-tx-orders-${RUN}`
+const INVOICES = `tut-js-tx-invoices-${RUN}`
+const GROUP = 'tut-js-invoicing'
+
+const INPUT = [
+  { orderId: 'A-1', customer: 'acme', total: 120.5 },
+  { orderId: 'B-1', customer: 'globex', total: 88.75 },
+  { orderId: 'C-1', customer: 'initech', total: 310.0 },
+]
+
+let checks = 0
+const assert = (condition, description) => {
+  if (!condition) throw new Error(description)
+  checks++
+  console.log(`  ok: ${description}`)
+}
+
+const queen = new Queen({ url: QUEEN_URL, handleSignals: false })
+
+try {
+  console.log(`broker ${QUEEN_URL}`)
+
+  for (const order of INPUT) {
+    await queen.queue(ORDERS).partition(order.customer).push({ data: order })
+  }
+  console.log(`pushed ${INPUT.length} orders`)
+
+  console.log('\ninvoicing')
+  const invoiced = []
+
+  // autoAck(false) is what makes this tutorial possible: the loop must not
+  // acknowledge behind your back, because the acknowledgement is part of the
+  // transaction below.
+  await queen
+    .queue(ORDERS)
+    .group(GROUP)
+    .subscriptionMode('all')
+    .each()
+    .autoAck(false)
+    .limit(INPUT.length)
+    .idleMillis(5000)
+    .consume(async (msg) => {
+      // One commit carries both operations. The ack names the consumer group
+      // explicitly: the transaction builder does not read it off the message,
+      // and an ack sent without it commits the wrong cursor.
+      //
+      // commit() throws when the broker rejects the bundle, so there is no
+      // success flag to inspect here: reaching the next line means both
+      // operations are durable. The Go and Rust clients hand the result back
+      // instead, and there you do have to check it.
+      await queen
+        .transaction()
+        .queue(INVOICES)
+        .partition(msg.data.customer)
+        .push([{
+          data: {
+            invoiceId: `INV-${msg.data.orderId}`,
+            orderId: msg.data.orderId,
+            amount: msg.data.total,
+          },
+        }])
+        .ack(msg, 'completed', { consumerGroup: GROUP })
+        .commit()
+
+      invoiced.push(msg.data.orderId)
+      console.log(`  ${msg.data.orderId} -> INV-${msg.data.orderId}`)
+    })
+
+  assert(invoiced.length === INPUT.length, `every order was invoiced once`)
+
+  // The commit fails if the lease has expired, which is what stops a slow
+  // consumer from acking work the broker has already handed to someone else.
+  // Nothing to assert here: the check above is that assertion, since a failed
+  // commit would have thrown.
+
+  console.log('\nchecking the output queue')
+
+  // The invoices went to one partition per customer, and a pop claims a single
+  // partition unless you say otherwise: partitions(10) lets this one call claim
+  // up to ten of them, with batch as the total budget across all of them.
+  const invoices = await queen
+    .queue(INVOICES)
+    .batch(10)
+    .partitions(10)
+    .wait(true)
+    .pop()
+
+  assert(invoices.length === INPUT.length, `${INPUT.length} invoices exist`)
+  const ids = invoices.map(m => m.data.orderId).sort()
+  assert(
+    JSON.stringify(ids) === JSON.stringify(INPUT.map(o => o.orderId).sort()),
+    'each invoice matches an order, none duplicated'
+  )
+
+  // And the input queue is committed for this group: the acks were part of the
+  // same transactions that produced those invoices, so the two states cannot
+  // disagree.
+  const leftovers = await queen.queue(ORDERS).group(GROUP).batch(10).wait(false).pop()
+  assert(leftovers.length === 0, 'the source queue is committed for this group')
+
+  await queen.queue(ORDERS).delete()
+  await queen.queue(INVOICES).delete()
+
+  console.log(`\nPASS: ${checks} checks`)
+} catch (err) {
+  console.error(`\nFAIL: ${err.message}`)
+  process.exitCode = 1
+} finally {
+  await queen.close()
+}
+```

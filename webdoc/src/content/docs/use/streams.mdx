@@ -1,25 +1,24 @@
 ---
-title: Streams and windowing
-description: "Tumbling, sliding, session and cron windows over a queue, with exactly-once aggregation: the Kafka Streams shape without a changelog topic or a state store to operate."
+title: Streams
+description: "Windowed aggregation over a queue: an operator chain in your process, four kinds of window, and one PostgreSQL transaction that commits state, output and ack together."
 type: concept
 tier: use
 sidebar:
-  order: 26
+  order: 10
 sourceOfTruth:
   - server/src/handlers/streams.rs
   - server/sql/procedures/007_log_streams.sql
-  - server/sql/procedures/002_streams_schema.sql
-  - server/sql/procedures/008_streams_register_query_v1.sql
-  - server/sql/procedures/009_streams_state_get_v1.sql
   - clients/client-js/client-v2/streams/Stream.js
-  - clients/client-js/client-v2/streams/runtime/Runner.js
-  - clients/client-go/streams/stream.go
-  - clients/client-py/queen/streams/stream.py
+verifiedBy:
+  - clients/client-rust/tests/streams.rs
 ---
 
-Windowed aggregation over a queue, expressed as an operator chain, with the accumulator state stored in the same PostgreSQL the broker uses. The operators run in your process; the broker contributes three endpoints, and the important one commits your state changes, your output messages and your source ack in one transaction. A stream is a process holding a partition lease, not a service to deploy.
+A windowed query reads a queue, groups its messages into time buckets, folds each bucket, and
+pushes the result to another queue. You write it as an operator chain, the chain runs in your
+process, and its accumulator state lives in the same PostgreSQL that holds the messages.
 
-## A complete query
+There is no changelog topic, no state store and no job manager to deploy. A stream is a worker
+holding a partition lease.
 
 <Tabs>
 
@@ -32,33 +31,18 @@ import { Queen, Stream } from 'queen-mq'
 const url = 'http://localhost:6632'
 const queen = new Queen({ url })
 
-const perMinute = Stream
+const handle = await Stream
   .from(queen.queue('orders'))
   .filter(msg => msg.data.amount > 0)
-  .windowTumbling({ seconds: 60, gracePeriod: 5 })
+  .windowTumbling({ seconds: 60, idleFlushMs: 5000 })
   .aggregate({ count: () => 1, sum: m => m.amount })
-  .map((agg, ctx) => ({ partition: ctx.partition, ...agg }))
   .to(queen.queue('orders.per_minute'))
-
-const handle = await perMinute.run({ queryId: 'orders.per_minute', url })
-// handle.metrics() reports counters; stop() drains in-flight cycles.
-
-// Each closed window is one ordinary message on the sink queue.
-const emits = await queen.queue('orders.per_minute')
-  .group('reporting')
-  .subscriptionMode('all')
-  .batch(10)
-  .pop()
-await queen.ack(emits, true, { group: 'reporting' })
-
-await handle.stop()
+  .run({ queryId: 'orders.per_minute', url, batchSize: 50 })
 ```
 
 </TabItem>
 
 <TabItem label="Rust">
-
-Extracted from the Rust client test suite (`q` is a connected `Queen`):
 
 <Render file="snippets/rust-stream" />
 
@@ -66,145 +50,74 @@ Extracted from the Rust client test suite (`q` is a connected `Queen`):
 
 </Tabs>
 
-Each closed window becomes one ordinary message on the sink queue, one per window and key: the payload is the value that left the chain (here `{ partition, count, sum }`), the partition name is the source's unless the sink overrides it. There is no separate results API: anything that can consume a queue reads it. What each callback receives:
+Each closed window is one ordinary message on the sink queue, one per window and per key, whose
+payload is the value that left the chain. There is no results API: anything that can read a queue
+reads it.
 
-| Callback | Receives |
-| --- | --- |
-| `filter`, `keyBy`, pre-window `map` | The source message, payload under `msg.data` |
-| `aggregate` extractors, `reduce` | The value being aggregated: the payload, or whatever an upstream `map` returned |
-| Post-window `map` | The aggregate plus a `ctx` carrying `partition`, `key`, `windowStart`, `windowEnd`, `windowKey` |
+## The four windows
 
-## The operator set
+- **Tumbling**: fixed, non-overlapping buckets, `windowTumbling({ seconds: 60 })`.
+- **Sliding**: overlapping windows of `size` hopping every `slide`, `windowSliding({ size: 3600, slide: 60 })`.
+- **Session**: one window per key, extending while events for that key keep arriving within `gap` seconds, `windowSession({ gap: 1800 })`.
+- **Cron**: wall-clock aligned buckets, `windowCron({ every: 'day' })`, where `every` is second, minute, hour, day or week.
 
-The chain is immutable (every combinator returns a new stream) and `run` finalises it. A sink (`to` or `foreach`) must be last; the builder rejects a chain where it is not. The same operators exist in four languages:
+Bucketing uses the broker's commit time unless you pass an `eventTime` extractor, which switches
+the runtime to event time and watermarks.
 
-| Stage | JavaScript | Python | Go | Rust |
-| --- | --- | --- | --- | --- |
-| Stateless | `map`, `filter`, `flatMap` | `map`, `filter`, `flat_map` | `Map`, `Filter`, `FlatMap` | `map`, `filter`, `flat_map` |
-| Keying | `keyBy` | `key_by` | `KeyBy` | `key_by` |
-| Windows | `windowTumbling`, `windowSliding`, `windowSession`, `windowCron` | `window_tumbling`, `window_sliding`, `window_session`, `window_cron` | `WindowTumbling`, `WindowSliding`, `WindowSession`, `WindowCron` | `window_tumbling`, `window_sliding`, `window_session`, `window_cron` |
-| Folding | `reduce`, `aggregate` | `reduce`, `aggregate` | `Reduce`, `Aggregate` | `reduce`, `aggregate_count`, `aggregate_sum`, `aggregate_min`, `aggregate_max`, `aggregate_avg` |
-| Flow control | `gate` | `gate` | `Gate` | `gate` |
-| Terminal | `to`, `foreach` | `to`, `foreach` | `To`, `Foreach` | `to`, `to_partitioned`, `foreach` |
+## Why it is exactly-once
 
-Rust names each aggregate field with its own call (`aggregate_count("count").aggregate_sum("sum", ...)`) because typed extractors have different signatures; it builds the same single aggregate and fingerprints identically.
+A cycle is four steps: pop a batch from the source under a lease, read the state rows for that
+partition, run your operators, commit. The commit is one request and one PostgreSQL transaction
+carrying three things: the state upserts and deletes, the sink pushes, the ack of the source
+batch.
 
-<Aside type="note">
-The `config_hash` is computed identically in all four SDKs (`sha256` over each operator's kind and structural configuration, user closures excluded), so a query can be redeployed in another language without tripping the mismatch guard; the Rust implementation is pinned with test vectors from the JavaScript one.
-</Aside>
+All three land or none does. A crash mid-cycle leaves the source cursor where it was, the lease
+expires, and the batch comes back to rebuild the same window from the same input. A response lost
+on the wire cannot double-emit either: the sink push happens before the ack inside the
+transaction, and the ack aborts on an expired lease, so a retried cycle finds the lease gone and
+its sink write rolls back with it.
 
-## The three endpoints behind it
+Sink pushes take the ordinary push path, so window results get offsets, deduplication and
+ordering like any other message.
 
-| Route | Access | Purpose |
-| --- | --- | --- |
-| `POST /streams/v1/queries` | read-write | Idempotent query registration. Returns the canonical `query_id` used by every later call. |
-| `POST /streams/v1/state/get` | read | Read state rows for one `(query_id, partition_id)`, by explicit keys, key prefix, or ripeness. |
-| `POST /streams/v1/cycle` | read-write | Commit one cycle: state operations, sink pushes and the source ack, atomically. |
+`foreach` is the exception. It calls your function and acks after it returns, so an effect
+outside PostgreSQL is at-least-once. An effect that must not repeat belongs on a sink queue with
+a consumer of its own.
 
-### Registration and the config hash
+## Keys, workers and state
 
-`run` posts the query name, its source and sink queues, and the `config_hash`. A name already registered with a different hash refuses with **HTTP 409**: rerun the same chain with `reset: true` (Rust: `.reset(true)` on `RunOptions`), which deletes the query's state rows before re-registering, because old accumulators and a new reducer shape do not mix. Registration is otherwise idempotent: restarts and multiple workers re-resolve the same `query_id`.
+State rows are keyed by query, partition and key, and partition leases are exclusive: one worker
+at a time writes a partition's state, so no worker locks against another. Parallelism is the
+partition count, exactly as it is for consumers in one group. `keyBy` changes the state key. Keep
+it aligned with the partition, or repartition through an intermediate queue first.
 
-### The cycle
+Closed windows delete their own rows, and nothing else does: retention never touches stream
+state. It is reclaimed by dropping the query, or by rerunning the chain with `reset` on. `reset`
+is also the answer to the **HTTP 409** you get when you redeploy a changed chain under a name
+already registered, because old accumulators and a new fold shape do not mix.
 
-<Steps>
-
-1. **Pop a batch** from the source under consumer group `streams.<queryId>` (overridable); an ordinary leased pop, whose response carries the lease id the cycle's ack presents.
-
-2. **Read state** for the partition, if the chain is stateful.
-
-3. **Run your operators** in your process and decide which windows close.
-
-4. **Commit** one `POST /streams/v1/cycle`: state upserts and deletes, sink messages, source ack.
-
-</Steps>
-
-The commit is one PostgreSQL transaction: the ack advances the source cursor, and sink pushes take an ordinary push's allocator path (pre-packed into segments), so sink messages get offsets, deduplication and ordering like any other message.
-
-`release_lease` in the cycle body defaults to `true`: ack the whole leased batch. A `gate` operator passes `false`: the cursor advances by exactly the messages allowed and the lease is **retained** on the un-acked tail, so denied messages and their successors redeliver in their original order, with no side queue.
-
-An idle-flush timer commits emit-only cycles (no source ack) that close ripe windows on a quiet partition, every 5000 ms per window operator by default. `idleFlushMs: 0` disables it; a window on a silent partition then never closes.
-
-## Windows
-
-All four kinds take `gracePeriod` and `idleFlushMs`, plus `eventTime`, `allowedLateness` and `onLate` to switch from processing time to event time.
-
-| Kind | Builder call | Semantics |
-| --- | --- | --- |
-| Tumbling | `windowTumbling({ seconds: 60 })` | Fixed non-overlapping buckets, `floor(time / seconds)`. One state row per key per window. |
-| Sliding | `windowSliding({ size: 3600, slide: 60 })` | Overlapping windows of `size` hopping every `slide`; `size` must be an integer multiple of `slide`, enforced at construction. Each event writes `size / slide` state rows per key (here 60), the cost to budget at high key cardinality. |
-| Session | `windowSession({ gap: 1800 })` | Per-key activity window: extends as long as events for that key keep arriving within `gap` seconds of each other. |
-| Cron | `windowCron({ every: 'day' })` | Wall-clock-aligned tumbling; `every` is `second`, `minute`, `hour`, `day` or `week`. Day and week boundaries are UTC. Full cron expressions are rejected at construction. |
-
-### Processing time and event time
-
-Without an `eventTime` extractor, bucketing uses `createdAt`, the broker-stamped commit time of the message's segment. With one, bucketing uses its return value (a `Date`, epoch milliseconds or an ISO string) and the runtime keeps a per-partition watermark. An event older than `watermark - allowedLateness` is late: `onLate: 'drop'` (the default) discards it, `'include'` accumulates it best-effort (an already-flushed window is recreated and emits a second time when it closes again), anything else throws.
-
-| Mode | A window closes when |
-| --- | --- |
-| Processing time | `windowEnd + gracePeriod` is at or before the latest time seen |
-| Event time | The partition watermark passes the same point |
-| Idle flush | Wall clock passes the same point on a quiet partition |
-
-## Keys, partitions and isolation
-
-The state primary key is `(query_id, partition_id, key)`, and that shape is the isolation mechanism: **partition leases are exclusive**, so one worker holds a partition at a time, so every write to one `(query, partition)`'s state rows comes from one writer, with no cross-worker locking. Stateful operators key on the source `partition_id` by default; `keyBy` overrides it, its callback returning the state key used downstream, `keyBy(msg => msg.data.userId)` for one session per user.
-
-<Aside type="caution">
-A `keyBy` key that does not line up with the partition lets workers on different partitions write the same logical key, which is contention on shared state rows: repartition instead, by pushing to an intermediate queue partitioned by that key and running the stateful stage there.
-</Aside>
-
-Workers of one query divide the source partitions exactly as consumers in one group do; parallelism is the partition count.
-
-## Where the state lives
-
-Two tables in their own schema, `queen_streams`, applied at boot like every other procedure file:
-
-| Table | Contents |
-| --- | --- |
-| `queen_streams.queries` | One row per registered query: `name`, `source_queue`, `sink_queue`, `config_hash`. |
-| `queen_streams.state` | `(query_id, partition_id, key) -> value` JSONB, with `updated_at`. Cascades on query delete. |
-
-**State is reclaimed only by dropping the query or re-registering with `reset: true`**; retention never touches it. Closed windows delete their own rows, so bounded key cardinality reaches a steady state and unbounded cardinality grows until you intervene ([watching it](/selfhost/retention)). **The schema is granted to `PUBLIC`**: database access is stream access ([details](/selfhost/postgres)).
-
-Read state over HTTP when debugging:
-
-```http
-POST /streams/v1/state/get
-Content-Type: application/json
-
-{"query_id": "…", "partition_id": "…", "key_prefix": "tumb:60"}
-```
-
-Rows are `key`, `value`, `updated_at`; accumulators live under a composite key of operator tag, window key and user key, joined by a unit-separator byte.
-
-## What is guaranteed, and what is not
-
-| Property | Mechanism |
-| --- | --- |
-| The cycle is atomic | State, sink pushes and the source ack commit together or not at all. A crash mid-cycle leaves the cursor in place, the lease expires, the batch redelivers. |
-| A lost response cannot double-consume or double-emit | The sink push happens before the ack inside the transaction, and the ack aborts on an invalid or expired lease, so a retried cycle finds the lease gone and its sink write rolls back with it. |
-| `foreach` is at-least-once | The source is acked only after your function resolves, so a crash during it redelivers and the side effect may already have happened. An effect that must not repeat belongs on a sink queue with a dedicated consumer. |
-| A cycle nack spends no pop-path retry budget | An `ack.ok = false` cycle releases the lease and leaves the cursor untouched for a full redelivery; retry policy is the runtime's business, not the broker's. |
-| The body is the signal, not the status code | `cycle` answers 200 even for a failed cycle; the SDKs raise on `success: false`. A 500 from it is an infrastructure error, safe to retry because the call is one transaction. `state/get` answers 400 when the procedure reports failure and 500 on an embedded error. Full contract: [errors](/use/errors). |
-
-## Operational notes
-
-- The three `/streams/v1/*` routes are **not tenant-scoped**, so a proxy deployment plan-gates streams on a dedicated cell. Route classes are in the [reference](/reference).
-- `run` requires an explicit broker URL: the runtime builds its own HTTP client for the `/streams/v1/*` calls, with its own retry policy ([errors](/use/errors)).
-- Sink emits and source acks land in per-queue and broker-wide metrics, on the same throughput charts as any producer and consumer.
-
-## Next
+One operator chain, four kinds of window, one transaction per cycle, and results that arrive on a
+queue like any other message.
 
 <CardGrid>
   <LinkCard
-    href="/use/examples/pipeline"
-    title="Transactional pipeline"
-    description="The same atomic push-and-ack, written by hand for a message-at-a-time stage."
+    href="/reference/sdk/javascript"
+    title="The operator catalogue"
+    description="Every combinator, every window option, and the full run options table, per SDK."
   />
   <LinkCard
-    href="/use/errors"
+    href="/internals/schema"
+    title="State and the cycle procedure"
+    description="The queen_streams tables and the stored procedure that commits a cycle."
+  />
+  <LinkCard
+    href="/reference/errors/"
     title="Errors and backpressure"
-    description="How the streams HTTP client differs from the queue client when it retries."
+    description="How the streams client differs from the queue client when it retries."
+  />
+  <LinkCard
+    href="/reference/http/routes"
+    title="The routes"
+    description="The three /streams/v1 endpoints and the access level each one takes."
   />
 </CardGrid>

@@ -1,0 +1,39 @@
+---
+title: Hello world
+description: "One message in, one message out, against a broker you started five minutes ago."
+type: tutorial
+tier: use
+sidebar:
+  order: 1
+verifiedBy:
+  - examples/tutorials/php/01-hello-world.php
+---
+
+The queue does not exist until the push names it, and it is created inside the transaction that
+stores the message. There is no declare step and nothing to provision first.
+
+The read takes the message under a **lease**: it is claimed until it is acknowledged or the lease
+expires, and the acknowledgement is what commits consumption. No consumer group is named here, so
+the read follows the queue's own cursor, which starts at the beginning. A named group would start
+at the tail and find nothing, which is [the next tutorial](/use/php-client/multi-queue-flow).
+
+The mechanism to hold on to is that the builders are lazy. `execute()` is the call that reaches
+the broker, and a chain that stops short of it does nothing and reports nothing. `pop()` is
+terminal in its own right, so it takes no `execute()`, and what it returns is one associative
+array per message with the decoded payload under `data`.
+
+<Render file="snippets/tut-php-hello-world" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/php` with the
+PHP client installed:
+
+```bash
+QUEEN_URL=http://localhost:6632 php 01-hello-world.php
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh php`.
+
+Next: [Multi-queue flow](/use/php-client/multi-queue-flow).

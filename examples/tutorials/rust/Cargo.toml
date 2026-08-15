@@ -1,0 +1,32 @@
+[package]
+name = "queen-tutorials"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The client comes from this repository, not from crates.io, so the tutorials
+# always exercise the code in the tree they ship with.
+[dependencies]
+queen-mq = { path = "../../../clients/client-rust" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+serde_json = "1"
+
+[[bin]]
+name = "01_hello_world"
+path = "src/bin/01_hello_world.rs"
+
+[[bin]]
+name = "02_multi_queue_flow"
+path = "src/bin/02_multi_queue_flow.rs"
+
+[[bin]]
+name = "03_transaction_ack_push"
+path = "src/bin/03_transaction_ack_push.rs"
+
+[[bin]]
+name = "04_replay"
+path = "src/bin/04_replay.rs"
+
+[[bin]]
+name = "05_streaming"
+path = "src/bin/05_streaming.rs"

@@ -1,0 +1,110 @@
+---
+title: HTTP Client
+description: "Queen from anything that speaks HTTP: push, pop, acknowledge and long-poll, each one a runnable curl."
+type: quickstart
+tier: use
+sidebar:
+  order: 9
+sourceOfTruth:
+  - server/src/handlers/data.rs
+  - server/src/handlers/mod.rs
+  - server/src/auth.rs
+  - server/src/main.rs
+---
+
+Queen has no binary protocol and no wire framing. Every SDK is a wrapper over JSON on HTTP, so
+anything that can make an HTTP request is a first-class client, `curl` included. The base URL is
+`http://host:6632`, and one header authenticates: `Authorization: Bearer <token>`.
+
+## Push
+
+Two messages, one call. The queue and the partition are created by it: there is no declaration
+step.
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/push -H 'Content-Type: application/json' -d '{"items":[{"queue":"demo","partition":"acct-42","transactionId":"evt-1","payload":{"n":1}},{"queue":"demo","partition":"acct-42","transactionId":"evt-2","payload":{"n":2}}]}'
+```
+
+`queue` and `payload` are required per item, `partition` defaults to `Default`. A missing
+`transactionId` is minted as a UUIDv7, which makes the push non-idempotent: send a
+deterministic one and a retry inside the dedup window comes back as a duplicate instead of
+writing twice.
+
+The answer is `201` and one entry per item, in request order, each carrying a `status`:
+`queued`, `duplicate` (nothing was written, and `message_id` is the original message's),
+`buffered` (the database write failed and the message is on the broker's disk spool awaiting
+replay) or `failed` (the spool write failed too, and the message is gone). A `201` does not by
+itself mean "stored in PostgreSQL": read every item's status.
+
+## Pop
+
+Lease a batch for a consumer group. `batch` caps how many messages come back.
+
+```bash
+curl -s 'http://localhost:6632/api/v1/pop/queue/demo?consumerGroup=billing&batch=10'
+```
+
+Add `/partition/:partition` to the path to pin one lane, or call `/api/v1/pop` with a
+`namespace` or a `task` to lease across every matching queue. The response, abridged, carries
+the lease and the messages. Keep the `leaseId` and each message's `partitionId`: the
+acknowledgement needs both.
+
+```json
+{
+  "success": true,
+  "queue": "demo",
+  "partitionId": "0197f2b0-...",
+  "leaseId": "0197f2b2-...",
+  "consumerGroup": "billing",
+  "messages": [
+    {
+      "id": "0197f2b1-...",
+      "transactionId": "evt-1",
+      "data": { "n": 1 },
+      "partitionId": "0197f2b0-..."
+    }
+  ]
+}
+```
+
+## Acknowledge
+
+Both messages, in one call.
+
+```bash
+curl -s -X POST http://localhost:6632/api/v1/ack/batch -H 'Content-Type: application/json' -d '{"consumerGroup":"billing","acknowledgments":[{"transactionId":"evt-1","partitionId":"<partitionId>","leaseId":"<leaseId>","status":"completed"},{"transactionId":"evt-2","partitionId":"<partitionId>","leaseId":"<leaseId>","status":"completed"}]}'
+```
+
+`partitionId` is required, because a `transactionId` is not unique across partitions. An ack is
+an offset commit: there is one cursor per partition and consumer group, so acking `evt-2` alone
+completes `evt-1` too, and a negative ack clamps the cursor at the failed message, which means
+everything after it in that batch is coming back.
+
+`status` is normalised server-side. `completed`, `success`, `acked`, `ok` and absent all mean
+`completed`; `retry` and `dlq` mean themselves; anything else at all means `failed`. A typo does
+not error, it nacks.
+
+The route answers `200` with an array in request order whatever the outcome, so a rejected ack
+is a `200` with `success: false` on its item. The status code tells you nothing here: check
+each entry, and the array length against what you sent.
+
+## Long-poll
+
+Do not spin on an empty queue. `wait=true` parks the request until a message arrives or
+`timeout` milliseconds pass.
+
+```bash
+curl -si 'http://localhost:6632/api/v1/pop/queue/demo?consumerGroup=billing&batch=10&wait=true&timeout=5000'
+```
+
+The group's cursor is past both messages now, so this one comes back `204 No Content` with no
+body at all, which `-i` makes visible. Treat a `204` as "no messages" and never parse it. Give
+your own HTTP client more time than the broker: the SDKs set their timeout to `timeout` plus
+5,000 ms, so the server's window closes first and the socket stays reusable.
+
+Conventions, access levels and error codes are in
+[the HTTP API reference](/reference/http); every method and path the broker registers, with the
+role that satisfies it, is in [the route table](/reference/http/routes).
+
+Next: [Hello world](/use/http-client/hello-world), the first of four tutorials that put these
+routes in a runnable script and check their own outcome.

@@ -1,0 +1,220 @@
+// docs:start(tut-rust-transaction-ack-push)
+//
+// Tutorial 3 of 5: acknowledge and push in one transaction.
+//
+// Tutorial 2 handed work from one queue to the next in two steps: push the
+// derived message, then let the loop acknowledge the source. Between those two
+// steps a crash duplicates work, and in the other order it loses work.
+//
+// A Queen transaction closes that window: the acknowledgement of the input and
+// the push of the output are one PostgreSQL transaction. Both land or neither
+// does.
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 cargo run --bin 03_transaction_ack_push
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use queen_mq::{Config, Message, Queen, SubscriptionMode};
+use serde_json::json;
+
+const GROUP: &str = "tut-rust-invoicing";
+
+// (orderId, customer, total)
+const INPUT: [(&str, &str, f64); 3] = [
+    ("A-1", "acme", 120.5),
+    ("B-1", "globex", 88.75),
+    ("C-1", "initech", 310.0),
+];
+
+struct Checks(usize);
+
+impl Checks {
+    fn assert(&mut self, condition: bool, description: &str) -> Result<(), String> {
+        if !condition {
+            return Err(description.to_string());
+        }
+        self.0 += 1;
+        println!("  ok: {description}");
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    match run().await {
+        Ok(checks) => println!("\nPASS: {checks} checks"),
+        Err(e) => {
+            eprintln!("\nFAIL: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run() -> Result<usize, String> {
+    let url = std::env::var("QUEEN_URL").unwrap_or_else(|_| "http://localhost:6632".into());
+    let run_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let orders = format!("tut-rust-tx-orders-{run_id}");
+    let invoices = format!("tut-rust-tx-invoices-{run_id}");
+
+    let mut checks = Checks(0);
+    println!("broker {url}");
+
+    let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
+
+    for (order_id, customer, total) in INPUT {
+        queen
+            .queue(&orders)
+            .partition(customer)
+            .push(json!({ "orderId": order_id, "customer": customer, "total": total }))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    println!("pushed {} orders", INPUT.len());
+
+    println!("\ninvoicing");
+    let invoiced: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&invoiced);
+        let tx_client = queen.clone();
+        let invoices_queue = invoices.clone();
+
+        // auto_ack(false) is what makes this tutorial possible: the loop must
+        // not acknowledge behind your back, because the acknowledgement is part
+        // of the transaction below. With it off, the handler's Ok only means
+        // "keep going" — nothing is settled for you.
+        queen
+            .queue(&orders)
+            .group(GROUP)
+            .subscription_mode(SubscriptionMode::All)
+            .auto_ack(false)
+            .limit(INPUT.len() as u64)
+            .poll_timeout(Duration::from_secs(1))
+            .idle(Duration::from_secs(5))
+            .consume(move |msg: Message| {
+                let sink = Arc::clone(&sink);
+                let tx_client = tx_client.clone();
+                let invoices_queue = invoices_queue.clone();
+                async move {
+                    let order_id = msg.data["orderId"].as_str().unwrap_or_default().to_string();
+                    let customer = msg.data["customer"].as_str().unwrap_or_default().to_string();
+
+                    // One commit carries both operations. Where the JavaScript
+                    // client wants the consumer group named on the ack, this one
+                    // reads the group, the lease id and the partition straight
+                    // off the message — so the ack cannot be pointed at the
+                    // wrong cursor by forgetting an argument.
+                    //
+                    // The collected lease ids travel as `requiredLeases`, which
+                    // is what makes a lease that expired mid-handler roll the
+                    // whole thing back instead of pushing stage two for a
+                    // message somebody else has already re-claimed.
+                    tx_client
+                        .transaction()
+                        .push_to(
+                            &invoices_queue,
+                            &customer,
+                            json!({
+                                "invoiceId": format!("INV-{order_id}"),
+                                "orderId": order_id,
+                                "amount": msg.data["total"],
+                            }),
+                        )
+                        .map_err(|e| e.to_string())?
+                        .ack(&msg)
+                        // A rolled-back transaction comes back as HTTP 200 with
+                        // success: false. This client raises that as an Err
+                        // rather than handing back a result nobody checks, so
+                        // the `?` here IS the check.
+                        .commit()
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                    println!("  {order_id} -> INV-{order_id}");
+                    sink.lock().unwrap().push(order_id);
+                    Ok::<_, String>(())
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let invoiced = invoiced.lock().unwrap().clone();
+    checks.assert(
+        invoiced.len() == INPUT.len(),
+        "every order was invoiced once",
+    )?;
+
+    // The commit fails if the lease has expired, which is what stops a slow
+    // consumer from acking work the broker has already handed to someone else.
+    // Nothing to assert here: the check above is that assertion, since a failed
+    // commit would have aborted the handler.
+
+    println!("\nchecking the output queue");
+
+    // The invoices went to one partition per customer, and a pop claims a
+    // single partition unless you say otherwise: partitions(10) lets this one
+    // call claim up to ten of them, with batch as the total budget across all
+    // of them.
+    let claimed = queen
+        .queue(&invoices)
+        .batch(10)
+        .partitions(10)
+        .wait(true)
+        .pop()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    checks.assert(
+        claimed.len() == INPUT.len(),
+        &format!("{} invoices exist", INPUT.len()),
+    )?;
+
+    let mut ids: Vec<&str> = claimed
+        .iter()
+        .filter_map(|m| m.data["orderId"].as_str())
+        .collect();
+    ids.sort_unstable();
+    let mut expected: Vec<&str> = INPUT.iter().map(|(id, _, _)| *id).collect();
+    expected.sort_unstable();
+    checks.assert(
+        ids == expected,
+        "each invoice matches an order, none duplicated",
+    )?;
+
+    // And the input queue is committed for this group: the acks were part of
+    // the same transactions that produced those invoices, so the two states
+    // cannot disagree.
+    let leftovers = queen
+        .queue(&orders)
+        .group(GROUP)
+        .batch(10)
+        .wait(false)
+        .pop()
+        .await
+        .map_err(|e| e.to_string())?;
+    checks.assert(
+        leftovers.is_empty(),
+        "the source queue is committed for this group",
+    )?;
+
+    queen
+        .queue(&orders)
+        .delete()
+        .await
+        .map_err(|e| e.to_string())?;
+    queen
+        .queue(&invoices)
+        .delete()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    queen.close().await.map_err(|e| e.to_string())?;
+
+    Ok(checks.0)
+}
+// docs:end

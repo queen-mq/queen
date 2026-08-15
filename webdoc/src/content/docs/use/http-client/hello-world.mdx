@@ -1,0 +1,43 @@
+---
+title: Hello world
+description: "One message in, one message out, with nothing but curl and jq."
+type: tutorial
+tier: use
+sidebar:
+  order: 1
+verifiedBy:
+  - examples/tutorials/http/01-hello-world.sh
+---
+
+There is no client library here and none is needed. The broker speaks HTTP/1.1 with JSON bodies,
+so every SDK is a wrapper over the routes this script calls by hand, and the script prints its
+requests and responses verbatim: what you read is the wire.
+
+Nothing is created before it is used, so the queue and the partition come into existence with the
+push that names them. That push carries the message under `payload`, and the pop hands it back
+under `data`.
+
+The mechanism to hold on to is that the status code is not the outcome. A push answers `201`
+whether the message reached PostgreSQL, the broker's disk spool or nowhere at all, and a refused
+acknowledgement arrives as `200` with `success: false` on its item. The per-item status is the
+answer; an empty pop is the one case with nothing to read, a `204` with no body.
+
+No consumer group is named here, so the read goes through the queue's own cursor, the reserved
+group `__QUEUE_MODE__`, which starts at the beginning. Named groups are
+[the next tutorial](/use/http-client/multi-queue-flow): a group created after a message was pushed
+starts at the tail and would find nothing.
+
+<Render file="snippets/tut-http-hello-world" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with `curl` and `jq` on the path:
+
+```bash
+QUEEN_URL=http://localhost:6632 bash examples/tutorials/http/01-hello-world.sh
+```
+
+The script checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh http`.
+
+Next: [Multi-queue flow](/use/http-client/multi-queue-flow).

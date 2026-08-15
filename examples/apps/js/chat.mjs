@@ -1,0 +1,200 @@
+// docs:start(app-js-chat)
+//
+// A chat messaging system.
+//
+// This is the application Queen was written for. A hotel messaging product ran
+// on Kafka and kept stalling: some conversations need a translation or an agent
+// reply before the next message can be handled, and on a shared partition one
+// slow conversation holds up every conversation behind it.
+//
+// The fix is structural rather than operational: one ordered lane per
+// conversation, created by the first message sent to it. A conversation that
+// takes ten seconds delays itself and nothing else.
+//
+// What this program builds:
+//
+//   chat-messages (one partition per conversation)
+//     ├── group "delivery"    fast, marks each message as delivered
+//     └── group "enrichment"  slow on conversations that need translation
+//
+// And what it proves: every message reaches both groups exactly once, in the
+// order it was sent inside its own conversation, and the conversations that
+// need no translation finish while the slow one is still working.
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 node chat.mjs
+
+import { Queen } from 'queen-mq'
+
+const QUEEN_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+const RUN = Date.now().toString(36)
+const MESSAGES = `app-js-chat-${RUN}`
+
+// Three conversations. The one in Japanese needs a translation pass, which is
+// the slow work: 400 ms a message against 10 ms for the rest.
+const CONVERSATIONS = {
+  'conv-en-1': { locale: 'en', needsTranslation: false },
+  'conv-en-2': { locale: 'en', needsTranslation: false },
+  'conv-jp-1': { locale: 'jp', needsTranslation: true },
+}
+const MESSAGES_PER_CONVERSATION = 6
+
+let checks = 0
+const assert = (condition, description) => {
+  if (!condition) throw new Error(description)
+  checks++
+  console.log(`  ok: ${description}`)
+}
+const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+
+const queen = new Queen({ url: QUEEN_URL, handleSignals: false })
+
+try {
+  console.log(`broker ${QUEEN_URL}`)
+
+  // Leases are what make a crashed worker safe: a message whose handler dies is
+  // redelivered once the lease expires. retryLimit bounds how many times that
+  // can happen before the message is dead-lettered instead.
+  await queen.queue(MESSAGES).config({ leaseTime: 60, retryLimit: 3 }).create()
+
+  // ---------------------------------------------------------------- producing
+  //
+  // A chat client sends a message: one push, into the partition named after the
+  // conversation. Nothing was declared for this conversation in advance, and
+  // nothing has to be cleaned up when it goes quiet.
+  console.log('\nsending')
+  const sent = []
+  for (let seq = 1; seq <= MESSAGES_PER_CONVERSATION; seq++) {
+    for (const [conversationId, meta] of Object.entries(CONVERSATIONS)) {
+      const message = {
+        conversationId,
+        seq,
+        locale: meta.locale,
+        body: `message ${seq} in ${conversationId}`,
+        // The transaction id is the client's own idempotency key: a retry of
+        // this send, from a phone on a flaky network, writes nothing the second
+        // time and answers with the first message's id.
+        sentAt: Date.now(),
+      }
+      await queen.queue(MESSAGES).partition(conversationId).push({
+        transactionId: `${conversationId}-${seq}`,
+        data: message,
+      })
+      sent.push(message)
+    }
+  }
+  console.log(`  ${sent.length} messages across ${Object.keys(CONVERSATIONS).length} conversations`)
+
+  // A resend of the same message: the client retried because it never saw the
+  // first answer. The broker recognises the transaction id and stores nothing.
+  const [duplicate] = await queen.queue(MESSAGES).partition('conv-en-1').push({
+    transactionId: 'conv-en-1-1',
+    data: { conversationId: 'conv-en-1', seq: 1, body: 'resent by the phone' },
+  })
+  assert(duplicate.status === 'duplicate', 'a resent message was deduplicated, not stored twice')
+
+  // --------------------------------------------------------------- delivering
+  //
+  // The delivery worker is what marks a message as delivered to the recipients.
+  // It is fast and must never fall behind, which is why it is its own consumer
+  // group: it shares no cursor with the slow work below.
+  //
+  // concurrency(3) runs three poll loops, and each pop claims a partition, so
+  // the three conversations are drained in parallel by three workers.
+  console.log('\ndelivering')
+  const delivered = new Map()
+  await queen
+    .queue(MESSAGES)
+    .group('delivery')
+    .subscriptionMode('all')
+    .concurrency(3)
+    .each()
+    .limit(sent.length)
+    .idleMillis(10000)
+    .consume(async (msg) => {
+      await sleep(10)
+      const seen = delivered.get(msg.data.conversationId) ?? []
+      seen.push(msg.data.seq)
+      delivered.set(msg.data.conversationId, seen)
+    })
+
+  assert(
+    [...delivered.values()].reduce((n, seqs) => n + seqs.length, 0) === sent.length,
+    'delivery saw every message exactly once'
+  )
+  for (const [conversationId, seqs] of delivered) {
+    assert(
+      JSON.stringify(seqs) === JSON.stringify([...seqs].sort((a, b) => a - b)),
+      `${conversationId} was delivered in order`
+    )
+  }
+
+  // -------------------------------------------------------------- enrichment
+  //
+  // The slow group. It reads the same messages through its own cursor, and the
+  // Japanese conversation costs 400 ms a message because it has to be
+  // translated before it can be answered.
+  //
+  // This is where a shared partition would hurt: on a hashed topic these
+  // messages would sit in the same lane as the English ones and hold them up.
+  // Here each conversation has its own lane, so the English conversations
+  // finish while the Japanese one is still being translated. The timings below
+  // are the proof.
+  console.log('\nenriching')
+  const finishedAt = new Map()
+  const started = Date.now()
+  await queen
+    .queue(MESSAGES)
+    .group('enrichment')
+    .subscriptionMode('all')
+    .concurrency(3)
+    .each()
+    .limit(sent.length)
+    .idleMillis(15000)
+    .consume(async (msg) => {
+      const meta = CONVERSATIONS[msg.data.conversationId]
+      await sleep(meta.needsTranslation ? 400 : 10)
+      finishedAt.set(msg.data.conversationId, Date.now() - started)
+    })
+
+  const slow = finishedAt.get('conv-jp-1')
+  const fast = Math.max(finishedAt.get('conv-en-1'), finishedAt.get('conv-en-2'))
+  console.log(`  english done after ${fast} ms, japanese after ${slow} ms`)
+
+  assert(
+    fast < slow,
+    'the conversations needing no translation finished first, in the same worker pool'
+  )
+  assert(
+    slow > MESSAGES_PER_CONVERSATION * 300,
+    'the slow conversation really was slow, so the comparison means something'
+  )
+
+  // ------------------------------------------------------------------- replay
+  //
+  // A new feature needs the history: sentiment scoring over everything ever
+  // said. It is a new consumer group reading from the beginning, and it costs
+  // no producer change and no second copy of the data.
+  console.log('\nbackfilling a new consumer')
+  let scored = 0
+  await queen
+    .queue(MESSAGES)
+    .group('sentiment')
+    .subscriptionMode('all')
+    .concurrency(3)
+    .each()
+    .limit(sent.length)
+    .idleMillis(10000)
+    .consume(async () => { scored++ })
+
+  assert(scored === sent.length, 'a group added today read the whole history')
+
+  await queen.queue(MESSAGES).delete()
+  console.log(`\nPASS: ${checks} checks`)
+} catch (err) {
+  console.error(`\nFAIL: ${err.message}`)
+  process.exitCode = 1
+} finally {
+  await queen.close()
+}
+// docs:end

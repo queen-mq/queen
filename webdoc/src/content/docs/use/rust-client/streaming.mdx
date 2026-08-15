@@ -1,0 +1,42 @@
+---
+title: Streaming
+description: "A tumbling window per entity, whose state, output and acknowledgements commit together."
+type: tutorial
+tier: use
+sidebar:
+  order: 5
+verifiedBy:
+  - examples/tutorials/rust/src/bin/05_streaming.rs
+---
+
+The four tutorials before this one move messages. This one aggregates them, and the aggregation
+lives in the same database as the queue: window state per partition, each closed window pushed to
+an output queue, and the acknowledgement of the inputs it was computed from, all in one PostgreSQL
+transaction. That is exactly-once aggregation with no changelog topic and no state store to size
+and operate.
+
+Where the JavaScript client takes a single options object, this one spells the query as a chain:
+`window_tumbling` and `idle_flush_ms` for the window, one call per aggregate, `to` for the sink,
+then `run`. `run` hands back a handle, and `stop` consumes it, so a stopped stream cannot be
+restarted by mistake.
+
+A stream is a running process, which decides the order of the program. Its cursor is created by
+the runner's first poll and starts at the tail, so a backlog already in the queue is not picked
+up: the stream is started, given a poll window, and only then are the sales pushed.
+
+The aggregate extractors are handed a `Record` over the message payload, not the envelope, so it
+is `r.number("amount")`. A field that is missing or is not a number reads as `None` and is left
+out of the total instead of failing, which is what makes getting this wrong quiet.
+
+<Render file="snippets/tut-rust-streaming" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/rust`:
+
+```bash
+QUEEN_URL=http://localhost:6632 cargo run --bin 05_streaming
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh rust`.

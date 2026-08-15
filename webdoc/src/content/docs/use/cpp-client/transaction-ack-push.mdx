@@ -1,0 +1,54 @@
+---
+title: Transactional ack and push
+description: "The acknowledgement of one stage and the push of the next, in one PostgreSQL transaction."
+type: tutorial
+tier: use
+sidebar:
+  order: 3
+verifiedBy:
+  - examples/tutorials/cpp/03-transaction-ack-push.cpp
+---
+
+The previous tutorial handed work between queues in two steps. In that order a crash between them
+duplicates work; in the other order it loses it. A transaction removes the choice: the ack of the
+input and the push of the output commit together or not at all, and `requiredLeases` makes the
+commit fail if the lease has expired, which is what stops a slow consumer from acknowledging work
+the broker has already handed to somebody else.
+
+This is the tutorial where the C++ client makes you drop to the wire. `client.transaction()`
+builds exactly this request, but its push sub-builder emits only `queue`, `payload` and
+`transactionId`: there is no partition step, so it can only ever write to a queue's `Default`
+lane. The invoices here are partitioned per customer, so the program assembles the request by hand
+and sends it through `client.get_http_client()`, which keeps the base URL, the retry and the
+`429` backoff that every other call in the file uses.
+
+`auto_ack(false)` on the consume builder is the other half. The loop must not acknowledge behind
+the transaction's back, and the ack operation names the consumer group explicitly, because the
+broker does not read it off the message.
+
+This is atomic handoff, not end-to-end exactly-once delivery: a lost response plus a retry still
+duplicates the pushes unless their transaction ids are deterministic. What it buys is that your
+pipeline's state can never disagree with itself.
+
+<Render file="snippets/tut-cpp-transaction-ack-push" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from `examples/tutorials/cpp` with the
+three headers on the include path ([the client page](/use/cpp-client) has that recipe):
+
+```bash
+mkdir -p build
+g++ -std=c++17 -O2 -pthread \
+    -I../../../clients/client-cpp -I../../../clients/server/vendor \
+    -I/opt/homebrew/include -I"$(brew --prefix openssl)/include" \
+    03-transaction-ack-push.cpp -o build/03-transaction-ack-push \
+    -L"$(brew --prefix openssl)/lib" -lssl -lcrypto -lpthread
+
+QUEEN_URL=http://localhost:6632 ./build/03-transaction-ack-push
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial on this
+page runs in the repository's own suite: `examples/tutorials/run.sh cpp`.
+
+Next: [Replay](/use/cpp-client/replay).

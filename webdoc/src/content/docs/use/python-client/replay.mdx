@@ -1,0 +1,41 @@
+---
+title: Replay
+description: "Reading history again: a new group backfilled from the beginning, and an existing group rewound."
+type: tutorial
+tier: use
+sidebar:
+  order: 4
+verifiedBy:
+  - examples/tutorials/py/04_replay.py
+---
+
+Acknowledging a message does not delete it. Consumption is a cursor per consumer group, and the
+messages stay until retention removes them, so history is still there to be read.
+
+Two different operations use that. A **new group** can start at the beginning instead of the tail,
+which is how you backfill a consumer that did not exist when the events happened. An **existing
+group** can be moved back to a timestamp with `admin.seek_consumer_group()`, which is how you
+reprocess after a bug. The subscription mode applies once, when the cursor is created, and cannot
+rewind a group that already exists; a seek can, and it releases any live lease, so an in-flight
+batch is abandoned rather than acknowledged.
+
+The seek is where Python asks something of you. The broker takes any ISO 8601 instant, so the
+`+00:00` that `isoformat()` writes is as good as the `Z` other clients send, but it will not guess
+a zone: a naive `datetime` is read as UTC, so from anywhere ahead of it the seek lands in the
+future and skips the history instead of rewinding into it, silently. Make it timezone-aware.
+
+<Render file="snippets/tut-py-replay" />
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), from the root of the repository, with
+the in-tree client on `PYTHONPATH`:
+
+```bash
+PYTHONPATH=clients/client-py python3 examples/tutorials/py/04_replay.py
+```
+
+The program checks its own outcome and exits non-zero if a check fails. Every tutorial in this
+section runs in the repository's own suite: `examples/tutorials/run.sh py`.
+
+Next: [Streaming](/use/python-client/streaming).

@@ -222,7 +222,7 @@ is what you sent plus the broker's default for everything you did not.
 `AutoAck` on `Pop` is the broker's at-most-once parameter, sent **only when you called
 `AutoAck` at all** (unset omits it rather than sending `false`); on `Consume` it is never sent
 and means client-side ack/nack around the handler. See
-[`autoAck`, and what it costs](/use/concepts/consuming#autoack-and-what-it-costs).
+[`autoAck`, and what it costs](/use/model/).
 </Aside>
 
 #### `Pop`
@@ -316,7 +316,7 @@ The two operations can be given in either order: the builder collects them and `
 one request.
 
 A transaction is atomic, not exactly-once end to end; see
-[the limit](/use/concepts/transactions#the-limit-this-is-not-end-to-end-exactly-once).
+[the limit](/use/model/).
 
 ## `*Admin`
 
@@ -418,7 +418,7 @@ if errors.As(err, &he) && he.StatusCode == 429 { /* ... */ }
 renders as `HTTP <status> [<code>]: <body>`.
 
 A `204` response yields a nil map:
-[a 204 carries no body at all](/use/errors#the-envelope).
+[a 204 carries no body at all](/reference/errors/).
 
 ## `*HttpClient`
 
