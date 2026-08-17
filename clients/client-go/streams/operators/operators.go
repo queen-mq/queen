@@ -181,12 +181,51 @@ func (k KeyByOperator) Apply(ctx context.Context, env Envelope) ([]Envelope, err
 // SinkOperator (terminal .to())
 // ---------------------------------------------------------------------------
 
+// PartitionFn derives the destination partition name from an emitted value.
+//
+// Declared as an ALIAS (not a defined type) on purpose: a plain
+// func(interface{}) string literal must satisfy the type switch in
+// resolvePartition, and a defined type would not.
+type PartitionFn = func(value interface{}) string
+
 type SinkOperator struct {
-	QueueName         string
-	PartitionResolver interface{} // string | func(value interface{}) string
+	QueueName string
+	// PartitionResolver is nil, a string (fixed partition), or a PartitionFn
+	// (per-value partition). Build it through NewSinkOperator so a wrong type
+	// fails loudly instead of silently falling back to the source partition.
+	PartitionResolver interface{}
+}
+
+// NewSinkOperator builds a sink with an optional partition resolver.
+//
+// resolver must be nil, a non-empty string, or a PartitionFn. Anything else
+// panics: resolvePartition would otherwise ignore it and every emit would
+// quietly land in the source partition — the exact bug this constructor
+// exists to prevent. Panicking on malformed operator config matches the
+// window constructors above.
+func NewSinkOperator(queueName string, resolver interface{}) SinkOperator {
+	switch r := resolver.(type) {
+	case nil:
+	case string:
+		if r == "" {
+			panic("sink partition resolver: empty string is not a valid partition name")
+		}
+	case PartitionFn:
+	default:
+		panic(fmt.Sprintf("sink partition resolver must be a string or func(interface{}) string, got %T", resolver))
+	}
+	return SinkOperator{QueueName: queueName, PartitionResolver: resolver}
 }
 
 func (SinkOperator) Kind() string { return "sink" }
+
+// Config deliberately omits PartitionResolver, for BOTH the string and the
+// function form. JS (SinkOperator.js) and Python (sink_op.py) both hard-code
+// config = {kind, queue} regardless of opts.partition, so adding the resolver
+// here — even the hashable string form — would make a Go chain's config_hash
+// diverge from the identical JS/Python chain and break cross-language resume
+// (see util.ConfigHashOf). Changing a resolver therefore does NOT invalidate
+// existing query state, in any of the three clients.
 func (s SinkOperator) Config() map[string]interface{} {
 	return map[string]interface{}{"kind": "sink", "queue": s.QueueName}
 }
@@ -227,7 +266,7 @@ func (s SinkOperator) resolvePartition(value interface{}, sourcePartition string
 	switch r := s.PartitionResolver.(type) {
 	case string:
 		return r
-	case func(interface{}) string:
+	case PartitionFn:
 		return r(value)
 	}
 	if sourcePartition != "" {

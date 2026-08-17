@@ -36,6 +36,7 @@ type (
 	ExtractorFn  = operators.ExtractorFn
 	EventTimeFn  = operators.EventTimeFn
 	ForeachFn    = operators.ForeachFn
+	PartitionFn  = operators.PartitionFn
 	WindowOption = operators.WindowOption
 	Source       = runtime.Source
 	Message      = runtime.Message
@@ -129,9 +130,37 @@ func (s *Stream) Gate(fn GateFn) *Stream {
 	return s.extend(operators.GateOperator{Fn: fn})
 }
 
-// To sends the final emits to a Queen queue.
+// To sends the final emits to a Queen queue, reusing the source partition
+// name for each push (co-partitioning by default).
 func (s *Stream) To(sink Sink) *Stream {
-	return s.extend(operators.SinkOperator{QueueName: sink.Name()})
+	return s.extend(operators.NewSinkOperator(sink.Name(), nil))
+}
+
+// ToPartitioned sends the final emits to a Queen queue, choosing the
+// destination partition explicitly. Mirror of the JS
+// .to(queue, { partition }) opts form.
+//
+// resolver is either:
+//
+//	string       — every emit lands in this fixed partition;
+//	PartitionFn  — func(value interface{}) string, called per emit.
+//
+// Anything else panics. Use this to fan output back out when the source is
+// deliberately single-partition (e.g. a .Gate() rate limiter whose budget
+// must live in one partition):
+//
+//	streams.From(queen.Queue("requests")).
+//	    Gate(limiter).
+//	    ToPartitioned(queen.Queue("requests.admitted"), func(v interface{}) string {
+//	        return v.(map[string]interface{})["tenantId"].(string)
+//	    })
+//
+// The resolver does NOT participate in the chain's config_hash (see
+// operators.SinkOperator.Config), so switching between To and ToPartitioned,
+// or changing the resolver, will not trip the registration mismatch check
+// and will not reset query state.
+func (s *Stream) ToPartitioned(sink Sink, resolver any) *Stream {
+	return s.extend(operators.NewSinkOperator(sink.Name(), resolver))
 }
 
 // Foreach runs a side effect for each emit (at-least-once).
