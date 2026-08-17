@@ -10,6 +10,10 @@ sourceOfTruth:
   - proxy/src/config.rs
   - proxy/src/cache.rs
   - proxy/src/oauth.rs
+  - proxy/src/db.rs
+  - proxy/src/pgtls.rs
+  - proxy/src/auth.rs
+  - proxy/src/gateway.rs
 ---
 
 `queen_proxy` is a second Rust binary that stands in front of a broker. It does two jobs, and
@@ -118,6 +122,110 @@ A port-forward therefore needs the header spelled out, or the request has no clu
 ```bash
 curl -H "Host: queen-prod.example.com" http://127.0.0.1:6711/api/v1/queues
 ```
+
+## Configuration
+
+Every setting is an environment variable, parsed the way the broker parses its own: only the
+literal `true` is truthy, an integer that does not parse falls back to its default instead of
+failing the boot, and an optional variable set to the empty string counts as unset.
+
+### The listener and TLS
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_PORT` | `6711` | Bind port. The listener is always `0.0.0.0:PORT`. |
+| `QUEEN_PROXY_TLS_CERT` | unset | Path to a PEM certificate chain. |
+| `QUEEN_PROXY_TLS_KEY` | unset | Path to the matching PEM private key. |
+
+The two TLS variables are both or neither. Set both and the proxy serves HTTPS itself on rustls
+with the ring provider, logging `TLS listener enabled (rustls/ring)`; set neither and it serves
+plaintext, which is the default. **Setting exactly one is a boot failure, not a downgrade**: the
+process logs the missing half and exits 1 before the port is bound, so a half-configured listener
+can never quietly answer in the clear. Both files are read and parsed before the bind for the same
+reason. The key may be a `PRIVATE KEY`, `RSA PRIVATE KEY` or `EC PRIVATE KEY` block, and the cert
+file must contain at least one `CERTIFICATE` block.
+
+<Aside type="caution">
+The proxy speaks **plaintext HTTP upstream to the broker**, whatever the listener does. That leg is
+assumed to be inside the cell network, so `QUEEN_PROXY_TLS_CERT` protects the client-to-proxy hop
+only.
+</Aside>
+
+### The control-plane database
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `PXDB_HOST` | unset | Hostname of pxdb. **Its presence is the switch**: unset means no control plane at all. |
+| `PXDB_PORT` | `5432` | Port. Point it at PostgreSQL directly, not at a pooler. |
+| `PXDB_USER` | `postgres` | Role the proxy connects as. |
+| `PXDB_PASSWORD` | empty | Password for that role. |
+| `PXDB_DB` | `queen_proxy` | Database name. The proxy owns the `queen_proxy` schema inside it. |
+| `PXDB_USE_SSL` | `false` | `true` connects over TLS. |
+| `PXDB_SSL_REJECT_UNAUTHORIZED` | `true` | With SSL on, `true` validates the chain against the Mozilla roots compiled into the binary; `false` encrypts and accepts any certificate. |
+| `PXDB_POOL_SIZE` | `16` | Maximum pooled connections. The dedicated `LISTEN` connection sits outside this pool, so budget one more. |
+
+The two SSL variables behave exactly like the broker's `PG_USE_SSL` and `PG_SSL_REJECT_UNAUTHORIZED`
+([PostgreSQL TLS](/reference/security/postgres-tls)), including the part that catches people: most
+managed PostgreSQL presents a privately rooted chain, so `true` fails validation and `false` is the
+usual answer, at the cost of not proving whose key answered.
+
+Two things about pxdb are boot failures rather than degraded modes. An unreachable database is one:
+the proxy takes a connection and runs `SELECT 1` before it serves anything, and a failure there, or
+in the migrations that follow, logs and exits 1. Leaving `PXDB_HOST` unset is the other, unless
+`QUEEN_PROXY_DEV_CELL_URL` is set instead; with neither, the process logs `nothing to serve` and
+exits 1 rather than starting an empty proxy.
+
+### Timeouts
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` | `35000` | Ceiling on one broker call, for every request that is not a long-poll pop. |
+| `QUEEN_PROXY_LONGPOLL_MAX_MS` | `90000` | Clamp on the wait a client may ask for on `wait=true`. |
+| `QUEEN_PROXY_LONGPOLL_MARGIN_MS` | `10000` | Added on top of that clamped wait. |
+
+A long-poll pop does not use `QUEEN_PROXY_UPSTREAM_TIMEOUT_MS` at all. Its budget is the client's
+`timeout` query parameter, or 30000 ms when absent, clamped to `QUEEN_PROXY_LONGPOLL_MAX_MS` and
+then increased by `QUEEN_PROXY_LONGPOLL_MARGIN_MS`, so the broker's own wait always expires first
+and the client gets an empty pop rather than a gateway error. When a timeout does fire, the proxy
+answers its own `504 {"code":"upstream_timeout"}`, records the request and does not bill it
+([usage metering](/reference/multi-tenant/metering)).
+
+### Cache staleness and token revocation
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_STALE_GRACE_MS` | `600000` | How long past a cache entry's TTL the last known-good cluster row may still be served, and only when pxdb failed to answer. |
+| `QUEEN_PROXY_REVOCATION_SWEEP_MS` | `3600000` | Interval of `queen_proxy.sweep_revoked_tokens()`. `0` disables the sweep. |
+
+`QUEEN_PROXY_STALE_GRACE_MS` is fail-open for known-good rows only. A clean answer of "no such row"
+is refused immediately whatever the window says, so the grace covers a pxdb outage and never covers
+a deleted cluster. It is also the number to read as the worst case in the other direction: nothing
+is refreshed while pxdb is down, so a suspension, a deletion or a key revocation decided during the
+outage takes up to this long to bite. Ten minutes is the default trade.
+
+The revocation sweep is pure garbage collection, since a deny-list row whose own `exp` has passed
+can no longer change a verification's outcome. Its first tick fires immediately at startup, and the
+whole task is skipped with a log line when there is no pxdb. The deny-list policy for a failed
+lookup is a different variable, `QUEEN_PROXY_REVOCATION_STRICT`
+([credentials and authorization](/reference/multi-tenant/auth)).
+
+### Dev only
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_DEV_INSECURE` | `false` | `true` skips authentication on the data plane entirely. |
+
+<Aside type="danger">
+`QUEEN_PROXY_DEV_INSECURE=true` does not weaken authentication, it removes it. Every request
+becomes an API-key principal with all four scopes and a nil key id, before any credential is read,
+so anything that can reach the port can produce, consume and administer queues on the cluster the
+`Host` header resolves to. Never set it anywhere a network can reach.
+</Aside>
+
+Two surfaces refuse to work in that mode, deliberately.
+The [cluster console API](/reference/multi-tenant/console) requires a human session and answers
+`403` to the synthetic API-key principal, and `x-queen-act-cluster` is rejected with a `403` naming
+dev-insecure, because there is no session to check the act-as against.
 
 ## Why one replica
 

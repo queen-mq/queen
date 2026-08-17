@@ -61,9 +61,17 @@ Pushing looks like this, and the partition is created by this call:
 The `transactionId` is optional and is the idempotency key: give it your own and a retry of the
 same push writes nothing the second time.
 
-Queen has been run with a million dynamic partitions at 200,000 messages a second, and at a
-million messages a second per side for 24 hours. Consumers choose how they read: which partition,
-how many at once, batch size, consumer group, lease time.
+Both headline runs are archived with their conditions.
+[A million ordered partitions in one queue](/benchmarks/cardinality-1m), none preallocated,
+created during the run at a thousand a second while serving 200,000 messages a second, with
+leased pops, explicit acks, retention on and deduplication off: 0 push, pop or ack errors.
+[About 1,000,000 messages a second per side for 24 hours](/benchmarks/soak-24h), with leased
+pops, explicit acks, deduplication on at a 60 second window and retention on: 0 restarts, and
+broker resident memory flat near 4.1 GB for the whole run. Both are Queen 1.0.0, one broker
+against one PostgreSQL, on a 32 vCPU / 62 GiB machine.
+
+Consumers choose how they read: which partition, how many at once, batch size, consumer group,
+lease time.
 
 <Render file="snippets/js-consume" />
 
@@ -104,5 +112,10 @@ Queen is multi-tenant, high throughput, high cardinality, and easy to operate.
     href="/deploy"
     title="Deploy Queen"
     description="One binary next to a PostgreSQL, and what changes when you want it highly available."
+  />
+  <LinkCard
+    href="/benchmarks"
+    title="Benchmarks"
+    description="Every published figure with the conditions that make it true, and the archived run behind it."
   />
 </CardGrid>

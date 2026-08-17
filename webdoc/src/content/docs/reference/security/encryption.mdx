@@ -10,6 +10,7 @@ sourceOfTruth:
   - server/src/encryption.rs
   - server/src/handlers/data.rs
   - server/src/handlers/messages.rs
+  - server/src/handlers/streams.rs
   - server/src/db.rs
   - server/sql/procedures/012_configure.sql
 ---
@@ -66,6 +67,14 @@ written, not after it is replayed.
 Two cases resolve to "no encryption", both without an error: a queue with no
 `queen.queues` row yet (created implicitly by a push, never `/configure`d), and a
 flag lookup that could not reach the database.
+
+**A stream's sink output is enveloped like any other write.** Before
+`POST /streams/v1/cycle` packs a cycle's `push_items`, the broker resolves
+`encryptionEnabled` for each sink queue and encrypts that queue's payloads, so a
+closed window lands in the log as ciphertext exactly as a pushed message does. The
+flag is resolved on the default tenant on this path, which is the only tenant a
+streams deployment serves. Consumers of the sink queue decrypt by shape on the way
+out, so nothing downstream has to know a stream produced the message.
 
 Only the payload is enveloped. The `transactionId`, trace name, queue and
 partition names, offsets, timestamps, `producerSub`, consumer-group cursors and
@@ -131,6 +140,14 @@ and only the boot log shows it. The same design covers a runtime cipher failure:
 if the cipher call fails for an individual message, the broker warns (sampled at
 one line per 10,000 occurrences, so it cannot flood stderr at ingest rate) and
 stores that message in plaintext rather than failing the push.
+
+The streams cycle degrades the same way and for the same reason. A cipher failure
+on a sink payload logs `encryption failed; stored plaintext` under the `streams`
+target, with the queue name and a `suppressed` count on the same 1-in-10,000
+sampler, and the cycle commits: the window result, the state writes and the source
+ack are one transaction, so failing the encryption would mean replaying the whole
+window rather than storing one message in the clear. Alert on that log line, since
+the cycle response reports success either way.
 
 Verify at the deployment level, since the queue's flag alone does not tell you
 whether the key loaded:

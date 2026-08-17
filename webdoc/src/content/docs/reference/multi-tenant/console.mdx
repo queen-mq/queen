@@ -1,0 +1,223 @@
+---
+title: Cluster console API
+description: "The eight human-only HTTP routes the proxy serves at /api/console: what each returns, which of them need the admin role, and the guards on the last admin and on cross-cluster key revocation."
+type: reference
+tier: operate
+sidebar:
+  order: 28
+  label: Console API
+sourceOfTruth:
+  - proxy/src/console.rs
+  - proxy/src/main.rs
+  - proxy/src/auth.rs
+  - proxy/migrations/001_init.sql
+  - proxy/migrations/002_functions.sql
+  - proxy/migrations/004_lifecycle.sql
+verifiedBy:
+  - proxy/scripts/isolation-smoke.sh
+digest: >-
+  The proxy serves a cluster console API at `/api/console`, eight routes on four paths:
+  `/overview`, `/usage`, `/keys` and `/members`. Every route requires a human session, and a
+  `qk_` cluster API key is refused with `403`. Every route except `/overview` and `/usage`
+  also requires the `admin` cluster role. The console creates no tenant, cluster or user:
+  those stay SQL functions on pxdb. `GET /overview` reports the cluster's live push-block
+  reason, so a tenant reads the same cause the broker's `403` carries.
+---
+
+The proxy serves a cluster console over HTTP, and it is the one part of the control plane a
+tenant drives itself. Eight routes on four paths hang off `/api/console`, all of them scoped
+to a single cluster, all of them refusing anything that is not a logged-in human.
+
+What it deliberately does not do is provision. No route here creates a tenant, a cluster, a
+user, a plan or an operator: those remain the SQL functions in
+[tenants, clusters and cells](/reference/multi-tenant/tenants). The console operates a
+cluster that already exists.
+
+## The routes
+
+| Route | Role needed | What it does |
+| --- | --- | --- |
+| `GET /api/console/overview` | any member | Plan, status, live quota flags, month-to-date usage |
+| `GET /api/console/usage` | any member | Per-minute metered usage, `?hours=` window |
+| `GET /api/console/keys` | `admin` | Lists the cluster's API keys, hashes never selected |
+| `POST /api/console/keys` | `admin` | Issues one key, returning the plaintext once |
+| `DELETE /api/console/keys/:id` | `admin` | Revokes one key of this cluster |
+| `GET /api/console/members` | `admin` | Lists `(user, role)` grants on this cluster |
+| `POST /api/console/members` | `admin` | Grants or changes one member's role |
+| `DELETE /api/console/members` | `admin` | Removes one member's grant |
+
+**Everything under `/keys` and `/members` is admin-only, reads included.** Only `/overview`
+and `/usage` answer a `producer`, `consumer` or `viewer`, which is what lets the console hide
+the tabs it would otherwise offer and then refuse.
+
+The SPA that consumes these routes is served at `/console`, `/console/` and `/console/*` from
+a build embedded in the binary. That bundle is static and is handed to anyone who asks for it;
+the gate is on the API, not on the assets.
+
+## Human sessions only
+
+Every route runs the same four checks before its own logic, in this order.
+
+<Steps>
+
+1. **The `Host` header resolves to a cluster**, or the request is `421`
+   `{"code":"cluster_unknown"}`. The console resolves the cluster from `Host` alone: unlike
+   the data plane it does not consult `x-queen-act-cluster`, so one browser session on one
+   hostname acts on exactly one cluster.
+
+2. **pxdb is configured**, or the request is `503` `{"code":"not_configured"}`. There are no
+   user or key tables to serve in the dev-static mode described in
+   [proxy configuration](/deploy/proxy), so the console is absent there rather than empty.
+
+3. **The credential verifies**, through the same `authenticate` call the data plane makes:
+   signature, expiry, the `jti` deny-list, then the `cluster_roles` row. A missing credential
+   is `401`, and a valid session whose user has no role on this cluster is `403`. The one
+   case that is `401` rather than `403` is a session whose user no longer exists, so the SPA
+   bounces to login instead of sitting on a dead end. An operator resolves to `admin` on
+   every cluster, so the operator capability is also a console admin
+   ([the operator capability](/reference/multi-tenant/auth)).
+
+4. **The principal is a human.** A cluster API key authenticates successfully and is then
+   refused with `403` and `api keys cannot access the console (human session required)`. A
+   `qk_` credential can produce, consume and administer queues, and it can never read the
+   console or issue another key.
+
+</Steps>
+
+<Aside type="note">
+Step 4 is why the console is **always** `403` under `QUEEN_PROXY_DEV_INSECURE=true`: that mode
+hands out a synthetic API-key principal before any credential is read, and an API-key principal
+is exactly what the console rejects.
+</Aside>
+
+## What overview tells a tenant about its own blocked state
+
+`GET /overview` exists so a tenant can never be told it is fine while its pushes are being
+rejected. It reads the same live flags the gateway turns into a `403`, not a second opinion
+computed for the page.
+
+```json
+{
+  "slug": "acme-prod",
+  "status": "active",
+  "role": "admin",
+  "plan": { "code": "growth", "monthly_msgs_quota": 500000000 },
+  "usage": { "month": "2026-08", "msgs": 41230991 },
+  "push_block": null,
+  "storage": { "max_retained_bytes": 107374182400, "over_quota": false },
+  "limits": { "max_req_per_sec": 2000, "max_queues": 500 },
+  "features": { "streams": true, "traces": false }
+}
+```
+
+Three fields carry the blocked state, and they answer different questions:
+
+| Field | Values | What it means |
+| --- | --- | --- |
+| `status` | `active`, `push_blocked`, `suspended`, `deleting` | The lifecycle status stored on the cluster or inherited from the tenant. It never says why it was set |
+| `push_block` | `null`, `storage`, `monthly_quota` | The live in-memory flag. Set means pushes are being refused right now |
+| `storage.over_quota` | `true`, `false` | `push_block` narrowed to the storage cause, next to the `max_retained_bytes` it is measured against |
+
+`push_block` names the same two causes the rejected push names, in shorter words: `storage`
+is the `403` `{"code":"storage_quota_exceeded"}` and `monthly_quota` is the `403`
+`{"code":"quota_exceeded"}`. Both are hard gates, enforced even on a cell running in shadow
+mode, which is exactly the case where a tenant would otherwise have no idea why produce
+stopped ([quotas and rate limits](/reference/multi-tenant/quotas)).
+
+The rest of the object is plan identity and headroom. `usage.msgs` is month-to-date for the
+UTC calendar month named in `usage.month`, computed as the rolled-up days plus the
+not-yet-rolled-up minutes, so it never under-counts today. `limits` carries all eleven plan
+limit columns and the sample above is abridged; each entry is either a number or `null`, and
+`null` means unlimited, not zero. `role` is the caller's own role on this cluster.
+
+`GET /usage?hours=N` is the graph behind that number: one row per `(minute, op class)` from
+`usage_minutes`, with `reqs`, `msgs`, `bytes_in` and `bytes_out`. `hours` defaults to **24** and
+is clamped to the range 1–168, so a caller cannot ask for an unbounded window or a backwards one
+([usage metering](/reference/multi-tenant/metering)).
+
+## Keys
+
+`POST /keys` takes `{"name": "...", "scopes": [...]}`. The name is trimmed and must not be
+empty; the scopes must be a non-empty subset of `produce`, `consume`, `admin`, `read`. The
+response is `{"id": "...", "key": "qk_live_..."}` and **that is the only time the plaintext
+exists**: only its sha256 hash is stored, and `GET /keys` does not select the hash column at
+all, let alone return it.
+
+`DELETE /keys/:id` refuses a malformed uuid with `400`, then checks that the id is an
+unrevoked key **of this cluster** before revoking it. That check lives in the handler on
+purpose: the underlying `queen_proxy.revoke_api_key(uuid)` looks a key up globally by id and
+takes no cluster argument, so without it a console admin on one cluster could revoke another
+cluster's key by guessing its uuid. A key that is not this cluster's answers `404`, the same
+answer an id that never existed gets.
+
+## Members
+
+`cluster_roles` is the table every authorization gate reads, and the two write routes are what
+made it editable without a `psql` session. Both go through
+`queen_proxy.grant_cluster_role` and `revoke_cluster_role` rather than direct DML, so the
+same-tenant check, the audit row and the cache invalidation stay in the one place that
+implements them.
+
+Members are addressed by email, carried in the JSON body on both write verbs, `DELETE`
+included, so an address never has to survive percent-encoding in a path. The cluster is never
+read from the request: it is bound from the session's resolved cluster, for the same reason
+the key revoke checks ownership.
+
+**The target user must already exist in this cluster's tenant.** `POST /members` resolves the
+address inside the tenant first, and an address that belongs to nobody and an address that
+belongs to another tenant get the identical `404`, so the route cannot be used to probe for
+other tenants' users. Creating the user is still a control-plane operation.
+
+### The last-admin guard
+
+A grant that would demote the last admin, and a revoke that would remove them, are both
+refused with `400` and `cannot demote the last admin of this cluster` or `cannot remove the
+last admin of this cluster`.
+
+This is a refusal rather than a warning because it is not recoverable through this API: no
+console route can create the first admin back, so a cluster with no admin can never be
+administered from the console again and needs `grant_cluster_role` run by hand on pxdb. The
+guard counts seats rather than identities, so it catches self-demotion and self-revocation
+too: a sole admin removing themselves is the same `admin_count == 1`.
+
+## Two audit rows, not one
+
+Every mutating control-plane function already writes one append-only `queen_proxy.operations`
+row through `record_operation`. Three console routes write a **second** row on top of it,
+attributed to the human:
+
+| Route | Row the SQL function writes | Row the console adds |
+| --- | --- | --- |
+| `POST /keys` | `issue_api_key`, actor `control_plane` | `console_api_key_issued`, actor `user`, target the key id |
+| `POST /members` | `grant_cluster_role`, actor `control_plane`, actor id the grantee | `console_member_granted`, actor `user`, target the grantee |
+| `DELETE /members` | `revoke_cluster_role`, actor `control_plane` | `console_member_revoked`, actor `user`, target the removed member |
+
+The pairing exists because the function's own row records what changed and the console's row
+records **who asked**, and the function cannot know the second thing: it takes a cluster and an
+email, not a caller. `DELETE /keys/:id` is the exception in this table and writes only
+`revoke_api_key`'s own row.
+
+The second row is best-effort. If the insert fails it logs a warning and the request still
+succeeds, because the key or the grant already exists either way. No console route reads
+`operations` back, so the audit trail is queried on pxdb, not through the API.
+
+## Failure reference
+
+| Status | Code | When |
+| --- | --- | --- |
+| `400` | `invalid_request` | Empty name, empty or unknown scope, unknown role, malformed email, malformed key uuid, or the last-admin guard |
+| `401` | `unauthorized` | No credential, a session that fails signature, expiry or the deny-list, or one whose user no longer exists |
+| `403` | `forbidden` | An API key, a session with no role on this cluster, or a non-admin on a `/keys` or `/members` route |
+| `404` | `not_found` | A key that is not this cluster's, a member with no grant here, or an email outside this tenant |
+| `421` | `cluster_unknown` | The `Host` header resolves to no cluster |
+| `502` | `bad_gateway` | pxdb accepted the connection and then failed the query |
+| `503` | `not_configured` | No pxdb is configured at all. This body is the bare `{"code":"not_configured"}`, with no `error` key |
+
+## Related
+
+- [Tenants, clusters and cells](/reference/multi-tenant/tenants): the SQL functions behind
+  everything the console cannot do.
+- [Credentials and authorization](/reference/multi-tenant/auth): how a session is minted,
+  bound to a cluster and revoked.
+- [Endpoints a tenant can reach](/reference/multi-tenant/endpoints): the broker routes the
+  proxy forwards, which is a separate surface from this one.

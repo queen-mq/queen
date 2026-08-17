@@ -1974,3 +1974,565 @@ pub async fn set_system_flag(
     client.execute(stmt, &[&key, &value]).await?;
     Ok(())
 }
+
+// ============================================================================
+// PLAN_KV_TIMERS §7.6 — THE ONE SQLSTATE CLASSIFIER IN THE BROKER
+// ============================================================================
+// Extracted from `file_buffer.rs::classify_push_error`, which owned the only
+// copy of these rules, and split three ways instead of two.
+//
+// The transient set is UNCHANGED, code for code, because the spool's drain loop
+// has been deciding "leave the file and retry" vs "quarantine it" with it for a
+// long time and that boundary must not move by a single SQLSTATE. What is new
+// is that class 42 leaves `Permanent` and becomes `Config`: "the destination
+// queue name is malformed" and "this payload violates a constraint" are
+// different OPERATIONAL events — an operator can repair the first and nobody
+// can repair the second — and the timer path has to log and count them
+// differently (§4.5, §14.2). `Config` is still permanent-SHAPED: it is not
+// retried, and it spends a timer's attempt exactly like `Permanent` does. That
+// is why `file_buffer.rs` collapses both back to `DrainErr::Permanent` and its
+// behaviour is bit-for-bit what it was.
+//
+// The split into a pure `classify_sqlstate` plus a one-line `classify_sql` is a
+// constraint of the test, not a convenience: `tokio_postgres::DbError` has no
+// public constructor, so a classifier that only accepts a `&tokio_postgres::Error`
+// cannot be unit-tested at all outside its own crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqlClass {
+    /// Retry the same work unchanged: serialization/deadlock, and every failure
+    /// of the infrastructure rather than of the data. A timer must NOT spend an
+    /// attempt here, or five minutes of database trouble would send every timer
+    /// in the system to the DLQ — an infrastructure failure turned into product
+    /// loss (§12).
+    Transient,
+    /// Class 42 only. Permanent in effect, repairable by a human: the schema was
+    /// never applied (42883, the broker-new/database-old case of §6.3), a name
+    /// does not resolve, a generated statement does not parse.
+    Config,
+    /// Everything else. The same data fails the same way on every retry, so the
+    /// spool quarantines the file and the timer spends an attempt.
+    Permanent,
+}
+
+/// Pure core: `None` means the error carried no SQLSTATE at all, i.e. a
+/// connection-level failure, which is the single most common transient during a
+/// rolling restart. Reading it as permanent would quarantine a healthy spool
+/// file and burn a timer's attempts because a pod moved.
+///
+/// The class prefix is taken over BYTES, never with `&code[..2]` on the `str`:
+/// a two-byte slice of a multi-byte character panics, and with `panic = "abort"`
+/// a panic on the sweeper's error path takes the whole broker down. Matching is
+/// deliberately case-sensitive — PostgreSQL sends SQLSTATEs uppercase, and case
+/// folding here would be pure cost on an error path for an input that cannot
+/// occur.
+pub(crate) fn classify_sqlstate(code: Option<&str>) -> SqlClass {
+    let Some(code) = code else {
+        return SqlClass::Transient;
+    };
+    // The two whole-code comparisons come first: class 40 as a whole is NOT
+    // transient (40002, 40003 are not retryable), only these two members of it.
+    if code == "40001" || code == "40P01" {
+        return SqlClass::Transient;
+    }
+    match &code.as_bytes()[..2.min(code.len())] {
+        b"08" | b"53" | b"57" | b"58" => SqlClass::Transient,
+        b"42" => SqlClass::Config,
+        _ => SqlClass::Permanent,
+    }
+}
+
+/// The wrapper every call site uses. One line on purpose — all the behaviour is
+/// in `classify_sqlstate`, which is the half that can be tested.
+#[allow(dead_code)] // until file_buffer.rs and sweeper.rs call it (F3)
+pub(crate) fn classify_sql(e: &tokio_postgres::Error) -> SqlClass {
+    classify_sqlstate(e.as_db_error().map(|d| d.code().code()))
+}
+
+/// The structured payload of a server-side `RAISE`, and the ONLY thing a caller
+/// may read out of one.
+///
+/// §8.3 and §6.1 point 5: a lost KV precondition escalated with `"required":true`
+/// arrives as SQLSTATE 23514 whose DETAIL is a JSON object (`index`, `op`, `ns`,
+/// `key`, `reason`, `version`, and the winner's `value`, capped at 4 KiB) while
+/// the MESSAGE stays deliberately OPAQUE — namespace and key names end up in
+/// shared logs and error aggregators, so the names live only in the DETAIL
+/// (§13.5). String-matching an error message is forbidden everywhere in this
+/// codebase; this accessor exists so that the rule has one place to be obeyed
+/// rather than one per handler.
+#[allow(dead_code)] // until the KV handler translates the escalation (F4)
+pub(crate) fn sql_error_detail(e: &tokio_postgres::Error) -> Option<&str> {
+    e.as_db_error().and_then(|d| d.detail())
+}
+
+// ============================================================================
+// PLAN_KV_TIMERS §8 — THE KV / TIMER WRAPPERS
+// ============================================================================
+// §13.1 makes tenant isolation for these two features STRUCTURAL: `p_tenant` is
+// an ARGUMENT of every one of these stored procedures and is never read from an
+// operation (§6.1 point 6, §6.2), and this file is the only place in the broker
+// allowed to bind it. There is no RLS on queen.kv or queen.log_timers — the
+// isolation IS the WHERE clause inside those SPs — so the moment a handler
+// writes its own SQL against either table, that argument becomes something a
+// request body can influence and the failure is silent: rows of the wrong
+// tenant, no error anywhere. `tests/kv_handler_isolation.rs` greps
+// `src/handlers/` for both table names and fails the build on a hit, and it
+// also asserts that `queen.kv_apply_v1` is reached from THIS file — a negative
+// grep alone is satisfied by a feature nobody wrote.
+//
+// Three conventions hold across every wrapper below, and each one is load-bearing:
+//
+//  * `p_now` is `now()` WRITTEN INTO THE STATEMENT, never a parameter the broker
+//    computes. `now()` is the transaction start timestamp, so one call sees one
+//    instant for every op in its batch (the property §6.1 gives as the reason
+//    `now` is a parameter of the pure helpers at all), and no broker's clock skew
+//    can enter: there is one clock and it is PostgreSQL's. It is also why nothing
+//    here does arithmetic on a timestamp — `log_timers_due_v1` and
+//    `log_timers_claim_v1` return `nextInMs` / `lateMs` already relative to the
+//    server clock (§6.2).
+//  * uuids cross the wire as TEXT and are cast in SQL (`$n::text::uuid`,
+//    `$n::text[]::uuid[]`), the idiom `log_push_multi` already uses for its
+//    per-segment tenants: the broker has no uuid crate and holds no uuid type.
+//  * NO `admission::note_commit`, on any of them, and that is a decision rather
+//    than an omission. §8.4 point 2 puts standalone KV/timer work in NO arbiter
+//    lane at all — 30 tenants each inside their own 100 writes/s would consume
+//    3000 `Lane::Push` slots per second on a stack whose measured commit-bound
+//    ceiling is ~480 msg/s, and the weigher cannot tell the two kinds of work
+//    apart because they are the same lane. The sweeper does hold a `Lane::Maint`
+//    slot (§7.2, slot BEFORE `pool.get()`, always), but feeding a rare bulky fire
+//    commit into the train sensor would skew the cadence estimate the push
+//    fusion sizes itself from. KV/timer volume is counted by their own series
+//    (§14.2), not by the arbiter's.
+//
+// Timeouts and cancellation are the CALLER's: every one of these goes through
+// `tokio::time::timeout` + `resolve_query_timeout` (§8.4 point 4 makes it
+// mandatory for the KV routes, and §7.2 for the sweeper — a fire stuck behind a
+// partition lock whose backend keeps running would hold locks on timer rows
+// indefinitely, and those block users' cancels).
+
+// ------------------------------------------------------------------------ kv
+// The WHOLE KV surface — get, getMany, getPrefix, put, putIfAbsent, delete,
+// incr — is this one call (§6.1). `ops_json` is the already-built JSON ARRAY of
+// operations, `tenant` the authenticated tenant, and the result is a bare JSONB
+// ARRAY index-aligned with the input, each element carrying its own `index` and
+// `op` (§6.4).
+//
+// `in_wire` is a FLAG, not a second SP, because the two surfaces differ in
+// exactly two ways (`getPrefix` forbidden, and the per-call caps drop) and two
+// SPs would be two implementations that drift. Pass `true` for anything that
+// arrived on the transaction wire — including a KV-only bundle that §8.2 point 6
+// routes here directly instead of through `queen.log_transaction_wire_v1`, since
+// it is still the wire's surface — and `false` only for `/api/v1/kv`.
+//
+// Errors worth naming, because both are BY DESIGN and neither is a bug to fix
+// at the call site: a lost precondition escalated with `"required":true` raises
+// 23514 with its verdict in the DETAIL (read it with `sql_error_detail`, never
+// by parsing the message — §8.3 turns it into an HTTP **200** carrying
+// `reason:"kv_precondition"`, because a lost race is the expected outcome of
+// every legitimate redelivery and must not pollute error metrics or retry
+// policies), and every shape/budget rejection is a class 22 or 23 RAISE, i.e.
+// `Permanent`.
+//
+// $1::text::jsonb pins $1 to TEXT so a &str binds (a bare $1::jsonb would make
+// tokio-postgres expect a Json param).
+pub async fn kv_apply(
+    client: &deadpool_postgres::Client,
+    ops_json: &str,
+    tenant: &str,
+    in_wire: bool,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.kv_apply_v1($1::text::jsonb, $2::text::uuid, now(), $3::bool))::text",
+        )
+        .await?;
+    let row = client.query_one(&stmt, &[&ops_json, &tenant, &in_wire]).await?;
+    Ok(row.get(0))
+}
+
+// -------------------------------------------------------------------- timers
+// schedule / reschedule / cancel, ONE code path (§6.2). `ops_json` is the JSON
+// array of operations; the result is a JSONB array index-aligned with it, with
+// the closed status taxonomy scheduled | rescheduled | cancelled | absent |
+// too_late.
+//
+// `producer_sub` is a SEPARATE ARGUMENT and is never read from an op — the same
+// discipline `auth.rs:31-36` declares for the push (single source; a
+// client-supplied producerSub is never honored). Without it, a timer would be
+// the only way in the whole product to forge the provenance of a frame, because
+// producer_sub is a frame's only non-repudiable field. `p_tenant` is separate
+// for the same reason, and so is the message id, which the HANDLER mints with
+// `util::uuidv7_bytes` and injects into each op as `_messageId` — an
+// underscore-prefixed name a client cannot spell, exactly the trick
+// `005_log_ack.sql:925` uses for `_tenant` — so that the schedule API can answer
+// "this is the id you will see". A client-spellable `messageId`, `producerSub`,
+// `tenant`/`tenantId`/`_tenant`, an absolute `deliverAt` or a `delaySeconds` in
+// an op is a RAISE 22023 and never a field quietly ignored.
+//
+// Durations on the wire are `delayMs` only (§4.2, §20.6: sub-second-capable
+// durations in milliseconds, the rest in seconds), and `deliver_at` is computed
+// inside the SP from `p_now`, so no broker clock takes part.
+//
+// AFTER THE COMMIT — never before — the caller rings the local sweeper wake-up
+// (§7.4): a hint for a transaction that then rolls back costs a wasted cycle and,
+// worse, teaches the loop that work exists which does not.
+pub async fn timers_apply(
+    client: &deadpool_postgres::Client,
+    ops_json: &str,
+    tenant: &str,
+    producer_sub: Option<&str>,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_timers_apply_v1($1::text::jsonb, $2::text::uuid, \
+             $3::text, now()))::text",
+        )
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&ops_json, &tenant, &producer_sub])
+        .await?;
+    Ok(row.get(0))
+}
+
+// The sweeper's PROBE (§6.2, §7.2 step A): one read-only call, one server
+// `now()`. Returns {"nextInMs","due","dueCapped","lateMs","now"} — everything
+// already relative to the server's clock, which is what keeps timestamp
+// arithmetic out of the broker entirely.
+//
+// `nextInMs` null means the table is empty, and that is the signal §7.1 turns
+// into the progressive idle backoff up to 30 s. `due` is CAPPED (`LIMIT cap + 1`
+// internally, with `dueCapped` telling the truth) because this probe runs every
+// cycle and an exact count would be O(due) precisely in the failure the probe
+// exists to detect; the plan's cap is 2000, not 10000.
+//
+// `shards` is the full 0..63 set in normal operation: the shard is a contention
+// spreader, NOT an ownership partition — every broker scans every shard (§1.10).
+#[allow(dead_code)] // no caller until F3/F4 wire the sweeper and the handlers
+pub async fn timers_due(
+    client: &deadpool_postgres::Client,
+    shards: &[i16],
+    cap: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.log_timers_due_v1($1::int2[], now(), $2::int))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&shards, &cap]).await?;
+    Ok(row.get(0))
+}
+
+// One claimed timer, as `queen.log_timers_claim_v1` returns it (§6.2).
+//
+// uuids arrive as TEXT for the reason given at the top of this section. The
+// payload is the raw stored bytes — the broker decompresses (`payload_zstd`) and
+// decrypts (`encrypted`) OUTSIDE any transaction, before packing the segment,
+// which is the whole reason the fire is a separate call from the claim.
+#[allow(dead_code)] // no caller until F3/F4 wire the sweeper and the handlers
+pub struct TimerClaim {
+    pub tenant: String,
+    pub queue: String,
+    pub timer_key: String,
+    /// The partition NAME. `queen.log_timers` stores names, never a
+    /// `partition_id` (§1.2, §2.4 C5): an id column would give
+    /// `log_partition_dead_v1` a veto leg to consult, which is P → T against the
+    /// wire's T → P.
+    pub partition: String,
+    /// The FIXED transactionId of the future frame — the secondary net against
+    /// double delivery. The primary guarantee is that the DELETE and the push
+    /// share one transaction, so correctness never depends on the dedup window.
+    pub txn: String,
+    pub message_id: String,
+    pub payload: Vec<u8>,
+    pub payload_zstd: bool,
+    pub encrypted: bool,
+    /// Nullable in the table: a deployment without authenticated producers has
+    /// no sub to record.
+    pub producer_sub: Option<String>,
+    pub attempts: i32,
+    /// How late this timer already is, computed by the SERVER from `deliver_at`.
+    /// Feeds `queen_timers_oldest_late_seconds` without the broker ever holding
+    /// a timestamp.
+    pub late_ms: i64,
+    /// The lease token this broker now holds. It is the authorisation for every
+    /// later call about this row — fire, fail, dlq — and a broker whose lease
+    /// expired and was reclaimed elsewhere simply updates nothing.
+    pub token: String,
+}
+
+// Claim a batch under a lease (§6.2). `FOR UPDATE SKIP LOCKED` lives INSIDE the
+// per-shard LATERAL, so the sweeper never waits on a timer row — that is what
+// keeps it out of every deadlock cycle, not an optimisation.
+//
+// THE ROW ORDER IS THE CONTRACT and must not be sorted away: rows come back in
+// `visible_at` order, which §4.2 makes observable ("the order is decided at the
+// fire").
+//
+// `per_tenant` is round-robin fairness applied INSIDE the claim, not a budget
+// applied after it (§6.2). Discarding already-claimed rows would put them back
+// at the head of the index with `visible_at` unchanged, so the next pass would
+// reselect exactly them: a livelock that burns the whole batch every cycle. One
+// tenant scheduling 200k timers for 09:00 must not fill every batch of every
+// broker while another tenant's single reminder waits minutes.
+//
+// `max_rows` is a per-CALL cap and the SP floors the per-shard slice at 8, so a
+// claim can legitimately return fewer rows than `max_rows` while work remains:
+// the drain loop of §7.2 takes the remainder on the next pass. Never assert that
+// one pass empties the table.
+#[allow(dead_code)] // no caller until F3/F4 wire the sweeper and the handlers
+pub async fn timers_claim(
+    client: &deadpool_postgres::Client,
+    shards: &[i16],
+    lease_ms: i32,
+    max_rows: i32,
+    per_tenant: i32,
+) -> Result<Vec<TimerClaim>, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT r_tenant, r_queue, r_timer_key, r_partition, r_txn, r_message_id, \
+                    r_payload, r_payload_zstd, r_encrypted, r_producer_sub, r_attempts, \
+                    r_late_ms, r_token \
+             FROM queen.log_timers_claim_v1($1::int2[], now(), $2::int, $3::int, $4::int)",
+        )
+        .await?;
+    let rows = client
+        .query(&stmt, &[&shards, &lease_ms, &max_rows, &per_tenant])
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| TimerClaim {
+            tenant: r.get(0),
+            queue: r.get(1),
+            timer_key: r.get(2),
+            partition: r.get(3),
+            txn: r.get(4),
+            message_id: r.get(5),
+            payload: r.get(6),
+            payload_zstd: r.get(7),
+            encrypted: r.get(8),
+            producer_sub: r.get(9),
+            attempts: r.get(10),
+            late_ms: r.get(11),
+            token: r.get(12),
+        })
+        .collect())
+}
+
+// The fire's statement, a NAMED CONST rather than a literal inside the async fn
+// — the retention precedent (`WORK_LIST_SQL`, `Phase::sql()`) — because §1.8
+// asks for a pin on this exact text and `src/tests_unit/fire_sql_pin.rs` has to
+// have something to read.
+//
+// What the pin defends is a LOCK ORDER, and a lock order is invisible at runtime
+// until two particular transactions overlap on two particular rows: the
+// concurrency test can only fail when it happens to interleave, this fails
+// deterministically at `cargo test`. The thing it forbids is what a competent
+// person writes first — reuse `log_push_multi_v1` to get base offsets, then
+// delete the timers in a second call. That is P → T against the wire's T → P, a
+// real cycle on the hottest path in the product. The fire is ONE SP and ONE
+// transaction: claim-verify (T), provision (Q), pre-lock (P), push, then DELETE
+// rows this transaction already holds. `log_push_one_v1` is reached from INSIDE
+// the SP, with pid and window already resolved (§6.2 point 6), so the broker
+// never names the allocator either.
+#[allow(dead_code)] // no caller until F3/F4 wire the sweeper and the handlers
+pub(crate) const TIMERS_FIRE_SQL: &str =
+    "SELECT (queen.log_timers_fire_v1($1::text[]::uuid[], $2::text[], $3::text[], \
+     $4::int4[], $5::bytea[], $6::bytea[], $7::text[], $8::int4[], $9::text[]::uuid[], \
+     now()))::text";
+
+// Verify the lease, release what will not be delivered, provision, pre-lock,
+// push and delete — ONE transaction (§1.3, §6.2). Returns a JSONB array
+// index-aligned with the SEGMENT arrays, closed taxonomy fired | stale |
+// duplicate.
+//
+// Two families of arrays, and mixing them up is the bug the SP's alignment
+// guards exist to catch loudly rather than quietly:
+//   * per SEGMENT, byte for byte the order `log_push_multi_v1` uses —
+//     `tenants`, `queues`, `partitions`, `counts`, `hashes`, `blobs`;
+//   * per TIMER, the frame → timer map — `keys`, `seg_of` (1-BASED segment
+//     index), `tokens`.
+// `hashes[i]` is the concatenation of that segment's 16-byte xxh3_128 txn
+// hashes, so `octet_length(hashes[i]) = counts[i] * 16`; the SP also checks that
+// EXACTLY `counts[i]` keys carry `seg_of = i`, without which a wrong map would
+// delete the wrong timer instead of failing.
+//
+// GROUPING IS THE CALLER'S JOB AND IT IS BY `(tenant, queue, partition)`, NEVER
+// BY `(queue, partition)` (§6.2 point 8). A tenant-blind grouping fuses two
+// tenants' timers into one segment — the worst isolation hole this feature can
+// have, one word shorter to write, and it raises no error. The SP enforces its
+// half (each segment resolves under its own tenant, and two live segments naming
+// the same triple are rejected), and there is a two-tenant regression test with
+// identical queue names and timer keys that is a merge criterion (§15).
+//
+// A failure here is classified with `classify_sql`: `Transient` must NOT spend a
+// timer's attempt, `Config`/`Permanent` must. On a PERMANENT failure of a
+// multi-segment batch the caller replays ONE SEGMENT PER CALL
+// (`QUEEN_SWEEPER_ISOLATE_ON_PERMANENT`, §7): a single poisoned segment
+// otherwise fails the whole batch forever and the healthy segments never arrive,
+// while the symptom — `lateMs` climbing — names nobody.
+#[allow(dead_code)] // no caller until F3/F4 wire the sweeper and the handlers
+#[allow(clippy::too_many_arguments)]
+pub async fn timers_fire(
+    client: &deadpool_postgres::Client,
+    tenants: &[String],
+    queues: &[String],
+    partitions: &[String],
+    counts: &[i32],
+    hashes: &[Vec<u8>],
+    blobs: &[Vec<u8>],
+    keys: &[String],
+    seg_of: &[i32],
+    tokens: &[String],
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client.prepare_cached(TIMERS_FIRE_SQL).await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[&tenants, &queues, &partitions, &counts, &hashes, &blobs, &keys, &seg_of, &tokens],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+// The fire failed: push `claimed_until` out by a backoff and NULL the claim
+// token, so the row is IN BACKOFF and IN NOBODY'S HANDS (§6.2). The two columns
+// are separate precisely for this state — a cancel during a backoff SUCCEEDS, or
+// a poisoned timer would be uncancellable for minutes and the user could not
+// remove the broken thing.
+//
+// `count_attempt = false` is the TRANSIENT path (`SqlClass::Transient`): the DLQ
+// budget is never spent on infrastructure, or five minutes of database trouble
+// would send every timer in the system to the DLQ.
+//
+// Returns {"failed":N,"exhausted":[...]}. The exhausted rows are deliberately
+// NOT deleted here — the DLQ needs a JSONB snapshot of the payload and only the
+// broker can decompress it, so the caller comes back through `timers_dlq`.
+#[allow(dead_code)] // no caller until F3/F4 wire the sweeper and the handlers
+#[allow(clippy::too_many_arguments)]
+pub async fn timers_fail(
+    client: &deadpool_postgres::Client,
+    tenants: &[String],
+    queues: &[String],
+    keys: &[String],
+    tokens: &[String],
+    backoff_ms: i32,
+    error: &str,
+    count_attempt: bool,
+    max_attempts: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_timers_fail_v1($1::text[]::uuid[], $2::text[], $3::text[], \
+             $4::text[]::uuid[], $5::int, $6::text, $7::bool, $8::int, now()))::text",
+        )
+        .await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[&tenants, &queues, &keys, &tokens, &backoff_ms, &error, &count_attempt,
+              &max_attempts],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+// Archive exhausted timers straight into `queen.log_dlq` and delete them (§6.2).
+// Returns {"archived":N,"skipped":M}.
+//
+// `payloads[i]` is the SNAPSHOT the broker already holds from the claim,
+// decompressed and parsed as JSON. When it is not valid JSON the caller writes
+// `{"_raw_b64":"..."}` rather than failing: the DLQ is the last resort and must
+// not have a branch that loses the message. ($4::text[]::jsonb[] so a &[String]
+// binds — a bare jsonb[] would make tokio-postgres expect Json params.)
+//
+// This does NOT reuse `log_dlq_head_v1`, and not for tidiness: that one demands
+// a valid lease on (partition, group) and advances a consumer's cursor, and a
+// poisoned timer has no lease, no group and no cursor. The non-secondary benefit
+// is that the fire path therefore never touches `queen.log_consumers`, so its
+// sequence stays T → Q → P without the last space (§2.3 actor 15).
+//
+// `min_attempts` guards both the INSERT and the DELETE and closes the race with
+// a reschedule landing between `timers_fail` and here: a reschedule zeroes
+// `attempts`, so the archive finds nothing and the row lives. It is a new timer
+// under an old name and must not be archived for the sins of the one it replaced.
+//
+// Declared consequence: a DLQ row PINS ITS PARTITION against partition cleanup.
+// That is intended — the payload has to stay reachable, and retention never
+// purges the DLQ.
+#[allow(dead_code)] // no caller until F3/F4 wire the sweeper and the handlers
+#[allow(clippy::too_many_arguments)]
+pub async fn timers_dlq(
+    client: &deadpool_postgres::Client,
+    tenants: &[String],
+    queues: &[String],
+    keys: &[String],
+    payloads: &[String],
+    errors: &[String],
+    min_attempts: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_timers_dlq_v1($1::text[]::uuid[], $2::text[], $3::text[], \
+             $4::text[]::jsonb[], $5::text[], $6::int, now()))::text",
+        )
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&tenants, &queues, &keys, &payloads, &errors, &min_attempts])
+        .await?;
+    Ok(row.get(0))
+}
+
+// GET /api/v1/timers/:queue/*timerKey — ONE key, WITH the payload (§6.2). A key
+// belonging to another tenant reads exactly like a key that does not exist:
+// the tenant is part of the primary key, not a filter applied to an id the
+// caller presented. Absent returns {"found":false,...}, never an error — §8.1's
+// single rule on status codes is that the status describes the outcome of the
+// CALL, not of the business predicate.
+pub async fn timers_peek(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    queue: &str,
+    timer_key: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.log_timers_peek_v1($1::text::uuid, $2, $3))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant, &queue, &timer_key]).await?;
+    Ok(row.get(0))
+}
+
+// GET /api/v1/timers/:queue — keyset page over the primary key, THE QUEUE IS
+// MANDATORY (§4.1): there is no tenant-wide list, because that would be a scan an
+// end user of the customer could trigger, on the first endpoint of the product
+// whose call rate is decided by somebody else's web traffic.
+//
+// `after` is an EXCLUSIVE cursor, not an offset, and it is stable because
+// `timer_key` carries `COLLATE "C"`: the order is byte order, identical between
+// machines and unchanged by a libc/ICU upgrade. Pass `None` for the first page.
+// The consequence to document is that non-ASCII keys come back in byte order,
+// not in locale-alphabetical order.
+//
+// `limit` is CLAMPED, never rejected, with `truncated` in the result telling the
+// truth — a 400 on a too-large limit is an error the caller cannot fix without
+// reading the server's configuration. No payload here: see `timers_peek`.
+pub async fn timers_list(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    queue: &str,
+    after: Option<&str>,
+    limit: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_timers_list_v1($1::text::uuid, $2, $3::text, $4::int))::text",
+        )
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant, &queue, &after, &limit]).await?;
+    Ok(row.get(0))
+}
+
+#[cfg(test)]
+#[path = "tests_unit/classify_sql.rs"]
+mod classify_sql_tests;
+
+#[cfg(test)]
+#[path = "tests_unit/fire_sql_pin.rs"]
+mod fire_sql_pin_tests;
+

@@ -9,6 +9,7 @@ sourceOfTruth:
   - server/src/mesh.rs
   - server/src/main.rs
   - server/src/file_buffer.rs
+  - server/src/admission.rs
   - server/src/retention.rs
   - server/src/stats.rs
   - server/src/config.rs
@@ -100,6 +101,65 @@ Reads need the database. Pops and acks error, safely, since an unacked lease red
 `POST /api/v1/transaction` is all-or-nothing so it fails with them. `GET /api/v1/status/buffers`
 and the `queen_file_buffer_pending` gauge watch the backlog, and maintenance mode is the same
 diversion on purpose, for a planned failover ([system routes](/reference/http/system)).
+
+## How the drain behaves
+
+The drain is not a loop that retries until something works. It classifies every failure and the
+classification decides whether the file is kept, retried or given up on.
+
+One cycle runs every `FILE_BUFFER_FLUSH_MS` (100 ms by default). It first finalizes the file
+currently being written so its events become drainable, then replays finalized files oldest-first,
+which is FIFO.
+
+**Transient against permanent is a SQLSTATE decision, not a heuristic.** A failure carrying no
+SQLSTATE at all is the connection itself, so it is transient. So are `40001` serialization failure,
+`40P01` deadlock detected, and the whole of classes `08`, `53`, `57` and `58`: connection exception,
+insufficient resources, operator intervention, system error. Any other server-side error, a
+constraint violation or a `RAISE` inside a procedure, is permanent, because the same bytes will fail
+every retry. A spool file the broker cannot read is permanent for the same reason.
+
+| Classification | What the drain does with the file |
+| --- | --- |
+| Transient | Leaves it in place, marks the database unhealthy, stops the cycle and retries on the next one. A file is **never** quarantined for a transient error, which is the property that makes an outage safe: surviving one is the entire point of the spool. |
+| Permanent | Counts the failure against that head file alone and retries it next cycle. The database stays marked healthy and the transient breaker is untouched, so one bad file does not look like an outage. |
+
+Two counters bound how long either failure can hold up everything behind it.
+
+- **Five attempts, then quarantine.** A head file that fails permanently five consecutive times is
+  moved to `<FILE_BUFFER_DIR>/failed` and the cycle carries on with the files behind it, so one
+  poison file cannot block replay of every newer buffered message. If the move itself fails the file
+  is deleted, on the reasoning that its data is a permanent SQL failure that can never be stored.
+  The counter is per file: it resets when the head changes and on the first successful drain.
+- **Ten consecutive transient failures, then a 5 s cooldown.** The circuit breaker parks the whole
+  drain loop for five seconds and resets its counter, so a broker does not spin against a database
+  that is still down.
+
+Pacing is asymmetric on purpose. A cycle drains up to **ten** files while the database is marked
+healthy and exactly **one** while it is not, so a recovering broker refills PostgreSQL at ten files
+per cycle, while a broker that is still failing probes with a single file rather than a burst.
+
+Replay is admitted, not privileged. Each file's replay takes a slot in the **Maint lane** of the
+same admission arbiter that governs live traffic, and Maint is last in the wake order with a
+guaranteed share of 0.05, so a recovering spool cannot outrank the pushes, pops and acks arriving
+right now ([flow control](/internals/flow-control/)). Within a file, events are replayed in batches
+of `FILE_BUFFER_MAX_BATCH` (100 by default) rather than as one large transaction, and a batch that
+already committed replays idempotently on the next attempt at the file because the original
+`transactionId` is preserved.
+
+**The tenant is preserved on disk.** Each spooled event carries the tenant resolved at push time,
+and the drain groups events by `(tenant, queue, partition)` and re-applies it on replay. A buffered
+push therefore cannot come back as the default tenant, which would be a quota and scope evasion. A
+push made by the default tenant omits the field, so a spool file written by a single-tenant broker
+is byte-identical to what it was before tenancy existed, and an older file without the field replays
+as the default tenant.
+
+<Aside type="caution">
+A quarantined file is an accepted-then-lost push, and `queen_file_buffer_failed` does not count it:
+that gauge counts spool **write** failures only. `GET /api/v1/status/buffers` counts the `.buf`
+files still pending in the spool root, not the contents of `failed/`. Alert on the broker's `spool`
+error log (`drain failed (permanent)` and `quarantined poison spool file`) as well as on the gauge,
+and treat any file appearing under `<FILE_BUFFER_DIR>/failed` as data that needs recovering by hand.
+</Aside>
 
 ## The spool is not replication
 

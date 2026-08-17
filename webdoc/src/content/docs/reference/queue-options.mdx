@@ -120,7 +120,7 @@ The second discovery dimension, matched the same way, and derived for a
 push-created queue from the name between the first and second `.` (empty when the
 name has no dot). Same change semantics as `namespace`.
 
-## leaseTime
+## leaseTime: the visibility timeout
 
 **Type** integer, seconds. **Default** `300` from `/configure`; the
 `queen.queues` column default of **60** applies to a queue created by a push.
@@ -147,7 +147,7 @@ while a consumer is still working means the batch is redelivered to someone else
 and because the retry budget is only charged by explicit `failed` acks, lease
 expiry can redeliver indefinitely without ever dead-lettering.
 
-## retryLimit
+## retryLimit: the retry budget before dead-lettering
 
 **Type** integer. **Default** `3`.
 
@@ -189,7 +189,7 @@ it and the ack reports `dropped: true`. That is silent data loss, chosen
 deliberately over an unbounded redelivery loop.
 </Aside>
 
-## delayedProcessing
+## delayedProcessing: delayed (deferred) delivery
 
 **Type** integer, seconds. **Default** `0` (off).
 
@@ -207,7 +207,7 @@ broker's scheduling copy of the value refreshes within 30 s, so a *lowered* dela
 can take up to that long to wake a parked consumer, even though a fresh pop sees
 the change at once.
 
-## windowBuffer
+## windowBuffer: quiet-period debounce (batching window)
 
 **Type** integer, seconds. **Default** `0` (off).
 
@@ -248,7 +248,7 @@ Turning it on with a window already configured makes the next maintenance cycle
 start deleting eligible segments, at most `RETENTION_INTERVAL` (5 s) away.
 Turning it off stops future deletion; it does not bring anything back.
 
-## retentionSeconds
+## retentionSeconds: age-based retention
 
 **Type** integer, seconds. **Default** `0`. **Requires** `retentionEnabled` and a
 positive value.
@@ -266,7 +266,7 @@ Lowering the value takes effect on the next cycle and can delete a large backlog
 in bounded steps of `RETENTION_BATCH_SIZE` segment rows per transaction so pushes
 interleave.
 
-## completedRetentionSeconds
+## completedRetentionSeconds: retention behind the consumers
 
 **Type** integer, seconds. **Default** `0`. **Requires** `retentionEnabled` and a
 positive value.
@@ -284,7 +284,7 @@ your consumers, and that one to enforce a hard age limit.
 One side effect is worth knowing: this value also participates in the retention
 window of the transaction-hash sidecar, described under `dedupWindowSeconds`.
 
-## maxWaitTimeSeconds
+## maxWaitTimeSeconds: message TTL (age eviction)
 
 **Type** integer, seconds. **Default** `0` (off).
 
@@ -302,7 +302,7 @@ Use it when stale data is worse than lost data: a live telemetry lane where a
 message older than the window has no value. Do not use it as a retention policy
 for anything you would want to audit.
 
-## minPopWaitTime
+## minPopWaitTime: batch fill wait (consumer-side linger)
 
 **Type** integer, milliseconds. **Default** `0` (off). Clamped to 0–60000.
 
@@ -324,7 +324,7 @@ The two counters `queen_pop_fill_wait_total` and
 `queen_pop_fill_wait_microseconds_total` tell you whether the lever is actually
 engaging.
 
-## encryptionEnabled
+## encryptionEnabled: encryption at rest
 
 **Type** boolean. **Default** `false`.
 
@@ -348,7 +348,7 @@ lease time immediately but not its cached encryption flag, so on that instance a
 flip can take up to `QUEEN_CACHE_REFRESH_INTERVAL_MS` (60 s) to apply. Configure
 encryption before you start producing, not while.
 
-## dedupWindowSeconds
+## dedupWindowSeconds: the deduplication window
 
 **Type** integer, seconds. **Default** `3600`. Stored on `queen.queues` like
 every other option, and echoed in the `/configure` response.

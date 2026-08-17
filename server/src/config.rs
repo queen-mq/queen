@@ -415,6 +415,198 @@ pub struct Config {
     // broker never validates the value — it is opaque; the trust is the cell
     // network (the proxy is the only thing that can set the header).
     pub tenancy_header: bool,
+
+    // ----------------------------------------------------- kv + timers (PLAN_KV_TIMERS.md)
+    //
+    // TWO INDEPENDENT features sharing one background component, one lock order and
+    // one quota surface (§0). Both flags default to `false` and stay that way for GA
+    // (§20.4, ratified). OFF is not "the code runs and returns 404": with the flag off
+    //   * the routes are NOT REGISTERED at all in main.rs (the JSON fallback answers
+    //     404 — §16 step 1: "le rotte non sono nemmeno registrate"),
+    //   * the sweeper task is NOT SPAWNED (§7.1 — an installation that will never use
+    //     the feature must not pay one due-probe per second per broker, forever),
+    //   * the wire's `kv` branch is refused with a class-42 SQLSTATE (config,
+    //     permanent, never retried).
+    // The TABLES are created at every boot either way: empty they cost nothing, and an
+    // always-virgin schema model does not tolerate two possible shapes.
+    //
+    // Turning a default from `false` to `true` after a measurement campaign is an
+    // upgrade; the other direction is a regression for whoever already relies on it
+    // (§17.3, one-way door taken in the right direction).
+    pub kv_enabled: bool,
+    pub timers_enabled: bool,
+
+    // --- KV shape limits (§9.2). "Shape" limits live in SQL, inside the SP, plus a
+    // body guard at the HTTP boundary: seven clients and the EMBEDDED broker (which
+    // never passes through the handlers) inherit one rule instead of seven copies.
+    // These values are what the broker hands the SP, so the two enforcement points
+    // can never drift.
+    //
+    // NOTE, and it must be documented rather than discovered: the two points MEASURE
+    // DIFFERENT THINGS. The HTTP boundary measures raw body bytes; the SP measures
+    // `octet_length(value::text)`, the canonical JSONB text, which is normally
+    // shorter. A value near the ceiling can pass one and fail the other.
+    pub kv_max_value_bytes: usize,
+    /// 512. The PK index tuple is `uuid(16) + namespace + key` and the btree ceiling
+    /// is ~2704 bytes, so 64+512+16 sits at a fifth of it. Without the cap the failure
+    /// mode is a `54000` on the first insert — runtime instead of validation.
+    pub kv_max_key_bytes: usize,
+    /// Ops per call. The IN-WIRE cap is a fixed 64 inside `kv_apply_v1` (§6.1) — it is
+    /// a property of `p_in_wire`, not a knob, so it is deliberately absent here.
+    pub kv_max_ops_per_call: usize,
+    /// Budget per CALL, not per operation (§6.1 point 4). The op count alone bounds
+    /// nothing: 63 `getMany` of 256 keys read 16 128 rows, and with values near the
+    /// ceiling that is ~1 GiB of detoast BEFORE the first partition lock is taken and
+    /// WHILE the `queen.kv` row locks are held. Three budgets apply together: op
+    /// count, the SUM of keys across all ops, and the read-bytes aggregate below.
+    pub kv_max_keys_per_call: usize,
+    /// 4 MiB, applied to the aggregate INSIDE the SP — including when `p_in_wire`,
+    /// not only on the HTTP routes. A cap on the number of keys is not a cap on
+    /// bytes: 1000 keys of 64 KiB are 64 MB. The real resource is the byte.
+    pub kv_max_read_bytes: usize,
+    /// `getPrefix` limit ceiling. A request's `limit` is CLAMPED to it, never
+    /// rejected, and `truncated` tells the truth — a 400 on too high a limit is an
+    /// error the user cannot fix without reading the server's config.
+    pub kv_prefix_limit: usize,
+
+    // --- KV serving (§8.4). This is the FIRST endpoint of the product whose call
+    // rate is decided by the customer's END USERS rather than by message volume.
+    // Every other route has a natural limiter upstream; here the limiter is somebody
+    // else's web traffic.
+    /// DEDICATED connection pool, DERIVED from the pool rather than hardcoded (the
+    /// same precedent as `admission_floor` below). The pool IS the semaphore, and the
+    /// property no other defence gives is this: at ~1 ms reads its capacity is far
+    /// above any rate limit, so it does not bind in normal conditions; it becomes the
+    /// limiter exactly when the DATABASE slows down, and the overflow takes a 503
+    /// instead of stealing connections from the message path.
+    pub kv_pool_size: usize,
+    /// With tenancy ON, the ABSENCE of a `queen.kv_quota` row is a DENIAL (403
+    /// `feature_gated`), not a permission (§9.4 correction 1): the tenant header is
+    /// opaque and unvalidated, so a client that rotates it on every request would
+    /// otherwise mint a fresh unlimited tenant each time. DERIVED from the tenancy
+    /// flag so a self-hosted operator never has to understand why they should
+    /// configure anything.
+    pub kv_require_grant: bool,
+    /// Per-tenant token bucket, evaluated BEFORE `pool.get()`, answering 429 +
+    /// `Retry-After`. In the BROKER and not only in the proxy, because self-hosted and
+    /// dedicated-without-proxy are real deployments and a defence that exists only in
+    /// the proxy is not a defence of the product. 200 reads/s is ~20% of one core at
+    /// 0,3-1 ms per PK read, and the rule being defended is that KV reads must not be
+    /// able to consume more than ~10% of the backend CPU serving the log.
+    pub kv_read_rate: u32,
+    pub kv_read_burst: u32,
+    /// 100 writes/s: every write is a durable commit (~4 ms fsync).
+    pub kv_write_rate: u32,
+    pub kv_write_burst: u32,
+    /// Aggregate CELL ceiling above the per-tenant limits: N conforming tenants can
+    /// sum to a non-conforming cell. 0 disables it.
+    pub kv_cell_rate: u32,
+    /// Size cap on the per-tenant in-RAM maps (token bucket, quota cache). The cap
+    /// DENIES, it does not evict (§9.4 correction 2) — eviction under an unvalidated,
+    /// attacker-chosen tenant id is just a slower unbounded map. The house precedent
+    /// is `handlers/mod.rs`: negatives are never cached, for exactly this reason.
+    pub kv_max_tenants: usize,
+    /// Usage-rollup sub-cadence (§7.5). Same cost class as retention's
+    /// `PARTITION_SWEEP_EVERY`: the phase is O(space), not O(work), so it gets its own
+    /// slow clock. It must NEVER move onto the due-driven path.
+    pub kv_usage_every_ms: u64,
+
+    // --- Timers shape limits (§9.2).
+    /// DERIVED, not independent: `min(1 MiB, plan.max_payload_bytes)`. A timer BECOMES
+    /// a message, so if its ceiling is not the message ceiling the timer is a service
+    /// door around the plan's `max_payload_bytes`. Written as an independent constant,
+    /// that hole opens by itself.
+    pub timers_max_payload_bytes: usize,
+    /// FINITE by default (90 days), never 0-means-unlimited. With an infinite horizon
+    /// the row quota becomes permanent instead of cyclic: the tenant fills `max_timers`
+    /// and never frees it. Finite, the worst case is computable:
+    /// `rows <= schedule_rate * horizon`.
+    pub timers_max_horizon_s: i64,
+    /// Ops per `POST /api/v1/timers` batch. Also the metering unit: ONE message is
+    /// billed per `schedule` op, never per call — at a cap of 256 ops, billing per
+    /// call would under-count by up to 256x (§9.7, ratified §20.3).
+    pub timers_max_ops_per_call: usize,
+
+    // --- Sweeper (§7). ONE background component, TWO clocks. The asymmetry is a
+    // principle, not a convenience: a late fire is product latency and is visible,
+    // while a late KV prune is invisible (the `kv_live_v1` predicate already hides the
+    // expired row on the first read) and costs only table size.
+    //
+    // LEADERLESS, unlike retention: retention takes session advisory lock 737_001 and
+    // one replica works per cycle; the sweeper must be the opposite on both axes,
+    // due-driven and leaderless, so every replica drains in parallel sharing the work
+    // through `SKIP LOCKED`. It takes NO advisory lock, so it consumes no new number
+    // and cannot close a cycle with the advisory space (§2.1). 737_003 stays reserved
+    // for PLAN_S3_ARCHIVE.md, which already claimed it.
+    pub sweeper_enabled: bool,
+    /// Sleep floor when there IS work. Not a latency floor for its own sake: a healthy
+    /// timer lands within ~10 ms above this.
+    pub sweeper_min_sleep_ms: u64,
+    /// Sleep ceiling, and therefore the maximum recovery window for a timer scheduled
+    /// on ANOTHER broker — this is the net that makes the `T_TIMER_DUE` mesh frame
+    /// unnecessary in v1 (§7.4, §18.3). A multi-broker cluster with no mesh works,
+    /// with at most one second of delay, and `deliverAt` is "no earlier than".
+    pub sweeper_max_sleep_ms: u64,
+    /// Empty-table backoff ceiling (§7.1): after K cycles with a NULL `nextInMs` and
+    /// zero pruned rows the sleep climbs to here, reset by a local `hint()`. The 1 s
+    /// ceiling is a net for DELIVERY latency and has no meaning when there is nothing
+    /// to deliver.
+    pub sweeper_idle_max_sleep_ms: u64,
+    /// Claim lease. Also the exact window in which a `cancel` or a `reschedule` can
+    /// answer `too_late` (§4.3), and the maximum delay after a broker dies holding
+    /// claims (§12).
+    pub sweeper_lease_ms: u64,
+    /// Rows per claim call. The per-shard floor derived from it is
+    /// `GREATEST(ceil(batch / 64), 8)` inside the SP (§6.2): plain integer division
+    /// gives 3 at the default and 1 for an operator who lowers the batch, and at
+    /// `v_per = 1` a single late shard can never catch up.
+    pub sweeper_claim_batch: i64,
+    /// Ceiling on rows drained per CYCLE. Claim and fire happen in the SAME iteration
+    /// (§7.2): draining 5000 rows in 25 rounds up front means the first round's claims
+    /// expire before the 25th fire commits, another broker re-claims them, our fire
+    /// finds different tokens, every segment is `stale`, and two brokers steal work
+    /// from each other while `lateMs` climbs — a LIVELOCK observable only as "the
+    /// sweeper is slow".
+    pub sweeper_cycle_max_rows: i64,
+    /// Cap on the due probe's count (§6.2). It runs every cycle, and an exact count
+    /// would be O(due) precisely in the failure the probe exists to detect; the probe
+    /// reports `dueCapped` instead of lying.
+    pub sweeper_due_cap: i64,
+    /// Fire-transaction ceiling in BYTES, not segments (§7.2). Retention's lesson is
+    /// that ITS step cost is per ROW so a bigger batch only stalls pushes; here the
+    /// cost is per byte of WAL, so the cap is in bytes. Over it, the batch splits into
+    /// several calls, each its own transaction.
+    pub sweeper_max_fire_bytes: usize,
+    /// `attempts` grows ONLY on permanent and config failures (§4.5). Past this the
+    /// timer goes to the destination queue's DLQ with `consumer_group = '__timer__'`.
+    /// Infrastructure never consumes the DLQ budget.
+    pub sweeper_max_attempts: i32,
+    /// Default 1, clamped by `sweeper::MAX_PARALLELISM` at the call site exactly like
+    /// `retention_parallelism`. 1 because the fire is a WRITING transaction holding
+    /// partition locks, not a maintenance delete: two concurrent fires on the same
+    /// partitions contend for the same push serializer. Raise it only if `lateMs`
+    /// grows under load AND the profile says the bottleneck is the round trip rather
+    /// than the commit.
+    pub sweeper_parallelism: usize,
+    /// Poison isolation (§7.6). A fire is ONE transaction for many segments, so one
+    /// poisoned segment fails the whole batch; without this that batch fails FOREVER
+    /// and the healthy segments never arrive. On a PERMANENT error with more than one
+    /// segment the broker replays the batch one segment per call: the healthy ones
+    /// commit, the poisoned one takes its `attempts`. It is the most insidious failure
+    /// of the feature, because the symptom (`lateMs` rising) does not name the culprit.
+    pub sweeper_isolate_on_permanent: bool,
+    /// Per-tenant round-robin budget INSIDE the claim (§6.2). Applied after the claim
+    /// it would not work at all: discarding already-claimed rows puts them back at the
+    /// head of the index (`visible_at` did not change) and they are re-selected next
+    /// cycle — a livelock that burns the whole batch every round. Because the shard is
+    /// a hash of `timer_key` and carries no tenant, one tenant's timers spread over all
+    /// 64 shards, so a tenant scheduling 200 000 timers for 09:00 fills EVERY claim
+    /// batch of EVERY broker until it drains.
+    pub sweeper_fire_rate_per_tenant: i64,
+    /// Exponential backoff for a failed fire: `min(min_ms * 2^attempts, max_ms)`,
+    /// computed broker-side. On a TRANSIENT failure the attempt is not counted.
+    pub sweeper_backoff_min_ms: i64,
+    pub sweeper_backoff_max_ms: i64,
 }
 
 /// File-buffer configuration, mirroring the C++ `FileBufferConfig`
@@ -698,6 +890,59 @@ pub fn log_effective(cfg: &Config) {
         tenancy_header = cfg.tenancy_header,
         "config: security"
     );
+    // PLAN_KV_TIMERS.md. Printed even when both flags are off, and deliberately so:
+    // "the feature is not on" is exactly the fact an operator comes to this block to
+    // check, and inferring it from the absence of a line is how a flag ends up
+    // half-believed. The derived values (`kv_pool`, `kv_require_grant`,
+    // `timers_max_payload_bytes`) are printed with the number ACTUALLY in force, not
+    // the formula — the formula is in the struct docs, the log carries the value.
+    tracing::info!(
+        target: "boot",
+        kv = cfg.kv_enabled,
+        timers = cfg.timers_enabled,
+        kv_pool = cfg.kv_pool_size,
+        kv_require_grant = cfg.kv_require_grant,
+        kv_max_value_bytes = cfg.kv_max_value_bytes,
+        kv_max_key_bytes = cfg.kv_max_key_bytes,
+        kv_budgets = %format!(
+            "{}ops/{}keys/{}B",
+            cfg.kv_max_ops_per_call, cfg.kv_max_keys_per_call, cfg.kv_max_read_bytes),
+        kv_prefix_limit = cfg.kv_prefix_limit,
+        kv_rate = %format!(
+            "{}r/{}rb/{}w/{}wb/{}cell",
+            cfg.kv_read_rate, cfg.kv_read_burst,
+            cfg.kv_write_rate, cfg.kv_write_burst, cfg.kv_cell_rate),
+        kv_max_tenants = cfg.kv_max_tenants,
+        kv_usage_every_ms = cfg.kv_usage_every_ms,
+        timers_max_payload_bytes = cfg.timers_max_payload_bytes,
+        timers_max_horizon_s = cfg.timers_max_horizon_s,
+        timers_max_ops_per_call = cfg.timers_max_ops_per_call,
+        "config: kv_timers"
+    );
+    tracing::info!(
+        target: "boot",
+        enabled = cfg.sweeper_enabled,
+        // The task is not spawned at all unless one of the two features is on (§7.1):
+        // with both off, a `QUEEN_SWEEPER=true` that still ran would cost every
+        // existing installation one due probe and one expire step per second per
+        // broker, forever, over two empty tables.
+        spawns = cfg.sweeper_enabled && (cfg.kv_enabled || cfg.timers_enabled),
+        sleep_ms = %format!(
+            "{}..{} (idle {})",
+            cfg.sweeper_min_sleep_ms, cfg.sweeper_max_sleep_ms, cfg.sweeper_idle_max_sleep_ms),
+        lease_ms = cfg.sweeper_lease_ms,
+        claim_batch = cfg.sweeper_claim_batch,
+        cycle_max_rows = cfg.sweeper_cycle_max_rows,
+        due_cap = cfg.sweeper_due_cap,
+        max_fire_bytes = cfg.sweeper_max_fire_bytes,
+        max_attempts = cfg.sweeper_max_attempts,
+        parallelism = cfg.sweeper_parallelism,
+        isolate_on_permanent = cfg.sweeper_isolate_on_permanent,
+        fire_rate_per_tenant = cfg.sweeper_fire_rate_per_tenant,
+        backoff_ms = %format!(
+            "{}..{}", cfg.sweeper_backoff_min_ms, cfg.sweeper_backoff_max_ms),
+        "config: sweeper"
+    );
     tracing::info!(
         target: "boot",
         level = %env_str("RUST_LOG", &env_str("LOG_LEVEL", "info")),
@@ -752,6 +997,34 @@ pub fn load() -> Config {
     let admission_pool_reserve = env_int("QUEEN_ADMISSION_POOL_RESERVE", 16).max(0) as u64;
     let admission_floor =
         ((pool_size as u64).saturating_sub(admission_pool_reserve) * 2 / 3).max(8) as i64;
+
+    // --- kv + timers derivations (PLAN_KV_TIMERS.md §8.4, §9.2, §9.4) ------
+    // Resolved BEFORE the struct because three of them are DERIVED from another
+    // knob, and a derived default that is written as a constant is a default that
+    // silently stops tracking what it was derived from.
+    let tenancy_header = env_bool("QUEEN_TENANCY_HEADER", false);
+    let kv_enabled = env_bool("QUEEN_KV_ENABLED", false);
+    // §8.4: derived from the pool rather than hardcoded, same precedent as
+    // `admission_floor`. With DB_POOL_SIZE=160 the KV pool is 16 — exactly the
+    // admission reserve the product already considers acceptable to hold idle.
+    let kv_pool_size = env_int("QUEEN_KV_POOL_SIZE", kv_pool_default(pool_size)).max(1) as usize;
+    // §9.4 correction 4. `tenant.rs` is explicit that with the header on, the tenant
+    // is OPAQUE and validated against nothing — the trust is the cell network. With
+    // KV on top of that, a client rotating the header per request gets a fresh key
+    // space, a fresh (unlimited) quota lookup and a permanent entry in the broker's
+    // maps, on a deployment the design itself calls real (self-hosted / dedicated
+    // with no proxy). So the combination requires the operator to STATE that a proxy
+    // sets the header, and the boot dies otherwise: a safety interlock must fail
+    // closed, and `env_bool` already treats a typo as fatal for the same reason.
+    if kv_enabled && tenancy_header && !env_bool("QUEEN_KV_TRUSTED_PROXY", false) {
+        crate::obs::fatal(
+            "QUEEN_KV_ENABLED=1 with QUEEN_TENANCY_HEADER=1: the tenant header is \
+             opaque and unvalidated, so KV would let any caller read and write another \
+             tenant's state by NAME. Set QUEEN_KV_TRUSTED_PROXY=1 to affirm that a \
+             proxy in front sets x-queen-tenant (and strips the client's), or turn one \
+             of the two flags off",
+        );
+    }
 
     let mut cfg = Config {
         port: env_str("PORT", "6632"),
@@ -862,7 +1135,51 @@ pub fn load() -> Config {
         hotlist_idle_sweep_ms: env_int("QUEEN_HOTLIST_IDLE_SWEEP_MS", 300_000).max(0) as u64,
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
-        tenancy_header: env_bool("QUEEN_TENANCY_HEADER", false),
+        tenancy_header,
+        // ------------------------------------------- kv + timers (PLAN_KV_TIMERS.md)
+        kv_enabled,
+        timers_enabled: env_bool("QUEEN_TIMERS_ENABLED", false),
+        kv_max_value_bytes: env_int("QUEEN_KV_MAX_VALUE_BYTES", 65536).max(1) as usize,
+        kv_max_key_bytes: env_int("QUEEN_KV_MAX_KEY_BYTES", 512).max(1) as usize,
+        kv_max_ops_per_call: env_int("QUEEN_KV_MAX_OPS_PER_CALL", 256).max(1) as usize,
+        kv_max_keys_per_call: env_int("QUEEN_KV_MAX_KEYS_PER_CALL", 1024).max(1) as usize,
+        kv_max_read_bytes: env_int("QUEEN_KV_MAX_READ_BYTES", 4 * 1024 * 1024).max(1) as usize,
+        kv_prefix_limit: env_int("QUEEN_KV_PREFIX_LIMIT", 1000).max(1) as usize,
+        kv_pool_size,
+        kv_require_grant: env_bool("QUEEN_KV_REQUIRE_GRANT", tenancy_header),
+        kv_read_rate: env_int("QUEEN_KV_READ_RATE", 200).max(1) as u32,
+        kv_read_burst: env_int("QUEEN_KV_READ_BURST", 400).max(1) as u32,
+        kv_write_rate: env_int("QUEEN_KV_WRITE_RATE", 100).max(1) as u32,
+        kv_write_burst: env_int("QUEEN_KV_WRITE_BURST", 200).max(1) as u32,
+        // 0 = no aggregate cell ceiling. The default is ten times the per-tenant read
+        // rate: it is a ceiling on the SUM of conforming tenants, not a second
+        // per-tenant limit, so it must sit well above one tenant's share.
+        kv_cell_rate: env_int("QUEEN_KV_CELL_RATE", 2000).max(0) as u32,
+        kv_max_tenants: env_int("QUEEN_KV_MAX_TENANTS", 10_000).max(1) as usize,
+        kv_usage_every_ms: env_int("QUEEN_KV_USAGE_EVERY_MS", 300_000).max(1000) as u64,
+        timers_max_payload_bytes: env_int("QUEEN_TIMERS_MAX_PAYLOAD_BYTES", 1024 * 1024)
+            .max(1) as usize,
+        timers_max_horizon_s: env_int("QUEEN_TIMERS_MAX_HORIZON_S", 7_776_000).max(1),
+        timers_max_ops_per_call: env_int("QUEEN_TIMERS_MAX_OPS_PER_CALL", 256).max(1) as usize,
+        sweeper_enabled: env_bool("QUEEN_SWEEPER", true),
+        sweeper_min_sleep_ms: env_int("QUEEN_SWEEPER_MIN_SLEEP_MS", 5).max(1) as u64,
+        sweeper_max_sleep_ms: env_int("QUEEN_SWEEPER_MAX_SLEEP_MS", 1000).max(1) as u64,
+        sweeper_idle_max_sleep_ms: env_int("QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS", 30_000).max(1)
+            as u64,
+        sweeper_lease_ms: env_int("QUEEN_SWEEPER_LEASE_MS", 30_000).max(1) as u64,
+        sweeper_claim_batch: env_int("QUEEN_SWEEPER_CLAIM_BATCH", 200).max(1),
+        sweeper_cycle_max_rows: env_int("QUEEN_SWEEPER_CYCLE_MAX_ROWS", 5000).max(1),
+        sweeper_due_cap: env_int("QUEEN_SWEEPER_DUE_CAP", 2000).max(1),
+        sweeper_max_fire_bytes: env_int("QUEEN_SWEEPER_MAX_FIRE_BYTES", 8 * 1024 * 1024)
+            .max(1) as usize,
+        sweeper_max_attempts: env_int("QUEEN_SWEEPER_MAX_ATTEMPTS", 5).max(1) as i32,
+        // .max(1) only — the ceiling is sweeper::MAX_PARALLELISM, applied at the call
+        // site exactly as retention.rs applies its own. One clamp, one owner.
+        sweeper_parallelism: env_int("QUEEN_SWEEPER_PARALLELISM", 1).max(1) as usize,
+        sweeper_isolate_on_permanent: env_bool("QUEEN_SWEEPER_ISOLATE_ON_PERMANENT", true),
+        sweeper_fire_rate_per_tenant: env_int("QUEEN_SWEEPER_FIRE_RATE_PER_TENANT", 50).max(1),
+        sweeper_backoff_min_ms: env_int("QUEEN_SWEEPER_BACKOFF_MIN_MS", 1000).max(1),
+        sweeper_backoff_max_ms: env_int("QUEEN_SWEEPER_BACKOFF_MAX_MS", 60_000).max(1),
     };
     // §8 windowed reseed: derive it when unset, then clamp it — see
     // resolve_reseed_window_ms. Resolved here, before anything reads the field, so the
@@ -927,6 +1244,20 @@ const RESEED_WINDOW_CEILING_MS: i64 = 7 * 24 * 3_600_000;
 /// The ceiling wins over the floor when a very long cadence puts the two in conflict:
 /// staying inside the arithmetic is not negotiable, and a cadence that slow has already
 /// chosen its own repair latency.
+/// The dedicated KV pool's default size, DERIVED from the main pool
+/// (PLAN_KV_TIMERS.md §8.4) rather than hardcoded — the same precedent as
+/// `admission_floor`.
+///
+/// A tenth of the pool, floored at 4 and capped at 32. With the default
+/// `DB_POOL_SIZE = 160` that is 16, exactly the admission reserve the product
+/// already accepts holding idle. The floor keeps a small deployment usable (a pool
+/// of 8 would otherwise derive 0 and wedge every KV call); the cap is what makes the
+/// pool a real bulkhead — an unbounded share would let a slow database turn KV
+/// traffic into starvation of the message path instead of into 503s.
+fn kv_pool_default(pool_size: usize) -> i64 {
+    ((pool_size / 10) as i64).clamp(4, 32)
+}
+
 fn resolve_reseed_window_ms(requested: i64, reseed_ms: i64) -> i64 {
     let want = if requested == 0 {
         reseed_ms.saturating_mul(4).max(120_000)
@@ -1002,6 +1333,30 @@ mod tests {
         std::env::set_var(K, "banana");
         assert!(env_bool_checked(K, false).is_err());
         std::env::remove_var(K);
+    }
+
+    /// PLAN_KV_TIMERS.md §8.4. The property that matters is not the arithmetic, it is
+    /// that the KV pool is a BULKHEAD: bounded above so KV can never eat the message
+    /// path's connections, and bounded below so a small deployment still works.
+    #[test]
+    fn kv_pool_is_derived_from_the_pool_and_bounded_both_ways() {
+        // The documented default deployment.
+        assert_eq!(kv_pool_default(160), 16);
+        // Floor: a tenth of a tiny pool rounds to zero, which would wedge every KV
+        // call on an empty pool instead of serving it.
+        assert_eq!(kv_pool_default(8), 4);
+        assert_eq!(kv_pool_default(0), 4);
+        // Ceiling: a very large pool must not hand KV an unbounded share, or a slow
+        // database turns KV traffic into starvation of the message path rather than
+        // into 503s on the KV routes.
+        assert_eq!(kv_pool_default(4000), 32);
+        // Monotone in between, so raising DB_POOL_SIZE never shrinks the KV pool.
+        let mut last = 0;
+        for p in (0..=4000).step_by(37) {
+            let v = kv_pool_default(p);
+            assert!(v >= last, "kv pool shrank at pool_size={p}");
+            last = v;
+        }
     }
 
     #[test]

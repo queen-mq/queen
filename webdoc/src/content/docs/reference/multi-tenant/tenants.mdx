@@ -14,6 +14,8 @@ sourceOfTruth:
   - proxy/migrations/006_operator.sql
   - proxy/src/auth.rs
   - proxy/src/registry.rs
+  - proxy/src/console.rs
+  - proxy/src/oauth.rs
 ---
 
 Everything the proxy needs to route, authorize, limit and bill a request lives in the
@@ -282,8 +284,15 @@ never forced to move a cluster in a hurry.
 `operations` is append-only, indexed by `(tenant, at DESC)` and by
 `(cluster, at DESC)`. Every function above writes exactly one row, with an `actor` of
 `user`, `api_key`, `control_plane` or `system`. The higher-level functions hardcode
-`control_plane`; `record_operation` itself takes an explicit actor, which is what a
-self-serve admin API would use.
+`control_plane`; `record_operation` itself takes an explicit actor, and the
+[self-serve console](/reference/multi-tenant/console/) is the caller that uses it
+today. Both the console handlers and the OAuth sign-in path call
+`queen_proxy.record_operation(…, 'user', …)` with the signed-in user's id, so a
+console action that also runs a higher-level function leaves two rows: the
+function's own `control_plane` row and a second, user-attributed one. That is
+deliberate, and it is why a `user` actor in the audit trail means a human acted
+rather than an automation did. The second row is best-effort: a failed
+`record_operation` logs a warning and does not fail the action it was recording.
 
 `cluster_id` on that table is `ON DELETE SET NULL` rather than cascading, so a
 hard-deleted cluster's history outlives the row. `tenant_id` is `NOT NULL` and
@@ -292,6 +301,8 @@ restricts, which is another way of saying: this design expresses tenant lifecycl
 
 ## Related
 
+- [The self-serve console](/reference/multi-tenant/console/): the caller that drives
+  these functions today, and what it writes to the audit trail.
 - [Credentials and authorization](/reference/multi-tenant/auth/): what a key or a
   session can actually do with these rows.
 - [Quotas and rate limits](/reference/multi-tenant/quotas/): how each plan column is

@@ -24,6 +24,68 @@ are inside one commit, so there is no window.
 
 <Render file="snippets/js-transaction" />
 
+## One transaction, many partitions, many queues
+
+A bundle is not limited to one ack and one push. It may acknowledge batches leased from any
+number of partitions, across any number of queues, and push to any number of queues and
+partitions. All of it commits together.
+
+**That is what makes a fan-in stage possible.** Consume from two input queues, merge, and write
+one result: either both inputs are acknowledged and the merged message is stored, or neither
+happened.
+
+```json
+{
+  "operations": [
+    {
+      "type": "ack",
+      "transactionId": "order-8891-created",
+      "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
+      "consumerGroup": "merge",
+      "status": "completed"
+    },
+    {
+      "type": "ack",
+      "transactionId": "payment-7742-settled",
+      "partitionId": "c2d3e4f5-6071-8290-ab1c-2d3e4f506172",
+      "consumerGroup": "merge",
+      "status": "completed"
+    },
+    {
+      "type": "push",
+      "items": [
+        {
+          "queue": "orders.enriched",
+          "partition": "customer-42",
+          "transactionId": "enriched-8891",
+          "payload": { "orderId": 8891, "paidAt": "2026-08-17T09:12:03Z" }
+        }
+      ]
+    }
+  ],
+  "requiredLeases": [
+    "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
+    "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8b01"
+  ]
+}
+```
+
+Inside the stored procedure this is a loop, not a special case. One set-based statement pre-locks
+every push partition in the bundle in ascending `queen.log_partitions.id` order, then a push loop
+runs over N push elements, then an ack loop runs over N ack elements in ascending
+`(partitionId, consumerGroup)` order. Nothing on that path assumes one of each.
+
+The step that makes several leases work is lease resolution. Each ack group's lease is read from
+its own `queen.log_consumers` row rather than from the request, because `requiredLeases` carries
+no lease-to-partition mapping and its single-hint fallback goes ambiguous the moment two distinct
+leases appear. Exactly one live lease exists per `(partition, group)`, so the consumer row is
+authoritative and a bundle carrying several distinct leases resolves correctly. The full
+resolution order is spelled out under "How the lease for an ack is found" below.
+
+Two contract tests in `clients/client-js/test-v2/transaction.js` cover exactly this shape:
+`transactionWithPartitions` acks two partitions of one queue in a single bundle, and
+`transactionMultipleQueues` acks from two queues and pushes the merged result to a third.
+
 ## Request
 
 ```json
@@ -133,9 +195,9 @@ items with the same `transactionId` in the same `(queue, partition)` inside one 
 first-wins. The second is echoed as a result with `duplicate: true`, produces no frame, and does
 **not** roll the transaction back.
 
-Deadlock safety comes from a fixed lock order (partitions ascending, then consumer rows
-ascending) shared with the ordinary push path, so concurrent transactions touching overlapping
-sets can never form a cycle.
+Deadlock safety comes from a fixed total lock order shared with the ordinary push path, so
+concurrent transactions touching overlapping sets can never form a cycle. The four steps of that
+order are under "What the atomicity is made of" below.
 
 ## Response
 
@@ -188,6 +250,37 @@ Failure keeps the same shape, with the reason at the top level:
 | `500` | no database connection was available |
 
 A rolled-back transaction is a `200`. Check `success`, not the status code.
+
+## What the atomicity is made of
+
+**There is no coordinator.** The bundle travels as one cached prepared statement in one round
+trip, a single `SELECT` over `queen.log_transaction_wire_v1`, executed on one pooled connection.
+The atomicity is PostgreSQL's own, and the whole bundle is one server-side statement inside it.
+
+Read it as four absences:
+
+- **No producer epoch and no fencing token.** Nothing has to be registered or leased before you
+  are allowed to write.
+- **No two-phase commit and no prepared transaction.** Nothing is ever left in a prepared state,
+  so a crash cannot strand a bundle that an operator then has to find and `ROLLBACK PREPARED` by
+  hand.
+- **No coordinator log** to compact, replicate, or lose track of.
+- **No half-applied state.** The call either committed or it did not, so there is nothing for an
+  operator to reconcile. Recovery is a client-side retry, and the next section is about what
+  makes that retry safe.
+
+What holds concurrent bundles apart is a lock order rather than a protocol, and it is one total
+order in four steps: provisioning of any missing queue or partition rows first, then one
+set-based pre-lock over every push partition in ascending `queen.log_partitions.id` order, then
+the pushes, then the acks in ascending `(partition_id, consumer_group)` order. Consumer-row locks
+are only ever taken after every partition-row lock, so the two lock spaces cannot form a
+cross-space cycle. The same partition pre-lock is used by the ordinary push path and by
+retention, which is why a transaction cannot deadlock against either.
+
+The boundary is worth stating plainly: the guarantee covers everything inside that one
+PostgreSQL, meaning the pushed messages, the committed cursors and any dead-letter rows. It
+covers nothing outside it. If the same handler also charged a card or called a third-party API,
+that side effect is not in the transaction and still needs its own idempotency key.
 
 ## It is not exactly-once end to end
 

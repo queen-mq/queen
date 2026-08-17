@@ -1,0 +1,61 @@
+# Debt recorded by scripts/check-sourceoftruth.mjs, seeded 2026-08-17.
+#
+# Every line below is a page that names a file in its `sourceOfTruth` and has
+# not been touched since that file last changed. The gate exists to stop that
+# happening again, so the debt that already existed on the day it was turned on
+# is written down here rather than used as an argument against turning it on.
+#
+# Format, one per line:
+#   <page, relative to webdoc/>                       exempt every finding on that page
+#   <page, relative to webdoc/> :: <path, relative to the repo root>
+# `#` starts a comment. Paths are copied verbatim out of a failure message.
+#
+# Prefer the pair form. A page-level line also hides the next thing that drifts
+# on that page, which is the failure this file exists to prevent.
+#
+# These entries are meant to be deleted. Re-read the named file against the
+# page, fix or confirm the prose, and remove the line: the checker prints any
+# entry that no longer matches a finding, so a stale exemption announces itself
+# instead of accumulating.
+
+# The docs rulebook predates check-markdown.mjs, check-brief.mjs and
+# check-prose.mjs, and its component list is two entries short of
+# src/components.ts. Known, and being rewritten separately.
+src/content/docs/internals/contributing/docs.mdx :: webdoc/package.json
+src/content/docs/internals/contributing/docs.mdx :: webdoc/src/components.ts
+src/content/docs/internals/contributing/docs.mdx :: webdoc/src/content.config.ts
+
+# Both workflows were deleted with the C++ server. The page still names them,
+# so this is a real correction rather than a re-read: the release process now
+# runs from the workflows that remain.
+src/content/docs/internals/contributing/release.mdx :: .github/workflows/cli.yml
+src/content/docs/internals/contributing/release.mdx :: .github/workflows/cpp-server-build.yml
+
+# The CI matrix on this page is transcribed from tests.yml and the tenancy
+# runner changed under it.
+src/content/docs/internals/contributing/testing.mdx :: .github/workflows/tests.yml
+src/content/docs/internals/contributing/testing.mdx :: test/runners/tenancy/tenancy-check.sh
+
+src/content/docs/internals/stats.mdx :: server/sql/procedures/011_log_stats.sql
+src/content/docs/internals/stats.mdx :: server/src/db.rs
+
+# The four management-route pages were written on 2026-07-31 and the broker has
+# had twelve days of commits since. Nothing here is known to be wrong; nothing
+# here has been re-read either, which is exactly the state this gate reports.
+src/content/docs/reference/http/analytics.mdx :: server/src/config.rs
+src/content/docs/reference/http/analytics.mdx :: server/src/db.rs
+src/content/docs/reference/http/analytics.mdx :: server/src/main.rs
+src/content/docs/reference/http/analytics.mdx :: server/src/syscollect.rs
+src/content/docs/reference/http/lease.mdx :: server/src/handlers/data.rs
+src/content/docs/reference/http/queues.mdx :: server/sql/procedures/001_log_schema.sql
+src/content/docs/reference/http/queues.mdx :: server/sql/procedures/004_log_pop.sql
+src/content/docs/reference/http/queues.mdx :: server/sql/procedures/011_log_stats.sql
+src/content/docs/reference/http/queues.mdx :: server/src/db.rs
+src/content/docs/reference/http/queues.mdx :: server/src/handlers/queues.rs
+src/content/docs/reference/http/queues.mdx :: server/src/main.rs
+src/content/docs/reference/http/queues.mdx :: server/src/retention.rs
+src/content/docs/reference/http/queues.mdx :: server/src/stats.rs
+src/content/docs/reference/http/traces.mdx :: server/sql/procedures/010_log_admin.sql
+src/content/docs/reference/http/traces.mdx :: server/src/db.rs
+src/content/docs/reference/http/traces.mdx :: server/src/handlers/traces.rs
+src/content/docs/reference/http/traces.mdx :: server/src/main.rs

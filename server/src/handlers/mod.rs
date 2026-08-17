@@ -421,6 +421,13 @@ pub(crate) fn sp_result_to_response(txt: String) -> Response {
 
 
 mod data;
+// PLAN_KV_TIMERS.md §8.1 — the KV and timer HTTP surfaces. Both modules are
+// compiled unconditionally; whether their routes EXIST is decided in main.rs by
+// QUEEN_KV_ENABLED / QUEEN_TIMERS_ENABLED (§16 step 1: with the flag off "the
+// routes are not even registered", so the answer is 404 and not 403). Each
+// handler re-checks its own flag as the second lock on that door.
+mod kv;
+mod timers;
 mod queues;
 mod messages;
 mod traces;
@@ -437,6 +444,11 @@ mod static_files;
 mod analytics;
 
 pub use data::*;
+// `unused_imports` until main.rs registers the routes that call these handlers.
+#[allow(unused_imports)]
+pub use kv::*;
+#[allow(unused_imports)]
+pub use timers::*;
 pub use queues::*;
 pub use messages::*;
 pub use traces::*;

@@ -311,6 +311,85 @@ pub fn zstd_compress(raw: &[u8], level: i32) -> Vec<u8> {
     zstd::stream::encode_all(raw, level).unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------------
+// ONE segment recipe (PLAN_KV_TIMERS.md §1.3 phase (b), §15 "Unit Rust").
+//
+// The fusion flush and the timer fire both produce a segment for
+// `queen.log_push_*`: the zstd blob that lands in `queen.log_segments.blob` and
+// the `16 * count` hash blob that lands in `queen.log_txns.hashes`. Before this
+// extraction the recipe existed only inside `fusion::build_hashes_and_blob`, and
+// the sweeper would have had to grow a second copy of it.
+//
+// It lives HERE and not in `fusion.rs` for a reason the plan states as a
+// constraint: §1.8 keeps the two paths apart (the sweeper must not depend on the
+// fusion module, and a module-level test pins that the fire's SQL never names
+// `log_push_multi_v1`), and `frames.rs` is already the shared codec both sides
+// use. `fusion::build_hashes_and_blob` is now a thin adapter over
+// `pack_segment_with_hashes` — one recipe, two callers.
+//
+// What is actually at stake, in the order it would hurt:
+//  1. the hash blob IS the dedup identity SQL compares, with a frame-order
+//     stride: position k belongs to packed frame k. A misordered or short blob
+//     does not fail loudly — it makes the dedup probe answer about a different
+//     message, and the fire's own guard (`octet_length(hashes[i]) = counts[i]*16`,
+//     plus "exactly counts[i] keys carry seg_of = i") is the only thing between
+//     that and a timer deleted after the wrong frame was pushed;
+//  2. the fire packs OUTSIDE any transaction and then commits all-or-nothing per
+//     segment, so a blob that does not decode is discovered with the lease held
+//     and costs a whole batch;
+//  3. duplicate txns inside one segment must KEEP THEIR POSITIONS. The fire maps
+//     the `i` the allocator echoes for a duplicate back to a timer row to delete,
+//     so a dedup-at-pack-time "optimization" here would delete the wrong timer.
+//     Neither function collapses anything.
+// ---------------------------------------------------------------------------
+
+/// One packed segment: the two blobs the push SPs take, plus the frame count
+/// their alignment guards check the blobs against.
+pub struct PackedSegment {
+    /// `16 * count` bytes, frame order: frame k's xxh3_128 txn fingerprint at
+    /// byte offset `16 * k`.
+    pub hashes: Vec<u8>,
+    /// `zstd(pack_frames(frames))` — the `queen.log_segments.blob` payload.
+    pub blob: Vec<u8>,
+    pub count: usize,
+}
+
+/// Pack a segment, computing each frame's txn fingerprint from its `txn`.
+///
+/// This is the form the timer fire uses: it holds decompressed payloads and the
+/// fixed `txn` of each timer and has no hashes cached anywhere.
+pub fn pack_segment(frames: &[FrameIn<'_>], zstd_level: i32) -> PackedSegment {
+    let mut hashes = Vec::with_capacity(frames.len() * 16);
+    for f in frames {
+        hashes.extend_from_slice(&crate::util::txn_hash128(f.txn));
+    }
+    pack_segment_with_hashes(frames, hashes, zstd_level)
+}
+
+/// The same recipe when the caller ALREADY holds the fingerprints.
+///
+/// The fusion flush computes them once per frame at flush time and reuses them
+/// across repacks (a bundle can be repacked after a `duplicate` verdict removes
+/// some frames), so re-hashing here would add xxh3 work per frame per repack to
+/// the push hot path — the path a 1% CPU-per-message gate is measured on. The
+/// blob half is identical either way, which is the whole point of the split.
+pub fn pack_segment_with_hashes(
+    frames: &[FrameIn<'_>],
+    hashes: Vec<u8>,
+    zstd_level: i32,
+) -> PackedSegment {
+    debug_assert_eq!(
+        hashes.len(),
+        frames.len() * 16,
+        "hash blob stride broken: the push SPs check octet_length(hashes) = count * 16"
+    );
+    PackedSegment {
+        count: frames.len(),
+        blob: zstd_compress(&pack_frames(frames), zstd_level),
+        hashes,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,3 +443,12 @@ mod tests {
 pub fn zstd_decompress(blob: &[u8]) -> Vec<u8> {
     zstd::stream::decode_all(blob).unwrap_or_default()
 }
+
+// PLAN_KV_TIMERS §15 "Unit Rust": the `pack_segment` unit tests, written before
+// this extraction landed. `#[path]` on a non-inline `mod` resolves relative to
+// the directory of the file that DECLARES it (i.e. `src/`), and the module is a
+// child of this one, so `use super::*` reaches everything above without making
+// anything more public than it already is. See `src/tests_unit/README.md`.
+#[cfg(test)]
+#[path = "tests_unit/pack_segment.rs"]
+mod pack_segment_tests;

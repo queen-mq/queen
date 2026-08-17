@@ -17,7 +17,11 @@ control group: a free-tier shape is two cores covering all four, loader outside 
 
 **A 2-core cell held above 2400 msg/s through the proxy with zero loss, and twelve tenants
 sharing one queue and one consumer group ran an hour with zero cross-tenant deliveries.** Both
-had **deduplication off** and **429 retry disabled**; the hour's verdict is FAIL.
+had **deduplication off** and **429 retry disabled**. That second setting decides the hour's
+aggregate verdict: two tenants were pinned to the free plan's rate limit, the loader never
+retried what enforcement refused them, and the checker counts an unretried refusal as a missing
+message. All 25,157 misses are those two tenants' refused backlog, the nine untouched tenants
+lost nothing, and the checker's aggregate verdict for the hour is therefore FAIL.
 
 ## The throughput ladder
 
@@ -63,9 +67,10 @@ on. Two tenants were pinned to the free plan's 5 requests and 20 messages a seco
 **0 cross-tenant deliveries.** 3,024,001 offered, 2,376,180 accepted, 2,400,397 delivered,
 2,350,538 acked, 0 shed. The proxy metered 2,376,180 push messages, exactly the accepted count.
 
-### The FAIL
+### Where the misses come from
 
-25,157 missing and 49,374 duplicates across 2,400,397 deliveries:
+Split the twelve tenants by what enforcement did to them, and the delivery result splits with
+them:
 
 | Class | Tenants | Accepted, of 252,000 offered each | Missing | Duplicates |
 | --- | --- | --- | --- | --- |
@@ -73,9 +78,14 @@ on. Two tenants were pinned to the free plan's 5 requests and 20 messages a seco
 | rate-limited | `soak-0000`, `soak-0001` | 13,778 and 14,610 | 12,612 and 12,545 | 24,433 and 24,886 |
 | quota-blocked | `soak-0002` | 83,695 | **0** | 3 |
 
-All of the missing and 99.9% of the duplicates belong to the two throttled tenants: with
+All of the missing and 99.9% of the duplicates belong to the two rate-limited tenants: with
 `retry429Attempts: 1` the loader never retries a refused request, so their backlog was never
-re-offered and the checker counts it missing.
+re-offered and the checker counts it missing. The nine untouched tenants and the quota-blocked
+one lost nothing.
+
+Aggregated over all twelve, that is 25,157 missing and 49,374 duplicates across 2,400,397
+deliveries, and the checker scores the hour **FAIL** on those totals. The number the isolation
+claim rests on is the one above it: 0 cross-tenant deliveries.
 
 ### Resources
 

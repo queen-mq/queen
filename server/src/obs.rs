@@ -165,6 +165,73 @@ impl Sampler {
     }
 }
 
+/// On-change gate: the counterpart to `Sampler` for signals that must be logged
+/// when they FLIP, not on a cadence (PLAN_KV_TIMERS.md §14.4).
+///
+/// The house precedent is the spool's enter/leave-buffered-mode transition in the
+/// reporter below — "the genuinely important signal is logged when it changes, not
+/// every interval". The sweeper needs the same shape for the degradation ladder of
+/// §12.1: a stage that has been active for an hour must not write a line an hour
+/// long, and entering it must not wait for the next reporter tick.
+///
+/// ```ignore
+/// static KV_PRUNE_SHED: OnChange<bool> = OnChange::new();
+/// if let Some(prev) = KV_PRUNE_SHED.changed(shed) { … }
+/// ```
+pub struct OnChange<T> {
+    last: std::sync::Mutex<Option<T>>,
+}
+
+impl<T: PartialEq + Clone> OnChange<T> {
+    pub const fn new() -> Self {
+        OnChange {
+            last: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// `Some(previous)` when the value differs from the last observation (the first
+    /// observation ever reports `Some(None)`), `None` when it is unchanged.
+    pub fn changed(&self, v: T) -> Option<Option<T>> {
+        let mut g = match self.last.lock() {
+            Ok(g) => g,
+            // A poisoned gate must not silence an operational signal: fall back to
+            // "report it" rather than swallowing a stage transition.
+            Err(p) => p.into_inner(),
+        };
+        if g.as_ref() == Some(&v) {
+            return None;
+        }
+        Some(std::mem::replace(&mut *g, Some(v)))
+    }
+}
+
+impl<T: PartialEq + Clone> Default for OnChange<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One line for one rung of the sweeper's degradation ladder (§12.1), emitted only
+/// on entry and exit. `stage` is the rung's name (`kv_prune`, `usage_rollup`,
+/// `kv_standalone_writes`, `kv_quota`, `kv_kill_switch`, `timers_schedule`), and the
+/// level is deliberately asymmetric: shedding is a WARN because the cell has started
+/// giving something up, recovering is an INFO.
+///
+/// What must NEVER appear here is the fire: it is not shed automatically at any rung
+/// (§12.1). Under pressure the sweeper shrinks the batch and lengthens the sleep, and
+/// the visible result is `fire_lag` rising — turning the fire off would convert a
+/// delay into what the customer reads as message loss.
+pub fn sweeper_stage(gate: &OnChange<bool>, stage: &'static str, shed: bool, reason: &str) {
+    if gate.changed(shed).is_none() {
+        return;
+    }
+    if shed {
+        tracing::warn!(target: "sweeper", stage, reason = %reason, "degradation stage ENTERED");
+    } else {
+        tracing::info!(target: "sweeper", stage, reason = %reason, "degradation stage LEFT");
+    }
+}
+
 /// Resolve when either SIGTERM (k8s pod termination) or Ctrl-C arrives, logging
 /// the signal. Fed to axum's `with_graceful_shutdown` so in-flight requests
 /// finish and the file-buffer spool can be reported before exit.
@@ -224,6 +291,12 @@ pub fn spawn_reporter(h: ReporterHandles) {
         // Track the spool's DB-health so we can emit the enter/leave-buffered-mode
         // transition (the single most important durability signal) on-change.
         let mut prev_healthy = h.file_buffer.db_healthy();
+        // PLAN_KV_TIMERS.md §14.4: the kv/timers rate fields are deltas over the same
+        // window as everything else in this block, so they need their own previous
+        // marks. Read unconditionally (three relaxed loads); only the LINE is gated.
+        let mut prev_kv_ops = h.metrics.kvt.kv_ops_total();
+        let mut prev_kv_rej = h.metrics.kvt.kv_rejected_total();
+        let mut prev_fired = h.metrics.kvt.timers_fired_total();
         let (mut prev_visits, mut prev_cands, _, _) = h.hotlist.lap.snapshot();
         static POOL_SAT: Sampler = Sampler::new(10_000);
         let mut last = Instant::now();
@@ -294,9 +367,20 @@ pub fn spawn_reporter(h: ReporterHandles) {
             let d_cands = lap_cands.saturating_sub(prev_cands);
             prev_visits = lap_visits;
             prev_cands = lap_cands;
-            tracing::info!(
-                target: "rates",
-                scope = "global",
+            // PLAN_KV_TIMERS.md §14.4: NO new periodic target. A third block is a line
+            // nobody reads; `rates` and `sizes` are the two people actually open during
+            // an incident, so the kv/timers numbers ride them.
+            //
+            // The fields are appended through a macro rather than by writing the
+            // `info!` twice: one field list, one place to change it. When both flags
+            // are off the extra fields are ABSENT — not zero — so the line is
+            // byte-identical for every installation that never turns the feature on,
+            // and nobody has to learn that six new columns are permanently 0.
+            macro_rules! rates_global {
+                ($($extra:tt)*) => {
+                    tracing::info!(
+                        target: "rates",
+                        scope = "global",
                 push_s = format!("{:.0}", d(cur.push_messages, prev.push_messages)),
                 pop_s = format!("{:.0}", d(cur.pop_messages, prev.pop_messages)),
                 ack_s = format!("{:.0}", d(cur.ack_messages, prev.ack_messages)),
@@ -326,8 +410,34 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 ring_oldest_ms = format!("{:.0}", ring_oldest),
                 ring_depth = ring_depth,
                 buffered = buffered,
+                $($extra)*
                 "broker rates"
-            );
+                    )
+                };
+            }
+            let kvt = &h.metrics.kvt;
+            if kvt.any_on() {
+                let kv_ops = kvt.kv_ops_total();
+                let kv_rej = kvt.kv_rejected_total();
+                let fired = kvt.timers_fired_total();
+                rates_global!(
+                    kv_ops_s = format!("{:.0}", d(kv_ops, prev_kv_ops)),
+                    kv_p99_ms = format!("{:.2}", kvt.kv_duration_p99()),
+                    // Non-zero on a tenant that was at zero is the EARLIEST of the six
+                    // pre-incident signals (§14.3.1) — a customer has just put KV reads
+                    // on their end users' path. The per-tenant list is the `sizes`
+                    // top-N line below; this is the cell-wide total.
+                    kv_rej_s = format!("{:.1}", d(kv_rej, prev_kv_rej)),
+                    timers_fire_s = format!("{:.1}", d(fired, prev_fired)),
+                    timers_backlog = kvt.timers_due(),
+                    fire_lag_p95 = format!("{:.2}", kvt.fire_lag_p95_seconds()),
+                );
+                prev_kv_ops = kv_ops;
+                prev_kv_rej = kv_rej;
+                prev_fired = fired;
+            } else {
+                rates_global!();
+            }
 
             // ---- rates (top-N hot queues) ----
             let cur_q = h.metrics.per_queue.snapshot();
@@ -390,7 +500,9 @@ pub fn spawn_reporter(h: ReporterHandles) {
             let ready: usize = rings.iter().map(|x| x.ready).sum();
             let wheel: usize = rings.iter().map(|x| x.wheel).sum();
             let rss_gb = h.metrics.resident_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
-            tracing::info!(
+            macro_rules! sizes_global {
+                ($($extra:tt)*) => {
+                    tracing::info!(
                 target: "sizes",
                 dedup = format!("{:.0}/{}MB({:.0}%)", dedup_mb, h.dedup_cap_mb, dedup_pct),
                 dedup_suppressed = h.dedup.suppressed_partitions(),
@@ -402,8 +514,56 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 pool_waiting = st.waiting,
                 adm_commits = adm.completions,
                 rss_gb = format!("{:.2}", rss_gb),
+                $($extra)*
                 "broker sizes"
-            );
+                    )
+                };
+            }
+            if kvt.any_on() {
+                // Occupancy, from the sweeper's slow rollup (§7.5) — never a count(*)
+                // from here. The measure is stale BY CONSTRUCTION and the quota it
+                // feeds is soft: the enforcer is each broker's own in-process delta,
+                // and the measure only drives RELEASE (§9.3).
+                let (kv_rows, kv_bytes, timers_pending) = kvt.usage_totals();
+                let (pool_used, pool_max) = kvt.kv_pool();
+                sizes_global!(
+                    kv = format!("{}rows/{:.1}MB", kv_rows, kv_bytes as f64 / (1024.0 * 1024.0)),
+                    // The failure that DISGUISES ITSELF AS SUCCESS: reads stay
+                    // perfectly correct while the table grows, because expiry is a
+                    // predicate and not the physical absence of the row. Alarm above
+                    // 50 000 rows OR an expiry lag over 600 s, whichever comes first
+                    // (§14.3.4).
+                    kv_unpruned = kvt.kv_expired_not_pruned(),
+                    timers = format!("{}pending", timers_pending),
+                    kv_pool = format!("{}/{}", pool_used, pool_max),
+                );
+                // Per-tenant top-N, modelled on the per-queue lines above. This is
+                // where the per-tenant view of this feature LIVES (§14.1): it is a
+                // log line and a JSON endpoint, never a Prometheus label on a
+                // per-operation counter, because there the cardinality would be
+                // tenant x op x outcome, i.e. chosen by the user.
+                let (top, total_tenants) = kvt.usage_top(h.top_n);
+                for t in top {
+                    if t.kv_rows == 0 && t.timers_pending == 0 {
+                        continue;
+                    }
+                    tracing::info!(
+                        target: "sizes",
+                        tenant = %t.tenant,
+                        kv_rows = t.kv_rows,
+                        // ESTIMATE, and labelled as one everywhere it is shown (§7.5).
+                        kv_mb_est = format!("{:.1}", t.kv_bytes as f64 / (1024.0 * 1024.0)),
+                        timers_pending = t.timers_pending,
+                        kv_quota_pct = format!("{:.0}", t.kv_quota_ratio * 100.0),
+                        timers_quota_pct = format!("{:.0}", t.timers_quota_ratio * 100.0),
+                        fire_lag_p95 = format!("{:.2}", kvt.fire_lag_p95_seconds_of(&t.tenant)),
+                        top = format!("{}/{}", h.top_n.min(total_tenants), total_tenants),
+                        "tenant sizes"
+                    );
+                }
+            } else {
+                sizes_global!();
+            }
 
             prev = cur;
             prev_q = cur_q;

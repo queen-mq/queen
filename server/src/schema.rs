@@ -33,6 +33,18 @@ const PROCEDURES: &[(&str, &str)] = &[
     // tables (001, 002) come first, engine SPs next, management plane after,
     // and the partition-counter trigger attachment (020) after both the table
     // it attaches to (001) and the functions it binds (019).
+    //
+    // 024/025 (kv, timers) come LAST, and that position is itself load-bearing
+    // twice over (PLAN_KV_TIMERS §3.1, §1.2):
+    //   * 005_log_ack.sql applies BEFORE them and calls queen.kv_apply_v1 and
+    //     queen.log_timers_apply_v1. That works only because the body of
+    //     log_transaction_wire_v1 is plpgsql, which resolves names at RUNTIME.
+    //     Rewriting it as LANGUAGE sql would kill the boot at creation time.
+    //   * conversely, nothing that applies before 024/025 can reference their
+    //     tables from a LANGUAGE sql body without failing the boot — which is
+    //     the free mechanical guard that keeps log_partition_dead_v1 (006,
+    //     LANGUAGE sql) from ever growing a veto leg on queen.kv or
+    //     queen.log_timers, and with it the O(partitions) scan it fronts.
     ("001_log_schema.sql", include_str!("../sql/procedures/001_log_schema.sql")),
     ("002_streams_schema.sql", include_str!("../sql/procedures/002_streams_schema.sql")),
     ("003_log_push.sql", include_str!("../sql/procedures/003_log_push.sql")),
@@ -56,10 +68,28 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("021_postgres_stats.sql", include_str!("../sql/procedures/021_postgres_stats.sql")),
     ("022_retention_analytics.sql", include_str!("../sql/procedures/022_retention_analytics.sql")),
     ("023_prometheus.sql", include_str!("../sql/procedures/023_prometheus.sql")),
+    ("024_kv.sql", include_str!("../sql/procedures/024_kv.sql")),
+    ("025_log_timers.sql", include_str!("../sql/procedures/025_log_timers.sql")),
 ];
 
+/// Minimum PostgreSQL this schema can be applied to, as `server_version_num`
+/// (14.0 = 140000).
+///
+/// PLAN_KV_TIMERS §0 pins the floor at 14 and asks for it to be checked here.
+/// `queen.kv` is the first thing in this schema to use `GENERATED ALWAYS AS ...
+/// STORED` (needs 12) and `starts_with()` (needs 11); neither has a precedent in
+/// the pre-024 files, so nothing before them would have noticed an older server.
+/// Without this check the symptom is not a clear error but an apply that fails
+/// mid-file, five times, through the deadlock retry below, and then exits with a
+/// message about a syntax error that names no version at all.
+const MIN_SERVER_VERSION_NUM: i32 = 140_000;
+
 /// Apply the schema at boot. Set `QUEEN_APPLY_SCHEMA=0` to skip (e.g. when the DB
-/// is managed externally). Fails the process on any DDL error (fail-fast boot).
+/// is managed externally). Fails the process on any DDL error (fail-fast boot),
+/// and — before any of it — on a PostgreSQL older than [`MIN_SERVER_VERSION_NUM`].
+/// The version check rides with the apply on purpose: it guards the statements
+/// this function is about to run, so `QUEEN_APPLY_SCHEMA=0` skips both together
+/// and a boot that writes no DDL is not killed by a check for DDL it never runs.
 pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     if !crate::config::env_bool("QUEEN_APPLY_SCHEMA", true) {
         tracing::info!(target: "schema", "apply skipped (QUEEN_APPLY_SCHEMA=0)");
@@ -67,6 +97,13 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let client = pool.get().await?;
+
+    // Refuse an unsupported server BEFORE taking the advisory lock and before
+    // the first DDL statement: a version too old is a permanent, operator-level
+    // fault, and the retry loop below exists for a transient one (deadlock
+    // against a live peer). Retrying this five times would only delay the exit
+    // and bury the cause.
+    let server_version = check_server_version(&client).await?;
 
     // Serialize DDL across replicas. Session-level lock held on THIS connection;
     // released below before the client returns to the pool.
@@ -111,9 +148,49 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         target: "schema",
         procedures = PROCEDURES.len(),
+        server_version = %server_version,
         "applied schema.sql + procedures"
     );
     Ok(())
+}
+
+/// Fail the boot on a PostgreSQL older than [`MIN_SERVER_VERSION_NUM`], with a
+/// message that names the version found and what to do about it. Returns the
+/// human-readable version string on success, for the applied-schema log line.
+///
+/// Takes no lock of any kind, so it is safe anywhere in the boot sequence.
+async fn check_server_version(
+    client: &deadpool_postgres::Client,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let row = client
+        .query_one(
+            "SELECT current_setting('server_version_num')::int, current_setting('server_version')",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("could not read the PostgreSQL server version: {e}"))?;
+    let version_num: i32 = row.get(0);
+    let version: String = row.get(1);
+
+    if version_num < MIN_SERVER_VERSION_NUM {
+        // Major derived from the constant, never spelled twice: a message that
+        // says "requires 14" next to a floor someone raised to 15 is worse than
+        // no message, because it sends the operator to check the wrong thing.
+        let min_major = MIN_SERVER_VERSION_NUM / 10_000;
+        return Err(format!(
+            "PostgreSQL {version} (server_version_num={version_num}) is too old: this schema \
+             requires PostgreSQL {min_major} or newer (server_version_num >= \
+             {MIN_SERVER_VERSION_NUM}). queen.kv uses GENERATED ALWAYS AS ... STORED and \
+             starts_with(), so the apply would die part-way through procedures/024_kv.sql and \
+             leave the database half-built. Upgrade this server, or point \
+             PG_HOST/PG_PORT/PG_DATABASE at a PostgreSQL {min_major}+ instance. \
+             QUEEN_APPLY_SCHEMA=0 skips the apply but does not make the broker work on this \
+             version."
+        )
+        .into());
+    }
+
+    Ok(version)
 }
 
 async fn apply_all(

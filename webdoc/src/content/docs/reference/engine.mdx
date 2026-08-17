@@ -64,7 +64,7 @@ single-tenant by construction) and `JWT_ENABLED` (there is no HTTP surface; the 
 caller is trusted). Silently inert because their machinery does not exist embedded: the
 inter-instance mesh family (`QUEEN_SYNC_ENABLED`, `QUEEN_MESH_PEERS`, `QUEEN_SYNC_SECRET`
 and the heartbeat knobs; cross-instance wake-ups ride the periodic database floors
-instead, see [Embed the engine](/reference/embed/)) and `QUEEN_MAX_BODY_BYTES` (no request body
+instead, see [Embed the engine](/use/embed/)) and `QUEEN_MAX_BODY_BYTES` (no request body
 to cap). A malformed boolean env value makes the binary exit; `Broker::start` returns
 `StartError::Config` instead.
 

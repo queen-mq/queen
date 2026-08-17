@@ -500,8 +500,18 @@ new `*Stream`.
 | Sink | `To(Sink)`, `Foreach(ForeachFn)` |
 | Terminal | `Run(ctx, opts RunOptions) (*Runner, error)`, `Compile() (*runtime.CompiledStream, error)` |
 
-Window options: `WithGracePeriod`, `WithIdleFlushMs`, `WithEventTime`, `WithAllowedLateness`,
-`WithOnLate`. `streams/helpers` provides `TokenBucketGate(TokenBucketGateOptions)` and
+Every `WindowX` constructor takes the same five `WindowOption` values, which control when a window
+closes and what happens to whatever arrives after it did:
+
+| Option | Default | What it controls |
+| --- | --- | --- |
+| `WithGracePeriod(seconds float64)` | `0` | Seconds a window stays open past its own end before it closes, so a straggler still lands in the bucket it belongs to. |
+| `WithIdleFlushMs(ms int64)` | `5000`, but `1000` for `WindowSession` and `30000` for `WindowCron` | How often the runner sweeps partitions that have gone quiet for windows that are ripe to close. `0` disables the sweep, and a window on a silent partition then stays open until traffic returns. |
+| `WithEventTime(fn EventTimeFn)` | none | Switches bucketing from the broker's `createdAt` to your own timestamp, and turns on a per-partition watermark. |
+| `WithAllowedLateness(seconds float64)` | `0` | Event-time mode only. Seconds of out-of-orderness tolerated before an event is called late, measured against that partition's watermark. |
+| `WithOnLate(policy string)` | `"drop"` | What happens to an event older than the watermark minus the allowed lateness. `"drop"` is the only value that keeps emits exact. `"include"` accumulates it anyway, which for an already-flushed window recreates the state row and produces a second emit for it. |
+
+`streams/helpers` provides `TokenBucketGate(TokenBucketGateOptions)` and
 `SlidingWindowGate(SlidingWindowGateOptions)`, both returning a `GateFn`.
 
 ### `RunOptions`
@@ -530,9 +540,18 @@ structural config are hashed, not the bodies of your functions.
 
 ## Same surface, other languages
 
+<Render file="sdk-capability-matrix" />
+
+The `go` suite in the [test matrix](/internals/contributing/testing) runs the root-package unit
+tests, then `./tests/` and `./tests/streams_integration/` with `-count=1` so a cached result can
+never hide a live-broker failure, on the `single`, `ha` and `tenanted` topologies. The
+`./streams/...` package is green at 13 of 13 on this tree, with one known deterministic failure
+named on that page.
+
 <CardGrid>
   <LinkCard href="/reference/sdk/javascript" title="JavaScript" description="Thenable builders, client-side auto-ack on consume." />
   <LinkCard href="/reference/sdk/python" title="Python" description="Async client with the same builder chain, snake_case." />
+  <LinkCard href="/reference/sdk/rust" title="Rust" description="Async on tokio, broker wire types, full streams runtime." />
   <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
   <LinkCard href="/reference/sdk/cpp" title="C++" description="Single-header, thread-pool consumers." />
   <LinkCard href="/reference/queenctl" title="queenctl" description="A CLI built on this package." />

@@ -116,6 +116,36 @@ is re-read every `QUEEN_CACHE_REFRESH_INTERVAL_MS` and a parked pop re-polls on 
 backoff, so a dropped frame costs latency only. It also has a security boundary you must
 enforce yourself: see [The mesh](/internals/mesh).
 
+## Working on Queen
+
+The four pages under **Contributing** are the same tier pointed at the repository rather than
+at the running system. They are the answer to "where does this claim come from": the workspace
+and the build order, the suites each page names in its `verifiedBy` frontmatter, the generators
+that derive this site's fact tables from `server/`, and what a release actually publishes.
+
+<CardGrid>
+  <LinkCard
+    href="/internals/contributing"
+    title="Building and developing"
+    description="The workspace, the build order that matters, and the compile-time embedding that makes a SQL edit invisible until you rebuild."
+  />
+  <LinkCard
+    href="/internals/contributing/testing"
+    title="Testing"
+    description="What each suite in the matrix covers, how to run one on its own, and what is green today."
+  />
+  <LinkCard
+    href="/internals/contributing/docs"
+    title="The documentation site"
+    description="The frontmatter contract every page here obeys, the generators behind the fact tables, and the checks that fail a build rather than let a page go stale."
+  />
+  <LinkCard
+    href="/internals/contributing/release"
+    title="How Queen ships"
+    description="The registries a release touches, where the version number lives, and the one boundary a rollback cannot cross."
+  />
+</CardGrid>
+
 ## Where to go next
 
 <CardGrid>

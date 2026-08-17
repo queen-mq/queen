@@ -5,11 +5,19 @@
  * type, default. Nothing is transcribed by hand, so a new knob cannot ship
  * undocumented — an unclassified variable lands in the main table by default.
  *
- * Three curated lists shape presentation only, never content:
+ * Four curated lists shape presentation only, never content:
  *   GROUPS       which section a variable belongs to
  *   EXPERIMENTAL variables the source itself marks as experiment-only
  *   INERT        variables still read (and logged) but no longer wired to
  *                anything
+ *   INHERITS     nested `env_int("A", env_int("B", n))` sites where B is a
+ *                different knob whose value A defaults to, not an older name
+ *                for A. The parser cannot tell the two apart (both read as a
+ *                nested call), and printing an inherited default under "Also
+ *                read as" told operators to set a variable that does not
+ *                configure the thing they were reading about. Every entry is
+ *                checked against the parse below, so the list cannot drift
+ *                away from config.rs without failing.
  * A variable in EXPERIMENTAL or INERT is still published — in its own table,
  * labelled — because silence is how the previous docs site went stale.
  */
@@ -132,14 +140,37 @@ const GROUPS = [
   ["PostgreSQL", (n) => n.startsWith("PG_") || n.startsWith("DB_") || n === "QUEEN_STMT_TIMEOUT_MS"],
   ["Authentication", (n) => n.startsWith("JWT_")],
   ["Multi-broker mesh", (n) => n.startsWith("QUEEN_MESH_") || n.startsWith("QUEEN_SYNC_") || n.startsWith("QUEEN_UDP_") || n === "QUEEN_CACHE_REFRESH_INTERVAL_MS"],
-  ["Consume and long-poll", (n) => n.startsWith("POP_") || n === "DEFAULT_TIMEOUT" || n.startsWith("QUEEN_POP_")],
+  ["Consume and long-poll", (n) => n.startsWith("POP_") || n === "DEFAULT_TIMEOUT" || n === "DEFAULT_SUBSCRIPTION_MODE" || n.startsWith("QUEEN_POP_")],
   ["Storage engine", (n) => n.startsWith("QUEEN_V2_") || n.startsWith("QUEEN_DEDUP") || n.startsWith("QUEEN_ACK_") || n.startsWith("QUEEN_HOTLIST")],
-  ["Flow control", (n) => n.startsWith("QUEEN_VEGAS") || n.startsWith("QUEEN_LIMIT") || n.startsWith("QUEEN_SEG_PUSH_") || n.startsWith("QUEEN_SEG_POP_")],
+  // The `QUEEN_VEGAS_*` and `QUEEN_SEG_*` knobs this group used to name went
+  // out with the Vegas limiter; config.rs now only warns at boot when one is
+  // still set, so none of them is an `env_*` call site and this group matched
+  // nothing at all. Admission is what governs concurrency now, and its twelve
+  // knobs were landing in the unclassified "Other" bucket.
+  ["Admission and flow control", (n) => n.startsWith("QUEEN_ADMISSION")],
   ["Background jobs", (n) => n.startsWith("RETENTION") || n.startsWith("STATS_") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" || n.startsWith("METRICS_")],
   ["Durability spool", (n) => n.startsWith("FILE_BUFFER")],
   ["Security", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
   ["Logging", (n) => n === "LOG_LEVEL" || n === "RUST_LOG" || n.startsWith("QUEEN_LOG")],
 ];
+
+/**
+ * Nested defaults that are an inheritance, not an alias.
+ *
+ * `env_int("QUEEN_ACK_FUSION_SHARDS", env_int("QUEEN_V2_FUSION_SHARDS", 8))`
+ * parses identically to `env_int("QUEEN_MESH_PORT", env_int("QUEEN_UDP_NOTIFY_PORT",
+ * 6633))`, but the two mean opposite things. `QUEEN_UDP_NOTIFY_PORT` is the
+ * older name for the same port and setting either one configures the mesh.
+ * `QUEEN_V2_FUSION_SHARDS` is the push fusion shard count, a live knob of its
+ * own: the ack fusion and hot-list shard counts merely start from whatever it
+ * is set to. Setting it moves three things, and setting the outer name moves
+ * only one. `verifyInherits` below asserts each entry against the parse, so
+ * the list fails the build rather than outliving the code.
+ */
+const INHERITS = new Map([
+  ["QUEEN_ACK_FUSION_SHARDS", "QUEEN_V2_FUSION_SHARDS"],
+  ["QUEEN_HOTLIST_SHARDS", "QUEEN_V2_FUSION_SHARDS"],
+]);
 
 /** The source itself calls these experiment knobs, not product contracts. */
 const EXPERIMENTAL = new Map([
@@ -208,6 +239,32 @@ function groupOf(name) {
   return "Other";
 }
 
+/**
+ * INHERITS is a claim about config.rs, so it is checked against config.rs.
+ * A renamed knob, a removed nesting or a changed inner name fails the
+ * generator here instead of publishing a column that points at nothing.
+ */
+function verifyInherits(vars) {
+  for (const [outer, inner] of INHERITS) {
+    const v = vars.get(outer);
+    if (!v) {
+      throw new Error(`INHERITS names ${outer}, which ${CONFIG} no longer defines`);
+    }
+    if (!v.aliases.includes(inner)) {
+      throw new Error(
+        `INHERITS says ${outer} inherits its default from ${inner}, but ${CONFIG} nests ` +
+          `${v.aliases.length ? v.aliases.join(", ") : "nothing"} there`,
+      );
+    }
+    if (!vars.has(inner)) {
+      throw new Error(
+        `${inner} is published as an inherited default of ${outer} but has no row of its own, ` +
+          `so it is an alias rather than a knob: move it back to "Also read as"`,
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 function main() {
@@ -225,6 +282,8 @@ function main() {
     if (!vars.has(name)) vars.set(name, { name, type: "integer", def: "see notes", aliases: [] });
   }
   for (const v of EXTRA_VARS) vars.set(v.name, v);
+
+  verifyInherits(vars);
 
   const all = [...vars.values()].sort((a, b) => a.name.localeCompare(b.name));
   const main_ = all.filter((v) => !EXPERIMENTAL.has(v.name) && !INERT.has(v.name));
@@ -245,16 +304,24 @@ function main() {
       `Booleans go through one strict parser: an unparseable value is a fatal boot error, ` +
       `while unset and empty both fall back to the default.`,
     "",
+    `Two columns record what a variable falls back to. **Also read as** is an older name for ` +
+      `the same setting: either name configures the same thing, and the row's name wins when ` +
+      `both are set. **Default inherited from** is a different knob whose value this one starts ` +
+      `at when it is unset: setting that knob moves this variable and everything else that ` +
+      `inherits from it, while setting this variable moves only this one.`,
+    "",
   );
 
   for (const [g] of [...GROUPS, ["Other"]]) {
     const rows = byGroup.get(g);
     if (!rows?.length) continue;
     lines.push(`### ${g}`, "");
-    lines.push("| Variable | Type | Default | Also read as |");
-    lines.push("| --- | --- | --- | --- |");
+    lines.push("| Variable | Type | Default | Default inherited from | Also read as |");
+    lines.push("| --- | --- | --- | --- | --- |");
     for (const v of rows) {
-      lines.push(`| \`${v.name}\` | ${v.type} | \`${cell(v.def)}\` | ${v.aliases.length ? v.aliases.map((a) => `\`${a}\``).join(", ") : ""} |`);
+      const inherited = INHERITS.has(v.name) ? `\`${INHERITS.get(v.name)}\`` : "";
+      const aliases = inherited ? "" : v.aliases.map((a) => `\`${a}\``).join(", ");
+      lines.push(`| \`${v.name}\` | ${v.type} | \`${cell(v.def)}\` | ${inherited} | ${aliases} |`);
     }
     lines.push("");
   }

@@ -17,6 +17,7 @@ sourceOfTruth:
   - server/sql/procedures/010_log_admin.sql
 verifiedBy:
   - clients/client-js/test-v2/dlq.js
+  - clients/client-rust/tests/coverage.rs
   - proxy/scripts/isolation-smoke.sh
 ---
 
@@ -215,14 +216,23 @@ Access level `read-write`. Replays a dead-lettered message: re-pushes the
 row. It works **only** for dead-lettered addresses; a live message has nothing to
 replay and returns the same `404` shape as `DELETE`.
 
-Two properties of the implementation you should rely on:
+Read it as four guarantees, each one a property of the handler rather than
+something the caller arranges:
 
-- **The replay gets a fresh transaction id.** Reusing the original would be seen as
-  a duplicate by the dedup window and silently dropped, so the push path mints a
-  new one from the new message id. The replayed message is a new message; it will
-  not deduplicate against the original.
-- **The DLQ row is deleted only after the push is accepted.** A failed push leaves
-  the message dead-lettered rather than losing it.
+1. **A foreign partition cannot be replayed.** The ownership gate runs before the
+   DLQ row is read, so with `QUEEN_TENANCY_HEADER` enabled a partition belonging to
+   another tenant gets exactly the same `404` as an address that does not exist, and
+   no payload is touched on the way to that answer.
+2. **An encrypted snapshot is decrypted before it is re-pushed, never
+   double-encrypted.** The snapshot is stored verbatim, so on an encryption-enabled
+   queue it is the `{encrypted, iv, authTag}` envelope. The handler decrypts it and
+   hands the plaintext to the push path, which re-encrypts it with the current key.
+3. **The replay gets a fresh transaction id.** Reusing the original would be seen as
+   a duplicate by the dedup window and silently dropped, so the push path mints a
+   new one from the new message id. The replayed message is a new message; it will
+   not deduplicate against the original.
+4. **The DLQ row is deleted only after the push is accepted.** A rejected push
+   leaves the message dead-lettered rather than losing it.
 
 ```json
 {
@@ -246,9 +256,11 @@ dead-letter queue. If the push succeeded but the DLQ cleanup failed, the body is
 `success: false` with `replayed: true` and `dlqRowRemoved: false`. The message now
 exists twice, once replayed and once still dead-lettered.
 
-On an encryption-enabled queue the snapshot is stored verbatim, so it is the
-encrypted envelope; the handler decrypts it before re-pushing and lets the push
-path re-encrypt, rather than double-encrypting.
+The JavaScript, Rust and Laravel admin clients wrap this route as `retryMessage`,
+and the Python one as `retry_message`. Three surfaces still predate it: the Go
+client's `RetryMessage` returns `not implemented server-side`, `queenctl` registers
+no command for it, and the dashboard's dead-letter view offers purge only. On any
+of those three, call the route over HTTP yourself.
 
 ## GET /api/v1/dlq
 

@@ -403,9 +403,11 @@ Stream.from_(client.queue("orders"), **options)   # or Stream.from_queue(...)
 | Sink | `to(sink_queue_builder, partition=None)`, `foreach(fn)` (must be last in the chain) |
 | Terminal | `run(query_id, url, **opts)` |
 
-Window keyword arguments mirror the JavaScript names in snake_case and are converted before
-they reach the wire. `token_bucket_gate(...)` and `sliding_window_gate(...)` return ready-made
-gate functions.
+Window keyword arguments mirror the JavaScript names in snake_case (`grace_period`,
+`idle_flush_ms`, `event_time`, `allowed_lateness`, `on_late`) and are converted before they reach
+the wire, so the defaults and the close semantics in the
+[JavaScript window option table](/reference/sdk/javascript#streaming-sdk) apply here unchanged.
+`token_bucket_gate(...)` and `sliding_window_gate(...)` return ready-made gate functions.
 
 ### `run(query_id, url, **opts)`
 
@@ -446,9 +448,16 @@ exception when present, with the proxy's stable values listed under
 
 ## Same surface, other languages
 
+<Render file="sdk-capability-matrix" />
+
+The `py` suite in the [test matrix](/internals/contributing/testing) runs the whole `pytest` tree
+under `clients/client-py/tests`, streams included, on the `single`, `ha` and `tenanted`
+topologies.
+
 <CardGrid>
   <LinkCard href="/reference/sdk/javascript" title="JavaScript" description="Same builder chain, camelCase, plus a hostHeader option." />
   <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute()." />
+  <LinkCard href="/reference/sdk/rust" title="Rust" description="Async on tokio, broker wire types, full streams runtime." />
   <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
   <LinkCard href="/reference/sdk/cpp" title="C++" description="Single-header, thread-pool consumers." />
   <LinkCard href="/reference/queenctl" title="queenctl" description="The same operations from a shell." />

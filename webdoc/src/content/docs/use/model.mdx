@@ -17,18 +17,16 @@ verifiedBy:
   - clients/client-js/test-v2/semantics.js
 digest: >-
   A queue is a named container with a configuration and a partition is an ordered lane inside it,
-  and neither is declared before use: a push naming a queue and partition that do not exist
-  creates both in the transaction that stores the message. A push naming no partition lands in a
-  fixed partition called Default. A partition costs one row plus one row per consumer group that
-  reads it, so tens of thousands of lanes are ordinary and one million has been served at 200,000
+  and neither is declared before use: the push that names them creates both in the transaction
+  that stores the message. A partition costs one row plus one row per consumer group that reads
+  it, so tens of thousands of lanes are ordinary and one million has been served at 200,000
   messages a second, while a partition per message is not a supported shape. A consumer group is a
   name holding one cursor per partition, so two groups read the same stored copy at their own
   pace; omitting the group places the caller in the implicit __QUEUE_MODE__ competing-consumers
-  group, whose cursor is real state like any other. Where a named group starts is decided on its
-  first contact with the queue and then stored: mode `new`, the default, skips the backlog and
-  mode `all` delivers everything retained, and passing the mode later changes nothing. An ack is
-  an offset commit, so acking one message completes every earlier unacked message in that
-  partition for that group.
+  group. Where a named group starts is decided on its first contact with the queue and
+  stored: mode `new`, the default, skips the backlog and `all` delivers everything retained,
+  and passing the mode later changes nothing. An ack is an offset commit, so acking one message
+  completes every earlier unacked message in that partition for that group.
 ---
 
 Queen stores a queue as a set of ordered partitions, and a consumer group as one cursor per
@@ -177,6 +175,11 @@ a fresh transaction id, so an unattended one grows without bound
 `POST /api/v1/transaction` bundles pushes and acks into one PostgreSQL transaction: everything
 in the call commits together or nothing does. It exists for the pipeline handoff, an ack of the
 input and a push of the output that cannot come apart.
+
+**The bundle is N to M, not one to one.** One call may acknowledge batches leased from any number
+of partitions, across any number of queues and consumer groups, and push to any number of queues
+and partitions, all in the same commit: that is what makes a fan-in stage possible
+([the bundle shape](/reference/http/transaction/)).
 
 <Render file="snippets/js-transaction" />
 

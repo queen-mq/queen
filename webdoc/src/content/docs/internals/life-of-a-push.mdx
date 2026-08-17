@@ -15,10 +15,17 @@ verifiedBy:
 ---
 
 A push request is not a transaction. It is a set of frames handed to a background layer that
-decides, per partition, when to commit, then commits several partitions together. Under
-load, one PostgreSQL transaction carries the writes of many concurrent HTTP requests across
-many partitions. That is where most of the broker's throughput comes from, and it is the single
-most important thing to understand about the write path.
+decides, per partition, when to commit, and that can commit several partitions together.
+[`POST /api/v1/push`](/reference/http/push/) is the route contract: the body, the four per-item
+statuses, the deduplication rules. This page is what happens behind it.
+
+Nothing in that layer waits on a timer. When the push lane is uncontended a group dispatches on
+arrival, so a single low-rate push costs about one database round trip. **Coalescing here is
+emergent, not timed:** while a partition has a flush in flight the next segment accumulates, so
+batches fatten only when load produces them. Under load, one PostgreSQL transaction then carries
+the writes of many concurrent HTTP requests across many partitions. That is where most of the
+broker's throughput comes from, and it is the single most important thing to understand about the
+write path.
 
 Here is the flow a client sees:
 
@@ -85,21 +92,28 @@ segments.
 
 Three rules govern dispatch:
 
-**Fire-on-idle.** On arrival, if the push lane is uncontended (the shard is under its
-concurrent-bundle cap and a push admission slot is *immediately* available), the ready partitions
-dispatch right now, with no hold timer. A single low-rate push therefore commits in about one
-database round trip. If no permit is free, the lane is contended, so the group stays and keeps
-accumulating.
+### Fire-on-idle
 
-**One flush in flight per partition.** While a partition's flush is in flight, its next segment
-accumulates and is dispatched only after the previous flush *commits*. Two flushes therefore
+On arrival, if the push lane is uncontended (the shard is under its concurrent-bundle cap and a
+push admission slot is *immediately* available), the ready partitions dispatch right now, with no
+hold timer. A single low-rate push therefore commits in about one database round trip. If no permit is free, the lane is contended, so the group stays and keeps
+accumulating. **The wait a contended push pays is the per-partition in-flight gate, not a
+configured linger.**
+
+### One flush in flight per partition
+
+While a partition's flush is in flight, its next segment accumulates and is dispatched only after
+the previous flush *commits*. Two flushes therefore
 never race on `UPDATE log_partitions SET last_offset = last_offset + n`, and per-partition offset
 order equals commit order. The completion signal is sent after the commit, not before, which is
-what makes that guarantee hold rather than merely usually hold.
+what makes that guarantee hold rather than merely usually hold. Fusing many requests into one
+transaction therefore cannot reorder a partition, however large the bundle gets.
 
-**Cross-partition bundling.** Each dispatch collects up to `QUEEN_V2_BUNDLE_MAX` ready,
-not-in-flight partitions and commits all of their segments in one `log_push_multi_v1`
-transaction: one commit and one fsync for N partitions. The in-flight gate *is* the bundle
+### Cross-partition bundling
+
+Each dispatch collects up to `QUEEN_V2_BUNDLE_MAX` ready, not-in-flight partitions and commits
+all of their segments in one `log_push_multi_v1`
+transaction: **one commit and one fsync for N partitions.** The in-flight gate *is* the bundle
 selector: it already guarantees the chosen partitions are disjoint. The bundle size auto-tunes
 to load. Idle means one ready partition and a bundle of one; busy means many partitions
 accumulate while permits are scarce, and a freed permit fires a large bundle. Commit rate is

@@ -337,6 +337,22 @@ Chain rules are checked at `run`: a terminal must be last, `reduce` needs a wind
 it, at most one window, reducer, `key_by` and `gate` each, and `gate` cannot share a stream
 with windowing.
 
+The window options apply to the most recent window in the chain and control when it closes and
+what happens to whatever arrives after it did. `window_options` is the escape hatch: it hands you
+the `Window` struct directly.
+
+| Method | Default | What it controls |
+| --- | --- | --- |
+| `grace_seconds(i64)` | `0` | Seconds a window stays open past its own end before it closes, so a straggler still lands in the bucket it belongs to. |
+| `idle_flush_ms(i64)` | `5_000`, but `1_000` for `window_session` and `30_000` for `window_cron` | How often the runner sweeps partitions that have gone quiet for windows that are ripe to close. `0` disables the sweep, and a window on a silent partition then stays open until traffic returns. |
+| `event_time(fn)` | none | `Fn(&Message) -> Option<i64>`. Switches bucketing from the broker's `createdAt` to your own timestamp, and turns on a per-partition watermark. |
+| `allowed_lateness(i64)` | `0` | Event-time mode only. Seconds of out-of-orderness tolerated before an event is called late, measured against that partition's watermark. |
+| `on_late(LatePolicy)` | `LatePolicy::Drop` | What happens to an event older than the watermark minus the allowed lateness. `Drop` is the only value that keeps emits exact. `Include` accumulates it anyway, which for an already-flushed window recreates the state row and produces a second emit for it. |
+
+Those three `idle_flush_ms` defaults are the same numbers the JavaScript, Python and Go runtimes
+use. A session window sweeps five times more often than a tumbling or sliding one because a session
+boundary is defined by silence, so a quiet partition is exactly the case it has to notice.
+
 A windowed aggregation from a source queue into a sink queue:
 
 <Render file="snippets/rust-stream" />
@@ -363,8 +379,19 @@ Registering a chain whose `config_hash` differs from the stored one returns an `
 
 ## Same surface, other languages
 
-- [JavaScript](/reference/sdk/javascript)
-- [Python](/reference/sdk/python)
-- [Go](/reference/sdk/go)
-- [PHP](/reference/sdk/php)
-- [C++](/reference/sdk/cpp)
+<Render file="sdk-capability-matrix" />
+
+The `rust-client` suite in the [test matrix](/internals/contributing/testing) runs `cargo test` in
+`clients/client-rust`, the lib unit tests and then each integration binary in turn, on the
+`single`, `ha` and `tenanted` topologies. `QUEEN_TEST_URL` is what turns the integration tests on;
+without it they skip. The separate `rust` row in that matrix is the broker's own in-process unit
+tests, not this client's.
+
+<CardGrid>
+  <LinkCard href="/reference/sdk/javascript" title="JavaScript" description="Thenable builders plus the streaming SDK." />
+  <LinkCard href="/reference/sdk/python" title="Python" description="Async client with the same builder chain, snake_case." />
+  <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute()." />
+  <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
+  <LinkCard href="/reference/sdk/cpp" title="C++" description="Single-header, thread-pool consumers." />
+  <LinkCard href="/reference/queenctl" title="queenctl" description="The same operations from a shell." />
+</CardGrid>

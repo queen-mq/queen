@@ -29,8 +29,8 @@ paths becomes a single branch on the flag.
 
 PostgreSQL remains the sole authority on claiming, leases, cursors and visibility. The hot-list
 is allowed to be wrong in exactly one direction: **stale in excess**. A partition in the ring that
-has nothing costs one empty `FOR UPDATE SKIP LOCKED` claim, a single indexed row-lock attempt that
-returns no rows. A partition
+has nothing adds a row to the batched `FOR UPDATE SKIP LOCKED` claim and a row to the fresh
+re-check that follows it, indexed row-lock work that returns no segments. A partition
 *missing* from the ring would be a real defect, and the design closes that hole with a periodic
 reseed floor rather than with a claim that the ring is always right.
 
@@ -122,12 +122,35 @@ wake purely on a ring transition would strand a tenant whose only consumer is pa
 ## Serving: check out, ask SQL, check in
 
 `take_batch` drains due wheel entries first, then takes up to `k` entries from the ready lists
-round-robin across sub-rings, marking each `INFLIGHT` and snapshotting its epoch. The pop path
-uses `k = clamp(partitions × 8, 16, 256)`.
+round-robin across sub-rings, marking each `INFLIGHT` and snapshotting its epoch. On the pop path
+`k = clamp(partitions × 2, 2, 64)`, and the take stops earlier as soon as the marks on the entries
+it has already claimed cover the caller's `batch`. (The
+[fused claim path](/internals/life-of-a-pop#pop-fusion) takes the SQL serve cap 1:1 instead, which
+on the default `partitions=1` is the same 2.) **Checkout width is what bounds how many pops
+can serve one ring at once**: every claimed entry is held `INFLIGHT` for the whole round trip, and
+that hold spans the client's work and its ack, not just the SQL. A deep partition is therefore
+claimed alone, while a sparse ring still claims up to `k`.
 
-Those names go to `queen.log_pop_list_v1(queue, group, names[], ...)`, which runs the same claim
-core as the wildcard pop (one `queen.log_pop_v1` call per candidate) and returns, alongside the
-segments and blobs, a **tri-state verdict per evaluated candidate**:
+The fixed over-claim this replaced (`partitions × 8`, floor 16) held 16 to 80 partitions per serve
+and capped a 100-partition ring at about six concurrent serves. Raising the ceiling back to 512
+after the claim went batched measured 4x to 13x worse on a sparse ring of 1000 partitions taking
+about one message per second each on an 8-core cell: p50 21.8 s at `k` 512 with `batch` 512,
+against about 1.5 s at the default.
+
+Those names go to `queen.log_pop_list_v1(queue, group, names[], ...)`, which claims every candidate
+in one batched pass: one `FOR UPDATE ... SKIP LOCKED` claim over all of them, one no-lock probe of
+whatever the claim did not take, one segment-metadata read that never selects the blob column, one
+lease `UPDATE`, and one blob fetch for the chosen ranges. About six statements in total,
+independent of how many candidates it was given. Only a partition on first contact, with no cursor
+row yet, still routes through `queen.log_pop_v1`, because that is where subscription seeding and
+the advisory-guarded row creation live.
+
+The per-partition shape it replaced cost about six statements per candidate. On the sparse shape it
+was measured on, 1000 partitions holding about one message each, that was 3.42 ms per pop of which
+0.17 ms was data work, and it pinned the broker at about 1.2k pops/s with the box idle.
+
+The call returns, alongside the segments and blobs, a **tri-state verdict per evaluated
+candidate**:
 
 | Verdict | Cause | Ring action |
 | --- | --- | --- |

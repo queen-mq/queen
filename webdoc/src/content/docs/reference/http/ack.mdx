@@ -220,13 +220,27 @@ An ack can arrive too late or address something the broker cannot resolve. In bo
 | `completed` ack that resolves at or below the cursor | `success: true`, `noop: true` (a duplicate commit, harmless) |
 | `failed`, `retry` or `dlq` that resolves at or below the cursor | `success: false`, `error: "already committed: the cursor moved past this message before this ack"`. The signal can no longer be honoured, and pretending otherwise would lose the nack |
 | a `transactionId` that resolves nowhere: never pushed, or its index entry has been purged | `success: false`, `error: "unresolvable: transaction not in the ack window (hash purged or never pushed); if leased, the message redelivers"` |
+| a `transactionId` that exists in the partition but sits **above the leased batch's end** | `success: false`, the same `unresolvable` error. Under a lease the resolution scan is bounded to the batch, so a message this lease never delivered resolves to nothing |
 
-The last one is the one to design against. The transaction index is purged on its own clock, so
-an ack that arrives long after delivery (a handler that ran for hours, a queued retry) may find
-nothing to resolve. The cursor does not move, the message redelivers, and if you were nacking it,
-that nack charged nothing and dead-lettered nothing. Without this report, the client would
-believe the ack landed while the cursor never moved: a silent redelivery livelock. Ack while your
-lease is alive, extending it if you need to.
+The last two are the ones to design against, and they report the same error string for two
+different mistakes.
+
+The purge case is a clock problem. The transaction index is purged on its own schedule, so an ack
+that arrives long after delivery (a handler that ran for hours, a queued retry) may find nothing
+to resolve. The cursor does not move, the message redelivers, and if you were nacking it, that
+nack charged nothing and dead-lettered nothing. Without this report, the client would believe the
+ack landed while the cursor never moved: a silent redelivery livelock. Ack while your lease is
+alive, extending it if you need to.
+
+The out-of-batch case is an addressing problem. A pop hands out the inclusive span
+`(committed, batch_end]`, and while that lease is live the broker resolves acked ids only
+against `queen.log_txns` rows at or below `batch_end`. A `transactionId` for an offset above the
+batch is therefore reported `unresolvable` rather than accepted, which is what acking a message
+your lease did not deliver looks like: an id kept from an earlier batch, or one that belongs to
+another worker's batch. A lease-less ack keeps the unbounded window and never hits this case,
+which is one more way the two behaviours above differ beyond lease validation. That bounded
+scan, and how a `transactionId` becomes an offset at all, are in
+[Ack internals](/internals/ack-internals).
 
 ### Error strings you can encounter
 

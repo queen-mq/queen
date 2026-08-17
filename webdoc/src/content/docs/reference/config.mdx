@@ -116,12 +116,16 @@ practice a deployment sets variables from these groups only.
 | --- | --- |
 | Reach PostgreSQL | `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` |
 | Size the connection pool and bound statements | `DB_POOL_SIZE`, `QUEEN_STMT_TIMEOUT_MS` |
+| Move the write-admission band, or reserve pool headroom | `QUEEN_ADMISSION_MIN`, `QUEEN_ADMISSION_MAX`, `QUEEN_ADMISSION_POOL_RESERVE`. See [flow control](/internals/flow-control/) |
+| Re-weight which lane wakes first when the budget is exhausted | `QUEEN_ADMISSION_SHARE_PUSH`, `QUEEN_ADMISSION_SHARE_POP`, `QUEEN_ADMISSION_SHARE_ACK`, `QUEEN_ADMISSION_SHARE_MAINT` |
 | Encrypt broker-to-PostgreSQL traffic | `PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED` |
 | Serve on a different port | `PORT` |
 | Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
 | Run more than one broker | `QUEEN_MESH_PEERS`, `QUEEN_MESH_PORT`, `QUEEN_SYNC_SECRET` |
 | Survive a database outage | `FILE_BUFFER_DIR` (must be writable and persistent) |
 | Change the maintenance cadence | `RETENTION_INTERVAL` |
+| Delete faster than one partition at a time | `RETENTION_PARALLELISM`, raised together with `QUEEN_ADMISSION_SHARE_MAINT` |
+| Put N pop claims in one transaction | `QUEEN_POP_FUSION` |
 | Accept larger request bodies | `QUEEN_MAX_BODY_BYTES` |
 | Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY` |
 | Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS` |
@@ -138,6 +142,38 @@ unparseable filter falls back to `info`.
 legacy `PG_DB`, then `postgres`), so an explicitly empty value falls through.
 Every other string variable keeps a present-but-empty value verbatim, which is
 how `JWT_SKIP_PATHS=""` can be used to clear the default skip list.
+
+## Every accelerator has an off switch
+
+The broker-side fast paths are all optional, and none of them is load-bearing for
+correctness. Each one has a kill switch that reverts to the path the broker used
+before that optimisation existed, so an accelerator you do not trust can be
+turned off in a deployment without giving up a guarantee. What you give up is
+throughput, and the table says how much of what.
+
+| Accelerator | Variable | Default | What the off switch reverts to, and what it costs |
+| --- | --- | --- | --- |
+| Wildcard candidate hot list | `QUEEN_HOTLIST` | on | The per-pop SQL candidate scan, which is the pre-hot-list path. Candidate scans reappear in the PostgreSQL profile. It also takes `windowBuffer` back to the SQL-only debounce, which has no early promotion, so a partition written to more often than every `windowBuffer` seconds stops being delivered at all. |
+| Windowed hot-list reseed | `QUEEN_HOTLIST_RESEED_FULL_MS` | `300000` ms | `0` makes every reseed a full walk over every partition of the queue again, and switches off the repair paths that exist only because a windowed pass cannot see a cursor move. |
+| Ack registry | `QUEEN_ACK_REGISTRY` | on, `64` MB (`QUEEN_ACK_REGISTRY_MB`) | Every ack takes `queen.log_ack_by_hash_v1` and resolves its hashes in PostgreSQL, instead of a full-batch completed ack becoming one positional cursor advance. Under the cap the registry already evicts whole entries onto that same path, so the switch only makes it unconditional. |
+| Ack fusion | `QUEEN_ACK_FUSION` | on | The synchronous `queen.log_ack_at_v1` fast path, byte-identical to the pre-fusion behaviour: one commit and one fsync per ack rather than one per flush for N cursor advances. |
+| Deduplication cache | `QUEEN_DEDUP_CACHE` | on, `512` MB (`QUEEN_DEDUP_CACHE_MB`) | The broker always sends `p_verified = -1` and SQL probes the full deduplication window on every push. Deduplication stays exact either way: the cache is a way to skip a probe, never a way to decide one. |
+| Retention fan-out | `RETENTION_PARALLELISM` | `1` | `1` is already the off position, the historical serial cycle, so an upgrade changes nothing until you raise it. That serial cycle measured about 13,800 step rows per second on the 2026-08-10 rig, just under the roughly 14,600 that sustaining 1,000,000 msg/s needs, which is what raising it (ceiling 16) buys. Each worker holds one maintenance-lane admission slot and one pooled connection while it runs. |
+| Pop fusion | `QUEEN_POP_FUSION` | off | The only accelerator that ships off. Set it and N pop claim legs share one transaction and one commit, and the Pop lane takes one admission slot per fused flush instead of one per claim. |
+| Partition cleanup | `QUEEN_PARTITION_CLEANUP_ENABLED` | on | Empty partitions idle for `PARTITION_CLEANUP_DAYS` (30) are kept forever instead of being deleted. |
+
+One accelerator is absent from that table because it has no switch: **push fusion
+has no enable flag**. Cross-request push fusion is always on, and
+`QUEEN_V2_FUSION_SHARDS` (8), `QUEEN_V2_FUSION_FRAMES` (500) and
+`QUEEN_V2_FUSION_HOLD_MS` (3 ms) shape it rather than disable it.
+
+The boot block prints the resolved state of most of these, so a deployment that
+thinks it turned one off can confirm it without inferring from throughput:
+`config: engine` carries `hotlist`, `dedup_cache`, `ack_registry`, `ack_fusion`
+and the reseed intervals, and `config: jobs` carries `retention_parallelism` and
+`partition_cleanup`. `QUEEN_POP_FUSION` is the exception: it prints nothing at
+boot in either state and has no counter of its own, so the deployment's own
+environment is the only record of whether it is on.
 
 ## The variables
 

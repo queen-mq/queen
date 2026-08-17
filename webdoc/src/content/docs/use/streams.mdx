@@ -1,6 +1,6 @@
 ---
 title: Streams
-description: "Windowed aggregation over a queue: an operator chain in your process, four kinds of window, and one PostgreSQL transaction that commits state, output and ack together."
+description: "Windowed aggregation, event time and per-message gating over a queue: an operator chain in your process, and one PostgreSQL transaction that commits state, output and ack together."
 type: concept
 tier: use
 sidebar:
@@ -8,26 +8,32 @@ sidebar:
 sourceOfTruth:
   - server/src/handlers/streams.rs
   - server/sql/procedures/007_log_streams.sql
+  - server/sql/procedures/006_log_maintenance.sql
   - clients/client-js/client-v2/streams/Stream.js
+  - clients/client-js/client-v2/streams/runtime/Runner.js
+  - clients/client-js/client-v2/streams/operators/GateOperator.js
 verifiedBy:
   - clients/client-rust/tests/streams.rs
+  - clients/client-js/test-v2/streams-unit/eventTime.test.js
+  - clients/client-go/tests/streams_integration/gate_test.go
 digest: >-
   A windowed query reads a queue, folds its messages into time buckets and pushes each closed
-  window onto a sink queue as one ordinary message per window and per key; there is no results
-  API. The chain runs in your process, state in the same PostgreSQL as the messages. Windows:
-  `windowTumbling`, `windowSliding` (`size`, `slide`), `windowSession` (`gap`), `windowCron`
-  (`every`: second, minute, hour, day or week). Bucketing uses the broker's commit time unless an
-  `eventTime` extractor is given. One cycle commits state writes, sink pushes and the leased
-  batch's ack in one PostgreSQL transaction, all or none. `foreach` acks after the function
-  returns, so an effect outside PostgreSQL is at-least-once. Closed windows delete their own rows
-  and nothing else does: retention never touches stream state, so the rest needs a dropped query
-  or a rerun with `reset`, which also clears the HTTP 409 from redeploying a changed chain under a
-  registered name.
+  window onto a sink queue, one ordinary message per window and per key; open windows are readable
+  through `POST /streams/v1/state/get`. The chain runs in your process; state is rows in the same
+  PostgreSQL. Windows are `windowTumbling`, `windowSliding`, `windowSession` and `windowCron`.
+  Bucketing uses the broker's commit time unless an `eventTime` extractor is given, which switches
+  the runtime to watermarks, `allowedLateness` and `onLate`. One cycle commits state writes, sink
+  pushes and the leased batch's ack in one PostgreSQL transaction, all or none, the sink push
+  taking the ordinary push path. `foreach` acks after the function returns, so an effect outside
+  PostgreSQL is at-least-once. `.gate()` replaces the window and reducer with a per-message allow
+  or deny that keeps the denied tail leased and in order. Retention never touches stream state.
 ---
 
-A windowed query reads a queue, groups its messages into time buckets, folds each bucket, and
-pushes the result to another queue. You write it as an operator chain, the chain runs in your
-process, and its accumulator state lives in the same PostgreSQL that holds the messages.
+A streaming query reads a queue, decides something per message or per time bucket, and pushes the
+result to another queue. You write it as an operator chain, the chain runs in your process, and its
+state lives in the same PostgreSQL that holds the messages. Two shapes exist: a window plus a
+reducer, which folds buckets and emits one message per closed window, and a [gate](#gating), which
+makes an allow or deny decision on every message.
 
 There is no changelog topic, no state store and no job manager to deploy. A stream is a worker
 holding a partition lease.
@@ -63,8 +69,13 @@ const handle = await Stream
 </Tabs>
 
 Each closed window is one ordinary message on the sink queue, one per window and per key, whose
-payload is the value that left the chain. There is no results API: anything that can read a queue
-reads it.
+payload is the value that left the chain. Closed windows need no results API: anything that reads a
+queue reads them.
+
+Open windows have one. [`POST /streams/v1/state/get`](/reference/http/streams) returns the live
+accumulators for a query and partition, by exact key, by key prefix, or by ripeness, at read-only
+access level. Because the state is rows in the same PostgreSQL, there is no instance to locate
+first and no metadata service to run.
 
 ## The four windows
 
@@ -73,8 +84,72 @@ reads it.
 - **Session**: one window per key, extending while events for that key keep arriving within `gap` seconds, `windowSession({ gap: 1800 })`.
 - **Cron**: wall-clock aligned buckets, `windowCron({ every: 'day' })`, where `every` is second, minute, hour, day or week.
 
-Bucketing uses the broker's commit time unless you pass an `eventTime` extractor, which switches
-the runtime to event time and watermarks.
+Every window carries the same four event-time options and the same idle-flush timer, described
+next.
+
+## Event time
+
+Without an `eventTime` extractor a window buckets on the broker's `createdAt`, and the close
+trigger is the newest `createdAt` in the batch just popped. Pass `eventTime`, a function returning
+a `Date`, an epoch-millisecond number or an ISO string, and four knobs come with it. All four are
+per window operator, all four exist in the JavaScript, Python, Go and Rust SDKs.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `eventTime` | unset | Switches the operator to event time. The close trigger becomes a per-partition watermark, stored as a state row under the reserved key `__wm__`, so it survives a restart with the accumulators rather than resetting to the newest message |
+| `allowedLateness` | `0` seconds | How far behind the newest event a straggler may arrive and still be counted. The watermark is persisted already offset by it, so an event below the watermark is late by definition |
+| `onLate` | `drop` | `drop` discards a late event and counts it in the runner's late-event stat. `include` accumulates it anyway, which for a window already flushed recreates the state row and emits that window a second time. Any other value throws when the chain is built, not at the first late event |
+| `gracePeriod` | `0` seconds | How long a bucket stays open past its own end. A window closes when `windowEnd + gracePeriod` is at or before the clock, the watermark in event time and the newest source `createdAt` in processing time |
+
+A window whose partition goes quiet would otherwise never close, because the clock only advances
+when a message arrives. `idleFlushMs` is the timer that closes it: the runner wakes on that
+interval, asks `POST /streams/v1/state/get` for the partitions it has touched in the last five
+minutes and the rows whose `windowEnd` is already ripe, and commits a cycle carrying the state
+deletes and the sink pushes with **no source ack**. It defaults to 5000 ms for tumbling and
+sliding, 1000 ms for session, and 30000 ms for cron. Pass `0` to disable it, and a window then
+closes only when the next message for that partition arrives.
+
+## Gating
+
+`.gate(fn)` is the second shape. Instead of folding a batch, it runs `fn(value, ctx)` on each
+message in source order, where `ctx.state` is that key's state row, mutable. Return `true` and the
+message flows downstream, the mutated state is committed, and the message counts toward the ack.
+Return `false` and the mutation is discarded, because it did not happen.
+
+```js
+// Illustrative, not extracted from a test. A fixed budget per key, no refill.
+await Stream
+  .from(queen.queue('api-requests'))
+  .gate((req, ctx) => {
+    ctx.state.remaining ??= 10
+    if (ctx.state.remaining < 1) return false
+    ctx.state.remaining -= 1
+    return true
+  })
+  .to(queen.queue('api-allowed'))
+  .run({ queryId: 'api-budget', url })
+```
+
+**A deny stops the batch and keeps the lease.** The runner commits the cycle with
+`release_lease: false` and `ack.count` set to the number of messages allowed before the deny, so
+the denied message and everything after it stay leased. When the lease expires they are redelivered
+in their original partition order. If the very first message is denied there is no cycle at all: no
+state write, no push, no ack, and the lease simply times out.
+
+That is what makes a rate limiter or a circuit breaker expressible without a deferred queue, and
+the ordering is preserved by construction rather than by a retry policy. The broker side is exact
+about it: a partial ack of K walks K frames forward over the real `queen.log_segments` ranges
+instead of adding K to the cursor, so offsets already removed by retention are skipped rather than
+counted.
+
+Three constraints, all enforced when the chain is built:
+
+- At most one `.gate()` per stream. Chain two streams if you need two decisions.
+- `.gate()` and a window plus reducer are mutually exclusive in one stream. The window model
+  assumes the whole batch is consumed atomically, which is exactly what gating breaks.
+- `.keyBy()` must come before the gate. The state key defaults to the source partition id, and for
+  a rate limiter that is the setup you want: partition the source queue by the limit key and add no
+  `keyBy` at all.
 
 ## Why it is exactly-once
 
@@ -89,8 +164,19 @@ on the wire cannot double-emit either: the sink push happens before the ack insi
 transaction, and the ack aborts on an expired lease, so a retried cycle finds the lease gone and
 its sink write rolls back with it.
 
-Sink pushes take the ordinary push path, so window results get offsets, deduplication and
-ordering like any other message.
+Sink pushes are not a second write path. `queen.log_streams_cycle_v1` calls
+`queen.log_push_one_v1` inline, in the same transaction, and that is the same allocator
+[`POST /api/v1/push`](/reference/http/push) and
+[`POST /api/v1/transaction`](/reference/http/transaction) go through. One code path is why a window
+result gets a real offset, a real deduplication probe against the sink queue's window, and its
+partition's ordering, rather than a lookalike write that a consumer can tell apart later.
+
+Two details make the cycle cheap rather than merely correct. The procedure takes an **array** of
+cycle elements and wraps each one in its own savepoint, so a failing element rolls back alone while
+the others commit in the same transaction; the broker route submits one element per request today.
+And concurrent cycles and idle flushes on the same `(query, partition)` state shard serialise on a
+PostgreSQL advisory lock taken before either writes, so a flush timer firing mid-cycle waits rather
+than interleaving.
 
 `foreach` is the exception. It calls your function and acks after it returns, so an effect
 outside PostgreSQL is at-least-once. An effect that must not repeat belongs on a sink queue with
@@ -103,13 +189,19 @@ at a time writes a partition's state, so no worker locks against another. Parall
 partition count, exactly as it is for consumers in one group. `keyBy` changes the state key. Keep
 it aligned with the partition, or repartition through an intermediate queue first.
 
+A partition carrying open stream state is never reclaimed underneath you. Maintenance deletes an
+empty, long-inactive partition only when nothing references it, and a surviving row in
+`queen_streams.state` vetoes that delete, so a keyed window on a queue that has gone quiet for a
+month still has its partition when the next message arrives. See
+[retention](/internals/retention/).
+
 Closed windows delete their own rows, and nothing else does: retention never touches stream
 state. It is reclaimed by dropping the query, or by rerunning the chain with `reset` on. `reset`
 is also the answer to the **HTTP 409** you get when you redeploy a changed chain under a name
 already registered, because old accumulators and a new fold shape do not mix.
 
-One operator chain, four kinds of window, one transaction per cycle, and results that arrive on a
-queue like any other message.
+One operator chain, four kinds of window or one gate, one transaction per cycle, and results that
+arrive on a queue like any other message.
 
 <CardGrid>
   <LinkCard
@@ -128,8 +220,8 @@ queue like any other message.
     description="How the streams client differs from the queue client when it retries."
   />
   <LinkCard
-    href="/reference/http/routes"
+    href="/reference/http/streams"
     title="The routes"
-    description="The three /streams/v1 endpoints and the access level each one takes."
+    description="The three /streams/v1 endpoints field by field, and the access level each one takes."
   />
 </CardGrid>

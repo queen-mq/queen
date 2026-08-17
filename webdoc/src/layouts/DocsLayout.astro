@@ -17,10 +17,35 @@ import { PageActions } from "@/components/ui/page-actions";
 import { Badge } from "@/components/ui/badge";
 import type { DocsPageProps } from "@cloudflare/nimbus-docs/types";
 import { getVersionStatus, getVersionAlternates } from "@cloudflare/nimbus-docs";
+import { config } from "virtual:nimbus/config";
 
-type Props = DocsPageProps & { audience?: "human" };
+type Props = DocsPageProps & {
+  audience?: "human";
+  /** Repo-relative paths of the code that governs the page. */
+  sourceOfTruth?: string[];
+  /** Repo-relative paths of the tests or examples that execute what it shows. */
+  verifiedBy?: string[];
+};
 
-const { title, description, sidebar, headings, breadcrumbs, prevNext, mode = "doc", banner, head = [], searchable, noindex, markdownUrl, socialImage, lastUpdated, editUrl, draft, audience, collection, entryId } = Astro.props;
+const { title, description, sidebar, headings, breadcrumbs, prevNext, mode = "doc", banner, head = [], searchable, noindex, markdownUrl, socialImage, lastUpdated, editUrl, draft, audience, collection, entryId, sourceOfTruth = [], verifiedBy = [] } = Astro.props;
+
+// `sourceOfTruth` and `verifiedBy` are the site's own evidence trail: dozens of
+// pages carry them and until now nothing rendered them, so a reader could not
+// tell a page written against the code from one written from memory, and the
+// checker in scripts/check-sourceoftruth.mjs was policing a field nobody could
+// see. Rendered quietly at the foot of the page, next to "Edit this page".
+//
+// Paths are repo-relative, so each one resolves against the configured
+// repository. `config.github` is optional in the Nimbus schema; with it unset
+// the entries render as plain code text rather than as dead links.
+const repoBlobBase =
+  typeof config.github === "string" && config.github
+    ? `${config.github.replace(/\/$/, "")}/blob/master/`
+    : null;
+const evidence = [
+  { label: "Source of truth", paths: sourceOfTruth },
+  { label: "Verified by", paths: verifiedBy },
+].filter((g) => g.paths.length > 0);
 
 // `searchable` derives from `noindex` when omitted: a non-crawlable page is
 // by default not in the site search either. Explicit `searchable: true`
@@ -248,13 +273,44 @@ const hasPagination = Astro.slots.has("pagination");
                 </article>
                 {hasContentFooter ? (
                   <slot name="content-footer" />
-                ) : editUrl && (
-                  <div class="mt-8 mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                    <a href={editUrl} class="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors no-underline" target="_blank" rel="noopener">
-                      <Icon name="ph:pencil-simple" class="w-3.5 h-3.5" />
-                      Edit this page
-                    </a>
-                  </div>
+                ) : (
+                  <Fragment>
+                    {/* data-pagefind-ignore: the evidence trail is metadata about
+                        the page, not part of what the page says. Indexed, a search
+                        for "config.rs" would rank every page that names it. */}
+                    {evidence.length > 0 && (
+                      <div data-pagefind-ignore="" class="mt-10 border-t border-border pt-4 text-xs text-muted-foreground">
+                        <dl class="grid gap-x-8 gap-y-3 sm:grid-cols-2">
+                          {evidence.map((group) => (
+                            <div>
+                              <dt class="font-medium text-foreground">{group.label}</dt>
+                              <dd class="mt-1">
+                                <ul class="list-none m-0 p-0 space-y-0.5">
+                                  {group.paths.map((path) => (
+                                    <li class="font-mono break-all leading-relaxed">
+                                      {repoBlobBase ? (
+                                        <a href={`${repoBlobBase}${path}`} class="text-muted-foreground hover:text-foreground transition-colors no-underline" target="_blank" rel="noopener">{path}</a>
+                                      ) : (
+                                        path
+                                      )}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </div>
+                    )}
+                    {editUrl && (
+                      <div class="mt-8 mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                        <a href={editUrl} class="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors no-underline" target="_blank" rel="noopener">
+                          <Icon name="ph:pencil-simple" class="w-3.5 h-3.5" />
+                          Edit this page
+                        </a>
+                      </div>
+                    )}
+                  </Fragment>
                 )}
               </div>
               {hasPagination ? <slot name="pagination" /> : <Pagination prevNext={prevNext} />}

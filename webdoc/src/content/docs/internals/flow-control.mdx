@@ -10,6 +10,8 @@ sourceOfTruth:
   - server/src/db.rs
   - server/src/handlers/data.rs
   - server/src/fusion.rs
+  - server/src/pop_fusion.rs
+  - server/src/hotlist.rs
   - server/src/config.rs
 verifiedBy:
   - server/src/admission.rs
@@ -115,9 +117,33 @@ A lane's optimum can sit well below its share, and pinning its cap at the share 
 the contention the arbiter exists to avoid.
 
 Each lane also carries its own concurrency cap inside `B`, moved by a per-lane controller that probes
-one step up when the lane presses its cap and keeps the raise only if the lane's completion rate
-actually grew. Some paths have negative returns to concurrency, and this is what finds each lane's
-operating point without hardcoding it.
+one step up (10% of the cap, at least one slot) when the lane presses its cap. Some paths have
+negative returns to concurrency, and this is what finds each lane's operating point without
+hardcoding it. What the controller judges the probe on is not the same in every lane.
+
+Push, Ack and Maint judge a probe on marginal throughput: the raise survives only if the lane's
+completion rate grew by at least 5%.
+
+The Pop lane does not, because throughput is the wrong objective for a delivery path. Its objective
+is the measured age of the oldest servable but unvisited entry in the hot-list ready ring, sampled
+from each shard's FIFO head so a lane that is never visited still reports. Age-at-visit sampling has
+survivorship bias: the starved lane is the one that never samples.
+
+Because ready age is roughly ring depth divided by visit rate, judging it alone would blame the
+probe for an arrival surge, so the verdict reads all three terms.
+
+| what the tick measured | verdict |
+| --- | --- |
+| age improved: at or below 90% of the pre-probe value, or under a 10 ms floor | keep the raise |
+| age worse, but depth grew at least 1.2× and the visit rate held at 95% or better | load, not the probe: hold the raise without blame |
+| anything else, including a fallen visit rate | revert |
+
+The last row is the one to read twice: inside a struggling system the default is to take capacity
+out, never to keep it. A reverted probe also holds the lane still for six ticks, 3 seconds on the
+default cadence, before it may probe again.
+
+The global budget deliberately watches a different variable, the oldest admitted slot's wait. Two
+controllers chasing the same number is how the coupled loops of the previous design were built.
 
 ## Slots are RAII
 
@@ -154,6 +180,12 @@ in Rust, before either resource is taken. A `pg_sleep` inside the pop procedure 
 connection, a slot, a PostgreSQL backend, and (after the first partition claim) row locks, for the
 whole window.
 
+One knob moves the slot boundary itself. With `QUEEN_POP_FUSION` set (off by default), N pop claim
+legs share one transaction, and the Pop lane takes **one slot per fused flush** rather than one per
+claim. What the sensor then measures is the fused transaction, which is the thing that actually
+queues on PostgreSQL, instead of N copies of the same WAL wait. The claim leg it fuses is described
+in [life of a pop](/internals/life-of-a-pop).
+
 Background jobs run in the Maint lane rather than bypassing admission, which is what lets the wake
 order keep them behind request traffic without starving them outright.
 
@@ -183,7 +215,22 @@ Note the path. These are on `/metrics/prometheus`, not `/metrics`.
 </Aside>
 
 The 10 second `broker rates` log line carries the same picture in one row: `adm_budget`, `adm_mode`,
-`adm_lanes` as `push:in/cap w<waiters>` per lane, `trains_s`, `cycle_ms` and `oldest_wait_ms`.
+`adm_lanes` as `push:in/cap w<waiters>` per lane, `trains_s`, `cycle_ms`, `oldest_wait_ms` and
+`adm_last`.
+
+`adm_last` is why the budget last moved, and it is the field that turns a flat budget into a
+diagnosis. It reads `init` until the first change, then `saturated` (the budget grew because `B` was
+exhausted), `oldest-age` (it shrank on queueing), or `nosync-detected` and `signal-restored` for the
+two mode transitions. `saturated` and `oldest-age` are written only when the budget actually changes
+by at least one slot, so a steady budget leaves the previous reason standing rather than reporting
+the ticks that decided to hold.
+
+`QUEEN_ADMISSION_TRACE=1`, off by default, adds a per-decision line on the `admission` target that
+none of the above carries: `budget adjusted` with the reason, the previous budget, the flush cycle,
+the oldest wait and transactions per train, plus `lane probe reverted` with the lane, its new cap and
+the verdict reason, and `lane probe kept` for the Pop lane. It logs on every tick that changes
+something, which on a busy broker is most of them, so it is a debugging knob rather than a setting to
+leave on.
 
 <Aside type="caution">
 The metric names changed in 1.0.0-beta.2. `queen_seg_push_vegas_limit` and

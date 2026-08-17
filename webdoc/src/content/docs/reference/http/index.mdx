@@ -40,7 +40,7 @@ at `http://localhost:6632`.
 | Prefix | What lives there |
 | --- | --- |
 | `/api/v1/…` | the whole public API: message plane, queues, consumer groups, messages, DLQ, traces, status, analytics, system |
-| `/streams/v1/…` | the stream-processing surface |
+| `/streams/v1/…` | the stream-processing surface: three JSON POSTs, documented in [Streams routes](/reference/http/streams) |
 | `/internal/api/…` | broker-to-broker calls; not a client API |
 | `/health`, `/metrics`, `/metrics/prometheus`, `/status` | operational endpoints |
 | everything else | the embedded dashboard SPA, served from assets compiled into the binary |

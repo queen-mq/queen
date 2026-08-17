@@ -14,10 +14,11 @@ verifiedBy:
   - clients/client-js/test-v2/push.js
 ---
 
-Deduplication in Queen is exact, not probabilistic. Within a partition and within the
-configured window, a `transactionId` that has already been stored writes nothing and returns
-`status: "duplicate"` with the original message's id. There is no Bloom filter, no sampling and
-no "best effort" qualifier.
+Deduplication in Queen is exact: the verdict is always computed in PostgreSQL, with no sampling and
+no "best effort" qualifier. Within a partition and within the configured window, a `transactionId`
+that has already been stored writes nothing and returns `status: "duplicate"` with the original
+message's id. Probabilistic structures appear only where they make an exact answer arrive faster,
+never where they could change it.
 
 It is also on by default. `queen.queues.dedup_window_seconds` defaults to 3600, and only an
 explicit `0` disables it.
@@ -157,12 +158,22 @@ The cache also memoises each partition's id, deduplication window and allocator 
 change forces a full rehydration, sticky until one succeeds, because the entry's expiry
 bookkeeping was computed under the old window.
 
+The steady-state consequence is easy to miss. A committed push advances `verified_upto` to its own
+last offset, so when the cache is warm `p_verified` equals the partition's current `last_offset`,
+`v_last > v_from` is false, and **the probe does not run at all**: SQL takes the row lock and goes
+straight to the allocator `UPDATE`, the same write it would have performed with deduplication off.
+Only an offset gap left by another broker, a cold or rebuilding entry, a suppressed partition or a
+local hit routed at `-1` reopens the probe, and then only across the span the cache cannot vouch
+for. Deduplication is not a per-push query; it is a per-push comparison the broker already made in
+memory.
+
 ## How the hashes are stored
 
 Not as a hash map. Each partition's in-window hashes live in a time-ordered ring of **immutable,
 sorted blocks** plus one mutable arrival-order buffer. There is no per-hash membership map at all:
-membership means "present in some surviving block", found by binary search in each sealed block and
-a linear scan of the hot buffer.
+on the exact path membership means "present in some surviving block", found by binary search in each
+sealed block and a linear scan of the hot buffer. That path is reached only when the bloom front
+described below answers "maybe".
 
 Three invariants make that correct and cheap:
 
@@ -188,6 +199,25 @@ buffer, sealed on a staggered per-partition schedule, cannot.
 
 The byte accounting is deliberately coarse but dominated by the real 16 bytes per hash, so the LRU
 budget (`QUEEN_DEDUP_CACHE_MB`, default 512) reflects the true footprint.
+
+### The bloom front
+
+Each entry fronts the exact ring with a temporal ring of **generational blocked bloom filters**: 16
+bits per hash, k = 7, with all seven probe bits inside one 64-byte block. A definitive miss
+therefore costs one cache line per live generation and touches neither the hot buffer nor any sealed
+block. A "maybe" falls through to the exact path, which stays the only authority: a false positive
+costs one exact check, and a local hit is still routed to SQL as before.
+
+Blooms have no false negatives, and a generation is dropped from the front only when its whole
+`max_created_ms` watermark is pre-window, so the soundness argument is the same whole-block expiry
+rule as the exact ring. Generation capacities tier up by a factor of eight from the 4096-hash block
+capacity to a ceiling of one million hashes, so an idle partition carries one small filter and a
+full-rate window settles at three or four live generations.
+
+Before the front existed, probing absent cost a linear scan of the hot buffer plus one binary search
+per sealed block, thousands of memory touches per hash once a high-rate window had accumulated
+hundreds of blocks: measured on 2026-07-31 at 60% of broker CPU at 1M msg/s with a 300 s window. The
+filter costs about 2 bytes per hash on top of the exact 16.
 
 ## Under memory pressure
 

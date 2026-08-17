@@ -10,7 +10,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/handlers/status.rs
 */}
 
-`GET /metrics/prometheus` exposes **54 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
+`GET /metrics/prometheus` exposes **81 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
 
 ### Process (this broker instance)
 
@@ -89,4 +89,31 @@ description: "Every Prometheus metric family the broker exposes, with its type a
 | `queen_file_buffer_db_healthy` | gauge | File-buffer DB-reachability hint |
 | `queen_file_buffer_failed` | gauge | Spool write failures |
 | `queen_file_buffer_pending` | gauge | Spooled push events awaiting drain |
+| `queen_kv_` |  |  |
+| `queen_kv_bytes_total` |  |  |
+| `queen_kv_expired_not_pruned` |  |  |
+| `queen_kv_expired_not_pruned_capped` |  |  |
+| `queen_kv_expiry_lag_seconds` |  |  |
+| `queen_kv_op_duration_milliseconds` |  |  |
+| `queen_kv_ops_total` |  |  |
+| `queen_kv_pool` |  |  |
+| `queen_kv_read_rejected_total` |  |  |
+| `queen_kv_singleflight_coalesced_total` |  |  |
 | `queen_maintenance_mode_enabled` | gauge | Push maintenance mode flag |
+| `queen_sweeper_` |  |  |
+| `queen_sweeper_cycle_milliseconds` |  |  |
+| `queen_sweeper_phase_skipped_total` |  |  |
+| `queen_sweeper_rows_total` |  |  |
+| `queen_sweeper_skip_locked_total` |  |  |
+| `queen_sweeper_sleep_milliseconds` |  |  |
+| `queen_timers_` |  |  |
+| `queen_timers_dlq_total` |  |  |
+| `queen_timers_due` |  |  |
+| `queen_timers_due_capped` |  |  |
+| `queen_timers_fire_failures_total` |  |  |
+| `queen_timers_fire_lag_seconds` |  |  |
+| `queen_timers_fire_lag_tenants_dropped_total` |  |  |
+| `queen_timers_fired_total` |  |  |
+| `queen_timers_oldest_late_seconds` |  |  |
+| `queen_timers_poisoned_total` |  |  |
+| `queen_timers_schedule_rejected_total` |  |  |

@@ -14,17 +14,18 @@ sourceOfTruth:
   - server/sql/procedures/004_log_pop.sql
   - server/build.rs
 digest: >-
-  A release is one broker binary plus client SDKs published at the same version for JavaScript,
+  A release is one broker binary plus client SDKs at the same version for JavaScript,
   Python, Go, Rust, PHP with Laravel and C++, plus the Go command-line client. There is no Java or
-  .NET SDK; those languages use the HTTP API directly. The deployment model is always-virgin: the
-  broker embeds schema.sql and 23 stored-procedure files numbered 001 to 023, applies all of them
-  in lexical order at every boot under a session advisory lock before accepting a request, and
-  there is no migration engine, no version table and nothing to run by hand. Every statement is
-  idempotent and any DDL error aborts the boot naming the failing file. Pointing a newer build at
-  a database created by a different build is unsupported, and a downgrade means restoring a dump
-  into a fresh database. Setting QUEEN_APPLY_SCHEMA=0 skips the apply, which moves both the DDL
-  and the ordering responsibility to the operator: a broker that skips the apply and finds an
-  older schema fails on the first request needing a missing object rather than at boot.
+  .NET SDK; those languages use HTTP directly. The deployment model is always-virgin: the
+  broker embeds schema.sql and 25 stored-procedure files numbered 001 to 025, applies all of them
+  in lexical order at every boot under a session advisory lock before serving a request, with
+  no migration engine, no version table and nothing to run by hand. Every statement is idempotent,
+  and any DDL error aborts the boot naming the failing file, except a deadlock against live
+  traffic, retried up to five attempts. Pointing a newer build at a database created by a
+  different build is unsupported, and a downgrade means restoring a dump into a fresh database.
+  QUEEN_APPLY_SCHEMA=0 skips the apply, moving DDL and ordering responsibility to the operator: a
+  broker that skips it and finds an older schema fails on the first request needing a missing
+  object, not at boot.
 ---
 
 Queen MQ 1.0.0 is one broker binary plus a set of client SDKs released at the
@@ -71,8 +72,8 @@ not to.
 
 ## The schema is applied at every boot
 
-The broker owns its own schema. It embeds `schema.sql` and 23 stored-procedure
-files (`001`–`023`) into the binary at compile time and applies all of them on
+The broker owns its own schema. It embeds `schema.sql` and 25 stored-procedure
+files (`001`–`025`) into the binary at compile time and applies all of them on
 every start, in lexical file order, before it accepts a request.
 
 Three properties make that safe to do on every boot:
@@ -82,9 +83,15 @@ Three properties make that safe to do on every boot:
   no-op when nothing changed.
 - **Serialised across instances.** The apply holds a session advisory lock, so a
   rolling restart of several brokers cannot run two DDL passes concurrently.
-- **Fail-fast.** Any DDL error aborts the boot with the failing file named in the
-  message. A broker never serves against a schema it could not bring to the
-  expected shape.
+- **Fail-fast, with one bounded retry.** Any DDL error aborts the boot with the
+  failing file named in the message, except a deadlock against live traffic
+  (`SQLSTATE 40P01`), which the applier retries: five attempts in all, backing
+  off 250 ms times the attempt number between them. The advisory lock serialises
+  appliers against each other but not against a peer that already booted and is
+  running its background cycles, so a rolling restart can genuinely cross a
+  running stats cycle. Re-applying is idempotent, so retrying is the correct
+  answer to that and dying is not. A broker never serves against a schema it
+  could not bring to the expected shape.
 
 The apply **only creates**. Every table and every function is defined exactly
 once, by exactly one file, in its final shape: nothing is dropped, migrated or

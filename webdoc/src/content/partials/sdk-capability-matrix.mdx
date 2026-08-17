@@ -1,0 +1,49 @@
+---
+params: []
+description: "What each of the six Queen SDKs implements, and the twelve rows where they diverge."
+---
+
+Parity here is a claim about the surface, not about shared code: each client is written natively
+in its own idiom. These twelve rows are that surface, read out of `clients/` on this tree. Five
+of them are full parity across all six clients; the other seven are where a client stops.
+
+| Capability | JavaScript | Python | Go | Rust | PHP | C++ |
+| --- | --- | --- | --- | --- | --- | --- |
+| Push, pop, ack, multi-partition claim | yes | yes | yes | yes | yes | yes |
+| Client-side push buffering | yes | yes | yes | yes | yes | yes |
+| Transactions through `POST /api/v1/transaction` | yes | yes | yes | yes | yes | yes |
+| Dead-letter reader | yes | yes | yes | yes | yes | yes |
+| HTTP 429 policy, separate from the retry counter | yes | yes | yes | yes | yes | yes |
+| `Admin` facade | yes | yes | yes | yes | yes | no |
+| `affinity` load-balancing strategy | yes | yes | yes | yes | yes | no |
+| Streams DSL over `/streams/v1/*` | yes | yes | yes | yes | no | no |
+| Lease renewal inside the consume loop | yes | yes | yes | yes | yes | no |
+| Per-message `trace` helper | yes | yes | yes | no | yes | no |
+| `Host` override independent of the address dialled | yes | no | no | yes | no | no |
+| `pop` reports a failure instead of an empty result | no | no | yes | yes | yes | no |
+
+The seven divergent rows, with their conditions:
+
+- **`Admin` facade.** C++ has no `Admin` class. Every management and observability route is still
+  reachable, through the shared `HttpClient` returned by `get_http_client()`.
+- **`affinity`.** The C++ `LoadBalancer` implements round-robin and `"session"` only, and
+  `load_balancing_strategy = "affinity"` falls through to round-robin silently. The strategy
+  matters because it keeps one consumer's pops on one backend, which is what keeps two clients
+  from contending on the same partition claim.
+- **Streams.** The `Stream` builder, the four window kinds, gates and the `/streams/v1/*` runtime
+  are in the JavaScript, Python, Go and Rust clients. PHP and C++ have none of it.
+- **Lease renewal.** In C++, `renew_lease()` sets a flag the consumer loop does not act on: the
+  worker carries an unimplemented placeholder where the timer would go. Call `client.renew(message)`
+  yourself before the lease expires.
+- **Per-message `trace`.** Where it exists it is attached by the consume loop, so a message
+  returned by a manual `pop()` never carries it. Rust records a trace through
+  `Admin::record_trace` instead of hanging a method off the message. C++ cannot hang one off a
+  JSON object at all, and its trace hook is an explicit no-op.
+- **`Host` override.** JavaScript (`hostHeader`) and Rust (`host_header`) advertise a request
+  authority, and a TLS SNI, independent of the address the socket dials. That is what addresses a
+  named tenant cluster behind a shared proxy endpoint. The other four clients send the dialled
+  address.
+- **`pop` failures.** Go, Rust and PHP surface a 4xx, an exhausted 429 budget, a terminal 403 or a
+  network fault to the caller, so an empty result means an empty queue. JavaScript, Python and C++
+  log the failure and return an empty result, which does not distinguish an empty queue from
+  revoked credentials.

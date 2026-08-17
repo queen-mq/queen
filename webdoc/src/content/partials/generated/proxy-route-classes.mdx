@@ -117,13 +117,21 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 
 | Method | Path |
 | --- | --- |
+| `POST` | `/api/v1/kv` |
+| `DELETE` | `/api/v1/kv/:ns/*key` |
+| `GET` | `/api/v1/kv/:ns/*key` |
+| `PUT` | `/api/v1/kv/:ns/*key` |
 | `GET` | `/api/v1/pop` |
 | `POST` | `/api/v1/stats/refresh` |
 | `GET` | `/api/v1/system/shared-state` |
+| `POST` | `/api/v1/timers` |
+| `GET` | `/api/v1/timers/:queue` |
+| `DELETE` | `/api/v1/timers/:queue/*timerKey` |
+| `GET` | `/api/v1/timers/:queue/*timerKey` |
 | `GET` | `/internal/api/inter-instance/stats` |
 | `POST` | `/internal/api/notify` |
 | `GET` | `/internal/api/shared-state/stats` |
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-45 of the broker's 63 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+45 of the broker's 71 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

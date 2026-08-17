@@ -9,9 +9,10 @@ use tokio::sync::oneshot;
 use tokio_postgres::NoTls;
 
 use crate::dedup::{DedupCache, PushCheck};
-use crate::frames::{
-    pack_frames, unpack_frames_ref, uuid_bytes_to_string, zstd_compress, zstd_decompress, FrameIn,
-};
+// `pack_frames` and `zstd_compress` are no longer named here: the segment recipe
+// moved to `frames::pack_segment_with_hashes` (see build_hashes_and_blob), which
+// this module now calls by full path.
+use crate::frames::{unpack_frames_ref, uuid_bytes_to_string, zstd_decompress, FrameIn};
 use crate::metrics::Metrics;
 use crate::admission::{Admission, Lane};
 
@@ -706,6 +707,14 @@ fn layer2_dedup(hashes: &[[u8; 16]]) -> (Vec<usize>, Vec<usize>) {
 // 16*K hash blob (frame order — position k in the blob is packed frame k, the
 // same "i" the SP echoes in dups) and the packed zstd payload blob (frame
 // packing UNCHANGED from the seg engine).
+//
+// PLAN_KV_TIMERS §15: the packing itself now lives in
+// `frames::pack_segment_with_hashes`, so the timer fire (which cannot go through
+// fusion — §1.8) uses THE SAME recipe instead of a second copy of it. This
+// function keeps its signature and its behaviour byte for byte: it still selects
+// the `pending` subset, still reuses the fingerprints the flush already computed
+// (re-hashing here would add xxh3 work per frame per repack to the push hot
+// path), and still emits them in frame order.
 fn build_hashes_and_blob(
     group: &FusionGroup,
     hashes: &[[u8; 16]],
@@ -734,8 +743,8 @@ fn build_hashes_and_blob(
             }
         })
         .collect();
-    let blob = zstd_compress(&pack_frames(&fins), zstd_level);
-    (hblob, blob)
+    let seg = crate::frames::pack_segment_with_hashes(&fins, hblob, zstd_level);
+    (seg.hashes, seg.blob)
 }
 
 // Push a bundle of N segments (distinct partitions) in ONE multi-segment

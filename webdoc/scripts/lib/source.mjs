@@ -49,14 +49,30 @@ export function rustFiles(relDir) {
  * that matches `endNeedle`. Deliberately line-based rather than a real parser:
  * the generators only need to see the shape of literal-heavy blocks, and a
  * brace-matching walk would be defeated by braces inside string literals.
+ *
+ * `startNeedle` may be an array of alternatives, tried in order. The router
+ * builder is the reason: a binding that gains a `mut` when routes start being
+ * registered conditionally is a refactor, not a contract change, and it should
+ * not take three generators down with it.
  */
 export function sliceBlock(text, startNeedle, endNeedle) {
-  const start = text.indexOf(startNeedle);
-  if (start === -1) throw new Error(`could not find block start: ${startNeedle}`);
+  const needles = Array.isArray(startNeedle) ? startNeedle : [startNeedle];
+  let start = -1;
+  for (const needle of needles) {
+    start = text.indexOf(needle);
+    if (start !== -1) break;
+  }
+  if (start === -1) throw new Error(`could not find block start: ${needles.join(" | ")}`);
   const end = text.indexOf(endNeedle, start);
   if (end === -1) throw new Error(`could not find block end: ${endNeedle}`);
   return text.slice(start, end + endNeedle.length);
 }
+
+/**
+ * The router binding, in the forms the tree has used. Conditional route
+ * registration needs `mut`; unconditional registration does not.
+ */
+export const ROUTER_BUILDER = ["let app = Router::new()", "let mut app = Router::new()"];
 
 /**
  * Extract a Rust function body by brace matching from the `{` that follows the

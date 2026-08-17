@@ -17,14 +17,10 @@ digest: >-
   entity. Amazon SQS FIFO's message group id is structurally the same idea as a Queen MQ
   partition. Where the other systems are better, stated plainly: Kafka replicates itself while
   Queen MQ delegates durability and failover to one PostgreSQL, which is therefore one failure
-  domain, and Kafka has connectors, stream processing and a large operational literature against
-  Queen MQ's six SDKs, one CLI and an HTTP API. Content-based routing is RabbitMQ's real strength
-  and Queen MQ has no exchanges, no bindings and no header matching. Amazon SQS has no server to
-  operate at all. pgmq needs no broker process, installs as an extension, and is insensitive to
-  lane count. On CPU, Kafka is the cheapest of the four in every measured shape, at roughly a
-  third of Queen MQ's cores on the sparse shape and a quarter on the dense one, which is partly a
-  durability difference: Kafka at its defaults pays no real fsync per commit and Queen MQ and pgmq
-  both do.
+  domain; content-based routing is RabbitMQ's real strength and Queen MQ has no exchanges, no
+  bindings and no header matching; Amazon SQS has no server to operate at all; pgmq needs no
+  broker process and is insensitive to lane count. Kafka is also the cheapest of the four on CPU
+  in every measured shape.
 ---
 
 One question separates these systems more sharply than any other: **how do you get strict
@@ -171,11 +167,13 @@ deduplication and retention all active. pgmq's ordered-consume path tops out bet
 | Deduplication on your own key | ✅ per queue | ⚠️ producer-session | ❌ plugin | ⚠️ FIFO, fixed window | ❌ |
 | Dead-letter queue with a retry budget | ✅ | ❌ app-level | ✅ | ✅ redrive | ❌ |
 | Per-group lag as data you can query | ✅ | ⚠️ via tooling | ❌ | ❌ | ❌ |
+| Per-tenant isolation, quotas and metering in the box | ✅ [proxy](/deploy/multi-tenant) | ⚠️ quotas, ACLs | ⚠️ vhosts | ⚠️ per AWS account | ❌ |
 | Ack and push in one transaction | ✅ | ❌ | ❌ | ❌ | ✅ same database |
 | Windowed aggregation with the state in the same commit | ✅ | ⚠️ separate runtime | ❌ | ❌ | ❌ |
 | Disk spool when the store is unreachable | ✅ | n/a | n/a | n/a | ❌ |
 | Content-based routing | ❌ | ❌ | ✅ | ❌ | ❌ |
 | Broker replicates itself | ❌ PostgreSQL's job | ✅ | ✅ | ✅ managed | ❌ |
+| Runs in-process as a library | ✅ [Rust, beta](/use/embed/) | ❌ | ❌ | ❌ | ❌ |
 | No server to operate | ❌ | ❌ | ❌ | ✅ | ⚠️ no broker, still a database |
 | Runs without extensions on managed PostgreSQL | ✅ | n/a | n/a | n/a | ❌ needs the extension |
 

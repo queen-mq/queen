@@ -13,6 +13,7 @@ sourceOfTruth:
   - server/src/auth.rs
   - server/src/db.rs
   - server/src/metrics.rs
+  - server/src/admission.rs
   - server/src/stats.rs
   - server/src/syscollect.rs
   - server/src/config.rs
@@ -209,7 +210,7 @@ Public. `Content-Type: text/plain; version=0.0.4; charset=utf-8`, with
 The body is assembled in two parts:
 
 1. **In-process gauges and counters**: `queen_process_*`, `queen_uptime_seconds`,
-   scheduler-lag and parked-poll gauges, the adaptive push/pop concurrency limits,
+   scheduler-lag and parked-poll gauges, the six `queen_admission_*` families,
    the DB pool gauges, the maintenance-mode flag and the file-buffer gauges. These
    are always emitted.
 2. **A database-derived block**: cluster lifetime totals
@@ -218,6 +219,18 @@ The body is assembled in two parts:
    the pool or the query fails, the response is still `200` with part 1 only. A
    scrape that suddenly loses half its families means the database read failed, not
    that the queues went quiet.
+
+The six `queen_admission_*` families are the ones to graph when the broker looks
+slow while PostgreSQL looks idle. `queen_admission_budget` is the total number of
+write transactions the arbiter will admit at once;
+`queen_admission_inflight` and `queen_admission_waiting` break that down with a
+`lane` label carrying `push`, `pop`, `ack` or `maint`; and
+`queen_admission_trains_per_s`, `queen_admission_txn_per_train` and
+`queen_admission_cycle_ms` are the commit-train sensor the budget moves on, read
+out of the broker's own commit completions rather than from PostgreSQL. Waiters on
+a lane while the pool reports idle connections mean admission is the constraint,
+not the database. [Flow control](/internals/flow-control) has the control law and
+the lane priorities.
 
 The complete family list, generated from `server/src/metrics.rs` and the exposition
 code, is in the [reference section](/reference). Three caveats that the family list

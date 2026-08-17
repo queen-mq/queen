@@ -17,6 +17,7 @@ import {
   emitPartial,
   fnBody,
   isCheck,
+  ROUTER_BUILDER,
   repoRead,
   rustFiles,
   sliceBlock,
@@ -30,7 +31,7 @@ const AUTH = "server/src/auth.rs";
 // ---------------------------------------------------------------------------
 
 function parseRoutes(text) {
-  const block = sliceBlock(text, "let app = Router::new()", ".with_state(state);");
+  const block = sliceBlock(text, ROUTER_BUILDER, ".with_state(state);");
   const routes = [];
   const re = /\.route\(\s*"([^"]+)"\s*,/g;
   let m;

@@ -12,20 +12,20 @@ sourceOfTruth:
   - server/src/db.rs
   - server/src/config.rs
   - server/src/fusion.rs
+  - server/src/admission.rs
+  - server/sql/procedures/001_log_schema.sql
+  - server/sql/procedures/003_log_push.sql
 digest: >-
   PostgreSQL 15 or newer, and no extensions. The floor is one unique index declared NULLS NOT
-  DISTINCT, which PostgreSQL 14 does not have, and gen_random_uuid() is used as a core built-in
-  rather than the pgcrypto function; the test matrix runs against PostgreSQL 16. PostgreSQL is the
-  storage engine rather than a dependency, so sizing PostgreSQL is sizing Queen: messages,
-  offsets, the deduplication index, queue configuration and the dead-letter table are ordinary
-  tables, and every queue semantic runs in stored procedures inside the database. The broker needs
-  a direct connection, because a pooler in transaction or statement mode breaks the session
-  advisory locks used by the boot-time schema apply and by the maintenance leader election, along
-  with the prepared statements the hot paths prepare once per connection; session-mode pooling is
-  transparent. DB_POOL_SIZE defaults to 160 for one broker, so replicas times DB_POOL_SIZE plus
-  superuser_reserved_connections plus tooling has to stay under max_connections: three brokers at
-  the default want 480 connections where a stock PostgreSQL allows 100, and the mismatch answers
-  500 with an error of pool.
+  DISTINCT, which PostgreSQL 14 does not have; the test matrix runs against PostgreSQL 16.
+  PostgreSQL is the storage engine rather than a dependency, so sizing PostgreSQL is sizing Queen,
+  and every queue semantic runs in stored procedures inside the database. A pooler in transaction or
+  statement mode breaks the session advisory locks the boot-time schema apply and the maintenance
+  leader election hold, and the prepared statements the hot paths prepare once per connection;
+  PgBouncer in session mode is supported. DB_POOL_SIZE defaults to 160 per broker, so replicas times
+  DB_POOL_SIZE plus superuser_reserved_connections plus tooling has to stay under max_connections:
+  three brokers at the default want 480 connections where a stock PostgreSQL allows 100, and the
+  mismatch answers 500 with an error of pool.
 ---
 
 PostgreSQL is not a dependency of Queen, it is Queen's storage engine. Messages, offsets, the
@@ -66,8 +66,14 @@ transaction or statement mode takes that away. Two mechanisms break:
 - **Prepared statements.** The hot paths prepare once per connection, and transaction-mode pooling
   invalidates that cache on every checkout, so every push, pop and ack pays a parse and a plan.
 
-Session-mode pooling, which multiplexes connections rather than statements, is transparent. Give
-each broker its own backends.
+**Session mode is the pooling mode that works.** PgBouncer in session mode pins one server
+connection per client for the life of that connection, so neither mechanism above is taken away,
+and it is a supported way to run. Two things decide whether it earns its place in front of a
+broker. It multiplexes nothing here, because the broker's own pool holds its connections open for
+the process lifetime: 28 client connections were measured against 28 backends. And a server
+connection recycled underneath a held session advisory lock surfaces as
+`pg_advisory_unlock reported not-held` in the retention logs. The deployments those numbers came
+from point `PG_PORT` at PostgreSQL directly for that reason. Give each broker its own backends.
 
 ## Size the pool before you scale out
 
@@ -100,14 +106,29 @@ update per pop and ack, and a matching delete rate once retention is on.
 - the autovacuum cadence, because the tables updated in place churn far faster than their row
   counts suggest.
 
-The broker sets its own per-table `fillfactor` and autovacuum parameters at every boot, which is
-why those tables look over-vacuumed. Leave them alone.
+The broker sets its own per-table `fillfactor` and autovacuum parameters at every boot. These are
+measured, not defaults with a margin. The coordination tables (`log_partitions`, `log_consumers`)
+carry `fillfactor` headroom to keep update chains HOT and on-page, threshold-based autovacuum
+(`scale_factor = 0`) because their churn rate has nothing to do with their row count, and
+`vacuum_truncate = off`, because heap truncation takes an ACCESS EXCLUSIVE lock, reclaims nothing
+on a fixed-population table, and freezes every push and pop behind it for seconds. Turning it off
+removed an entire class of periodic latency spike seen across every high-rate run.
+
+`log_segments` carries a different set, including matching parameters on its TOAST table, chosen
+after stock scale factors were measured re-firing vacuum every 13 seconds at 1M msg/s. All of it is
+storage parameters only: no table rewrite, idempotent at every boot. Do not strip them in a tuning
+pass. The tables these parameters exist for, and why each one is shaped the way it is, are in
+[the storage model](/internals/storage-model).
 
 ## Size it in commits, not messages
 
-A push becomes one compressed segment row per partition touched, and that row is one transaction,
-which is one WAL flush. So the question that decides the hardware is how many messages ride each
-commit, and a saturated Queen is almost always commit-bound rather than CPU-bound.
+A push becomes one compressed segment row per partition touched. Those rows are not one transaction
+each: each dispatch bundles up to `QUEEN_V2_BUNDLE_MAX` ready, disjoint partitions into a single
+`log_push_multi_v1` transaction, so one commit and one fsync carry many partitions. Commit rate is
+decoupled from partition count, which is what 16,500 commits per second during the
+[million-partition run](/benchmarks/cardinality-1m) measures. The question that decides the
+hardware is therefore how many messages ride each commit, and a saturated Queen is almost always
+commit-bound rather than CPU-bound.
 
 ```bash
 curl -s http://localhost:6632/metrics/prometheus | grep -E 'queen_fusion_items_per_batch|queen_batch_rtt_milliseconds'
@@ -115,7 +136,9 @@ curl -s http://localhost:6632/metrics/prometheus | grep -E 'queen_fusion_items_p
 
 The first gauge is messages per commit, the second is how long a commit takes. Client batch size is
 the dominant lever on the first one, ahead of every server-side knob, and it is free. The broker
-also coalesces concurrent pushes, and concurrent acks, into shared transactions on its own.
+also coalesces concurrent pushes and concurrent acks into shared transactions on its own, and can
+do the same for pop claims (`QUEEN_POP_FUSION`, off by default), which puts N claim legs in one
+transaction. The claim that fusion shares is in [life of a pop](/internals/life-of-a-pop).
 
 Partition count is the other axis, and it drives background work whether or not traffic exists:
 retention, the stats reconciler and the metrics collector all iterate partitions on a fixed
@@ -131,8 +154,15 @@ database CPU while both move zero messages.
 3. Choose the partition count from the consumer parallelism you need, then price its background
    cost.
 
-4. Load the deployment until `pool_waiting` goes non-zero. That rate is your commit ceiling on that
-   disk, and it moves with the disk.
+4. Load the deployment until `queen_admission_waiting{lane="push"}` goes non-zero while
+   `queen_admission_budget` sits at its ceiling. That is the commit ceiling on that disk. Read
+   `queen_admission_txn_per_train` at that point for how many transactions each fsync is carrying,
+   and `queen_admission_cycle_ms` for the flush interval you are actually getting: those two are
+   what `commit_delay` and `commit_siblings` move. `pool_waiting` is not the signal here. The
+   arbiter caps admitted write transactions below `DB_POOL_SIZE` minus
+   `QUEEN_ADMISSION_POOL_RESERVE` precisely so admitted work never queues on the pool, so a
+   non-zero `pool_waiting` means read traffic or an unmetered path, not a saturated write path.
+   The arbiter itself is in [flow control](/internals/flow-control).
 
 5. Turn retention on before you go live. An unbounded queue is a full disk on a schedule you did
    not choose.

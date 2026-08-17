@@ -10,6 +10,8 @@ sourceOfTruth:
   - server/src/handlers/standalone.rs
   - app/src/router/index.js
   - app/src/stores/identity.js
+  - app/src/views/System.vue
+  - app/src/views/DeadLetter.vue
   - proxy/src/webapp.rs
 ---
 
@@ -42,7 +44,7 @@ Every view is tenant-scoped except System, and the exception is labelled on scre
 - **Messages**, `/messages`: listing, single-message inspection, delete
 - **Traces**, `/traces`: the trace names that exist, and the timeline for one
 - **Analytics**, `/analytics`: status over time, lag and ops series, retention volume
-- **Dead Letter**, `/dlq`: the dead-letter listing, with purge
+- **Dead Letter**, `/dlq`: the dead-letter listing, with per-row purge
 - **System**, `/system`: cell-level host CPU and memory, worker metrics, PostgreSQL internals,
   the disk spool, the maintenance switch
 
@@ -54,8 +56,11 @@ Every view is tenant-scoped except System, and the exception is labelled on scre
 
 Three things to know before reading a number off this UI. System covers the whole cell and
 every tenant on it, so a cell figure is not a tenant figure. The dead-letter view inspects and
-purges, with no replay control. And an unknown is not a zero: a failed call renders as a
-failure, and one shared ticker refreshes the page, so what you see is one moment.
+purges: replaying a dead-lettered message is a broker route,
+[`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), and
+this console does not call it yet, so purge is the only action on a row. And an unknown is not a
+zero: a failed call renders as a failure, and one shared ticker refreshes the page, so what you
+see is one moment.
 
 <Screenshot
   src="dashboard-system"
@@ -67,6 +72,35 @@ failure, and one shared ticker refreshes the page, so what you see is one moment
   src="dashboard-dlq"
   alt="The dead letter view. Three tiles summarise the messages on the page, the partitions they came from and the most frequent error. A table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and a single Purge action."
   caption="Purge is the only action on a row. The tiles also say they are computed from the page, not from a broker-side total."
+/>
+
+## The PostgreSQL panel
+
+System carries two sources, switched at the top of the view. **Server resources** is the broker:
+host CPU and memory per replica or summed, worker metrics, the database pool and the disk spool.
+**Postgres stats** reads `GET /api/v1/analytics/postgres-stats` and describes the database Queen
+runs on, which is [the throughput ceiling and the failure domain](/reference/limits) of the whole
+deployment:
+
+- cache hit ratios for the database, for the tables and for the indexes, beside the configured
+  `shared_buffers` size
+- disk reads, cache hits and hit ratio per table in the `queen` schema
+- what is resident in `shared_buffers` right now, per object, as a size and a share of the cache
+- total, table and index size per table
+- dead tuples per table, tables pending autovacuum with their vacuum count and last autovacuum
+  time, and the HOT update percentage per table
+- every query running longer than **1 second**, with its pid, state, duration and wait event
+
+Two scoping facts. `postgres-stats` covers the whole PostgreSQL instance rather than Queen's
+database alone, so a slow query listed here can belong to another application sharing the server,
+and a proxy refuses the route to tenant credentials along with the rest of System. And a ratio for
+an object that has seen no I/O yet renders as a dash rather than as `0%`, because it is unknown,
+not zero. A failed fetch says so in a banner and keeps the last stats that loaded, timestamped.
+
+<Screenshot
+  src="soak-24h-1m-postgres"
+  alt="The System view with the Postgres stats source selected. Below the cell operator banner and the source switch sit the file buffer tiles, a cache performance card with database, table and index hit ratios next to the shared buffers size, and a table of disk reads, cache hits and hit ratio for each table in the queen schema."
+  caption="The Postgres source, captured on the soak rig. The ratios and the table names belong to that run; the panel is what every broker serves."
 />
 
 ## Who it thinks you are

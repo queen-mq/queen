@@ -28,7 +28,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { WEBDOC, cell, emitPartial, isCheck, repoRead, rustFiles, sliceBlock } from "./lib/source.mjs";
+import { ROUTER_BUILDER, WEBDOC, cell, emitPartial, isCheck, repoRead, rustFiles, sliceBlock } from "./lib/source.mjs";
 
 const OUT = join(WEBDOC, "public", "openapi");
 const VERSION = "1.0.0";
@@ -418,7 +418,7 @@ const ERROR_SCHEMA = {
 // ---------------------------------------------------------------------------
 
 function brokerSpec(handlers, structs) {
-  const chain = sliceBlock(repoRead("server/src/main.rs"), "let app = Router::new()", ".with_state(state);");
+  const chain = sliceBlock(repoRead("server/src/main.rs"), ROUTER_BUILDER, ".with_state(state);");
   const routes = dropTrailingSlashTwins(parseRouterChain(chain));
   if (routes.length < 40) throw new Error(`only parsed ${routes.length} broker routes`);
 
@@ -545,7 +545,7 @@ function subRouter(file) {
 
 function proxySpec(handlers, structs) {
   const mainText = repoRead("proxy/src/main.rs");
-  const chain = sliceBlock(mainText, "let app = Router::new()", ";");
+  const chain = sliceBlock(mainText, ROUTER_BUILDER, ";");
   const own = parseRouterChain(chain);
 
   const nested = [

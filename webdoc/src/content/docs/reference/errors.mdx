@@ -14,22 +14,23 @@ sourceOfTruth:
   - server/src/handlers/streams.rs
   - server/src/auth.rs
   - server/src/tenant.rs
+  - server/src/admission.rs
   - proxy/src/errors.rs
   - proxy/src/limits.rs
 verifiedBy:
   - clients/client-js/test-v2/http-unit/retry429.test.js
 digest: >-
   Most broker failures are `{"error":"..."}`, `application/json`, with no `code`, enum or request
-  id: match on status. Exceptions: 413, `/health` (its own document at 200 and 503), and unmatched
-  `/api/` paths, which return 404 with `{"error":"Not Found","code":"no_such_route"}`. Codes: 200
-  reads, management, acks, transactions; 201 `POST /api/v1/push`; 204 empty pop or any pop under
-  pop maintenance, no body, so no `{"messages":[]}` and no `paused`; 400, 401, 403, 404, 409; 413
-  over `QUEEN_MAX_BODY_BYTES` (64 MiB default); 500; 503 only on `GET /health`, on DB round-trip
-  failure. Never 429 (no rate limiter), 502, 504. Procedure error text with `not found`
-  (case-insensitive) maps to 404, else 500. 2xx is not success: push item status is `queued`,
-  `duplicate`, `error`, `buffered` or `failed` (spooled still 201); ack and transaction report
-  `success:false` at 200. The proxy adds `code` and `Retry-After` in seconds on 429; SDKs retry
-  only 429.
+  id: match on status. Exceptions: 413, `/health` (its own document at 200, and at 503 when the DB
+  round trip fails), and unmatched `/api/` paths, 404 with
+  `{"error":"Not Found","code":"no_such_route"}`. Codes: 200 reads, management, acks, transactions;
+  201 `POST /api/v1/push`; 204 empty pop or any pop under pop maintenance, no body: no
+  `{"messages":[]}`, no `paused`; 413 over `QUEEN_MAX_BODY_BYTES` (64 MiB default). Never 429: the
+  broker makes a request wait for an admission slot instead of refusing it. Never 502 or 504.
+  Procedure error text with `not found` (case-insensitive) maps to 404, else 500. 2xx is not
+  success: push item status is `queued`, `duplicate`, `error`, `buffered` or `failed` (spooled
+  still 201); ack and transaction report `success:false` at 200. The proxy adds `code` and
+  `Retry-After` in seconds on 429; SDKs retry only 429.
 ---
 
 Most broker failures are one JSON object with one key:
@@ -76,8 +77,14 @@ though pop maintenance is what produced it.
 | `500` | A pool acquisition failure (`{"error":"pool"}`); a statement error or statement timeout; a stored-procedure error that is not a "not found"; a push diverted to the spool during maintenance whose spool write failed; a JWT configuration fault discovered per-request, such as an `HS256` token with no configured secret or an unparseable public-key PEM. |
 | `503` | `GET /health` only, when the database round trip fails. |
 
-Two codes are conspicuously absent. There is no `429` from the broker: it has no
-rate limiter. There is no `502` or `504`: it proxies nothing.
+Two codes are conspicuously absent. The broker never answers `429`, and that is a
+property rather than a gap: it paces work instead of refusing it. Every write
+transaction on the hot paths takes a slot from one process-wide
+[admission arbiter](/internals/flow-control) that measures PostgreSQL's own
+commit pipeline and holds concurrency where the database still converts work into
+throughput, waking acks before pops before pushes when the budget is tight.
+Per-tenant rate limiting is the proxy's job, and the proxy is the only thing that
+returns `429`. There is no `502` or `504`: the broker proxies nothing.
 
 ## Responses that are not the generic envelope
 

@@ -10,9 +10,12 @@ sourceOfTruth:
   - server/src/config.rs
 ---
 
-This section is lookup material. Every page names the source files that govern it, in the
-`sourceOfTruth` field of its frontmatter, and the largest tables here are not written by hand
-at all: they are extracted from the code when the site is built.
+This section is lookup material. Every page names the source files that govern it and the test
+suites that exercise them, listed at the foot of the page under **Source of truth** and
+**Verified by**, and the largest tables here are not written by hand at all: they are extracted
+from the code when the site is built. [The documentation site](/internals/contributing/docs)
+covers both mechanisms: what those two frontmatter fields oblige a page to, and which generator
+emits which table.
 
 The version documented here is **1.0.0**. The broker and all client SDKs are version-aligned
 at that number.
@@ -81,7 +84,7 @@ up rather than by which component implements it.
 | --- | --- |
 | The remaining HTTP routes: queues, consumer groups, messages and DLQ, traces, status, analytics, system | [HTTP API](/reference/http/), one page per group |
 | A client library's methods and builder chain | [JavaScript](/reference/sdk/javascript/), [Python](/reference/sdk/python/), [Go](/reference/sdk/go/), [Rust](/reference/sdk/rust/), [PHP](/reference/sdk/php/), [C++](/reference/sdk/cpp/) |
-| The embedded broker's Rust surface: `BrokerConfig`, `Broker` methods, error mapping (beta) | [Engine (Rust)](/reference/engine/) |
+| The embedded broker's Rust surface: `BrokerConfig`, `Broker` methods, error mapping (beta) | [Engine (Rust)](/reference/engine/), argument by argument. [Embed the engine](/use/embed/) is the how-to that precedes it |
 | Command-line usage | [queenctl](/reference/queenctl/) |
 | Environment variables and their defaults | [Configuration](/reference/config/), generated |
 | Queue options accepted by `/api/v1/configure` | [Queue options](/reference/queue-options/) |
@@ -102,3 +105,14 @@ model rather than in the route itself.
 | To run the broker | [Self-hosting](/deploy/) |
 | Why the storage engine behaves this way | [Internals](/internals) |
 | Measured throughput, with the configuration that produced it | [Benchmarks](/benchmarks) |
+
+**The route pages tell you what a call does; the internals pages tell you why it cannot do
+otherwise.** The four questions readers of this section ask most often are answered one level
+down, not on the route page.
+
+| The question a route page raises | The page that answers it |
+| --- | --- |
+| Why a push of N partitions costs one commit, and where the second deduplication layer sits | [Life of a push](/internals/life-of-a-push) |
+| Why a pop can return 204 while the queue has messages, and what a lease costs | [Life of a pop](/internals/life-of-a-pop) |
+| Why the broker makes a request wait instead of answering 429, and why raising the ceiling does nothing | [Flow control](/internals/flow-control) |
+| What the suites named under **Verified by** at the foot of each page actually run | [Testing](/internals/contributing/testing) |

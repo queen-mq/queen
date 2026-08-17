@@ -38,7 +38,9 @@ How to read the columns:
 The five message-plane routes have a page each documenting their request and response
 fields: [push](/reference/http/push), [pop](/reference/http/pop),
 [ack](/reference/http/ack), [transaction](/reference/http/transaction) and
-[lease extension](/reference/http/lease). The remaining groups are documented on the
-other pages of this section.
+[lease extension](/reference/http/lease). The stream-processing surface has one too:
+[streams](/reference/http/streams) documents the three `/streams/v1` routes field by
+field, because that protocol is public and versioned rather than an SDK internal. The
+remaining groups are documented on the other pages of this section.
 
 <Render file="generated/broker-routes" />

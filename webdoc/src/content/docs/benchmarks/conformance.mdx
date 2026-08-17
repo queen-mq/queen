@@ -1,0 +1,145 @@
+---
+title: Conformance
+description: "The other half of the evidence: every client suite run against every applicable topology in its own throwaway stack, the tenancy parity gate, and the two-tenant isolation run."
+type: reference
+sidebar:
+  order: 8
+sourceOfTruth:
+  - test/run.sh
+  - test/compose/docker-compose.single.yml
+  - test/compose/docker-compose.ha.yml
+  - test/runners/tenancy/tenancy-check.sh
+  - test/runners/mesh/mesh-check.sh
+  - test/runners/rust-client/entrypoint.sh
+  - test/runners/cli/entrypoint.sh
+  - test/runners/cpp/entrypoint.sh
+verifiedBy:
+  - test/run.sh
+digest: >-
+  Queen MQ's conformance evidence is `test/run.sh`: six client suites (JavaScript, Python, Go,
+  Rust, C++ and the queenctl CLI) on three topologies each, plus the broker's unit tests, an HA
+  mesh assertion and a two-tenant isolation suite, every cell its own throwaway Docker stack. The
+  `tenanted` lane reruns each client suite against a broker with tenant scoping on and no tenant
+  header, and any divergence from the flag-off lane fails the run either way. The recorded
+  isolation run is 45 assertions, 0 failures. The PHP SDK has no suite in the matrix.
+---
+
+The throughput pages measure how fast one shape goes. This page is the other half of the
+evidence: whether the clients and the broker agree about what the API means, on more than one
+topology, every time.
+
+One command is the whole thing.
+
+```bash
+test/run.sh
+```
+
+It builds a broker image from the current tree, builds one runner image per suite, then runs
+every applicable pair of suite and topology as its own `docker compose` project on its own
+private network, in parallel, and prints a pass/fail matrix. Nothing binds a host port and every
+PostgreSQL runs on `tmpfs`, so a run cannot collide with another run or with a database you are
+using.
+
+## What runs
+
+Six client suites cover five SDK languages and the CLI, and each of the six runs on three
+topologies. Three more suites bring their own.
+
+| Suite | What it exercises | Topologies |
+| --- | --- | --- |
+| `js` | `clients/client-js/test-v2`: the broker-free unit tests including the proxy `429` contract, then the integration run | `single`, `ha`, `tenanted` |
+| `go` | the root-package unit tests, then `./tests/` and `./tests/streams_integration/` with `-count=1`, so a cached result never hides a live-broker failure | `single`, `ha`, `tenanted` |
+| `py` | the whole `pytest` tree under `clients/client-py/tests`, streams included | `single`, `ha`, `tenanted` |
+| `cli` | the `queenctl` end-to-end suite, with `QUEEN_E2E=1` and the PostgreSQL variables that turn on its database-side assertions | `single`, `ha`, `tenanted` |
+| `cpp` | `test_retry429` first, self-contained with no broker, then `test_client` against the broker | `single`, `ha`, `tenanted` |
+| `rust-client` | `cargo test --locked` in `clients/client-rust`: the lib unit tests, then each integration binary in turn | `single`, `ha`, `tenanted` |
+| `rust` | the **broker's** own in-process unit tests, `cargo test`, no stack and no PostgreSQL | `unit` |
+| `mesh` | that both brokers of an HA pair report the peer connected with 0 handshake failures | `ha` |
+| `tenancy` | two-tenant isolation over the HA pair, driven at the brokers with the trusted `x-queen-tenant` header | `ha-tenanted` |
+
+The `rust` row is the broker, not the Rust client: the client suite is `rust-client`. The two are
+separate rows because they prove separate things, and only one of them needs a database.
+
+The **PHP SDK has no suite in this matrix.** It is a supported client with no automated
+conformance lane here, and that is a gap rather than an omission.
+
+Two entrypoint details are the difference between running and passing vacuously. The
+`rust-client` runner exports `QUEEN_TEST_URL` (without it every integration test skips) and
+`QUEEN_TEST_STRICT=1`, which makes the skip branch itself fatal, so an empty broker URL fails
+instead of reading like a green run of about 130 tests. The `cli` runner exports `QUEEN_E2E=1`,
+without which `TestMain` exits 0 having run nothing.
+
+## The topologies
+
+| Topology | Stack | `QUEEN_TENANCY_HEADER` |
+| --- | --- | --- |
+| `single` | one PostgreSQL, one broker | off |
+| `ha` | one PostgreSQL, `queen-a` and `queen-b` as a framed-TCP mesh pair, client suites hitting `queen-a` | off |
+| `tenanted` | the `single` stack, with the broker started with native tenant scoping on while the suite sends **no** tenant header | on |
+| `ha-tenanted` | the `ha` pair with the flag on, the substrate for the `tenancy` suite | on |
+
+Running the client suites on `ha` is what makes [high availability](/deploy/ha) a tested claim
+rather than a topology diagram: the same unmodified suite, pointed at one broker of a mesh pair
+sharing one PostgreSQL, has to produce the same result it produces against a single broker.
+
+## The tenancy parity gate
+
+The `tenanted` lane exists to prove a negative. Turning native tenant scoping on must change
+nothing for a client that sends no tenant header, which is the default-tenant path every
+[multi-tenant cell](/deploy/multi-tenant) serves. So `run.sh` runs the unmodified suite on both
+lanes and prints a `TENANCY PARITY` verdict.
+
+The exit code is the hard gate. Because an exit code is coarse (99 of 112 and 100 of 112 are both
+`rc=1`), `run.sh` also parses each suite's printed pass tally where one exists, counts only and
+never durations, and compares that too. **A divergence fails the run in either direction.** A
+behaviour change caused by the flag is a regression even when the flag-on side is the greener one.
+
+The two lanes share their compose file, with `run.sh` exporting `QUEEN_TEST_TENANCY`. Duplicating
+the stack definitions would let them drift, which is exactly what the gate exists to catch.
+
+## The isolation run
+
+`test/runners/tenancy/tenancy-check.sh` drives the HA pair directly. Every scenario deliberately
+uses the *same* queue name, the *same* partition name and the *same* consumer-group name for both
+tenants, with traffic on both brokers, so shared-name collisions are the default rather than the
+exception. Eight scenarios:
+
+| # | What it asserts |
+| --- | --- |
+| 1 | queue identity and configuration are per-tenant, read back consistently on both brokers after each tenant configured on a different one |
+| 2 | no message crosses tenants: push on one broker, pop on the other |
+| 3 | a foreign `partitionId` cannot advance another tenant's cursor |
+| 4 | deduplication keys are per-tenant, while within-tenant deduplication still fires |
+| 5 | listings are scoped |
+| 6 | a consumer-group *name* shared by two tenants keeps independent cursors |
+| 7 | one tenant's claim-and-ack cannot hide or delay the other's pending message through the in-process hot-list ring |
+| 8 | a push by one tenant delivers nothing to another tenant's parked long poll |
+
+The run recorded on 2026-07-29 against a freshly built image is **45 assertions, 0 failures**,
+5 notes, in 21 seconds.
+
+**It refuses to pass vacuously.** A probe up front configures one queue name for two tenants with
+different lease times and aborts if the broker does not keep them apart, so the lane can never
+pass by comparing the default tenant with itself. Expected and harmless crosstalk is printed as
+`note` lines rather than asserted: PostgreSQL is the authority on those paths and every
+stored-procedure call carries the tenant, so the cost is a re-query, not a leak.
+
+## What this evidence does not cover
+
+- **A green cell is a screen, not a proof.** `--exit-code-from runner` with
+  `--abort-on-container-exit` can yield 0 for a runner that was merely stopped, and `run.sh`
+  scores 0 as `PASS`. Each cell prints its duration next to `PASS` so an anomalously short run
+  stands out, and the per-cell logs are the evidence.
+- **Streaming window arithmetic is the noisy part.** The failing set moves between runs and
+  between lanes, and this site therefore makes no per-test verification claim about window
+  arithmetic.
+- **Two failures are known and deterministic**: `TestGateTokenBucketBasic` in the Go client, and
+  `TestLoad_BenchSmoke` in the CLI, which is a benchmark deadline rather than a semantic check.
+- **The `mesh` suite asserts connection, not behaviour.** Cross-replica wake latency, dead-peer
+  detection and reconnection are `server/mesh-verify.sh`, run by hand.
+- **The proxy is not in this matrix.** `queen_proxy`'s own unit tests run with `cargo test`
+  inside `proxy/`, and its two-tenant end-to-end check is `proxy/scripts/isolation-smoke.sh`.
+
+The full harness, including how to run a subset and what each runner maps its environment
+variables onto, is in [Testing](/internals/contributing/testing/). The performance rigs and the
+archive are in [method, rig and archive](/benchmarks/method/).

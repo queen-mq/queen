@@ -26,6 +26,10 @@ mod reconcile;
 mod retention;
 mod schema;
 mod stats;
+// KV + timers background sweeper (PLAN_KV_TIMERS.md §7). Registered in three places
+// like every other background loop: this list, the twin list in lib.rs, and the spawn
+// below. The task itself is not spawned unless a feature flag is on.
+mod sweeper;
 mod syscollect;
 mod tenant;
 mod util;
@@ -125,6 +129,11 @@ async fn main() {
     admission::set_global(admission.clone());
 
     let metrics = Arc::new(metrics::Metrics::new());
+    // PLAN_KV_TIMERS.md §14: the kv/timers families are EXPOSED only when their
+    // feature is on. Set before anything can scrape, so /metrics/prometheus is
+    // byte-identical to the pre-feature broker on every installation that leaves the
+    // flags off — the parity gate of §15 is a test, not a promise.
+    metrics.kvt.enable(cfg.kv_enabled, cfg.timers_enabled);
 
     // JWT auth. Disabled by default (JWT_ENABLED=false) → the middleware is a
     // transparent pass-through and every request is served with no token, exactly
@@ -584,6 +593,37 @@ async fn main() {
     // polling an unbounded set of queue names.
     reconcile::spawn_idle_sweep(state.clone(), cfg.hotlist_idle_sweep_ms);
 
+    // KV + timers background sweeper (PLAN_KV_TIMERS.md §7). Its own module, not a
+    // phase of retention.rs: that cycle is fixed-cadence and leader-gated (session
+    // advisory lock 737_001, one replica works per cycle), and folding this in would
+    // either serialize it behind retention's phases or make retention leaderless. The
+    // sweeper is the opposite on both axes — due-driven and LEADERLESS, so every
+    // replica drains in parallel and shares the work through `SKIP LOCKED`. It takes
+    // no advisory lock at all, which is also what keeps it out of the lock-order
+    // graph (§2.1); 737_003 stays reserved for PLAN_S3_ARCHIVE.md.
+    //
+    // NOT SPAWNED when both features are off (§7.1), and that decision lives INSIDE
+    // `sweeper::spawn` (it returns `None`) rather than being re-stated here: one rule,
+    // one owner, and `embedded/boot.rs` gets the same behaviour from the same line
+    // instead of a second copy of the condition. With QUEEN_SWEEPER defaulting to
+    // true, a task that ran anyway would cost every existing installation one due
+    // probe (a LATERAL over 64 shards plus a count) and one expire step per second per
+    // broker, forever, plus a Maint lane slot and a pooled connection per cycle, over
+    // two permanently empty tables. On a 2-core free tier whose measured ceiling is
+    // ~480 msg/s that is measurable noise no customer asked for.
+    let _sweeper = sweeper::spawn(pool.clone(), metrics.clone(), &cfg);
+    if !cfg.sweeper_enabled && (cfg.kv_enabled || cfg.timers_enabled) {
+        // The one combination that silently accumulates: a feature on with its only
+        // reaper switched off. Expired KV rows are never pruned and timers never fire.
+        tracing::warn!(
+            target: "boot",
+            kv = cfg.kv_enabled,
+            timers = cfg.timers_enabled,
+            "QUEEN_SWEEPER=false with a kv/timers flag on: expired keys will never be \
+             pruned and timers will never fire — they are not lost, they simply wait"
+        );
+    }
+
     // Inter-instance mesh notifications. Gated on QUEEN_SYNC_ENABLED (default true)
     // AND at least one configured peer — a single stock broker binds nothing and
     // sends nothing, behaving exactly as before (only the in-process waker, wired
@@ -708,7 +748,12 @@ async fn main() {
         tracing::info!(target: "mesh", "mesh sync enabled but no peers configured — local waker only");
     }
 
-    let app = Router::new()
+    // `mut` because the kv and timers routes are registered CONDITIONALLY below
+    // (PLAN_KV_TIMERS.md §16 step 1). With a flag off the route does not exist at all
+    // — the JSON fallback answers 404 — which is a stronger statement than a handler
+    // that returns 404: there is no surface to probe, no extractor to run, and no
+    // "feature disabled" body that a client could learn to retry against.
+    let mut app = Router::new()
         .route("/api/v1/push", post(handlers::handle_push))
         // Namespace/task discovery pop (no queue in the path). Registered before
         // the `/pop/queue/:queue` routes; matchit keeps the static `/api/v1/pop`
@@ -872,7 +917,75 @@ async fn main() {
         // explanation page with auth on). See handlers/standalone.rs.
         .route("/auth/me", get(handlers::handle_auth_me))
         .route("/auth/login", get(handlers::handle_auth_login))
-        .route("/auth/logout", post(handlers::handle_auth_logout))
+        .route("/auth/logout", post(handlers::handle_auth_logout));
+
+    // ------------------------------------------------------ kv (PLAN_KV_TIMERS.md §8.1)
+    //
+    // Data path, not management plane, and registered only with the flag on.
+    //
+    // Order matters: matchit keeps the static `/api/v1/kv` distinct from the deeper
+    // parametric paths, the same rule this file already follows four times over.
+    // `*key` is a CATCH-ALL so `order/9f1/items` can be written naturally, and there
+    // is deliberately NO literal segment under `/api/v1/kv/:ns/` — one would make
+    // every key named after it unreachable, which is also why `incr` exists only on
+    // the POST batch.
+    //
+    // One rule for status codes: the status describes the outcome of the CALL, not of
+    // the business predicate. An absent key, a lost race and a delete that matched
+    // nothing are all 200 with an explicit field. The cost is stated (curl does not
+    // behave "RESTfully" on a missing key, and whoever scripts against it must read
+    // the body); the benefit is that no SDK, proxy, dashboard or retry policy treats
+    // the product's most frequent outcome as an error. The house precedent is queue
+    // deletion, which keeps 200 on `deleted:false`.
+    if cfg.kv_enabled {
+        app = app
+            .route("/api/v1/kv", post(handlers::handle_kv_batch))
+            .route(
+                "/api/v1/kv/:ns/*key",
+                get(handlers::handle_kv_get)
+                    .put(handlers::handle_kv_put)
+                    .delete(handlers::handle_kv_delete),
+            );
+        tracing::info!(
+            target: "boot",
+            pool = cfg.kv_pool_size,
+            require_grant = cfg.kv_require_grant,
+            "QUEEN_KV_ENABLED on — /api/v1/kv registered"
+        );
+    }
+
+    // --------------------------------------------------- timers (PLAN_KV_TIMERS.md §8.1)
+    //
+    // Note what is NOT here: a tenant-wide timer list. `list` is scoped to a queue and
+    // the queue is a PATH SEGMENT, not a filter, precisely so that no call can ask for
+    // "every timer of this tenant" — that is a scan an end user of the customer could
+    // trigger (§4.1).
+    //
+    // And the cancel has its OWN route and its own authorization class (§9.6). It is
+    // the same stored procedure as schedule but NOT the same authorization decision:
+    // `POST /api/v1/timers` carries cancels in the same array as schedules, so a
+    // tenant over quota would be refused on its cancels too — while the fire never
+    // stops on its own (§12), meaning that tenant would keep producing messages it
+    // cannot stop, up to the horizon or an operator's intervention. Blocking would
+    // produce the opposite of its purpose, so cancel goes through a route the proxy
+    // classifies as read/management and never blocks.
+    if cfg.timers_enabled {
+        app = app
+            .route("/api/v1/timers", post(handlers::handle_timers_batch))
+            .route("/api/v1/timers/:queue", get(handlers::handle_timers_list))
+            .route(
+                "/api/v1/timers/:queue/*timerKey",
+                get(handlers::handle_timer_peek).delete(handlers::handle_timer_cancel),
+            );
+        tracing::info!(
+            target: "boot",
+            max_horizon_s = cfg.timers_max_horizon_s,
+            max_payload_bytes = cfg.timers_max_payload_bytes,
+            "QUEEN_TIMERS_ENABLED on — /api/v1/timers registered"
+        );
+    }
+
+    let app = app
         // SPA dashboard: any request not matching a route above is served from the
         // assets embedded at compile time (server/webapp/dist — there is no
         // runtime static-dir override), falling back to index.html for

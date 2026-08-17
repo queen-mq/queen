@@ -15,6 +15,10 @@ sourceOfTruth:
   - server/src/handlers/streams.rs
   - proxy/src/routes.rs
   - proxy/src/gateway.rs
+verifiedBy:
+  - test/runners/tenancy/tenancy-check.sh
+  - proxy/scripts/isolation-smoke.sh
+  - test/run.sh
 ---
 
 Tenant isolation in Queen is split across two processes on purpose. The broker scopes
@@ -179,6 +183,48 @@ broker being unreachable except through the thing that sets it:
    four points above rest on.
 
 </Steps>
+
+## How these claims are tested
+
+Every property on this page is asserted by a suite that plays one tenant against
+another, on a running stack, rather than by reading the code.
+
+`test/runners/tenancy/tenancy-check.sh` drives the two-broker mesh pair directly
+with the trusted `x-queen-tenant` header and no proxy in the picture. Every
+scenario gives two tenants the **same queue name, the same partition name and the
+same consumer-group name**, and splits the traffic across both brokers so the mesh
+frames and both brokers' caches are in play. It asserts that queue identity and
+configuration are per-tenant when read back on either broker, that no message
+crosses, that a foreign `partitionId` cannot advance another tenant's cursor,
+that deduplication keys are per-tenant while within-tenant deduplication still
+fires, that a shared consumer-group name keeps independent cursors, and that one
+tenant's claim-and-ack traffic can neither hide nor delay the other's pending
+message. That last one carries a latency budget rather than a bare delivery
+assertion, because a shared ring would still deliver eventually through the
+reseed floor and a delivery-only assertion would pass on the broken shape. It
+runs on the `ha-tenanted` topology: `test/run.sh --suite tenancy`.
+
+`proxy/scripts/isolation-smoke.sh` asks the same question end to end through the
+proxy, against a dev cell with a second cluster as the adversary. It asserts
+scoped listings and aggregates on **content** rather than on HTTP 200, foreign
+partition-id rejection on every mutating route, trace-name isolation, cross-tenant
+retention, api-key scopes, key and session revocation, key-to-cluster binding, the
+blocked operator surfaces, the storage quota and the meters. Under shadow mode the
+three enforcement checks are reported as counted skips and never as silent passes,
+so the printed tally means the same thing whether `QUEEN_PROXY_ENFORCE` is on or
+off.
+
+A third gate covers the case nobody thinks to test: the tenancy flag changing
+behaviour for a client that sends no header at all. `test/run.sh` runs each of its
+client suites (`js`, `go`, `py`, `cli`, `cpp`, `rust-client`) against a flag-off
+broker and again against a broker started with `QUEEN_TENANCY_HEADER=true` and no
+header on the wire, and requires the same verdict from both. It compares exit
+codes, and, where a suite prints a machine-readable tally, the pass counts too. A
+divergence fails the run **even when the flag-on side is the green one**, because
+a behaviour change in either direction is a regression.
+
+[Running the suites](/internals/contributing/testing/) covers the topologies, the
+runners and how to reproduce any of this locally.
 
 ## What isolation does not mean
 

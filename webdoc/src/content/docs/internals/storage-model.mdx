@@ -9,6 +9,8 @@ sourceOfTruth:
   - server/sql/schema.sql
   - server/sql/procedures/001_log_schema.sql
   - server/sql/procedures/003_log_push.sql
+  - server/sql/procedures/005_log_ack.sql
+  - server/sql/procedures/006_log_maintenance.sql
   - server/src/frames.rs
   - server/src/util.rs
 ---
@@ -46,9 +48,9 @@ range of the one segment it hangs off.
 ## The tables
 
 Four log tables are created by `001_log_schema.sql`, applied at every boot; `queen.log_dlq` is a
-fifth, created by the ack file (005_log_ack). See [Ack internals](/internals/ack-internals). All of
-them hang off `queen.queues` (created by `schema.sql`), which is both the queue's identity and its
-configuration.
+fifth, created by the ack file (005_log_ack) and covered below; [Ack internals](/internals/ack-internals)
+has the path that writes it. All of them hang off `queen.queues` (created by `schema.sql`), which
+is both the queue's identity and its configuration.
 
 ### queen.queues
 
@@ -123,8 +125,27 @@ The messages.
 | `blob` | `BYTEA` | the packed, zstd-compressed frames |
 
 `blob` is `SET STORAGE EXTERNAL`, so TOAST does not spend CPU trying to re-compress bytes the
-broker already compressed. The table has **zero secondary indexes**: the primary key is also
-the pop path, and every read is a range scan or a backward step on it.
+broker already compressed. **`log_segments` carries zero secondary indexes**, and that is a
+property of this one table rather than of the model: its primary key is also the pop path, so
+every read is a range scan or a backward step on it. The other tables here do carry an index
+where a scan needs one, `log_partitions` on `(queue_id, last_write_at)` and `log_dlq` on
+`(partition_id, failed_at DESC)`.
+
+Autovacuum on this table is set by measurement, and the numbers are recorded with their dates in
+`001_log_schema.sql`. The earlier factors, 0.02 for vacuum and 0.05 for insert, re-fired vacuum
+roughly every 13 seconds at 1M msg/s, and each pass over the growing heap and its TOAST table
+competed for I/O exactly when the system had no headroom left: an absorbed hiccup at 800k msg/s,
+a stall at 900k, and a contributor to collapse at 1M. The table now sets
+`autovacuum_vacuum_scale_factor = 0.1` and `autovacuum_vacuum_insert_scale_factor = 0.3`, with
+`autovacuum_vacuum_cost_limit = 4000` and `autovacuum_vacuum_cost_delay = 0` so each pass finishes
+fast. **The same four values are set again with the `toast.` prefix.** The blob bytes live in the
+TOAST table, so tuning only the heap would leave the larger half of the write volume on the stock
+cadence. At 0.1 and 0.3 vacuum still keeps pace with retention churn: the heap plateaus through
+slot reuse, verified over 300 seconds at 1M msg/s with retention sweeping every 5 seconds. These
+are storage parameters only, so applying them at every boot is idempotent and rewrites nothing.
+
+Operators meet the same reasoning from the other side, next to the server settings that matter
+alongside it, in [PostgreSQL](/deploy/postgres). Do not strip these parameters in a tuning pass.
 
 ### queen.log_txns
 
@@ -187,6 +208,44 @@ retry budget an explicit failure is entitled to.
 
 Like `log_partitions`, this table sets `fillfactor = 50`, threshold-based autovacuum and
 `vacuum_truncate = off`, for the same churn and exclusive-lock reasons.
+
+### queen.log_dlq
+
+The per-message escape hatch. Everything else in this model is a cursor; this is the one table
+with a row per message. The payload is a snapshot, not a pointer, and the table carries no foreign
+key on purpose: a dead letter survives the retention that deletes its source segment, and the
+cleanup phase refuses to reclaim a partition that still holds one.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | `UUID` | primary key, defaulted from `gen_random_uuid()`; the DLQ row's own identity, not the message's |
+| `partition_id` | `UUID` | where the poison frame lived; carries **no foreign key**, deliberately |
+| `consumer_group` | `TEXT` | the group whose retries ran out. One frame poisonous to two groups produces two rows |
+| `"offset"` | `BIGINT` | the frame's offset, recorded for tracing. Quoted in DDL and column lists because `offset` is a reserved word |
+| `message_id` | `UUID` | the frame's message id |
+| `transaction_id` | `TEXT` | the frame's `transactionId`, and the address the delete and retry routes take |
+| `payload` | `JSONB` | the snapshot the broker extracted from the segment blob before disposing of the frame |
+| `error` | `TEXT` | the error text carried by the ack that exhausted the budget |
+| `retry_count` | `INTEGER` | the `(partition, group)` `batch_retry_count` as it stood when the frame was dead-lettered |
+| `failed_at` | `TIMESTAMPTZ` | defaults to `now()` |
+
+One secondary index, `idx_log_dlq_partition_failed_at` on `(partition_id, failed_at DESC)`, which
+is what the DLQ browse and depth queries scan.
+
+`queen.log_dlq_head_v1` files the row and moves the cursor in one transaction: it sets
+`committed = GREATEST(committed, p_off)`, releases the lease, and resets `batch_retry_count` and
+the attempt counters. The `GREATEST` is a guard rather than arithmetic. The cursor already sits at
+the completed prefix, so the normal move is exactly the one disposed frame, and a stale caller can
+never walk it backward.
+
+The missing foreign key leaves the same obligation `log_txns` carries: whatever deletes a partition
+must delete these rows itself, and `delete_queue_v1` does exactly that before dropping the queue
+row. Partition cleanup takes the opposite route and declines to delete at all. The eligibility
+predicate `log_partition_dead_v1` vetoes on `EXISTS (SELECT 1 FROM queen.log_dlq ...)`, so an empty,
+long-inactive partition that still holds a dead letter is not empty and stays. Nothing removes a row
+on a timer: retention never touches this table, and the only removals are
+`DELETE /api/v1/messages/:partitionId/:transactionId` and the retry route, which re-pushes the
+snapshot and then drops the row.
 
 ### The helper
 
@@ -271,8 +330,12 @@ Four properties hold, and every other page in this section leans on at least one
 
 - **No global order.** Order is per partition. Two messages in different partitions of the same
   queue have no defined relative order, and nothing in the storage layer could give them one.
-- **No per-message consumption state.** Acking offset `N` implicitly completes every earlier
-  unacked offset in that partition for that group. There is no place to record "message 7 done,
-  message 5 still pending".
+- **No per-message *pending* state.** Progress is a cursor: acking offset `N` implicitly completes
+  every earlier unacked offset in that partition for that group, and there is nowhere to record
+  "message 5 still pending while message 7 is done". Terminal failure is different. A message that
+  exhausts its retries is disposed of individually into `queen.log_dlq`, and the cursor moves past
+  exactly that offset, which is what keeps one poison message from pinning an ordered lane. Dead
+  lettering is on by default; with it disabled the poison frame is dropped instead of filed, and
+  the cursor still moves past it.
 - **No reordering mechanism of any kind.** A partition is strictly first-in, first-out in commit
   order. Nothing can jump the queue.

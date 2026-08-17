@@ -9,6 +9,7 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/config.rs
   - server/src/retention.rs
+  - server/src/schema.rs
   - server/src/file_buffer.rs
   - server/src/handlers/queues.rs
   - server/src/handlers/messages.rs
@@ -20,26 +21,22 @@ sourceOfTruth:
   - server/sql/procedures/005_log_ack.sql
   - server/sql/procedures/006_log_maintenance.sql
   - server/sql/schema.sql
+  - proxy/src/state.rs
+  - proxy/src/gateway.rs
 digest: >-
   The documented non-goals and operational boundaries, all properties of the build available
-  today. Ordering is per partition and never global: there is no cross-partition sequence number,
-  and total ordering means one partition, which is one writer's worth of throughput. Delivery is
-  arrival order inside a partition, with no priority lane, no deadline scheduling and no
-  reordering at pop time. In-group parallelism equals partition count, because exactly one
-  in-flight leased batch exists per partition and consumer group. One PostgreSQL is one failure
-  domain and the ceiling; while it is unreachable pushes are spooled to disk and answered 201 with
-  a per-item status of buffered, and pops, acks and every management route are unavailable, so
+  today. Ordering granularity is the partition key: one partition is total ordering at one
+  writer's worth of throughput, and in-group parallelism equals partition count. A bare broker
+  enforces no per-caller quota; queen_proxy in front enforces a per-cluster plan of rates, counts,
+  sizes and retained bytes. One PostgreSQL is one failure domain and the ceiling; while it is
+  unreachable pushes are spooled to disk and answered 201 with a per-item status of buffered, and
   nothing is consumable. Retention is opt-in and its granularity is a whole segment, so deleting
-  exactly one message is not an operation and a seek to a timestamp lands on a segment boundary.
-  maxWaitTimeSeconds deletes whole segments past a cutoff for every consumer group including
-  in-flight leases, regardless of whether retention is enabled, and does not dead-letter what it
-  drops: that is data loss by design. Dead letters are removed only when you remove them. POST
-  /api/v1/configure is a full replace rather than a patch, so any omitted option is written back
-  at its default. Transactions are one PostgreSQL transaction, which is real atomicity and not
-  end-to-end exactly-once. Payloads must be JSON, inside a request body capped by
-  QUEEN_MAX_BODY_BYTES at 64 MiB. The broker expects a trusted network segment: no TLS listener,
-  no CORS layer, JWT authentication off by default, and a mesh port that must be firewalled
-  because post-handshake frames are unauthenticated. There is no Java or .NET SDK.
+  exactly one message is not an operation and a seek lands on a segment boundary. POST
+  /api/v1/configure is a full replace, not a patch, so any omitted option is written back at its
+  default. Transactions are one PostgreSQL transaction, real atomicity and not end-to-end
+  exactly-once. Payloads must be JSON, inside a request body capped by QUEEN_MAX_BODY_BYTES at 64
+  MiB. The broker expects a trusted network segment: no TLS listener, no CORS layer, JWT
+  authentication off by default.
 ---
 
 This page states Queen's opinions in one place: the design decisions, how to
@@ -48,28 +45,56 @@ property of the build you can run today, not a roadmap item. Most of these are
 how we believe a queue should behave; the point of collecting them here is that
 you can check them against your requirements in one read.
 
-## Ordering is per partition, never global
+## Per-tenant limits belong to the gateway
+
+A bare broker enforces no per-caller quota: it is one namespace and one resource
+pool. Put `queen_proxy` in front and every cluster carries a plan: request and
+message rates with burst, queue and partition counts, payload and batch size,
+parked long-poll slots, retained bytes and a retention ceiling, plus an optional
+monthly message allowance. Enforcement is per cluster, and the wire contract is
+one the SDKs already handle: `429` with `Retry-After` for a rate limit, which
+every client retries on its own with backoff, and `403` with a code naming the
+quota for a hard cap. What each number does at request time, in the order the
+gateway evaluates them, is in
+[Quotas and rate limits](/reference/multi-tenant/quotas).
+
+## Ordering granularity is your partition key
 
 A message's position is a per-partition `BIGINT` offset, allocated under that
-partition's row lock. There is no cross-partition sequence number, no global log,
-and no way to ask "what happened first" across two partitions. Two consumers
-draining two partitions of the same queue observe two independent orders.
+partition's row lock, so the order is exactly as coarse or as fine as the key you
+push with. One partition for a whole queue is total ordering across everything,
+at one writer and one in-flight leased batch per consumer group: a correct
+configuration, with one writer's worth of throughput. A partition per customer is
+a million independent orders. Nothing about this is fixed when the queue is
+created, because partitions are created by the push that names them.
+
+What you cannot have is both at once. There is no cross-partition sequence
+number, no global log, and no way to ask "what happened first" across two
+partitions. Two consumers draining two partitions of the same queue observe two
+independent orders. That is not a property of this implementation: a total order
+has to be serialised through one writer, whatever the system underneath it.
 
 The one extra guarantee you get *inside* a partition is that `created_at` is
 monotone, because the timestamp is written under the same `FOR UPDATE` lock that
 bumps the offset. Time-based retention and timestamp subscriptions depend on
 that; it does not extend into a global clock.
 
-If you need total ordering across everything, you need one partition, and one
-partition is one writer and one in-flight leased batch per consumer group. That
-is a correct configuration, with one writer's worth of throughput.
-
 ## Delivery order is arrival order
 
-Inside a partition, messages are delivered in the order they arrived, and nothing
-lets one overtake another. If some work is more urgent than other work, that is a
-different queue or a different partition, and you dedicate consumers to it. There
-is no priority lane, no deadline scheduling and no reordering at pop time.
+There is no priority lane, no reordering at pop time, and no per-message
+deadline: a message's position is fixed at push. If some work is more urgent than
+other work, that is a different queue or a different partition, and you dedicate
+consumers to it.
+
+What you *can* shift is when a whole lane becomes visible. `delayedProcessing`
+defers every message of a queue by N seconds after commit, and `windowBuffer`
+holds a bursty partition until it goes quiet or the accumulated batch fills. Both
+are per-queue options and neither reorders anything. `delayedProcessing` is
+enforced in SQL on every pop path and is never skipped; `windowBuffer` is
+enforced either by the same SQL debounce or, with `QUEEN_HOTLIST` on, by the
+broker's timer wheel, which is what releases a continuously written partition at
+first mark plus the window. Both are described in
+[Queue options](/reference/queue-options).
 
 ## Parallelism inside a group is bounded by partition count
 
@@ -111,8 +136,12 @@ Know which half keeps working before you rely on it:
 <Aside type="danger">
 `/health` performs a real database round-trip and returns 503 when PostgreSQL is
 unreachable. Wiring it to a Kubernetes **liveness** probe therefore kills the
-broker during exactly the outage the disk spool exists to survive, throwing away
-the spooled pushes it was holding. Use it as a readiness signal.
+broker during exactly the outage the disk spool exists to survive. The spool
+itself is not lost: a restarted broker finalizes any file it was mid-write on and
+replays the spool before it accepts a request, under the one-hour startup cap
+above, provided `FILE_BUFFER_DIR` sits on a volume that outlives the container.
+What the kill loop costs is every push arriving during it, refused at the socket
+instead of buffered. Use `/health` as a readiness signal.
 </Aside>
 
 ## Retention deletes segments, not messages
@@ -217,7 +246,7 @@ reach. The properties that follow from that:
 
 ## The embedded engine is beta, and one per process
 
-The broker can run inside a Rust application ([Embed the engine](/reference/embed/)).
+The broker can run inside a Rust application ([Embed the engine](/use/embed/)).
 Its boundaries are its own: one `Broker` per process lifetime (the admission
 arbiter is a process-wide singleton, and a start, shutdown, start cycle keeps
 metering maintenance through the first instance's arbiter); shutdown is best
@@ -238,16 +267,28 @@ states what that means.
   code.
 - **Consumers poll.** Long-polling parks a pop and wakes it, but there is no
   server-initiated push and no persistent subscription stream.
-- **Stream-processing state accumulates.** Nothing purges `queen_streams.queries`
-  or `queen_streams.state`, and both are `GRANT`ed to `PUBLIC`.
+- **Retention cannot delete stream state, and a partition carrying open
+  accumulators is never reclaimed.** `queen_streams.state` keys on
+  `partition_id` and declines the foreign key on purpose, so partition cleanup
+  checks it explicitly and refuses to delete: it is one of three vetoes, with
+  dead-letter rows and a live lease ([Retention](/internals/retention)). The
+  limitation that follows is that accumulators have no TTL. Nothing purges
+  `queen_streams.queries` or `queen_streams.state`, and both are `GRANT`ed to
+  `PUBLIC`.
 - **The bundled dashboard and JWT auth do not combine broker-direct.** With auth
   off the broker serves a fully working dashboard as an anonymous operator; with
   `JWT_ENABLED=true` it serves an explanation page instead, because the app
   sends no bearer token and the broker holds no sessions. A dashboard with
   logins and roles is `queen_proxy`'s.
-- **The broker needs a session it keeps.** Schema apply and the retention leader
-  election both use session-level advisory locks, so a transaction-pooling proxy
-  in front of PostgreSQL breaks them.
+- **The broker needs a session it keeps.** Schema apply (advisory lock
+  `778120010`) and the retention leader election (`737001`) hold session-scoped
+  advisory locks, which live on one backend session. **Transaction** pooling
+  breaks that and is the only pooling mode that does; **session** pooling keeps
+  the session intact and is supported, which is how PgBouncer is normally put in
+  front. The residual risk in session mode is a pooler that recycles the server
+  connection underneath a live session, dropping a lock the broker still holds:
+  it surfaces as `pg_advisory_unlock reported not-held` in the retention log, and
+  connecting directly is what rules it out.
 - **The broker does not serve an OpenAPI document at runtime.** The
   [OpenAPI 3.1 documents](/reference/openapi) published with this site are
   generated from the router at documentation build time, not by the broker.
@@ -263,10 +304,11 @@ states what that means.
 | If you need | Where Queen stands |
 | --- | --- |
 | Total ordering across an entire topic or system | Ordering is per partition. One partition gives you total order and one writer's worth of throughput |
-| Message priority, deadlines, or reordering | Delivery is arrival order within a partition, with no override |
-| Many workers sharing one ordered stream | One in-flight leased batch per (partition, group) caps in-group parallelism at partition count |
+| Message priority, deadlines, or reordering | Delivery is arrival order within a partition, with no override. `delayedProcessing` and `windowBuffer` shift when a whole lane becomes visible, and reorder nothing |
+| Many workers sharing one ordered stream | One in-flight leased batch per `(partition, group)` is what makes per-entity FIFO true. Parallelise by choosing a partition key with more distinct values: lanes are unbounded in the broker and created by the push that names them |
 | A broker that keeps serving while the database is down for hours | Only pushes survive, into a disk spool bounded by your disk; nothing is consumable until PostgreSQL returns |
 | A managed service with no database to operate | Queen is a binary you run against a PostgreSQL you run. Its ceiling and its failure domain are that instance |
+| Per-tenant quotas, plans and usage metering | Shipped, in the Apache-2.0 gateway in `proxy/`, not in the broker |
 | Opaque binary or very large payloads | Payloads are JSON, inside a request-body cap |
 | A broker you can expose directly to untrusted clients | No TLS listener, no CORS, authentication off by default, and a mesh port that must be firewalled |
 | A Java or .NET SDK today | Only six language SDKs exist; everything else is plain HTTP |

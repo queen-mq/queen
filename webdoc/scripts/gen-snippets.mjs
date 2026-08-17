@@ -265,9 +265,20 @@ function main() {
     return { drifted, title: `${rendered.length} verified snippets`, file: SNIPPET_DIR };
   }
 
-  // Rewrite the directory so a removed marker removes its partial.
-  rmSync(SNIPPET_DIR, { recursive: true, force: true });
+  // Sweep so a removed marker removes its partial, but only over files this
+  // generator wrote. The directory also holds hand-authored partials (the
+  // shared mermaid diagrams), which are tracked in git and included by pages;
+  // a blanket rmSync deleted those on every run and took the build down with
+  // "Partial not found". Provenance is the generator's own header line.
   mkdirSync(SNIPPET_DIR, { recursive: true });
+  for (const name of readdirSync(SNIPPET_DIR)) {
+    if (!name.endsWith(".mdx")) continue;
+    if (contents.has(name)) continue;
+    const existing = readFileSync(join(SNIPPET_DIR, name), "utf8");
+    if (existing.includes("GENERATED FILE. Do not edit by hand.")) {
+      rmSync(join(SNIPPET_DIR, name), { force: true });
+    }
+  }
   for (const [name, content] of contents) writeFileSync(join(SNIPPET_DIR, name), content, "utf8");
   return { written: true, drifted: false, title: `${rendered.length} verified snippets`, file: SNIPPET_DIR };
 }

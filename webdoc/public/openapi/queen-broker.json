@@ -3870,6 +3870,463 @@
         "x-queen-handler": "server/src/handlers/standalone.rs::handle_auth_logout",
         "x-queen-query-params": "none"
       }
+    },
+    "/api/v1/kv": {
+      "post": {
+        "operationId": "kv_batch",
+        "tags": [
+          "Other"
+        ],
+        "summary": "POST /api/v1/kv",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_batch",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "operations": {
+                    "description": "See the reference page for this route."
+                  },
+                  "op": {
+                    "description": "See the reference page for this route."
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/api/v1/kv/{ns}/{key}": {
+      "get": {
+        "operationId": "kv_get",
+        "tags": [
+          "Other"
+        ],
+        "summary": "GET /api/v1/kv/:ns/*key",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_get",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-catch-all": true,
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      },
+      "put": {
+        "operationId": "kv_put",
+        "tags": [
+          "Other"
+        ],
+        "summary": "PUT /api/v1/kv/:ns/*key",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_put",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        },
+        "x-queen-catch-all": true,
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      },
+      "delete": {
+        "operationId": "kv_delete",
+        "tags": [
+          "Other"
+        ],
+        "summary": "DELETE /api/v1/kv/:ns/*key",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_delete",
+        "x-queen-query-params": "forwarded",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-catch-all": true,
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+      }
+    },
+    "/api/v1/timers": {
+      "post": {
+        "operationId": "timers_batch",
+        "tags": [
+          "Other"
+        ],
+        "summary": "POST /api/v1/timers",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/timers.rs::handle_timers_batch",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
+      }
+    },
+    "/api/v1/timers/{queue}": {
+      "get": {
+        "operationId": "timers_list",
+        "tags": [
+          "Other"
+        ],
+        "summary": "GET /api/v1/timers/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/timers.rs::handle_timers_list",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/timers/{queue}/{timerKey}": {
+      "get": {
+        "operationId": "timer_peek",
+        "tags": [
+          "Other"
+        ],
+        "summary": "GET /api/v1/timers/:queue/*timerKey",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timerKey",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/timers.rs::handle_timer_peek",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-catch-all": true
+      },
+      "delete": {
+        "operationId": "timer_cancel",
+        "tags": [
+          "Other"
+        ],
+        "summary": "DELETE /api/v1/timers/:queue/*timerKey",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timerKey",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "txn",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/timers.rs::handle_timer_cancel",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-catch-all": true
+      }
     }
   }
 }

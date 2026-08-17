@@ -57,8 +57,8 @@ digest: >-
   auth, `4` no-op (an empty pop). `pop --auto-ack` commits inside the pop transaction, so messages
   lost after the pop are never redelivered. `tail` without `--cg` advances the real
   `queenctl-tail` group. `queue configure` drops zero-valued flags, so `--dlq=false` cannot
-  disable dead-lettering; `/configure` is a full replace. `dlq drain` deletes, no requeue route;
-  `partition seek` is end only.
+  disable dead-lettering; `/configure` is a full replace. `dlq drain` deletes; no command wraps the
+  DLQ retry route; `partition seek` is end only.
 ---
 
 `queenctl` is a single static Go binary built on the [Go client](/reference/sdk/go). It exposes the
@@ -502,11 +502,17 @@ so a replay can start slightly earlier than the instant you named, never later.
 `--limit` (`0`), `--offset` (`0`). `drain` adds `--dry-run` and `--yes`, and refuses to run without
 one of them.
 
+`drain` pages through the filtered set in `--limit`-sized pages, defaulting to 200 when `--limit`
+is `0`, and deletes every row it matches. **It is the bulk delete you run after deciding not to
+replay.** Replay itself is a broker route,
+[`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), which
+re-pushes the dead-letter snapshot to its own queue and partition and drops the DLQ row only once
+that push has been accepted.
+
 <Aside type="danger">
-`dlq drain` **deletes**. There is no server-side requeue or retry endpoint for the DLQ, so draining
-is destructive and nothing else. To replay dead-lettered messages, read them with `dlq list` or
-`messages get`, then re-publish with `queenctl push`. `drain` pages through the filtered set in
-`--limit`-sized pages, defaulting to 200 when `--limit` is `0`.
+No `queenctl` command wraps that retry route, so `dlq drain` is deletion and nothing else, and a
+drained row is gone. To replay dead-lettered messages, call the route directly, or read the rows
+with `dlq list` or `messages get` and re-publish them with `queenctl push`.
 </Aside>
 
 ### `queenctl traces`

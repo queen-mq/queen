@@ -107,8 +107,6 @@
 /use/clients/http/                      /use/http-client/                  301
 /use/errors                             /reference/errors/                 301
 /use/errors/                            /reference/errors/                 301
-/use/embed                              /reference/embed/                  301
-/use/embed/                             /reference/embed/                  301
 /full-examples                          /use/full-examples/                301
 /full-examples/                         /use/full-examples/                301
 /use/examples/dedup                     /use/examples/                     301
@@ -194,3 +192,12 @@
 /full-examples/produce-consume          /use/js-client/hello-world/         301
 /full-examples/ordering-and-dedup       /use/js-client/multi-queue-flow/    301
 /full-examples/pipeline                 /use/js-client/transaction-ack-push/ 301
+
+# Embedding the engine moved back to Use Queen on 2026-08-17. The page always
+# declared `tier: use`, and filing it under Reference put a Rust team's first
+# encounter with the library target inside a collapsed group, behind the
+# caveat section of /reference/limits. The 2026-08-15 pair that sent
+# /use/embed to /reference/embed is deleted above and inverted here, so the
+# original URL is the live one again and the Reference path keeps working.
+/reference/embed                        /use/embed/                        301
+/reference/embed/                       /use/embed/                        301

@@ -38,6 +38,15 @@ build.
 Also: [cross-broker comparison](/benchmarks/comparison) and
 [method, rig and archive](/benchmarks/method/).
 
+## The other evidence
+
+How fast one shape goes is one kind of evidence. Whether the clients and the broker agree about
+what the API means, on more than one topology, is the other.
+[Conformance](/benchmarks/conformance) is that matrix: six client suites on three topologies
+each, the broker's own unit tests, an HA mesh assertion and a two-tenant isolation suite recorded
+at 45 assertions and 0 failures, every cell in its own throwaway stack. The harness itself, and
+how to run a subset of it, is [Testing](/internals/contributing/testing/).
+
 ## How to read a figure
 
 Producers are open-loop: each push leaves at its scheduled instant and is shed over the in-flight

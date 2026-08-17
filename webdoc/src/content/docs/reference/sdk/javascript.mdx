@@ -464,10 +464,18 @@ Stream.from(queen.queue('orders'), options?) // → Stream
 | Sink | `to(sinkQueueBuilder, opts)`, `foreach(fn)` (must be the last operator in the chain) |
 | Terminal | `run(runOptions)` |
 
-Window option objects share `gracePeriod`, `idleFlushMs`, `eventTime`, `allowedLateness` and
-`onLate` (`'drop'` \| `'include'`); the size argument differs per window:
-`windowTumbling({ seconds })`, `windowSliding({ size, slide })`, `windowSession({ gap })`,
-`windowCron({ every })` where `every` is one of `'second' | 'minute' | 'hour' | 'day' | 'week'`.
+The size argument differs per window: `windowTumbling({ seconds })`,
+`windowSliding({ size, slide })`, `windowSession({ gap })`, `windowCron({ every })` where `every`
+is one of `'second' | 'minute' | 'hour' | 'day' | 'week'`. Every window option object also accepts
+these five, which control when a window closes and what happens to whatever arrives after it did:
+
+| Option | Default | What it controls |
+| --- | --- | --- |
+| `gracePeriod` | `0` | Seconds a window stays open past its own end before it closes, so a straggler still lands in the bucket it belongs to. |
+| `idleFlushMs` | `5000`, but `1000` for `windowSession` and `30000` for `windowCron` | How often the runner sweeps partitions that have gone quiet for windows that are ripe to close. `0` disables the sweep, and a window on a silent partition then stays open until traffic returns. |
+| `eventTime` | none | `msg => epoch_ms`. Setting it switches bucketing from the broker's `createdAt` to your own timestamp, and turns on a per-partition watermark. |
+| `allowedLateness` | `0` | Event-time mode only. Seconds of out-of-orderness tolerated before an event is called late, measured against that partition's watermark. |
+| `onLate` | `'drop'` | What happens to an event older than `watermark - allowedLateness`. `'drop'` is the only value that keeps emits exact. `'include'` accumulates it anyway, which for an already-flushed window recreates the state row and produces a second emit for it. |
 
 `gate(fn)` receives `(value, ctx)` with `ctx.state` (per-key, persisted only on ALLOW),
 `ctx.streamTimeMs` and `ctx.partitionId`. Returning `false` halts the batch: the runner acks the
@@ -541,8 +549,16 @@ A `204` response resolves to `null`:
 
 ## Same surface, other languages
 
+<Render file="sdk-capability-matrix" />
+
+The `js` suite in the [test matrix](/internals/contributing/testing) runs
+`clients/client-js/test-v2`, the broker-free unit tests including the proxy 429 contract and then
+the live-broker integration run, on the `single`, `ha` and `tenanted` topologies. The unit tests
+are green at 91 of 91 on this tree.
+
 <CardGrid>
   <LinkCard href="/reference/sdk/python" title="Python" description="Async client with the same builder chain, snake_case." />
+  <LinkCard href="/reference/sdk/rust" title="Rust" description="Async on tokio, broker wire types, full streams runtime." />
   <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute()." />
   <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
   <LinkCard href="/reference/sdk/cpp" title="C++" description="Single-header, thread-pool consumers." />

@@ -49,7 +49,10 @@ PostgreSQL. `QUEEN_HOTLIST=0` reverts to the SQL candidate scan.
 
 The full list, with every variable, is in
 [Environment variables](/reference/config). These are the ones whose default
-changes what a client observes.
+changes what a client observes. The `QUEEN_ADMISSION_*` defaults in particular
+are the settled output of a measured control loop rather than round numbers:
+[flow control](/internals/flow-control/) explains what the loop measures and why
+each of them sits where it does.
 
 | Variable | Default | Effect of the default |
 | --- | --- | --- |
@@ -57,11 +60,17 @@ changes what a client observes.
 | `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | Larger request bodies are rejected with 413 before any handler runs. |
 | `DB_POOL_SIZE` | `160` | Upper bound on concurrent PostgreSQL work. A request that cannot get a pooled connection at all answers 500 with `{"error":"pool"}`. |
 | `QUEEN_STMT_TIMEOUT_MS` | `30000` | A statement past this is abandoned, cancelled server-side, and its pooled connection is quarantined. |
+| `QUEEN_ADMISSION_MIN` | `96` on the default pool | Floor on the admitted-write-transaction budget. It is derived, not a constant: two thirds of (`DB_POOL_SIZE` minus `QUEEN_ADMISSION_POOL_RESERVE`), never below 8, which is 96 at `DB_POOL_SIZE=160` with reserve 16. Shrink the pool and the floor shrinks with it. A fixed floor larger than the pool would admit more concurrent transactions than there are connections. |
+| `QUEEN_ADMISSION_MAX` | `128` | Ceiling on the same budget, itself capped at `DB_POOL_SIZE - QUEEN_ADMISSION_POOL_RESERVE`, so a pool smaller than 144 lowers the effective ceiling without any change here. |
+| `QUEEN_ADMISSION_POOL_RESERVE` | `16` | Pooled connections held back from the admission budget so admitted work never queues on the pool and unmetered admin writes cannot deadlock behind metered ones. |
+| `QUEEN_ADMISSION_SHARE_PUSH` / `_POP` / `_ACK` / `_MAINT` | `0.25` / `0.40` / `0.30` / `0.05` | Guaranteed lane shares of the budget. They order the wake queue when the budget is exhausted (ack, then pop, then push, then maint); they are not slot reservations and not a floor on a lane's own concurrency cap. |
+| `QUEEN_POP_FUSION` | `false` | Off. Each pop claim commits on its own. Set it and N claim legs share one transaction and one commit, and the Pop lane takes one admission slot per fused flush instead of one per claim. |
 | `DEFAULT_TIMEOUT` / `POP_DEFAULT_TIMEOUT_MS` | `30000` | How long a `wait=true` pop parks when the client sends no `timeout`. |
 | `DEFAULT_SUBSCRIPTION_MODE` | `new` | Where a consumer group starts when its first pop sends no `subscriptionMode`: `new` at the partition's tail, `all` at the oldest retained offset. Only consulted on a group's first contact, and ignored entirely by group-less pops, which are always `all`. |
 | `POP_WAIT_INITIAL_INTERVAL_MS` | `100` | First re-query interval of a parked pop; grows past `POP_WAIT_BACKOFF_THRESHOLD` (3) by `POP_WAIT_BACKOFF_MULTIPLIER` (2.0) up to `POP_WAIT_MAX_INTERVAL_MS` (1000). A push-wake resets it. |
 | `RETENTION_INTERVAL` | `5000` | Maintenance cycle cadence, leader-gated by one advisory lock, so only one instance sweeps per cycle. |
 | `RETENTION_BATCH_SIZE` | `1000` | Maximum segment rows deleted per bounded step, and partitions deleted per cleanup batch. |
+| `RETENTION_PARALLELISM` | `1` | Concurrent per-partition step workers in retention phases 1 to 3, clamped to 16. `1` is the historical serial cycle, so an upgrade changes nothing until you raise it. Each worker holds one maintenance-lane admission slot and one pooled connection while it runs, so raise `QUEEN_ADMISSION_SHARE_MAINT` with it. |
 | `PARTITION_CLEANUP_DAYS` | `30` | How long a partition must be empty *and* idle before the cleanup phase deletes the row. `QUEEN_PARTITION_CLEANUP_ENABLED=false` keeps every partition forever. |
 | `METRICS_FLUSH_MS` | `60000` | How often per-queue counters reach PostgreSQL, and therefore how stale a per-queue Prometheus series can be. |
 | `STATS_INTERVAL_MS` | `10000` | Cadence of the stats reconciler that feeds the dashboard's pending and total counts. |

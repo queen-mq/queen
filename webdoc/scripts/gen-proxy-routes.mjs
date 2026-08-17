@@ -17,6 +17,7 @@ import {
   emitPartial,
   fnBody,
   isCheck,
+  ROUTER_BUILDER,
   repoRead,
   sliceBlock,
 } from "./lib/source.mjs";
@@ -103,7 +104,7 @@ const CLASS_MEANING = [
 
 /** The broker's real routes — same parse as gen-routes.mjs. */
 function brokerRoutes() {
-  const block = sliceBlock(repoRead(MAIN), "let app = Router::new()", ".with_state(state);");
+  const block = sliceBlock(repoRead(MAIN), ROUTER_BUILDER, ".with_state(state);");
   const routes = [];
   const re = /\.route\(\s*"([^"]+)"\s*,/g;
   let m;

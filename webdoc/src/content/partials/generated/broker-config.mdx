@@ -10,160 +10,203 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 98 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 134 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+
+Two columns record what a variable falls back to. **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set. **Default inherited from** is a different knob whose value this one starts at when it is unset: setting that knob moves this variable and everything else that inherits from it, while setting this variable moves only this one.
 
 ### Server
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `PORT` | string | `6632` |  |
-| `QUEEN_APPLY_SCHEMA` | boolean | `true` |  |
-| `QUEEN_MAX_BODY_BYTES` | integer | `67108864 (64 MiB)` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `PORT` | string | `6632` |  |  |
+| `QUEEN_APPLY_SCHEMA` | boolean | `true` |  |  |
+| `QUEEN_MAX_BODY_BYTES` | integer | `67108864 (64 MiB)` |  |  |
 
 ### PostgreSQL
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `DB_POOL_SIZE` | integer | `160` |  |
-| `PG_DATABASE` | string | `postgres` | `PG_DB` |
-| `PG_HOST` | string | `localhost` |  |
-| `PG_PASSWORD` | string | `postgres` |  |
-| `PG_PORT` | integer | `5432` |  |
-| `PG_SSL_REJECT_UNAUTHORIZED` | boolean | `true` |  |
-| `PG_USE_SSL` | boolean | `false` |  |
-| `PG_USER` | string | `postgres` |  |
-| `QUEEN_STMT_TIMEOUT_MS` | integer | `30000` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `DB_POOL_SIZE` | integer | `160` |  |  |
+| `PG_DATABASE` | string | `postgres` |  | `PG_DB` |
+| `PG_HOST` | string | `localhost` |  |  |
+| `PG_PASSWORD` | string | `postgres` |  |  |
+| `PG_PORT` | integer | `5432` |  |  |
+| `PG_SSL_REJECT_UNAUTHORIZED` | boolean | `true` |  |  |
+| `PG_USE_SSL` | boolean | `false` |  |  |
+| `PG_USER` | string | `postgres` |  |  |
+| `QUEEN_STMT_TIMEOUT_MS` | integer | `30000` |  |  |
 
 ### Authentication
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `JWT_ALGORITHM` | string | `HS256` |  |
-| `JWT_AUDIENCE` | string | `(empty)` |  |
-| `JWT_CLOCK_SKEW` | integer | `30` |  |
-| `JWT_ENABLED` | boolean | `false` |  |
-| `JWT_ISSUER` | string | `(empty)` |  |
-| `JWT_JWKS_REFRESH_INTERVAL` | integer | `3600` |  |
-| `JWT_JWKS_TIMEOUT_MS` | integer | `5000` |  |
-| `JWT_JWKS_URL` | string | `(empty)` |  |
-| `JWT_PUBLIC_KEY` | string | `(empty)` |  |
-| `JWT_ROLE_ADMIN` | string | `admin` |  |
-| `JWT_ROLE_READ_ONLY` | string | `read-only` |  |
-| `JWT_ROLE_READ_WRITE` | string | `read-write` |  |
-| `JWT_ROLE_WRITE_ONLY` | string | `write-only` |  |
-| `JWT_ROLES_ARRAY_CLAIM` | string | `roles` |  |
-| `JWT_ROLES_CLAIM` | string | `role` |  |
-| `JWT_SECRET` | string | `(empty)` |  |
-| `JWT_SKIP_PATHS` | string | `/health,/metrics/prometheus,/metrics,/` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `JWT_ALGORITHM` | string | `HS256` |  |  |
+| `JWT_AUDIENCE` | string | `(empty)` |  |  |
+| `JWT_CLOCK_SKEW` | integer | `30` |  |  |
+| `JWT_ENABLED` | boolean | `false` |  |  |
+| `JWT_ISSUER` | string | `(empty)` |  |  |
+| `JWT_JWKS_REFRESH_INTERVAL` | integer | `3600` |  |  |
+| `JWT_JWKS_TIMEOUT_MS` | integer | `5000` |  |  |
+| `JWT_JWKS_URL` | string | `(empty)` |  |  |
+| `JWT_PUBLIC_KEY` | string | `(empty)` |  |  |
+| `JWT_ROLE_ADMIN` | string | `admin` |  |  |
+| `JWT_ROLE_READ_ONLY` | string | `read-only` |  |  |
+| `JWT_ROLE_READ_WRITE` | string | `read-write` |  |  |
+| `JWT_ROLE_WRITE_ONLY` | string | `write-only` |  |  |
+| `JWT_ROLES_ARRAY_CLAIM` | string | `roles` |  |  |
+| `JWT_ROLES_CLAIM` | string | `role` |  |  |
+| `JWT_SECRET` | string | `(empty)` |  |  |
+| `JWT_SKIP_PATHS` | string | `/health,/metrics/prometheus,/metrics,/` |  |  |
 
 ### Multi-broker mesh
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `QUEEN_CACHE_REFRESH_INTERVAL_MS` | integer | `60000` |  |
-| `QUEEN_MESH_PEERS` | string | `(empty)` |  |
-| `QUEEN_MESH_PORT` | integer | `6633` | `QUEEN_UDP_NOTIFY_PORT` |
-| `QUEEN_SYNC_DEAD_THRESHOLD_MS` | integer | `5000` |  |
-| `QUEEN_SYNC_ENABLED` | boolean | `true` |  |
-| `QUEEN_SYNC_HEARTBEAT_MS` | integer | `1000` |  |
-| `QUEEN_SYNC_SECRET` | string | `(empty)` |  |
-| `QUEEN_UDP_NOTIFY_PORT` | integer | `6633` |  |
-| `QUEEN_UDP_PEERS` | string | `(empty)` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `QUEEN_CACHE_REFRESH_INTERVAL_MS` | integer | `60000` |  |  |
+| `QUEEN_MESH_PEERS` | string | `(empty)` |  |  |
+| `QUEEN_MESH_PORT` | integer | `6633` |  | `QUEEN_UDP_NOTIFY_PORT` |
+| `QUEEN_SYNC_DEAD_THRESHOLD_MS` | integer | `5000` |  |  |
+| `QUEEN_SYNC_ENABLED` | boolean | `true` |  |  |
+| `QUEEN_SYNC_HEARTBEAT_MS` | integer | `1000` |  |  |
+| `QUEEN_SYNC_SECRET` | string | `(empty)` |  |  |
+| `QUEEN_UDP_NOTIFY_PORT` | integer | `6633` |  |  |
+| `QUEEN_UDP_PEERS` | string | `(empty)` |  |  |
 
 ### Consume and long-poll
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `DEFAULT_TIMEOUT` | integer | `30000` | `POP_DEFAULT_TIMEOUT_MS` |
-| `POP_DEFAULT_TIMEOUT_MS` | integer | `30000` |  |
-| `POP_WAIT_BACKOFF_MULTIPLIER` | number | `2.0` |  |
-| `POP_WAIT_BACKOFF_THRESHOLD` | integer | `3` |  |
-| `POP_WAIT_INITIAL_INTERVAL_MS` | integer | `100` |  |
-| `POP_WAIT_MAX_INTERVAL_MS` | integer | `1000` |  |
-| `QUEEN_POP_FUSION` | boolean | `false` |  |
-| `QUEEN_POP_FUSION_CONCURRENCY` | integer | `1` |  |
-| `QUEEN_POP_FUSION_HOLD_MS` | integer | `3` |  |
-| `QUEEN_POP_FUSION_MAX_JOBS` | integer | `16` |  |
-| `QUEEN_POP_FUSION_SHARDS` | integer | `4` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `DEFAULT_SUBSCRIPTION_MODE` | string | `new` |  |  |
+| `DEFAULT_TIMEOUT` | integer | `30000` |  | `POP_DEFAULT_TIMEOUT_MS` |
+| `POP_DEFAULT_TIMEOUT_MS` | integer | `30000` |  |  |
+| `POP_WAIT_BACKOFF_MULTIPLIER` | number | `2.0` |  |  |
+| `POP_WAIT_BACKOFF_THRESHOLD` | integer | `3` |  |  |
+| `POP_WAIT_INITIAL_INTERVAL_MS` | integer | `100` |  |  |
+| `POP_WAIT_MAX_INTERVAL_MS` | integer | `1000` |  |  |
+| `QUEEN_POP_FUSION` | boolean | `false` |  |  |
+| `QUEEN_POP_FUSION_CONCURRENCY` | integer | `1` |  |  |
+| `QUEEN_POP_FUSION_HOLD_MS` | integer | `3` |  |  |
+| `QUEEN_POP_FUSION_MAX_JOBS` | integer | `16` |  |  |
+| `QUEEN_POP_FUSION_SHARDS` | integer | `4` |  |  |
 
 ### Storage engine
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `QUEEN_ACK_FUSION` | boolean | `true` |  |
-| `QUEEN_ACK_FUSION_HOLD_MS` | integer | `3` |  |
-| `QUEEN_ACK_FUSION_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |
-| `QUEEN_ACK_REGISTRY` | boolean | `true` |  |
-| `QUEEN_ACK_REGISTRY_MB` | integer | `64` |  |
-| `QUEEN_DEDUP_CACHE` | boolean | `true` |  |
-| `QUEEN_DEDUP_CACHE_MB` | integer | `512` |  |
-| `QUEEN_HOTLIST` | boolean | `true` |  |
-| `QUEEN_HOTLIST_IDLE_SWEEP_MS` | integer | `300_000` |  |
-| `QUEEN_HOTLIST_RESEED_FULL_MS` | integer | `300_000` |  |
-| `QUEEN_HOTLIST_RESEED_MS` | integer | `30000` |  |
-| `QUEEN_HOTLIST_RESEED_WINDOW_MS` | integer | `120000 (max of 4x QUEEN_HOTLIST_RESEED_MS and 120000)` |  |
-| `QUEEN_HOTLIST_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |
-| `QUEEN_HOTLIST_WINDOW_BATCH` | integer | `100` |  |
-| `QUEEN_V2_FUSION_HOLD_MS` | integer | `3` |  |
-| `QUEEN_V2_FUSION_SHARDS` | integer | `8` |  |
-| `QUEEN_V2_ZSTD_LEVEL` | integer | `3` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `QUEEN_ACK_FUSION` | boolean | `true` |  |  |
+| `QUEEN_ACK_FUSION_HOLD_MS` | integer | `3` |  |  |
+| `QUEEN_ACK_FUSION_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |  |
+| `QUEEN_ACK_REGISTRY` | boolean | `true` |  |  |
+| `QUEEN_ACK_REGISTRY_MB` | integer | `64` |  |  |
+| `QUEEN_DEDUP_CACHE` | boolean | `true` |  |  |
+| `QUEEN_DEDUP_CACHE_MB` | integer | `512` |  |  |
+| `QUEEN_HOTLIST` | boolean | `true` |  |  |
+| `QUEEN_HOTLIST_IDLE_SWEEP_MS` | integer | `300_000` |  |  |
+| `QUEEN_HOTLIST_RESEED_FULL_MS` | integer | `300_000` |  |  |
+| `QUEEN_HOTLIST_RESEED_MS` | integer | `30000` |  |  |
+| `QUEEN_HOTLIST_RESEED_WINDOW_MS` | integer | `120000 (max of 4x QUEEN_HOTLIST_RESEED_MS and 120000)` |  |  |
+| `QUEEN_HOTLIST_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |  |
+| `QUEEN_HOTLIST_WINDOW_BATCH` | integer | `100` |  |  |
+| `QUEEN_V2_FUSION_HOLD_MS` | integer | `3` |  |  |
+| `QUEEN_V2_FUSION_SHARDS` | integer | `8` |  |  |
+| `QUEEN_V2_ZSTD_LEVEL` | integer | `3` |  |  |
+
+### Admission and flow control
+
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `QUEEN_ADMISSION_INIT` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |  |
+| `QUEEN_ADMISSION_MAX` | integer | `128` |  |  |
+| `QUEEN_ADMISSION_MIN` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |  |
+| `QUEEN_ADMISSION_NOSYNC_BUDGET` | integer | `64` |  |  |
+| `QUEEN_ADMISSION_POOL_RESERVE` | integer | `16` |  |  |
+| `QUEEN_ADMISSION_SHARE_ACK` | number | `0.30` |  |  |
+| `QUEEN_ADMISSION_SHARE_MAINT` | number | `0.05` |  |  |
+| `QUEEN_ADMISSION_SHARE_POP` | number | `0.40` |  |  |
+| `QUEEN_ADMISSION_SHARE_PUSH` | number | `0.25` |  |  |
+| `QUEEN_ADMISSION_TICK_MS` | integer | `500` |  |  |
+| `QUEEN_ADMISSION_TRACE` | boolean | `false` |  |  |
+| `QUEEN_ADMISSION_TRAIN_GAP_US` | integer | `300` |  |  |
 
 ### Background jobs
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `METRICS_FLUSH_MS` | integer | `60000` |  |
-| `METRICS_RETENTION_DAYS` | integer | `90` |  |
-| `PARTITION_CLEANUP_DAYS` | integer | `30` |  |
-| `QUEEN_PARTITION_CLEANUP_ENABLED` | boolean | `true` |  |
-| `RETENTION_BATCH_SIZE` | integer | `1000` |  |
-| `RETENTION_INTERVAL` | integer | `5000` |  |
-| `RETENTION_PARALLELISM` | integer | `1` |  |
-| `STATS_INTERVAL_MS` | integer | `10000` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `METRICS_FLUSH_MS` | integer | `60000` |  |  |
+| `METRICS_RETENTION_DAYS` | integer | `90` |  |  |
+| `PARTITION_CLEANUP_DAYS` | integer | `30` |  |  |
+| `QUEEN_PARTITION_CLEANUP_ENABLED` | boolean | `true` |  |  |
+| `RETENTION_BATCH_SIZE` | integer | `1000` |  |  |
+| `RETENTION_INTERVAL` | integer | `5000` |  |  |
+| `RETENTION_PARALLELISM` | integer | `1` |  |  |
+| `STATS_INTERVAL_MS` | integer | `10000` |  |  |
 
 ### Durability spool
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `FILE_BUFFER_DIR` | string | `/var/lib/queen/buffers` |  |
-| `FILE_BUFFER_EVENTS_PER_FILE` | integer | `10000` |  |
-| `FILE_BUFFER_FLUSH_MS` | integer | `100` |  |
-| `FILE_BUFFER_MAX_BATCH` | integer | `100` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `FILE_BUFFER_DIR` | string | `/var/lib/queen/buffers` |  |  |
+| `FILE_BUFFER_EVENTS_PER_FILE` | integer | `10000` |  |  |
+| `FILE_BUFFER_FLUSH_MS` | integer | `100` |  |  |
+| `FILE_BUFFER_MAX_BATCH` | integer | `100` |  |  |
 
 ### Security
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `QUEEN_ENCRYPTION_KEY` | string | `(empty)` |  |
-| `QUEEN_TENANCY_HEADER` | boolean | `false` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `QUEEN_ENCRYPTION_KEY` | string | `(empty)` |  |  |
+| `QUEEN_TENANCY_HEADER` | boolean | `false` |  |  |
 
 ### Logging
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `LOG_LEVEL` | string | `info` |  |
-| `QUEEN_LOG_JSON` | boolean | `false` |  |
-| `QUEEN_LOG_RATES_MS` | integer | `10000` |  |
-| `QUEEN_LOG_TOPN_QUEUES` | integer | `10` |  |
-| `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `LOG_LEVEL` | string | `info` |  |  |
+| `QUEEN_LOG_JSON` | boolean | `false` |  |  |
+| `QUEEN_LOG_RATES_MS` | integer | `10000` |  |  |
+| `QUEEN_LOG_TOPN_QUEUES` | integer | `10` |  |  |
+| `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` |  |  |
 
 ### Other
 
-| Variable | Type | Default | Also read as |
-| --- | --- | --- | --- |
-| `DEFAULT_SUBSCRIPTION_MODE` | string | `new` |  |
-| `QUEEN_ADMISSION_INIT` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |
-| `QUEEN_ADMISSION_MAX` | integer | `128` |  |
-| `QUEEN_ADMISSION_MIN` | integer | `96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)` |  |
-| `QUEEN_ADMISSION_NOSYNC_BUDGET` | integer | `64` |  |
-| `QUEEN_ADMISSION_POOL_RESERVE` | integer | `16` |  |
-| `QUEEN_ADMISSION_SHARE_ACK` | number | `0.30` |  |
-| `QUEEN_ADMISSION_SHARE_MAINT` | number | `0.05` |  |
-| `QUEEN_ADMISSION_SHARE_POP` | number | `0.40` |  |
-| `QUEEN_ADMISSION_SHARE_PUSH` | number | `0.25` |  |
-| `QUEEN_ADMISSION_TICK_MS` | integer | `500` |  |
-| `QUEEN_ADMISSION_TRACE` | boolean | `false` |  |
-| `QUEEN_ADMISSION_TRAIN_GAP_US` | integer | `300` |  |
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `QUEEN_KV_CELL_RATE` | integer | `2000` |  |  |
+| `QUEEN_KV_ENABLED` | boolean | `false` |  |  |
+| `QUEEN_KV_MAX_KEY_BYTES` | integer | `512` |  |  |
+| `QUEEN_KV_MAX_KEYS_PER_CALL` | integer | `1024` |  |  |
+| `QUEEN_KV_MAX_OPS_PER_CALL` | integer | `256` |  |  |
+| `QUEEN_KV_MAX_READ_BYTES` | integer | `4 * 1024 * 1024` |  |  |
+| `QUEEN_KV_MAX_TENANTS` | integer | `10_000` |  |  |
+| `QUEEN_KV_MAX_VALUE_BYTES` | integer | `65536` |  |  |
+| `QUEEN_KV_POOL_SIZE` | integer | `kv_pool_default(pool_size` |  |  |
+| `QUEEN_KV_PREFIX_LIMIT` | integer | `1000` |  |  |
+| `QUEEN_KV_READ_BURST` | integer | `400` |  |  |
+| `QUEEN_KV_READ_RATE` | integer | `200` |  |  |
+| `QUEEN_KV_REQUIRE_GRANT` | boolean | `tenancy_header` |  |  |
+| `QUEEN_KV_TRUSTED_PROXY` | boolean | `false` |  |  |
+| `QUEEN_KV_USAGE_EVERY_MS` | integer | `300_000` |  |  |
+| `QUEEN_KV_WRITE_BURST` | integer | `200` |  |  |
+| `QUEEN_KV_WRITE_RATE` | integer | `100` |  |  |
+| `QUEEN_SWEEPER` | boolean | `true` |  |  |
+| `QUEEN_SWEEPER_BACKOFF_MAX_MS` | integer | `60_000` |  |  |
+| `QUEEN_SWEEPER_BACKOFF_MIN_MS` | integer | `1000` |  |  |
+| `QUEEN_SWEEPER_CLAIM_BATCH` | integer | `200` |  |  |
+| `QUEEN_SWEEPER_CYCLE_MAX_ROWS` | integer | `5000` |  |  |
+| `QUEEN_SWEEPER_DUE_CAP` | integer | `2000` |  |  |
+| `QUEEN_SWEEPER_FIRE_RATE_PER_TENANT` | integer | `50` |  |  |
+| `QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS` | integer | `30_000` |  |  |
+| `QUEEN_SWEEPER_ISOLATE_ON_PERMANENT` | boolean | `true` |  |  |
+| `QUEEN_SWEEPER_LEASE_MS` | integer | `30_000` |  |  |
+| `QUEEN_SWEEPER_MAX_ATTEMPTS` | integer | `5` |  |  |
+| `QUEEN_SWEEPER_MAX_FIRE_BYTES` | integer | `8 * 1024 * 1024` |  |  |
+| `QUEEN_SWEEPER_MAX_SLEEP_MS` | integer | `1000` |  |  |
+| `QUEEN_SWEEPER_MIN_SLEEP_MS` | integer | `5` |  |  |
+| `QUEEN_SWEEPER_PARALLELISM` | integer | `1` |  |  |
+| `QUEEN_TIMERS_ENABLED` | boolean | `false` |  |  |
+| `QUEEN_TIMERS_MAX_HORIZON_S` | integer | `7_776_000` |  |  |
+| `QUEEN_TIMERS_MAX_OPS_PER_CALL` | integer | `256` |  |  |
+| `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` | integer | `1024 * 1024` |  |  |
 
 ### Experiment-only
 

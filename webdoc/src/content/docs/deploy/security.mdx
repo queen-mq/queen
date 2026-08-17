@@ -14,6 +14,9 @@ sourceOfTruth:
   - server/src/encryption.rs
   - server/src/pgtls.rs
   - server/sql/procedures/002_streams_schema.sql
+  - proxy/src/main.rs
+  - proxy/src/gateway.rs
+  - proxy/src/routes.rs
 digest: >-
   One plaintext listener on `0.0.0.0:PORT` serves the HTTP API and dashboard; no TLS listener, no
   CORS layer. `JWT_ENABLED` is `false` by default; off, every route answers any caller, `DELETE
@@ -50,7 +53,7 @@ JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$JWT_SECRET" \
 
 The boundaries, and who defends each one:
 
-- HTTP API and dashboard, on `PORT`: optional JWT per route, with TLS termination and network policy yours.
+- HTTP API and dashboard, on `PORT`: optional JWT per route, with TLS terminated by [`queen_proxy`](/deploy/proxy) or by whatever else you put in front, and network policy yours.
 - Broker to PostgreSQL: optional TLS, off by default.
 - The mesh between brokers, on `QUEEN_MESH_PORT`: an HMAC handshake and then nothing, so the firewall is yours and not optional.
 - Payloads at rest: optional AES-256-GCM on flagged queues, with key management yours.
@@ -59,6 +62,22 @@ The boundaries, and who defends each one:
 One more surface has no switch at all: `/metrics/prometheus` is public, broker authentication
 cannot protect it, and its per-queue series carry no tenant label, so keep it off any network a
 customer can reach ([Prometheus metrics](/reference/prometheus)).
+
+## The front door is in this repository
+
+`queen_proxy` (Apache-2.0, in `proxy/`) is the component the boundaries above assume. It terminates
+TLS itself: set `QUEEN_PROXY_TLS_CERT` and `QUEEN_PROXY_TLS_KEY` and it serves rustls/ring directly,
+failing at boot rather than serving plaintext if only one of the two is set. It authenticates two
+credential kinds, an opaque cluster API key and a human session token, classifies every broker path
+against a fail-closed table that forwards nothing it cannot name, strips the caller's
+`Authorization` header and substitutes the cell's own token where the cell has one, and appends a
+`queen_proxy.operations` row on every mutating control-plane function, a table nothing deletes
+from. It is worth running in front of a single-tenant broker for those properties alone.
+
+Neither TLS variable is set by default, and unset means the proxy serves its own plaintext listener
+on `QUEEN_PROXY_PORT`, so a proxy in front of the broker is not by itself a TLS deployment. The
+variables, the timeouts and the pxdb settings are in [proxy configuration](/deploy/proxy); the
+classification table is in [endpoints a tenant can reach](/reference/multi-tenant/endpoints).
 
 ## Authentication
 

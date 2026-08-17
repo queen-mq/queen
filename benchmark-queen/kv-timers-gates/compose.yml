@@ -1,0 +1,81 @@
+# Isolated stack for the two PLAN_KV_TIMERS performance gates (§15).
+#
+# Deliberately NOT the scratchpad rr-compose: this one differs in three ways that the gates
+# depend on, and folding them back into a shared file would change what other people measure.
+#
+#   1. pg_stat_statements is preloaded. The hot-path gate's second half is "no new query with
+#      calls > 0", and the extension only records if it is in shared_preload_libraries — a
+#      CREATE EXTENSION on a server without the preload succeeds and then reports nothing,
+#      which reads exactly like a pass.
+#   2. Explicit CPU limits on both services. CPU per message is a ratio, and a ratio measured
+#      on a host that is doing something else in between the two captures is not a measurement.
+#      A limit does not remove host noise, but it removes the part that scales with it.
+#   3. Its own port and project namespace, so a gate can run while the F1/F3 rigs are up.
+#
+# Never point this at :5432 — that is the live channel-ts stack.
+services:
+  pg:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      # track=all also records statements inside PL/pgSQL bodies. That is the point: the
+      # statements this feature adds live INSIDE log_transaction_wire_v1, so with the default
+      # track=top they would be invisible and the gate would pass on a broker that grew three
+      # new queries in the wire.
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - max_connections=200
+      # Full durability. The wire's cost is dominated by the commit; measuring CPU per message
+      # with synchronous_commit=off would measure a system nobody runs.
+      - -c
+      - synchronous_commit=${GATE_SYNC_COMMIT:-on}
+      # Autovacuum stays ON. §15's vacuum gate is a separate campaign, but a gate that disabled
+      # it would hide exactly the class of cost the two new tables introduce.
+    volumes:
+      - gatepg:/var/lib/postgresql/data
+    cpus: ${GATE_PG_CPUS:-4}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  broker:
+    image: ${GATE_IMAGE:-queen:test}
+    depends_on:
+      pg:
+        condition: service_healthy
+    environment:
+      PG_HOST: pg
+      PG_PORT: "5432"
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: postgres
+      QUEEN_APPLY_SCHEMA: "1"
+      PORT: "6632"
+      DB_POOL_SIZE: "${GATE_POOL_SIZE:-32}"
+      QUEEN_TENANCY_HEADER: "false"
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+      LOG_LEVEL: "${GATE_LOG_LEVEL:-warn}"
+      # The two feature flags and the sweeper knobs, passed straight through so a gate can flip
+      # them per condition without a second compose file. Empty means "let the binary decide",
+      # which for a pre-F1 image is the same as absent.
+      QUEEN_KV_ENABLED: "${GATE_KV_ENABLED:-false}"
+      QUEEN_TIMERS_ENABLED: "${GATE_TIMERS_ENABLED:-false}"
+      QUEEN_SWEEPER_PARALLELISM: "${GATE_SWEEPER_PARALLELISM:-1}"
+    ports:
+      - "${GATE_BROKER_PORT:-16644}:6632"
+    cpus: ${GATE_BROKER_CPUS:-4}
+    tmpfs:
+      - /var/lib/queen/buffers
+
+volumes:
+  gatepg:

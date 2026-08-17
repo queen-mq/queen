@@ -1,0 +1,238 @@
+---
+title: Streams routes
+description: "The three /streams/v1 endpoints field by field: query registration and its 409, the state read, and the cycle commit that carries state ops, sink pushes and the source ack."
+type: reference
+sidebar:
+  order: 16
+  label: Streams
+sourceOfTruth:
+  - server/src/main.rs
+  - server/src/handlers/streams.rs
+  - server/sql/procedures/007_log_streams.sql
+  - server/sql/procedures/008_streams_register_query_v1.sql
+  - server/sql/procedures/009_streams_state_get_v1.sql
+verifiedBy:
+  - clients/client-rust/tests/streams.rs
+  - clients/client-js/test-v2/streams-unit/cycle.test.js
+  - clients/client-go/tests/streams_integration/gate_test.go
+digest: >-
+  `/streams/v1` is three JSON POSTs and a public versioned contract, not an SDK internal.
+  `POST /streams/v1/queries` registers a query by `name` and returns its `query_id`, answering 409
+  when `config_hash` differs from the stored one and `reset` is absent. `POST /streams/v1/state/get`
+  reads state rows for one `query_id` and `partition_id`, filtered by `keys`, `key_prefix` or
+  `ripe_at_or_before`, at read-only access level. `POST /streams/v1/cycle` commits `state_ops`,
+  `push_items` and the source ack in one PostgreSQL transaction, at read-write.
+---
+
+The whole streaming engine is three JSON POSTs. `/streams/v1` sits inside the versioned contract
+alongside `/api/v1` (see [compatibility](/reference/compatibility)), so these routes are a public
+protocol rather than an SDK's private wire: a language with no Queen streams SDK can run a complete
+streaming worker by registering a query, reading its state, and committing cycles.
+
+| Route | Access level | What it does |
+| --- | --- | --- |
+| `POST /streams/v1/queries` | read-write | Registers or re-registers a query by name, returns its `query_id` |
+| `POST /streams/v1/state/get` | read-only | Reads the state rows for one query and one partition |
+| `POST /streams/v1/cycle` | read-write | Commits state writes, sink pushes and the source ack in one transaction |
+
+None of the three is tenant-scoped. A query `name` is global to the database, and the cycle
+resolves its sink queues on the default tenant. See [the model](/use/streams) for what a worker
+does between these calls.
+
+## POST /streams/v1/queries
+
+Registration is idempotent on `name`, and it is where a changed operator chain is caught.
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | yes | The query's global identity. This is the SDK's `queryId` |
+| `source_queue` | string | yes | The queue the worker pops from |
+| `sink_queue` | string | no | The queue closed windows are pushed to. An empty string is stored as null |
+| `config_hash` | string | yes | A hash the client computes over the operator chain. The handler rejects a missing or empty value with **400** before the procedure runs |
+| `reset` | boolean | no, default `false` | Delete every state row for this query before rewriting the registration |
+
+Three outcomes:
+
+- **The name is new.** The row is inserted and the response carries `fresh: true`.
+- **The name exists and `config_hash` matches.** `source_queue` and `sink_queue` are updated to the
+  supplied values and the accumulators are kept. `fresh` is `false`.
+- **The name exists and `config_hash` differs.** With `reset` absent or `false` this is **HTTP
+  409**, with `success: false` and an error naming the query. With `reset: true` the broker deletes
+  every `queen_streams.state` row for the query, stores the new hash, and answers 200 with
+  `reset: true`.
+
+A 200 body carries the identity every later call uses. `query_id` is that value; the name never
+appears on the wire again.
+
+```json
+{
+  "success": true,
+  "query_id": "0193f0c4-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+  "name": "orders.per_minute",
+  "config_hash": "9f2c…",
+  "fresh": false,
+  "reset": false
+}
+```
+
+<Aside type="caution">
+`reset: true` deletes the accumulators, not just the registration. Every open window for that query
+is gone, and the next cycle starts folding from an empty state while the source cursor stays where
+it was. It is the right answer to the 409 and the wrong answer to a transient startup failure.
+</Aside>
+
+The 409 is the only 409 the broker emits (see [status codes](/reference/errors)). It exists because
+old accumulators and a new fold shape do not mix: a chain that used to sum and now averages would
+read the old value as if it meant the new thing.
+
+## POST /streams/v1/state/get
+
+Read-only, and the only way to see a window before it closes. Closed windows are ordinary messages
+on the sink queue and need nothing from this route.
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `query_id` | uuid string | yes | From registration |
+| `partition_id` | uuid string | yes | The source partition whose state shard you want |
+| `keys` | string array | no | Exact keys. Absent, `null` or `[]` all mean no key filter |
+| `key_prefix` | string | no | Returns keys beginning with this string. An empty string is treated as absent |
+| `ripe_at_or_before` | number | no | Epoch milliseconds. Returns only rows whose `value.windowEnd` is a JSON number at or before it |
+
+The filters are ANDed in that order, so `keys` and `key_prefix` together mean both must hold. The
+response is `{"success": true, "rows": [{"key": "…", "value": {…}, "updated_at": "…"}]}`, ordered by
+`key`. **A key that does not exist is absent from `rows`, not present with a null value**, so an
+empty `rows` and an unknown `query_id` look identical from here.
+
+`ripe_at_or_before` is what an idle-flush timer uses: ask for the windows that are already due on a
+partition that has stopped receiving, emit them, and delete their rows in the same cycle. A state
+row whose `value` has no numeric `windowEnd` can never match that filter.
+
+Missing `query_id` or `partition_id` produces **400**, because the procedure reports `success:
+false` for it and the handler maps that to 400. An `error` field in the result is **500**.
+
+<Aside type="note">
+No SDK exposes the full filter set. `getState` is an internal module in JavaScript and Rust, and
+Go's `runtime.GetState` takes explicit keys only. Prefix and ripeness reads are available over HTTP
+and nowhere else, which is the practical reason to treat this as a route rather than a client
+feature.
+</Aside>
+
+## POST /streams/v1/cycle
+
+One call, one PostgreSQL transaction: the state writes, the sink pushes and the source ack land
+together or not at all. This is the route the [exactly-once argument](/use/streams) rests on.
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `query_id` | uuid string | yes | 400 if absent or empty |
+| `partition_id` | uuid string | yes | The source partition. 400 if absent or empty |
+| `consumer_group` | string | no | Defaults to `__QUEUE_MODE__` when absent or empty. The SDKs send `streams.<queryId>` |
+| `state_ops` | array | no, default `[]` | Applied in order against `queen_streams.state`, scoped to this query and partition |
+| `push_items` | array | no, default `[]` | Sink messages. The broker packs them into segments before the procedure runs |
+| `ack` | object or `null` | no | The source ack. `null` is an idle-flush cycle: state ops and sink pushes only, no cursor movement |
+| `release_lease` | boolean | no, default `true` | `false` retains the source lease on the un-acked tail |
+
+The two arrays and the ack have fixed element shapes. A state `key` is an opaque string to this
+route; the SDKs compose it from the operator tag, the window key and the user key joined by
+`U+001F`, which is what makes a `key_prefix` read return exactly one operator's windows.
+
+```json
+{
+  "state_ops": [
+    {"type": "upsert", "key": "tumb:60\u001f2026-08-17T10:01:00.000Z\u001facme", "value": {"acc": 41}},
+    {"type": "delete", "key": "tumb:60\u001f2026-08-17T10:00:00.000Z\u001facme"}
+  ],
+  "push_items": [
+    {"queue": "orders.per_minute", "partition": "Default", "payload": {"count": 41}}
+  ],
+  "ack": {"transactionId": "…", "leaseId": "…", "status": "completed", "count": 50}
+}
+```
+
+Any `type` other than `upsert` or `delete` raises inside the element and fails the whole cycle,
+which is the intended outcome: a typo must not commit a partial fold.
+
+In a `push_items` element, `partition` defaults to `Default` and `payload` may also be sent as
+`data`. An item with an empty `queue` is skipped rather than rejected. You may supply `messageId`
+and `transactionId`, and the broker stamps a UUIDv7 message id and reuses it as the transaction id
+when you do not.
+
+`leaseId` is the worker id the pop returned, and it is the exactly-once guard: the procedure locks
+the cursor row and raises if the lease is absent, held by another worker, or expired, which rolls
+the sink pushes back with it. `status` counts as success for `completed`, `success`, `acked`, `ok`
+and for an absent field; **anything else, including a misspelling, is a nack** and redelivers the
+batch.
+
+### What the ack does to the cursor
+
+| `status` | `release_lease` | Effect |
+| --- | --- | --- |
+| ok | `true` | `committed` jumps to the recorded `batch_end`, the lease and the retry state are cleared, `total_consumed` grows by `count`. Identical to an ordinary ack of the whole leased batch |
+| ok | `false` | `committed` advances by exactly `count` frames, walked forward over the real `queen.log_segments` ranges so offsets removed by retention are skipped, and the lease is **retained**. This is the gate partial ack |
+| not ok | either | The lease is released and the cursor is untouched, so the whole batch redelivers. The reported `count` is forced to 0 |
+| `ack: null` | either | The lease block is skipped entirely |
+
+### The response
+
+A completed procedure call is always **HTTP 200**, whether the element succeeded or not, so a
+client must read the body rather than the status line. A 500 means the call itself failed, and
+retrying it is safe because the whole call is one transaction.
+
+```json
+{
+  "success": true,
+  "query_id": "0193f0c4-...",
+  "partition_id": "0193f0c5-...",
+  "queueName": "orders",
+  "state_ops_applied": 3,
+  "push_results": [
+    {"queue": "orders.per_minute", "partition": "Default", "status": "queued", "baseOffset": 4711}
+  ],
+  "ack_result": {"success": true, "count": 50, "lease_released": true, "dlq": false}
+}
+```
+
+On failure the same envelope comes back with `"success": false` and an `error` string carrying the
+PostgreSQL message, and nothing committed for that element.
+
+<Aside type="caution">
+`"success": false` arrives with a 200. A client that checks only the status code will treat a
+rolled-back cycle as a committed one, re-pop the same batch after the lease expires, and never
+notice it is looping.
+</Aside>
+
+## What the broker adds on this route
+
+Three things happen in the handler rather than in the procedure, and a client implementing the
+protocol by hand inherits all of them:
+
+- **Packing.** `push_items` are grouped by queue and partition, framed, zstd-compressed and hashed
+  broker-side, then pushed through `queen.log_push_one_v1`, the same allocator
+  [`POST /api/v1/push`](/reference/http/push) uses. Stream output is not a second class of message.
+- **Encryption.** Sink payloads for a queue with `encryptionEnabled` are enveloped before packing,
+  and a cipher failure warns and stores plaintext rather than failing the cycle. See
+  [payload encryption](/reference/security/encryption/).
+- **Discoverability and metrics.** Because the procedure commits internally, neither the push nor
+  the ack fast path runs afterwards, so the handler does their bookkeeping: it marks the sink
+  partitions in the hot list (or wakes parked pops directly when the hot list is off) and
+  attributes the cycle's pushes and acks to the per-queue counters itself. Without that step a sink
+  emit stays invisible to consumers until the periodic reseed sweep, and the charts read zero while
+  the queue visibly fills.
+
+<CardGrid>
+  <LinkCard
+    href="/use/streams"
+    title="Streaming queries"
+    description="What a worker does between these calls: windows, event time, gating, and why the cycle is exactly-once."
+  />
+  <LinkCard
+    href="/reference/errors"
+    title="Status codes"
+    description="Every code the broker returns, including the 409 that only registration emits."
+  />
+  <LinkCard
+    href="/internals/schema"
+    title="Schema and procedures"
+    description="The queen_streams tables and the stored procedures these three routes call."
+  />
+</CardGrid>

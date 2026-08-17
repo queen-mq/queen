@@ -13,11 +13,13 @@ sourceOfTruth:
   - server/src/file_buffer.rs
   - server/src/schema.rs
   - server/src/handlers/status.rs
+  - server/src/admission.rs
 ---
 
 Three replicas, a headless Service so they can find each other, and a client Service carrying only
-the HTTP port. There is no official Helm chart, so this is the manifest: apply it with `-n queen`,
-against a PostgreSQL at `queen-pg`.
+the HTTP port. The manifest below is the deployment in full: apply it with `-n queen`, against a
+PostgreSQL at `queen-pg`. Every value in it that is not obvious is explained underneath, including
+the three that decide whether the broker performs.
 
 ```bash
 kubectl -n queen create secret generic queen-secrets \
@@ -184,12 +186,40 @@ For one replica that accepts losing an unreplayed spool: drop the claim template
   declaring UDP blocks the mesh silently: brokers keep serving, with pop wakes arriving late.
 - The peer list is uniform and names the pod itself, which is safe because a frame is applied to
   local state and never re-broadcast.
-- No CPU limit: the runtime sizes its worker threads from the core count it sees rather than the
-  cgroup quota, so a low limit on a large node buys contention instead of a throttle.
+- No CPU limit, but not for the reason usually given: tokio sizes its worker pool from
+  `available_parallelism()`, which honours the cgroup quota on the toolchain this builds with, so a
+  limit would size the pool correctly rather than oversubscribe it. The cost is CFS throttling. The
+  commit path is bursty, and a quota turns a burst into scheduler latency at exactly the percentile
+  you are watching. Memory has no such caveat and is set.
 - `podManagementPolicy: Parallel` is safe: the schema apply serialises cluster-wide on a
   PostgreSQL advisory lock.
 - Nothing but the other brokers belongs on 6633: keep it off the client Service and close it with
   a NetworkPolicy ([the mesh port](/deploy/security#the-mesh-port)).
+
+## The three sizing rules
+
+None of these shows up in a `kubectl get`, and each one is the difference between a broker that
+runs and a broker that performs.
+
+- **`PG_PORT` points at PostgreSQL directly, not at a pooler.** The broker holds session-scoped
+  advisory locks across the boot schema apply and across every retention cycle, plus the statements
+  the hot paths prepare once per connection, and all of that lives on one specific backend session.
+  PgBouncer in session mode is the supported way to pool, and it pins a server connection per
+  client, so it multiplexes nothing for a long-lived application pool anyway: 28 client connections
+  were measured against 28 backends. It can still recycle the server underneath and drop a held
+  lock, which is what `pg_advisory_unlock reported not-held` in the retention logs was. Full
+  reasoning in [PostgreSQL](/deploy/postgres#give-it-a-direct-connection).
+- **`DB_POOL_SIZE` has to comfortably exceed `QUEEN_ADMISSION_POOL_RESERVE`, default 16.** The
+  admission arbiter derives its band from `DB_POOL_SIZE` minus that reserve, so with the default
+  reserve a pool of 24 or less collapses the band to `[8,8]`: the broker then runs at a fixed eight
+  concurrent write transactions whatever the disk can take, and the AIMD adapter stops adapting.
+  The 60 in the manifest gives a band of `[29,44]`. If PostgreSQL cannot take
+  `replicas × DB_POOL_SIZE`, lower `QUEEN_ADMISSION_POOL_RESERVE` alongside rather than shrinking
+  the pool on its own ([flow control](/internals/flow-control)).
+- **Leave `QUEEN_STMT_TIMEOUT_MS` at its 30000 default unless you have measured a reason.** An
+  admission slot is held across the timed call, so a longer deadline means a wedged statement
+  occupies a write slot for that much longer, and the budget the arbiter is trying to hold shrinks
+  by one for the duration.
 
 ## Verify
 

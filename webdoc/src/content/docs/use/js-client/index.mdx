@@ -17,8 +17,9 @@ verifiedBy:
   - clients/client-js/test-v2/consume.js
 ---
 
-The JavaScript client is the reference implementation, the one every other SDK is a
-transliteration of: ESM only, Node 22 or newer, broker client and streaming SDK in one package.
+The JavaScript client is where the builder shape originated. Every SDK implements the same surface
+natively in its own idiom, and the Rust client shares its wire types with the broker. This one is
+ESM only, Node 22 or newer, with the broker client and the streaming SDK in one package.
 
 <PackageManagers pkg="queen-mq" />
 

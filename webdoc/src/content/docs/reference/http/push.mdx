@@ -9,6 +9,7 @@ sourceOfTruth:
   - server/src/handlers/data.rs
   - server/src/fusion.rs
   - server/sql/procedures/003_log_push.sql
+  - server/sql/procedures/004_log_pop.sql
   - server/sql/procedures/012_configure.sql
 verifiedBy:
   - clients/client-js/test-v2/push.js
@@ -154,9 +155,22 @@ several writes to land together, use
 [`POST /api/v1/transaction`](/reference/http/transaction), which runs the whole bundle in one
 PostgreSQL transaction.
 
-The handler does not answer until every group has resolved, so the call's latency includes the
-broker's write-coalescing hold window: concurrent pushes to different partitions are bundled
-into a single database transaction, which is what makes one commit carry many messages.
+The handler does not answer until every group has committed. There is no batching delay in front
+of that commit: when the push lane is uncontended the segment dispatches on arrival, so a single
+low-rate push costs about one database round trip. Coalescing is emergent, not timed. While a
+partition has a flush in flight the next segment accumulates, so batches fatten only when load
+produces them, and `QUEEN_V2_FUSION_HOLD_MS` (default 3) is a liveness backstop tick, not a
+linger window.
+
+Coalescing never reorders a partition either. At most one flush per `(queue, partition)` is in
+flight, and the next segment is dispatched only after the previous one commits, so a partition's
+offsets are assigned in commit order no matter how many requests were fused into the same
+transaction. The commit timestamp is taken under the same partition row lock, so `created_at` is
+monotone per partition as well.
+
+Bundling is the other half: one transaction can carry the segments of many partitions, which is
+what makes one commit and one fsync serve many messages.
+[Life of a push](/internals/life-of-a-push/) walks the whole path, shard by shard.
 
 ## Deduplication
 
@@ -191,6 +205,28 @@ new message. Choose the window to cover your worst-case retry horizon, and remem
 `/api/v1/configure` is a **full replace**: omitting `dedupWindowSeconds` on a later configure
 call resets it to 3600.
 </Aside>
+
+## Delayed delivery
+
+A push has no per-message delay field. The delay is a queue option,
+[`delayedProcessing`](/reference/queue-options/), an integer number of seconds defaulting to `0`,
+set through `/api/v1/configure` and applied to **every** message the queue receives. A message
+pushed to a queue with `delayedProcessing: 30` is stored and committed immediately, and becomes
+poppable 30 seconds after that commit.
+
+The cut is enforced in SQL on the pop path, not in the producer: a pop delivers only segments
+whose `created_at` is at least `delayedProcessing` seconds old. The broker's in-memory scheduler
+only schedules a revisit for the deadline, it never bypasses the cut, so a delayed message cannot
+be delivered early by a consumer that polls at the wrong moment.
+
+Nothing is reordered by the delay. Commit timestamps are monotone per partition, so the deadline
+cuts a contiguous recent tail of the partition rather than holding individual messages back past
+their neighbours: the same messages come out in the same order, later. The in-flight backlog the
+delay creates is bounded by push rate times the delay.
+
+Changing the option applies to messages that are already stored: raising it hides messages that
+were visible a moment ago, and lowering it exposes them. Remember that `/api/v1/configure` is a
+full replace, so omitting `delayedProcessing` on a later call resets it to `0`.
 
 ## Examples
 

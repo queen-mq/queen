@@ -117,8 +117,12 @@ const differentiators = [
     body: "Durability, replication, backup and SQL introspection are the ones you already operate, not a second data system.",
   },
   {
-    title: "Acknowledgement is an offset commit",
-    body: "One cursor per partition and consumer group, with no per-message delivery record to store, scan or clean up.",
+    title: "Acknowledgement moves a cursor",
+    body: "Ack a single message or a whole leased batch. Either way progress is one cursor per partition and consumer group, so there is no per-message delivery record to store, scan or clean up.",
+  },
+  {
+    title: "Ack the input and push the output in one commit",
+    body: "One transaction acknowledges batches leased from any number of partitions and pushes to any number of queues. A pipeline stage cannot lose its input or duplicate its output.",
   },
   {
     title: "Windowed aggregation, in the same transaction",
@@ -172,9 +176,11 @@ const proof = [
  * rather than out of an array, and looks for it here.
  */
 const HOME_LIMITS =
-  "Queen has real limits: ordering is per partition and never global, nothing overtakes " +
-  "anything inside a lane, in-group parallelism is capped by partition count, and one " +
-  "PostgreSQL is both the ceiling and the failure domain.";
+  "Queen has real limits: in-group parallelism is bounded by how many distinct entities you " +
+  "push to, because exactly one leased batch is in flight per partition and consumer group, " +
+  "and one PostgreSQL is both the ceiling and the failure domain. Ordering is per entity, and " +
+  "how coarse or fine that is comes from your partition key rather than from a number fixed " +
+  "when the queue was created.";
 
 /**
  * The landing page as markdown, from the eyebrow down. The `# ` headline is

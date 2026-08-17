@@ -435,14 +435,21 @@ The command errors out when the handler class does not exist.
 ## Not in this client
 
 There is no streaming SDK for PHP. The `Stream` builder, windows, gates and the
-`/streams/v1/*` runtime exist in the JavaScript, Python and Go clients only.
+`/streams/v1/*` runtime exist in the JavaScript, Python, Go and Rust clients.
 
 ## Same surface, other languages
+
+<Render file="sdk-capability-matrix" />
+
+PHP is the one client with no suite in the [test matrix](/internals/contributing/testing): nothing
+in `test/run.sh` executes it. The rows above are read off `clients/client-laravel/src`, not off a
+run, and the package's own `tests/` directory is the only thing that exercises it.
 
 <CardGrid>
   <LinkCard href="/reference/sdk/javascript" title="JavaScript" description="Thenable builders plus the streaming SDK." />
   <LinkCard href="/reference/sdk/python" title="Python" description="Async client with the same builder chain." />
   <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute()." />
+  <LinkCard href="/reference/sdk/rust" title="Rust" description="Async on tokio, broker wire types, full streams runtime." />
   <LinkCard href="/reference/sdk/cpp" title="C++" description="Single-header, thread-pool consumers." />
   <LinkCard href="/reference/queenctl" title="queenctl" description="The same operations from a shell." />
 </CardGrid>

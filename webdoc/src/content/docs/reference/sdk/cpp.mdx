@@ -377,14 +377,21 @@ are also public.
 ## Not in this client
 
 There is no streaming SDK for C++ and no `Admin` facade. The `Stream` builder, windows, gates and
-the `/streams/v1/*` runtime exist in the JavaScript, Python and Go clients only.
+the `/streams/v1/*` runtime exist in the JavaScript, Python, Go and Rust clients.
 
 ## Same surface, other languages
+
+<Render file="sdk-capability-matrix" />
+
+The `cpp` suite in the [test matrix](/internals/contributing/testing) runs `test_retry429`, which
+needs no broker, then `test_client` against a live one, on the `single`, `ha` and `tenanted`
+topologies. That suite plus its 14 proxy-contract assertions is green on this tree.
 
 <CardGrid>
   <LinkCard href="/reference/sdk/javascript" title="JavaScript" description="Thenable builders plus the streaming SDK." />
   <LinkCard href="/reference/sdk/python" title="Python" description="Async client with the same builder chain." />
   <LinkCard href="/reference/sdk/go" title="Go" description="Context-first, explicit Execute(), full Admin facade." />
+  <LinkCard href="/reference/sdk/rust" title="Rust" description="Async on tokio, broker wire types, full streams runtime." />
   <LinkCard href="/reference/sdk/php" title="PHP" description="Synchronous Guzzle client with Laravel integration." />
   <LinkCard href="/reference/queenctl" title="queenctl" description="The same operations from a shell." />
 </CardGrid>

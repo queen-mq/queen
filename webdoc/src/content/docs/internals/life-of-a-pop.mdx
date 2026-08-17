@@ -8,6 +8,8 @@ sidebar:
 sourceOfTruth:
   - server/src/handlers/data.rs
   - server/sql/procedures/004_log_pop.sql
+  - server/src/pop_fusion.rs
+  - server/src/config.rs
   - server/src/db.rs
 verifiedBy:
   - clients/client-js/test-v2/pop.js
@@ -29,10 +31,13 @@ The client side looks like this:
 | `GET /api/v1/pop/queue/:queue/partition/:partition` | one named partition | `log_pop_specific_v1` |
 | `GET /api/v1/pop?namespace=&task=` | across every matching queue | `log_pop_discover_wire_v1` |
 
-All three funnel into `queen.log_pop_v1`, once per partition. The claim algorithm below is
-therefore the same in all cases; only candidate selection differs. A discovery pop requires at
-least one of `namespace` or `task`: a bare `GET /api/v1/pop` is a `400` rather than an
-unbounded scan of every queue.
+The single-partition, wildcard and discovery procedures funnel into `queen.log_pop_v1`, once per
+partition. `log_pop_list_v1`, the hot-list serve path, runs the same claim algorithm in one batched
+pass over the whole candidate list, about six statements regardless of how many candidates it was
+given, and calls `queen.log_pop_v1` only for a candidate on first contact that has no cursor row
+yet. The claim algorithm below is therefore the same in all cases; only candidate selection and
+batching differ. A discovery pop requires at least one of `namespace` or `task`: a bare
+`GET /api/v1/pop` is a `400` rather than an unbounded scan of every queue.
 
 The single-partition route carries one wire subtlety worth recording. Its response assembly lives
 inside `queen.log_pop_specific_v1` (004_log_pop), a `VOLATILE` plpgsql function that calls
@@ -54,7 +59,7 @@ sequenceDiagram
   C->>H: GET pop with batch, partitions, wait
   H->>R: ask for candidate partitions
   R-->>H: k names, or nothing ready
-  H->>PG: log_pop_list_v1, one log_pop_v1 per candidate
+  H->>PG: log_pop_list_v1, one batched claim over all candidates
   PG->>PG: claim log_consumers FOR UPDATE SKIP LOCKED
   PG->>PG: head probe backwards, then forward scan to the budget
   alt autoAck
@@ -95,9 +100,19 @@ it is deliberate:
    of parked consumers: acquiring the shared serving limiter on every empty re-poll let that storm
    saturate the limiter, so a freshly woken real delivery queued behind thousands of empty polls.
 2. Only if there is real work does the pop take a permit and a connection.
-3. It takes up to `k = clamp(partitions × 8, 16, 256)` candidate names from the ring and calls
-   `queen.log_pop_list_v1(queue, group, names[], ...)`.
+3. It takes up to `k = clamp(partitions × 2, 2, 64)` candidate names from the ring, stopping
+   earlier as soon as the marks on the entries it has already claimed cover the caller's `batch`,
+   and calls `queen.log_pop_list_v1(queue, group, names[], ...)`, which claims all of them in one
+   batched pass.
 4. It checks a per-candidate verdict back into the ring.
+
+Checkout width is what bounds how many pops can serve one ring at once: every claimed entry is
+held `INFLIGHT` for the whole round trip, and that hold spans the client's work and its ack, not
+just the SQL. The fixed over-claim this replaced (`partitions × 8`, floor 16) held 16 to 80
+partitions per serve and capped a 100-partition ring at about six concurrent serves; raising the
+ceiling back to 512 after the claim went batched measured 4x to 13x worse on a sparse ring of 1000
+partitions taking about one message per second each on an 8-core cell, p50 21.8 s against about
+1.5 s at the default.
 
 A first-ever pop for a `(queue, group)` is routed through the SQL wildcard procedure instead,
 because that one carries the group-first-contact bulk seed. After the seed marker exists, every
@@ -371,6 +386,69 @@ one cheap commit for a scarce connection and a held lock. Waiting in the broker 
 
 The feature is also gated by a relaxed atomic that is false on every broker where no queue has
 ever configured it, so the default path pays one atomic load rather than a per-queue map lookup.
+
+## Pop fusion
+
+`QUEEN_POP_FUSION` (default **off**) makes N pop claims share one PostgreSQL transaction, and
+therefore one commit. It is the third leg of the coalescing that the
+[push path](/internals/life-of-a-push) and the [ack path](/internals/ack-internals) already had;
+until it existed, one pop was one transaction.
+
+What it buys is the WAL flush. On the sparse shape (1000 partitions taking about one message per
+second each on an 8-core cell, admission window 64) the wait sampler showed `LWLock`/`WALWrite`
+dominating at 16.4k samples against 3.5k on CPU, and about 90% of the roughly 88 ms of wall per pop
+was time queued for the commit. Fusion shares that seat, it does not skip it: the commit stays
+synchronous, so a served pop's lease is durable exactly as it is on the direct path.
+
+It is only reachable because the claim went batched. `log_pop_list_v1` is about six statements
+regardless of candidate count and every row lock it takes is `FOR UPDATE ... SKIP LOCKED`, so jobs
+inside one fused transaction never wait on each other: candidate sets are disjoint by hot-list
+checkout, and `SKIP LOCKED` never blocks. Fusing the old per-partition body would have multiplied
+a long serial leg instead.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_POP_FUSION` | `false` | the kill switch. Unset or `0` and the serve path never enqueues, so the pop path is the direct one described above |
+| `QUEEN_POP_FUSION_SHARDS` | 4 | round-robin buffers. Pop jobs have no fold key, because hot-list checkout already made the candidate sets disjoint, so any placement is correct |
+| `QUEEN_POP_FUSION_MAX_JOBS` | 16 | the most claims one flush drains from a buffer |
+| `QUEEN_POP_FUSION_CONCURRENCY` | 1 | flushes in flight per shard. Pop claims have no cross-flush ordering, so overlap is allowed, unlike ack fusion |
+| `QUEEN_POP_FUSION_HOLD_MS` | 3 | the buffer's liveness tick |
+
+**Batch size is emergent, not configured.** A job arriving at a shard with a free in-flight slot
+fires immediately, so at low load a fused pop claims in about one database round trip and its
+latency matches the direct path. Under load, arrivals accumulate for the in-flight flush's round
+trip and the next flush carries all of them, up to `QUEEN_POP_FUSION_MAX_JOBS`, which makes the
+batch roughly `pop rate × RTT / shards`. `QUEEN_POP_FUSION_HOLD_MS` is a backstop tick that re-runs
+the dispatch, not a linger every claim waits on.
+
+Two placements carry the win. The admission slot is taken once per flush rather than once per pop,
+so the limiter's round-trip signal becomes the fused transaction, the thing that actually queues on
+PostgreSQL. And the fused route is taken before any permit or connection, because `take_batch` is
+pure memory: the flush task holds the one permit and the one connection for every claim in it.
+
+A pop that owes side work stays on the direct path. The branch requires both the deferral-config
+refresh and the reseed floor to be idle, since each of those needs a private connection.
+
+Checkout width differs by one factor on this path: it is the SQL's serve cap 1:1,
+`k = clamp(partitions, 2, 64)`, without the direct path's twofold over-fetch. On the default
+`partitions=1` both work out to 2. The over-fetch dates from the random-candidate-scan era, when
+half a claim's candidates were routinely stolen or already empty; against the hot-list ring the
+candidates measured 0.0% `leased` and 1.0% `empty` on 2026-08-03, so the surplus half of every
+claim came back with no verdict at all and went to the back of the ready ring for a full extra
+lap.
+
+Failure is the direct path's failure. A pool error, a statement error, a broker-side timeout or a
+failed commit resolves **every** participant of that flush to a flush error; each caller re-appends
+its candidates to the ring and returns empty, which is what it does on a direct-path database
+error too. A rolled-back transaction wrote nothing. On the
+timeout arm the statement is cancelled server-side and the connection is quarantined rather than
+recycled. A caller whose HTTP future dies mid-flush leaves the flush to commit leases nobody is
+waiting on: the ring entries are requeued by the drop guard, the next serve reads them as `leased`,
+and the leases expire into redelivery. That is the same at-least-once window the direct path has
+between the SQL completing and the response rendering, widened by at most one flush round trip.
+
+The `pop-fusion` log target emits a `coalesce summary` line at most once every 10 seconds with
+`commits`, `jobs`, `jobs_per_commit` (the fusion gain) and the commit wait at p50 and p95.
 
 ## What to expect when things go wrong
 
