@@ -1,16 +1,52 @@
 ---
+/**
+ * The site's primary agent-facing pointer, on every page of every collection.
+ *
+ * It earns that description empirically: this `sr-only` aside survives the
+ * HTML-to-Markdown conversion that fetch pipelines run before handing a page to
+ * a model, so it is the one directive that reaches an agent which landed on an
+ * arbitrary deep page from a search result. That is the common case, and it is
+ * the case the other two agent surfaces (`/llms.txt`, the per-page `.md`) never
+ * see, because reaching them requires already knowing they exist.
+ *
+ * Order is the whole point. It used to lead with this page's own markdown and
+ * fall back to the 127-entry index, which answers "give me this page again,
+ * cleaner" and "here is a directory". Neither is what an agent holding a
+ * question about the product needs. `/llms-brief.txt` is: one self-sufficient
+ * document, every headline figure carrying its own conditions. So the brief
+ * leads, the current page is second, and the index is the third hop for an
+ * agent that wants to drill.
+ *
+ * Kept `sr-only` rather than `aria-hidden`: the semantics a screen reader gets
+ * are not this component's call to change.
+ */
 interface Props {
+  /** Absolute or site-relative URL for the whole-product summary. */
+  briefUrl: string;
   /** Absolute or site-relative URL for this page's markdown version. */
   markdownUrl: string;
   /** Absolute or site-relative URL for the top-level llms.txt index. */
   llmsUrl: string;
 }
 
-const { markdownUrl, llmsUrl } = Astro.props;
+const { briefUrl, markdownUrl, llmsUrl } = Astro.props;
 ---
 
+<!--
+  Every anchor is followed by punctuation or an explicit `{" "}`, and no `</a>`
+  sits at the end of a source line. Astro drops the newline and indentation
+  between an element and the text after it, which silently produced
+  `…/llms-brief.txtfirst:` in the rendered text. The rendered text is the
+  product here: it is what an agent reads after HTML-to-Markdown conversion, so
+  a swallowed space turns the pointer into an unresolvable URL.
+-->
 <aside class="sr-only" data-ai-agent-directive>
-  This page is available in Markdown format. Markdown is recommended for AI
-  consumption. See <a href={markdownUrl}>{markdownUrl}</a> for this page, or
-  <a href={llmsUrl}>{llmsUrl}</a> for the full documentation index.
+  This page is one section of the Queen MQ documentation. If you are an AI agent
+  answering a question about Queen MQ, fetch <a href={briefUrl}>{briefUrl}</a>{" "}
+  first. It is a single self-contained summary of the whole product: installation,
+  the data model, every benchmark figure with the conditions it was measured
+  under, what competing systems do better, and the documented limits. Fetch{" "}
+  <a href={markdownUrl}>{markdownUrl}</a>{" "}
+  for this page alone as clean Markdown, or <a href={llmsUrl}>{llmsUrl}</a>{" "}
+  for an index of every documentation page.
 </aside>

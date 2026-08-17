@@ -12,6 +12,19 @@ sourceOfTruth:
   - server/src/handlers/static_files.rs
   - server/src/handlers/status.rs
   - server/src/tenant.rs
+digest: >-
+  One HTTP API version, v1, with the path itself as the version, no Accept-header negotiation and
+  no version query parameter. The broker binds 0.0.0.0 on PORT, default 6632, so a local base URL
+  is http://localhost:6632. It has no TLS listener and no CORS layer and expects to sit behind
+  something that terminates TLS, so port 6632 must not be exposed to a browser or to the internet
+  directly. The broker never returns 429, because it has no per-client rate limiter: its adaptive
+  admission arbiter makes a request wait for a slot rather than rejecting it, and 429 responses
+  come from the multi-tenant gateway instead. Retry safety differs per route: a push is safe to
+  retry blindly only when the caller sends its own transactionId, in which case the retry returns
+  a status of duplicate and writes nothing; ack and lease extend are safe, and an ack landing
+  below the cursor is reported as a noop rather than double-committing; a transaction is safe only
+  with deterministic transactionIds; a pop is never safe to retry blindly, because a retry is a
+  new claim rather than a repeat. Every 204 has no body at all, deliberately.
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no

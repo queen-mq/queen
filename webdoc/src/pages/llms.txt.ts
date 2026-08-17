@@ -13,31 +13,17 @@
 import { getIndexedTopLevel } from "@cloudflare/nimbus-docs";
 import { config } from "virtual:nimbus/config";
 import { HOME_HEADLINE, HOME_SUMMARY } from "./index.md.ts";
+// `buildBrief` is imported to measure the summary, not to inline it: the size
+// advertised beside the link has to be the size of the file that will arrive.
+// `sidebarLabels()` lives there too, so one place decides that the heading an
+// agent reads is the heading a reader sees.
+import { buildBrief, sidebarLabels } from "@/lib/llms-brief";
 
 export const prerender = true;
 
-/**
- * `getIndexedTopLevel()` labels a group with its own slug (`start`,
- * `full-examples`). The sidebar in `astro.config.ts` already carries a written
- * label for each of those directories ("Start here", "Full examples"), so use
- * it: the heading an agent reads should be the heading a reader sees.
- */
-interface SidebarGroupish {
-  label?: unknown;
-  autogenerate?: { directory?: unknown };
-}
-
-function sidebarLabels(): Map<string, string> {
-  const labels = new Map<string, string>();
-  const items = (config as { sidebar?: { items?: unknown } }).sidebar?.items;
-  if (!Array.isArray(items)) return labels;
-  for (const raw of items) {
-    const item = raw as SidebarGroupish;
-    const directory = item.autogenerate?.directory;
-    if (typeof directory !== "string" || typeof item.label !== "string") continue;
-    labels.set(directory.replace(/^\/+|\/+$/g, ""), item.label);
-  }
-  return labels;
+/** Rounded for a human-legible advertisement, from the real byte length. */
+function approxKb(text: string): number {
+  return Math.round(new TextEncoder().encode(text).length / 1024);
 }
 
 export async function GET() {
@@ -45,12 +31,36 @@ export async function GET() {
   const abs = (path: string) => new URL(path, config.site).href;
   const labels = sidebarLabels();
 
+  const brief = await buildBrief();
+
   const lines = [
     `# ${config.title}`,
     "",
     `> ${config.description ?? "Documentation index for AI agents."}`,
     "",
-    `Full corpus (all pages, one document): ${abs("/llms-full.txt")}`,
+    // Order matters more than content here. This file used to open on the full
+    // corpus, which is the one pointer an agent should almost never take: at
+    // about 1.5 MB it is above the input ceiling of every fetch pipeline, and
+    // they truncate it silently, so following the site's own first
+    // recommendation yields a partial document that reads as a complete one.
+    "## Read this first",
+    "",
+    `Complete summary of Queen MQ, self-contained, about ${approxKb(brief)} KB: ${abs("/llms-brief.txt")}`,
+    "",
+    "It carries the definition, installation, the data model, every benchmark figure with",
+    "the conditions it was measured under, what competing systems do better, and the",
+    "documented limits. If the question is about the product rather than about one",
+    "specific page, that document answers it and this index is the fallback.",
+    "",
+    // No byte figure here on purpose. Stating one would mean either hardcoding
+    // a number that drifts as pages are added, or collating the entire corpus at
+    // build time to measure a string this route then throws away. The ratio is
+    // the part an agent needs to act on, and it is true at any corpus size.
+    `Every page collated into one document: ${abs("/llms-full.txt")}`,
+    "",
+    "Roughly fifty times the size of the summary above, and above the input ceiling of",
+    "most fetch pipelines, which truncate it without reporting that they did. Take it",
+    "only if you know your own limit is larger.",
     "",
     "## Pages",
     "",

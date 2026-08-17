@@ -14,6 +14,18 @@ sourceOfTruth:
   - server/sql/procedures/012_configure.sql
 verifiedBy:
   - clients/client-js/test-v2/docs.js
+digest: >-
+  A first push provisions the queue, its partition and its configuration in the transaction that
+  writes it. Fan-out is one group name per consumer: no exchange, binding or create-group call,
+  bytes written once, one cursor row per partition per group, free on the write side; reads scale
+  with groups. In a transaction a duplicate push or rejected ack rolls back the batch, not per
+  item. Dedup is exact, scoped to one partition, writes nothing on a duplicate; the window is
+  `dedupWindowSeconds`, 3600 by default, and outside it the same id is new. A seek releases the
+  live lease, resets retry counters and lands on a segment, not a message. A new group seeds at
+  each partition's end unless `subscriptionMode('all')` seeds it just below the oldest retained
+  offset. A nack charges one retry; at `retryLimit`, 3 by default, the message is snapshotted to
+  the DLQ. An expired lease charges nothing, so a hung handler redelivers forever, never reaching
+  it.
 ---
 
 Six shapes, in the order they are worth reading, each one the smallest code that makes it work.

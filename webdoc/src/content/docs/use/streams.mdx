@@ -11,6 +11,18 @@ sourceOfTruth:
   - clients/client-js/client-v2/streams/Stream.js
 verifiedBy:
   - clients/client-rust/tests/streams.rs
+digest: >-
+  A windowed query reads a queue, folds its messages into time buckets and pushes each closed
+  window onto a sink queue as one ordinary message per window and per key; there is no results
+  API. The chain runs in your process, state in the same PostgreSQL as the messages. Windows:
+  `windowTumbling`, `windowSliding` (`size`, `slide`), `windowSession` (`gap`), `windowCron`
+  (`every`: second, minute, hour, day or week). Bucketing uses the broker's commit time unless an
+  `eventTime` extractor is given. One cycle commits state writes, sink pushes and the leased
+  batch's ack in one PostgreSQL transaction, all or none. `foreach` acks after the function
+  returns, so an effect outside PostgreSQL is at-least-once. Closed windows delete their own rows
+  and nothing else does: retention never touches stream state, so the rest needs a dropped query
+  or a rerun with `reset`, which also clears the HTTP 409 from redeploying a changed chain under a
+  registered name.
 ---
 
 A windowed query reads a queue, groups its messages into time buckets, folds each bucket, and

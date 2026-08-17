@@ -9,6 +9,16 @@ sourceOfTruth:
   - benchmark-queen/2026-08-11-soak24-1M/raw/loader-01/g.out
   - benchmark-queen/2026-08-11-soak24-1M/raw/bench/bench.csv
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
+digest: >-
+  24 hours, one broker against one PostgreSQL 18, both on a 32 vCPU / 62 GiB machine, Queen 1.0.0:
+  86,369,975,300 messages accepted at about 1,000,000 msg/s per side with 0 restarts. Broker CPU
+  averaged 10.92 cores of 32 and PostgreSQL 11.54. Broker resident memory held flat near 4.1 GB
+  for the whole run, and database size plateaued between 29.6 and 31.4 GB, which is retention
+  working rather than a leak. WAL was 83 MB/s, or 83 bytes per message including the envelope.
+  Conditions: leased pops with explicit acks, deduplication on with a 60 second window, 200
+  partitions, 600 consumers, push batch 100, 256-byte payloads, loaders on three separate 16 vCPU
+  machines, fdatasync about 70 microseconds. The page states its own caveats: one workload shape,
+  and a compressible payload.
 ---
 
 **In 24 hours one broker against one PostgreSQL moved 86,369,975,300 messages, about 1,000,000

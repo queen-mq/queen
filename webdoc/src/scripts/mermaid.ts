@@ -1,5 +1,4 @@
 let diagrams: HTMLPreElement[] = [];
-const captured = new WeakSet<HTMLPreElement>();
 
 // Full-screen expand dialog (lazy — only created when needed)
 let dialog: HTMLDialogElement | null = null;
@@ -11,10 +10,14 @@ function uniqueMermaidId(): string {
 	return `mermaid-${random}`;
 }
 
+// The guard lives on the node, not in module scope. A rendered diagram's
+// textContent is the SVG's embedded CSS rather than the source, so re-capturing
+// after a successful render poisons `data-diagram` and every later render fails.
+// Module-level state does not survive HMR re-executing this file, which is
+// exactly when that second capture happens.
 function captureDiagramSource(diagram: HTMLPreElement): void {
-	if (captured.has(diagram)) return;
+	if (diagram.hasAttribute("data-diagram")) return;
 	diagram.setAttribute("data-diagram", diagram.textContent as string);
-	captured.add(diagram);
 }
 
 function showRenderError(diagram: HTMLPreElement): void {

@@ -1,0 +1,296 @@
+---
+title: Docker Compose
+description: "The whole stack in one file: PostgreSQL, two meshed brokers and the proxy, with the control plane bootstrapped and one message pushed through the front door."
+type: how-to
+tier: operate
+sidebar:
+  order: 3
+sourceOfTruth:
+  - server/src/config.rs
+  - server/src/mesh.rs
+  - proxy/src/config.rs
+  - proxy/src/main.rs
+  - proxy/migrations/004_lifecycle.sql
+  - test/compose/docker-compose.ha.yml
+digest: >-
+  One Compose file brings up PostgreSQL, two meshed brokers and `queen_proxy` against published
+  images. Three secrets are generated first and passed in through `.env`: `CELL_JWT_SECRET` is the
+  broker's `JWT_SECRET` and also signs the cell token the proxy presents, `MESH_SECRET` is
+  `QUEEN_SYNC_SECRET` and must be byte-identical on both brokers, `SESSION_SECRET` signs proxy
+  sessions. Each broker needs a distinct `QUEEN_SERVER_ID` and its own spool volume, never shared.
+  Brokers gate on `depends_on: condition: service_healthy`, which is what keeps them from racing
+  PostgreSQL's first boot. The proxy has no route until the control plane has rows: insert one
+  `queen_proxy.cells` row carrying an HS256 token signed with `CELL_JWT_SECRET`, then call
+  `queen_proxy.bootstrap_tenant(...)`, which returns a plaintext `api_key` shown exactly once.
+  Requests then carry that key as a bearer token and a `Host` whose first DNS label is the cluster
+  slug. Both brokers sit behind one `queen` network alias, which is standby and not load
+  spreading: the proxy pins to whichever it resolves and moves to the other when that one goes
+  away. One PostgreSQL means this survives losing a broker, not losing the database.
+---
+
+Every other page in this section deploys one part. This one is the whole thing in a single file,
+against published images, so there is something to run before there is something to decide.
+
+<Aside type="caution">
+This is a complete topology, not a hardened deployment. There is no TLS, PostgreSQL holds a
+password of `postgres`, and one database serves both the brokers and the proxy. What to change
+before it faces anything real is in [Security](/deploy/security) and
+[PostgreSQL](/deploy/postgres).
+</Aside>
+
+## Three secrets, first
+
+They have to exist before the brokers start, because two of them are broker environment. Generate
+them once into `.env` beside the Compose file:
+
+```bash
+cat > .env <<EOF
+CELL_JWT_SECRET=$(openssl rand -hex 32)
+MESH_SECRET=$(openssl rand -hex 32)
+SESSION_SECRET=$(openssl rand -hex 32)
+EOF
+```
+
+`CELL_JWT_SECRET` is the broker's `JWT_SECRET`, and the same value signs the token the proxy
+presents as a cell. `MESH_SECRET` authenticates the mesh and has to be byte-identical on both
+brokers. `SESSION_SECRET` signs proxy sessions, so changing it later logs every human out.
+
+## The file
+
+```yaml title="docker-compose.yml"
+services:
+  pg:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  queen-a:
+    image: ghcr.io/queen-mq/queen:latest
+    restart: on-failure
+    depends_on:
+      pg: { condition: service_healthy }
+    environment:
+      PG_HOST: pg
+      PG_PASSWORD: postgres
+      QUEEN_SERVER_ID: queen-a
+      QUEEN_MESH_PORT: "6633"
+      QUEEN_MESH_PEERS: "queen-b:6633"
+      QUEEN_SYNC_SECRET: ${MESH_SECRET:?set MESH_SECRET}
+      JWT_ENABLED: "true"
+      JWT_ALGORITHM: HS256
+      JWT_SECRET: ${CELL_JWT_SECRET:?set CELL_JWT_SECRET}
+      QUEEN_TENANCY_HEADER: "true"
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    volumes:
+      - spool-a:/var/lib/queen/buffers
+    ports: ["6632:6632"]
+    networks:
+      default:
+        aliases: [queen]
+
+  queen-b:
+    image: ghcr.io/queen-mq/queen:latest
+    restart: on-failure
+    depends_on:
+      pg: { condition: service_healthy }
+    environment:
+      PG_HOST: pg
+      PG_PASSWORD: postgres
+      QUEEN_SERVER_ID: queen-b
+      QUEEN_MESH_PORT: "6633"
+      QUEEN_MESH_PEERS: "queen-a:6633"
+      QUEEN_SYNC_SECRET: ${MESH_SECRET:?set MESH_SECRET}
+      JWT_ENABLED: "true"
+      JWT_ALGORITHM: HS256
+      JWT_SECRET: ${CELL_JWT_SECRET:?set CELL_JWT_SECRET}
+      QUEEN_TENANCY_HEADER: "true"
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    volumes:
+      - spool-b:/var/lib/queen/buffers
+    ports: ["6642:6632"]
+    networks:
+      default:
+        aliases: [queen]
+
+  proxy:
+    image: ghcr.io/queen-mq/queen-proxy:latest
+    restart: on-failure
+    depends_on:
+      pg: { condition: service_healthy }
+    environment:
+      PXDB_HOST: pg
+      PXDB_PASSWORD: postgres
+      PXDB_DB: queen_proxy
+      QUEEN_PROXY_JWT_SECRET: ${SESSION_SECRET:?set SESSION_SECRET}
+    volumes:
+      - proxy-spool:/app/spool
+    ports: ["6711:6711"]
+
+volumes:
+  pgdata:
+  spool-a:
+  spool-b:
+  proxy-spool:
+```
+
+The proxy wants its own database, which is one file next to the Compose file:
+
+```sql title="initdb/01-proxy-db.sql"
+CREATE DATABASE queen_proxy;
+```
+
+Four things in there are load-bearing. `depends_on` with `condition: service_healthy` is what keeps
+the brokers from racing PostgreSQL's first boot, which they lose. Each broker has a distinct
+`QUEEN_SERVER_ID` and its **own** spool volume, because the spool is node-local and a shared one is
+corruption. Both brokers answer to the `queen` network alias, which is how the proxy reaches the
+pair. And `${VAR:?}` fails the `up` with a readable message instead of starting a broker with an
+empty secret.
+
+```bash
+docker compose up -d
+```
+
+All three answer within a few seconds of that returning:
+
+```bash
+curl -s http://localhost:6632/health && curl -s http://localhost:6642/health && curl -s http://localhost:6711/healthz
+```
+
+```json
+{"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.2"}
+{"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.2"}
+{"enforce":false,"status":"ok","tenant_header":true}
+```
+
+## Bootstrap the control plane
+
+The proxy is up and routes nothing, because routing is rows. Both brokers now refuse
+unauthenticated traffic too, so until this runs there is no way in. It is two SQL calls, and the
+[multi-tenant](/deploy/multi-tenant) page is the long version of what they do.
+
+<Steps>
+
+1. **Mint the cell token.** The broker holds the HMAC secret; the cell row holds a token signed
+   with it. The `admin` role is required, because the proxy forwards deletions.
+
+   ```bash
+   set -a; . ./.env; set +a
+   b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+   header=$(printf '{"alg":"HS256","typ":"JWT"}' | b64url)
+   claims=$(printf '{"sub":"queen-proxy","role":"admin"}' | b64url)
+   sig=$(printf '%s.%s' "$header" "$claims" | openssl dgst -binary -sha256 -hmac "$CELL_JWT_SECRET" | b64url)
+   CELL_SECRET="$header.$claims.$sig"
+   ```
+
+2. **Register the cell,** pointing `base_url` at the alias rather than at either broker.
+
+   ```bash
+   docker compose exec -T pg psql -U postgres -d queen_proxy -v ON_ERROR_STOP=1 -v cell_secret="$CELL_SECRET" <<'SQL'
+   INSERT INTO queen_proxy.cells (slug, region, base_url, class, cell_secret)
+   VALUES ('local', 'local', 'http://queen:6632', 'shared', :'cell_secret');
+   SQL
+   ```
+
+3. **Onboard a tenant.** One call makes the tenant, the cluster, the admin user and the first API
+   key, and unwinds completely if any part of it raises.
+
+   ```bash
+   docker compose exec -T pg psql -U postgres -d queen_proxy -tA <<'SQL'
+   SELECT queen_proxy.bootstrap_tenant(
+     'acme', 'Acme Inc', 'acme-prod', 'free',
+     (SELECT id FROM queen_proxy.cells WHERE slug = 'local'),
+     'ops@acme.example', 'initial-password', 'default'
+   );
+   SQL
+   ```
+
+   ```json
+   {"api_key": "qk_live_...", "user_id": "...", "tenant_id": "...", "cluster_id": "..."}
+   ```
+
+   That key is plaintext exactly once: only its sha256 hash is stored, and re-running on the same
+   slugs returns the existing ids with a null key.
+
+</Steps>
+
+## Through the front door
+
+Two things get a request routed: the key as a bearer token, and a `Host` whose **first DNS label**
+is the cluster slug. Locally that host is a header rather than a name that resolves.
+
+```bash
+export KEY=qk_live_...
+
+curl -s -X POST http://localhost:6711/api/v1/push \
+  -H "Host: acme-prod.local.test" -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"queue":"orders","partition":"customer-42","payload":{"hello":"world"}}]}'
+```
+
+```bash
+curl -s "http://localhost:6711/api/v1/pop/queue/orders?batch=1&wait=true&consumerGroup=demo&subscriptionMode=all" \
+  -H "Host: acme-prod.local.test" -H "Authorization: Bearer $KEY"
+```
+
+The popped message carries `"producerSub": "queen-proxy"`, which is how you know it went through
+the front door and not around it. Drop either header and the answer is `401`, from the proxy
+without the key and from the broker without a token.
+
+## What this stack does and does not survive
+
+Stop either broker and the next request through the proxy succeeds against the other, with nothing
+in between to reconfigure. That is the whole of what the second broker buys, and it is worth being
+precise about how it works here: Docker's DNS returns both containers for the `queen` alias, and
+the proxy pins to whichever it resolved rather than spreading across the pair. This is standby, not
+load spreading. A Kubernetes Service or a real load balancer in that position does spread, which is
+[Kubernetes](/deploy/kubernetes).
+
+What it does not survive is PostgreSQL, because there is one and it is the source of truth. Two
+brokers cover a broker dying, a rolling restart and one node's network. They do not cover the
+database, and no arrangement of brokers does. That is [High availability](/deploy/ha), and the
+database's own story is [PostgreSQL](/deploy/postgres).
+
+The mesh between the brokers is visible in their logs, including the five-second threshold at which
+a peer is called down:
+
+```bash
+docker compose logs queen-a | grep mesh
+```
+
+```
+INFO mesh: started server_id=queen-a port=6633 peers=1 auth="hmac"
+WARN mesh: peer down peer=queen-b threshold_ms=5000
+INFO mesh: peer recovered peer=queen-b
+```
+
+## Clean up
+
+```bash
+docker compose down -v
+```
+
+<CardGrid>
+  <LinkCard
+    href="/deploy/ha"
+    title="High availability"
+    description="What the mesh carries, what a push does while PostgreSQL is unreachable, and why the spool is not replication."
+  />
+  <LinkCard
+    href="/deploy/proxy"
+    title="Proxy"
+    description="Running the front door for real: pxdb, one replica, and the single-tenant shape."
+  />
+  <LinkCard
+    href="/deploy/multi-tenant"
+    title="Multi-tenant"
+    description="Cells, tenants, clusters, API keys and quotas, at the length the subject deserves."
+  />
+</CardGrid>

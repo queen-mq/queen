@@ -16,9 +16,10 @@
     "lint:docs:fix": "nimbus-docs lint --fix",
     "gen": "node scripts/gen.mjs",
     "gen:check": "node scripts/gen.mjs --check",
-    "verify": "pnpm gen:check && pnpm build && pnpm check:markdown && pnpm lint:docs && pnpm check:prose",
+    "verify": "pnpm gen:check && pnpm build && pnpm check:markdown && pnpm check:brief && pnpm lint:docs && pnpm check:prose",
     "check:prose": "node scripts/check-prose.mjs",
-    "check:markdown": "node scripts/check-markdown.mjs"
+    "check:markdown": "node scripts/check-markdown.mjs",
+    "check:brief": "node scripts/check-brief.mjs"
   },
   "dependencies": {
     "@cloudflare/nimbus-docs": "0.8.2",

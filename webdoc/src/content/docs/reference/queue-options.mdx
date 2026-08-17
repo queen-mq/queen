@@ -16,6 +16,18 @@ sourceOfTruth:
   - server/sql/procedures/006_log_maintenance.sql
   - server/src/retention.rs
   - server/src/hotlist.rs
+digest: >-
+  `POST /api/v1/configure` is a full replace, not a patch: every omitted key resets to its
+  default. Integer seconds: `leaseTime` 300 from `/configure`, 60 for a push-created queue,
+  `delayedProcessing` 0, `windowBuffer` 0, `retentionSeconds` 0, `completedRetentionSeconds` 0,
+  `maxWaitTimeSeconds` 0, `dedupWindowSeconds` 3600 (off only at `0`). `minPopWaitTime` 0 ms,
+  clamped 0 to 60000. `retryLimit` 3 (a count), charged only by explicit `failed` acks. Strings
+  `namespace`, `task` `""` from `/configure`, derived from the queue name by a push. Booleans:
+  `deadLetterQueue` and `dlqAfterMaxRetries` `true`, OR-ed, so both must be `false` to disable
+  dead-lettering, an exhausted message then dropped; `retentionEnabled` `false`, required by both
+  retention windows; `encryptionEnabled` `false`, storing plaintext without a valid
+  `QUEEN_ENCRYPTION_KEY`. `maxWaitTimeSeconds` deletes whole segments including in-flight leases,
+  ignoring `retentionEnabled`.
 ---
 
 `POST /api/v1/configure` creates or updates a queue's configuration. It is a

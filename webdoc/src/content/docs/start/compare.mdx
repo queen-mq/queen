@@ -9,6 +9,22 @@ sourceOfTruth:
   - server/src/main.rs
   - server/sql/procedures/003_log_push.sql
   - server/sql/procedures/004_log_pop.sql
+digest: >-
+  Per-entity ordering is the axis these systems differ on. Queen MQ makes a partition a row
+  created by the first push that names it, so lanes are unbounded, nothing is preallocated and
+  nothing rebalances. Kafka hash-mods a changing key set onto a partition count fixed in advance,
+  so entities that collide block each other. RabbitMQ and pgmq both need one live queue per
+  entity. Amazon SQS FIFO's message group id is structurally the same idea as a Queen MQ
+  partition. Where the other systems are better, stated plainly: Kafka replicates itself while
+  Queen MQ delegates durability and failover to one PostgreSQL, which is therefore one failure
+  domain, and Kafka has connectors, stream processing and a large operational literature against
+  Queen MQ's six SDKs, one CLI and an HTTP API. Content-based routing is RabbitMQ's real strength
+  and Queen MQ has no exchanges, no bindings and no header matching. Amazon SQS has no server to
+  operate at all. pgmq needs no broker process, installs as an extension, and is insensitive to
+  lane count. On CPU, Kafka is the cheapest of the four in every measured shape, at roughly a
+  third of Queen MQ's cores on the sparse shape and a quarter on the dense one, which is partly a
+  durability difference: Kafka at its defaults pays no real fsync per commit and Queen MQ and pgmq
+  both do.
 ---
 
 One question separates these systems more sharply than any other: **how do you get strict

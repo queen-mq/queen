@@ -47,6 +47,18 @@ sourceOfTruth:
   - clients/client-go/operation_builder.go
   - server/sql/procedures/012_configure.sql
   - server/src/main.rs
+digest: >-
+  A single static Go binary; the only documented install is a repository-checkout build: `make -C
+  clients/client-cli build` writes `clients/client-cli/bin/queenctl`, `make install` runs `go
+  install` into `$GOBIN` (or `$HOME/go/bin`). Target: `--server`/`$QUEEN_SERVER`,
+  `--token`/`$QUEEN_TOKEN`, `~/.queen/config.yaml`. Core commands: `push`, `pop`, `tail`, `ack`,
+  `apply -f`, `status`, `ping`. `pop` and `tail` always emit NDJSON; `-o` is `table` on a TTY,
+  `json` on a pipe. Exit codes: `0` success, `1` user error, `2` server error or unreachable, `3`
+  auth, `4` no-op (an empty pop). `pop --auto-ack` commits inside the pop transaction, so messages
+  lost after the pop are never redelivered. `tail` without `--cg` advances the real
+  `queenctl-tail` group. `queue configure` drops zero-valued flags, so `--dlq=false` cannot
+  disable dead-lettering; `/configure` is a full replace. `dlq drain` deletes, no requeue route;
+  `partition seek` is end only.
 ---
 
 `queenctl` is a single static Go binary built on the [Go client](/reference/sdk/go). It exposes the

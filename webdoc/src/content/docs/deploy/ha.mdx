@@ -4,7 +4,7 @@ description: "More than one broker against one PostgreSQL: what the mesh between
 type: how-to
 tier: operate
 sidebar:
-  order: 4
+  order: 5
 sourceOfTruth:
   - server/src/mesh.rs
   - server/src/main.rs
@@ -15,6 +15,18 @@ sourceOfTruth:
   - test/compose/docker-compose.ha.yml
 verifiedBy:
   - server/mesh-verify.sh
+digest: >-
+  Replicas are copies of one binary on one PostgreSQL, and messages, offsets, leases,
+  deduplication, queue configuration and the dead-letter queue are rows: nothing replicates
+  between brokers, no quorum, no serving leader, no split-brain. They cover a broker dying, a
+  rolling restart, one node's network, not PostgreSQL, the failure domain. Three brokers is the
+  designed ceiling: replicas × `DB_POOL_SIZE` must fit `max_connections`. Every replica serves
+  every route, so a pop from one broker is acked to another. Leader election is an advisory lock:
+  retention sweep and statistics reconciler run on one replica per cycle. `QUEEN_MESH_PORT`
+  carries hints only. While PostgreSQL is unreachable a push spools to disk, answered `201` with
+  `status: "buffered"` per item; pops, acks and `POST /api/v1/transaction` fail. The spool is
+  node-local, drained only by its broker, uncapped in size and age: a long outage fills the disk
+  and pushes report `failed`.
 ---
 
 Brokers hold no authoritative state, so a second broker is another copy of the same binary pointed

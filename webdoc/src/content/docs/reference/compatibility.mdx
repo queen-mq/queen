@@ -13,6 +13,18 @@ sourceOfTruth:
   - server/sql/procedures/001_log_schema.sql
   - server/sql/procedures/004_log_pop.sql
   - server/build.rs
+digest: >-
+  A release is one broker binary plus client SDKs published at the same version for JavaScript,
+  Python, Go, Rust, PHP with Laravel and C++, plus the Go command-line client. There is no Java or
+  .NET SDK; those languages use the HTTP API directly. The deployment model is always-virgin: the
+  broker embeds schema.sql and 23 stored-procedure files numbered 001 to 023, applies all of them
+  in lexical order at every boot under a session advisory lock before accepting a request, and
+  there is no migration engine, no version table and nothing to run by hand. Every statement is
+  idempotent and any DDL error aborts the boot naming the failing file. Pointing a newer build at
+  a database created by a different build is unsupported, and a downgrade means restoring a dump
+  into a fresh database. Setting QUEEN_APPLY_SCHEMA=0 skips the apply, which moves both the DDL
+  and the ordering responsibility to the operator: a broker that skips the apply and finds an
+  older schema fails on the first request needing a missing object rather than at boot.
 ---
 
 Queen MQ 1.0.0 is one broker binary plus a set of client SDKs released at the

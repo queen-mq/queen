@@ -8,6 +8,16 @@ sidebar:
 sourceOfTruth:
   - server/src/main.rs
   - server/sql/procedures/001_log_schema.sql
+digest: >-
+  Queen MQ is a message broker written in Rust that keeps all of its state in PostgreSQL 15 or
+  newer, with no extensions and no migration step: the broker compiles its DDL and 23 stored
+  procedures into the binary and re-applies them idempotently at every boot. Its one design idea
+  is an arbitrarily large number of ordered partitions, each created by the first push that names
+  it, which gives per-entity FIFO ordering with no head-of-line blocking between entities. A
+  deployment is one stateless broker process serving HTTP on port 6632 plus one PostgreSQL,
+  optionally with a node-local disk spool and the separate queen_proxy multi-tenant gateway.
+  Clients all speak HTTP. The licence is Apache 2.0 and the container image is
+  ghcr.io/queen-mq/queen.
 ---
 
 Queen MQ is a message broker written in Rust that keeps its data in PostgreSQL. It was built at

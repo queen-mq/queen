@@ -25,6 +25,18 @@ import { docsCollection, partialsCollection } from "@cloudflare/nimbus-docs/cont
  *                 names what verified it.
  *   generated     the page or partial is emitted by webdoc/scripts/. Hand
  *                 edits are lost on the next regeneration.
+ *   digest        the few sentences this page contributes to a summary of the
+ *                 whole product, phrased for a machine rather than for a
+ *                 reader: flat, literal, the subject named, every figure
+ *                 carrying its own conditions in the same sentence. Collected
+ *                 into `/llms-brief.txt` (see `src/pages/llms-brief.txt.ts`),
+ *                 which is the one document an agent is pointed at first.
+ *                 Optional, and most pages should not have one: a page earns a
+ *                 digest by stating a fact the product cannot be understood
+ *                 without. Scope is the page, with one exception: a section's
+ *                 own `index.mdx` may speak for its section, because that is
+ *                 what a front door is for and because the alternative is
+ *                 giving a digest to each of its children to say one line.
  */
 const RECIPE_TYPES = [
   "overview",
@@ -48,6 +60,7 @@ export const collections = {
         sourceOfTruth: z.array(z.string()).optional(),
         verifiedBy: z.array(z.string()).optional(),
         generated: z.boolean().default(false),
+        digest: z.string().optional(),
       },
     }),
   ),

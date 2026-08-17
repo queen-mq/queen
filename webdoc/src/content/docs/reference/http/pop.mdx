@@ -15,6 +15,18 @@ verifiedBy:
   - clients/client-js/test-v2/consume.js
   - clients/client-js/test-v2/semantics.js
   - clients/client-py/tests/test_pop.py
+digest: >-
+  A pop claims a leased batch and removes nothing, but a queue-scoped pop creates a missing
+  queue's `queen.queues` row. Read-write `GET` routes: `/api/v1/pop/queue/:queue`, that path +
+  `/partition/:partition`, and `/api/v1/pop` discovery (needs `namespace`/`task`). Defaults:
+  `batch` 200 (call-wide budget), `partitions` 1, `autoAck` and `wait` false, `timeout` 30000 ms
+  (needs `wait=true`), `consumerGroup` `__QUEUE_MODE__`, `subscriptionMode` `new` (seeds absent
+  cursors, never in queue mode), `leaseSeconds` the queue's `leaseTime`, else 60. 200 gives
+  `leaseId`, `messages` of `id`, `transactionId`, `data`, `partitionId`, no offset/attempt count;
+  ack per-message `partitionId`. A bare `204` covers idle, `delayedProcessing`/`windowBuffer`
+  holdback, pop maintenance, procedure errors, `wait=true` timeouts. One live leased batch per
+  `(partition, group)` caps parallelism at the partition count; expiry redelivers, `autoAck=true`
+  is at-most-once.
 ---
 
 A pop claims a **leased batch**: a contiguous span of offsets just past the consumer group's

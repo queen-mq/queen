@@ -14,6 +14,18 @@ verifiedBy:
   - clients/client-js/test-v2/push.js
   - clients/client-py/tests/test_push.py
   - clients/client-go/tests/push_test.go
+digest: >-
+  `POST /api/v1/push`, access level `write-only`, writes messages to one or more queues. Body
+  `{"items":[...]}`; per item, `queue` and `payload` are required, `partition` defaults to
+  `"Default"`, `transactionId` to the minted message id, and `data` without `payload` gives 400.
+  Success is `201 Created` plus a top-level array of `index`, `message_id`, `transaction_id`,
+  `queueName`, `status`, one per item in request order. `status`: `queued`, `duplicate`,
+  `buffered` (on-disk spool, drained later) or `failed` (exists nowhere, retry); both still return
+  201, so the code alone cannot detect loss. Also 400 non-JSON or missing
+  `items`/`queue`/`payload`, 403 auth on and no writer role, 413 over 64 MiB, 500 maintenance mode
+  plus a failed spool write. Commits are per `(queue, partition)` group, not per request. Dedup:
+  on by default, exact, per partition, keyed on `transactionId` within the queue's
+  `dedupWindowSeconds` (default 3600, `0` disables).
 ---
 
 One call writes one or more messages to one or more queues. Access level **write-only**, which

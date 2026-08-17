@@ -12,6 +12,20 @@ sourceOfTruth:
   - server/src/db.rs
   - server/src/config.rs
   - server/src/fusion.rs
+digest: >-
+  PostgreSQL 15 or newer, and no extensions. The floor is one unique index declared NULLS NOT
+  DISTINCT, which PostgreSQL 14 does not have, and gen_random_uuid() is used as a core built-in
+  rather than the pgcrypto function; the test matrix runs against PostgreSQL 16. PostgreSQL is the
+  storage engine rather than a dependency, so sizing PostgreSQL is sizing Queen: messages,
+  offsets, the deduplication index, queue configuration and the dead-letter table are ordinary
+  tables, and every queue semantic runs in stored procedures inside the database. The broker needs
+  a direct connection, because a pooler in transaction or statement mode breaks the session
+  advisory locks used by the boot-time schema apply and by the maintenance leader election, along
+  with the prepared statements the hot paths prepare once per connection; session-mode pooling is
+  transparent. DB_POOL_SIZE defaults to 160 for one broker, so replicas times DB_POOL_SIZE plus
+  superuser_reserved_connections plus tooling has to stay under max_connections: three brokers at
+  the default want 480 connections where a stock PostgreSQL allows 100, and the mismatch answers
+  500 with an error of pool.
 ---
 
 PostgreSQL is not a dependency of Queen, it is Queen's storage engine. Messages, offsets, the

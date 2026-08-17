@@ -20,6 +20,26 @@ sourceOfTruth:
   - server/sql/procedures/005_log_ack.sql
   - server/sql/procedures/006_log_maintenance.sql
   - server/sql/schema.sql
+digest: >-
+  The documented non-goals and operational boundaries, all properties of the build available
+  today. Ordering is per partition and never global: there is no cross-partition sequence number,
+  and total ordering means one partition, which is one writer's worth of throughput. Delivery is
+  arrival order inside a partition, with no priority lane, no deadline scheduling and no
+  reordering at pop time. In-group parallelism equals partition count, because exactly one
+  in-flight leased batch exists per partition and consumer group. One PostgreSQL is one failure
+  domain and the ceiling; while it is unreachable pushes are spooled to disk and answered 201 with
+  a per-item status of buffered, and pops, acks and every management route are unavailable, so
+  nothing is consumable. Retention is opt-in and its granularity is a whole segment, so deleting
+  exactly one message is not an operation and a seek to a timestamp lands on a segment boundary.
+  maxWaitTimeSeconds deletes whole segments past a cutoff for every consumer group including
+  in-flight leases, regardless of whether retention is enabled, and does not dead-letter what it
+  drops: that is data loss by design. Dead letters are removed only when you remove them. POST
+  /api/v1/configure is a full replace rather than a patch, so any omitted option is written back
+  at its default. Transactions are one PostgreSQL transaction, which is real atomicity and not
+  end-to-end exactly-once. Payloads must be JSON, inside a request body capped by
+  QUEEN_MAX_BODY_BYTES at 64 MiB. The broker expects a trusted network segment: no TLS listener,
+  no CORS layer, JWT authentication off by default, and a mesh port that must be firewalled
+  because post-handshake frames are unauthenticated. There is no Java or .NET SDK.
 ---
 
 This page states Queen's opinions in one place: the design decisions, how to

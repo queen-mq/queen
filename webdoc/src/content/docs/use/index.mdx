@@ -8,6 +8,18 @@ sidebar:
 sourceOfTruth:
   - server/src/main.rs
   - server/src/handlers/data.rs
+digest: >-
+  The surface is four operations: push, pop, acknowledge, and a transaction bundling pushes and
+  acks into one PostgreSQL commit. The queue and partition are created by the push that names
+  them, so nothing is provisioned first. An acknowledgement commits a position, not one message,
+  so acking the last message of a batch completes the batch. A consumer group holds at most one
+  leased batch per partition, so parallelism comes from partitions, not from more consumers on
+  one. It is all HTTP over a small JSON API: curl is a client, and the SDKs are convenience over
+  it. Packages: JavaScript `npm i queen-mq`, Python `pip install queen-mq`, Go `go get
+  github.com/smartpricing/queen/clients/client-go`, Rust crate `queen-mq`, PHP `composer require
+  smartpricing/queen-mq`, CLI `make -C clients/client-cli build`. C++ is one header,
+  `clients/client-cpp/queen_client.hpp`, plus `json.hpp`, `httplib.h` and `threadpool.hpp` on the
+  include path.
 ---
 
 The surface you write against is small: push a message, pop it, acknowledge it, and a transaction

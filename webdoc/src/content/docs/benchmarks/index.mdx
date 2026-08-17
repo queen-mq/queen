@@ -9,6 +9,17 @@ sourceOfTruth:
   - benchmark-queen/2026-07-29-vm-campaign/results.md
   - benchmark-queen/2026-07-30-1h-soak/soak1h.json
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
+digest: >-
+  The two headline figures, each with the conditions that make it true. Sustained throughput:
+  86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per side, 0 restarts and broker
+  resident memory flat near 4.1 GB, on Queen 1.0.0 with explicit acks on leased pops,
+  deduplication on with a 60 second window, 200 partitions, 600 consumers, push batch 100 and
+  256-byte payloads, broker and PostgreSQL 18 co-located on one 32 vCPU / 62 GiB machine, loaders
+  on separate hosts, fdatasync about 70 microseconds. Cardinality: 1,000,000 ordered partitions in
+  one queue, created during the run at 1,000 a second, serving 200,000 msg/s with zero push, pop
+  or ack errors, on the same machine with retention on at RETENTION_PARALLELISM=16, deduplication
+  off, 300 consumers, over one hour. Both are single-shape runs, and neither is a claim about a
+  shape that was not measured.
 ---
 
 A number appears here only when an archived artifact under `benchmark-queen/` records what

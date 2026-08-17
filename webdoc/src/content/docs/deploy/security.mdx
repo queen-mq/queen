@@ -4,7 +4,7 @@ description: "One plaintext listener and five trust boundaries: what the broker 
 type: how-to
 tier: operate
 sidebar:
-  order: 6
+  order: 8
 sourceOfTruth:
   - server/src/main.rs
   - server/src/auth.rs
@@ -14,6 +14,18 @@ sourceOfTruth:
   - server/src/encryption.rs
   - server/src/pgtls.rs
   - server/sql/procedures/002_streams_schema.sql
+digest: >-
+  One plaintext listener on `0.0.0.0:PORT` serves the HTTP API and dashboard; no TLS listener, no
+  CORS layer. `JWT_ENABLED` is `false` by default; off, every route answers any caller, `DELETE
+  /api/v1/resources/queues/:queue` included, dashboard as full admin. `/metrics/prometheus` is
+  public, no switch; its per-queue series carry no tenant label. `PG_USE_SSL` is `false` by
+  default; on, most managed PostgreSQL fails the binary's Mozilla-root validation, and
+  `PG_SSL_REJECT_UNAUTHORIZED=false` encrypts without verifying the server. Encryption needs
+  `QUEEN_ENCRYPTION_KEY` plus the queue's `encryptionEnabled`; one alone stores plaintext, no
+  error. On `QUEEN_MESH_PORT`, frames after the replayable HMAC `HELLO` handshake are
+  unauthenticated JSON; firewalling is mandatory. `002_streams_schema.sql` grants
+  `queen_streams.queries` and `queen_streams.state` to `PUBLIC`. With native tenancy on,
+  `x-queen-tenant` is checked for shape, never authority.
 ---
 
 The broker is one process with one plaintext listener. It binds `0.0.0.0:PORT`, serves the HTTP API

@@ -12,6 +12,7 @@
     "/benchmarks/ordered-pipeline",
     "/benchmarks/soak-24h",
     "/deploy",
+    "/deploy/compose",
     "/deploy/dashboard",
     "/deploy/ha",
     "/deploy/kubernetes",

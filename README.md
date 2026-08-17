@@ -82,11 +82,15 @@ docker run --name qpg --network queen -e POSTGRES_PASSWORD=postgres -p 5433:5432
 ```
 
 ```bash
-docker run -p 6632:6632 --network queen -e PG_HOST=qpg -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
+docker run -d --name queen --restart on-failure:10 -p 6632:6632 --network queen -e PG_HOST=qpg -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
 ```
 
-The broker creates its own schema on boot. Then push and consume with the JavaScript SDK
-(`npm install queen-mq`):
+The broker creates its own schema on boot. `--restart on-failure:10` covers the seconds PostgreSQL
+spends initialising on a first run: the broker refuses to start against a database it cannot reach,
+and Docker brings it back as soon as it can. `curl -s http://localhost:6632/health` tells you when
+it is up, and `docker logs queen` says why if it is not.
+
+Then push and consume with the JavaScript SDK (`npm install queen-mq`):
 
 ```js
 import { Queen } from 'queen-mq'

@@ -11,6 +11,19 @@ sourceOfTruth:
   - test/compose/docker-compose.single.yml
 verifiedBy:
   - clients/client-js/test-v2/docs.js
+digest: >-
+  A broker from nothing in four commands, needing only Docker: `docker network create queen`; then
+  `docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16`; then
+  `docker run -d --name queen --restart on-failure:10 --network queen -p 6632:6632 -e
+  PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest`; then
+  `curl -s http://localhost:6632/health`, which takes a pooled connection and does a real database
+  round-trip, so a healthy answer proves both processes. The restart policy matters on the first
+  run: the broker refuses to start against a database it cannot reach, and PostgreSQL is still
+  initialising for the first seconds after step 2. PG_USER and PG_DATABASE both default to
+  postgres and PG_PORT to 5432, so host and password are usually the whole configuration. Adding
+  `-v queen-spool:/var/lib/queen/buffers` persists the outage spool. Nothing is installed into
+  PostgreSQL and there is no migration to run. The same binary serves its dashboard on the same
+  port.
 ---
 
 Docker and five minutes. At the end you have a PostgreSQL, a broker, and one message that went
@@ -34,10 +47,12 @@ DDL and its stored procedures, and applies them at boot.
    ```
 
 3. **The broker.** `PG_USER` and `PG_DATABASE` both default to `postgres`, so host, port and
-   password are enough. It listens on `PORT`, default `6632`.
+   password are enough. It listens on `PORT`, default `6632`. `--restart on-failure:10` covers
+   the seconds PostgreSQL spends initialising on its first boot: the broker refuses to start
+   against a database it cannot reach, and Docker brings it back as soon as it can.
 
    ```bash
-   docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
+   docker run -d --name queen --restart on-failure:10 --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PORT=5432 -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
    ```
 
 4. **Check it.** `/health` takes a connection from the pool and does a real round-trip, so a
@@ -50,6 +65,9 @@ DDL and its stored procedures, and applies them at boot.
    ```json
    {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.2"}
    ```
+
+   An empty answer on the first try means the broker is still waiting for PostgreSQL. Run it
+   again a second later. If it is still empty after a few tries, `docker logs queen` says why.
 
 </Steps>
 

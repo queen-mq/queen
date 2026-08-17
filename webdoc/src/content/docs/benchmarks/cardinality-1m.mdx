@@ -9,6 +9,13 @@ sourceOfTruth:
   - benchmark-queen/2026-08-11-1m-partitions/raw-final-dedupoff/g.out
   - benchmark-queen/2026-08-11-1m-partitions/raw-final-dedupoff/partitions.csv
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
+digest: >-
+  1,000,000 ordered partitions in a single queue, created during the run at 1,000 a second,
+  serving 200,000 msg/s with zero push, pop or ack errors, on one 32 vCPU / 62 GiB machine over
+  one hour, of which 43 minutes ran against the completed space. Conditions: leased pops with
+  explicit acks, deduplication off, retention on with RETENTION_PARALLELISM=16, 300 consumers,
+  push batch 100, 256-byte payloads. Without synthetic consumer work this shape held p50 27.5 ms
+  and p99 115 ms. Storage grew 235 MB a minute, 19.6 bytes per message.
 ---
 
 **One broker against one PostgreSQL held 1,000,000 ordered partitions in a single queue, none

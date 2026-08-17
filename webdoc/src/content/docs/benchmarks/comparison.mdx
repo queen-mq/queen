@@ -9,6 +9,24 @@ sourceOfTruth:
   - benchmark-queen/crossbench/results/2026-08-04-scale-campaign/NIGHT-REPORT.md
   - benchmark-queen/crossbench/results/2026-08-03-pgmq-ab/RESULTS.md
   - benchmark-queen/crossbench/SPEC.md
+digest: >-
+  Queen MQ, Kafka, RabbitMQ and pgmq on one 32 vCPU / 62 GB machine, Intel Xeon Platinum 8358 at
+  2.60 GHz with NVMe, matched at CM_CPUS=32 and CM_MEM=56g, PostgreSQL left at synchronous_commit
+  = on and fsync = on, the same twelve-stage ordered pipeline carrying 10 to 30 ms of simulated
+  work per message, 256-byte payloads, one run per system except Queen MQ's dense figure, which is
+  a median of eight. Sparse, 1,000 ordered lanes at 2 messages per lane per second: all four
+  served the full rate, and pgmq won on latency with p50 55.1 ms against Queen MQ's 71.5 ms,
+  RabbitMQ's 92.7 ms and Kafka's 142.9 ms. Dense, the same 1,000 lanes at 12 messages per lane per
+  second: Queen MQ served 96 percent of the offered rate at p50 680 ms and Kafka 89 percent at
+  2,287 ms, while pgmq served 63 percent and shed 104,780 messages and RabbitMQ served 27 percent
+  and shed 363,942. That reversal between the two shapes is the finding. Kafka was the cheapest of
+  the four on CPU and on disk in every shape, using 2.2 cores against Queen MQ's 7.4 on sparse and
+  3.9 against 16.0 on dense, which is partly a durability difference rather than pure efficiency:
+  Kafka at its defaults pays no real fsync per commit and Queen MQ and pgmq both do. pgmq is
+  insensitive to cardinality, returning identical percentiles across a twentyfold change in lane
+  count, and at 20,000 properties it beat Queen MQ roughly threefold on both tail percentiles. The
+  page states that each of these systems would go faster run by someone who operates it daily, and
+  that for three of the four that is not its authors.
 ---
 
 Queen, Kafka, RabbitMQ and pgmq ran the same twelve-stage ordered pipeline on one machine, under

@@ -40,6 +40,13 @@ const llmsIndexPath = collection
 const llmsUrl = Astro.site
   ? new URL(llmsIndexPath, Astro.site).href
   : llmsIndexPath;
+// The whole-product summary is one document at the site root, for every
+// collection and every version: an agent asking what Queen MQ is wants the
+// current product, not the surface it happened to land on. Unlike the index,
+// this does not vary per collection.
+const briefUrl = Astro.site
+  ? new URL("/llms-brief.txt", Astro.site).href
+  : "/llms-brief.txt";
 ---
 
 <!doctype html>
@@ -98,6 +105,18 @@ const llmsUrl = Astro.site
       collection={collection}
       entryId={entryId}
     />
+    {/*
+      NimbusHead emits the per-page markdown alternate and the llms.txt
+      pointer. The whole-product summary is this site's own surface, so it is
+      advertised here: a machine-readable sibling of the AgentDirective below,
+      for clients that read link relations instead of page text.
+    */}
+    <link
+      rel="alternate"
+      type="text/plain"
+      href={briefUrl}
+      title="Queen MQ, complete summary for AI agents"
+    />
   </head>
   <body class="min-h-screen bg-background text-foreground antialiased">
     <a
@@ -106,7 +125,9 @@ const llmsUrl = Astro.site
     >
       Skip to content
     </a>
-    {markdownUrl && !isHiddenVersion && <AgentDirective markdownUrl={markdownUrl} llmsUrl={llmsUrl} />}
+    {markdownUrl && !isHiddenVersion && (
+      <AgentDirective briefUrl={briefUrl} markdownUrl={markdownUrl} llmsUrl={llmsUrl} />
+    )}
     <slot />
     {config.search !== false && <SearchDialog />}
 

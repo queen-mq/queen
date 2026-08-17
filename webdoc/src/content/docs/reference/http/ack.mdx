@@ -13,6 +13,18 @@ verifiedBy:
   - clients/client-js/test-v2/semantics.js
   - clients/client-js/test-v2/ackwindow.js
   - clients/client-js/test-v2/dlq.js
+digest: >-
+  An ack commits a cursor per `(partition, group)`, not a per-message delete: earlier unacked ones
+  complete. `POST /api/v1/ack` takes `transactionId`, `partitionId`, `leaseId`, `error`, `status`
+  (default `completed`), `consumerGroup` (default `__QUEUE_MODE__`); `POST /api/v1/ack/batch` puts
+  items in `acknowledgments`, `consumerGroup` top-level only. Both are read-write; 200 gives
+  per-item `success`, `leaseReleased`, `dlq`, `noop`. `status` is case-sensitive: absent/null,
+  `completed`, `success`, `acked`, `ok` complete; `retry` is budget-free; `dlq` dead-letters at
+  once; anything else, `nack` included, silently becomes `failed`, charging its `(partition,
+  group)` budget `retryLimit` (default 3); exhaustion dead-letters by default. A lease-less ack
+  skips validation and commits. At or below the cursor `completed` is `noop: true`,
+  `failed`/`retry`/`dlq` fail as `already committed`, an unresolvable `transactionId` fails,
+  redelivering if leased.
 ---
 
 An acknowledgement is not a per-message delete. Consumption state is one cursor per

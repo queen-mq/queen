@@ -12,6 +12,20 @@ sourceOfTruth:
   - server/src/obs.rs
   - server/src/schema.rs
   - server/src/encryption.rs
+digest: >-
+  Most of the configuration table is measured engine tuning that should be left alone. In practice
+  a deployment sets: PG_HOST, PG_PORT, PG_PASSWORD, PG_USER and PG_DATABASE to reach PostgreSQL,
+  where PG_USER and PG_DATABASE both default to postgres, PG_PORT to 5432 and PG_HOST to
+  localhost; DB_POOL_SIZE, default 160, with QUEEN_STMT_TIMEOUT_MS; PG_USE_SSL and
+  PG_SSL_REJECT_UNAUTHORIZED; PORT, default 6632; the JWT_ variables, with JWT_ENABLED false by
+  default so the middleware passes every request through; QUEEN_MESH_PORT, default 6633, with
+  QUEEN_MESH_PEERS and QUEEN_SYNC_SECRET; FILE_BUFFER_DIR, default /var/lib/queen/buffers;
+  RETENTION_INTERVAL, default 5000 milliseconds; QUEEN_MAX_BODY_BYTES, default 67108864, which is
+  64 MiB and returns 413 above it; QUEEN_ENCRYPTION_KEY, which must be 64 hexadecimal characters,
+  because a malformed or wrong-length key logs one warning, disables encryption and then stores
+  plaintext on queues flagged for it; LOG_LEVEL, default info, accepting EnvFilter syntax and
+  overridden by RUST_LOG; DEFAULT_SUBSCRIPTION_MODE, default new; QUEEN_APPLY_SCHEMA, default
+  true; and QUEEN_TENANCY_HEADER.
 ---
 
 The broker has no configuration file and no command-line flags. Every knob is an

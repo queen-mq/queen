@@ -10,6 +10,17 @@ sourceOfTruth:
   - server/src/config.rs
   - server/src/schema.rs
   - Dockerfile
+digest: >-
+  A deployment is one process and one database. The broker is a single stateless Rust binary
+  serving HTTP on port 6632 that keeps every byte of state in PostgreSQL: no data directory to
+  back up, no coordination service, no sidecar, no message file format on disk. The optional parts
+  are a node-local disk spool and the separate queen_proxy multi-tenant gateway. Brokers are
+  stateless and scale horizontally as one to three identical replicas; the database does not
+  scale, and it is simultaneously the durability story, the coordination substrate, the throughput
+  ceiling and the single point of failure, so high availability means PostgreSQL high
+  availability. Nothing is installed into either required part: the DDL and the 23
+  stored-procedure files are compiled into the binary and re-applied idempotently at every boot
+  under an advisory lock, so there is no migration step, no version table and no extension.
 ---
 
 A Queen deployment is one process and one database. The broker is a single stateless Rust binary
@@ -35,13 +46,16 @@ A complete deployment, ready to verify:
 ```bash
 docker network create queen
 docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16
-docker run -d --name queen --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PASSWORD=postgres -v queen-spool:/var/lib/queen/buffers ghcr.io/queen-mq/queen:latest
+docker run -d --name queen --restart on-failure:10 --network queen -p 6632:6632 -e PG_HOST=queen-pg -e PG_PASSWORD=postgres -v queen-spool:/var/lib/queen/buffers ghcr.io/queen-mq/queen:latest
 curl -s http://localhost:6632/health
 ```
 
 The only ordering requirement is a reachable PostgreSQL. Without one the broker fails its boot
-loudly instead of starting half-working, and a broker that loses the database later answers 503 on
-`/health` until it comes back.
+loudly instead of starting half-working, which is what the restart policy is for: pasted as a
+block, the third command lands while PostgreSQL is still initialising, and Docker brings the broker
+back as soon as it can. Expect the `curl` to answer nothing on the first try and to answer within a
+couple of seconds on the next. A broker that loses the database later answers 503 on `/health`
+until it comes back.
 
 ## The variables of the first day
 

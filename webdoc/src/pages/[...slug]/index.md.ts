@@ -62,9 +62,15 @@ export async function GET({ props }: { props: SlugProps }) {
     ...(version ? [`version: ${JSON.stringify(version)}`] : []),
     "---",
     "",
-    "> Documentation Index",
-    `> Fetch the complete documentation index at: ${new URL("/llms.txt", config.site).href}`,
-    "> Use this file to discover all available pages before exploring further.",
+    // Leads with the whole-product summary, not with the index. An agent that
+    // reached a `.md` has one page of a 127-page site and, most of the time, a
+    // question about the product rather than about this page. A directory is
+    // the wrong answer to that; `/llms-brief.txt` is the right one, and it is
+    // small enough to fetch without a second thought.
+    "> Queen MQ documentation, for AI agents",
+    `> Complete self-contained summary of Queen MQ: ${new URL("/llms-brief.txt", config.site).href}`,
+    "> Fetch that first when the question is about the product rather than about this page.",
+    `> Index of all pages: ${new URL("/llms.txt", config.site).href}`,
     "",
     `# ${title}`,
     "",

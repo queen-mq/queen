@@ -18,6 +18,18 @@ sourceOfTruth:
   - proxy/src/limits.rs
 verifiedBy:
   - clients/client-js/test-v2/http-unit/retry429.test.js
+digest: >-
+  Most broker failures are `{"error":"..."}`, `application/json`, with no `code`, enum or request
+  id: match on status. Exceptions: 413, `/health` (its own document at 200 and 503), and unmatched
+  `/api/` paths, which return 404 with `{"error":"Not Found","code":"no_such_route"}`. Codes: 200
+  reads, management, acks, transactions; 201 `POST /api/v1/push`; 204 empty pop or any pop under
+  pop maintenance, no body, so no `{"messages":[]}` and no `paused`; 400, 401, 403, 404, 409; 413
+  over `QUEEN_MAX_BODY_BYTES` (64 MiB default); 500; 503 only on `GET /health`, on DB round-trip
+  failure. Never 429 (no rate limiter), 502, 504. Procedure error text with `not found`
+  (case-insensitive) maps to 404, else 500. 2xx is not success: push item status is `queued`,
+  `duplicate`, `error`, `buffered` or `failed` (spooled still 201); ack and transaction report
+  `success:false` at 200. The proxy adds `code` and `Retry-After` in seconds on 429; SDKs retry
+  only 429.
 ---
 
 Most broker failures are one JSON object with one key:
