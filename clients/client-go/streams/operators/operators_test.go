@@ -4,6 +4,7 @@ package operators
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -503,5 +504,79 @@ func TestWindowSessionOperator(t *testing.T) {
 		if res.Emits[0].Value.(int) != 99 {
 			t.Fatalf("expected emit acc=99, got %v", res.Emits[0].Value)
 		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// SinkOperator partition resolution (4 tests)
+// ---------------------------------------------------------------------------
+
+func TestSinkOperatorPartitionResolver(t *testing.T) {
+	entries := []SinkEntry{
+		{Key: "a", Value: map[string]interface{}{"tenantId": "acme"}},
+		{Key: "b", Value: map[string]interface{}{"tenantId": "globex"}},
+	}
+
+	t.Run("defaults to the source partition when no resolver is set", func(t *testing.T) {
+		op := NewSinkOperator("out", nil)
+		items := op.BuildPushItems(entries, "src-partition")
+		for _, it := range items {
+			if it.Partition != "src-partition" {
+				t.Fatalf("expected source partition, got %q", it.Partition)
+			}
+			if it.Queue != "out" {
+				t.Fatalf("expected queue out, got %q", it.Queue)
+			}
+		}
+	})
+
+	t.Run("falls back to Default when the source partition is empty", func(t *testing.T) {
+		op := NewSinkOperator("out", nil)
+		items := op.BuildPushItems(entries[:1], "")
+		if items[0].Partition != "Default" {
+			t.Fatalf("expected Default, got %q", items[0].Partition)
+		}
+	})
+
+	t.Run("a string resolver pins every emit to one partition", func(t *testing.T) {
+		op := NewSinkOperator("out", "fixed")
+		items := op.BuildPushItems(entries, "src-partition")
+		for _, it := range items {
+			if it.Partition != "fixed" {
+				t.Fatalf("expected fixed, got %q", it.Partition)
+			}
+		}
+	})
+
+	t.Run("a func resolver fans emits out per value", func(t *testing.T) {
+		op := NewSinkOperator("out", func(v interface{}) string {
+			return v.(map[string]interface{})["tenantId"].(string)
+		})
+		items := op.BuildPushItems(entries, "src-partition")
+		if items[0].Partition != "acme" || items[1].Partition != "globex" {
+			t.Fatalf("expected per-value partitions, got %q / %q", items[0].Partition, items[1].Partition)
+		}
+	})
+
+	t.Run("rejects a resolver that is neither string nor func", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic on a bad resolver type")
+			}
+			if !strings.Contains(fmt.Sprint(r), "must be a string or func") {
+				t.Fatalf("unexpected panic message: %v", r)
+			}
+		}()
+		NewSinkOperator("out", 42)
+	})
+
+	t.Run("rejects an empty string resolver", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic on an empty partition name")
+			}
+		}()
+		NewSinkOperator("out", "")
 	})
 }
